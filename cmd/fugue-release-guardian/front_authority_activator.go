@@ -126,18 +126,30 @@ func (activator *frontAuthorityActivator) BeginPromote(ctx context.Context, targ
 }
 
 func (activator *frontAuthorityActivator) BeginRestore(ctx context.Context, current releaseguardian.CurrentAuthority) (releaseguardian.FrontAuthorityTransaction, error) {
-	if current.Validate() != nil || current.GroupID != activator.config.GroupID || current.PreviousFrontGeneration == 0 {
+	if current.Validate() != nil || current.GroupID != activator.config.GroupID || current.PreviousFrontGeneration == 0 ||
+		current.CurrentFrontGeneration == 0 || strings.TrimSpace(current.CurrentBundleGeneration) == "" ||
+		strings.TrimSpace(current.PreviousBundleGeneration) == "" || !exactSourceSHA(current.CurrentWorkerSourceSHA) ||
+		!exactSourceSHA(current.PreviousWorkerSourceSHA) || !exactSHA256Digest(current.CurrentWorkerImageDigest) ||
+		!exactSHA256Digest(current.PreviousWorkerImageDigest) || !exactSHA256Digest(current.CurrentRecordDigest) ||
+		!exactSHA256Digest(current.PreviousRecordDigest) {
 		return nil, errors.New("Front authority restore target is invalid")
 	}
 	target := releaseguardian.FrontAuthorityTarget{GroupID: current.GroupID, TargetSlot: current.PreviousWorkerSlot,
 		CandidateBundleGeneration: current.PreviousBundleGeneration, ServingGeneration: current.PreviousBundleGeneration,
 		FrontBundleGeneration: current.PreviousBundleGeneration, WorkerSourceSHA: current.PreviousWorkerSourceSHA,
 		WorkerImageDigest: current.PreviousWorkerImageDigest, CandidateRecordDigest: current.PreviousRecordDigest,
-		CanaryResultDigest: current.CurrentRecordDigest}
-	return activator.begin(ctx, target)
+		CanaryResultDigest: current.CurrentRecordDigest, PreviousSlot: current.CurrentWorkerSlot,
+		PreviousFrontGeneration: current.CurrentFrontGeneration, PreviousBundleGeneration: current.CurrentBundleGeneration,
+		PreviousWorkerSourceSHA: current.CurrentWorkerSourceSHA, PreviousWorkerImageDigest: current.CurrentWorkerImageDigest}
+	return activator.beginWithOperation(ctx, target, edgegroupfront.ActivationOperationRollback,
+		current.CurrentFrontGeneration, "restore Guardian group authority LKG")
 }
 
 func (activator *frontAuthorityActivator) begin(ctx context.Context, target releaseguardian.FrontAuthorityTarget) (releaseguardian.FrontAuthorityTransaction, error) {
+	return activator.beginWithOperation(ctx, target, edgegroupfront.ActivationOperationPromote, 0, "promote Guardian verified candidate authority")
+}
+
+func (activator *frontAuthorityActivator) beginWithOperation(ctx context.Context, target releaseguardian.FrontAuthorityTarget, operation string, rollbackOf uint64, reason string) (releaseguardian.FrontAuthorityTransaction, error) {
 	lease, err := activator.acquireLease(ctx)
 	if err != nil {
 		return nil, err
@@ -148,11 +160,11 @@ func (activator *frontAuthorityActivator) begin(ctx context.Context, target rele
 			_ = lease.release(context.WithoutCancel(ctx))
 		}
 	}()
-	preflight, err := activator.preflight(ctx, target)
+	preflight, err := activator.preflightForOperation(ctx, target, operation)
 	if err != nil {
 		return nil, err
 	}
-	transaction, err := activator.promoteWithLease(ctx, target, lease, preflight)
+	transaction, err := activator.applyWithLease(ctx, target, lease, preflight, operation, rollbackOf, reason)
 	if err != nil {
 		if errors.Is(err, errFrontCompensationUnknown) {
 			releaseOnError = false
@@ -170,6 +182,13 @@ type frontAuthorityPreflight struct {
 }
 
 func (activator *frontAuthorityActivator) preflight(ctx context.Context, target releaseguardian.FrontAuthorityTarget) (frontAuthorityPreflight, error) {
+	return activator.preflightForOperation(ctx, target, edgegroupfront.ActivationOperationPromote)
+}
+
+func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Context, target releaseguardian.FrontAuthorityTarget, operation string) (frontAuthorityPreflight, error) {
+	if operation != edgegroupfront.ActivationOperationPromote && operation != edgegroupfront.ActivationOperationRollback {
+		return frontAuthorityPreflight{}, errors.New("Front authority preflight operation is invalid")
+	}
 	workers, cohort, err := activator.observeWorkers(ctx, target)
 	if err != nil {
 		return frontAuthorityPreflight{}, err
@@ -196,7 +215,7 @@ func (activator *frontAuthorityActivator) preflight(ctx context.Context, target 
 		if state.ActiveSlot == string(target.TargetSlot) {
 			if state.Generation != target.PreviousFrontGeneration+1 || state.PreviousSlot != string(target.PreviousSlot) ||
 				state.BundleGeneration != target.FrontBundleGeneration || state.WorkerSourceCommit != target.WorkerSourceSHA ||
-				state.WorkerImageDigest != target.WorkerImageDigest || state.Operation != edgegroupfront.ActivationOperationPromote {
+				state.WorkerImageDigest != target.WorkerImageDigest || state.Operation != operation {
 				return frontAuthorityPreflight{}, errors.New("Front activation replay state is not target-bound")
 			}
 		} else {
@@ -213,6 +232,14 @@ func (activator *frontAuthorityActivator) preflight(ctx context.Context, target 
 }
 
 func (activator *frontAuthorityActivator) promoteWithLease(ctx context.Context, target releaseguardian.FrontAuthorityTarget, lease *heldAuthorityLease, preflight frontAuthorityPreflight) (releaseguardian.FrontAuthorityTransaction, error) {
+	return activator.applyWithLease(ctx, target, lease, preflight, edgegroupfront.ActivationOperationPromote, 0,
+		"promote Guardian verified candidate authority")
+}
+
+func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, target releaseguardian.FrontAuthorityTarget, lease *heldAuthorityLease, preflight frontAuthorityPreflight, operation string, rollbackOf uint64, reason string) (releaseguardian.FrontAuthorityTransaction, error) {
+	if operation != edgegroupfront.ActivationOperationPromote && operation != edgegroupfront.ActivationOperationRollback {
+		return nil, errors.New("Front authority operation is invalid")
+	}
 	workers, states := preflight.workers, preflight.states
 	if preflight.alreadyAtNew {
 		receipt := releaseguardian.FrontAuthorityReceipt{GroupID: target.GroupID, PreviousSlot: target.PreviousSlot,
@@ -245,7 +272,7 @@ func (activator *frontAuthorityActivator) promoteWithLease(ctx context.Context, 
 		receipt, casErr := activator.activationCAS(ctx, worker.Name, edgegroupfront.ActivationCASRequest{
 			GroupID: target.GroupID, ExpectedGeneration: state.Generation, ExpectedSlot: state.ActiveSlot, TargetSlot: string(target.TargetSlot),
 			BundleGeneration: target.FrontBundleGeneration, WorkerSourceCommit: target.WorkerSourceSHA, WorkerImageDigest: target.WorkerImageDigest,
-			Operation: edgegroupfront.ActivationOperationPromote, Reason: "promote Guardian verified candidate authority",
+			Operation: operation, RollbackOfGeneration: rollbackOf, Reason: reason,
 		})
 		if casErr != nil {
 			if rollbackErr := activator.rollbackReceipts(context.WithoutCancel(ctx), workers, changed); rollbackErr != nil {
@@ -294,7 +321,8 @@ func (activator *frontAuthorityActivator) verifyPublicRoute(ctx context.Context,
 	if activator.config.RouteAddress == "" {
 		return nil
 	}
-	status, body, headers, routeErr := requestCandidateRoute(ctx, activator.config.RouteAddress, activator.config.RouteHost, activator.config.RoutePath)
+	probe := canaryProbe{Address: activator.config.RouteAddress, Host: activator.config.RouteHost, Path: activator.config.RoutePath}
+	status, body, headers, routeErr := requestPublicRouteWithHeaders(ctx, probe)
 	if routeErr != nil || status != http.StatusOK || shaDigest(body) != activator.config.RouteBodyDigest ||
 		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) != target.CandidateRecordDigest ||
 		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) != target.TargetSlot {

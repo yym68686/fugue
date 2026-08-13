@@ -97,6 +97,7 @@ func groupAuthorityActivatorFixture(t *testing.T, endpoint, group string, now ti
 	}
 	activator := &groupAuthorityActivator{config: groupAuthorityConfig{GroupID: group, Endpoint: endpoint, KeyringFile: path},
 		client: &http.Client{Timeout: time.Second}, now: func() time.Time { return now }}
+	activator.config.SlotA, activator.config.SlotB = "192.0.2.10:18443", "192.0.2.10:28443"
 	if _, _, err := activator.activeKey(now); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}

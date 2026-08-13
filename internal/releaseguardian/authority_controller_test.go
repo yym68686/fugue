@@ -17,6 +17,17 @@ type testFrontActivator struct {
 	beginErr    error
 	transaction *testFrontTransaction
 }
+type testAuthorityHealthObserver struct {
+	currentHealthy bool
+	lkgHealthy     bool
+	digest         string
+	err            error
+}
+
+func (observer testAuthorityHealthObserver) ObserveCurrentAndLKG(context.Context, CurrentAuthority) (bool, bool, string, error) {
+	return observer.currentHealthy, observer.lkgHealthy, observer.digest, observer.err
+}
+
 type testFrontTransaction struct {
 	receipt     FrontAuthorityReceipt
 	commitErr   error
@@ -161,6 +172,69 @@ func TestAuthorityControllerSwitchesAndRevertsOneGroupWithExactCAS(t *testing.T)
 	untouched, _, _, err := store.LoadCurrent(ctx, otherGroup.GroupID)
 	if err != nil || untouched != otherGroup {
 		t.Fatalf("group-local A->B->A changed another group: %+v err=%v", untouched, err)
+	}
+}
+
+func TestAuthorityControllerRevertsOnlyAfterThreeCandidateOnlyRouteFailures(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(2_500, 0).UTC()
+	client := fake.NewSimpleClientset()
+	store, _ := NewAuthorityStore(client, "fugue-system")
+	group := "edge-pool-health-a"
+	current := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: group,
+		CurrentRecordDigest: otherDigest, CurrentWorkerSlot: AuthoritySlotB, CurrentFrontGeneration: 8,
+		CurrentBundleGeneration: "candidate-bundle.p8.r0", CurrentWorkerSourceSHA: strings.Repeat("2", 40),
+		CurrentWorkerImageDigest: otherDigest, PreviousRecordDigest: testDigest, PreviousWorkerSlot: AuthoritySlotA,
+		PreviousFrontGeneration: 7, PreviousBundleGeneration: "previous-bundle.p7.r0", PreviousWorkerSourceSHA: testSHA,
+		PreviousWorkerImageDigest: testDigest, AuthorityEpoch: 5}
+	_, _, _ = store.SwitchCurrent(ctx, current, "", "")
+	setAuthorityObjectCAS(t, client, currentAuthorityName(group), "current-health-a", "90")
+	observer := testAuthorityHealthObserver{currentHealthy: false, lkgHealthy: true, digest: testDigest}
+	controller, err := NewAuthorityControllerWithActivators(testAuthorityDecisionStore{AuthorityStore: store},
+		map[string]CandidateCanaryVerifier{group: {KeyID: "candidate-canary-v1", Key: make([]byte, 32)}},
+		map[string]FrontAuthorityActivator{group: testFrontActivator{}})
+	if err != nil || controller.SetHealthObservers(map[string]AuthorityHealthObserver{group: observer}) != nil {
+		t.Fatalf("create health controller: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	for attempt := 1; attempt <= 2; attempt++ {
+		if receipt, changed, err := controller.ObserveAndRevert(ctx, group); err != nil || changed || receipt.Action != "" {
+			t.Fatalf("premature rollback attempt=%d receipt=%+v changed=%v err=%v", attempt, receipt, changed, err)
+		}
+	}
+	receipt, changed, err := controller.ObserveAndRevert(ctx, group)
+	if err != nil || !changed || receipt.Action != AuthorityCurrentReverted || receipt.Before != current ||
+		receipt.After.CurrentRecordDigest != current.PreviousRecordDigest || receipt.After.CurrentFrontGeneration != current.CurrentFrontGeneration+1 {
+		t.Fatalf("bounded rollback receipt=%+v changed=%v err=%v", receipt, changed, err)
+	}
+}
+
+func TestAuthorityControllerDoesNotRevertSharedDependencyFailure(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	store, _ := NewAuthorityStore(client, "fugue-system")
+	group := "edge-pool-health-b"
+	current := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: group,
+		CurrentRecordDigest: otherDigest, CurrentWorkerSlot: AuthoritySlotB, PreviousRecordDigest: testDigest,
+		PreviousWorkerSlot: AuthoritySlotA, AuthorityEpoch: 5}
+	_, _, _ = store.SwitchCurrent(ctx, current, "", "")
+	setAuthorityObjectCAS(t, client, currentAuthorityName(group), "current-health-b", "91")
+	controller, err := NewAuthorityControllerWithActivators(testAuthorityDecisionStore{AuthorityStore: store},
+		map[string]CandidateCanaryVerifier{group: {KeyID: "candidate-canary-v1", Key: make([]byte, 32)}},
+		map[string]FrontAuthorityActivator{group: testFrontActivator{}})
+	if err != nil || controller.SetHealthObservers(map[string]AuthorityHealthObserver{group: testAuthorityHealthObserver{
+		currentHealthy: false, lkgHealthy: false, digest: testDigest,
+	}}) != nil {
+		t.Fatalf("create dependency health controller: %v", err)
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, changed, err := controller.ObserveAndRevert(ctx, group); err != nil || changed {
+			t.Fatalf("shared dependency failure triggered rollback: changed=%v err=%v", changed, err)
+		}
+	}
+	live, _, _, _ := store.LoadCurrent(ctx, group)
+	if live != current {
+		t.Fatalf("shared dependency failure changed current authority: %+v", live)
 	}
 }
 

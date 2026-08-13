@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"fugue/internal/releaseguardian"
 	"k8s.io/client-go/kubernetes"
@@ -60,8 +61,8 @@ func newAuthorityRuntimeWithActivators(store *releaseguardian.AuthorityStore, cl
 	}
 	for _, raw := range activatorEntries {
 		fields := strings.Split(raw, ",")
-		if len(fields) != 8 {
-			return nil, errors.New("authority activator must be group,endpoint,keyring-file,nodes,address,host,path,body-digest")
+		if len(fields) != 10 {
+			return nil, errors.New("authority activator must be group,endpoint,keyring-file,nodes,address,host,path,body-digest,slot-a,slot-b")
 		}
 		group := strings.TrimSpace(fields[0])
 		nodes, nodesErr := strconv.Atoi(strings.TrimSpace(fields[3]))
@@ -76,7 +77,8 @@ func newAuthorityRuntimeWithActivators(store *releaseguardian.AuthorityStore, cl
 			return nil, err
 		}
 		groupActivator, err := newGroupAuthorityActivator(front, groupAuthorityConfig{GroupID: group,
-			Endpoint: strings.TrimSpace(fields[1]), KeyringFile: strings.TrimSpace(fields[2])})
+			Endpoint: strings.TrimSpace(fields[1]), KeyringFile: strings.TrimSpace(fields[2]),
+			SlotA: strings.TrimSpace(fields[8]), SlotB: strings.TrimSpace(fields[9])})
 		if err != nil {
 			return nil, err
 		}
@@ -94,6 +96,13 @@ func newAuthorityRuntimeWithActivators(store *releaseguardian.AuthorityStore, cl
 	if err != nil {
 		return nil, err
 	}
+	observers := make(map[string]releaseguardian.AuthorityHealthObserver, len(activators))
+	for group, activator := range activators {
+		observers[group] = activator.(*groupAuthorityActivator)
+	}
+	if err := controller.SetHealthObservers(observers); err != nil {
+		return nil, err
+	}
 	runtime := &authorityRuntime{controller: controller, groups: groups, queues: map[string]chan struct{}{}}
 	for _, group := range groups {
 		runtime.queues[group] = make(chan struct{}, 1)
@@ -109,10 +118,19 @@ func (runtime *authorityRuntime) Start(ctx context.Context) {
 		for _, group := range runtime.groups {
 			group := group
 			go func() {
+				ticker := time.NewTicker(10 * time.Second)
+				defer ticker.Stop()
 				for {
 					select {
 					case <-ctx.Done():
 						return
+					case <-ticker.C:
+						receipt, changed, err := runtime.controller.ObserveAndRevert(ctx, group)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "authority health %s: %v\n", group, err)
+						} else if changed {
+							fmt.Fprintf(os.Stderr, "authority health %s: action=%s receipt=%s\n", group, receipt.Action, receipt.ReceiptDigest)
+						}
 					case <-runtime.queues[group]:
 						receipt, changed, err := runtime.controller.Reconcile(ctx, group)
 						if err != nil {

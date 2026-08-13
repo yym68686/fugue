@@ -102,6 +102,11 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 	if err != nil {
 		return err
 	}
+	if value := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE")); value != "" {
+		if err := materializeAuthorityPublicKey(value); err != nil {
+			return err
+		}
+	}
 	imports, err := parseCandidateImports(os.Getenv("FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS"))
 	if err != nil {
 		return err
@@ -260,6 +265,11 @@ func probeOnce(ctx context.Context, store *releaseguardian.KubeStore, probe cana
 }
 
 func requestPublicRoute(ctx context.Context, probe canaryProbe) (int, []byte, error) {
+	status, body, _, err := requestPublicRouteWithHeaders(ctx, probe)
+	return status, body, err
+}
+
+func requestPublicRouteWithHeaders(ctx context.Context, probe canaryProbe) (int, []byte, http.Header, error) {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	transport := &http.Transport{
 		Proxy: nil,
@@ -273,16 +283,16 @@ func requestPublicRoute(ctx context.Context, probe canaryProbe) (int, []byte, er
 	client := &http.Client{Transport: transport}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+probe.Host+probe.Path, nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	request.Host = probe.Host
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-	return response.StatusCode, body, err
+	return response.StatusCode, body, response.Header.Clone(), err
 }
 
 func parseTargets(value string) ([]releaseguardian.TargetConfig, error) {

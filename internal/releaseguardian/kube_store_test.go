@@ -73,6 +73,11 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"secretName":"fugue-edge-worker-reader-de"`,
 		`"fieldPath":"metadata.uid"`, `"mountPath":"/tmp"`,
 		`"fugue.io/edge-authority-importer":"true"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE","value":"/var/run/secrets/fugue-candidate-import-de/token,/tmp/candidate-canary-de.pub"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS","value":"edge-group-country-de,candidate-canary-de-v1,/tmp/candidate-canary-de.pub"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS","value":"edge-group-country-de,http://edge-control-de.fugue-system.svc:8092,/var/run/secrets/fugue-authority-recovery-de/keyring.json,1,51.38.126.103:443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,51.38.126.103:18443,51.38.126.103:28443"`,
+		`"mountPath":"/var/run/secrets/fugue-authority-recovery-de"`,
+		`"secretName":"fugue-edge-control-recovery-de"`,
 		`"name":"fugue-release-guardian-edge-control-de-import"`,
 		`"app.kubernetes.io/instance":"edge-control-de"`,
 		`"fugue.io/edge-group-id":"edge-group-country-de"`,
@@ -93,7 +98,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 	if strings.Count(source, `"resources":["secrets"]`) != 1 {
 		t.Fatal("Guardian Secret metadata access is not one exact resourceNames-scoped rule")
 	}
-	for _, forbidden := range []string{`FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS`, `"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
+	for _, forbidden := range []string{`edge-group-country-us,candidate-canary`, `FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS","value":"edge-group-country-de;`, `"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("shadow Guardian resources grant forbidden capability %s", forbidden)
 		}

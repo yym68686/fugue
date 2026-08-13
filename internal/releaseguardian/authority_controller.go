@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -101,6 +102,9 @@ type AuthorityController struct {
 	store      authorityDecisionStore
 	verifiers  map[string]CandidateCanaryVerifier
 	activators map[string]FrontAuthorityActivator
+	observers  map[string]AuthorityHealthObserver
+	failures   map[string]int
+	healthMu   sync.Mutex
 	now        func() time.Time
 }
 
@@ -138,6 +142,66 @@ func NewAuthorityControllerWithActivators(store authorityDecisionStore, verifier
 	}
 	controller.activators = values
 	return controller, nil
+}
+
+func (controller *AuthorityController) SetHealthObservers(observers map[string]AuthorityHealthObserver) error {
+	if controller == nil {
+		return errors.New("authority controller is nil")
+	}
+	values := make(map[string]AuthorityHealthObserver, len(observers))
+	for group, observer := range observers {
+		if !groupPattern.MatchString(group) || observer == nil || controller.activators[group] == nil {
+			return errors.New("authority health observer configuration is invalid")
+		}
+		values[group] = observer
+	}
+	controller.observers, controller.failures = values, map[string]int{}
+	return nil
+}
+
+// ObserveAndRevert is event/timer driven after an authority switch. Three
+// consecutive candidate-only failures are required; any healthy current or
+// unhealthy LKG resets the counter and cannot trigger a rollback.
+func (controller *AuthorityController) ObserveAndRevert(ctx context.Context, groupID string) (AuthorityTransitionReceipt, bool, error) {
+	if controller == nil || !groupPattern.MatchString(groupID) {
+		return AuthorityTransitionReceipt{}, false, errors.New("authority health group is invalid")
+	}
+	observer := controller.observers[groupID]
+	if observer == nil {
+		return AuthorityTransitionReceipt{}, false, nil
+	}
+	current, _, _, err := controller.store.LoadCurrent(ctx, groupID)
+	if err != nil {
+		return AuthorityTransitionReceipt{}, false, err
+	}
+	if current.PreviousRecordDigest == "" || current.PreviousWorkerSlot == "" {
+		controller.healthMu.Lock()
+		controller.failures[groupID] = 0
+		controller.healthMu.Unlock()
+		return AuthorityTransitionReceipt{}, false, nil
+	}
+	currentHealthy, lkgHealthy, evidenceDigest, err := observer.ObserveCurrentAndLKG(ctx, current)
+	if err != nil || !digestPattern.MatchString(evidenceDigest) {
+		controller.healthMu.Lock()
+		controller.failures[groupID] = 0
+		controller.healthMu.Unlock()
+		return AuthorityTransitionReceipt{}, false, err
+	}
+	controller.healthMu.Lock()
+	if currentHealthy || !lkgHealthy {
+		controller.failures[groupID] = 0
+		controller.healthMu.Unlock()
+		return AuthorityTransitionReceipt{}, false, nil
+	}
+	controller.failures[groupID]++
+	if controller.failures[groupID] < 3 {
+		controller.healthMu.Unlock()
+		return AuthorityTransitionReceipt{}, false, nil
+	}
+	controller.failures[groupID] = 0
+	controller.healthMu.Unlock()
+	receipt, err := controller.Revert(ctx, groupID, current.CurrentRecordDigest, evidenceDigest)
+	return receipt, err == nil, err
 }
 
 func (controller *AuthorityController) VerifyAndSwitch(ctx context.Context, groupID, resultDigest string) (AuthorityTransitionReceipt, error) {
@@ -343,6 +407,27 @@ func (controller *AuthorityController) Revert(ctx context.Context, groupID, fail
 	transaction, err := activator.BeginRestore(ctx, current)
 	if err != nil {
 		return AuthorityTransitionReceipt{}, fmt.Errorf("restore group authority: %w", err)
+	}
+	restore := transaction.Receipt()
+	if restore.GroupID != groupID || restore.PreviousSlot != current.CurrentWorkerSlot || restore.TargetSlot != current.PreviousWorkerSlot ||
+		restore.PreviousGeneration != current.CurrentFrontGeneration || restore.TargetGeneration != current.CurrentFrontGeneration+1 ||
+		restore.PreviousBundleGeneration != current.CurrentBundleGeneration || restore.TargetBundleGeneration != current.PreviousBundleGeneration ||
+		restore.PreviousWorkerSourceSHA != current.CurrentWorkerSourceSHA || restore.PreviousWorkerImageDigest != current.CurrentWorkerImageDigest ||
+		restore.TargetWorkerSourceSHA != current.PreviousWorkerSourceSHA || restore.TargetWorkerImageDigest != current.PreviousWorkerImageDigest {
+		if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {
+			return AuthorityTransitionReceipt{}, errors.Join(errors.New("authority restore receipt is invalid"), rollbackErr)
+		}
+		return AuthorityTransitionReceipt{}, errors.New("authority restore receipt is invalid")
+	}
+	reverted.CurrentFrontGeneration, reverted.CurrentBundleGeneration = restore.TargetGeneration, restore.TargetBundleGeneration
+	reverted.CurrentWorkerSourceSHA, reverted.CurrentWorkerImageDigest = restore.TargetWorkerSourceSHA, restore.TargetWorkerImageDigest
+	reverted.PreviousFrontGeneration, reverted.PreviousBundleGeneration = restore.PreviousGeneration, restore.PreviousBundleGeneration
+	reverted.PreviousWorkerSourceSHA, reverted.PreviousWorkerImageDigest = restore.PreviousWorkerSourceSHA, restore.PreviousWorkerImageDigest
+	if reverted.Validate() != nil {
+		if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {
+			return AuthorityTransitionReceipt{}, errors.Join(errors.New("authority restored pointer is invalid"), rollbackErr)
+		}
+		return AuthorityTransitionReceipt{}, errors.New("authority restored pointer is invalid")
 	}
 	if _, _, err := controller.store.SwitchCurrent(ctx, reverted, uid, rv); err != nil {
 		if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {

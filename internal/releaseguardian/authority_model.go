@@ -579,6 +579,14 @@ type FrontAuthorityActivator interface {
 	BeginRestore(context.Context, CurrentAuthority) (FrontAuthorityTransaction, error)
 }
 
+// AuthorityHealthObserver attributes a post-switch route failure by comparing
+// ordinary user traffic with the exact inactive LKG slot. Both paths are
+// outside the Guardian process; a shared failure is dependency degradation,
+// not permission to roll back a healthy component.
+type AuthorityHealthObserver interface {
+	ObserveCurrentAndLKG(context.Context, CurrentAuthority) (currentHealthy, lkgHealthy bool, evidenceDigest string, err error)
+}
+
 type FrontAuthorityTransaction interface {
 	Receipt() FrontAuthorityReceipt
 	Commit(context.Context) error

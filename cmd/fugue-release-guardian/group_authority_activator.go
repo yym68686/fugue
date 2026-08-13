@@ -10,14 +10,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"fugue/internal/declarativerelease"
 	"fugue/internal/edgecontrol"
+	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 )
 
@@ -29,6 +33,8 @@ type groupAuthorityConfig struct {
 	GroupID     string
 	Endpoint    string
 	KeyringFile string
+	SlotA       string
+	SlotB       string
 }
 
 type authorityRecoveryKeyring struct {
@@ -63,10 +69,46 @@ type groupAuthorityTransaction struct {
 func newGroupAuthorityActivator(front *frontAuthorityActivator, config groupAuthorityConfig) (*groupAuthorityActivator, error) {
 	endpoint, err := url.Parse(strings.TrimSpace(config.Endpoint))
 	if front == nil || err != nil || endpoint.Scheme != "http" || endpoint.Host == "" || endpoint.User != nil || endpoint.Path != "" || endpoint.RawQuery != "" || endpoint.Fragment != "" ||
-		config.GroupID != front.config.GroupID || !filepath.IsAbs(config.KeyringFile) || filepath.Clean(config.KeyringFile) != config.KeyringFile {
+		config.GroupID != front.config.GroupID || !filepath.IsAbs(config.KeyringFile) || filepath.Clean(config.KeyringFile) != config.KeyringFile ||
+		!validAuthoritySlotAddress(config.SlotA) || !validAuthoritySlotAddress(config.SlotB) || config.SlotA == config.SlotB {
 		return nil, errors.New("group authority activator configuration is invalid")
 	}
 	return &groupAuthorityActivator{front: front, config: config, client: &http.Client{Timeout: 8 * time.Second}, now: time.Now}, nil
+}
+
+func validAuthoritySlotAddress(value string) bool {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(value))
+	parsed, portErr := strconv.Atoi(port)
+	return err == nil && portErr == nil && strings.TrimSpace(host) != "" && parsed > 0 && parsed <= 65535
+}
+
+func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Context, current releaseguardian.CurrentAuthority) (bool, bool, string, error) {
+	if activator == nil || current.Validate() != nil || current.GroupID != activator.config.GroupID || current.PreviousRecordDigest == "" ||
+		current.PreviousWorkerSlot.Validate() != nil || current.CurrentWorkerSlot == current.PreviousWorkerSlot {
+		return false, false, "", errors.New("group authority health observation is invalid")
+	}
+	probe := canaryProbe{Address: activator.front.config.RouteAddress, Host: activator.front.config.RouteHost, Path: activator.front.config.RoutePath}
+	status, body, headers, currentErr := requestPublicRouteWithHeaders(ctx, probe)
+	currentHealthy := currentErr == nil && status == http.StatusOK && shaDigest(body) == activator.front.config.RouteBodyDigest &&
+		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) == current.CurrentRecordDigest &&
+		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) == current.CurrentWorkerSlot
+	address := activator.config.SlotA
+	if current.PreviousWorkerSlot == releaseguardian.AuthoritySlotB {
+		address = activator.config.SlotB
+	}
+	status, body, headers, lkgErr := requestCandidateRoute(ctx, address, activator.front.config.RouteHost, activator.front.config.RoutePath)
+	lkgHealthy := lkgErr == nil && status == http.StatusOK && shaDigest(body) == activator.front.config.RouteBodyDigest &&
+		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) == current.PreviousRecordDigest &&
+		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) == current.PreviousWorkerSlot
+	evidence, err := declarativerelease.CanonicalJSON(map[string]any{
+		"groupId": current.GroupID, "currentRecordDigest": current.CurrentRecordDigest, "currentSlot": current.CurrentWorkerSlot,
+		"currentHealthy": currentHealthy, "currentError": errorClass(currentErr), "lkgRecordDigest": current.PreviousRecordDigest,
+		"lkgSlot": current.PreviousWorkerSlot, "lkgHealthy": lkgHealthy, "lkgError": errorClass(lkgErr),
+	})
+	if err != nil {
+		return false, false, "", err
+	}
+	return currentHealthy, lkgHealthy, shaDigest(evidence), nil
 }
 
 func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, target releaseguardian.FrontAuthorityTarget) (releaseguardian.FrontAuthorityTransaction, error) {
@@ -114,7 +156,61 @@ func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, targ
 }
 
 func (activator *groupAuthorityActivator) BeginRestore(ctx context.Context, current releaseguardian.CurrentAuthority) (releaseguardian.FrontAuthorityTransaction, error) {
-	return nil, errors.New("continuous group authority restore is not enabled until a durable transition receipt is installed")
+	if current.Validate() != nil || current.GroupID != activator.config.GroupID || current.PreviousRecordDigest == "" ||
+		current.PreviousWorkerSlot.Validate() != nil || current.CurrentWorkerSlot == current.PreviousWorkerSlot {
+		return nil, errors.New("group authority restore target is invalid")
+	}
+	currentGeneration, currentSequence, currentRecovery, err := splitPromotedBundleVersion(current.CurrentBundleGeneration)
+	if err != nil {
+		return nil, errors.New("current group authority generation is invalid")
+	}
+	previousGeneration, _, _, err := splitPromotedBundleVersion(current.PreviousBundleGeneration)
+	if err != nil {
+		return nil, errors.New("previous group authority generation is invalid")
+	}
+	target := releaseguardian.FrontAuthorityTarget{GroupID: current.GroupID, TargetSlot: current.PreviousWorkerSlot,
+		CandidateBundleGeneration: current.PreviousBundleGeneration, ServingGeneration: previousGeneration,
+		FrontBundleGeneration: current.PreviousBundleGeneration, WorkerSourceSHA: current.PreviousWorkerSourceSHA,
+		WorkerImageDigest: current.PreviousWorkerImageDigest, CandidateRecordDigest: current.PreviousRecordDigest,
+		CanaryResultDigest: current.CurrentRecordDigest, PreviousSlot: current.CurrentWorkerSlot,
+		PreviousFrontGeneration: current.CurrentFrontGeneration, PreviousBundleGeneration: current.CurrentBundleGeneration,
+		PreviousWorkerSourceSHA: current.CurrentWorkerSourceSHA, PreviousWorkerImageDigest: current.CurrentWorkerImageDigest}
+	lease, err := activator.front.acquireLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	releaseOnError := true
+	defer func() {
+		if releaseOnError {
+			_ = lease.release(context.WithoutCancel(ctx))
+		}
+	}()
+	preflight, err := activator.front.preflightForOperation(ctx, target, edgegroupfront.ActivationOperationRollback)
+	if err != nil {
+		return nil, err
+	}
+	recovered, err := activator.recoverControlReceipt(ctx, edgecontrol.GroupPromotionReceipt{
+		GroupID: current.GroupID, PublicationSequence: currentSequence, RecoveryEpoch: currentRecovery,
+	}, previousGeneration)
+	if err != nil {
+		return nil, err
+	}
+	frontTx, err := activator.front.applyWithLease(ctx, target, lease, preflight, edgegroupfront.ActivationOperationRollback,
+		current.CurrentFrontGeneration, "restore Guardian group authority LKG")
+	if err != nil {
+		compensation := edgecontrol.GroupPromotionReceipt{GroupID: current.GroupID, PublicationSequence: recovered.PublicationSequence,
+			RecoveryEpoch: recovered.RecoveryEpoch}
+		if recoveryErr := activator.recoverControl(context.WithoutCancel(ctx), compensation, currentGeneration); recoveryErr != nil {
+			releaseOnError = false
+			return nil, errors.Join(err, fmt.Errorf("Edge Control restore compensation is unknown: %w", recoveryErr))
+		}
+		return nil, err
+	}
+	releaseOnError = false
+	return &groupAuthorityTransaction{activator: activator, front: frontTx.(*frontAuthorityTransaction), promotion: edgecontrol.GroupPromotionReceipt{
+		GroupID: current.GroupID, PublicationSequence: recovered.PublicationSequence, RecoveryEpoch: recovered.RecoveryEpoch,
+		PreviousBundleGeneration: currentGeneration,
+	}}, nil
 }
 
 func (activator *groupAuthorityActivator) Finalize(ctx context.Context) error {
@@ -202,9 +298,14 @@ func (activator *groupAuthorityActivator) promoteControl(ctx context.Context, ta
 }
 
 func (activator *groupAuthorityActivator) recoverControl(ctx context.Context, promotion edgecontrol.GroupPromotionReceipt, targetGeneration string) error {
+	_, err := activator.recoverControlReceipt(ctx, promotion, targetGeneration)
+	return err
+}
+
+func (activator *groupAuthorityActivator) recoverControlReceipt(ctx context.Context, promotion edgecontrol.GroupPromotionReceipt, targetGeneration string) (edgecontrol.GroupRecoveryReceipt, error) {
 	keyID, secret, err := activator.activeKey(activator.now().UTC())
 	if err != nil {
-		return err
+		return edgecontrol.GroupRecoveryReceipt{}, err
 	}
 	defer zeroSecret(secret)
 	now := activator.now().UTC().Truncate(time.Second)
@@ -214,41 +315,46 @@ func (activator *groupAuthorityActivator) recoverControl(ctx context.Context, pr
 		Reason: "rollback uncommitted Guardian group authority"}
 	request.Nonce, err = randomAuthorityNonce()
 	if err != nil {
-		return err
+		return edgecontrol.GroupRecoveryReceipt{}, err
 	}
 	if err := edgecontrol.SignGroupRecoveryRequest(&request, secret); err != nil {
-		return err
+		return edgecontrol.GroupRecoveryReceipt{}, err
 	}
 	var receipt edgecontrol.GroupRecoveryReceipt
 	if err := activator.post(ctx, edgecontrol.GroupRecoveryPathV1, request, &receipt); err != nil {
 		if errors.Is(err, errAuthorityMutationUnknown) {
-			return activator.reconcileRecovery(ctx, promotion, targetGeneration)
+			return activator.reconcileRecoveryReceipt(ctx, promotion, targetGeneration)
 		}
-		return err
+		return edgecontrol.GroupRecoveryReceipt{}, err
 	}
 	if receipt.Schema != edgecontrol.GroupRecoveryReceiptSchemaV1 || receipt.GroupID != promotion.GroupID ||
 		receipt.PublicationSequence != promotion.PublicationSequence+1 || receipt.RecoveryEpoch != promotion.RecoveryEpoch+1 ||
 		receipt.BundleGeneration != targetGeneration || !exactSHA256Digest(receipt.PublishedBundleDigest) ||
 		receipt.Authority != "edge-control" || !receipt.PublicationEnabled {
-		return errors.New("Edge Control recovery receipt is invalid")
+		return edgecontrol.GroupRecoveryReceipt{}, errors.New("Edge Control recovery receipt is invalid")
 	}
-	return nil
+	return receipt, nil
 }
 
 func (activator *groupAuthorityActivator) reconcileRecovery(ctx context.Context, promotion edgecontrol.GroupPromotionReceipt, targetGeneration string) error {
+	_, err := activator.reconcileRecoveryReceipt(ctx, promotion, targetGeneration)
+	return err
+}
+
+func (activator *groupAuthorityActivator) reconcileRecoveryReceipt(ctx context.Context, promotion edgecontrol.GroupPromotionReceipt, targetGeneration string) (edgecontrol.GroupRecoveryReceipt, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(activator.config.Endpoint, "/")+
 		edgecontrol.AuthorityGroupReadyPrefixV1+url.PathEscape(promotion.GroupID)+"/readyz", nil)
 	if err != nil {
-		return err
+		return edgecontrol.GroupRecoveryReceipt{}, err
 	}
 	response, err := activator.client.Do(request)
 	if err != nil {
-		return errAuthorityMutationUnknown
+		return edgecontrol.GroupRecoveryReceipt{}, errAuthorityMutationUnknown
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-		return errAuthorityMutationUnknown
+		return edgecontrol.GroupRecoveryReceipt{}, errAuthorityMutationUnknown
 	}
 	var status edgecontrol.AuthorityGroupStatus
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
@@ -256,9 +362,12 @@ func (activator *groupAuthorityActivator) reconcileRecovery(ctx context.Context,
 	if decoder.Decode(&status) != nil || !decodeEOF(decoder) || status.GroupID != promotion.GroupID ||
 		status.PublicationSequence != promotion.PublicationSequence+1 || status.RecoveryEpoch != promotion.RecoveryEpoch+1 ||
 		status.BundleGeneration != targetGeneration || !exactSHA256Digest(status.PublishedBundleDigest) {
-		return errAuthorityMutationUnknown
+		return edgecontrol.GroupRecoveryReceipt{}, errAuthorityMutationUnknown
 	}
-	return nil
+	return edgecontrol.GroupRecoveryReceipt{Schema: edgecontrol.GroupRecoveryReceiptSchemaV1, GroupID: status.GroupID,
+		PublicationSequence: status.PublicationSequence, RecoveryEpoch: status.RecoveryEpoch,
+		BundleGeneration: status.BundleGeneration, PublishedBundleDigest: status.PublishedBundleDigest,
+		Authority: "edge-control", PublicationEnabled: true}, nil
 }
 
 func (activator *groupAuthorityActivator) post(ctx context.Context, path string, value, destination any) error {
@@ -320,6 +429,19 @@ func randomAuthorityNonce() (string, error) {
 
 func promotedBundleVersion(generation string, sequence, recoveryEpoch uint64) string {
 	return strings.TrimSpace(generation) + ".p" + fmt.Sprint(sequence) + ".r" + fmt.Sprint(recoveryEpoch)
+}
+
+func splitPromotedBundleVersion(version string) (string, uint64, uint64, error) {
+	separator := strings.LastIndex(strings.TrimSpace(version), ".p")
+	if separator < 1 {
+		return "", 0, 0, errors.New("promoted bundle version is invalid")
+	}
+	generation := strings.TrimSpace(version[:separator])
+	sequence, recovery, err := parseAuthorityBundleVersion(generation, strings.TrimSpace(version))
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return generation, sequence, recovery, nil
 }
 
 func zeroSecret(value []byte) {
