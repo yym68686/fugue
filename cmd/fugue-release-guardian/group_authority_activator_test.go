@@ -153,15 +153,53 @@ func TestGroupAuthorityRecoveryUsesReadOnlyReconcileBeforePosting(t *testing.T) 
 			panic(http.ErrAbortHandler)
 		case http.MethodGet:
 			gets++
+			validUntil := now.Add(time.Minute)
 			_ = json.NewEncoder(w).Encode(edgecontrol.AuthorityGroupStatus{GroupID: target.GroupID,
-				PublicationSequence: promotion.PublicationSequence + 1, RecoveryEpoch: promotion.RecoveryEpoch + 1,
-				BundleGeneration: target.PreviousServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("8", 64)})
+				PublicationSequence: promotion.PublicationSequence + 9, CurrentPublicationSequence: promotion.PublicationSequence + 1,
+				RecoveryEpoch: promotion.RecoveryEpoch + 1, BundleGeneration: target.PreviousServingGeneration,
+				PublishedBundleDigest: "sha256:" + strings.Repeat("8", 64), BundleValidUntil: &validUntil})
 		}
 	}))
 	defer server.Close()
 	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
 	if err := activator.recoverControl(context.Background(), promotion, target.PreviousServingGeneration); err != nil || posts != 0 || gets != 1 {
 		t.Fatalf("recovery reconcile posts=%d gets=%d err=%v", posts, gets, err)
+	}
+}
+
+func TestGroupAuthorityRecoveryRefreshesExpiredExactLKGAtPublishedCAS(t *testing.T) {
+	now := time.Date(2026, 8, 13, 5, 35, 0, 0, time.UTC)
+	target := groupAuthorityTargetFixture()
+	promotion := edgecontrol.GroupPromotionReceipt{GroupID: target.GroupID, PublicationSequence: target.AuthoritySequence + 1,
+		RecoveryEpoch: target.RecoveryEpoch, PreviousBundleGeneration: target.PreviousServingGeneration}
+	posts, gets := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodGet:
+			gets++
+			expired := now.Add(-time.Minute)
+			_ = json.NewEncoder(w).Encode(edgecontrol.AuthorityGroupStatus{GroupID: target.GroupID,
+				PublicationSequence: promotion.PublicationSequence + 7, CurrentPublicationSequence: promotion.PublicationSequence + 4,
+				RecoveryEpoch: promotion.RecoveryEpoch + 2, BundleGeneration: target.PreviousServingGeneration,
+				PublishedBundleDigest: "sha256:" + strings.Repeat("8", 64), BundleValidUntil: &expired})
+		case http.MethodPost:
+			posts++
+			var recovery edgecontrol.GroupRecoveryRequest
+			if json.NewDecoder(request.Body).Decode(&recovery) != nil || recovery.ExpectedPublicationSequence != promotion.PublicationSequence+4 ||
+				recovery.ExpectedRecoveryEpoch != promotion.RecoveryEpoch+2 {
+				t.Fatal("expired recovery did not bind the current published CAS")
+			}
+			_ = json.NewEncoder(w).Encode(edgecontrol.GroupRecoveryReceipt{Schema: edgecontrol.GroupRecoveryReceiptSchemaV1,
+				GroupID: target.GroupID, PublicationSequence: promotion.PublicationSequence + 8, RecoveryEpoch: promotion.RecoveryEpoch + 3,
+				BundleGeneration: target.PreviousServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("9", 64),
+				Authority: "edge-control", PublicationEnabled: true})
+		}
+	}))
+	defer server.Close()
+	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
+	receipt, err := activator.recoverControlReceipt(context.Background(), promotion, target.PreviousServingGeneration)
+	if err != nil || gets != 2 || posts != 1 || receipt.PublicationSequence != promotion.PublicationSequence+8 {
+		t.Fatalf("expired recovery refresh gets=%d posts=%d receipt=%+v err=%v", gets, posts, receipt, err)
 	}
 }
 

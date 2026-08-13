@@ -458,6 +458,16 @@ func (activator *groupAuthorityActivator) recoverControlReceipt(ctx context.Cont
 	if receipt, err := activator.reconcileRecoveryReceipt(ctx, promotion, targetGeneration); err == nil {
 		return receipt, nil
 	}
+	// A prior recovery may have committed and then expired before Front could
+	// finish its CAS. Refresh that exact published LKG rather than replaying the
+	// stale pre-recovery sequence. PublicationSequence is the audit-ledger head;
+	// CurrentPublicationSequence is the only CAS value for the live bundle.
+	if status, statusErr := activator.groupStatus(ctx, promotion.GroupID); statusErr == nil &&
+		status.BundleGeneration == targetGeneration && status.CurrentPublicationSequence > promotion.PublicationSequence &&
+		status.RecoveryEpoch > promotion.RecoveryEpoch && exactSHA256Digest(status.PublishedBundleDigest) {
+		promotion.PublicationSequence = status.CurrentPublicationSequence
+		promotion.RecoveryEpoch = status.RecoveryEpoch
+	}
 	keyID, secret, err := activator.activeKey(activator.now().UTC())
 	if err != nil {
 		return edgecontrol.GroupRecoveryReceipt{}, err
@@ -515,12 +525,13 @@ func (activator *groupAuthorityActivator) reconcileRecoveryReceipt(ctx context.C
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&status) != nil || !decodeEOF(decoder) || status.GroupID != promotion.GroupID ||
-		status.PublicationSequence <= promotion.PublicationSequence || status.RecoveryEpoch <= promotion.RecoveryEpoch ||
-		status.BundleGeneration != targetGeneration || !exactSHA256Digest(status.PublishedBundleDigest) {
+		status.CurrentPublicationSequence <= promotion.PublicationSequence || status.RecoveryEpoch <= promotion.RecoveryEpoch ||
+		status.BundleGeneration != targetGeneration || !exactSHA256Digest(status.PublishedBundleDigest) ||
+		status.BundleValidUntil == nil || !status.BundleValidUntil.After(activator.now().UTC()) {
 		return edgecontrol.GroupRecoveryReceipt{}, errAuthorityMutationUnknown
 	}
 	return edgecontrol.GroupRecoveryReceipt{Schema: edgecontrol.GroupRecoveryReceiptSchemaV1, GroupID: status.GroupID,
-		PublicationSequence: status.PublicationSequence, RecoveryEpoch: status.RecoveryEpoch,
+		PublicationSequence: status.CurrentPublicationSequence, RecoveryEpoch: status.RecoveryEpoch,
 		BundleGeneration: status.BundleGeneration, PublishedBundleDigest: status.PublishedBundleDigest,
 		Authority: "edge-control", PublicationEnabled: true}, nil
 }
