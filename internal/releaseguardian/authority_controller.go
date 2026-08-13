@@ -136,7 +136,7 @@ func (controller *AuthorityController) VerifyAndSwitch(ctx context.Context, grou
 		APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: groupID,
 		CurrentRecordDigest: candidate.RecordDigest, CurrentWorkerSlot: candidate.WorkerSlot,
 		PreviousRecordDigest: current.CurrentRecordDigest, PreviousWorkerSlot: current.CurrentWorkerSlot,
-		AuthorityEpoch: current.AuthorityEpoch + 1,
+		AuthorityEpoch: current.AuthorityEpoch + 1, BaselineReceiptDigest: current.BaselineReceiptDigest,
 	}
 	if _, _, err := controller.store.SwitchCurrent(ctx, next, currentUID, currentRV); err != nil {
 		return AuthorityTransitionReceipt{}, err
@@ -163,7 +163,7 @@ func (controller *AuthorityController) Revert(ctx context.Context, groupID, fail
 		APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: groupID,
 		CurrentRecordDigest: current.PreviousRecordDigest, CurrentWorkerSlot: current.PreviousWorkerSlot,
 		PreviousRecordDigest: current.CurrentRecordDigest, PreviousWorkerSlot: current.CurrentWorkerSlot,
-		AuthorityEpoch: current.AuthorityEpoch + 1,
+		AuthorityEpoch: current.AuthorityEpoch + 1, BaselineReceiptDigest: current.BaselineReceiptDigest,
 	}
 	if _, _, err := controller.store.SwitchCurrent(ctx, reverted, uid, rv); err != nil {
 		return AuthorityTransitionReceipt{}, err

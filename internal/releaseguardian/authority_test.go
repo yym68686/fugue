@@ -22,12 +22,15 @@ const testCandidateBundle = "candidate-bundle-generation-1"
 func bindCandidatePromotionWitness(candidate CandidateAuthority) CandidateAuthority {
 	candidate.AuthoritySequence = 7
 	candidate.CandidateSequence = 9
+	if candidate.ServingGeneration == "" {
+		candidate.ServingGeneration = candidate.BundleGeneration
+	}
 	return candidate
 }
 
 func candidateResultFixture(candidate CandidateAuthority, now time.Time, route, dependency HealthState) CandidateCanaryResult {
 	return CandidateCanaryResult{
-		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, BundleGeneration: candidate.BundleGeneration,
+		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, BundleGeneration: candidate.BundleGeneration, ServingGeneration: candidate.ServingGeneration,
 		AuthoritySequence: candidate.AuthoritySequence, CandidateSequence: candidate.CandidateSequence,
 		WorkerSlot: candidate.WorkerSlot, WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest, WorkerCohortDigest: otherDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: route, DependencyState: dependency,

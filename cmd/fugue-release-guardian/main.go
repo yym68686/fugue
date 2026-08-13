@@ -107,6 +107,11 @@ func runGuardian(ctx context.Context, client kubernetes.Interface, store *releas
 		return err
 	}
 	startCandidateImporters(ctx, authorityStore, client, imports)
+	baselines, err := parseAuthorityBaselines(os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_BASELINES"))
+	if err != nil {
+		return err
+	}
+	startAuthorityBaselineAdopters(ctx, authorityStore, client, targets[0].Namespace, baselines)
 	authority, err := newAuthorityRuntime(authorityStore, os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS"))
 	if err != nil {
 		return err

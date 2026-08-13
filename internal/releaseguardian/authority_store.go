@@ -56,6 +56,23 @@ func (store *AuthorityStore) CreateRouteBundleRecord(ctx context.Context, record
 	return store.createImmutable(ctx, routeBundleRecordName(record.GroupID, record.RecordDigest), record.GroupID, "route-bundle", "record.json", record)
 }
 
+func (store *AuthorityStore) LoadRouteBundleRecord(ctx context.Context, groupID, recordDigest string) (RouteBundleRecord, error) {
+	if !groupPattern.MatchString(groupID) || !digestPattern.MatchString(recordDigest) {
+		return RouteBundleRecord{}, errors.New("route bundle record lookup is invalid")
+	}
+	object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, routeBundleRecordName(groupID, recordDigest), metav1.GetOptions{})
+	if err != nil {
+		return RouteBundleRecord{}, err
+	}
+	var record RouteBundleRecord
+	if object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 || object.Labels["fugue.pro/group"] != groupID ||
+		object.Labels["fugue.pro/authority-kind"] != "route-bundle" || decodeStrict([]byte(object.Data["record.json"]), &record) != nil ||
+		record.Validate() != nil || record.GroupID != groupID || record.RecordDigest != recordDigest {
+		return RouteBundleRecord{}, errors.New("route bundle record object is invalid")
+	}
+	return record, nil
+}
+
 func (store *AuthorityStore) CreateCandidateCanaryResult(ctx context.Context, result CandidateCanaryResult, now time.Time) error {
 	if err := result.Validate(now); err != nil {
 		return err
@@ -146,15 +163,31 @@ func (store *AuthorityStore) LoadCandidate(ctx context.Context, groupID string) 
 }
 
 func (store *AuthorityStore) LoadCurrent(ctx context.Context, groupID string) (CurrentAuthority, types.UID, string, error) {
-	var authority CurrentAuthority
-	uid, rv, err := store.loadMutable(ctx, currentAuthorityName(groupID), groupID, "authority.json", &authority)
+	if !groupPattern.MatchString(groupID) {
+		return CurrentAuthority{}, "", "", errors.New("authority group identity is invalid")
+	}
+	object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, currentAuthorityName(groupID), metav1.GetOptions{})
 	if err != nil {
 		return CurrentAuthority{}, "", "", err
 	}
-	if err := authority.Validate(); err != nil {
-		return CurrentAuthority{}, "", "", err
+	if object.Immutable != nil && *object.Immutable || object.UID == "" || strings.TrimSpace(object.ResourceVersion) == "" ||
+		object.Labels["fugue.pro/group"] != groupID || object.Labels["fugue.pro/authority-store"] != "true" || len(object.Data) < 1 || len(object.Data) > 2 {
+		return CurrentAuthority{}, "", "", errors.New("mutable authority object metadata is invalid")
 	}
-	return authority, uid, rv, nil
+	var authority CurrentAuthority
+	if decodeStrict([]byte(object.Data["authority.json"]), &authority) != nil || authority.Validate() != nil {
+		return CurrentAuthority{}, "", "", errors.New("mutable authority payload is invalid")
+	}
+	if raw, exists := object.Data["baseline-receipt.json"]; exists {
+		var receipt AuthorityBaselineReceipt
+		if decodeStrict([]byte(raw), &receipt) != nil || receipt.Validate() != nil || receipt.GroupID != groupID ||
+			authority.BaselineReceiptDigest != receipt.ReceiptDigest {
+			return CurrentAuthority{}, "", "", errors.New("authority baseline receipt binding is invalid")
+		}
+	} else if authority.BaselineReceiptDigest != "" {
+		return CurrentAuthority{}, "", "", errors.New("authority baseline receipt is missing")
+	}
+	return authority, object.UID, object.ResourceVersion, nil
 }
 
 func (store *AuthorityStore) loadMutable(ctx context.Context, name, groupID, key string, destination any) (types.UID, string, error) {
@@ -229,7 +262,7 @@ func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, cand
 	if err := decodeStrict([]byte(object.Data["result.json"]), &result); err != nil || result.Validate(now) != nil ||
 		result.ResultDigest != resultDigest || result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
 		result.AuthoritySequence != candidate.AuthoritySequence || result.CandidateSequence != candidate.CandidateSequence ||
-		result.BundleGeneration != candidate.BundleGeneration ||
+		result.BundleGeneration != candidate.BundleGeneration || result.ServingGeneration != candidate.ServingGeneration ||
 		result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 		return CandidateCanaryResult{}, errors.New("candidate canary object binding is invalid")
 	}
@@ -267,7 +300,7 @@ func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context
 		}
 		if result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
 			result.AuthoritySequence != candidate.AuthoritySequence || result.CandidateSequence != candidate.CandidateSequence ||
-			result.BundleGeneration != candidate.BundleGeneration ||
+			result.BundleGeneration != candidate.BundleGeneration || result.ServingGeneration != candidate.ServingGeneration ||
 			result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 			continue
 		}
@@ -295,7 +328,8 @@ func (store *AuthorityStore) PutCandidate(ctx context.Context, candidate Candida
 		if err := decodeStrict([]byte(raw), &current); err != nil || current.Validate() != nil {
 			return errors.New("current candidate authority is invalid")
 		}
-		if current.GroupID != candidate.GroupID || current.RecordDigest != candidate.RecordDigest || current.BundleGeneration != candidate.BundleGeneration || current.WorkerSlot != candidate.WorkerSlot ||
+		if current.GroupID != candidate.GroupID || current.RecordDigest != candidate.RecordDigest || current.BundleGeneration != candidate.BundleGeneration ||
+			current.ServingGeneration != candidate.ServingGeneration || current.WorkerSlot != candidate.WorkerSlot ||
 			current.AuthoritySequence != candidate.AuthoritySequence || current.CandidateSequence != candidate.CandidateSequence ||
 			current.ReleaseRecordDigest != candidate.ReleaseRecordDigest || candidate.Generation != current.Generation+1 {
 			return errors.New("candidate authority transition changes immutable identity")
@@ -318,7 +352,7 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 		var current CandidateAuthority
 		if err := decodeStrict([]byte(raw), &current); err != nil || current.Validate() != nil || current.State != CandidateAuthorityLoaded ||
 			candidate.Generation != current.Generation+1 || candidate.GroupID != current.GroupID ||
-			(candidate.RecordDigest == current.RecordDigest && candidate.BundleGeneration == current.BundleGeneration &&
+			(candidate.RecordDigest == current.RecordDigest && candidate.BundleGeneration == current.BundleGeneration && candidate.ServingGeneration == current.ServingGeneration &&
 				candidate.AuthoritySequence == current.AuthoritySequence && candidate.CandidateSequence == current.CandidateSequence &&
 				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
 			return errors.New("loaded candidate replacement changes an ineligible pointer")
@@ -338,11 +372,48 @@ func (store *AuthorityStore) SwitchCurrent(ctx context.Context, authority Curren
 		}
 		if current.GroupID != authority.GroupID || authority.AuthorityEpoch != current.AuthorityEpoch+1 ||
 			authority.PreviousRecordDigest != current.CurrentRecordDigest || authority.PreviousWorkerSlot != current.CurrentWorkerSlot ||
-			authority.CurrentRecordDigest == current.CurrentRecordDigest || authority.CurrentWorkerSlot == current.CurrentWorkerSlot {
+			authority.CurrentRecordDigest == current.CurrentRecordDigest || authority.CurrentWorkerSlot == current.CurrentWorkerSlot ||
+			authority.BaselineReceiptDigest != current.BaselineReceiptDigest {
 			return errors.New("current authority transition is not an atomic slot switch")
 		}
 		return nil
 	})
+}
+
+func (store *AuthorityStore) AdoptCurrentBaseline(ctx context.Context, authority CurrentAuthority, receipt AuthorityBaselineReceipt, expectedUID types.UID, expectedResourceVersion string) (types.UID, string, error) {
+	if authority.Validate() != nil || receipt.Validate() != nil || authority.GroupID != receipt.GroupID ||
+		authority.CurrentRecordDigest != receipt.RecordDigest || authority.CurrentWorkerSlot != receipt.WorkerSlot ||
+		authority.AuthorityEpoch != receipt.AuthorityEpoch || authority.BaselineReceiptDigest != receipt.ReceiptDigest ||
+		authority.PreviousRecordDigest != "" || authority.PreviousWorkerSlot != "" || expectedUID == "" || strings.TrimSpace(expectedResourceVersion) == "" {
+		return "", "", errors.New("authority baseline adoption is invalid")
+	}
+	configMaps := store.client.CoreV1().ConfigMaps(store.namespace)
+	current, err := configMaps.Get(ctx, currentAuthorityName(authority.GroupID), metav1.GetOptions{})
+	if err != nil || current.UID != expectedUID || current.ResourceVersion != expectedResourceVersion ||
+		current.Labels["fugue.pro/group"] != authority.GroupID || len(current.Data) != 1 {
+		return "", "", errors.New("authority baseline adoption CAS changed")
+	}
+	var before CurrentAuthority
+	if decodeStrict([]byte(current.Data["authority.json"]), &before) != nil || before.Validate() != nil || before.BaselineReceiptDigest != "" ||
+		before.CurrentRecordDigest != receipt.BeforeRecordDigest || before.CurrentWorkerSlot != receipt.BeforeWorkerSlot || before.AuthorityEpoch != receipt.BeforeAuthorityEpoch {
+		return "", "", errors.New("authority baseline adoption predecessor changed")
+	}
+	authorityRaw, err := declarativerelease.CanonicalJSON(authority)
+	if err != nil {
+		return "", "", err
+	}
+	receiptRaw, err := declarativerelease.CanonicalJSON(receipt)
+	if err != nil {
+		return "", "", err
+	}
+	updated := current.DeepCopy()
+	updated.Data = map[string]string{"authority.json": string(authorityRaw), "baseline-receipt.json": string(receiptRaw)}
+	updated.Labels = authorityLabels(authority.GroupID)
+	result, err := configMaps.Update(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		return "", "", err
+	}
+	return result.UID, result.ResourceVersion, nil
 }
 
 type mutableTransitionCheck func(currentPayload string) error
@@ -375,6 +446,11 @@ func (store *AuthorityStore) putMutable(ctx context.Context, name, groupID, key 
 	}
 	updated := current.DeepCopy()
 	updated.Data = map[string]string{key: string(raw)}
+	if key == "authority.json" {
+		if receipt, exists := current.Data["baseline-receipt.json"]; exists {
+			updated.Data["baseline-receipt.json"] = receipt
+		}
+	}
 	updated.Labels = authorityLabels(groupID)
 	result, err := configMaps.Update(ctx, updated, metav1.UpdateOptions{})
 	if err != nil {

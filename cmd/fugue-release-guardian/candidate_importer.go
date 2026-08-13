@@ -156,7 +156,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	}
 	candidate := releaseguardian.CandidateAuthority{
 		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind, GroupID: config.GroupID,
-		RecordDigest: envelope.Record.RecordDigest, BundleGeneration: envelope.Bundle.Version,
+		RecordDigest: envelope.Record.RecordDigest, BundleGeneration: envelope.Bundle.Version, ServingGeneration: envelope.Bundle.Generation,
 		AuthoritySequence: envelope.AuthorityLedgerSequence, CandidateSequence: envelope.CandidateLedgerSequence,
 		WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
 		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
@@ -167,7 +167,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		return false, fmt.Errorf("read candidate authority: %w", err)
 	}
 	candidateChanged := !candidateMissing && (existingCandidate.GroupID != candidate.GroupID || existingCandidate.RecordDigest != candidate.RecordDigest ||
-		existingCandidate.BundleGeneration != candidate.BundleGeneration ||
+		existingCandidate.BundleGeneration != candidate.BundleGeneration || existingCandidate.ServingGeneration != candidate.ServingGeneration ||
 		existingCandidate.AuthoritySequence != candidate.AuthoritySequence || existingCandidate.CandidateSequence != candidate.CandidateSequence ||
 		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
 	if candidateChanged && existingCandidate.State != releaseguardian.CandidateAuthorityLoaded {
