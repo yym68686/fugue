@@ -520,9 +520,17 @@ func TestGroupBundleReaderAndRecoveryAreAuthenticatedGroupScopedCAS(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	failedAudit := GroupAuthorityLedgerEntry{Schema: GroupAuthorityLedgerSchemaV1, GroupID: groups[1], Status: GroupAuthorityStatusFailed,
+		CandidateLedgerSequence: usCurrent.Published.CandidateLedgerSequence, RouteIntentGeneration: "recovery-audit-tail",
+		LastPublishedBundleGeneration: usCurrent.Published.Bundle.Generation, FailureCode: GroupShadowFailureInventoryInvalid,
+		Authority: "edge-control", PublicationEnabled: true, RecordedAt: now.Add(time.Second)}
+	if _, err := store.AppendGroupAuthorityCAS(ctx, groups[1], usCurrent.LedgerHead.Sequence,
+		usCurrent.Published.CandidateLedgerSequence, failedAudit, nil); err != nil {
+		t.Fatalf("seed recovery audit tail: %v", err)
+	}
 	recoveryRequest := GroupRecoveryRequest{
 		Schema: GroupRecoveryRequestSchemaV1, KeyID: "recovery-us-1", GroupID: groups[1],
-		ExpectedPublicationSequence: usCurrent.LedgerHead.Sequence, ExpectedRecoveryEpoch: 0,
+		ExpectedPublicationSequence: usCurrent.Published.PublicationSequence, ExpectedRecoveryEpoch: 0,
 		TargetBundleGeneration: firstUS.BundleGeneration, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(),
 		Nonce: "recovery-nonce-00000001", Reason: "rollback after failed semantic probe",
 	}
@@ -540,8 +548,8 @@ func TestGroupBundleReaderAndRecoveryAreAuthenticatedGroupScopedCAS(t *testing.T
 	usRecovered, _ := store.ReadGroupAuthority(ctx, groups[1])
 	deAfter, _ := store.ReadGroupAuthority(ctx, groups[0])
 	if usRecovered.Published.Bundle.Generation != firstUS.BundleGeneration || usRecovered.LedgerHead.RecoveryEpoch != 1 ||
-		usRecovered.Published.RecoveryEpoch != 1 || usRecovered.Published.Bundle.Version != groupPublicationVersion(firstUS.BundleGeneration, usCurrent.LedgerHead.Sequence+1, 1) ||
-		usRecovered.LedgerHead.Sequence != usCurrent.LedgerHead.Sequence+1 || deAfter.Published.Digest != deCurrent.Published.Digest || deAfter.LedgerHead.Sequence != deCurrent.LedgerHead.Sequence {
+		usRecovered.Published.RecoveryEpoch != 1 || usRecovered.Published.Bundle.Version != groupPublicationVersion(firstUS.BundleGeneration, usCurrent.LedgerHead.Sequence+2, 1) ||
+		usRecovered.LedgerHead.Sequence != usCurrent.LedgerHead.Sequence+2 || deAfter.Published.Digest != deCurrent.Published.Digest || deAfter.LedgerHead.Sequence != deCurrent.LedgerHead.Sequence {
 		t.Fatalf("group recovery escaped scope: US=%+v DE before=%+v after=%+v", usRecovered, deCurrent, deAfter)
 	}
 	replay := httptest.NewRecorder()

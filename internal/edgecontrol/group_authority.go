@@ -372,7 +372,7 @@ func (publisher GroupAuthorityPublisher) refreshPublishedLKG(ctx context.Context
 		RecoveryReason: reason,
 		Authority:      "edge-control", PublicationEnabled: true, RecordedAt: now,
 	}
-	appended, err := store.RecoverGroupAuthorityCAS(ctx, groupID, authority.LedgerHead.Sequence, recoveryEpoch, entry, signed)
+	appended, err := store.RecoverGroupAuthorityCAS(ctx, groupID, authority.Published.PublicationSequence, recoveryEpoch, entry, signed)
 	if err != nil {
 		return GroupAuthorityResult{}, false
 	}

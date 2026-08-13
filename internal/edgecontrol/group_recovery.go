@@ -160,7 +160,8 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 		writeGroupBundleError(w, http.StatusBadRequest, "target_rejected")
 		return
 	}
-	if !authority.LedgerExists || !authority.PublishedExists || authority.LedgerHead.Sequence != recovery.ExpectedPublicationSequence || recoveryEpoch != recovery.ExpectedRecoveryEpoch {
+	if !authority.LedgerExists || !authority.PublishedExists ||
+		authority.Published.PublicationSequence != recovery.ExpectedPublicationSequence || recoveryEpoch != recovery.ExpectedRecoveryEpoch {
 		writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 		return
 	}
@@ -175,7 +176,7 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 	if authority.Published.Bundle.Generation != bundle.Generation {
 		bundle.PreviousGeneration = authority.Published.Bundle.Generation
 	}
-	bundle.Version = groupPublicationVersion(bundle.Generation, recovery.ExpectedPublicationSequence+1, recovery.ExpectedRecoveryEpoch+1)
+	bundle.Version = groupPublicationVersion(bundle.Generation, authority.LedgerHead.Sequence+1, recovery.ExpectedRecoveryEpoch+1)
 	signed, err := handler.signer.SignGroupBundle(request.Context(), groupID, bundle)
 	if err != nil {
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "signing_unavailable")

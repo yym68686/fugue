@@ -531,6 +531,16 @@ func (store *PersistentGroupStore) RecoverGroupAuthorityCAS(ctx context.Context,
 		if currentRecoveryEpoch != expectedRecoveryEpoch {
 			return ErrGroupAuthorityCASConflict
 		}
+		if state.Published == nil || state.Published.PublicationSequence != expectedSequence ||
+			state.Published.RecoveryEpoch != expectedRecoveryEpoch {
+			return ErrGroupAuthorityCASConflict
+		}
+		for _, audit := range state.AuthorityLedger[expectedSequence:] {
+			if audit.Status != GroupAuthorityStatusFailed || audit.RecoveryEpoch != 0 ||
+				audit.LastPublishedBundleGeneration != state.Published.Bundle.Generation {
+				return ErrGroupAuthorityCASConflict
+			}
+		}
 		candidateSequence := entry.CandidateLedgerSequence
 		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) || state.Ledger[candidateSequence-1].Bundle == nil {
 			return ErrGroupAuthorityCandidateCAS
@@ -553,7 +563,8 @@ func (store *PersistentGroupStore) RecoverGroupAuthorityCAS(ctx context.Context,
 		}
 		var next *GroupPublishedBundle
 		var err error
-		appended, next, err = prepareGroupAuthorityAppend(state.GroupID, expectedSequence, state.AuthorityLedger, current, &candidate, entry, &signed)
+		currentAuthoritySequence := uint64(len(state.AuthorityLedger))
+		appended, next, err = prepareGroupAuthorityAppend(state.GroupID, currentAuthoritySequence, state.AuthorityLedger, current, &candidate, entry, &signed)
 		if err != nil {
 			return err
 		}
