@@ -39,6 +39,8 @@ type AuthorityGroupStoreSnapshot struct {
 	Producer        GroupInventoryProducerState
 	ProducerExists  bool
 	Authority       GroupAuthorityState
+	Candidate       GroupCandidateBundle
+	CandidateExists bool
 }
 
 type AuthorityGroupStatus struct {
@@ -50,7 +52,10 @@ type AuthorityGroupStatus struct {
 	InventoryProducerGeneration uint64     `json:"inventory_producer_generation,omitempty"`
 	InventoryProducerNodes      int        `json:"inventory_producer_nodes,omitempty"`
 	InventoryHeartbeatAt        *time.Time `json:"inventory_heartbeat_at,omitempty"`
+	AuthoritySequence           uint64     `json:"authority_sequence,omitempty"`
 	PublicationSequence         uint64     `json:"publication_sequence,omitempty"`
+	CurrentPublicationSequence  uint64     `json:"current_publication_sequence,omitempty"`
+	CandidateEpoch              uint64     `json:"candidate_epoch,omitempty"`
 	PublicationDecision         string     `json:"publication_decision,omitempty"`
 	BundleGeneration            string     `json:"bundle_generation,omitempty"`
 	PublishedBundleDigest       string     `json:"published_bundle_digest,omitempty"`
@@ -269,6 +274,7 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 	authority := stored.Authority
 	authorityErr := storeErr
 	if authorityErr == nil && authority.LedgerExists {
+		group.AuthoritySequence = authority.LedgerHead.Sequence
 		group.PublicationSequence = authority.LedgerHead.Sequence
 		group.PublicationDecision = authority.LedgerHead.Status
 		group.FailureCode = authority.LedgerHead.FailureCode
@@ -276,6 +282,7 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 	if authorityErr == nil && authority.PublishedExists && validateGroupPublishedBundle(groupID, authority.Published) == nil && authority.Published.Bundle.ValidUntil.After(now) {
 		validUntil := authority.Published.Bundle.ValidUntil
 		group.BundleGeneration = authority.Published.Bundle.Generation
+		group.CurrentPublicationSequence = authority.Published.PublicationSequence
 		group.PublishedBundleDigest = authority.Published.Digest
 		group.RecoveryEpoch = authority.Published.RecoveryEpoch
 		group.BundleValidUntil = &validUntil
@@ -291,6 +298,9 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 				group.Status = GroupAuthorityHealthServingLKG
 			}
 		}
+	}
+	if stored.CandidateExists {
+		group.CandidateEpoch = stored.Candidate.Epoch
 	}
 	if inventoryErr != nil && !errors.Is(inventoryErr, ErrGroupInventoryNotFound) && group.FailureCode == "" {
 		group.FailureCode = GroupShadowFailureInventoryRead

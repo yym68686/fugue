@@ -400,6 +400,10 @@ func (store *PersistentGroupStore) ReadGroupAuthorityStatus(ctx context.Context,
 			snapshot.Authority.Published = cloneGroupPublishedBundle(*state.Published)
 			snapshot.Authority.PublishedExists = true
 		}
+		if state.Candidate != nil {
+			snapshot.Candidate = cloneGroupCandidateBundle(*state.Candidate)
+			snapshot.CandidateExists = true
+		}
 		return nil
 	})
 	return snapshot, err
