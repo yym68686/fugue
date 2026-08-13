@@ -348,6 +348,38 @@ func TestActiveWorkerRejectsCurrentPublicationOutsideActivationGeneration(t *tes
 	}
 }
 
+func TestActiveWorkerAcceptsOnlyActivationBoundCurrentRefresh(t *testing.T) {
+	selection := routeSourceSelection{candidate: false, activeSlot: model.EdgeSlotA, activationGeneration: 37,
+		expectedGeneration: "routes-current", expectedPublicationSequence: 11341, expectedRecoveryEpoch: 109}
+	current := routePublicationMetadata{Source: edgeControlRouteSourceV1, GroupID: "edge-group-country-de",
+		Generation: "routes-current", PublicationSequence: 11341, RecoveryEpoch: 109}
+	if err := validateRouteBundleActivationBinding(selection, current); err != nil {
+		t.Fatalf("activation-bound promoted current was rejected: %v", err)
+	}
+	refreshed := current
+	refreshed.PublicationSequence++
+	if err := validateRouteBundleActivationBinding(selection, refreshed); err != nil {
+		t.Fatalf("same-authority current refresh was rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*routePublicationMetadata){
+		"old sequence":     func(value *routePublicationMetadata) { value.PublicationSequence = 11340 },
+		"wrong recovery":   func(value *routePublicationMetadata) { value.RecoveryEpoch = 110 },
+		"wrong generation": func(value *routePublicationMetadata) { value.Generation = "routes-other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := current
+			mutate(&changed)
+			if err := validateRouteBundleActivationBinding(selection, changed); err == nil {
+				t.Fatal("publication outside the Front authority was accepted")
+			}
+		})
+	}
+	generation, sequence, recovery, err := parseActivatedPublicationVersion("routes-current.p11341.r109")
+	if err != nil || generation != "routes-current" || sequence != 11341 || recovery != 109 {
+		t.Fatalf("activation publication version was not parsed exactly: generation=%q sequence=%d recovery=%d err=%v", generation, sequence, recovery, err)
+	}
+}
+
 func TestCandidatePublicationMayStartAtIndependentRecoveryEpoch(t *testing.T) {
 	current := routePublicationMetadata{
 		Source:              edgeControlRouteSourceV1,

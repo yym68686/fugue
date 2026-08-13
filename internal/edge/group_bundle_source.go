@@ -140,11 +140,13 @@ type configEdgeRouteSource struct {
 }
 
 type routeSourceSelection struct {
-	config               configEdgeRouteSource
-	candidate            bool
-	activationGeneration uint64
-	activeSlot           string
-	expectedGeneration   string
+	config                      configEdgeRouteSource
+	candidate                   bool
+	activationGeneration        uint64
+	activeSlot                  string
+	expectedGeneration          string
+	expectedPublicationSequence uint64
+	expectedRecoveryEpoch       uint64
 }
 
 func newEdgeRouteBundleHTTPClient(timeout time.Duration) *http.Client {
@@ -202,6 +204,11 @@ func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
 		// active worker must retain its already-loaded bundle instead of
 		// accepting an older current publication during the CAS window.
 		selection.expectedGeneration = activation.BundleGeneration
+		if generation, sequence, recovery, parseErr := parseActivatedPublicationVersion(activation.BundleGeneration); parseErr == nil {
+			selection.expectedGeneration = generation
+			selection.expectedPublicationSequence = sequence
+			selection.expectedRecoveryEpoch = recovery
+		}
 	}
 	return selection, nil
 }
@@ -213,7 +220,30 @@ func validateRouteBundleActivationBinding(selection routeSourceSelection, public
 	if publication.Generation != selection.expectedGeneration {
 		return errors.New("edge-control current publication is not bound to Front activation")
 	}
+	if selection.expectedPublicationSequence > 0 &&
+		(publication.PublicationSequence < selection.expectedPublicationSequence || publication.RecoveryEpoch != selection.expectedRecoveryEpoch) {
+		return errors.New("edge-control current publication is not bound to Front activation")
+	}
 	return nil
+}
+
+func parseActivatedPublicationVersion(value string) (string, uint64, uint64, error) {
+	value = strings.TrimSpace(value)
+	pivot := strings.LastIndex(value, ".p")
+	if pivot < 1 {
+		return "", 0, 0, errors.New("Front activation publication version is invalid")
+	}
+	recoveryPivot := strings.LastIndex(value[pivot+2:], ".r")
+	if recoveryPivot < 1 {
+		return "", 0, 0, errors.New("Front activation publication version is invalid")
+	}
+	recoveryPivot += pivot + 2
+	sequence, sequenceErr := strconv.ParseUint(value[pivot+2:recoveryPivot], 10, 64)
+	recovery, recoveryErr := strconv.ParseUint(value[recoveryPivot+2:], 10, 64)
+	if sequenceErr != nil || recoveryErr != nil || sequence == 0 {
+		return "", 0, 0, errors.New("Front activation publication version is invalid")
+	}
+	return value[:pivot], sequence, recovery, nil
 }
 
 func (s *Service) validateRouteBundleSourceSelection(selection routeSourceSelection) error {
