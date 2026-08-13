@@ -16,6 +16,7 @@ func candidateCanaryFixture(t *testing.T) (CandidateAuthority, CurrentAuthority,
 		RecordDigest: otherDigest, BundleGeneration: "candidate-bundle-7", WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
 		State: CandidateAuthorityLoaded, Generation: 7,
 	}
+	candidate = bindCandidatePromotionWitness(candidate)
 	current := CurrentAuthority{
 		APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: candidate.GroupID,
 		CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 11,
@@ -136,5 +137,12 @@ func TestCandidateCanaryCannotEvaluateCurrentSlotOrUnloadedCandidate(t *testing.
 	candidate.WorkerSlot = current.CurrentWorkerSlot
 	if _, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, true, true), routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil {
 		t.Fatal("current slot was accepted as a candidate")
+	}
+	legacy, current, now := candidateCanaryFixture(t)
+	legacy.AuthoritySequence, legacy.CandidateSequence = 0, 0
+	previous = legacy
+	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
+	if _, err := EvaluateCandidateCanary(legacy, current, candidateWorkerCohortFixture(t, legacy), routeSamples(legacy, now, true, true), routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil {
+		t.Fatal("legacy candidate without promotion witness was accepted")
 	}
 }

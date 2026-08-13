@@ -76,6 +76,7 @@ func TestCandidateImporterBootstrapsExactGroupPointersIdempotently(t *testing.T)
 	candidate, _, _, err := store.LoadCandidate(context.Background(), groupID)
 	if err != nil || candidate.RecordDigest != envelope.Record.RecordDigest || candidate.WorkerSlot != envelope.WorkerSlot ||
 		candidate.BundleGeneration != envelope.Bundle.Version ||
+		candidate.AuthoritySequence != envelope.AuthorityLedgerSequence || candidate.CandidateSequence != envelope.CandidateLedgerSequence ||
 		candidate.ReleaseRecordDigest != envelope.ReleaseRecordDigest || candidate.State != releaseguardian.CandidateAuthorityLoaded || candidate.Generation != 1 {
 		t.Fatalf("candidate authority=%+v err=%v", candidate, err)
 	}
@@ -191,6 +192,7 @@ func TestCandidateImporterMigratesLoadedPointerToSignedBundleIdentity(t *testing
 	}
 	migrated, _, _, err := store.LoadCandidate(context.Background(), groupID)
 	if err != nil || migrated.BundleGeneration != envelope.Bundle.Version || migrated.Generation != legacy.Generation+1 ||
+		migrated.AuthoritySequence != envelope.AuthorityLedgerSequence || migrated.CandidateSequence != envelope.CandidateLedgerSequence ||
 		migrated.RecordDigest != legacy.RecordDigest || migrated.WorkerSlot != legacy.WorkerSlot {
 		t.Fatalf("migrated candidate=%+v err=%v", migrated, err)
 	}
@@ -246,5 +248,5 @@ func candidateImporterEnvelopeFixture(t *testing.T, groupID string, now time.Tim
 	if err != nil {
 		t.Fatal(err)
 	}
-	return candidateEnvelope{Schema: edgeCandidateEnvelopeSchemaV1, GroupID: groupID, Epoch: 5, CandidateLedgerSequence: 9, RouteIntentGeneration: "route-intent-5", InventoryGeneration: "inventory-5", ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), WorkerSlot: releaseguardian.AuthoritySlotB, PublishedAt: now, CurrentRecord: &current, CurrentBundle: &currentBundle, CurrentWorkerSlot: releaseguardian.AuthoritySlotA, Record: candidate, Bundle: candidateBundle}
+	return candidateEnvelope{Schema: edgeCandidateEnvelopeSchemaV1, GroupID: groupID, Epoch: 5, AuthorityLedgerSequence: 7, CandidateLedgerSequence: 9, RouteIntentGeneration: "route-intent-5", InventoryGeneration: "inventory-5", ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), WorkerSlot: releaseguardian.AuthoritySlotB, PublishedAt: now, CurrentRecord: &current, CurrentBundle: &currentBundle, CurrentWorkerSlot: releaseguardian.AuthoritySlotA, Record: candidate, Bundle: candidateBundle}
 }

@@ -214,7 +214,7 @@ func (store *AuthorityStore) createImmutableWithLabels(ctx context.Context, name
 }
 
 func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, candidate CandidateAuthority, resultDigest string, now time.Time) (CandidateCanaryResult, error) {
-	if candidate.Validate() != nil || !digestPattern.MatchString(resultDigest) {
+	if candidate.Validate() != nil || !candidate.HasPromotionWitness() || !digestPattern.MatchString(resultDigest) {
 		return CandidateCanaryResult{}, errors.New("candidate canary lookup is invalid")
 	}
 	object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, candidateCanaryResultName(candidate.GroupID, resultDigest), metav1.GetOptions{})
@@ -228,6 +228,7 @@ func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, cand
 	var result CandidateCanaryResult
 	if err := decodeStrict([]byte(object.Data["result.json"]), &result); err != nil || result.Validate(now) != nil ||
 		result.ResultDigest != resultDigest || result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
+		result.AuthoritySequence != candidate.AuthoritySequence || result.CandidateSequence != candidate.CandidateSequence ||
 		result.BundleGeneration != candidate.BundleGeneration ||
 		result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 		return CandidateCanaryResult{}, errors.New("candidate canary object binding is invalid")
@@ -236,7 +237,7 @@ func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, cand
 }
 
 func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context, candidate CandidateAuthority, now time.Time) (CandidateCanaryResult, error) {
-	if candidate.Validate() != nil {
+	if candidate.Validate() != nil || !candidate.HasPromotionWitness() {
 		return CandidateCanaryResult{}, errors.New("candidate canary lookup is invalid")
 	}
 	selector := labels.Set{
@@ -265,6 +266,7 @@ func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context
 			return CandidateCanaryResult{}, errors.New("candidate canary object is invalid")
 		}
 		if result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
+			result.AuthoritySequence != candidate.AuthoritySequence || result.CandidateSequence != candidate.CandidateSequence ||
 			result.BundleGeneration != candidate.BundleGeneration ||
 			result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 			continue
@@ -294,6 +296,7 @@ func (store *AuthorityStore) PutCandidate(ctx context.Context, candidate Candida
 			return errors.New("current candidate authority is invalid")
 		}
 		if current.GroupID != candidate.GroupID || current.RecordDigest != candidate.RecordDigest || current.BundleGeneration != candidate.BundleGeneration || current.WorkerSlot != candidate.WorkerSlot ||
+			current.AuthoritySequence != candidate.AuthoritySequence || current.CandidateSequence != candidate.CandidateSequence ||
 			current.ReleaseRecordDigest != candidate.ReleaseRecordDigest || candidate.Generation != current.Generation+1 {
 			return errors.New("candidate authority transition changes immutable identity")
 		}
@@ -316,6 +319,7 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 		if err := decodeStrict([]byte(raw), &current); err != nil || current.Validate() != nil || current.State != CandidateAuthorityLoaded ||
 			candidate.Generation != current.Generation+1 || candidate.GroupID != current.GroupID ||
 			(candidate.RecordDigest == current.RecordDigest && candidate.BundleGeneration == current.BundleGeneration &&
+				candidate.AuthoritySequence == current.AuthoritySequence && candidate.CandidateSequence == current.CandidateSequence &&
 				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
 			return errors.New("loaded candidate replacement changes an ineligible pointer")
 		}

@@ -40,6 +40,7 @@ type candidateEnvelope struct {
 	Schema                  string                             `json:"schema"`
 	GroupID                 string                             `json:"edge_group_id"`
 	Epoch                   uint64                             `json:"epoch"`
+	AuthorityLedgerSequence uint64                             `json:"authority_ledger_sequence"`
 	CandidateLedgerSequence uint64                             `json:"candidate_ledger_sequence"`
 	RouteIntentGeneration   string                             `json:"route_intent_generation"`
 	InventoryGeneration     string                             `json:"inventory_generation"`
@@ -156,6 +157,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	candidate := releaseguardian.CandidateAuthority{
 		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind, GroupID: config.GroupID,
 		RecordDigest: envelope.Record.RecordDigest, BundleGeneration: envelope.Bundle.Version,
+		AuthoritySequence: envelope.AuthorityLedgerSequence, CandidateSequence: envelope.CandidateLedgerSequence,
 		WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
 		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
 	}
@@ -166,6 +168,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	}
 	candidateChanged := !candidateMissing && (existingCandidate.GroupID != candidate.GroupID || existingCandidate.RecordDigest != candidate.RecordDigest ||
 		existingCandidate.BundleGeneration != candidate.BundleGeneration ||
+		existingCandidate.AuthoritySequence != candidate.AuthoritySequence || existingCandidate.CandidateSequence != candidate.CandidateSequence ||
 		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
 	if candidateChanged && existingCandidate.State != releaseguardian.CandidateAuthorityLoaded {
 		return false, errors.New("candidate envelope conflicts with terminal candidate authority")
@@ -253,7 +256,8 @@ func fetchCandidateEnvelope(ctx context.Context, config candidateImportConfig, e
 
 func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now time.Time) error {
 	if envelope.Schema != edgeCandidateEnvelopeSchemaV1 || envelope.GroupID != groupID || envelope.Epoch == 0 ||
-		envelope.CandidateLedgerSequence == 0 || strings.TrimSpace(envelope.RouteIntentGeneration) == "" || strings.TrimSpace(envelope.InventoryGeneration) == "" ||
+		envelope.AuthorityLedgerSequence == 0 || envelope.CandidateLedgerSequence == 0 ||
+		strings.TrimSpace(envelope.RouteIntentGeneration) == "" || strings.TrimSpace(envelope.InventoryGeneration) == "" ||
 		!exactSHA256Digest(envelope.ReleaseRecordDigest) || envelope.PublishedAt.IsZero() || !envelope.PublishedAt.Equal(envelope.PublishedAt.UTC()) ||
 		envelope.CurrentRecord == nil || envelope.CurrentBundle == nil || envelope.CurrentRecord.Validate() != nil || envelope.Record.Validate() != nil ||
 		envelope.CurrentRecord.GroupID != groupID || envelope.Record.GroupID != groupID || envelope.Record.Epoch != int64(envelope.Epoch) ||

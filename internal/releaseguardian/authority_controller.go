@@ -89,6 +89,9 @@ func (controller *AuthorityController) VerifyAndSwitch(ctx context.Context, grou
 	if err != nil {
 		return AuthorityTransitionReceipt{}, err
 	}
+	if !candidate.HasPromotionWitness() {
+		return AuthorityTransitionReceipt{}, errors.New("candidate promotion witness is unavailable")
+	}
 	result, err := controller.store.LoadCandidateCanaryResult(ctx, candidate, resultDigest, controller.now().UTC())
 	if err != nil || result.KeyID != verifier.KeyID || result.VerifySignature(verifier.Key) != nil {
 		return AuthorityTransitionReceipt{}, errors.New("candidate canary attestation is invalid")

@@ -19,9 +19,16 @@ const testSignature = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 const testCandidateBundle = "candidate-bundle-generation-1"
 
+func bindCandidatePromotionWitness(candidate CandidateAuthority) CandidateAuthority {
+	candidate.AuthoritySequence = 7
+	candidate.CandidateSequence = 9
+	return candidate
+}
+
 func candidateResultFixture(candidate CandidateAuthority, now time.Time, route, dependency HealthState) CandidateCanaryResult {
 	return CandidateCanaryResult{
 		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, BundleGeneration: candidate.BundleGeneration,
+		AuthoritySequence: candidate.AuthoritySequence, CandidateSequence: candidate.CandidateSequence,
 		WorkerSlot: candidate.WorkerSlot, WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest, WorkerCohortDigest: otherDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: route, DependencyState: dependency,
 		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
@@ -71,6 +78,7 @@ func TestAuthorityModelsBindCandidateCurrentAndLKGIdentity(t *testing.T) {
 func TestCandidateCanaryIsImmutableCandidateBoundAndFresh(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	candidate := CandidateAuthority{GroupID: "edge-pool-a", RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest}
+	candidate = bindCandidatePromotionWitness(candidate)
 	unsigned := candidateResultFixture(candidate, now, HealthHealthy, HealthHealthy)
 	unsigned.KeyID, unsigned.Signature = "canary-key-1", testableSignaturePlaceholder
 	result, err := unsigned.Seal()
@@ -102,6 +110,7 @@ func TestCandidateCanaryStoreScopesLookupAndPrunesOnlyExpiredValidResults(t *tes
 		RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest,
 		State: CandidateAuthorityLoaded, Generation: 1,
 	}
+	candidate = bindCandidatePromotionWitness(candidate)
 	result, err := SignCandidateCanaryResult(candidateResultFixture(candidate, now, HealthHealthy, HealthHealthy), candidateCanaryTestKey)
 	if err != nil || store.CreateCandidateCanaryResult(ctx, result, now) != nil {
 		t.Fatalf("create candidate canary: result=%+v err=%v", result, err)
@@ -161,6 +170,7 @@ func TestLegacyCandidateCanaryCanOnlyBeRecognizedForBoundedExpiryCleanup(t *test
 	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: groupID,
 		RecordDigest: legacy.CandidateRecordDigest, BundleGeneration: testCandidateBundle, WorkerSlot: legacy.WorkerSlot,
 		ReleaseRecordDigest: legacy.ReleaseRecordDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	candidate = bindCandidatePromotionWitness(candidate)
 	if _, err := store.LoadLatestCandidateCanaryResult(ctx, candidate, now); err == nil {
 		t.Fatal("legacy result was accepted as authority evidence")
 	}
@@ -203,6 +213,7 @@ func TestAuthorityStoreKeepsGroupsImmutableAndCASIsolated(t *testing.T) {
 	}
 
 	candidateA := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: a.GroupID, RecordDigest: a.RecordDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	candidateA = bindCandidatePromotionWitness(candidateA)
 	_, _, err = store.PutCandidate(ctx, candidateA, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -291,6 +302,7 @@ func TestLoadedCandidateReplacementIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: oldCurrent.GroupID, RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	candidate = bindCandidatePromotionWitness(candidate)
 	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
 		t.Fatal(err)
 	}

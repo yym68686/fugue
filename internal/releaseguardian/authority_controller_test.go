@@ -24,6 +24,7 @@ func TestAuthorityControllerSwitchesAndRevertsOneGroupWithExactCAS(t *testing.T)
 		RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
 		State: CandidateAuthorityLoaded, Generation: 1,
 	}
+	candidate = bindCandidatePromotionWitness(candidate)
 	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +100,7 @@ func TestAuthorityControllerWaitsForBoundCandidateCanary(t *testing.T) {
 		RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
 		State: CandidateAuthorityLoaded, Generation: 1,
 	}
+	candidate = bindCandidatePromotionWitness(candidate)
 	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +151,7 @@ func TestAuthorityControllerRejectsBadCandidateWithoutChangingCurrent(t *testing
 	}
 	group := "edge-pool-b"
 	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: group, RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	candidate = bindCandidatePromotionWitness(candidate)
 	_, _, _ = store.PutCandidate(ctx, candidate, "", "")
 	setAuthorityObjectCAS(t, client, candidateAuthorityName(group), "candidate-b", "30")
 	current := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: group, CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 8}

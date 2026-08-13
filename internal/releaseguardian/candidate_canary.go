@@ -136,7 +136,7 @@ func (sample CandidateRouteSample) healthy() bool {
 // candidate-local; simultaneous failure is dependency degradation and cannot
 // authorize a switch or an unrelated rollback.
 func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthority, cohort CandidateWorkerCohort, candidateSamples, previousSamples []CandidateRouteSample, observedAt time.Time, ttl time.Duration, keyID string, signingKey []byte) (CandidateCanaryResult, error) {
-	if candidate.Validate() != nil || !authorityGenerationPattern.MatchString(candidate.BundleGeneration) || candidate.State != CandidateAuthorityLoaded || current.Validate() != nil ||
+	if candidate.Validate() != nil || !candidate.HasPromotionWitness() || !authorityGenerationPattern.MatchString(candidate.BundleGeneration) || candidate.State != CandidateAuthorityLoaded || current.Validate() != nil ||
 		cohort.Validate() != nil || cohort.GroupID != candidate.GroupID || cohort.WorkerSlot != candidate.WorkerSlot || cohort.BundleGeneration != candidate.BundleGeneration ||
 		candidate.GroupID != current.GroupID || candidate.RecordDigest == current.CurrentRecordDigest ||
 		candidate.WorkerSlot == current.CurrentWorkerSlot || len(candidateSamples) != CandidateCanaryRequiredSamples ||
@@ -200,6 +200,7 @@ func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthor
 	}
 	return SignCandidateCanaryResult(CandidateCanaryResult{
 		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, WorkerSlot: candidate.WorkerSlot,
+		AuthoritySequence: candidate.AuthoritySequence, CandidateSequence: candidate.CandidateSequence,
 		BundleGeneration: candidate.BundleGeneration, WorkerSourceSHA: cohort.WorkerSourceSHA,
 		WorkerImageDigest: cohort.WorkerImageDigest, WorkerCohortDigest: cohort.CohortDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: routeState, DependencyState: dependencyState,
