@@ -91,16 +91,8 @@ type PersistentGroupStore struct {
 }
 
 type persistentGroupSummary struct {
-	identity persistentGroupStateFileIdentity
-	status   AuthorityGroupStoreSnapshot
-	stage    GroupCandidateStageSnapshot
-}
-
-type persistentGroupStateFileIdentity struct {
-	size       int64
-	modifiedNS int64
-	device     uint64
-	inode      uint64
+	status AuthorityGroupStoreSnapshot
+	stage  GroupCandidateStageSnapshot
 }
 
 func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
@@ -629,7 +621,7 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 	if err := store.writeGroupState(statePath, state); err != nil {
 		return err
 	}
-	store.cacheGroupSummary(statePath, groupID, state)
+	store.cacheGroupSummary(groupID, state)
 	return nil
 }
 
@@ -641,16 +633,13 @@ func (store *PersistentGroupStore) readGroupSummary(ctx context.Context, groupID
 		return persistentGroupSummary{}, err
 	}
 	groupID = normalizeGroupID(groupID)
-	path := store.groupStatePath(groupID)
-	if cached, found := store.cachedGroupSummary(path, groupID); found {
+	if cached, found := store.cachedGroupSummary(groupID); found {
 		return cached, nil
 	}
 	var summary persistentGroupSummary
 	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
 		summary = summarizePersistentGroupState(*state)
-		identity, identityErr := persistentGroupStateIdentity(path)
-		summary.identity = identity
-		return identityErr
+		return nil
 	})
 	if err != nil {
 		return persistentGroupSummary{}, err
@@ -661,24 +650,15 @@ func (store *PersistentGroupStore) readGroupSummary(ctx context.Context, groupID
 	return summary, nil
 }
 
-func (store *PersistentGroupStore) cachedGroupSummary(path, groupID string) (persistentGroupSummary, bool) {
-	identity, err := persistentGroupStateIdentity(path)
-	if err != nil {
-		return persistentGroupSummary{}, false
-	}
+func (store *PersistentGroupStore) cachedGroupSummary(groupID string) (persistentGroupSummary, bool) {
 	store.summaryMu.RLock()
 	summary, found := store.summaries[groupID]
 	store.summaryMu.RUnlock()
-	return summary, found && summary.identity == identity
+	return summary, found
 }
 
-func (store *PersistentGroupStore) cacheGroupSummary(path, groupID string, state persistentGroupState) {
-	identity, err := persistentGroupStateIdentity(path)
-	if err != nil {
-		return
-	}
+func (store *PersistentGroupStore) cacheGroupSummary(groupID string, state persistentGroupState) {
 	summary := summarizePersistentGroupState(state)
-	summary.identity = identity
 	store.summaryMu.Lock()
 	store.summaries[groupID] = summary
 	store.summaryMu.Unlock()
@@ -746,21 +726,6 @@ func cloneGroupCandidateStageSnapshot(value GroupCandidateStageSnapshot) GroupCa
 	}
 	value.PublishedCandidate = cloneGroupShadowLedgerEntry(value.PublishedCandidate)
 	return value
-}
-
-func persistentGroupStateIdentity(path string) (persistentGroupStateFileIdentity, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return persistentGroupStateFileIdentity{}, err
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o007 != 0 {
-		return persistentGroupStateFileIdentity{}, errors.New("edge-control group state must be a private regular file")
-	}
-	identity := persistentGroupStateFileIdentity{size: info.Size(), modifiedNS: info.ModTime().UnixNano()}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		identity.device, identity.inode = uint64(stat.Dev), uint64(stat.Ino)
-	}
-	return identity, nil
 }
 
 func (store *PersistentGroupStore) readGroupState(path, groupID string) (persistentGroupState, error) {
