@@ -128,6 +128,37 @@ func TestBindGuardianLKGPreservesStableProvenanceAndRejectsRuntimeDrift(t *testi
 	}
 }
 
+func TestEdgeGuardianLKGAllowsBootstrapTwinSlotsThenRequiresMixedCurrent(t *testing.T) {
+	release := PlanRelease{ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1,
+		ExpectedPreviousImageDigest: testDigest, Artifact: Artifact{Repository: "ghcr.io/example/fugue-edge"},
+		Transition: &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{FrontName: "front", WorkerAName: "worker-a", WorkerBName: "worker-b"}},
+		ArtifactTargets: []ArtifactTarget{
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "test", Name: "front", Container: "edge-front", ContainerType: "container"},
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "test", Name: "worker-a", Container: "edge", ContainerType: "container"},
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "test", Name: "worker-b", Container: "edge", ContainerType: "container"},
+		}}
+	item := func(name, container, source, image string) map[string]any {
+		return map[string]any{"apiVersion": "apps/v1", "kind": "DaemonSet", "metadata": map[string]any{"name": name, "namespace": "test", "annotations": map[string]any{
+			"fugue.pro/production-config-sha": source, "fugue.pro/release-plan-digest": "sha256:" + strings.Repeat("b", 64), "fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("c", 64)}},
+			"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{
+				"fugue.pro/source-commit": source, "fugue.pro/oci-revision": source, "fugue.pro/production-config-sha": source}},
+				"spec": map[string]any{"containers": []any{map[string]any{"name": container, "image": image}}}}}}
+	}
+	wantImage := release.Artifact.Repository + "@" + testDigest
+	set := ResourceSet{Items: []map[string]any{item("front", "edge-front", testSHA1, wantImage), item("worker-a", "edge", testSHA1, wantImage), item("worker-b", "edge", testSHA1, wantImage)}}
+	if err := validateGuardianLKGIdentity(set, release); err != nil {
+		t.Fatalf("bootstrap twin slots: %v", err)
+	}
+	set.Items[2] = item("worker-b", "edge", testSHA2, "ghcr.io/example/fugue-edge@sha256:"+strings.Repeat("d", 64))
+	if err := validateGuardianLKGIdentity(set, release); err != nil {
+		t.Fatalf("mixed current/previous slots: %v", err)
+	}
+	set.Items[1] = item("worker-a", "edge", testSHA2, "ghcr.io/example/fugue-edge@sha256:"+strings.Repeat("e", 64))
+	if err := validateGuardianLKGIdentity(set, release); err == nil {
+		t.Fatal("LKG without a current Worker slot was accepted")
+	}
+}
+
 func TestRenderManifestsBindsEveryDeclaredArtifactTarget(t *testing.T) {
 	registry := testRegistry()
 	registry.Components[0].ArtifactTargets = []ArtifactTarget{

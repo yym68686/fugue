@@ -417,7 +417,6 @@ func readEdgeCandidateStageStatus(ctx context.Context, stageURL, groupID string)
 		return edgeCandidateStageStatus{}, fmt.Errorf("read edge-control candidate status: HTTP %d", response.StatusCode)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
-	decoder.DisallowUnknownFields()
 	var status edgeCandidateStageStatus
 	if decoder.Decode(&status) != nil || decoder.Decode(&struct{}{}) != io.EOF || status.GroupID != groupID {
 		return edgeCandidateStageStatus{}, errors.New("edge-control candidate status is invalid")

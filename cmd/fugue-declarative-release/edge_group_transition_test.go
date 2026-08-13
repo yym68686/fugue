@@ -4,12 +4,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/declarativerelease"
 )
+
+func TestReadEdgeCandidateStageStatusAcceptsFullAuthorityResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"edge_group_id":"edge-group-country-us","status":"serving_lkg","ready":true,"authority_sequence":12,"publication_sequence":12,"current_publication_sequence":10,"candidate_epoch":13,"published_bundle_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recovery_epoch":2,"lkg_state":"preserved"}`))
+	}))
+	defer server.Close()
+	endpoint := server.URL + edgeCandidateStagePath
+	status, err := readEdgeCandidateStageStatus(context.Background(), endpoint, "edge-group-country-us")
+	if err != nil || status.AuthoritySequence != 12 || status.CurrentPublicationSequence != 10 || status.CandidateEpoch != 13 {
+		t.Fatalf("full status response: status=%+v err=%v", status, err)
+	}
+}
 
 type fakeEdgeGroupRuntime struct {
 	snapshots       []edgeGroupState

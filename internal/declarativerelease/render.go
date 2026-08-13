@@ -196,8 +196,8 @@ func validateGuardianLKGIdentity(set ResourceSet, release PlanRelease) error {
 			return errors.New("exact Guardian LKG workload identity is invalid")
 		}
 	}
-	if edgeMixedLKG && edgeExpectedWorkers != 1 {
-		return errors.New("exact Guardian LKG must bind one current and one previous Worker slot")
+	if edgeMixedLKG && edgeExpectedWorkers != 1 && edgeExpectedWorkers != 2 {
+		return errors.New("exact Guardian LKG must bind its current Worker and optional previous slot")
 	}
 	return nil
 }
