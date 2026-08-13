@@ -1436,6 +1436,9 @@ func typedPrewritePredecessorHealth(ctx context.Context, release declarativerele
 	if errors.Is(err, errServiceHTTPHealth) {
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
+	if errors.Is(err, errEdgeGroupAuthorityHealth) {
+		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
+	}
 	return nil
 }
 
@@ -1737,10 +1740,10 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			transition := *release.Transition.EdgeGroupAB
 			state, err := cluster.readEdgeGroupState(ctx, release, transition)
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("%w: %v", errEdgeGroupAuthorityHealth, err)
 			}
 			if err := validateEdgeGroupAuthority(state, transition); err != nil {
-				return "", err
+				return "", fmt.Errorf("%w: %v", errEdgeGroupAuthorityHealth, err)
 			}
 			items := []string{"group=" + transition.GroupID, "active_slot=" + state.ActiveSlot}
 			for _, slot := range []struct {
@@ -1862,6 +1865,13 @@ var errWorkloadOriginatedServiceHealth = errors.New("workload-originated service
 // when the target is the exact immutable LKG in the bounded prewrite context.
 // Forward targets and ordinary successors therefore remain fail-closed.
 var errServiceHTTPHealth = errors.New("service-http health is degraded")
+
+// errEdgeGroupAuthorityHealth marks only a failure of the declared group
+// publication/inventory health contract. It is promoted to a degraded LKG
+// witness exclusively by typedPrewritePredecessorHealth, which additionally
+// proves the exact predecessor artifact and bounded prewrite context. Forward
+// health and identity failures remain ordinary fail-closed errors.
+var errEdgeGroupAuthorityHealth = errors.New("edge-group authority health is degraded")
 
 func servicePortByName(raw []byte, name string) (int, error) {
 	value, err := decodeJSONObject(raw)

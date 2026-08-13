@@ -1300,6 +1300,27 @@ func TestHealthWorkloadContainerUsesTransitionBoundEdgeWorker(t *testing.T) {
 	}
 }
 
+func TestTypedPrewriteAllowsOnlyExactLKGGroupAuthorityHealth(t *testing.T) {
+	release := declarativerelease.PlanRelease{ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: strings.Repeat("1", 40),
+		ExpectedPreviousManifestSHA: strings.Repeat("1", 40), ExpectedPreviousOCIRevision: strings.Repeat("1", 40),
+		ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("a", 64), Artifact: declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-edge"}}
+	target := declarativerelease.TargetIdentity{Present: true, ConfigSHA: release.ExpectedPreviousConfigSHA,
+		ManifestSHA: release.ExpectedPreviousManifestSHA, OCIRevision: release.ExpectedPreviousOCIRevision,
+		ImageRef: release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest}
+	healthErr := fmt.Errorf("%w: inventory is not current", errEdgeGroupAuthorityHealth)
+	ctx := declarativerelease.WithPrewritePredecessorHealthWait(context.Background())
+	if err := typedPrewritePredecessorHealth(ctx, release, target, healthErr); !errors.Is(err, declarativerelease.ErrDegradedPredecessorHealth) {
+		t.Fatalf("exact LKG group health was not typed: %v", err)
+	}
+	if err := typedPrewritePredecessorHealth(context.Background(), release, target, healthErr); err != nil {
+		t.Fatalf("ordinary health check gained degraded authority: %v", err)
+	}
+	target.ConfigSHA = strings.Repeat("2", 40)
+	if err := typedPrewritePredecessorHealth(ctx, release, target, healthErr); err != nil {
+		t.Fatalf("identity-drifted target gained degraded authority: %v", err)
+	}
+}
+
 func podFixture(name, uid, source, imageDigest string) map[string]any {
 	return map[string]any{
 		"metadata": map[string]any{"name": name, "uid": uid, "annotations": map[string]any{"fugue.pro/source-commit": source}},
