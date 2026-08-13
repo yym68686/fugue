@@ -103,12 +103,10 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 		address = activator.config.SlotB
 	}
 	status, body, headers, lkgErr := requestCandidateRoute(ctx, address, activator.front.config.RouteHost, activator.front.config.RoutePath)
-	lkgHealthy := lkgErr == nil && status == http.StatusOK && shaDigest(body) == activator.front.config.RouteBodyDigest &&
-		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) == current.PreviousRecordDigest &&
-		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) == current.PreviousWorkerSlot
 	lkgRuntimeHealthy, lkgRuntimeErr := activator.front.observeAuthorityRuntime(ctx, current.PreviousWorkerSlot,
 		current.PreviousWorkerSourceSHA, current.PreviousWorkerImageDigest, 0, current.PreviousBundleGeneration, false)
-	lkgHealthy = lkgHealthy && lkgRuntimeHealthy
+	lkgHealthy := lkgRuntimeHealthy && authorityRouteMatches(status, body, headers, lkgErr, activator.front.config.RouteBodyDigest,
+		current.PreviousRecordDigest, current.PreviousWorkerSlot, true)
 	evidence, err := declarativerelease.CanonicalJSON(map[string]any{
 		"groupId": current.GroupID, "currentRecordDigest": current.CurrentRecordDigest, "currentSlot": current.CurrentWorkerSlot,
 		"currentHealthy": currentHealthy, "currentError": errorClass(currentErr), "currentRuntimeError": errorClass(currentRuntimeErr),
@@ -119,6 +117,23 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 		return false, false, "", err
 	}
 	return currentHealthy, lkgHealthy, shaDigest(evidence), nil
+}
+
+// authorityRouteMatches permits an unattested route only for a previous LKG.
+// Old LKG workers predate candidate headers; their record binding is instead
+// supplied by observeAuthorityRuntime's exact source/image and bundle witness.
+// A partially populated or wrong attestation always fails closed.
+func authorityRouteMatches(status int, body []byte, headers http.Header, requestErr error, expectedBodyDigest, recordDigest string,
+	slot releaseguardian.AuthoritySlot, allowUnattestedLKG bool) bool {
+	if requestErr != nil || status != http.StatusOK || shaDigest(body) != expectedBodyDigest {
+		return false
+	}
+	record := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest"))
+	observedSlot := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))
+	if record == "" && observedSlot == "" {
+		return allowUnattestedLKG
+	}
+	return record == recordDigest && releaseguardian.AuthoritySlot(observedSlot) == slot
 }
 
 func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, target releaseguardian.FrontAuthorityTarget) (releaseguardian.FrontAuthorityTransaction, error) {

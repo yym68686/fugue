@@ -18,6 +18,58 @@ import (
 	"fugue/internal/releaseguardian"
 )
 
+func TestAuthorityRouteMatchesAttestedCurrentOrExactLegacyLKG(t *testing.T) {
+	body := []byte("route-ok")
+	bodyDigest := shaDigest(body)
+	record := "sha256:" + strings.Repeat("a", 64)
+	headers := http.Header{"X-Fugue-Candidate-Record-Digest": []string{record}, "X-Fugue-Candidate-Worker-Slot": []string{"b"}}
+	if !authorityRouteMatches(http.StatusOK, body, headers, nil, bodyDigest, record, releaseguardian.AuthoritySlotB, false) {
+		t.Fatal("exact attested route was rejected")
+	}
+	if authorityRouteMatches(http.StatusOK, body, http.Header{}, nil, bodyDigest, record, releaseguardian.AuthoritySlotB, false) {
+		t.Fatal("current route accepted without attestation")
+	}
+	if !authorityRouteMatches(http.StatusOK, body, http.Header{}, nil, bodyDigest, record, releaseguardian.AuthoritySlotB, true) {
+		t.Fatal("legacy LKG route without candidate headers was rejected")
+	}
+	for name, changed := range map[string]http.Header{
+		"partial record": {"X-Fugue-Candidate-Record-Digest": []string{record}},
+		"partial slot":   {"X-Fugue-Candidate-Worker-Slot": []string{"b"}},
+		"wrong record":   {"X-Fugue-Candidate-Record-Digest": []string{"sha256:" + strings.Repeat("c", 64)}, "X-Fugue-Candidate-Worker-Slot": []string{"b"}},
+		"wrong slot":     {"X-Fugue-Candidate-Record-Digest": []string{record}, "X-Fugue-Candidate-Worker-Slot": []string{"a"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if authorityRouteMatches(http.StatusOK, body, changed, nil, bodyDigest, record, releaseguardian.AuthoritySlotB, true) {
+				t.Fatal("invalid LKG attestation was accepted")
+			}
+		})
+	}
+}
+
+func TestAuthorityWorkerHealthMatchesExactPromotedGeneration(t *testing.T) {
+	group := "edge-group-country-de"
+	bundle := "serving-generation.p11481.r129"
+	health := baselineWorkerHealth{Healthy: true, EdgeGroupID: group, BundleVersion: bundle, PublicationSequence: 11481, ServingGeneration: "serving-generation"}
+	if !authorityWorkerHealthMatches(health, group, bundle) {
+		t.Fatal("exact Worker route generation was rejected")
+	}
+	for name, mutate := range map[string]func(*baselineWorkerHealth){
+		"unhealthy":     func(value *baselineWorkerHealth) { value.Healthy = false },
+		"wrong group":   func(value *baselineWorkerHealth) { value.EdgeGroupID = "edge-group-other" },
+		"wrong bundle":  func(value *baselineWorkerHealth) { value.BundleVersion += "-other" },
+		"wrong epoch":   func(value *baselineWorkerHealth) { value.PublicationSequence++ },
+		"wrong serving": func(value *baselineWorkerHealth) { value.ServingGeneration += "-other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := health
+			mutate(&changed)
+			if authorityWorkerHealthMatches(changed, group, bundle) {
+				t.Fatal("invalid Worker route generation was accepted")
+			}
+		})
+	}
+}
+
 func TestGroupAuthorityPromotionReplaysOnlyUnknownExactRequest(t *testing.T) {
 	now := time.Date(2026, 8, 13, 5, 0, 0, 0, time.UTC)
 	target := groupAuthorityTargetFixture()

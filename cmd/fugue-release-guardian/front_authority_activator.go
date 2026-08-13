@@ -459,6 +459,16 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 	if err != nil || !authorityRuntimeMatches(workers, cohort, nil, slot, sourceSHA, imageDigest, frontGeneration, bundleGeneration, false) {
 		return false, errors.New("authority Worker runtime does not match its pointer")
 	}
+	for _, worker := range workers {
+		if worker.Status.PodIP == "" {
+			return false, errors.New("authority Worker route generation is unavailable")
+		}
+		var health baselineWorkerHealth
+		if err := readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil ||
+			!authorityWorkerHealthMatches(health, activator.config.GroupID, bundleGeneration) {
+			return false, errors.New("authority Worker route generation does not match its pointer")
+		}
+	}
 	if !requireFront {
 		return true, nil
 	}
@@ -470,6 +480,12 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 		return false, errors.New("authority Front runtime does not match its pointer")
 	}
 	return true, nil
+}
+
+func authorityWorkerHealthMatches(health baselineWorkerHealth, groupID, bundleGeneration string) bool {
+	serving, publication, _, err := splitPromotedBundleVersion(bundleGeneration)
+	return err == nil && health.Healthy && health.EdgeGroupID == groupID && health.BundleVersion == bundleGeneration &&
+		health.ServingGeneration == serving && health.PublicationSequence == publication
 }
 
 func authorityRuntimeMatches(workers map[string]corev1.Pod, cohort releaseguardian.CandidateWorkerCohort, fronts map[string]observedFront,
