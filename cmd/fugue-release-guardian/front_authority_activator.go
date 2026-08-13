@@ -245,11 +245,13 @@ func frontLKGGenerationMatches(state edgegroupfront.ActivationState, expected ui
 	if state.Generation == expected {
 		return true
 	}
-	// A failed promotion can advance Front twice: candidate generation N+1,
-	// followed by its exact rollback N+2. Only that adjacent, explicitly
-	// linked rollback is an eligible LKG witness for the next promotion.
+	// Every failed promotion advances Front twice: candidate N+1 followed by
+	// its exact rollback N+2. A durable prepared journal can survive more than
+	// one such compensated attempt, so accept the latest even generation only
+	// when it is itself an exact rollback of its immediately preceding write.
+	// The caller separately binds slot, bundle, source and image to the LKG.
 	return operation == edgegroupfront.ActivationOperationPromote && state.Operation == edgegroupfront.ActivationOperationRollback &&
-		state.Generation == expected+2 && state.RollbackOfGeneration == expected+1
+		state.Generation > expected && (state.Generation-expected)%2 == 0 && state.RollbackOfGeneration == state.Generation-1
 }
 
 func (activator *frontAuthorityActivator) promoteWithLease(ctx context.Context, target releaseguardian.FrontAuthorityTarget, lease *heldAuthorityLease, preflight frontAuthorityPreflight) (releaseguardian.FrontAuthorityTransaction, error) {
