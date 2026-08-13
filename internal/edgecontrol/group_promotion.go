@@ -159,20 +159,22 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 		writeJSON(w, http.StatusOK, receipt)
 		return
 	}
-	if authority.LedgerHead.Sequence != promotion.ExpectedAuthoritySequence ||
+	if authority.LedgerHead.Sequence < promotion.ExpectedAuthoritySequence ||
 		authority.Published.PublicationSequence != promotion.ExpectedPublicationSequence ||
 		authority.Published.RecoveryEpoch != promotion.ExpectedRecoveryEpoch ||
-		authority.Published.Digest != promotion.ExpectedPublishedBundleDigest {
+		authority.Published.Digest != promotion.ExpectedPublishedBundleDigest ||
+		(authority.LedgerHead.Sequence > promotion.ExpectedAuthoritySequence && authority.LedgerHead.Status != GroupAuthorityStatusFailed) {
 		writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 		return
 	}
+	previousAuthoritySequence := authority.LedgerHead.Sequence
 	bundle := cloneEdgeRouteBundle(candidate.Bundle)
 	bundle.Issuer = groupAuthorityIssuer
 	bundle.GeneratedAt = now
 	bundle.ValidUntil = time.Time{}
 	bundle.KeyID, bundle.Signature, bundle.Signatures = "", "", nil
 	bundle.PreviousGeneration = authority.Published.Bundle.Generation
-	bundle.Version = groupPublicationVersion(bundle.Generation, promotion.ExpectedAuthoritySequence+1, promotion.ExpectedRecoveryEpoch)
+	bundle.Version = groupPublicationVersion(bundle.Generation, previousAuthoritySequence+1, promotion.ExpectedRecoveryEpoch)
 	signed, err := handler.signer.SignGroupBundle(request.Context(), promotion.GroupID, bundle)
 	if err != nil {
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "signing_unavailable")
@@ -193,7 +195,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 		return
 	}
 	writeJSON(w, http.StatusOK, GroupPromotionReceipt{Schema: GroupPromotionReceiptSchemaV1, GroupID: promotion.GroupID,
-		PreviousAuthoritySequence:   promotion.ExpectedAuthoritySequence,
+		PreviousAuthoritySequence:   previousAuthoritySequence,
 		PreviousPublicationSequence: promotion.ExpectedPublicationSequence, PreviousRecoveryEpoch: promotion.ExpectedRecoveryEpoch,
 		PreviousBundleGeneration: authority.Published.Bundle.Generation, PreviousPublishedBundleDigest: promotion.ExpectedPublishedBundleDigest,
 		PublicationSequence: appended.Sequence, RecoveryEpoch: promotion.ExpectedRecoveryEpoch, BundleGeneration: appended.BundleGeneration,
@@ -202,11 +204,8 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 }
 
 func groupPromotionReplayReceipt(authority GroupAuthorityState, candidate GroupCandidateBundle, promotion GroupPromotionRequest) (GroupPromotionReceipt, bool) {
-	if authority.LedgerHead.Sequence != promotion.ExpectedAuthoritySequence+1 || authority.LedgerHead.Status != GroupAuthorityStatusPublished ||
-		authority.LedgerHead.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
-		authority.LedgerHead.BundleGeneration != promotion.CandidateBundleGeneration ||
-		authority.LedgerHead.PublishedBundleDigest != authority.Published.Digest ||
-		authority.Published.PublicationSequence != promotion.ExpectedAuthoritySequence+1 ||
+	if authority.Published.PublicationSequence <= promotion.ExpectedAuthoritySequence ||
+		authority.Published.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
 		authority.Published.RecoveryEpoch != promotion.ExpectedRecoveryEpoch ||
 		authority.Published.Bundle.Generation != promotion.CandidateBundleGeneration ||
 		authority.Published.Bundle.PreviousGeneration != candidate.CurrentBundle.Generation ||
@@ -216,7 +215,7 @@ func groupPromotionReplayReceipt(authority GroupAuthorityState, candidate GroupC
 		return GroupPromotionReceipt{}, false
 	}
 	return GroupPromotionReceipt{Schema: GroupPromotionReceiptSchemaV1, GroupID: promotion.GroupID,
-		PreviousAuthoritySequence: promotion.ExpectedAuthoritySequence, PreviousPublicationSequence: promotion.ExpectedPublicationSequence,
+		PreviousAuthoritySequence: authority.Published.PublicationSequence - 1, PreviousPublicationSequence: promotion.ExpectedPublicationSequence,
 		PreviousRecoveryEpoch: promotion.ExpectedRecoveryEpoch, PreviousBundleGeneration: candidate.CurrentBundle.Generation,
 		PreviousPublishedBundleDigest: promotion.ExpectedPublishedBundleDigest, PublicationSequence: authority.Published.PublicationSequence,
 		RecoveryEpoch: authority.Published.RecoveryEpoch, BundleGeneration: authority.Published.Bundle.Generation,

@@ -70,6 +70,83 @@ func TestGroupPromotionAtomicallyReissuesExactCandidateAsCurrent(t *testing.T) {
 	}
 }
 
+func TestGroupPromotionAllowsOnlyFailedAuditTailAfterCandidateCanary(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 8, 30, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, signer, candidate, current := groupPromotionFixture(t, groupID, now)
+	canaryAuthoritySequence := candidate.AuthorityLedgerSequence
+	for index := 0; index < 2; index++ {
+		authority, err := store.ReadGroupAuthority(ctx, groupID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed := GroupAuthorityLedgerEntry{Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Status: GroupAuthorityStatusFailed,
+			CandidateLedgerSequence: authority.Published.CandidateLedgerSequence, RouteIntentGeneration: "post-canary-audit",
+			LastPublishedBundleGeneration: authority.Published.Bundle.Generation, FailureCode: GroupShadowFailureInventoryInvalid,
+			Authority: "edge-control", PublicationEnabled: true, RecordedAt: now.Add(time.Duration(index+2) * time.Minute)}
+		if _, err := store.AppendGroupAuthorityCAS(ctx, groupID, authority.LedgerHead.Sequence,
+			authority.Published.CandidateLedgerSequence, failed, nil); err != nil {
+			t.Fatalf("append failed audit %d: %v", index, err)
+		}
+	}
+	afterAudits, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || afterAudits.LedgerHead.Sequence != canaryAuthoritySequence+2 ||
+		afterAudits.Published.Digest != current.Published.Digest {
+		t.Fatalf("audit tail changed publication: authority=%+v err=%v", afterAudits, err)
+	}
+
+	keyDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x75}, 32)
+	writeGroupRecoveryFixture(t, keyDir, groupID, secret, now)
+	handler, err := NewGroupPromotionHandler(GroupPromotionHandlerConfig{Store: store, Signer: signer,
+		GroupIDs: []string{groupID}, KeyringDir: keyDir, Now: func() time.Time { return now.Add(4 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotion := GroupPromotionRequest{Schema: GroupPromotionRequestSchemaV1, KeyID: "recovery-de-1", GroupID: groupID,
+		ExpectedAuthoritySequence: canaryAuthoritySequence, ExpectedPublicationSequence: current.Published.PublicationSequence,
+		ExpectedRecoveryEpoch: current.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: current.Published.Digest,
+		ExpectedCandidateEpoch: candidate.Epoch, CandidateRecordDigest: candidate.Record.RecordDigest,
+		CandidateWorkerSlot: candidate.WorkerSlot, CandidateBundleGeneration: candidate.Bundle.Generation,
+		IssuedAtUnix: now.Add(4 * time.Minute).Unix(), ExpiresAtUnix: now.Add(5 * time.Minute).Unix(),
+		Nonce: "promotion-audit-tail-0001", Reason: "promote after harmless failed audit tail"}
+	if err := SignGroupPromotionRequest(&promotion, secret); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(promotion)
+	request := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	var receipt GroupPromotionReceipt
+	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &receipt) != nil ||
+		receipt.PreviousAuthoritySequence != afterAudits.LedgerHead.Sequence ||
+		receipt.PublicationSequence != afterAudits.LedgerHead.Sequence+1 {
+		t.Fatalf("promotion after audit tail status=%d receipt=%+v body=%s", recorder.Code, receipt, recorder.Body.String())
+	}
+	after, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || after.Published.Bundle.Generation != candidate.Bundle.Generation ||
+		after.Published.Bundle.Version != groupPublicationVersion(candidate.Bundle.Generation, receipt.PublicationSequence, receipt.RecoveryEpoch) {
+		t.Fatalf("audit-tail promotion was not exact: authority=%+v err=%v", after, err)
+	}
+	failed := GroupAuthorityLedgerEntry{Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Status: GroupAuthorityStatusFailed,
+		CandidateLedgerSequence: after.Published.CandidateLedgerSequence, RouteIntentGeneration: "post-promotion-audit",
+		LastPublishedBundleGeneration: after.Published.Bundle.Generation, FailureCode: GroupShadowFailureInventoryInvalid,
+		Authority: "edge-control", PublicationEnabled: true, RecordedAt: now.Add(6 * time.Minute)}
+	if _, err := store.AppendGroupAuthorityCAS(ctx, groupID, after.LedgerHead.Sequence,
+		after.Published.CandidateLedgerSequence, failed, nil); err != nil {
+		t.Fatal(err)
+	}
+	replay := httptest.NewRecorder()
+	replayRequest := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
+	replayRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(replay, replayRequest)
+	if replay.Code != http.StatusOK || replay.Body.String() != recorder.Body.String() {
+		t.Fatalf("promotion replay after audit status=%d body=%s", replay.Code, replay.Body.String())
+	}
+}
+
 func TestGroupPromotionRejectsCandidateAndCurrentCASDriftWithoutWriting(t *testing.T) {
 	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
 	groupID := "edge-group-country-us"

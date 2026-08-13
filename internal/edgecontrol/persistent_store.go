@@ -440,12 +440,18 @@ func (store *PersistentGroupStore) PromoteGroupCandidateCAS(ctx context.Context,
 	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
 		candidateBundle, candidateExists := persistentCandidateByEpoch(state, request.ExpectedCandidateEpoch)
 		if state.Published == nil || !candidateExists || len(state.AuthorityLedger) == 0 ||
-			state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != request.ExpectedAuthoritySequence ||
+			uint64(len(state.AuthorityLedger)) < request.ExpectedAuthoritySequence ||
 			state.Published.PublicationSequence != request.ExpectedPublicationSequence || state.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch ||
 			state.Published.Digest != request.ExpectedPublishedBundleDigest || candidateBundle.Record.RecordDigest != request.CandidateRecordDigest ||
 			candidateBundle.WorkerSlot != request.CandidateWorkerSlot || candidateBundle.Bundle.Generation != request.CandidateBundleGeneration ||
 			candidateBundle.AuthorityLedgerSequence != request.ExpectedAuthoritySequence {
 			return ErrGroupAuthorityCASConflict
+		}
+		for _, audit := range state.AuthorityLedger[request.ExpectedAuthoritySequence:] {
+			if audit.Status != GroupAuthorityStatusFailed || audit.RecoveryEpoch != 0 ||
+				audit.LastPublishedBundleGeneration != state.Published.Bundle.Generation {
+				return ErrGroupAuthorityCASConflict
+			}
 		}
 		candidateSequence := candidateBundle.CandidateLedgerSequence
 		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) {
@@ -459,7 +465,8 @@ func (store *PersistentGroupStore) PromoteGroupCandidateCAS(ctx context.Context,
 		current := cloneGroupPublishedBundle(*state.Published)
 		var next *GroupPublishedBundle
 		var err error
-		appended, next, err = prepareGroupAuthorityAppend(state.GroupID, request.ExpectedAuthoritySequence, state.AuthorityLedger, &current, &candidate, entry, &signed)
+		currentAuthoritySequence := uint64(len(state.AuthorityLedger))
+		appended, next, err = prepareGroupAuthorityAppend(state.GroupID, currentAuthoritySequence, state.AuthorityLedger, &current, &candidate, entry, &signed)
 		if err != nil {
 			return err
 		}
