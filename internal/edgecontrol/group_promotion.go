@@ -141,11 +141,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 		return
 	}
 	authority, err := handler.store.ReadGroupAuthority(request.Context(), promotion.GroupID)
-	if err != nil || !authority.PublishedExists || !authority.LedgerExists ||
-		authority.LedgerHead.Sequence != promotion.ExpectedAuthoritySequence ||
-		authority.Published.PublicationSequence != promotion.ExpectedPublicationSequence ||
-		authority.Published.RecoveryEpoch != promotion.ExpectedRecoveryEpoch ||
-		authority.Published.Digest != promotion.ExpectedPublishedBundleDigest {
+	if err != nil || !authority.PublishedExists || !authority.LedgerExists {
 		writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 		return
 	}
@@ -157,6 +153,17 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 		candidate.CurrentRecord == nil || candidate.CurrentRecord.BundleDigest != promotion.ExpectedPublishedBundleDigest ||
 		candidate.CurrentBundle == nil || signedGroupBundleDigest(*candidate.CurrentBundle) != promotion.ExpectedPublishedBundleDigest {
 		writeGroupBundleError(w, http.StatusConflict, "candidate_conflict")
+		return
+	}
+	if receipt, replayed := groupPromotionReplayReceipt(authority, candidate, promotion); replayed {
+		writeJSON(w, http.StatusOK, receipt)
+		return
+	}
+	if authority.LedgerHead.Sequence != promotion.ExpectedAuthoritySequence ||
+		authority.Published.PublicationSequence != promotion.ExpectedPublicationSequence ||
+		authority.Published.RecoveryEpoch != promotion.ExpectedRecoveryEpoch ||
+		authority.Published.Digest != promotion.ExpectedPublishedBundleDigest {
+		writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 		return
 	}
 	bundle := cloneEdgeRouteBundle(candidate.Bundle)
@@ -192,6 +199,29 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 		PublicationSequence: appended.Sequence, RecoveryEpoch: promotion.ExpectedRecoveryEpoch, BundleGeneration: appended.BundleGeneration,
 		PublishedBundleDigest: appended.PublishedBundleDigest, CandidateRecordDigest: promotion.CandidateRecordDigest,
 		WorkerSlot: promotion.CandidateWorkerSlot, Authority: "edge-control"})
+}
+
+func groupPromotionReplayReceipt(authority GroupAuthorityState, candidate GroupCandidateBundle, promotion GroupPromotionRequest) (GroupPromotionReceipt, bool) {
+	if authority.LedgerHead.Sequence != promotion.ExpectedAuthoritySequence+1 || authority.LedgerHead.Status != GroupAuthorityStatusPublished ||
+		authority.LedgerHead.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
+		authority.LedgerHead.BundleGeneration != promotion.CandidateBundleGeneration ||
+		authority.LedgerHead.PublishedBundleDigest != authority.Published.Digest ||
+		authority.Published.PublicationSequence != promotion.ExpectedAuthoritySequence+1 ||
+		authority.Published.RecoveryEpoch != promotion.ExpectedRecoveryEpoch ||
+		authority.Published.Bundle.Generation != promotion.CandidateBundleGeneration ||
+		authority.Published.Bundle.PreviousGeneration != candidate.CurrentBundle.Generation ||
+		candidate.CurrentRecord == nil || candidate.CurrentBundle == nil ||
+		candidate.CurrentRecord.BundleDigest != promotion.ExpectedPublishedBundleDigest ||
+		signedGroupBundleDigest(*candidate.CurrentBundle) != promotion.ExpectedPublishedBundleDigest {
+		return GroupPromotionReceipt{}, false
+	}
+	return GroupPromotionReceipt{Schema: GroupPromotionReceiptSchemaV1, GroupID: promotion.GroupID,
+		PreviousAuthoritySequence: promotion.ExpectedAuthoritySequence, PreviousPublicationSequence: promotion.ExpectedPublicationSequence,
+		PreviousRecoveryEpoch: promotion.ExpectedRecoveryEpoch, PreviousBundleGeneration: candidate.CurrentBundle.Generation,
+		PreviousPublishedBundleDigest: promotion.ExpectedPublishedBundleDigest, PublicationSequence: authority.Published.PublicationSequence,
+		RecoveryEpoch: authority.Published.RecoveryEpoch, BundleGeneration: authority.Published.Bundle.Generation,
+		PublishedBundleDigest: authority.Published.Digest, CandidateRecordDigest: promotion.CandidateRecordDigest,
+		WorkerSlot: promotion.CandidateWorkerSlot, Authority: "edge-control"}, true
 }
 
 func validateGroupPromotionRequest(request GroupPromotionRequest) error {

@@ -61,7 +61,7 @@ func TestGroupPromotionAtomicallyReissuesExactCandidateAsCurrent(t *testing.T) {
 	replayRequest := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
 	replayRequest.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(replay, replayRequest)
-	if replay.Code != http.StatusConflict {
+	if replay.Code != http.StatusOK || replay.Body.String() != recorder.Body.String() {
 		t.Fatalf("promotion replay status=%d body=%s", replay.Code, replay.Body.String())
 	}
 	history, err := store.AuthorityHistory(ctx, groupID)
