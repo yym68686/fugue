@@ -42,6 +42,7 @@ type persistentGroupState struct {
 	AuthorityLedger   []GroupAuthorityLedgerEntry  `json:"authority_ledger,omitempty"`
 	Published         *GroupPublishedBundle        `json:"published_bundle,omitempty"`
 	Candidate         *GroupCandidateBundle        `json:"candidate_bundle,omitempty"`
+	CandidateHistory  []GroupCandidateBundle       `json:"candidate_history,omitempty"`
 	Digest            string                       `json:"digest"`
 }
 
@@ -217,6 +218,28 @@ func (store *PersistentGroupStore) ReadGroupCandidate(ctx context.Context, group
 	return candidate, exists, err
 }
 
+func (store *PersistentGroupStore) ReadGroupCandidateByEpoch(ctx context.Context, groupID string, epoch uint64) (GroupCandidateBundle, bool, error) {
+	if epoch == 0 {
+		return GroupCandidateBundle{}, false, errors.New("edge-control candidate epoch is required")
+	}
+	var candidate GroupCandidateBundle
+	found := false
+	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
+		if state.Candidate != nil && state.Candidate.Epoch == epoch {
+			candidate, found = cloneGroupCandidateBundle(*state.Candidate), true
+			return nil
+		}
+		for index := len(state.CandidateHistory) - 1; index >= 0; index-- {
+			if state.CandidateHistory[index].Epoch == epoch {
+				candidate, found = cloneGroupCandidateBundle(state.CandidateHistory[index]), true
+				return nil
+			}
+		}
+		return nil
+	})
+	return candidate, found, err
+}
+
 func (store *PersistentGroupStore) PutGroupCandidateCAS(ctx context.Context, groupID string, expectedEpoch, expectedCandidateSequence uint64, candidate GroupCandidateBundle) (GroupCandidateBundle, error) {
 	var stored GroupCandidateBundle
 	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
@@ -245,6 +268,7 @@ func (store *PersistentGroupStore) PutGroupCandidateCAS(ctx context.Context, gro
 			return ErrGroupAuthorityCandidateCAS
 		}
 		stored = cloneGroupCandidateBundle(candidate)
+		retainReplacedCandidate(state, stored.Epoch)
 		state.Candidate = &stored
 		return nil
 	})
@@ -284,10 +308,36 @@ func (store *PersistentGroupStore) PutGroupCurrentLKGCandidateCAS(ctx context.Co
 			return err
 		}
 		stored = cloneGroupCandidateBundle(candidate)
+		retainReplacedCandidate(state, stored.Epoch)
 		state.Candidate = &stored
 		return nil
 	})
 	return cloneGroupCandidateBundle(stored), err
+}
+
+func retainReplacedCandidate(state *persistentGroupState, nextEpoch uint64) {
+	if state == nil || state.Candidate == nil || state.Candidate.Epoch == nextEpoch {
+		return
+	}
+	state.CandidateHistory = append(state.CandidateHistory, cloneGroupCandidateBundle(*state.Candidate))
+	if len(state.CandidateHistory) > retainedGroupCandidateBundles {
+		state.CandidateHistory = append([]GroupCandidateBundle(nil), state.CandidateHistory[len(state.CandidateHistory)-retainedGroupCandidateBundles:]...)
+	}
+}
+
+func persistentCandidateByEpoch(state *persistentGroupState, epoch uint64) (*GroupCandidateBundle, bool) {
+	if state == nil || epoch == 0 {
+		return nil, false
+	}
+	if state.Candidate != nil && state.Candidate.Epoch == epoch {
+		return state.Candidate, true
+	}
+	for index := len(state.CandidateHistory) - 1; index >= 0; index-- {
+		if state.CandidateHistory[index].Epoch == epoch {
+			return &state.CandidateHistory[index], true
+		}
+	}
+	return nil, false
 }
 
 func (store *PersistentGroupStore) ReadGroupAuthorityStatus(ctx context.Context, groupID string) (AuthorityGroupStoreSnapshot, error) {
@@ -353,22 +403,22 @@ func (store *PersistentGroupStore) PromoteGroupCandidateCAS(ctx context.Context,
 	entry GroupAuthorityLedgerEntry, signed model.EdgeRouteBundle) (GroupAuthorityLedgerEntry, error) {
 	var appended GroupAuthorityLedgerEntry
 	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
-		if state.Published == nil || state.Candidate == nil || len(state.AuthorityLedger) == 0 ||
+		candidateBundle, candidateExists := persistentCandidateByEpoch(state, request.ExpectedCandidateEpoch)
+		if state.Published == nil || !candidateExists || len(state.AuthorityLedger) == 0 ||
 			state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != request.ExpectedAuthoritySequence ||
 			state.Published.PublicationSequence != request.ExpectedPublicationSequence || state.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch ||
-			state.Published.Digest != request.ExpectedPublishedBundleDigest || state.Candidate.Epoch != request.ExpectedCandidateEpoch ||
-			state.Candidate.Record.RecordDigest != request.CandidateRecordDigest || state.Candidate.WorkerSlot != request.CandidateWorkerSlot ||
-			state.Candidate.Bundle.Generation != request.CandidateBundleGeneration ||
-			state.Candidate.AuthorityLedgerSequence != request.ExpectedAuthoritySequence {
+			state.Published.Digest != request.ExpectedPublishedBundleDigest || candidateBundle.Record.RecordDigest != request.CandidateRecordDigest ||
+			candidateBundle.WorkerSlot != request.CandidateWorkerSlot || candidateBundle.Bundle.Generation != request.CandidateBundleGeneration ||
+			candidateBundle.AuthorityLedgerSequence != request.ExpectedAuthoritySequence {
 			return ErrGroupAuthorityCASConflict
 		}
-		candidateSequence := state.Candidate.CandidateLedgerSequence
+		candidateSequence := candidateBundle.CandidateLedgerSequence
 		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) {
 			return ErrGroupAuthorityCandidateCAS
 		}
 		candidate := cloneGroupShadowLedgerEntry(state.Ledger[candidateSequence-1])
 		if candidate.Sequence != candidateSequence || candidate.Bundle == nil || candidate.BundleArchived ||
-			groupAuthorityCandidateDigest(*candidate.Bundle) != groupAuthorityCandidateDigest(state.Candidate.Bundle) {
+			groupAuthorityCandidateDigest(*candidate.Bundle) != groupAuthorityCandidateDigest(candidateBundle.Bundle) {
 			return ErrGroupAuthorityCandidateCAS
 		}
 		current := cloneGroupPublishedBundle(*state.Published)
@@ -581,6 +631,14 @@ func compactPersistentGroupState(state *persistentGroupState) {
 	if state.Published != nil && state.Published.CandidateLedgerSequence > 0 {
 		keep[state.Published.CandidateLedgerSequence] = struct{}{}
 	}
+	if state.Candidate != nil && state.Candidate.CandidateLedgerSequence > 0 {
+		keep[state.Candidate.CandidateLedgerSequence] = struct{}{}
+	}
+	for index := range state.CandidateHistory {
+		if state.CandidateHistory[index].CandidateLedgerSequence > 0 {
+			keep[state.CandidateHistory[index].CandidateLedgerSequence] = struct{}{}
+		}
+	}
 	remaining := retainedGroupCandidateBundles
 	for index := len(state.Ledger) - 1; index >= 0 && remaining > 0; index-- {
 		entry := state.Ledger[index]
@@ -762,19 +820,39 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 		}
 	}
 	if state.Candidate != nil {
-		if err := validateGroupCandidateBundle(groupID, *state.Candidate); err != nil {
+		if err := validatePersistentCandidateBinding(state, groupID, *state.Candidate); err != nil {
 			return err
 		}
-		candidate := state.Candidate
-		if candidate.CandidateLedgerSequence > uint64(len(state.Ledger)) || state.Ledger[candidate.CandidateLedgerSequence-1].Bundle == nil ||
-			state.Ledger[candidate.CandidateLedgerSequence-1].BundleArchived ||
-			state.Ledger[candidate.CandidateLedgerSequence-1].RouteIntentGeneration != candidate.RouteIntentGeneration ||
-			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryGeneration != candidate.InventoryGeneration ||
-			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryDigest != candidate.Record.InventoryDigest ||
-			(state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "a" && state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "b") ||
-			groupAuthorityCandidateDigest(*state.Ledger[candidate.CandidateLedgerSequence-1].Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) {
-			return errors.New("edge-control persistent candidate is not bound to the group shadow ledger")
+	}
+	if len(state.CandidateHistory) > retainedGroupCandidateBundles {
+		return errors.New("edge-control persistent candidate history exceeds its retention bound")
+	}
+	previousEpoch := uint64(0)
+	for index := range state.CandidateHistory {
+		candidate := state.CandidateHistory[index]
+		if candidate.Epoch <= previousEpoch || (state.Candidate != nil && candidate.Epoch >= state.Candidate.Epoch) {
+			return errors.New("edge-control persistent candidate history order is invalid")
 		}
+		if err := validatePersistentCandidateBinding(state, groupID, candidate); err != nil {
+			return err
+		}
+		previousEpoch = candidate.Epoch
+	}
+	return nil
+}
+
+func validatePersistentCandidateBinding(state persistentGroupState, groupID string, candidate GroupCandidateBundle) error {
+	if err := validateGroupCandidateBundle(groupID, candidate); err != nil {
+		return err
+	}
+	if candidate.CandidateLedgerSequence == 0 || candidate.CandidateLedgerSequence > uint64(len(state.Ledger)) ||
+		state.Ledger[candidate.CandidateLedgerSequence-1].Bundle == nil || state.Ledger[candidate.CandidateLedgerSequence-1].BundleArchived ||
+		state.Ledger[candidate.CandidateLedgerSequence-1].RouteIntentGeneration != candidate.RouteIntentGeneration ||
+		state.Ledger[candidate.CandidateLedgerSequence-1].InventoryGeneration != candidate.InventoryGeneration ||
+		state.Ledger[candidate.CandidateLedgerSequence-1].InventoryDigest != candidate.Record.InventoryDigest ||
+		(state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "a" && state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "b") ||
+		groupAuthorityCandidateDigest(*state.Ledger[candidate.CandidateLedgerSequence-1].Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) {
+		return errors.New("edge-control persistent candidate is not bound to the group shadow ledger")
 	}
 	return nil
 }
@@ -851,6 +929,13 @@ func clonePersistentGroupState(state persistentGroupState) persistentGroupState 
 	if state.Candidate != nil {
 		candidate := cloneGroupCandidateBundle(*state.Candidate)
 		state.Candidate = &candidate
+	}
+	if len(state.CandidateHistory) > 0 {
+		history := make([]GroupCandidateBundle, len(state.CandidateHistory))
+		for index := range state.CandidateHistory {
+			history[index] = cloneGroupCandidateBundle(state.CandidateHistory[index])
+		}
+		state.CandidateHistory = history
 	}
 	return state
 }

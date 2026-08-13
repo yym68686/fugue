@@ -66,7 +66,7 @@ type GroupPromotionReceipt struct {
 
 type GroupPromotionStore interface {
 	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
-	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
+	ReadGroupCandidateByEpoch(context.Context, string, uint64) (GroupCandidateBundle, bool, error)
 	PromoteGroupCandidateCAS(context.Context, string, GroupPromotionRequest, GroupAuthorityLedgerEntry, model.EdgeRouteBundle) (GroupAuthorityLedgerEntry, error)
 }
 
@@ -145,7 +145,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 		writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 		return
 	}
-	candidate, exists, err := handler.store.ReadGroupCandidate(request.Context(), promotion.GroupID)
+	candidate, exists, err := handler.store.ReadGroupCandidateByEpoch(request.Context(), promotion.GroupID, promotion.ExpectedCandidateEpoch)
 	if err != nil || !exists || validateGroupCandidateBundle(promotion.GroupID, candidate) != nil ||
 		candidate.Epoch != promotion.ExpectedCandidateEpoch || candidate.Record.RecordDigest != promotion.CandidateRecordDigest ||
 		candidate.WorkerSlot != promotion.CandidateWorkerSlot || candidate.Bundle.Generation != promotion.CandidateBundleGeneration ||

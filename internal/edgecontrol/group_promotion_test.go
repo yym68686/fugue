@@ -118,6 +118,77 @@ func TestGroupPromotionRejectsCandidateAndCurrentCASDriftWithoutWriting(t *testi
 	}
 }
 
+func TestGroupPromotionPromotesExactCanariedEpochAfterCandidatePointerAdvances(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, signer, canaried, current := groupPromotionFixture(t, groupID, now)
+
+	inventory, err := store.ReadGroupInventory(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory.Sequence++
+	inventory.Generation = "inventory-after-canary"
+	inventory.ObservedAt = now.Add(90 * time.Second)
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, inventory.Sequence-1, inventory); err != nil {
+		t.Fatalf("advance inventory: %v", err)
+	}
+	compiled, err := (GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now.Add(90 * time.Second) }}).
+		Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || compiled.Succeeded != 1 {
+		t.Fatalf("compile replacement candidate: batch=%+v err=%v", compiled, err)
+	}
+	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64)}
+	publisher := GroupCandidatePublisher{Store: store, Signer: signer,
+		CurrentLKG: &GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now.Add(90 * time.Second) }},
+		Identity:   identity, Now: func() time.Time { return now.Add(90 * time.Second) }}
+	if batch, publishErr := publisher.Publish(ctx, compiled); publishErr != nil || batch.Published != 1 {
+		t.Fatalf("publish replacement candidate: batch=%+v err=%v", batch, publishErr)
+	}
+	latest, exists, err := store.ReadGroupCandidate(ctx, groupID)
+	if err != nil || !exists || latest.Epoch <= canaried.Epoch || latest.Record.RecordDigest == canaried.Record.RecordDigest {
+		t.Fatalf("candidate pointer did not advance: latest=%+v exists=%v err=%v", latest, exists, err)
+	}
+	retained, exists, err := store.ReadGroupCandidateByEpoch(ctx, groupID, canaried.Epoch)
+	if err != nil || !exists || retained.Record.RecordDigest != canaried.Record.RecordDigest {
+		t.Fatalf("canaried epoch was not retained: retained=%+v exists=%v err=%v", retained, exists, err)
+	}
+
+	keyDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x74}, 32)
+	writeGroupRecoveryFixture(t, keyDir, groupID, secret, now)
+	handler, err := NewGroupPromotionHandler(GroupPromotionHandlerConfig{Store: store, Signer: signer,
+		GroupIDs: []string{groupID}, KeyringDir: keyDir, Now: func() time.Time { return now.Add(2 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotion := GroupPromotionRequest{Schema: GroupPromotionRequestSchemaV1, KeyID: "recovery-de-1", GroupID: groupID,
+		ExpectedAuthoritySequence: current.LedgerHead.Sequence, ExpectedPublicationSequence: current.Published.PublicationSequence,
+		ExpectedRecoveryEpoch: current.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: current.Published.Digest,
+		ExpectedCandidateEpoch: canaried.Epoch, CandidateRecordDigest: canaried.Record.RecordDigest,
+		CandidateWorkerSlot: canaried.WorkerSlot, CandidateBundleGeneration: canaried.Bundle.Generation,
+		IssuedAtUnix: now.Add(2 * time.Minute).Unix(), ExpiresAtUnix: now.Add(3 * time.Minute).Unix(),
+		Nonce: "promotion-retained-epoch-0001", Reason: "promote exact independently canaried epoch"}
+	if err := SignGroupPromotionRequest(&promotion, secret); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(promotion)
+	request := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retained epoch promotion status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	after, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || after.Published.Bundle.Generation != canaried.Bundle.Generation || after.Published.CandidateLedgerSequence != canaried.CandidateLedgerSequence {
+		t.Fatalf("retained epoch was not promoted exactly: authority=%+v err=%v", after, err)
+	}
+}
+
 func groupPromotionFixture(t *testing.T, groupID string, now time.Time) (*PersistentGroupStore, *fixtureGroupSigner, GroupCandidateBundle, GroupAuthorityState) {
 	t.Helper()
 	ctx := context.Background()
