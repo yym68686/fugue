@@ -87,12 +87,18 @@ type authorityGroupStatus struct {
 	GroupID                     string     `json:"edge_group_id"`
 	Status                      string     `json:"status"`
 	Ready                       bool       `json:"ready"`
+	ServingHealthy              bool       `json:"serving_healthy"`
+	BootstrapEligible           bool       `json:"bootstrap_eligible"`
+	BootstrapValidUntil         *time.Time `json:"bootstrap_valid_until,omitempty"`
 	InventorySequence           uint64     `json:"inventory_sequence,omitempty"`
 	InventoryGeneration         string     `json:"inventory_generation,omitempty"`
 	InventoryProducerGeneration uint64     `json:"inventory_producer_generation,omitempty"`
 	InventoryProducerNodes      int        `json:"inventory_producer_nodes,omitempty"`
 	InventoryHeartbeatAt        *time.Time `json:"inventory_heartbeat_at,omitempty"`
+	AuthoritySequence           uint64     `json:"authority_sequence,omitempty"`
 	PublicationSequence         uint64     `json:"publication_sequence,omitempty"`
+	CurrentPublicationSequence  uint64     `json:"current_publication_sequence,omitempty"`
+	CandidateEpoch              uint64     `json:"candidate_epoch,omitempty"`
 	PublicationDecision         string     `json:"publication_decision,omitempty"`
 	BundleGeneration            string     `json:"bundle_generation,omitempty"`
 	PublishedBundleDigest       string     `json:"published_bundle_digest,omitempty"`

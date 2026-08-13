@@ -41,8 +41,12 @@ func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *te
 			if request.URL.RawQuery != "" || request.Header.Get("Authorization") != "" {
 				t.Fatalf("cursor request leaked credential or query: %s headers=%v", request.URL.String(), request.Header)
 			}
+			bootstrapUntil := now.Add(time.Hour)
 			return inventoryJSONResponse(http.StatusServiceUnavailable, edgecontrol.AuthorityGroupStatus{
-				GroupID: groupID, InventorySequence: 9, InventoryProducerGeneration: 7,
+				GroupID: groupID, Status: edgecontrol.GroupAuthorityHealthServingLKG, ServingHealthy: true,
+				BootstrapEligible: true, BootstrapValidUntil: &bootstrapUntil,
+				InventorySequence: 9, InventoryProducerGeneration: 7, AuthoritySequence: 12,
+				PublicationSequence: 12, CurrentPublicationSequence: 11, CandidateEpoch: 14,
 			}), nil
 		case request.Method == http.MethodPost && request.URL.Path == edgecontrol.GroupAuthorityInventoryHeartbeatPathV1:
 			if request.URL.RawQuery != "" || !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") || request.Header.Get("Content-Type") != "application/json" {
