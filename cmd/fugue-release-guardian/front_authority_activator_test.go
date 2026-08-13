@@ -1,9 +1,13 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/releaseguardian"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestFrontLKGGenerationAcceptsOnlyExactCompensationChain(t *testing.T) {
@@ -33,5 +37,36 @@ func TestFrontLKGGenerationAcceptsOnlyExactCompensationChain(t *testing.T) {
 	}
 	if frontLKGGenerationMatches(compensated, base, edgegroupfront.ActivationOperationRollback) {
 		t.Fatal("restore path accepted promotion-only compensation relaxation")
+	}
+}
+
+func TestAuthorityRuntimeRequiresExactWorkerAndFrontIdentity(t *testing.T) {
+	source := strings.Repeat("1", 40)
+	digest := "sha256:" + strings.Repeat("2", 64)
+	worker := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Annotations: map[string]string{"fugue.pro/source-commit": source}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "edge", Ready: true,
+			ImageID: "ghcr.io/example/edge@" + digest}}}}
+	workers := map[string]corev1.Pod{"node-a": worker}
+	cohort := releaseguardian.CandidateWorkerCohort{WorkerSourceSHA: source, WorkerImageDigest: digest}
+	fronts := map[string]observedFront{"node-a": {Generation: 12, ActiveSlot: "a", BundleGeneration: "bundle-a.p8.r1",
+		WorkerSourceCommit: source, WorkerImageDigest: digest}}
+	if !authorityRuntimeMatches(workers, cohort, fronts, releaseguardian.AuthoritySlotA, source, digest, 12, "bundle-a.p8.r1", true) {
+		t.Fatal("exact current authority runtime was rejected")
+	}
+	if !authorityRuntimeMatches(workers, cohort, nil, releaseguardian.AuthoritySlotA, source, digest, 0, "bundle-a.p8.r1", false) {
+		t.Fatal("exact inactive LKG Worker was rejected")
+	}
+	oldSource := strings.Repeat("3", 40)
+	oldDigest := "sha256:" + strings.Repeat("4", 64)
+	oldWorker := worker
+	oldWorker.Annotations = map[string]string{"fugue.pro/source-commit": oldSource}
+	oldWorker.Status.ContainerStatuses[0].ImageID = "ghcr.io/example/edge@" + oldDigest
+	if authorityRuntimeMatches(map[string]corev1.Pod{"node-a": oldWorker}, cohort, fronts, releaseguardian.AuthoritySlotA, source, digest, 12, "bundle-a.p8.r1", true) {
+		t.Fatal("candidate pointer accepted a compensated LKG Worker runtime")
+	}
+	if authorityRuntimeMatches(workers, cohort, map[string]observedFront{"node-a": {
+		Generation: 12, ActiveSlot: "a", BundleGeneration: "bundle-a.p8.r1", WorkerSourceCommit: oldSource, WorkerImageDigest: oldDigest,
+	}}, releaseguardian.AuthoritySlotA, source, digest, 12, "bundle-a.p8.r1", true) {
+		t.Fatal("candidate pointer accepted a compensated LKG Front runtime")
 	}
 }

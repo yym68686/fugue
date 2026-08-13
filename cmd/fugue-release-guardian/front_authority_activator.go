@@ -443,6 +443,65 @@ func (activator *frontAuthorityActivator) observeWorkers(ctx context.Context, ta
 	return workers, cohort, nil
 }
 
+// observeAuthorityRuntime binds the traffic pointer to the exact running
+// Worker cohort. Current authority additionally binds every Front process to
+// the committed activation state; LKG health deliberately does not, because a
+// failed activation may leave Front on the candidate while the inactive LKG
+// Worker remains the only safe rollback target.
+func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Context, slot releaseguardian.AuthoritySlot,
+	sourceSHA, imageDigest string, frontGeneration uint64, bundleGeneration string, requireFront bool) (bool, error) {
+	if activator == nil || slot.Validate() != nil || !exactSourceSHA(sourceSHA) || !exactSHA256Digest(imageDigest) ||
+		strings.TrimSpace(bundleGeneration) == "" || (requireFront && frontGeneration == 0) {
+		return false, errors.New("authority runtime observation input is invalid")
+	}
+	workers, cohort, err := activator.observeWorkers(ctx, releaseguardian.FrontAuthorityTarget{GroupID: activator.config.GroupID,
+		TargetSlot: slot, CandidateBundleGeneration: bundleGeneration, WorkerSourceSHA: sourceSHA, WorkerImageDigest: imageDigest})
+	if err != nil || !authorityRuntimeMatches(workers, cohort, nil, slot, sourceSHA, imageDigest, frontGeneration, bundleGeneration, false) {
+		return false, errors.New("authority Worker runtime does not match its pointer")
+	}
+	if !requireFront {
+		return true, nil
+	}
+	fronts, err := activator.observeFronts(ctx)
+	if err != nil || len(fronts) != activator.config.ExpectedNodes {
+		return false, errors.New("authority Front runtime is unavailable")
+	}
+	if !authorityRuntimeMatches(workers, cohort, fronts, slot, sourceSHA, imageDigest, frontGeneration, bundleGeneration, true) {
+		return false, errors.New("authority Front runtime does not match its pointer")
+	}
+	return true, nil
+}
+
+func authorityRuntimeMatches(workers map[string]corev1.Pod, cohort releaseguardian.CandidateWorkerCohort, fronts map[string]observedFront,
+	slot releaseguardian.AuthoritySlot, sourceSHA, imageDigest string, frontGeneration uint64, bundleGeneration string, requireFront bool) bool {
+	if len(workers) == 0 || cohort.WorkerSourceSHA != sourceSHA || cohort.WorkerImageDigest != imageDigest {
+		return false
+	}
+	for node, worker := range workers {
+		if strings.TrimSpace(worker.Annotations["fugue.pro/source-commit"]) != sourceSHA || containerRuntimeDigest(worker, "edge") != imageDigest {
+			return false
+		}
+		if !requireFront {
+			continue
+		}
+		front, exists := fronts[node]
+		if !exists || front.Generation != frontGeneration || front.ActiveSlot != string(slot) || front.BundleGeneration != bundleGeneration ||
+			front.WorkerSourceCommit != sourceSHA || front.WorkerImageDigest != imageDigest {
+			return false
+		}
+	}
+	return !requireFront || len(fronts) == len(workers)
+}
+
+func containerRuntimeDigest(pod corev1.Pod, container string) string {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == container && status.Ready && status.RestartCount == 0 {
+			return imageDigest(status.ImageID)
+		}
+	}
+	return ""
+}
+
 func sealFrontCandidateWorkerCohort(pods []corev1.Pod, candidate releaseguardian.CandidateAuthority) (releaseguardian.CandidateWorkerCohort, error) {
 	cohort := releaseguardian.CandidateWorkerCohort{GroupID: candidate.GroupID, WorkerSlot: candidate.WorkerSlot,
 		BundleGeneration: candidate.BundleGeneration, Instances: make([]releaseguardian.CandidateWorkerInstance, 0, len(pods))}

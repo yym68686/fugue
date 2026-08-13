@@ -95,6 +95,9 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 	currentHealthy := currentErr == nil && status == http.StatusOK && shaDigest(body) == activator.front.config.RouteBodyDigest &&
 		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) == current.CurrentRecordDigest &&
 		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) == current.CurrentWorkerSlot
+	currentRuntimeHealthy, currentRuntimeErr := activator.front.observeAuthorityRuntime(ctx, current.CurrentWorkerSlot,
+		current.CurrentWorkerSourceSHA, current.CurrentWorkerImageDigest, current.CurrentFrontGeneration, current.CurrentBundleGeneration, true)
+	currentHealthy = currentHealthy && currentRuntimeHealthy
 	address := activator.config.SlotA
 	if current.PreviousWorkerSlot == releaseguardian.AuthoritySlotB {
 		address = activator.config.SlotB
@@ -103,10 +106,14 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 	lkgHealthy := lkgErr == nil && status == http.StatusOK && shaDigest(body) == activator.front.config.RouteBodyDigest &&
 		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) == current.PreviousRecordDigest &&
 		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) == current.PreviousWorkerSlot
+	lkgRuntimeHealthy, lkgRuntimeErr := activator.front.observeAuthorityRuntime(ctx, current.PreviousWorkerSlot,
+		current.PreviousWorkerSourceSHA, current.PreviousWorkerImageDigest, 0, current.PreviousBundleGeneration, false)
+	lkgHealthy = lkgHealthy && lkgRuntimeHealthy
 	evidence, err := declarativerelease.CanonicalJSON(map[string]any{
 		"groupId": current.GroupID, "currentRecordDigest": current.CurrentRecordDigest, "currentSlot": current.CurrentWorkerSlot,
-		"currentHealthy": currentHealthy, "currentError": errorClass(currentErr), "lkgRecordDigest": current.PreviousRecordDigest,
-		"lkgSlot": current.PreviousWorkerSlot, "lkgHealthy": lkgHealthy, "lkgError": errorClass(lkgErr),
+		"currentHealthy": currentHealthy, "currentError": errorClass(currentErr), "currentRuntimeError": errorClass(currentRuntimeErr),
+		"lkgRecordDigest": current.PreviousRecordDigest, "lkgSlot": current.PreviousWorkerSlot, "lkgHealthy": lkgHealthy,
+		"lkgError": errorClass(lkgErr), "lkgRuntimeError": errorClass(lkgRuntimeErr),
 	})
 	if err != nil {
 		return false, false, "", err
