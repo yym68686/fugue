@@ -73,9 +73,22 @@ type GroupCandidateStore interface {
 	ReadGroupInventory(context.Context, string) (GroupInventorySnapshot, error)
 	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
 	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
+	ReadGroupCandidateStage(context.Context, string) (GroupCandidateStageSnapshot, error)
 	PutGroupCandidateCAS(context.Context, string, uint64, uint64, GroupCandidateBundle) (GroupCandidateBundle, error)
 	PutGroupCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, string, GroupCandidateBundle) (GroupCandidateBundle, error)
 	PutGroupStagedCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, uint64, string, GroupCandidateBundle) (GroupCandidateBundle, error)
+}
+
+// GroupCandidateStageSnapshot is the exact small projection required to bind
+// an inactive Worker candidate. Persistent stores derive it from one fully
+// validated group-state revision so staging cannot combine separate reads.
+type GroupCandidateStageSnapshot struct {
+	Authority          GroupAuthorityState
+	Candidate          GroupCandidateBundle
+	CandidateExists    bool
+	Inventory          GroupInventorySnapshot
+	InventoryExists    bool
+	PublishedCandidate GroupShadowLedgerEntry
 }
 
 type GroupCandidatePublisher struct {

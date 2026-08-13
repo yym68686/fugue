@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,7 +85,22 @@ type legacyCandidatePersistentGroupState struct {
 // and one CAS sequence per edge group. A corrupt group file cannot prevent any
 // other group from being read or advanced.
 type PersistentGroupStore struct {
-	root string
+	root      string
+	summaryMu sync.RWMutex
+	summaries map[string]persistentGroupSummary
+}
+
+type persistentGroupSummary struct {
+	identity persistentGroupStateFileIdentity
+	status   AuthorityGroupStoreSnapshot
+	stage    GroupCandidateStageSnapshot
+}
+
+type persistentGroupStateFileIdentity struct {
+	size       int64
+	modifiedNS int64
+	device     uint64
+	inode      uint64
 }
 
 func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
@@ -102,7 +118,7 @@ func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o007 != 0 {
 		return nil, errors.New("edge-control persistent state directory must be a non-world-accessible real directory")
 	}
-	return &PersistentGroupStore{root: root}, nil
+	return &PersistentGroupStore{root: root, summaries: make(map[string]persistentGroupSummary)}, nil
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryCAS(ctx context.Context, groupID string, expectedSequence uint64, snapshot GroupInventorySnapshot) error {
@@ -216,6 +232,11 @@ func (store *PersistentGroupStore) ReadGroupCandidate(ctx context.Context, group
 		return nil
 	})
 	return candidate, exists, err
+}
+
+func (store *PersistentGroupStore) ReadGroupCandidateStage(ctx context.Context, groupID string) (GroupCandidateStageSnapshot, error) {
+	summary, err := store.readGroupSummary(ctx, groupID)
+	return cloneGroupCandidateStageSnapshot(summary.stage), err
 }
 
 func (store *PersistentGroupStore) ReadGroupCandidateByEpoch(ctx context.Context, groupID string, epoch uint64) (GroupCandidateBundle, bool, error) {
@@ -382,31 +403,8 @@ func persistentCandidateByEpoch(state *persistentGroupState, epoch uint64) (*Gro
 }
 
 func (store *PersistentGroupStore) ReadGroupAuthorityStatus(ctx context.Context, groupID string) (AuthorityGroupStoreSnapshot, error) {
-	var snapshot AuthorityGroupStoreSnapshot
-	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
-		if state.Inventory != nil {
-			snapshot.Inventory = cloneGroupInventorySnapshot(*state.Inventory)
-			snapshot.InventoryExists = true
-		}
-		if state.InventoryProducer != nil {
-			snapshot.Producer = cloneGroupInventoryProducerState(*state.InventoryProducer)
-			snapshot.ProducerExists = true
-		}
-		if len(state.AuthorityLedger) > 0 {
-			snapshot.Authority.LedgerHead = state.AuthorityLedger[len(state.AuthorityLedger)-1]
-			snapshot.Authority.LedgerExists = true
-		}
-		if state.Published != nil {
-			snapshot.Authority.Published = cloneGroupPublishedBundle(*state.Published)
-			snapshot.Authority.PublishedExists = true
-		}
-		if state.Candidate != nil {
-			snapshot.Candidate = cloneGroupCandidateBundle(*state.Candidate)
-			snapshot.CandidateExists = true
-		}
-		return nil
-	})
-	return snapshot, err
+	summary, err := store.readGroupSummary(ctx, groupID)
+	return cloneAuthorityGroupStoreSnapshot(summary.status), err
 }
 
 func (store *PersistentGroupStore) AppendGroupAuthorityCAS(ctx context.Context, groupID string, expectedSequence, expectedCandidateSequence uint64,
@@ -628,7 +626,141 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 	}
 	compactPersistentGroupState(&state)
 	state.Revision++
-	return store.writeGroupState(statePath, state)
+	if err := store.writeGroupState(statePath, state); err != nil {
+		return err
+	}
+	store.cacheGroupSummary(statePath, groupID, state)
+	return nil
+}
+
+func (store *PersistentGroupStore) readGroupSummary(ctx context.Context, groupID string) (persistentGroupSummary, error) {
+	if ctx == nil {
+		return persistentGroupSummary{}, errors.New("edge-control group summary context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return persistentGroupSummary{}, err
+	}
+	groupID = normalizeGroupID(groupID)
+	path := store.groupStatePath(groupID)
+	if cached, found := store.cachedGroupSummary(path, groupID); found {
+		return cached, nil
+	}
+	var summary persistentGroupSummary
+	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
+		summary = summarizePersistentGroupState(*state)
+		identity, identityErr := persistentGroupStateIdentity(path)
+		summary.identity = identity
+		return identityErr
+	})
+	if err != nil {
+		return persistentGroupSummary{}, err
+	}
+	store.summaryMu.Lock()
+	store.summaries[groupID] = summary
+	store.summaryMu.Unlock()
+	return summary, nil
+}
+
+func (store *PersistentGroupStore) cachedGroupSummary(path, groupID string) (persistentGroupSummary, bool) {
+	identity, err := persistentGroupStateIdentity(path)
+	if err != nil {
+		return persistentGroupSummary{}, false
+	}
+	store.summaryMu.RLock()
+	summary, found := store.summaries[groupID]
+	store.summaryMu.RUnlock()
+	return summary, found && summary.identity == identity
+}
+
+func (store *PersistentGroupStore) cacheGroupSummary(path, groupID string, state persistentGroupState) {
+	identity, err := persistentGroupStateIdentity(path)
+	if err != nil {
+		return
+	}
+	summary := summarizePersistentGroupState(state)
+	summary.identity = identity
+	store.summaryMu.Lock()
+	store.summaries[groupID] = summary
+	store.summaryMu.Unlock()
+}
+
+func summarizePersistentGroupState(state persistentGroupState) persistentGroupSummary {
+	var out persistentGroupSummary
+	if state.Inventory != nil {
+		out.status.Inventory = cloneGroupInventorySnapshot(*state.Inventory)
+		out.status.InventoryExists = true
+		out.stage.Inventory = cloneGroupInventorySnapshot(*state.Inventory)
+		out.stage.InventoryExists = true
+	}
+	if state.InventoryProducer != nil {
+		out.status.Producer = cloneGroupInventoryProducerState(*state.InventoryProducer)
+		out.status.ProducerExists = true
+	}
+	if len(state.AuthorityLedger) > 0 {
+		out.status.Authority.LedgerHead = state.AuthorityLedger[len(state.AuthorityLedger)-1]
+		out.status.Authority.LedgerExists = true
+		out.stage.Authority.LedgerHead = out.status.Authority.LedgerHead
+		out.stage.Authority.LedgerExists = true
+	}
+	if state.Published != nil {
+		published := cloneGroupPublishedBundle(*state.Published)
+		out.status.Authority.Published, out.status.Authority.PublishedExists = published, true
+		out.stage.Authority.Published, out.stage.Authority.PublishedExists = cloneGroupPublishedBundle(published), true
+		sequence := published.CandidateLedgerSequence
+		if sequence > 0 && sequence <= uint64(len(state.Ledger)) {
+			out.stage.PublishedCandidate = cloneGroupShadowLedgerEntry(state.Ledger[sequence-1])
+		}
+	}
+	if state.Candidate != nil {
+		out.status.Candidate, out.status.CandidateExists = cloneGroupCandidateBundle(*state.Candidate), true
+		out.stage.Candidate, out.stage.CandidateExists = cloneGroupCandidateBundle(*state.Candidate), true
+	}
+	return out
+}
+
+func cloneAuthorityGroupStoreSnapshot(value AuthorityGroupStoreSnapshot) AuthorityGroupStoreSnapshot {
+	if value.InventoryExists {
+		value.Inventory = cloneGroupInventorySnapshot(value.Inventory)
+	}
+	if value.ProducerExists {
+		value.Producer = cloneGroupInventoryProducerState(value.Producer)
+	}
+	if value.Authority.PublishedExists {
+		value.Authority.Published = cloneGroupPublishedBundle(value.Authority.Published)
+	}
+	if value.CandidateExists {
+		value.Candidate = cloneGroupCandidateBundle(value.Candidate)
+	}
+	return value
+}
+
+func cloneGroupCandidateStageSnapshot(value GroupCandidateStageSnapshot) GroupCandidateStageSnapshot {
+	if value.Authority.PublishedExists {
+		value.Authority.Published = cloneGroupPublishedBundle(value.Authority.Published)
+	}
+	if value.CandidateExists {
+		value.Candidate = cloneGroupCandidateBundle(value.Candidate)
+	}
+	if value.InventoryExists {
+		value.Inventory = cloneGroupInventorySnapshot(value.Inventory)
+	}
+	value.PublishedCandidate = cloneGroupShadowLedgerEntry(value.PublishedCandidate)
+	return value
+}
+
+func persistentGroupStateIdentity(path string) (persistentGroupStateFileIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return persistentGroupStateFileIdentity{}, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o007 != 0 {
+		return persistentGroupStateFileIdentity{}, errors.New("edge-control group state must be a private regular file")
+	}
+	identity := persistentGroupStateFileIdentity{size: info.Size(), modifiedNS: info.ModTime().UnixNano()}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		identity.device, identity.inode = uint64(stat.Dev), uint64(stat.Ino)
+	}
+	return identity, nil
 }
 
 func (store *PersistentGroupStore) readGroupState(path, groupID string) (persistentGroupState, error) {

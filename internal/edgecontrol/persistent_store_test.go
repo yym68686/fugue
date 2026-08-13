@@ -148,6 +148,47 @@ func TestPersistentGroupStoreCompactsCandidateBundlesWithoutLosingSequence(t *te
 	}
 }
 
+func TestPersistentGroupStoreCachesOnlyValidatedCurrentSummary(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	groupID := "edge-group-country-de"
+	root := privateStateDir(t)
+	store, err := OpenPersistentGroupStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := GroupInventorySnapshot{Schema: GroupInventorySchemaV1, GroupID: groupID, Sequence: 1,
+		Generation: "inventory-1", ObservedAt: time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)}
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, first); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.ReadGroupAuthorityStatus(ctx, groupID)
+	if err != nil || !status.InventoryExists || status.Inventory.Sequence != 1 {
+		t.Fatalf("initial summary=%+v err=%v", status, err)
+	}
+	store.summaryMu.RLock()
+	summary := store.summaries[groupID]
+	store.summaryMu.RUnlock()
+	if summary.identity.size == 0 || summary.stage.Inventory.Sequence != 1 || summary.status.Inventory.Sequence != 1 {
+		t.Fatalf("validated current projection was not cached: %+v", summary)
+	}
+
+	replacement, err := OpenPersistentGroupStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := cloneGroupInventorySnapshot(first)
+	second.Sequence, second.Generation = 2, "inventory-2"
+	if err := replacement.StoreGroupInventoryCAS(ctx, groupID, 1, second); err != nil {
+		t.Fatal(err)
+	}
+	status, err = store.ReadGroupAuthorityStatus(ctx, groupID)
+	if err != nil || status.Inventory.Sequence != 2 || status.Inventory.Generation != second.Generation {
+		t.Fatalf("replaced summary=%+v err=%v", status, err)
+	}
+}
+
 func TestPersistentGroupStoreAcceptsFirstProducerInventoryAfterMissingInventoryLedger(t *testing.T) {
 	t.Parallel()
 

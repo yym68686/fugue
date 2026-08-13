@@ -146,16 +146,14 @@ func (handler *groupCandidateStageHandler) ServeHTTP(w http.ResponseWriter, requ
 }
 
 func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Context, request GroupCandidateStageRequest, now time.Time) (GroupCandidateBundle, error) {
-	authority, err := publisher.Store.ReadGroupAuthority(ctx, request.GroupID)
+	snapshot, err := publisher.Store.ReadGroupCandidateStage(ctx, request.GroupID)
+	authority := snapshot.Authority
 	if err != nil || !authority.LedgerExists || !authority.PublishedExists || validateGroupPublishedBundle(request.GroupID, authority.Published) != nil ||
 		authority.LedgerHead.Sequence != request.ExpectedAuthoritySequence || authority.Published.PublicationSequence != request.ExpectedPublicationSequence ||
 		authority.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch || authority.Published.Digest != request.ExpectedPublishedBundleDigest {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	currentCandidate, exists, err := publisher.Store.ReadGroupCandidate(ctx, request.GroupID)
-	if err != nil {
-		return GroupCandidateBundle{}, err
-	}
+	currentCandidate, exists := snapshot.Candidate, snapshot.CandidateExists
 	currentEpoch := uint64(0)
 	if exists {
 		currentEpoch = currentCandidate.Epoch
@@ -166,18 +164,17 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	if currentEpoch != request.ExpectedCandidateEpoch {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	inventory, err := publisher.Store.ReadGroupInventory(ctx, request.GroupID)
-	if err != nil || inventory.ActiveEpoch.Slot != request.ExpectedCurrentWorkerSlot ||
+	inventory := snapshot.Inventory
+	if !snapshot.InventoryExists || inventory.ActiveEpoch.Slot != request.ExpectedCurrentWorkerSlot ||
 		inventory.ObservedAt.IsZero() || inventory.ObservedAt.After(now.Add(maxInventoryHeartbeatClockSkew)) ||
 		now.Sub(inventory.ObservedAt) > GroupInventoryHeartbeatMaxAge {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	history, err := publisher.Store.History(ctx, request.GroupID)
 	sequence := authority.Published.CandidateLedgerSequence
-	if err != nil || sequence == 0 || sequence > uint64(len(history)) {
+	if sequence == 0 {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	head := history[sequence-1]
+	head := snapshot.PublishedCandidate
 	if head.Sequence != sequence || head.Status != GroupShadowStatusCompiled || head.Bundle == nil || head.BundleArchived ||
 		head.BundleGeneration != authority.Published.Bundle.Generation || !groupAuthorityDigestPattern.MatchString(head.InventoryDigest) {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
