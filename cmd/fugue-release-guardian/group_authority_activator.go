@@ -478,7 +478,7 @@ func (activator *groupAuthorityActivator) recoverControlReceipt(ctx context.Cont
 		return edgecontrol.GroupRecoveryReceipt{}, err
 	}
 	if receipt.Schema != edgecontrol.GroupRecoveryReceiptSchemaV1 || receipt.GroupID != promotion.GroupID ||
-		receipt.PublicationSequence != promotion.PublicationSequence+1 || receipt.RecoveryEpoch != promotion.RecoveryEpoch+1 ||
+		receipt.PublicationSequence <= promotion.PublicationSequence || receipt.RecoveryEpoch != promotion.RecoveryEpoch+1 ||
 		receipt.BundleGeneration != targetGeneration || !exactSHA256Digest(receipt.PublishedBundleDigest) ||
 		receipt.Authority != "edge-control" || !receipt.PublicationEnabled {
 		return edgecontrol.GroupRecoveryReceipt{}, errors.New("Edge Control recovery receipt is invalid")
@@ -510,7 +510,7 @@ func (activator *groupAuthorityActivator) reconcileRecoveryReceipt(ctx context.C
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&status) != nil || !decodeEOF(decoder) || status.GroupID != promotion.GroupID ||
-		status.PublicationSequence != promotion.PublicationSequence+1 || status.RecoveryEpoch != promotion.RecoveryEpoch+1 ||
+		status.PublicationSequence <= promotion.PublicationSequence || status.RecoveryEpoch != promotion.RecoveryEpoch+1 ||
 		status.BundleGeneration != targetGeneration || !exactSHA256Digest(status.PublishedBundleDigest) {
 		return edgecontrol.GroupRecoveryReceipt{}, errAuthorityMutationUnknown
 	}

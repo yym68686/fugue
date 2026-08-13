@@ -165,6 +165,25 @@ func TestGroupAuthorityRecoveryUnknownUsesReadOnlyReconcile(t *testing.T) {
 	}
 }
 
+func TestGroupAuthorityRecoveryAcceptsMonotonicAuditTailReceipt(t *testing.T) {
+	now := time.Date(2026, 8, 13, 5, 45, 0, 0, time.UTC)
+	target := groupAuthorityTargetFixture()
+	promotion := edgecontrol.GroupPromotionReceipt{GroupID: target.GroupID, PublicationSequence: target.AuthoritySequence + 1,
+		RecoveryEpoch: target.RecoveryEpoch, PreviousBundleGeneration: target.PreviousServingGeneration}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(edgecontrol.GroupRecoveryReceipt{Schema: edgecontrol.GroupRecoveryReceiptSchemaV1,
+			GroupID: target.GroupID, PublicationSequence: promotion.PublicationSequence + 4, RecoveryEpoch: promotion.RecoveryEpoch + 1,
+			BundleGeneration: target.PreviousServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("8", 64),
+			Authority: "edge-control", PublicationEnabled: true})
+	}))
+	defer server.Close()
+	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
+	receipt, err := activator.recoverControlReceipt(context.Background(), promotion, target.PreviousServingGeneration)
+	if err != nil || receipt.PublicationSequence != promotion.PublicationSequence+4 {
+		t.Fatalf("audit-tail recovery receipt=%+v err=%v", receipt, err)
+	}
+}
+
 func TestEdgeControlCompensationSettlementRequiresExactLKGAndMonotonicRecovery(t *testing.T) {
 	target := groupAuthorityTargetFixture()
 	candidate := releaseguardian.CandidateAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind,
