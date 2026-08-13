@@ -176,9 +176,10 @@ func (activator *frontAuthorityActivator) beginWithOperation(ctx context.Context
 }
 
 type frontAuthorityPreflight struct {
-	workers      map[string]corev1.Pod
-	states       map[string]edgegroupfront.ActivationState
-	alreadyAtNew bool
+	workers            map[string]corev1.Pod
+	states             map[string]edgegroupfront.ActivationState
+	previousGeneration uint64
+	alreadyAtNew       bool
 }
 
 func (activator *frontAuthorityActivator) preflight(ctx context.Context, target releaseguardian.FrontAuthorityTarget) (frontAuthorityPreflight, error) {
@@ -202,6 +203,7 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 	}
 	states := make(map[string]edgegroupfront.ActivationState, len(workers))
 	alreadyAtNew := true
+	previousGeneration := uint64(0)
 	for node, worker := range workers {
 		state, readErr := activator.readActivation(ctx, worker.Name)
 		if readErr != nil || state.GroupID != target.GroupID {
@@ -220,15 +222,34 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 			}
 		} else {
 			alreadyAtNew = false
-			if state.ActiveSlot != string(target.PreviousSlot) || state.Generation != target.PreviousFrontGeneration ||
+			if state.ActiveSlot != string(target.PreviousSlot) || !frontLKGGenerationMatches(state, target.PreviousFrontGeneration, operation) ||
 				state.BundleGeneration != target.PreviousBundleGeneration || state.WorkerSourceCommit != target.PreviousWorkerSourceSHA ||
 				state.WorkerImageDigest != target.PreviousWorkerImageDigest {
 				return frontAuthorityPreflight{}, errors.New("Front activation LKG is not target-bound")
 			}
+			if previousGeneration == 0 {
+				previousGeneration = state.Generation
+			} else if previousGeneration != state.Generation {
+				return frontAuthorityPreflight{}, errors.New("Front activation LKG generations are mixed")
+			}
 		}
 		states[node] = state
 	}
-	return frontAuthorityPreflight{workers: workers, states: states, alreadyAtNew: alreadyAtNew}, nil
+	if alreadyAtNew {
+		previousGeneration = target.PreviousFrontGeneration
+	}
+	return frontAuthorityPreflight{workers: workers, states: states, previousGeneration: previousGeneration, alreadyAtNew: alreadyAtNew}, nil
+}
+
+func frontLKGGenerationMatches(state edgegroupfront.ActivationState, expected uint64, operation string) bool {
+	if state.Generation == expected {
+		return true
+	}
+	// A failed promotion can advance Front twice: candidate generation N+1,
+	// followed by its exact rollback N+2. Only that adjacent, explicitly
+	// linked rollback is an eligible LKG witness for the next promotion.
+	return operation == edgegroupfront.ActivationOperationPromote && state.Operation == edgegroupfront.ActivationOperationRollback &&
+		state.Generation == expected+2 && state.RollbackOfGeneration == expected+1
 }
 
 func (activator *frontAuthorityActivator) promoteWithLease(ctx context.Context, target releaseguardian.FrontAuthorityTarget, lease *heldAuthorityLease, preflight frontAuthorityPreflight) (releaseguardian.FrontAuthorityTransaction, error) {
@@ -241,11 +262,15 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 		return nil, errors.New("Front authority operation is invalid")
 	}
 	workers, states := preflight.workers, preflight.states
+	previousGeneration := preflight.previousGeneration
+	if previousGeneration == 0 {
+		return nil, errors.New("Front authority predecessor generation is unavailable")
+	}
 	if preflight.alreadyAtNew {
 		receipt := releaseguardian.FrontAuthorityReceipt{GroupID: target.GroupID, PreviousSlot: target.PreviousSlot,
-			PreviousGeneration: target.PreviousFrontGeneration, PreviousBundleGeneration: target.PreviousBundleGeneration,
+			PreviousGeneration: previousGeneration, PreviousBundleGeneration: target.PreviousBundleGeneration,
 			PreviousWorkerSourceSHA: target.PreviousWorkerSourceSHA, PreviousWorkerImageDigest: target.PreviousWorkerImageDigest,
-			TargetSlot: target.TargetSlot, TargetGeneration: target.PreviousFrontGeneration + 1,
+			TargetSlot: target.TargetSlot, TargetGeneration: previousGeneration + 1,
 			TargetBundleGeneration: target.FrontBundleGeneration, TargetWorkerSourceSHA: target.WorkerSourceSHA,
 			TargetWorkerImageDigest: target.WorkerImageDigest}
 		return &frontAuthorityTransaction{activator: activator, lease: lease, receipt: receipt}, nil
@@ -297,10 +322,10 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 		}
 	}
 	for _, receipt := range changed {
-		if receipt.Previous == nil || receipt.Previous.Generation != target.PreviousFrontGeneration ||
+		if receipt.Previous == nil || receipt.Previous.Generation != previousGeneration ||
 			receipt.Previous.ActiveSlot != string(target.PreviousSlot) || receipt.Previous.BundleGeneration != target.PreviousBundleGeneration ||
 			receipt.Previous.WorkerSourceCommit != target.PreviousWorkerSourceSHA || receipt.Previous.WorkerImageDigest != target.PreviousWorkerImageDigest ||
-			receipt.Current.Generation != target.PreviousFrontGeneration+1 || receipt.Current.ActiveSlot != string(target.TargetSlot) ||
+			receipt.Current.Generation != previousGeneration+1 || receipt.Current.ActiveSlot != string(target.TargetSlot) ||
 			receipt.Current.BundleGeneration != target.FrontBundleGeneration || receipt.Current.WorkerSourceCommit != target.WorkerSourceSHA ||
 			receipt.Current.WorkerImageDigest != target.WorkerImageDigest {
 			if rollbackErr := activator.rollbackReceipts(context.WithoutCancel(ctx), workers, changed); rollbackErr != nil {
@@ -310,9 +335,9 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 		}
 	}
 	receipt := releaseguardian.FrontAuthorityReceipt{GroupID: target.GroupID, PreviousSlot: target.PreviousSlot,
-		PreviousGeneration: target.PreviousFrontGeneration, PreviousBundleGeneration: target.PreviousBundleGeneration,
+		PreviousGeneration: previousGeneration, PreviousBundleGeneration: target.PreviousBundleGeneration,
 		PreviousWorkerSourceSHA: target.PreviousWorkerSourceSHA, PreviousWorkerImageDigest: target.PreviousWorkerImageDigest,
-		TargetSlot: target.TargetSlot, TargetGeneration: target.PreviousFrontGeneration + 1, TargetBundleGeneration: target.FrontBundleGeneration,
+		TargetSlot: target.TargetSlot, TargetGeneration: previousGeneration + 1, TargetBundleGeneration: target.FrontBundleGeneration,
 		TargetWorkerSourceSHA: target.WorkerSourceSHA, TargetWorkerImageDigest: target.WorkerImageDigest}
 	return &frontAuthorityTransaction{activator: activator, lease: lease, receipt: receipt}, nil
 }

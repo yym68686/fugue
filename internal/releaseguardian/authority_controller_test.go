@@ -79,9 +79,9 @@ func (activator testFrontActivator) BeginPromote(_ context.Context, target Front
 	if transaction == nil {
 		transaction = &testFrontTransaction{}
 	}
-	transaction.receipt = FrontAuthorityReceipt{GroupID: target.GroupID, PreviousSlot: AuthoritySlotA, PreviousGeneration: 7,
-		PreviousBundleGeneration: "previous-bundle-7", PreviousWorkerSourceSHA: testSHA, PreviousWorkerImageDigest: testDigest,
-		TargetSlot: target.TargetSlot, TargetGeneration: 8, TargetBundleGeneration: target.ServingGeneration + ".p8.r0",
+	transaction.receipt = FrontAuthorityReceipt{GroupID: target.GroupID, PreviousSlot: target.PreviousSlot, PreviousGeneration: target.PreviousFrontGeneration,
+		PreviousBundleGeneration: target.PreviousBundleGeneration, PreviousWorkerSourceSHA: target.PreviousWorkerSourceSHA, PreviousWorkerImageDigest: target.PreviousWorkerImageDigest,
+		TargetSlot: target.TargetSlot, TargetGeneration: target.PreviousFrontGeneration + 1, TargetBundleGeneration: target.ServingGeneration + ".p8.r0",
 		TargetWorkerSourceSHA: target.WorkerSourceSHA, TargetWorkerImageDigest: target.WorkerImageDigest}
 	return transaction, nil
 }
@@ -413,6 +413,38 @@ func TestAuthorityControllerRetiresOnlyProvenCompensatedActivatedJournal(t *test
 	controller.activators[current.GroupID] = testFrontActivator{settled: false}
 	if _, _, err := controller.resumeTransition(context.Background(), current, journal); err == nil || deleted != 1 {
 		t.Fatalf("unproven journal was retired: deleted=%d err=%v", deleted, err)
+	}
+}
+
+func TestAuthorityControllerActivatedResumeUsesJournalFrontGeneration(t *testing.T) {
+	transaction := &testFrontTransaction{}
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{transaction: transaction})
+	candidate, candidateUID, candidateRV, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := candidate
+	verified.State, verified.Generation, verified.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, fixture.result.ResultDigest
+	if _, _, err := fixture.store.PutCandidate(context.Background(), verified, candidateUID, candidateRV); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := (AuthorityTransitionJournal{GroupID: fixture.group, Phase: AuthorityTransitionActivated,
+		CurrentUID: "current-failure", CurrentRV: "80", Before: fixture.current, Candidate: verified,
+		CanaryResultDigest: fixture.result.ResultDigest, PreviousNodes: append([]AuthorityBaselineNodeWitness(nil), fixture.baseline.Nodes...),
+		Activation: &FrontAuthorityReceipt{GroupID: fixture.group, PreviousSlot: fixture.current.CurrentWorkerSlot, PreviousGeneration: 9,
+			PreviousBundleGeneration: fixture.current.CurrentBundleGeneration, PreviousWorkerSourceSHA: fixture.current.CurrentWorkerSourceSHA,
+			PreviousWorkerImageDigest: fixture.current.CurrentWorkerImageDigest, TargetSlot: verified.WorkerSlot, TargetGeneration: 10,
+			TargetBundleGeneration: verified.ServingGeneration + ".p8.r0", TargetWorkerSourceSHA: testSHA, TargetWorkerImageDigest: testDigest},
+		CreatedAt: time.Unix(5_000, 0).UTC().Format(time.RFC3339Nano)}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline}
+	if _, err := fixture.controller.verifyAndSwitch(context.Background(), fixture.group, fixture.result.ResultDigest, &journal); err != nil {
+		t.Fatalf("%v expected=%+v actual=%+v", err, *journal.Activation, transaction.receipt)
+	}
+	if transaction.receipt.PreviousGeneration != 9 || transaction.receipt.TargetGeneration != 10 {
+		t.Fatalf("activated resume ignored journal generation: %+v", transaction.receipt)
 	}
 }
 

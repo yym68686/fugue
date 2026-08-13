@@ -306,6 +306,16 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 			}
 		}
 	}
+	if resume != nil && resume.Phase == AuthorityTransitionActivated && resume.Activation != nil {
+		activation := *resume.Activation
+		if activation.GroupID != groupID || activation.PreviousSlot != current.CurrentWorkerSlot ||
+			activation.PreviousBundleGeneration != currentBundleGeneration ||
+			activation.PreviousWorkerSourceSHA != currentWorkerSourceSHA || activation.PreviousWorkerImageDigest != currentWorkerImageDigest ||
+			activation.PreviousGeneration < currentFrontGeneration {
+			return AuthorityTransitionReceipt{}, errors.New("authority transition activation predecessor is invalid")
+		}
+		currentFrontGeneration = activation.PreviousGeneration
+	}
 	verifiedCandidate := candidate
 	if verifiedCandidate.State == CandidateAuthorityLoaded {
 		verifiedCandidate.State, verifiedCandidate.Generation, verifiedCandidate.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, result.ResultDigest
