@@ -15,6 +15,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
@@ -121,6 +122,86 @@ func TestCandidateImporterNeverRefreshesAnExistingCurrentAuthority(t *testing.T)
 	}
 }
 
+func TestCandidateImporterAcceptsExactServingAuthorityWitness(t *testing.T) {
+	now := time.Date(2026, 8, 14, 20, 0, 0, 0, time.UTC)
+	groupID := "edge-pool-a"
+	token := strings.Repeat("t", 48)
+	envelope := candidateImporterEnvelopeFixture(t, groupID, now)
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: groupID, CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 8, CurrentBundleGeneration: "routes-candidate.p3.r1", CurrentWorkerSourceSHA: strings.Repeat("b", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("c", 64), AuthorityEpoch: 23}
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "41", FrontGeneration: current.CurrentFrontGeneration,
+		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: current.CurrentWorkerSlot, WorkerSourceSHA: current.CurrentWorkerSourceSHA,
+		WorkerImageDigest: current.CurrentWorkerImageDigest}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(envelope) }))
+	defer server.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Namespace: "fugue-system", Labels: map[string]string{
+		"fugue.io/edge-group-id": groupID, "fugue.io/edge-control-client": "true",
+	}}, Spec: corev1.PodSpec{NodeName: "edge-node-a"}})
+	store, _ := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	if _, _, err := store.SwitchCurrent(context.Background(), current, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	setMutableAuthorityFixture(t, client, "fugue-current-authority-"+groupID, envelope.ServingAuthority.CurrentAuthorityUID, envelope.ServingAuthority.CurrentAuthorityRV)
+	changed, err := importCandidateOnce(context.Background(), store, client, candidateImportConfig{
+		GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile,
+	}, now)
+	if err != nil || !changed {
+		t.Fatalf("serving-witness import: changed=%v err=%v", changed, err)
+	}
+	loaded, uid, rv, err := store.LoadCurrent(context.Background(), groupID)
+	if err != nil || loaded != current || string(uid) != envelope.ServingAuthority.CurrentAuthorityUID || rv != envelope.ServingAuthority.CurrentAuthorityRV {
+		t.Fatalf("importer changed serving authority: current=%+v uid=%s rv=%s err=%v", loaded, uid, rv, err)
+	}
+}
+
+func TestCandidateImporterRejectsServingAuthorityCASDriftBeforeWritingRecords(t *testing.T) {
+	now := time.Date(2026, 8, 14, 20, 15, 0, 0, time.UTC)
+	groupID := "edge-pool-a"
+	token := strings.Repeat("t", 48)
+	envelope := candidateImporterEnvelopeFixture(t, groupID, now)
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: groupID, CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 8, CurrentBundleGeneration: "routes-candidate.p3.r1", CurrentWorkerSourceSHA: strings.Repeat("b", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("c", 64), AuthorityEpoch: 23}
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "stale-rv", FrontGeneration: current.CurrentFrontGeneration,
+		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: current.CurrentWorkerSlot, WorkerSourceSHA: current.CurrentWorkerSourceSHA,
+		WorkerImageDigest: current.CurrentWorkerImageDigest}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(envelope) }))
+	defer server.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Namespace: "fugue-system", Labels: map[string]string{
+		"fugue.io/edge-group-id": groupID, "fugue.io/edge-control-client": "true",
+	}}, Spec: corev1.PodSpec{NodeName: "edge-node-a"}})
+	store, _ := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	if _, _, err := store.SwitchCurrent(context.Background(), current, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	setMutableAuthorityFixture(t, client, "fugue-current-authority-"+groupID, "current-authority", "42")
+	changed, err := importCandidateOnce(context.Background(), store, client, candidateImportConfig{
+		GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile,
+	}, now)
+	if err == nil || changed {
+		t.Fatalf("stale serving witness was imported: changed=%v err=%v", changed, err)
+	}
+	if _, _, _, err := store.LoadCandidate(context.Background(), groupID); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale serving witness wrote candidate authority: %v", err)
+	}
+	if _, err := store.LoadRouteBundleRecord(context.Background(), groupID, envelope.Record.RecordDigest); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale serving witness wrote immutable candidate record: %v", err)
+	}
+}
+
 func TestCandidateImporterRejectsDigestDriftWithoutChangingPointers(t *testing.T) {
 	now := time.Date(2026, 8, 12, 4, 30, 0, 0, time.UTC)
 	groupID := "edge-pool-a"
@@ -172,6 +253,15 @@ func TestCandidateImporterAcceptsExpiredSignedCurrentLKGButRejectsExpiredCandida
 	envelope.Record = candidate
 	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
 		t.Fatal("expired candidate authority was accepted")
+	}
+}
+
+func TestCandidateImporterRejectsMissingCurrentBundleWithoutPanic(t *testing.T) {
+	now := time.Date(2026, 8, 14, 20, 30, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
+	envelope.CurrentBundle = nil
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("candidate envelope without current bundle was accepted")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,8 @@ const (
 	edgeCandidateEnvelopePathV1   = "/v1/edge/candidate-envelope"
 	maxCandidateEnvelopeBytes     = 2 << 20
 )
+
+var candidateServingAuthorityTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,255}$`)
 
 // candidateImportConfig is deliberately a fixed, read-only input. The
 // importer never receives credentials in a URL and never writes a workload.
@@ -53,8 +56,26 @@ type candidateEnvelope struct {
 	CurrentRecord           *releaseguardian.RouteBundleRecord `json:"current_record"`
 	CurrentBundle           *model.EdgeRouteBundle             `json:"current_bundle"`
 	CurrentWorkerSlot       releaseguardian.AuthoritySlot      `json:"current_worker_slot"`
+	ServingAuthority        *candidateServingAuthorityWitness  `json:"serving_authority,omitempty"`
 	Record                  releaseguardian.RouteBundleRecord  `json:"record"`
 	Bundle                  model.EdgeRouteBundle              `json:"bundle"`
+}
+
+// candidateServingAuthorityWitness is the read-only Guardian projection of
+// Edge Control's optional serving witness. Older Controls omit it. Newer
+// Controls use it to prove that a candidate was derived from the exact
+// historical publication still serving behind Front, rather than from a
+// newer Control publication that has not acquired ordinary traffic.
+type candidateServingAuthorityWitness struct {
+	CurrentRecordDigest string                        `json:"current_record_digest"`
+	AuthorityEpoch      int64                         `json:"authority_epoch"`
+	CurrentAuthorityUID string                        `json:"current_authority_uid"`
+	CurrentAuthorityRV  string                        `json:"current_authority_resource_version"`
+	FrontGeneration     uint64                        `json:"front_generation"`
+	BundleVersion       string                        `json:"bundle_version"`
+	WorkerSlot          releaseguardian.AuthoritySlot `json:"worker_slot"`
+	WorkerSourceSHA     string                        `json:"worker_source_sha"`
+	WorkerImageDigest   string                        `json:"worker_image_digest"`
 }
 
 type candidateImportStore interface {
@@ -138,6 +159,16 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	if err := validateCandidateEnvelope(config.GroupID, envelope, now.UTC()); err != nil {
 		return false, err
 	}
+	current, currentUID, currentRV, err := store.LoadCurrent(ctx, config.GroupID)
+	currentMissing := apierrors.IsNotFound(err)
+	if err != nil && !currentMissing {
+		return false, fmt.Errorf("load current authority: %w", err)
+	}
+	if envelope.ServingAuthority != nil {
+		if currentMissing || validateCandidateServingAuthorityBinding(envelope, current, currentUID, currentRV) != nil {
+			return false, errors.New("candidate serving authority does not match Guardian current authority")
+		}
+	}
 	currentPublicationSequence, currentRecoveryEpoch, _ := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
 	// Immutable records are idempotent. Persist both sides before creating the
 	// mutable pointers, so an invalid envelope can never create a partial
@@ -149,15 +180,10 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		return false, fmt.Errorf("persist candidate route record: %w", err)
 	}
 	changed := false
-	current := releaseguardian.CurrentAuthority{
+	bootstrapCurrent := releaseguardian.CurrentAuthority{
 		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind, GroupID: config.GroupID,
 		CurrentRecordDigest: envelope.CurrentRecord.RecordDigest, CurrentWorkerSlot: envelope.CurrentWorkerSlot,
 		AuthorityEpoch: envelope.CurrentRecord.Epoch,
-	}
-	_, _, _, err = store.LoadCurrent(ctx, config.GroupID)
-	currentMissing := apierrors.IsNotFound(err)
-	if err != nil && !currentMissing {
-		return false, fmt.Errorf("load current authority: %w", err)
 	}
 	candidate := releaseguardian.CandidateAuthority{
 		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind, GroupID: config.GroupID,
@@ -203,7 +229,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		changed = true
 	}
 	if currentMissing {
-		if _, _, err := store.SwitchCurrent(ctx, current, "", ""); err != nil {
+		if _, _, err := store.SwitchCurrent(ctx, bootstrapCurrent, "", ""); err != nil {
 			return false, fmt.Errorf("bootstrap current authority: %w", err)
 		}
 		changed = true
@@ -272,6 +298,9 @@ func fetchCandidateEnvelope(ctx context.Context, config candidateImportConfig, e
 }
 
 func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now time.Time) error {
+	if envelope.CurrentRecord == nil || envelope.CurrentBundle == nil {
+		return errors.New("candidate envelope identity is invalid")
+	}
 	currentPublicationSequence, _, currentVersionErr := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
 	candidatePublicationSequence, candidateRecoveryEpoch, candidateVersionErr := parseAuthorityBundleVersion(envelope.Bundle.Generation, envelope.Bundle.Version)
 	if envelope.Schema != edgeCandidateEnvelopeSchemaV1 || envelope.GroupID != groupID || envelope.Epoch == 0 ||
@@ -279,7 +308,7 @@ func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now t
 		strings.TrimSpace(envelope.RouteIntentGeneration) == "" || strings.TrimSpace(envelope.InventoryGeneration) == "" ||
 		!exactSHA256Digest(envelope.ReleaseRecordDigest) || envelope.PublishedAt.IsZero() || !envelope.PublishedAt.Equal(envelope.PublishedAt.UTC()) ||
 		!exactSourceSHA(envelope.WorkerSourceSHA) || !exactSHA256Digest(envelope.WorkerImageDigest) ||
-		envelope.CurrentRecord == nil || envelope.CurrentBundle == nil || envelope.CurrentRecord.Validate() != nil || envelope.Record.Validate() != nil ||
+		envelope.CurrentRecord.Validate() != nil || envelope.Record.Validate() != nil ||
 		envelope.CurrentRecord.GroupID != groupID || envelope.Record.GroupID != groupID || envelope.Record.Epoch != int64(envelope.Epoch) ||
 		envelope.CurrentRecord.Epoch >= envelope.Record.Epoch || envelope.CurrentWorkerSlot.Validate() != nil || envelope.WorkerSlot.Validate() != nil ||
 		envelope.CurrentWorkerSlot == envelope.WorkerSlot || envelope.CurrentRecord.RecordDigest == envelope.Record.RecordDigest ||
@@ -297,6 +326,42 @@ func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now t
 		envelope.CurrentBundle.GeneratedAt.After(now) || envelope.Bundle.GeneratedAt.After(now) ||
 		!envelope.CurrentBundle.ValidUntil.After(envelope.CurrentBundle.GeneratedAt) || !envelope.Bundle.ValidUntil.After(envelope.Bundle.GeneratedAt) {
 		return errors.New("candidate envelope bundle binding is invalid")
+	}
+	if envelope.ServingAuthority != nil && validateCandidateServingAuthorityEnvelope(envelope) != nil {
+		return errors.New("candidate envelope serving authority is invalid")
+	}
+	return nil
+}
+
+func validateCandidateServingAuthorityEnvelope(envelope candidateEnvelope) error {
+	witness := envelope.ServingAuthority
+	if witness == nil {
+		return nil
+	}
+	if !exactSHA256Digest(witness.CurrentRecordDigest) || witness.AuthorityEpoch < 1 ||
+		!candidateServingAuthorityTokenPattern.MatchString(witness.CurrentAuthorityUID) ||
+		!candidateServingAuthorityTokenPattern.MatchString(witness.CurrentAuthorityRV) || witness.FrontGeneration == 0 ||
+		witness.WorkerSlot.Validate() != nil || witness.WorkerSlot != envelope.CurrentWorkerSlot || witness.WorkerSlot == envelope.WorkerSlot ||
+		!exactSourceSHA(witness.WorkerSourceSHA) || !exactSHA256Digest(witness.WorkerImageDigest) {
+		return errors.New("candidate serving authority identity is invalid")
+	}
+	if _, _, err := parseAuthorityBundleVersion(envelope.Bundle.Generation, witness.BundleVersion); err != nil {
+		return errors.New("candidate serving publication is invalid")
+	}
+	return nil
+}
+
+func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, current releaseguardian.CurrentAuthority, uid types.UID, resourceVersion string) error {
+	witness := envelope.ServingAuthority
+	if witness == nil {
+		return nil
+	}
+	if current.Validate() != nil || current.GroupID != envelope.GroupID || current.CurrentRecordDigest != witness.CurrentRecordDigest ||
+		current.AuthorityEpoch != witness.AuthorityEpoch || string(uid) != witness.CurrentAuthorityUID || resourceVersion != witness.CurrentAuthorityRV ||
+		current.CurrentFrontGeneration != witness.FrontGeneration || current.CurrentBundleGeneration != witness.BundleVersion ||
+		current.CurrentWorkerSlot != witness.WorkerSlot || current.CurrentWorkerSourceSHA != witness.WorkerSourceSHA ||
+		current.CurrentWorkerImageDigest != witness.WorkerImageDigest {
+		return errors.New("candidate serving authority binding is invalid")
 	}
 	return nil
 }
