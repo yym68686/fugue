@@ -320,7 +320,7 @@ func TestCandidateProxyResponseAttestsExactLoadedPublicationEvenWhenRouteIsMissi
 	}
 }
 
-func TestCurrentProxyResponseNeverEmitsCandidateAttestation(t *testing.T) {
+func TestPromotedCurrentProxyResponseRetainsCandidateAttestation(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(config.EdgeConfig{}, log.New(ioDiscard{}, "", 0))
@@ -334,9 +334,13 @@ func TestCurrentProxyResponseNeverEmitsCandidateAttestation(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	service.ProxyHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://canary.fugue.pro/route-canary", nil))
-	for _, header := range []string{edgeControlCandidateRecordHeader, edgeControlReleaseRecordHeader, edgeControlCandidateSlotHeader} {
-		if value := recorder.Header().Get(header); value != "" {
-			t.Fatalf("current response leaked %s=%q", header, value)
+	for header, expected := range map[string]string{
+		edgeControlCandidateRecordHeader: testEdgeRouteDigestA,
+		edgeControlReleaseRecordHeader:   testEdgeRouteDigestB,
+		edgeControlCandidateSlotHeader:   model.EdgeSlotA,
+	} {
+		if value := recorder.Header().Get(header); value != expected {
+			t.Fatalf("current response %s=%q, want %q", header, value, expected)
 		}
 	}
 }

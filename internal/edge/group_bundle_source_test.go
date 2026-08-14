@@ -359,8 +359,9 @@ func TestActiveWorkerAcceptsOnlyActivationBoundCurrentRefresh(t *testing.T) {
 	refreshed := current
 	refreshed.PublicationSequence++
 	refreshed.RecoveryEpoch++
+	refreshed.Generation = "routes-refreshed"
 	if err := validateRouteBundleActivationBinding(selection, refreshed); err != nil {
-		t.Fatalf("same-authority current refresh was rejected: %v", err)
+		t.Fatalf("newer current publication after the activation anchor was rejected: %v", err)
 	}
 	for name, mutate := range map[string]func(*routePublicationMetadata){
 		"old sequence":        func(value *routePublicationMetadata) { value.PublicationSequence = 11340 },
@@ -378,6 +379,37 @@ func TestActiveWorkerAcceptsOnlyActivationBoundCurrentRefresh(t *testing.T) {
 	generation, sequence, recovery, err := parseActivatedPublicationVersion("routes-current.p11341.r109")
 	if err != nil || generation != "routes-current" || sequence != 11341 || recovery != 109 {
 		t.Fatalf("activation publication version was not parsed exactly: generation=%q sequence=%d recovery=%d err=%v", generation, sequence, recovery, err)
+	}
+}
+
+func TestActivatedCandidateAttestationFollowsPromotedCurrentPublications(t *testing.T) {
+	selection := routeSourceSelection{activeSlot: model.EdgeSlotB, expectedGeneration: "candidate-generation", expectedPublicationSequence: 11502}
+	loadedCandidate := routePublicationMetadata{
+		Source: edgeControlRouteSourceV1, GroupID: "edge-group-country-us", Generation: "candidate-generation",
+		PublicationSequence: 11502, Candidate: true, CandidateRecord: "sha256:" + strings.Repeat("a", 64),
+		ReleaseRecord: "sha256:" + strings.Repeat("b", 64), WorkerSlot: model.EdgeSlotB,
+	}
+	promoted := routePublicationMetadata{
+		Source: edgeControlRouteSourceV1, GroupID: loadedCandidate.GroupID, Generation: loadedCandidate.Generation,
+		PublicationSequence: 11502, RecoveryEpoch: 41,
+	}
+	promoted = retainActivatedCandidateAttestation(selection, model.EdgeSlotB, loadedCandidate, promoted)
+	if promoted.Candidate || promoted.CandidateRecord != loadedCandidate.CandidateRecord ||
+		promoted.ReleaseRecord != loadedCandidate.ReleaseRecord || promoted.WorkerSlot != loadedCandidate.WorkerSlot {
+		t.Fatalf("promoted current lost candidate attestation: %+v", promoted)
+	}
+	refreshed := promoted
+	refreshed.Generation = "current-refresh"
+	refreshed.PublicationSequence++
+	refreshed.CandidateRecord, refreshed.ReleaseRecord, refreshed.WorkerSlot = "", "", ""
+	refreshed = retainActivatedCandidateAttestation(selection, model.EdgeSlotB, promoted, refreshed)
+	if refreshed.CandidateRecord != loadedCandidate.CandidateRecord || refreshed.ReleaseRecord != loadedCandidate.ReleaseRecord || refreshed.WorkerSlot != model.EdgeSlotB {
+		t.Fatalf("current refresh lost release attestation: %+v", refreshed)
+	}
+	otherSlotCurrent := promoted
+	otherSlotCurrent.CandidateRecord, otherSlotCurrent.ReleaseRecord, otherSlotCurrent.WorkerSlot = "", "", ""
+	if got := retainActivatedCandidateAttestation(selection, model.EdgeSlotA, loadedCandidate, otherSlotCurrent); got.CandidateRecord != "" {
+		t.Fatal("attestation helper unexpectedly rewrote another worker slot")
 	}
 }
 

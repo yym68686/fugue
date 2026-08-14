@@ -661,6 +661,7 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 				s.recordSyncError(err)
 				return err
 			}
+			publication = retainActivatedCandidateAttestation(routeSelection, s.Config.EdgeSlot, currentPublication, publication)
 		}
 		etag := strings.TrimSpace(resp.Header.Get("ETag"))
 		if etag == "" {
@@ -714,6 +715,9 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			observedPublication, publicationErr := routePublicationFromResponse(resp.Header, *currentBundle, s.Config.EdgeGroupID)
 			if routeSelection.candidate {
 				observedPublication, publicationErr = bindCandidatePublication(resp.Header, observedPublication, s.Config.EdgeSlot)
+			}
+			if publicationErr == nil {
+				observedPublication = retainActivatedCandidateAttestation(routeSelection, s.Config.EdgeSlot, currentPublication, observedPublication)
 			}
 			if publicationErr != nil || validateRouteBundleActivationBinding(routeSelection, observedPublication) != nil ||
 				observedPublication != currentPublication || s.validateRouteBundleSourceSelection(routeSelection) != nil {
@@ -1292,16 +1296,15 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeCandidateRouteAttestationHeaders exposes only the immutable identity
-// already verified while loading a candidate publication. Current/LKG workers
-// never emit these headers. The independent canary binds all three values on
-// every real routed response; no request header or query parameter can select
-// a slot or synthesize this identity.
+// already verified while loading a candidate publication. The identity remains
+// attached after that exact candidate is promoted so the post-activation canary
+// can bind the routed response to the release. No request input can synthesize it.
 func (s *Service) writeCandidateRouteAttestationHeaders(w http.ResponseWriter) {
 	if s == nil || w == nil {
 		return
 	}
 	publication, _ := s.currentRoutePublicationAndBundle()
-	if !publication.Candidate || !edgeRouteDigestPattern.MatchString(publication.CandidateRecord) ||
+	if !edgeRouteDigestPattern.MatchString(publication.CandidateRecord) ||
 		!edgeRouteDigestPattern.MatchString(publication.ReleaseRecord) ||
 		(publication.WorkerSlot != model.EdgeSlotA && publication.WorkerSlot != model.EdgeSlotB) {
 		return

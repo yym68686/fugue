@@ -217,14 +217,30 @@ func validateRouteBundleActivationBinding(selection routeSourceSelection, public
 	if selection.candidate || selection.expectedGeneration == "" {
 		return nil
 	}
-	if publication.Generation != selection.expectedGeneration {
-		return errors.New("edge-control current publication is not bound to Front activation")
+	if selection.expectedPublicationSequence == 0 {
+		if publication.Generation != selection.expectedGeneration {
+			return errors.New("edge-control current publication is not bound to Front activation")
+		}
+		return nil
 	}
-	if selection.expectedPublicationSequence > 0 &&
-		(publication.PublicationSequence < selection.expectedPublicationSequence || publication.RecoveryEpoch < selection.expectedRecoveryEpoch) {
+	if publication.PublicationSequence < selection.expectedPublicationSequence || publication.RecoveryEpoch < selection.expectedRecoveryEpoch ||
+		(publication.PublicationSequence == selection.expectedPublicationSequence && publication.Generation != selection.expectedGeneration) {
 		return errors.New("edge-control current publication is not bound to Front activation")
 	}
 	return nil
+}
+
+func retainActivatedCandidateAttestation(selection routeSourceSelection, workerSlot string, current, next routePublicationMetadata) routePublicationMetadata {
+	workerSlot = strings.TrimSpace(workerSlot)
+	if selection.candidate || next.Candidate || selection.activeSlot != workerSlot || current.WorkerSlot != workerSlot ||
+		current.Source != next.Source || current.GroupID != next.GroupID ||
+		!edgeRouteDigestPattern.MatchString(current.CandidateRecord) || !edgeRouteDigestPattern.MatchString(current.ReleaseRecord) {
+		return next
+	}
+	next.CandidateRecord = current.CandidateRecord
+	next.ReleaseRecord = current.ReleaseRecord
+	next.WorkerSlot = current.WorkerSlot
+	return next
 }
 
 func parseActivatedPublicationVersion(value string) (string, uint64, uint64, error) {
@@ -499,8 +515,9 @@ func (s *Service) validateCachedRouteSource(cached cacheFile) error {
 		metadata.Generation == "" || metadata.PublicationSequence == 0 || cached.Bundle.Version != groupPublicationVersion(metadata.Generation, metadata.PublicationSequence, metadata.RecoveryEpoch) {
 		return errors.New("edge-control route publication cache is invalid or belongs to another source")
 	}
-	if metadata.Candidate && (!edgeRouteDigestPattern.MatchString(metadata.CandidateRecord) || !edgeRouteDigestPattern.MatchString(metadata.ReleaseRecord) ||
-		(metadata.WorkerSlot != model.EdgeSlotA && metadata.WorkerSlot != model.EdgeSlotB)) {
+	hasCandidateAttestation := metadata.CandidateRecord != "" || metadata.ReleaseRecord != "" || metadata.WorkerSlot != ""
+	if (metadata.Candidate || hasCandidateAttestation) && (!edgeRouteDigestPattern.MatchString(metadata.CandidateRecord) ||
+		!edgeRouteDigestPattern.MatchString(metadata.ReleaseRecord) || metadata.WorkerSlot != strings.TrimSpace(s.Config.EdgeSlot)) {
 		return errors.New("edge-control candidate publication cache is invalid")
 	}
 	return validateNonCatastrophicGroupBundle(nil, cached.Bundle, false)
