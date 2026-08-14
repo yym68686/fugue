@@ -461,6 +461,62 @@ func TestPrepareFailedAtomSuccessorUsesTypedPredecessorWaitAfterObservationError
 	}
 }
 
+func TestPrepareFailedAtomSuccessorAdoptsOwnedManifestDriftFromHealthyLKG(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	plan.Releases[0].SupersedesFailedConfigSHA = strings.Repeat("f", 40)
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	owned := casOnlyObservation(lkg)
+	owned.ImageRef = lkg.ImageRef
+	owned.ConfigSHA = lkg.ConfigSHA
+	owned.ManifestSHA = lkg.ManifestSHA
+	owned.OCIRevision = lkg.OCIRevision
+	owned.TemplateDigest = lkg.TemplateDigest
+	owned.FieldManagers = append([]string(nil), lkg.FieldManagers...)
+	fake := &fakeCluster{
+		observations:    []Observation{lkg},
+		health:          []Observation{lkg},
+		degraded:        []Observation{owned, owned},
+		convergedErrors: []error{errors.New("declared predecessor manifest has not converged"), nil},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Now().UTC())
+	if err != nil || !prepared.DegradedPredecessor || prepared.AlreadyConverged || prepared.Prewrite.ImageRef != lkg.ImageRef || fake.dryRuns != 2 {
+		t.Fatalf("healthy owned predecessor drift was not adopted: prepared=%+v dryRuns=%d err=%v", prepared, fake.dryRuns, err)
+	}
+	if len(fake.healthTargets) != 1 || !fake.healthPrewrite[0] || len(fake.converged) != 2 || len(fake.degraded) != 0 {
+		t.Fatalf("healthy owned predecessor evidence was incomplete: health=%+v marked=%+v converged=%d degraded_remaining=%d",
+			fake.healthTargets, fake.healthPrewrite, len(fake.converged), len(fake.degraded))
+	}
+}
+
+func TestPrepareOrdinarySuccessorRejectsOwnedManifestDriftFromHealthyLKG(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	owned := casOnlyObservation(lkg)
+	owned.ImageRef = lkg.ImageRef
+	owned.ConfigSHA = lkg.ConfigSHA
+	owned.ManifestSHA = lkg.ManifestSHA
+	owned.OCIRevision = lkg.OCIRevision
+	owned.TemplateDigest = lkg.TemplateDigest
+	owned.FieldManagers = append([]string(nil), lkg.FieldManagers...)
+	fake := &fakeCluster{
+		observations:    []Observation{lkg},
+		health:          []Observation{lkg},
+		degraded:        []Observation{owned, owned},
+		convergedErrors: []error{errors.New("declared predecessor manifest has not converged")},
+	}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "has not converged") {
+		t.Fatalf("ordinary successor accepted healthy predecessor manifest drift: %v", err)
+	}
+	if len(fake.degraded) != 2 || fake.dryRuns != 0 {
+		t.Fatalf("ordinary successor entered owned recovery: degraded_remaining=%d dryRuns=%d", len(fake.degraded), fake.dryRuns)
+	}
+}
+
 func TestPrepareFailedAtomSuccessorRejectsUntypedReadyCountMismatch(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	fake := &fakeCluster{

@@ -291,7 +291,11 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 					if err == nil {
 						err = cluster.Converged(ctx, release, predecessorWitness)
 					}
-					if err == nil {
+					if err != nil && release.SupersedesFailedConfigSHA != "" {
+						prewrite, err = prepareOwnedDegradedPredecessor(ctx, cluster, release, rendered.Forward, err)
+						degradedPredecessor = err == nil
+					}
+					if err == nil && !degradedPredecessor {
 						var freshLKG Observation
 						freshLKG, err = cluster.Observe(ctx, release, lkg, rendered.LKG)
 						if err == nil && freshLKG.HealthDigest != prewrite.HealthDigest {
