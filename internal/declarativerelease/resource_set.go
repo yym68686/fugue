@@ -518,9 +518,16 @@ func RetryPredecessorConvergenceManifest(manifest []byte, release PlanRelease) (
 				return nil, metadataErr
 			}
 			if annotations, ok := templateMetadata["annotations"].(map[string]any); ok {
-				delete(annotations, "fugue.pro/source-commit")
-				delete(annotations, "fugue.pro/oci-revision")
-				delete(annotations, "fugue.pro/production-config-sha")
+				for _, key := range []string{
+					"fugue.pro/artifact-image",
+					"fugue.pro/artifact-receipt-digest",
+					"fugue.pro/oci-revision",
+					"fugue.pro/production-config-sha",
+					"fugue.pro/release-plan-digest",
+					"fugue.pro/source-commit",
+				} {
+					delete(annotations, key)
+				}
 			}
 			cleanedWorkloads[workloadKey] = struct{}{}
 		}

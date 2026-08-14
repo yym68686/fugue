@@ -167,17 +167,17 @@ func TestRetryPredecessorConvergenceManifestDropsOnlyRenderedTargetIdentity(t *t
 	release := PlanRelease{
 		Workload: Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "telemetry", Container: "telemetry-agent", FieldManager: "fugue-telemetry-declarative"},
 	}
-	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"fugue.pro/artifact-receipt-digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/release-plan-digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","stable.example/key":"keep"},"labels":{"app.kubernetes.io/managed-by":"fugue-telemetry-declarative"},"name":"telemetry","namespace":"fugue-system"},"spec":{"replicas":1,"strategy":{"type":"RollingUpdate"},"template":{"metadata":{"annotations":{"fugue.pro/oci-revision":"1111111111111111111111111111111111111111","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/source-commit":"1111111111111111111111111111111111111111"}},"spec":{"containers":[{"env":[{"name":"LIMIT","value":"16"}],"image":"ghcr.io/example/telemetry@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"telemetry-agent"}]}}}}],"kind":"ComponentResourceSet"}`)
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"fugue.pro/artifact-receipt-digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/release-plan-digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","stable.example/key":"keep"},"labels":{"app.kubernetes.io/managed-by":"fugue-telemetry-declarative"},"name":"telemetry","namespace":"fugue-system"},"spec":{"replicas":1,"strategy":{"type":"RollingUpdate"},"template":{"metadata":{"annotations":{"fugue.pro/artifact-image":"ghcr.io/example/telemetry@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","fugue.pro/artifact-receipt-digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","fugue.pro/oci-revision":"1111111111111111111111111111111111111111","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/release-plan-digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","fugue.pro/source-commit":"1111111111111111111111111111111111111111","stable.example/template-key":"keep"}},"spec":{"containers":[{"env":[{"name":"LIMIT","value":"16"}],"image":"ghcr.io/example/telemetry@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"telemetry-agent"}]}}}}],"kind":"ComponentResourceSet"}`)
 	witnessRaw, err := RetryPredecessorConvergenceManifest(manifest, release)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, removed := range []string{"fugue.pro/artifact-receipt-digest", "fugue.pro/production-config-sha", "fugue.pro/release-plan-digest", "fugue.pro/oci-revision", "fugue.pro/source-commit", "ghcr.io/example/telemetry@"} {
+	for _, removed := range []string{"fugue.pro/artifact-image", "fugue.pro/artifact-receipt-digest", "fugue.pro/production-config-sha", "fugue.pro/release-plan-digest", "fugue.pro/oci-revision", "fugue.pro/source-commit", "ghcr.io/example/telemetry@"} {
 		if bytes.Contains(witnessRaw, []byte(removed)) {
 			t.Fatalf("rendered identity %q remains in retry witness: %s", removed, witnessRaw)
 		}
 	}
-	for _, retained := range []string{"app.kubernetes.io/managed-by", "fugue-telemetry-declarative", "stable.example/key", `"name":"LIMIT"`, `"value":"16"`, `"replicas":1`} {
+	for _, retained := range []string{"app.kubernetes.io/managed-by", "fugue-telemetry-declarative", "stable.example/key", "stable.example/template-key", `"name":"LIMIT"`, `"value":"16"`, `"replicas":1`} {
 		if !bytes.Contains(witnessRaw, []byte(retained)) {
 			t.Fatalf("operational field %q was dropped: %s", retained, witnessRaw)
 		}
@@ -189,7 +189,13 @@ func TestRetryPredecessorConvergenceManifestDropsOnlyRenderedTargetIdentity(t *t
 	live := deepCopyMap(witness.Items[0])
 	container := live["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
 	container["image"] = "ghcr.io/example/telemetry@sha256:" + strings.Repeat("9", 64)
-	live["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"] = map[string]any{"fugue.pro/source-commit": strings.Repeat("9", 40)}
+	live["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"] = map[string]any{
+		"fugue.pro/artifact-image":          container["image"],
+		"fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("8", 64),
+		"fugue.pro/release-plan-digest":     "sha256:" + strings.Repeat("7", 64),
+		"fugue.pro/source-commit":           strings.Repeat("9", 40),
+		"stable.example/template-key":       "keep",
+	}
 	if !ResourceDesiredSubset(witness.Items[0], live) {
 		t.Fatal("exact operational predecessor with different rendered identity was rejected")
 	}
