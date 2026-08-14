@@ -54,6 +54,10 @@ var emergencyOwnershipManagers = map[string]bool{
 	"kubectl-set":   true,
 }
 
+var legacyOwnershipManagers = map[string]bool{
+	"helm": true,
+}
+
 type kubectlCluster struct {
 	kubectl        string
 	verifier       string
@@ -246,7 +250,27 @@ func emergencyRuntimePointerValue(resource map[string]any, pointer string) (stri
 		value, ok := mapField(mapField(mapField(mapField(resource, "spec"), "template"), "metadata"), "annotations")[key].(string)
 		return value, ok
 	}
-	return emergencyContainerImagePointerValue(resource, pointer)
+	field, name, tail, ok := emergencyContainerPointerParts(pointer)
+	if !ok {
+		return "", false
+	}
+	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")[field]) {
+		container, _ := raw.(map[string]any)
+		if stringValue(container["name"]) != name {
+			continue
+		}
+		if tail == "image" {
+			value, found := container["image"].(string)
+			return value, found
+		}
+		probeName, probeOK := probePathTail(tail)
+		if !probeOK {
+			return "", false
+		}
+		value, found := mapField(mapField(container, probeName), "httpGet")["path"].(string)
+		return value, found
+	}
+	return "", false
 }
 
 func setEmergencyRuntimePointerValue(resource map[string]any, pointer, value string) bool {
@@ -260,50 +284,63 @@ func setEmergencyRuntimePointerValue(resource map[string]any, pointer, value str
 		mapField(mapField(mapField(mapField(resource, "spec"), "template"), "metadata"), "annotations")[key] = value
 		return true
 	}
-	field, name, ok := emergencyContainerPointerParts(pointer)
+	field, name, tail, ok := emergencyContainerPointerParts(pointer)
 	if !ok {
 		return false
 	}
 	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")[field]) {
 		container, _ := raw.(map[string]any)
 		if stringValue(container["name"]) == name {
-			container["image"] = value
+			if tail == "image" {
+				container["image"] = value
+				return true
+			}
+			probeName, probeOK := probePathTail(tail)
+			if !probeOK {
+				return false
+			}
+			mapField(mapField(container, probeName), "httpGet")["path"] = value
 			return true
 		}
 	}
 	return false
 }
 
-func emergencyContainerImagePointerValue(resource map[string]any, pointer string) (string, bool) {
-	field, name, ok := emergencyContainerPointerParts(pointer)
-	if !ok {
-		return "", false
+func emergencyContainerPointerParts(pointer string) (string, string, string, bool) {
+	const prefix = "/spec/template/spec/"
+	if !strings.HasPrefix(pointer, prefix) {
+		return "", "", "", false
 	}
-	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")[field]) {
-		container, _ := raw.(map[string]any)
-		if stringValue(container["name"]) == name {
-			value, found := container["image"].(string)
-			return value, found
+	remainder := strings.TrimPrefix(pointer, prefix)
+	open := strings.Index(remainder, "[name=")
+	if open < 1 {
+		return "", "", "", false
+	}
+	close := strings.Index(remainder[open:], "]")
+	if close < 0 {
+		return "", "", "", false
+	}
+	close += open
+	field, name := remainder[:open], remainder[open+len("[name="):close]
+	tail := strings.TrimPrefix(remainder[close+1:], "/")
+	if (field != "containers" && field != "initContainers") || name == "" {
+		return "", "", "", false
+	}
+	if tail != "image" {
+		if _, ok := probePathTail(tail); !ok {
+			return "", "", "", false
+		}
+	}
+	return field, name, tail, true
+}
+
+func probePathTail(tail string) (string, bool) {
+	for _, name := range []string{"startupProbe", "livenessProbe", "readinessProbe"} {
+		if tail == name+"/httpGet/path" {
+			return name, true
 		}
 	}
 	return "", false
-}
-
-func emergencyContainerPointerParts(pointer string) (string, string, bool) {
-	const prefix = "/spec/template/spec/"
-	if !strings.HasPrefix(pointer, prefix) || !strings.HasSuffix(pointer, "]/image") {
-		return "", "", false
-	}
-	remainder := strings.TrimSuffix(strings.TrimPrefix(pointer, prefix), "]/image")
-	open := strings.Index(remainder, "[name=")
-	if open < 1 {
-		return "", "", false
-	}
-	field, name := remainder[:open], remainder[open+len("[name="):]
-	if (field != "containers" && field != "initContainers") || name == "" {
-		return "", "", false
-	}
-	return field, name, true
 }
 
 func unescapeJSONPointerToken(value string) string {
@@ -744,11 +781,11 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 
 // applyResourceWithOwnershipConvergence is the one bounded recovery path for
 // emergency kubectl writes. It never force-applies an unreviewed field. A
-// typed SSA conflict must exactly match the release-owned annotation/image
-// allowlist and an Update managedFields entry. Execute removes only that exact
-// entry with UID/RV/entry JSON-Patch tests, then retries ordinary SSA. Prepare
-// remains read-only and accepts only the same typed proof. No broad takeover
-// or persistent compatibility mode exists.
+// typed SSA conflict must exactly match the release-owned annotation, image,
+// or HTTP probe path allowlist and an Update managedFields entry. Execute
+// removes an emergency entry or only the conflicting legacy probe path leaf
+// with UID/RV/entry JSON-Patch tests, then retries ordinary SSA. Prepare
+// remains read-only and accepts only the same typed proof.
 func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
 	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
 	if applyErr != nil {
@@ -785,7 +822,20 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if dryRun {
 			return nil
 		}
-		if cleanupErr := cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, false); cleanupErr != nil {
+		legacyPatch, legacyFound, legacyErr := nextLegacyProbeOwnershipPatch(live, allowed, applyErr)
+		if legacyErr != nil {
+			return legacyErr
+		}
+		if legacyFound {
+			encodedPatch, encodeErr := declarativerelease.CanonicalJSON(legacyPatch)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if _, patchErr := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
+				"--namespace", identity.Namespace, "--type=json", "--patch", string(encodedPatch), "--output", "json"); patchErr != nil {
+				return fmt.Errorf("remove exact legacy probe ownership: %w", patchErr)
+			}
+		} else if cleanupErr := cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, false); cleanupErr != nil {
 			return cleanupErr
 		}
 		freshRaw, getErr := cluster.getResource(ctx, identity)
@@ -925,12 +975,50 @@ func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity
 			add("/spec/template/spec/" + field + "[name=" + target.Container + "]/image")
 		}
 	}
+	if release.Workload.APIVersion == identity.APIVersion && release.Workload.Kind == identity.Kind &&
+		release.Workload.Namespace == identity.Namespace && release.Workload.Name == identity.Name {
+		addDeclaredContainerProbePointers(desired, "container", release.Workload.Container, add)
+	}
+	for _, target := range release.ArtifactTargets {
+		if target.APIVersion != identity.APIVersion || target.Kind != identity.Kind || target.Namespace != identity.Namespace || target.Name != identity.Name {
+			continue
+		}
+		addDeclaredContainerProbePointers(desired, target.ContainerType, target.Container, add)
+	}
 	allowed := make([]string, 0, len(allowedSet))
 	for pointer := range allowedSet {
 		allowed = append(allowed, pointer)
 	}
 	sort.Strings(allowed)
 	return allowed
+}
+
+// addDeclaredContainerProbePointers adds only HTTP probe path leaves to the
+// emergency ownership allowlist. Probe timing, headers, ports, commands and
+// every other workload field remain outside the recovery write boundary.
+func addDeclaredContainerProbePointers(desired map[string]any, containerType, containerName string, add func(string)) {
+	templateSpec := mapField(mapField(mapField(desired, "spec"), "template"), "spec")
+	field := "containers"
+	if containerType == "init-container" {
+		field = "initContainers"
+	} else if containerType != "container" {
+		return
+	}
+	for _, raw := range anySlice(templateSpec[field]) {
+		container, _ := raw.(map[string]any)
+		if stringValue(container["name"]) != containerName {
+			continue
+		}
+		for _, probeName := range []string{"startupProbe", "livenessProbe", "readinessProbe"} {
+			probe := mapField(container, probeName)
+			httpGet := mapField(probe, "httpGet")
+			if _, ok := httpGet["path"].(string); !ok {
+				continue
+			}
+			add("/spec/template/spec/" + field + "[name=" + containerName + "]" +
+				"/" + probeName + "/httpGet/path")
+		}
+	}
 }
 
 func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, allowed []string, applyErr error) error {
@@ -946,8 +1034,11 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 	seen := make(map[string]bool, len(conflicts))
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
-		if pointer == "" || !emergencyOwnershipManagers[conflict.manager] {
+		if pointer == "" || (!emergencyOwnershipManagers[conflict.manager] && !legacyOwnershipManagers[conflict.manager]) {
 			return fmt.Errorf("emergency ownership conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
+		}
+		if legacyOwnershipManagers[conflict.manager] && !emergencyProbePathPointer(pointer) {
+			return fmt.Errorf("legacy ownership conflict %s:%s is outside the exact allowlist; only HTTP probe paths may transfer", conflict.manager, conflict.field)
 		}
 		key := conflict.manager + "\x00" + pointer
 		if seen[key] {
@@ -962,7 +1053,7 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 				continue
 			}
 			pointers, flattenErr := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
-			if flattenErr != nil || len(pointers) == 0 || !stringSubset(pointers, allowed) {
+			if flattenErr != nil || len(pointers) == 0 || (emergencyOwnershipManagers[conflict.manager] && !stringSubset(pointers, allowed)) {
 				return errors.New("emergency managedFields entry expands beyond the exact allowlist")
 			}
 			matchedEntry = true
@@ -972,6 +1063,127 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 		}
 	}
 	return nil
+}
+
+func nextLegacyProbeOwnershipPatch(live map[string]any, allowed []string, applyErr error) ([]map[string]any, bool, error) {
+	conflicts, err := parseEmergencySSAConflicts(applyErr)
+	if err != nil {
+		return nil, false, err
+	}
+	metadata := mapField(live, "metadata")
+	uid, rv := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"])
+	if uid == "" || rv == "" {
+		return nil, false, errors.New("legacy probe ownership cleanup lacks UID/RV")
+	}
+	hasLegacy, hasOther := false, false
+	for _, conflict := range conflicts {
+		if legacyOwnershipManagers[conflict.manager] {
+			hasLegacy = true
+		} else {
+			hasOther = true
+		}
+	}
+	if !hasLegacy {
+		return nil, false, nil
+	}
+	if hasOther {
+		return nil, false, errors.New("legacy probe ownership conflicts cannot be mixed with emergency ownership conflicts")
+	}
+	type removal struct {
+		entryIndex int
+		entry      map[string]any
+		pointer    string
+	}
+	removals := make([]removal, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		pointer := pointerForEmergencySSAField(conflict.field, allowed)
+		if !emergencyProbePathPointer(pointer) {
+			return nil, false, fmt.Errorf("legacy ownership conflict %s:%s is outside the exact HTTP probe path allowlist", conflict.manager, conflict.field)
+		}
+		foundIndex := -1
+		var foundEntry map[string]any
+		for index, rawEntry := range anySlice(metadata["managedFields"]) {
+			entry, _ := rawEntry.(map[string]any)
+			if stringValue(entry["manager"]) != conflict.manager || stringValue(entry["operation"]) != "Update" ||
+				stringValue(entry["subresource"]) != "" || !managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), []string{pointer}, true) {
+				continue
+			}
+			if foundIndex >= 0 {
+				return nil, false, errors.New("legacy probe ownership witness is ambiguous")
+			}
+			foundIndex, foundEntry = index, entry
+		}
+		if foundIndex < 0 {
+			return nil, false, errors.New("legacy probe ownership conflict lacks an exact Update managedFields witness")
+		}
+		removals = append(removals, removal{entryIndex: foundIndex, entry: foundEntry, pointer: pointer})
+	}
+	if len(removals) == 0 {
+		return nil, false, nil
+	}
+	patch := []map[string]any{
+		{"op": "test", "path": "/metadata/uid", "value": uid},
+		{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
+	}
+	testedEntries := make(map[int]bool)
+	for _, item := range removals {
+		if testedEntries[item.entryIndex] {
+			continue
+		}
+		testedEntries[item.entryIndex] = true
+		patch = append(patch, map[string]any{
+			"op": "test", "path": "/metadata/managedFields/" + strconv.Itoa(item.entryIndex), "value": item.entry,
+		})
+	}
+	sort.Slice(removals, func(i, j int) bool {
+		if removals[i].entryIndex != removals[j].entryIndex {
+			return removals[i].entryIndex < removals[j].entryIndex
+		}
+		return removals[i].pointer < removals[j].pointer
+	})
+	for _, item := range removals {
+		path, pathErr := managedFieldsJSONPatchPath(item.entryIndex, item.pointer)
+		if pathErr != nil {
+			return nil, false, pathErr
+		}
+		patch = append(patch, map[string]any{"op": "remove", "path": path})
+	}
+	return patch, true, nil
+}
+
+func emergencyProbePathPointer(pointer string) bool {
+	_, _, tail, ok := emergencyContainerPointerParts(pointer)
+	if !ok {
+		return false
+	}
+	_, ok = probePathTail(tail)
+	return ok
+}
+
+func managedFieldsJSONPatchPath(entryIndex int, pointer string) (string, error) {
+	if entryIndex < 0 || !strings.HasPrefix(pointer, "/") {
+		return "", errors.New("managedFields patch path identity is invalid")
+	}
+	path := "/metadata/managedFields/" + strconv.Itoa(entryIndex) + "/fieldsV1"
+	for _, encoded := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
+		token := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
+		field, selector := token, ""
+		if open := strings.Index(token, "[name="); open > 0 && strings.HasSuffix(token, "]") {
+			field, selector = token[:open], token[open+len("[name="):len(token)-1]
+		}
+		if field == "" {
+			return "", errors.New("managedFields patch path contains an empty field")
+		}
+		path += "/" + escapeJSONPointerToken("f:"+field)
+		if selector != "" {
+			encodedSelector, err := json.Marshal(selector)
+			if err != nil {
+				return "", err
+			}
+			path += "/" + escapeJSONPointerToken("k:{\"name\":"+string(encodedSelector)+"}")
+		}
+	}
+	return path, nil
 }
 
 func (cluster *kubectlCluster) cleanupEmergencyOwnership(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, requireDeclarativeOwner bool) error {

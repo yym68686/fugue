@@ -548,6 +548,114 @@ func TestEmergencyOwnershipAllowlistIncludesPrimaryWorkloadImageWithoutArtifactT
 	}
 }
 
+func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePaths(t *testing.T) {
+	release := declarativerelease.PlanRelease{
+		Workload: declarativerelease.Workload{
+			APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker",
+			Container: "edge", FieldManager: "fugue-edge-worker-declarative",
+		},
+		ArtifactTargets: []declarativerelease.ArtifactTarget{{
+			APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker",
+			Container: "edge", ContainerType: "container",
+		}},
+	}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker"}
+	desired := map[string]any{
+		"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": strings.Repeat("a", 40)}},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+			"containers": []any{map[string]any{
+				"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("b", 64),
+				"livenessProbe":  map[string]any{"httpGet": map[string]any{"path": "/livez", "port": "health"}, "periodSeconds": json.Number("10")},
+				"readinessProbe": map[string]any{"httpGet": map[string]any{"path": "/readyz", "port": "health"}, "timeoutSeconds": json.Number("3")},
+				"startupProbe":   map[string]any{"httpGet": map[string]any{"path": "/healthz", "port": "health"}},
+			}},
+		}}},
+	}
+	allowed := emergencyOwnershipPointers(release, identity, desired)
+	want := []string{
+		"/spec/template/spec/containers[name=edge]/image",
+		"/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path",
+		"/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path",
+		"/spec/template/spec/containers[name=edge]/startupProbe/httpGet/path",
+	}
+	if !stringSubset(want, allowed) {
+		t.Fatalf("probe paths missing from emergency allowlist: allowed=%v want=%v", allowed, want)
+	}
+	for _, forbidden := range []string{
+		"/spec/template/spec/containers[name=edge]/livenessProbe/periodSeconds",
+		"/spec/template/spec/containers[name=edge]/readinessProbe/timeoutSeconds",
+		"/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/port",
+	} {
+		if stringSubset([]string{forbidden}, allowed) {
+			t.Fatalf("unreviewed probe field entered emergency allowlist: %s in %v", forbidden, allowed)
+		}
+	}
+	live := deepCopyJSONMap(t, desired)
+	if value, ok := emergencyRuntimePointerValue(live, "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"); !ok || value != "/readyz" {
+		t.Fatalf("probe path pointer read failed: value=%q ok=%v", value, ok)
+	}
+	if !setEmergencyRuntimePointerValue(live, "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path", "/livez") {
+		t.Fatal("probe path pointer write failed")
+	}
+	if value, ok := emergencyRuntimePointerValue(live, "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"); !ok || value != "/livez" {
+		t.Fatalf("probe path pointer write was not observable: value=%q ok=%v", value, ok)
+	}
+}
+
+func TestLegacyProbeOwnershipPatchRemovesOnlyConflictingPathLeaves(t *testing.T) {
+	liveness := "/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path"
+	readiness := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"
+	image := "/spec/template/spec/containers[name=edge]/image"
+	port := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/port"
+	entry := map[string]any{
+		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{liveness, readiness, image, port}),
+	}
+	live := map[string]any{"metadata": map[string]any{
+		"uid": "worker-uid", "resourceVersion": "42",
+		"managedFields": []any{
+			map[string]any{"manager": "declarative", "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
+			entry,
+		},
+	}}
+	allowed := []string{liveness, readiness, image}
+	applyErr := errors.New(strings.Join([]string{
+		"Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:",
+		"- " + ssaFieldForPointer(liveness),
+		"- " + ssaFieldForPointer(readiness),
+	}, "\n"))
+	if err := validateEmergencyOwnershipConflictEvidence(map[string]any{"metadata": map[string]any{
+		"uid": "worker-uid", "resourceVersion": "42",
+	}}, live, allowed, applyErr); err != nil {
+		t.Fatalf("exact legacy probe conflicts were rejected: %v", err)
+	}
+	patch, found, err := nextLegacyProbeOwnershipPatch(live, allowed, applyErr)
+	if err != nil || !found {
+		t.Fatalf("legacy probe ownership patch was not produced: found=%v err=%v", found, err)
+	}
+	removed := make(map[string]bool)
+	for _, operation := range patch {
+		if operation["op"] == "remove" {
+			removed[fmt.Sprint(operation["path"])] = true
+		}
+	}
+	for _, pointer := range []string{liveness, readiness} {
+		path, pathErr := managedFieldsJSONPatchPath(1, pointer)
+		if pathErr != nil || !removed[path] {
+			t.Fatalf("patch does not remove exact probe path %s: path=%s err=%v patch=%v", pointer, path, pathErr, patch)
+		}
+	}
+	if removed["/metadata/managedFields/1"] {
+		t.Fatalf("legacy managedFields entry would be removed wholesale: %v", patch)
+	}
+	for _, pointer := range []string{image, port} {
+		path, pathErr := managedFieldsJSONPatchPath(1, pointer)
+		if pathErr == nil && removed[path] {
+			t.Fatalf("patch expands beyond conflicting probe path %s: %v", pointer, patch)
+		}
+	}
+}
+
 func TestValidateEmergencyRollbackDriftAllowsOnlyExactOwnedRuntimePointer(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ComponentID: "edge-control-de",
