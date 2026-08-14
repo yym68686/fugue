@@ -1694,9 +1694,44 @@ func TestSyncOnceWithoutCacheIsUnhealthyWhenAPIUnavailable(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected health status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
 	}
+	ready := httptest.NewRecorder()
+	service.Handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if ready.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected readiness status %d without a bundle, got %d body=%s", http.StatusServiceUnavailable, ready.Code, ready.Body.String())
+	}
+	live := httptest.NewRecorder()
+	service.Handler().ServeHTTP(live, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	if live.Code != http.StatusOK || !strings.Contains(live.Body.String(), `"status":"live"`) {
+		t.Fatalf("expected liveness status 200 without a bundle, got %d body=%s", live.Code, live.Body.String())
+	}
 	metrics := renderMetrics(t, service)
 	if !strings.Contains(metrics, `fugue_edge_bundle_sync_total{result="error"} 1`) {
 		t.Fatalf("expected sync error metric, got %s", metrics)
+	}
+}
+
+func TestLivenessStaysUpWhenMaxStaleExceedsServingReadiness(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{MaxStale: time.Minute}, log.New(ioDiscard{}, "", 0))
+	bundle := testBundle("routegen_expired")
+	bundle.ValidUntil = time.Now().UTC().Add(-2 * time.Minute)
+	now := time.Now().UTC()
+	service.recordSyncSuccess(bundle, `"routegen_expired"`, now, true)
+
+	status := service.Status()
+	if status.Healthy || !status.MaxStaleExceeded || status.BundleVersion != bundle.Version {
+		t.Fatalf("expected max-stale bundle to remain loaded but not serving-ready, got %+v", status)
+	}
+	ready := httptest.NewRecorder()
+	service.Handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if ready.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected max-stale readiness status %d, got %d body=%s", http.StatusServiceUnavailable, ready.Code, ready.Body.String())
+	}
+	live := httptest.NewRecorder()
+	service.Handler().ServeHTTP(live, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	if live.Code != http.StatusOK {
+		t.Fatalf("expected process liveness to remain 200 after max-stale, got %d body=%s", live.Code, live.Body.String())
 	}
 }
 

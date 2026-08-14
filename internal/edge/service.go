@@ -837,6 +837,8 @@ func (s *Service) LoadCache() error {
 
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /livez", s.handleLivez)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /edge/bundle", s.handleBundle)
 	mux.HandleFunc("GET /edge/tls/ask", s.handleTLSAsk)
@@ -1061,6 +1063,14 @@ func (s *Service) hasBundle() bool {
 }
 
 func (s *Service) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	s.handleReadyz(w, r)
+}
+
+func (s *Service) handleLivez(w http.ResponseWriter, _ *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "live"})
+}
+
+func (s *Service) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	status := s.Status()
 	code := http.StatusOK
 	if !status.Healthy {
