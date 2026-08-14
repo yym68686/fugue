@@ -134,6 +134,7 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		return err
 	}
 	decision := Classify(snapshot.CurrentRecordDigest, snapshot.Desired.RecordDigest, snapshot.Health)
+	degradedPredecessorRollout := degradedPredecessorRolloutEligible(snapshot)
 	status := ReleaseStatus{
 		Component: key.Component, Group: key.Group, State: decision.State,
 		CurrentRecordDigest: snapshot.CurrentRecordDigest, TargetRecordDigest: snapshot.Desired.RecordDigest,
@@ -144,6 +145,10 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		status.State = StateVerifying
 		status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
 		status.Reason = joinedReason("rollout is verified locally and is waiting for target-bound route evidence", snapshot.Health)
+	}
+	if degradedPredecessorRollout {
+		status.State = StateRolloutPending
+		status.Reason = joinedReason("exact degraded predecessor repair is authorized by immutable prewrite evidence", snapshot.Health)
 	}
 	if controller.mode == ModeWrite && snapshot.Managed && pendingUnprovenLKGRecovery(snapshot) {
 		status.State = StateRecoveryRequired
@@ -177,7 +182,7 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		}
 		return controller.store.UpdateStatus(ctx, snapshot, sealed)
 	}
-	if decision.RolloutEligible {
+	if decision.RolloutEligible || degradedPredecessorRollout {
 		status.State = StateRolling
 		receipt, executeErr := controller.executor.Rollout(ctx, snapshot)
 		if executeErr != nil {
@@ -252,6 +257,15 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		return err
 	}
 	return controller.store.UpdateStatus(ctx, snapshot, sealed)
+}
+
+func degradedPredecessorRolloutEligible(snapshot Snapshot) bool {
+	prepared := snapshot.Bundle.Prepared
+	return prepared.DegradedPredecessor && prepared.Component == snapshot.Key.Component &&
+		prepared.ConfigSHA == snapshot.Record.ConfigSHA && prepared.Forward.ConfigSHA == snapshot.Record.ConfigSHA &&
+		snapshot.Desired.RecordDigest == snapshot.Record.RecordDigest &&
+		snapshot.CurrentRecordDigest == snapshot.Record.LKGRecordDigest &&
+		snapshot.LastSuccessfulLKG == snapshot.Record.LKGRecordDigest
 }
 
 func pendingUnprovenLKGRecovery(snapshot Snapshot) bool {

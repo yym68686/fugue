@@ -179,6 +179,57 @@ func TestWriteModeReconcilesUnprovenLKGBeforeRetryingCandidate(t *testing.T) {
 	}
 }
 
+func TestWriteModeRollsOutExactDegradedPredecessorRepair(t *testing.T) {
+	now := time.Unix(23, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthDegraded, now), otherDigest)
+	snapshot.Bundle.Prepared = declarativerelease.ExecutionPlan{
+		Component: snapshot.Key.Component, ConfigSHA: snapshot.Record.ConfigSHA, DegradedPredecessor: true,
+		Forward: declarativerelease.TargetIdentity{ConfigSHA: snapshot.Record.ConfigSHA},
+	}
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 1 || executor.rollbacks != 0 || store.lkgCAS != 0 ||
+		store.status.State != StateVerifying || store.status.CurrentRecordDigest != snapshot.Record.RecordDigest {
+		t.Fatalf("degraded predecessor repair was not rolled out: executor=%+v store=%+v status=%+v", executor, store, store.status)
+	}
+}
+
+func TestDegradedPredecessorRolloutRequiresExactRecordBindings(t *testing.T) {
+	now := time.Unix(23, 0).UTC()
+	exact := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthDegraded, now), otherDigest)
+	exact.Bundle.Prepared = declarativerelease.ExecutionPlan{
+		Component: exact.Key.Component, ConfigSHA: exact.Record.ConfigSHA, DegradedPredecessor: true,
+		Forward: declarativerelease.TargetIdentity{ConfigSHA: exact.Record.ConfigSHA},
+	}
+	if !degradedPredecessorRolloutEligible(exact) {
+		t.Fatal("exact degraded predecessor repair was rejected")
+	}
+	for name, mutate := range map[string]func(*Snapshot){
+		"component": func(snapshot *Snapshot) { snapshot.Bundle.Prepared.Component = "other" },
+		"config":    func(snapshot *Snapshot) { snapshot.Bundle.Prepared.ConfigSHA = strings.Repeat("2", 40) },
+		"forward":   func(snapshot *Snapshot) { snapshot.Bundle.Prepared.Forward.ConfigSHA = strings.Repeat("2", 40) },
+		"desired":   func(snapshot *Snapshot) { snapshot.Desired.RecordDigest = testDigest },
+		"current":   func(snapshot *Snapshot) { snapshot.CurrentRecordDigest = testDigest },
+		"lkg":       func(snapshot *Snapshot) { snapshot.LastSuccessfulLKG = testDigest },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := exact
+			mutate(&candidate)
+			if degradedPredecessorRolloutEligible(candidate) {
+				t.Fatal("identity-drifted degraded predecessor repair was accepted")
+			}
+		})
+	}
+}
+
 func TestWriteModeKeepsVerifiedRolloutPendingUntilTargetCanaryArrives(t *testing.T) {
 	now := time.Unix(24, 0).UTC()
 	snapshot := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthUnknown, now), "")
