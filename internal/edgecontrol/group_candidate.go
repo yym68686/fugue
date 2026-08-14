@@ -63,6 +63,7 @@ type GroupCandidateBundle struct {
 	CurrentRecord           *edgeauthority.RouteBundleRecord `json:"current_record,omitempty"`
 	CurrentBundle           *model.EdgeRouteBundle           `json:"current_bundle,omitempty"`
 	CurrentWorkerSlot       string                           `json:"current_worker_slot,omitempty"`
+	ServingAuthority        *GroupServingAuthorityWitness    `json:"serving_authority,omitempty"`
 	Record                  edgeauthority.RouteBundleRecord  `json:"record"`
 	Bundle                  model.EdgeRouteBundle            `json:"bundle"`
 }
@@ -73,10 +74,10 @@ type GroupCandidateStore interface {
 	ReadGroupInventory(context.Context, string) (GroupInventorySnapshot, error)
 	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
 	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
-	ReadGroupCandidateStage(context.Context, string) (GroupCandidateStageSnapshot, error)
+	ReadGroupCandidateStage(context.Context, string, string) (GroupCandidateStageSnapshot, error)
 	PutGroupCandidateCAS(context.Context, string, uint64, uint64, GroupCandidateBundle) (GroupCandidateBundle, error)
 	PutGroupCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, string, GroupCandidateBundle) (GroupCandidateBundle, error)
-	PutGroupStagedCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, uint64, string, GroupCandidateBundle) (GroupCandidateBundle, error)
+	PutGroupStagedCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, uint64, string, *GroupServingAuthorityWitness, GroupCandidateBundle) (GroupCandidateBundle, error)
 }
 
 // GroupCandidateStageSnapshot is the exact small projection required to bind
@@ -89,6 +90,9 @@ type GroupCandidateStageSnapshot struct {
 	Inventory          GroupInventorySnapshot
 	InventoryExists    bool
 	PublishedCandidate GroupShadowLedgerEntry
+	ServingAuthority   GroupAuthorityLedgerEntry
+	ServingCandidate   GroupShadowLedgerEntry
+	ServingExists      bool
 }
 
 type GroupCandidatePublisher struct {
@@ -411,6 +415,16 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 		(candidate.WorkerSourceSHA != "" && !candidateHasStagedWorkerIdentity(candidate)) {
 		return errors.New("edge-control group candidate worker release identity is invalid")
 	}
+	if candidate.ServingAuthority != nil {
+		if candidate.ServingAuthority.Validate() != nil || candidate.ServingAuthority.WorkerSlot != candidate.CurrentWorkerSlot ||
+			candidate.ServingAuthority.WorkerSlot == candidate.WorkerSlot {
+			return errors.New("edge-control group candidate serving authority witness is invalid")
+		}
+		generation, _, _, ok := parseGroupPublicationVersion(candidate.ServingAuthority.BundleVersion)
+		if !ok || generation != candidate.Bundle.Generation {
+			return errors.New("edge-control group candidate serving publication is invalid")
+		}
+	}
 	if candidate.CurrentRecord == nil && candidate.CurrentBundle == nil && candidate.CurrentWorkerSlot == "" {
 		return nil
 	}
@@ -439,6 +453,10 @@ func cloneGroupCandidateBundle(value GroupCandidateBundle) GroupCandidateBundle 
 	if value.CurrentBundle != nil {
 		current := cloneEdgeRouteBundle(*value.CurrentBundle)
 		value.CurrentBundle = &current
+	}
+	if value.ServingAuthority != nil {
+		serving := *value.ServingAuthority
+		value.ServingAuthority = &serving
 	}
 	value.Bundle = cloneEdgeRouteBundle(value.Bundle)
 	return value

@@ -12,6 +12,8 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,28 +27,61 @@ const (
 	maxGroupCandidateStageBodyBytes    = 64 << 10
 )
 
+var groupServingAuthorityTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,255}$`)
+
+// GroupServingAuthorityWitness binds a candidate-stage request to the exact
+// CurrentAuthority object and Front/Worker activation that are serving users.
+// It is optional for backward compatibility; when present, Edge Control may
+// select only the exact immutable historical publication named here.
+type GroupServingAuthorityWitness struct {
+	CurrentRecordDigest string `json:"current_record_digest"`
+	AuthorityEpoch      int64  `json:"authority_epoch"`
+	CurrentAuthorityUID string `json:"current_authority_uid"`
+	CurrentAuthorityRV  string `json:"current_authority_resource_version"`
+	FrontGeneration     uint64 `json:"front_generation"`
+	BundleVersion       string `json:"bundle_version"`
+	WorkerSlot          string `json:"worker_slot"`
+	WorkerSourceSHA     string `json:"worker_source_sha"`
+	WorkerImageDigest   string `json:"worker_image_digest"`
+}
+
+func (witness GroupServingAuthorityWitness) Validate() error {
+	if !groupAuthorityDigestPattern.MatchString(witness.CurrentRecordDigest) || witness.AuthorityEpoch < 1 ||
+		!groupServingAuthorityTokenPattern.MatchString(witness.CurrentAuthorityUID) ||
+		!groupServingAuthorityTokenPattern.MatchString(witness.CurrentAuthorityRV) || witness.FrontGeneration == 0 ||
+		(witness.WorkerSlot != "a" && witness.WorkerSlot != "b") || !groupCandidateSourcePattern.MatchString(witness.WorkerSourceSHA) ||
+		!groupAuthorityDigestPattern.MatchString(witness.WorkerImageDigest) {
+		return errors.New("edge-control serving authority witness is invalid")
+	}
+	if _, publicationSequence, _, ok := parseGroupPublicationVersion(witness.BundleVersion); !ok || publicationSequence == 0 {
+		return errors.New("edge-control serving authority publication is invalid")
+	}
+	return nil
+}
+
 // GroupCandidateStageRequest can only attach an immutable Worker release to
 // the inactive slot and the exact current signed LKG. It carries no route,
 // manifest, publication, or ordinary-traffic mutation.
 type GroupCandidateStageRequest struct {
-	Schema                        string `json:"schema"`
-	KeyID                         string `json:"key_id"`
-	GroupID                       string `json:"edge_group_id"`
-	ExpectedAuthoritySequence     uint64 `json:"expected_authority_sequence"`
-	ExpectedPublicationSequence   uint64 `json:"expected_publication_sequence"`
-	ExpectedRecoveryEpoch         uint64 `json:"expected_recovery_epoch"`
-	ExpectedPublishedBundleDigest string `json:"expected_published_bundle_digest"`
-	ExpectedCandidateEpoch        uint64 `json:"expected_candidate_epoch"`
-	ExpectedCurrentWorkerSlot     string `json:"expected_current_worker_slot"`
-	TargetWorkerSlot              string `json:"target_worker_slot"`
-	WorkerSourceSHA               string `json:"worker_source_sha"`
-	WorkerImageDigest             string `json:"worker_image_digest"`
-	ReleaseRecordDigest           string `json:"release_record_digest"`
-	IssuedAtUnix                  int64  `json:"issued_at_unix"`
-	ExpiresAtUnix                 int64  `json:"expires_at_unix"`
-	Nonce                         string `json:"nonce"`
-	Reason                        string `json:"reason"`
-	Signature                     string `json:"signature"`
+	Schema                        string                        `json:"schema"`
+	KeyID                         string                        `json:"key_id"`
+	GroupID                       string                        `json:"edge_group_id"`
+	ExpectedAuthoritySequence     uint64                        `json:"expected_authority_sequence"`
+	ExpectedPublicationSequence   uint64                        `json:"expected_publication_sequence"`
+	ExpectedRecoveryEpoch         uint64                        `json:"expected_recovery_epoch"`
+	ExpectedPublishedBundleDigest string                        `json:"expected_published_bundle_digest"`
+	ExpectedCandidateEpoch        uint64                        `json:"expected_candidate_epoch"`
+	ExpectedCurrentWorkerSlot     string                        `json:"expected_current_worker_slot"`
+	TargetWorkerSlot              string                        `json:"target_worker_slot"`
+	ServingAuthority              *GroupServingAuthorityWitness `json:"serving_authority,omitempty"`
+	WorkerSourceSHA               string                        `json:"worker_source_sha"`
+	WorkerImageDigest             string                        `json:"worker_image_digest"`
+	ReleaseRecordDigest           string                        `json:"release_record_digest"`
+	IssuedAtUnix                  int64                         `json:"issued_at_unix"`
+	ExpiresAtUnix                 int64                         `json:"expires_at_unix"`
+	Nonce                         string                        `json:"nonce"`
+	Reason                        string                        `json:"reason"`
+	Signature                     string                        `json:"signature"`
 }
 
 type GroupCandidateStageReceipt struct {
@@ -146,7 +181,11 @@ func (handler *groupCandidateStageHandler) ServeHTTP(w http.ResponseWriter, requ
 }
 
 func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Context, request GroupCandidateStageRequest, now time.Time) (GroupCandidateBundle, error) {
-	snapshot, err := publisher.Store.ReadGroupCandidateStage(ctx, request.GroupID)
+	servingBundleVersion := ""
+	if request.ServingAuthority != nil {
+		servingBundleVersion = request.ServingAuthority.BundleVersion
+	}
+	snapshot, err := publisher.Store.ReadGroupCandidateStage(ctx, request.GroupID, servingBundleVersion)
 	authority := snapshot.Authority
 	if err != nil || !authority.LedgerExists || !authority.PublishedExists || validateGroupPublishedBundle(request.GroupID, authority.Published) != nil ||
 		authority.LedgerHead.Sequence != request.ExpectedAuthoritySequence || authority.Published.PublicationSequence != request.ExpectedPublicationSequence ||
@@ -168,23 +207,33 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	if currentEpoch != request.ExpectedCandidateEpoch {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	head := snapshot.PublishedCandidate
-	if head.ActiveSlot != request.ExpectedCurrentWorkerSlot {
+	currentHead := snapshot.PublishedCandidate
+	if currentHead.Sequence != authority.Published.CandidateLedgerSequence || currentHead.Status != GroupShadowStatusCompiled ||
+		currentHead.Bundle == nil || currentHead.BundleArchived || currentHead.BundleGeneration != authority.Published.Bundle.Generation ||
+		!groupAuthorityDigestPattern.MatchString(currentHead.InventoryDigest) {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	sequence := authority.Published.CandidateLedgerSequence
-	if sequence == 0 {
-		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
+	head := currentHead
+	if request.ServingAuthority == nil {
+		if head.ActiveSlot != request.ExpectedCurrentWorkerSlot {
+			return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
+		}
+	} else {
+		if !snapshot.ServingExists || snapshot.ServingCandidate.Bundle == nil || snapshot.ServingCandidate.BundleArchived ||
+			snapshot.ServingCandidate.Status != GroupShadowStatusCompiled || snapshot.ServingCandidate.ActiveSlot != request.ExpectedCurrentWorkerSlot ||
+			request.ServingAuthority.WorkerSlot != request.ExpectedCurrentWorkerSlot ||
+			groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch) != request.ServingAuthority.BundleVersion {
+			return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
+		}
+		head = snapshot.ServingCandidate
 	}
-	if head.Sequence != sequence || head.Status != GroupShadowStatusCompiled || head.Bundle == nil || head.BundleArchived ||
-		head.BundleGeneration != authority.Published.Bundle.Generation || !groupAuthorityDigestPattern.MatchString(head.InventoryDigest) {
-		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
-	}
+	sequence := head.Sequence
 	epoch := authority.Published.PublicationSequence + 1
 	if currentEpoch >= epoch {
 		epoch = currentEpoch + 1
 	}
-	bundle := cloneEdgeRouteBundle(authority.Published.Bundle)
+	bundle := cloneEdgeRouteBundle(*head.Bundle)
+	bundle.Issuer = groupAuthorityIssuer
 	bundle.GeneratedAt, bundle.ValidUntil = now, time.Time{}
 	bundle.KeyID, bundle.Signature, bundle.Signatures = "", "", nil
 	bundle.PreviousGeneration = authority.Published.Bundle.Generation
@@ -202,7 +251,7 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	}
 	currentRecord, err := (edgeauthority.RouteBundleRecord{GroupID: request.GroupID, Epoch: int64(authority.Published.PublicationSequence),
 		BundleDigest: authority.Published.Digest, SourceSHA: publisher.Identity.SourceSHA, ControlImageDigest: publisher.Identity.ControlImageDigest,
-		InventoryDigest: head.InventoryDigest, ManifestDigest: publisher.Identity.ManifestDigest, HealthContractDigest: publisher.Identity.HealthContractDigest,
+		InventoryDigest: currentHead.InventoryDigest, ManifestDigest: publisher.Identity.ManifestDigest, HealthContractDigest: publisher.Identity.HealthContractDigest,
 		IssuedAt: now.Format(time.RFC3339Nano), KeyID: authority.Published.Bundle.KeyID, Signature: authority.Published.Bundle.Signature}).Seal()
 	if err != nil {
 		return GroupCandidateBundle{}, err
@@ -212,16 +261,17 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 		RouteIntentGeneration: head.RouteIntentGeneration, InventoryGeneration: head.InventoryGeneration,
 		ReleaseRecordDigest: request.ReleaseRecordDigest, WorkerSourceSHA: request.WorkerSourceSHA, WorkerImageDigest: request.WorkerImageDigest,
 		WorkerSlot: request.TargetWorkerSlot, PublishedAt: now, CurrentRecord: &currentRecord,
-		CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: request.ExpectedCurrentWorkerSlot, Record: record, Bundle: signed}
+		CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: request.ExpectedCurrentWorkerSlot,
+		ServingAuthority: request.ServingAuthority, Record: record, Bundle: signed}
 	return publisher.Store.PutGroupStagedCurrentLKGCandidateCAS(ctx, request.GroupID, currentEpoch, request.ExpectedAuthoritySequence,
-		request.ExpectedPublicationSequence, request.ExpectedRecoveryEpoch, request.ExpectedPublishedBundleDigest, candidate)
+		request.ExpectedPublicationSequence, request.ExpectedRecoveryEpoch, request.ExpectedPublishedBundleDigest, request.ServingAuthority, candidate)
 }
 
 func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request GroupCandidateStageRequest, authority GroupAuthorityState) bool {
 	return candidateHasStagedWorkerIdentity(candidate) && candidateBindsCurrentAuthority(candidate, authority) &&
 		candidate.ReleaseRecordDigest == request.ReleaseRecordDigest && candidate.WorkerSourceSHA == request.WorkerSourceSHA &&
 		candidate.WorkerImageDigest == request.WorkerImageDigest && candidate.WorkerSlot == request.TargetWorkerSlot &&
-		candidate.CurrentWorkerSlot == request.ExpectedCurrentWorkerSlot
+		candidate.CurrentWorkerSlot == request.ExpectedCurrentWorkerSlot && servingAuthorityWitnessesEqual(candidate.ServingAuthority, request.ServingAuthority)
 }
 
 func groupCandidateStageReceipt(candidate GroupCandidateBundle, request GroupCandidateStageRequest) GroupCandidateStageReceipt {
@@ -243,7 +293,41 @@ func validateGroupCandidateStageRequest(request GroupCandidateStageRequest) erro
 		len(request.Reason) < 8 || len(request.Reason) > 256 {
 		return errors.New("edge-control worker candidate staging request is invalid")
 	}
+	if request.ServingAuthority != nil && (request.ServingAuthority.Validate() != nil ||
+		request.ServingAuthority.WorkerSlot != request.ExpectedCurrentWorkerSlot) {
+		return errors.New("edge-control worker candidate serving authority is invalid")
+	}
 	return nil
+}
+
+func servingAuthorityWitnessesEqual(left, right *GroupServingAuthorityWitness) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func parseGroupPublicationVersion(version string) (string, uint64, uint64, bool) {
+	version = strings.TrimSpace(version)
+	recoveryIndex := strings.LastIndex(version, ".r")
+	if recoveryIndex <= 0 || recoveryIndex+2 >= len(version) {
+		return "", 0, 0, false
+	}
+	recoveryEpoch, err := strconv.ParseUint(version[recoveryIndex+2:], 10, 64)
+	if err != nil {
+		return "", 0, 0, false
+	}
+	publicationPart := version[:recoveryIndex]
+	publicationIndex := strings.LastIndex(publicationPart, ".p")
+	if publicationIndex <= 0 || publicationIndex+2 >= len(publicationPart) {
+		return "", 0, 0, false
+	}
+	publicationSequence, err := strconv.ParseUint(publicationPart[publicationIndex+2:], 10, 64)
+	generation := strings.TrimSpace(publicationPart[:publicationIndex])
+	if err != nil || publicationSequence == 0 || generation == "" || groupPublicationVersion(generation, publicationSequence, recoveryEpoch) != version {
+		return "", 0, 0, false
+	}
+	return generation, publicationSequence, recoveryEpoch, true
 }
 
 func SignGroupCandidateStageRequest(request *GroupCandidateStageRequest, secret []byte) error {

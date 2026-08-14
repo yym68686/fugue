@@ -168,6 +168,127 @@ func TestWorkerCandidateStageRejectsCrossGroupStaleCASAndInvalidSignature(t *tes
 	}
 }
 
+func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChangingCurrentAuthority(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := groupInventoryFixture(groupID, "b", "epoch-b", "inventory-serving-b", false)
+	inventory.ObservedAt = now
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
+		t.Fatal(err)
+	}
+	signer := &fixtureGroupSigner{keys: map[string][]byte{groupID: bytes.Repeat([]byte{0x73}, 32)}, validFor: time.Hour}
+	firstIntent := routeIntentFixture()
+	firstCompiled, err := (GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}).
+		Reconcile(ctx, firstIntent, []string{groupID})
+	if err != nil || firstCompiled.Succeeded != 1 {
+		t.Fatalf("compile historical serving publication: batch=%+v err=%v", firstCompiled, err)
+	}
+	authorityPublisher := GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now }}
+	if batch, publishErr := authorityPublisher.Publish(ctx, firstCompiled); publishErr != nil || batch.Published != 1 {
+		t.Fatalf("publish historical serving publication: batch=%+v err=%v", batch, publishErr)
+	}
+	servingAuthority, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servingVersion := servingAuthority.Published.Bundle.Version
+
+	inventory.Sequence++
+	inventory.Generation = "inventory-control-a"
+	inventory.ActiveEpoch.Slot = "a"
+	inventory.ActiveEpoch.ReleaseEpoch = "epoch-a"
+	inventory.ActiveEpoch.FenceSequence++
+	inventory.Instances[0].Slot = "a"
+	inventory.Instances[0].ReleaseEpoch = "epoch-a"
+	inventory.Instances[0].InstanceUID = "uid-" + groupID + "-a"
+	inventory.ObservedAt = now.Add(time.Minute)
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, inventory.Sequence-1, inventory); err != nil {
+		t.Fatal(err)
+	}
+	secondIntent := routeIntentFixture()
+	secondIntent.Generation = "route-intents-43"
+	secondIntent.Routes[0].Generation = "route-all-2"
+	secondIntent.Routes[0].UpstreamURL = "http://runtime-next.mesh:8080"
+	secondIntent.Routes[0].UpdatedAt = now.Add(time.Minute)
+	secondCompiled, err := (GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now.Add(time.Minute) }}).
+		Reconcile(ctx, secondIntent, []string{groupID})
+	if err != nil || secondCompiled.Succeeded != 1 {
+		t.Fatalf("compile current Control publication: batch=%+v err=%v", secondCompiled, err)
+	}
+	authorityPublisher.Now = func() time.Time { return now.Add(time.Minute) }
+	if batch, publishErr := authorityPublisher.Publish(ctx, secondCompiled); publishErr != nil || batch.Published != 1 {
+		t.Fatalf("publish current Control publication: batch=%+v err=%v", batch, publishErr)
+	}
+	current, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || current.Published.Bundle.Generation == servingAuthority.Published.Bundle.Generation {
+		t.Fatalf("fixture did not diverge Control and serving LKG: current=%+v serving=%+v err=%v", current, servingAuthority, err)
+	}
+	authorityBefore := current
+
+	keyringDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x59}, 32)
+	writeGroupRecoveryFixture(t, keyringDir, groupID, secret, now.Add(2*time.Minute))
+	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64)}
+	handler, err := NewGroupCandidateStageHandler(GroupCandidateStageHandlerConfig{Publisher: GroupCandidatePublisher{
+		Store: store, Signer: signer, CurrentLKG: &authorityPublisher, Identity: identity,
+	}, GroupIDs: []string{groupID}, KeyringDir: keyringDir, Now: func() time.Time { return now.Add(2 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	witness := &GroupServingAuthorityWitness{CurrentRecordDigest: "sha256:" + strings.Repeat("9", 64), AuthorityEpoch: 42,
+		CurrentAuthorityUID: "11111111-2222-3333-4444-555555555555", CurrentAuthorityRV: "12345", FrontGeneration: 124,
+		BundleVersion: servingVersion, WorkerSlot: "b", WorkerSourceSHA: strings.Repeat("a", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("b", 64)}
+	request := GroupCandidateStageRequest{Schema: GroupCandidateStageRequestSchemaV1, KeyID: "recovery-de-1", GroupID: groupID,
+		ExpectedAuthoritySequence: current.LedgerHead.Sequence, ExpectedPublicationSequence: current.Published.PublicationSequence,
+		ExpectedRecoveryEpoch: current.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: current.Published.Digest,
+		ExpectedCandidateEpoch: 0, ExpectedCurrentWorkerSlot: "b", TargetWorkerSlot: "a", ServingAuthority: witness,
+		WorkerSourceSHA: strings.Repeat("6", 40), WorkerImageDigest: "sha256:" + strings.Repeat("7", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("8", 64), IssuedAtUnix: now.Add(2 * time.Minute).Unix(),
+		ExpiresAtUnix: now.Add(3 * time.Minute).Unix(), Nonce: strings.Repeat("s", 24), Reason: "stage from exact serving historical publication"}
+	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	recorder := postGroupCandidateStage(t, handler, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("stage historical serving publication status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	staged, exists, err := store.ReadGroupCandidate(ctx, groupID)
+	if err != nil || !exists || staged.Bundle.Generation != servingAuthority.Published.Bundle.Generation ||
+		staged.Bundle.Generation == current.Published.Bundle.Generation || staged.CandidateLedgerSequence != servingAuthority.Published.CandidateLedgerSequence ||
+		!servingAuthorityWitnessesEqual(staged.ServingAuthority, witness) || staged.CurrentRecord == nil ||
+		staged.CurrentRecord.BundleDigest != current.Published.Digest || staged.CurrentBundle == nil ||
+		signedGroupBundleDigest(*staged.CurrentBundle) != current.Published.Digest {
+		t.Fatalf("historical serving candidate was not bound exactly: staged=%+v exists=%v err=%v", staged, exists, err)
+	}
+	authorityAfter, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !reflect.DeepEqual(authorityAfter, authorityBefore) {
+		t.Fatalf("historical staging changed current Control authority: before=%+v after=%+v err=%v", authorityBefore, authorityAfter, err)
+	}
+
+	request.ExpectedCandidateEpoch = staged.Epoch
+	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
+		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
+		BundleVersion: groupPublicationVersion(servingAuthority.Published.Bundle.Generation, servingAuthority.Published.PublicationSequence+100, servingAuthority.Published.RecoveryEpoch),
+		WorkerSlot:    witness.WorkerSlot, WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest}
+	request.Nonce = strings.Repeat("t", 24)
+	request.Signature = ""
+	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	rejected := postGroupCandidateStage(t, handler, request)
+	if rejected.Code != http.StatusConflict {
+		t.Fatalf("unknown serving publication status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+}
+
 func postGroupCandidateStage(t *testing.T, handler http.Handler, value GroupCandidateStageRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	raw, err := json.Marshal(value)
