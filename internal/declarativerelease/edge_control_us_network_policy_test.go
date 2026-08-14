@@ -109,8 +109,8 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	const failedAtomSHA = "077f7eb2a15815fd7719a13c139d881d53a18c63"
-	if intent.Generation != 23 || intent.ExpectedPreviousConfigSHA != "63264ec329125fc6a7ef90d5772fd664094d7a4f" ||
+	const failedAtomSHA = "99b5f268e0874d6a1ab8d01858c78159f1493894"
+	if intent.Generation != 24 || intent.ExpectedPreviousConfigSHA != "63264ec329125fc6a7ef90d5772fd664094d7a4f" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
 		intent.ExpectedPreviousImageDigest != "sha256:49d8ac7037332760f768a22daf6dad9682629ab229ea2e59a32c57e2de503e18" ||
 		intent.SupersedesFailedConfigSHA != failedAtomSHA || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
@@ -125,7 +125,7 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 22
+	prior.Generation = 23
 	prior.SupersedesFailedConfigSHA = ""
 	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior},
 		map[string]string{us.Control.ID: failedAtomSHA})
