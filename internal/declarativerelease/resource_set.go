@@ -584,6 +584,9 @@ func desiredSubset(desired, live any, path string) bool {
 		if !ok || len(candidate) != len(typed) {
 			return false
 		}
+		if key := kubernetesMapListKey(path); key != "" {
+			return desiredMapListSubset(typed, candidate, path, key)
+		}
 		for index := range typed {
 			if !desiredSubset(typed[index], candidate[index], fmt.Sprintf("%s[%d]", path, index)) {
 				return false
@@ -596,6 +599,49 @@ func desiredSubset(desired, live any, path string) bool {
 	default:
 		return fmt.Sprint(live) == fmt.Sprint(desired)
 	}
+}
+
+func kubernetesMapListKey(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".volumes"):
+		return "name"
+	case strings.HasSuffix(path, ".volumeMounts"):
+		return "mountPath"
+	default:
+		return ""
+	}
+}
+
+func desiredMapListSubset(desired, live []any, path, key string) bool {
+	indexed := make(map[string]map[string]any, len(live))
+	for _, raw := range live {
+		item, ok := raw.(map[string]any)
+		value, valueOK := item[key].(string)
+		if !ok || !valueOK || strings.TrimSpace(value) == "" {
+			return false
+		}
+		if _, duplicate := indexed[value]; duplicate {
+			return false
+		}
+		indexed[value] = item
+	}
+	seen := make(map[string]struct{}, len(desired))
+	for _, raw := range desired {
+		item, ok := raw.(map[string]any)
+		value, valueOK := item[key].(string)
+		if !ok || !valueOK || strings.TrimSpace(value) == "" {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+		candidate, exists := indexed[value]
+		if !exists || !desiredSubset(item, candidate, path+"["+key+"="+value+"]") {
+			return false
+		}
+	}
+	return len(seen) == len(indexed)
 }
 
 func joinJSONPath(parent, child string) string {

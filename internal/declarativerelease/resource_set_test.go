@@ -42,6 +42,51 @@ func TestResourceDesiredSubsetAllowsServerDefaultsButRejectsDesiredDrift(t *test
 	}
 }
 
+func TestResourceDesiredSubsetComparesKubernetesMapListsBySchemaKey(t *testing.T) {
+	desired := map[string]any{
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+			"containers": []any{map[string]any{
+				"name": "guardian",
+				"volumeMounts": []any{
+					map[string]any{"name": "tmp", "mountPath": "/tmp"},
+					map[string]any{"name": "recovery", "mountPath": "/var/run/recovery", "readOnly": true},
+				},
+			}},
+			"volumes": []any{
+				map[string]any{"name": "tmp", "emptyDir": map[string]any{}},
+				map[string]any{"name": "recovery", "secret": map[string]any{"secretName": "recovery-key"}},
+			},
+		}}},
+	}
+	live := deepCopyMap(desired)
+	podSpec := live["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	podSpec["volumes"] = []any{
+		map[string]any{"name": "recovery", "secret": map[string]any{"secretName": "recovery-key", "defaultMode": json.Number("420")}},
+		map[string]any{"name": "tmp", "emptyDir": map[string]any{}},
+	}
+	container := podSpec["containers"].([]any)[0].(map[string]any)
+	container["volumeMounts"] = []any{
+		map[string]any{"name": "recovery", "mountPath": "/var/run/recovery", "readOnly": true},
+		map[string]any{"name": "tmp", "mountPath": "/tmp"},
+	}
+	if !ResourceDesiredSubset(desired, live) {
+		t.Fatal("Kubernetes map-list reordering was treated as resource drift")
+	}
+
+	drifted := deepCopyMap(live)
+	driftedSpec := drifted["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	driftedSpec["volumes"].([]any)[0].(map[string]any)["secret"].(map[string]any)["secretName"] = "other-key"
+	if ResourceDesiredSubset(desired, drifted) {
+		t.Fatal("Kubernetes map-list value drift was accepted")
+	}
+
+	positionalDesired := map[string]any{"items": []any{map[string]any{"name": "first"}, map[string]any{"name": "second"}}}
+	positionalLive := map[string]any{"items": []any{map[string]any{"name": "second"}, map[string]any{"name": "first"}}}
+	if ResourceDesiredSubset(positionalDesired, positionalLive) {
+		t.Fatal("an undeclared positional list was treated as a Kubernetes map list")
+	}
+}
+
 func TestBindManifestCASBindsPresentResourcesAndAllowsDeclaredCreate(t *testing.T) {
 	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"template":{"metadata":{},"spec":{"containers":[]}}}},{"apiVersion":"v1","kind":"Service","metadata":{"name":"fugue-api-tls","namespace":"fugue-system"}}],"kind":"ComponentResourceSet"}`)
 	observation := stableObservation("api-uid", "50", "ghcr.io/example/fugue-api@"+testDigest, testSHA1)
