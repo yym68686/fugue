@@ -24,7 +24,7 @@ check_pattern() {
 }
 
 release_surfaces=(
-  .github/workflows/deploy-control-plane.yml
+  .github/workflows/ci.yml
   deploy/helm/fugue/values.yaml
   deploy/helm/fugue/templates
   internal/api/discovery.go
