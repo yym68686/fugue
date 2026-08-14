@@ -72,10 +72,12 @@ func nodeHeartbeatFresh(lastHeartbeatAt, lastSeenAt *time.Time, now time.Time) b
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	seen := lastHeartbeatAt
-	if seen == nil || seen.IsZero() {
-		seen = lastSeenAt
-	}
+	// Edge nodes update last_seen_at while authenticating route/bundle
+	// requests, and older workers may not refresh last_heartbeat_at on every
+	// control-plane cycle. Treat the newest evidence as authoritative; using
+	// the older non-nil heartbeat timestamp first can incorrectly mark a live
+	// edge stale and make every newly published route unavailable.
+	seen := latestNodeActivity(lastHeartbeatAt, lastSeenAt)
 	if seen == nil || seen.IsZero() {
 		return false
 	}
@@ -85,4 +87,19 @@ func nodeHeartbeatFresh(lastHeartbeatAt, lastSeenAt *time.Time, now time.Time) b
 		return true
 	}
 	return now.Sub(seenAt) <= platformNodeHeartbeatStaleAfter
+}
+
+func latestNodeActivity(values ...*time.Time) *time.Time {
+	var latest *time.Time
+	for _, value := range values {
+		if value == nil || value.IsZero() {
+			continue
+		}
+		candidate := value.UTC()
+		if latest == nil || candidate.After(*latest) {
+			copy := candidate
+			latest = &copy
+		}
+	}
+	return latest
 }
