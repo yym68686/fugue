@@ -253,6 +253,25 @@ func TestExecuteVerifiesForwardAndReconcilesCommitUnknown(t *testing.T) {
 	}
 }
 
+func TestExecuteRetainsApplyFailureWhenNoProductionWriteOccurred(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.observations = []Observation{lkg, lkg}
+	fake.applyErrors = []error{errors.New("stage edge Worker candidate: HTTP 409 (sequence_conflict)")}
+	fake.health = []Observation{lkg}
+	fake.healthErrors = []error{errors.New("forward health was not reached")}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "failed-no-write" || result.Reason != "forward-apply-rejected-before-commit" ||
+		result.FailureClass != "forward_apply" || result.FailureDetail != "stage edge Worker candidate: HTTP 409 (sequence_conflict)" ||
+		result.ForwardApplyCount != 1 || result.LKGApplyCount != 0 || fake.applies != 1 {
+		t.Fatalf("no-write apply failure lost its cause: result=%+v applies=%d", result, fake.applies)
+	}
+}
+
 func TestPrepareObservesTheLivePredecessorAgainstTheLKGManifest(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}

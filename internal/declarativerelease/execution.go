@@ -620,6 +620,8 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		if unchanged {
 			result.Status = "failed-no-write"
 			result.Reason = "forward-apply-rejected-before-commit"
+			result.FailureClass = "forward_apply"
+			result.FailureDetail = boundedFailureDetail(applyErr.Error())
 			result.Final = observed
 			return sealResult(result)
 		}

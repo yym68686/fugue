@@ -26,6 +26,32 @@ func TestReadEdgeCandidateStageStatusAcceptsFullAuthorityResponse(t *testing.T) 
 	}
 }
 
+func TestPostEdgeCandidateStageReportsTrustedControlErrorCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusConflict)
+		_, _ = writer.Write([]byte(`{"schema":"edge-control-error/v1","error":"sequence_conflict"}`))
+	}))
+	defer server.Close()
+	_, err := postEdgeCandidateStage(context.Background(), server.URL, edgeCandidateStageRequest{})
+	if err == nil || err.Error() != "stage edge Worker candidate: HTTP 409 (sequence_conflict)" {
+		t.Fatalf("trusted edge-control error code was lost: %v", err)
+	}
+}
+
+func TestPostEdgeCandidateStageDoesNotReflectUntrustedErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusConflict)
+		_, _ = writer.Write([]byte(`{"schema":"edge-control-error/v1","error":"sequence conflict: secret"}`))
+	}))
+	defer server.Close()
+	_, err := postEdgeCandidateStage(context.Background(), server.URL, edgeCandidateStageRequest{})
+	if err == nil || err.Error() != "stage edge Worker candidate: HTTP 409" {
+		t.Fatalf("untrusted edge-control error body was reflected: %v", err)
+	}
+}
+
 type fakeEdgeGroupRuntime struct {
 	snapshots       []edgeGroupState
 	rolls           map[string]map[string]edgeGroupPod

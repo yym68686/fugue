@@ -77,6 +77,11 @@ type edgeCandidateStageReceipt struct {
 	OrdinaryTrafficMutation      bool   `json:"ordinary_traffic_mutation"`
 }
 
+type edgeControlError struct {
+	Schema string `json:"schema"`
+	Error  string `json:"error"`
+}
+
 type edgeCandidateStageStatus struct {
 	GroupID                    string `json:"edge_group_id"`
 	AuthoritySequence          uint64 `json:"authority_sequence"`
@@ -438,22 +443,50 @@ func postEdgeCandidateStage(ctx context.Context, endpoint string, value edgeCand
 			lastErr = requestErr
 			continue
 		}
-		decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
-		decoder.DisallowUnknownFields()
-		var receipt edgeCandidateStageReceipt
-		decodeErr := decoder.Decode(&receipt)
-		trailingErr := decoder.Decode(&struct{}{})
+		rawResponse, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 		response.Body.Close()
-		if response.StatusCode == http.StatusOK && decodeErr == nil && trailingErr == io.EOF &&
+		var receipt edgeCandidateStageReceipt
+		decodeErr := decodeEdgeCandidateStageResponse(rawResponse, &receipt)
+		if response.StatusCode == http.StatusOK && readErr == nil && decodeErr == nil &&
 			receipt.Schema == edgeCandidateReceiptSchema {
 			return receipt, nil
 		}
 		lastErr = fmt.Errorf("stage edge Worker candidate: HTTP %d", response.StatusCode)
+		if readErr == nil {
+			var failure edgeControlError
+			if decodeEdgeCandidateStageResponse(rawResponse, &failure) == nil && failure.Schema == "edge-control-error/v1" && validEdgeControlErrorCode(failure.Error) {
+				lastErr = fmt.Errorf("stage edge Worker candidate: HTTP %d (%s)", response.StatusCode, failure.Error)
+			}
+		}
 		if response.StatusCode != http.StatusServiceUnavailable {
 			break
 		}
 	}
 	return edgeCandidateStageReceipt{}, lastErr
+}
+
+func decodeEdgeCandidateStageResponse(raw []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("edge-control candidate response has trailing data")
+	}
+	return nil
+}
+
+func validEdgeControlErrorCode(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && character != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func signEdgeCandidateStageRequest(filename string, request *edgeCandidateStageRequest, now time.Time) error {
