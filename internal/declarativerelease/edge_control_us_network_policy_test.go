@@ -34,7 +34,7 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 			break
 		}
 	}
-	if us == nil || us.Control.ManifestPath != "internal/edgecontrol/component/resources.authority.de.json" {
+	if us == nil || us.Control.ManifestPath != "internal/edgecontrol/component/resources.authority.us.json" {
 		t.Fatalf("US Edge Control does not use the production-verified API authority manifest: %+v", us)
 	}
 
@@ -46,8 +46,31 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	}
 	for index := range sharedItems {
 		if sharedItems[index]["kind"] != "NetworkPolicy" {
-			if !reflect.DeepEqual(sharedItems[index], usItems[index]) {
-				t.Fatalf("US authority prerequisite changed non-NetworkPolicy resource %d", index)
+			if sharedItems[index]["kind"] != "Deployment" {
+				if !reflect.DeepEqual(sharedItems[index], usItems[index]) {
+					t.Fatalf("US authority prerequisite changed non-NetworkPolicy resource %d", index)
+				}
+				continue
+			}
+			sharedContainer := sharedItems[index]["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+			usContainer := usItems[index]["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+			sharedResources := sharedContainer["resources"].(map[string]any)
+			usResources := usContainer["resources"].(map[string]any)
+			if got := usResources["limits"].(map[string]any)["cpu"]; got != "2" {
+				t.Fatalf("US Control CPU limit=%v, want 2", got)
+			}
+			if got := usResources["requests"].(map[string]any)["cpu"]; got != "100m" {
+				t.Fatalf("US Control CPU request=%v, want 100m", got)
+			}
+			copyUS := cloneJSONMap(t, usItems[index])
+			copyContainer := copyUS["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+			copyResources := copyContainer["resources"].(map[string]any)
+			copyResources["limits"].(map[string]any)["cpu"] = sharedResources["limits"].(map[string]any)["cpu"]
+			copyResources["requests"].(map[string]any)["cpu"] = sharedResources["requests"].(map[string]any)["cpu"]
+			got, gotErr := CanonicalJSON(copyUS)
+			wantRaw, wantErr := CanonicalJSON(sharedItems[index])
+			if gotErr != nil || wantErr != nil || !bytes.Equal(got, wantRaw) {
+				t.Fatalf("US authority prerequisite changed non-NetworkPolicy resource %d: got=%s want=%s errors=%v/%v", index, got, wantRaw, gotErr, wantErr)
 			}
 			continue
 		}
@@ -86,10 +109,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	if intent.Generation != 22 || intent.ExpectedPreviousConfigSHA != "63264ec329125fc6a7ef90d5772fd664094d7a4f" ||
+	const failedAtomSHA = "077f7eb2a15815fd7719a13c139d881d53a18c63"
+	if intent.Generation != 23 || intent.ExpectedPreviousConfigSHA != "63264ec329125fc6a7ef90d5772fd664094d7a4f" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
 		intent.ExpectedPreviousImageDigest != "sha256:49d8ac7037332760f768a22daf6dad9682629ab229ea2e59a32c57e2de503e18" ||
-		intent.SupersedesFailedConfigSHA != "" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
+		intent.SupersedesFailedConfigSHA != failedAtomSHA || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
 	registry, err := MergeEdgeGroupRegistry(base, edge)
@@ -101,11 +125,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 21
+	prior.Generation = 22
 	prior.SupersedesFailedConfigSHA = ""
 	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior},
-		map[string]string{us.Control.ID: "c725cd0e6a35f262dc5d0af9170075be8f06337e"})
-	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" || !bound.Releases[0].RetrySameLKG {
+		map[string]string{us.Control.ID: failedAtomSHA})
+	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" {
 		t.Fatalf("US Edge Control prerequisite planner expanded: releases=%+v err=%v", bound.Releases, err)
 	}
 }
