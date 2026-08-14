@@ -86,9 +86,9 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	if intent.Generation != 20 || intent.ExpectedPreviousConfigSHA != "a455e63d434483a7c0a11a8bf23d4204568ee416" ||
+	if intent.Generation != 22 || intent.ExpectedPreviousConfigSHA != "63264ec329125fc6a7ef90d5772fd664094d7a4f" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:600af1dc6d48481ad564b8feef091673a4006a99ea3273a6df05f757b5b1a143" ||
+		intent.ExpectedPreviousImageDigest != "sha256:49d8ac7037332760f768a22daf6dad9682629ab229ea2e59a32c57e2de503e18" ||
 		intent.SupersedesFailedConfigSHA != "" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
@@ -101,15 +101,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 19
-	prior.ExpectedPreviousConfigSHA = "23993124ea413c578706392c8f7afb7251cbbc2d"
-	prior.ExpectedPreviousManifestSHA = prior.ExpectedPreviousConfigSHA
-	prior.ExpectedPreviousOCIRevision = prior.ExpectedPreviousConfigSHA
-	prior.ExpectedPreviousImageDigest = "sha256:a227c5b1a5b204412d6221628cf4250e19c6659ce343bd343f81112c324d9c3c"
+	prior.Generation = 21
 	prior.SupersedesFailedConfigSHA = ""
 	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior},
-		map[string]string{us.Control.ID: intent.ExpectedPreviousConfigSHA})
-	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" {
+		map[string]string{us.Control.ID: "c725cd0e6a35f262dc5d0af9170075be8f06337e"})
+	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" || !bound.Releases[0].RetrySameLKG {
 		t.Fatalf("US Edge Control prerequisite planner expanded: releases=%+v err=%v", bound.Releases, err)
 	}
 }

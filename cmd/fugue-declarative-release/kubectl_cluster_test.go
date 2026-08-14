@@ -548,7 +548,7 @@ func TestEmergencyOwnershipAllowlistIncludesPrimaryWorkloadImageWithoutArtifactT
 	}
 }
 
-func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePaths(t *testing.T) {
+func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePathsAndCPUResources(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		Workload: declarativerelease.Workload{
 			APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker",
@@ -565,6 +565,10 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePaths(t *testing.T) {
 		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
 			"containers": []any{map[string]any{
 				"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("b", 64),
+				"resources": map[string]any{
+					"limits":   map[string]any{"cpu": "2", "memory": "512Mi"},
+					"requests": map[string]any{"cpu": "100m", "memory": "128Mi"},
+				},
 				"livenessProbe":  map[string]any{"httpGet": map[string]any{"path": "/livez", "port": "health"}, "periodSeconds": json.Number("10")},
 				"readinessProbe": map[string]any{"httpGet": map[string]any{"path": "/readyz", "port": "health"}, "timeoutSeconds": json.Number("3")},
 				"startupProbe":   map[string]any{"httpGet": map[string]any{"path": "/healthz", "port": "health"}},
@@ -574,6 +578,8 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePaths(t *testing.T) {
 	allowed := emergencyOwnershipPointers(release, identity, desired)
 	want := []string{
 		"/spec/template/spec/containers[name=edge]/image",
+		"/spec/template/spec/containers[name=edge]/resources/limits/cpu",
+		"/spec/template/spec/containers[name=edge]/resources/requests/cpu",
 		"/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path",
 		"/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path",
 		"/spec/template/spec/containers[name=edge]/startupProbe/httpGet/path",
@@ -585,9 +591,11 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePaths(t *testing.T) {
 		"/spec/template/spec/containers[name=edge]/livenessProbe/periodSeconds",
 		"/spec/template/spec/containers[name=edge]/readinessProbe/timeoutSeconds",
 		"/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/port",
+		"/spec/template/spec/containers[name=edge]/resources/limits/memory",
+		"/spec/template/spec/containers[name=edge]/resources/requests/memory",
 	} {
 		if stringSubset([]string{forbidden}, allowed) {
-			t.Fatalf("unreviewed probe field entered emergency allowlist: %s in %v", forbidden, allowed)
+			t.Fatalf("unreviewed workload field entered emergency allowlist: %s in %v", forbidden, allowed)
 		}
 	}
 	live := deepCopyJSONMap(t, desired)
@@ -599,6 +607,43 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePaths(t *testing.T) {
 	}
 	if value, ok := emergencyRuntimePointerValue(live, "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"); !ok || value != "/livez" {
 		t.Fatalf("probe path pointer write was not observable: value=%q ok=%v", value, ok)
+	}
+	cpuPointer := "/spec/template/spec/containers[name=edge]/resources/limits/cpu"
+	if value, ok := emergencyRuntimePointerValue(live, cpuPointer); !ok || value != "2" {
+		t.Fatalf("CPU resource pointer read failed: value=%q ok=%v", value, ok)
+	}
+	if !setEmergencyRuntimePointerValue(live, cpuPointer, "1500m") {
+		t.Fatal("CPU resource pointer write failed")
+	}
+	if value, ok := emergencyRuntimePointerValue(live, cpuPointer); !ok || value != "1500m" {
+		t.Fatalf("CPU resource pointer write was not observable: value=%q ok=%v", value, ok)
+	}
+	missingResources := deepCopyJSONMap(t, live)
+	delete(anySlice(mapField(mapField(mapField(missingResources, "spec"), "template"), "spec")["containers"])[0].(map[string]any), "resources")
+	if setEmergencyRuntimePointerValue(missingResources, cpuPointer, "1") {
+		t.Fatal("CPU resource pointer write created an undeclared resource map")
+	}
+}
+
+func TestEmergencyOwnershipCleanupRemovesOnlyExactKubectlSetCPUEntry(t *testing.T) {
+	limit := "/spec/template/spec/containers[name=edge-control]/resources/limits/cpu"
+	request := "/spec/template/spec/containers[name=edge-control]/resources/requests/cpu"
+	allowed := []string{limit, request}
+	declarative := map[string]any{"manager": "fugue-edge-control-us-declarative", "operation": "Apply", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, allowed)}
+	emergency := map[string]any{"manager": "kubectl-set", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, allowed)}
+	live := map[string]any{"metadata": map[string]any{"uid": "control-uid", "resourceVersion": "42",
+		"managedFields": []any{declarative, emergency}}}
+	patch, found, err := nextEmergencyOwnershipPatch(live, "fugue-edge-control-us-declarative", allowed, true)
+	if err != nil || !found || len(patch) != 4 || patch[3]["op"] != "remove" || patch[3]["path"] != "/metadata/managedFields/1" {
+		t.Fatalf("exact CPU ownership cleanup patch=%+v found=%v err=%v", patch, found, err)
+	}
+
+	expanded := deepCopyJSONMap(t, live)
+	mapField(anySlice(mapField(expanded, "metadata")["managedFields"])[1].(map[string]any), "fieldsV1")["f:unreviewed"] = map[string]any{}
+	if _, _, err := nextEmergencyOwnershipPatch(expanded, "fugue-edge-control-us-declarative", allowed, true); err == nil {
+		t.Fatal("expanded kubectl-set ownership was accepted")
 	}
 }
 

@@ -263,6 +263,10 @@ func emergencyRuntimePointerValue(resource map[string]any, pointer string) (stri
 			value, found := container["image"].(string)
 			return value, found
 		}
+		if scope, resource, resourceOK := resourceCPUTail(tail); resourceOK {
+			value, found := mapField(mapField(container, "resources"), scope)[resource].(string)
+			return value, found
+		}
 		probeName, probeOK := probePathTail(tail)
 		if !probeOK {
 			return "", false
@@ -293,6 +297,14 @@ func setEmergencyRuntimePointerValue(resource map[string]any, pointer, value str
 		if stringValue(container["name"]) == name {
 			if tail == "image" {
 				container["image"] = value
+				return true
+			}
+			if scope, resource, resourceOK := resourceCPUTail(tail); resourceOK {
+				resourceScope := mapField(mapField(container, "resources"), scope)
+				if resourceScope == nil {
+					return false
+				}
+				resourceScope[resource] = value
 				return true
 			}
 			probeName, probeOK := probePathTail(tail)
@@ -327,11 +339,22 @@ func emergencyContainerPointerParts(pointer string) (string, string, string, boo
 		return "", "", "", false
 	}
 	if tail != "image" {
-		if _, ok := probePathTail(tail); !ok {
-			return "", "", "", false
+		if _, _, resourceOK := resourceCPUTail(tail); !resourceOK {
+			if _, ok := probePathTail(tail); !ok {
+				return "", "", "", false
+			}
 		}
 	}
 	return field, name, tail, true
+}
+
+func resourceCPUTail(tail string) (string, string, bool) {
+	for _, scope := range []string{"limits", "requests"} {
+		if tail == "resources/"+scope+"/cpu" {
+			return scope, "cpu", true
+		}
+	}
+	return "", "", false
 }
 
 func probePathTail(tail string) (string, bool) {
@@ -962,6 +985,7 @@ func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity
 		if _, found, err := declaredContainerImageOptional(desired, release.Workload.Container, "container"); err == nil && found {
 			add("/spec/template/spec/containers[name=" + release.Workload.Container + "]/image")
 		}
+		addDeclaredContainerCPUResourcePointers(desired, release.Workload.Container, add)
 	}
 	for _, target := range release.ArtifactTargets {
 		if target.APIVersion != identity.APIVersion || target.Kind != identity.Kind || target.Namespace != identity.Namespace || target.Name != identity.Name {
@@ -991,6 +1015,27 @@ func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity
 	}
 	sort.Strings(allowed)
 	return allowed
+}
+
+// addDeclaredContainerCPUResourcePointers admits only the two scalar CPU
+// leaves that kubectl set resources can own. Memory, ephemeral storage,
+// resource maps and every other container field remain outside the recovery
+// boundary. A reviewed manifest must declare the exact value before cleanup.
+func addDeclaredContainerCPUResourcePointers(desired map[string]any, containerName string, add func(string)) {
+	templateSpec := mapField(mapField(mapField(desired, "spec"), "template"), "spec")
+	for _, raw := range anySlice(templateSpec["containers"]) {
+		container, _ := raw.(map[string]any)
+		if stringValue(container["name"]) != containerName {
+			continue
+		}
+		resources := mapField(container, "resources")
+		for _, scope := range []string{"limits", "requests"} {
+			if _, ok := mapField(resources, scope)["cpu"].(string); ok {
+				add("/spec/template/spec/containers[name=" + containerName + "]/resources/" + scope + "/cpu")
+			}
+		}
+		return
+	}
 }
 
 // addDeclaredContainerProbePointers adds only HTTP probe path leaves to the
