@@ -888,6 +888,7 @@ func TestTypedHealthShortCircuitIsRestrictedToTheExactPrewritePredecessor(t *tes
 	typed := fmt.Errorf("%w: ready workload pod count mismatch", declarativerelease.ErrDegradedPredecessorHealth)
 	serviceDegraded := fmt.Errorf("%w: source Pod did not observe the expected service response", errWorkloadOriginatedServiceHealth)
 	serviceProxyDegraded := fmt.Errorf("%w: read-only kubectl get failed after 2 attempts", errServiceHTTPHealth)
+	publicRouteDegraded := fmt.Errorf("%w: public route canary response is invalid", errPublicRouteHTTPHealth)
 	forward := predecessor
 	forward.ConfigSHA = strings.Repeat("2", 40)
 	for _, test := range []struct {
@@ -900,11 +901,14 @@ func TestTypedHealthShortCircuitIsRestrictedToTheExactPrewritePredecessor(t *tes
 		{name: "exact typed predecessor", ctx: marked, target: predecessor, err: typed, want: true},
 		{name: "exact workload service predecessor", ctx: marked, target: predecessor, err: serviceDegraded, want: true},
 		{name: "exact service proxy predecessor", ctx: marked, target: predecessor, err: serviceProxyDegraded, want: true},
+		{name: "exact public route predecessor", ctx: marked, target: predecessor, err: publicRouteDegraded, want: true},
 		{name: "forward typed zero ready", ctx: marked, target: forward, err: typed},
 		{name: "forward workload service failure", ctx: marked, target: forward, err: serviceDegraded},
 		{name: "forward service proxy failure", ctx: marked, target: forward, err: serviceProxyDegraded},
+		{name: "forward public route failure", ctx: marked, target: forward, err: publicRouteDegraded},
 		{name: "unmarked compensation predecessor", ctx: context.Background(), target: predecessor, err: typed},
 		{name: "unmarked workload service predecessor", ctx: context.Background(), target: predecessor, err: serviceDegraded},
+		{name: "unmarked public route predecessor", ctx: context.Background(), target: predecessor, err: publicRouteDegraded},
 		{name: "recoverable non-typed predecessor", ctx: marked, target: predecessor, err: errors.New("temporarily unavailable")},
 		{name: "unknown context predecessor", ctx: marked, target: predecessor, err: context.DeadlineExceeded},
 		{name: "healthy predecessor", ctx: marked, target: predecessor},

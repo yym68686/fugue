@@ -1693,6 +1693,9 @@ func typedPrewritePredecessorHealth(ctx context.Context, release declarativerele
 	if errors.Is(err, errServiceHTTPHealth) {
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
+	if errors.Is(err, errPublicRouteHTTPHealth) {
+		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
+	}
 	if errors.Is(err, errEdgeGroupAuthorityHealth) {
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
@@ -1976,7 +1979,7 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 		case "public-route-http":
 			body, err := readPublicRouteCanary(ctx, probe)
 			if err != nil {
-				return "", fmt.Errorf("public route health probe %q failed: %w", probe.Name, err)
+				return "", fmt.Errorf("public route health probe %q failed: %w: %v", probe.Name, errPublicRouteHTTPHealth, err)
 			}
 			evidence = append(evidence, probe.Type+":"+probe.Name+":"+digestBytesLocal(body))
 		case "leader-lease":
@@ -2122,6 +2125,12 @@ var errWorkloadOriginatedServiceHealth = errors.New("workload-originated service
 // when the target is the exact immutable LKG in the bounded prewrite context.
 // Forward targets and ordinary successors therefore remain fail-closed.
 var errServiceHTTPHealth = errors.New("service-http health is degraded")
+
+// errPublicRouteHTTPHealth marks a failure of an existing public route canary.
+// It is promoted only for the exact immutable predecessor during the bounded
+// prewrite repair path, so a broken route can be repaired without weakening
+// forward or post-deploy route verification.
+var errPublicRouteHTTPHealth = errors.New("public-route-http health is degraded")
 
 // errEdgeGroupAuthorityHealth marks only a failure of the declared group
 // publication/inventory health contract. It is promoted to a degraded LKG
