@@ -192,9 +192,11 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 		authority.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch || authority.Published.Digest != request.ExpectedPublishedBundleDigest {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	bootstrapEligible, _ := groupPublishedBootstrapEligibility(authority.Published, now)
-	if !bootstrapEligible {
-		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
+	if request.ServingAuthority == nil {
+		bootstrapEligible, _ := groupPublishedBootstrapEligibility(authority.Published, now)
+		if !bootstrapEligible {
+			return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
+		}
 	}
 	currentCandidate, exists := snapshot.Candidate, snapshot.CandidateExists
 	currentEpoch := uint64(0)

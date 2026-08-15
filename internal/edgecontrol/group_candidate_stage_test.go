@@ -168,9 +168,43 @@ func TestWorkerCandidateStageRejectsCrossGroupStaleCASAndInvalidSignature(t *tes
 	}
 }
 
+func TestWorkerCandidateStageWithoutServingAuthorityRejectsExpiredBootstrapWindow(t *testing.T) {
+	now := time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC)
+	stageAt := now.Add(maxGroupBundleValidity + time.Minute)
+	groupID := "edge-group-country-de"
+	store, signer, existing, authority := groupPromotionFixture(t, groupID, now)
+	keyringDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x5a}, 32)
+	writeGroupRecoveryFixture(t, keyringDir, groupID, secret, stageAt.Add(time.Minute))
+	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64)}
+	handler, err := NewGroupCandidateStageHandler(GroupCandidateStageHandlerConfig{Publisher: GroupCandidatePublisher{
+		Store: store, Signer: signer, CurrentLKG: &GroupAuthorityPublisher{Store: store, Signer: signer}, Identity: identity,
+	}, GroupIDs: []string{groupID}, KeyringDir: keyringDir, Now: func() time.Time { return stageAt }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := GroupCandidateStageRequest{Schema: GroupCandidateStageRequestSchemaV1, KeyID: "recovery-de-1", GroupID: groupID,
+		ExpectedAuthoritySequence: authority.LedgerHead.Sequence, ExpectedPublicationSequence: authority.Published.PublicationSequence,
+		ExpectedRecoveryEpoch: authority.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: authority.Published.Digest,
+		ExpectedCandidateEpoch: existing.Epoch, ExpectedCurrentWorkerSlot: "a", TargetWorkerSlot: "b",
+		WorkerSourceSHA: strings.Repeat("6", 40), WorkerImageDigest: "sha256:" + strings.Repeat("7", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("8", 64), IssuedAtUnix: stageAt.Unix(),
+		ExpiresAtUnix: stageAt.Add(time.Minute).Unix(), Nonce: strings.Repeat("u", 24), Reason: "reject stale unbound bootstrap publication"}
+	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	recorder := postGroupCandidateStage(t, handler, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expired unbound publication status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChangingCurrentAuthority(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	stageAt := now.Add(maxGroupBundleValidity + 2*time.Minute)
 	groupID := "edge-group-country-de"
 	store, err := OpenPersistentGroupStore(privateStateDir(t))
 	if err != nil {
@@ -232,13 +266,13 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 
 	keyringDir := privateFixtureDir(t)
 	secret := bytes.Repeat([]byte{0x59}, 32)
-	writeGroupRecoveryFixture(t, keyringDir, groupID, secret, now.Add(2*time.Minute))
+	writeGroupRecoveryFixture(t, keyringDir, groupID, secret, stageAt.Add(time.Minute))
 	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
 		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
 		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64)}
 	handler, err := NewGroupCandidateStageHandler(GroupCandidateStageHandlerConfig{Publisher: GroupCandidatePublisher{
 		Store: store, Signer: signer, CurrentLKG: &authorityPublisher, Identity: identity,
-	}, GroupIDs: []string{groupID}, KeyringDir: keyringDir, Now: func() time.Time { return now.Add(2 * time.Minute) }})
+	}, GroupIDs: []string{groupID}, KeyringDir: keyringDir, Now: func() time.Time { return stageAt }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,8 +285,8 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 		ExpectedRecoveryEpoch: current.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: current.Published.Digest,
 		ExpectedCandidateEpoch: 0, ExpectedCurrentWorkerSlot: "b", TargetWorkerSlot: "a", ServingAuthority: witness,
 		WorkerSourceSHA: strings.Repeat("6", 40), WorkerImageDigest: "sha256:" + strings.Repeat("7", 64),
-		ReleaseRecordDigest: "sha256:" + strings.Repeat("8", 64), IssuedAtUnix: now.Add(2 * time.Minute).Unix(),
-		ExpiresAtUnix: now.Add(3 * time.Minute).Unix(), Nonce: strings.Repeat("s", 24), Reason: "stage from exact serving historical publication"}
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("8", 64), IssuedAtUnix: stageAt.Unix(),
+		ExpiresAtUnix: stageAt.Add(time.Minute).Unix(), Nonce: strings.Repeat("s", 24), Reason: "stage from exact serving historical publication"}
 	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
 		t.Fatal(err)
 	}
