@@ -304,6 +304,55 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 			}
 		})
 	}
+	failedDesired := snapshot
+	failedDesired.Record = ReleaseRecord{
+		Component: key.Component, Group: key.Group, ConfigSHA: targetSHA, ImageDigest: failedImageDigest,
+		LKGRecordDigest: testDigest, RecordDigest: otherDigest,
+	}
+	failedDesired.Desired.RecordDigest = otherDigest
+	failedDesired.PreviousStatus = &ReleaseStatus{
+		Component: key.Component, Group: key.Group, State: StateRecoveryRequired, CurrentRecordDigest: testDigest,
+		TargetRecordDigest: otherDigest, LastSuccessfulLKG: testDigest,
+		Reason: "lkg-unproven: public route health remains degraded", RolloutReceiptDigest: testDigest,
+	}
+	successor := bundle
+	successor.Prepared.ConfigSHA = strings.Repeat("4", 40)
+	successor.Prepared.Forward.ConfigSHA = successor.Prepared.ConfigSHA
+	successor.Prepared.Forward.ImageRef = repository + "@sha256:" + strings.Repeat("f", 64)
+	successor.Release.RetrySameLKG = false
+	successor.Release.SupersedesFailedConfigSHA = targetSHA
+	if !failedDesiredReplacementEligible(failedDesired, successor, record) || !publishDesiredEligible(failedDesired, successor, record) {
+		t.Fatal("exact failed DesiredRelease successor was rejected")
+	}
+	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
+		"missing rollout receipt": func(value *Snapshot, _ *ExecutionBundle) { value.PreviousStatus.RolloutReceiptDigest = "" },
+		"rollback receipt":        func(value *Snapshot, _ *ExecutionBundle) { value.PreviousStatus.RollbackReceiptDigest = testDigest },
+		"wrong state":             func(value *Snapshot, _ *ExecutionBundle) { value.PreviousStatus.State = StateDegraded },
+		"wrong reason":            func(value *Snapshot, _ *ExecutionBundle) { value.PreviousStatus.Reason = "another recovery reason" },
+		"wrong failed SHA": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Release.SupersedesFailedConfigSHA = strings.Repeat("5", 40)
+		},
+		"failed LKG drift": func(value *Snapshot, _ *ExecutionBundle) { value.Record.LKGRecordDigest = otherDigest },
+		"target drift":     func(value *Snapshot, _ *ExecutionBundle) { value.PreviousStatus.TargetRecordDigest = testDigest },
+		"current drift":    func(value *Snapshot, _ *ExecutionBundle) { value.CurrentRecordDigest = otherDigest },
+		"desired drift":    func(value *Snapshot, _ *ExecutionBundle) { value.Desired.RecordDigest = testDigest },
+		"not degraded plan": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Prepared.DegradedPredecessor = false
+		},
+		"predecessor drift": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Release.ExpectedPreviousConfigSHA = strings.Repeat("5", 40)
+		},
+	} {
+		t.Run("failed desired "+name, func(t *testing.T) {
+			candidateSnapshot, candidateBundle := failedDesired, successor
+			previous := *failedDesired.PreviousStatus
+			candidateSnapshot.PreviousStatus = &previous
+			mutate(&candidateSnapshot, &candidateBundle)
+			if failedDesiredReplacementEligible(candidateSnapshot, candidateBundle, record) || publishDesiredEligible(candidateSnapshot, candidateBundle, record) {
+				t.Fatal("unsafe failed DesiredRelease successor was accepted")
+			}
+		})
+	}
 	healthy := snapshot
 	healthy.Managed = false
 	healthy.Health = testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now)

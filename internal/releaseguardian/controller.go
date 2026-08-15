@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"k8s.io/client-go/util/workqueue"
@@ -277,9 +276,7 @@ func pendingUnprovenLKGRecovery(snapshot Snapshot) bool {
 		previous.LastSuccessfulLKG != snapshot.CurrentRecordDigest {
 		return false
 	}
-	reason := previous.Reason
-	return reason == "lkg-unproven" || strings.HasPrefix(reason, "lkg-unproven: ") ||
-		strings.HasPrefix(reason, "failed candidate is fenced while LKG health awaits complete evidence")
+	return unprovenLKGReason(previous.Reason)
 }
 
 func pendingTargetCanaryVerification(snapshot Snapshot) bool {

@@ -164,7 +164,9 @@ func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle, stableRec
 	if settled && snapshot.Health.Local.State == HealthHealthy && snapshot.Health.Dependency.State == HealthHealthy && snapshot.Health.Route.State == HealthHealthy {
 		return true
 	}
-	return degradedPredecessorPublishEligible(snapshot, bundle) || fencedDesiredReplacementEligible(snapshot, bundle, stableRecord)
+	return degradedPredecessorPublishEligible(snapshot, bundle) ||
+		fencedDesiredReplacementEligible(snapshot, bundle, stableRecord) ||
+		failedDesiredReplacementEligible(snapshot, bundle, stableRecord)
 }
 
 // A degraded predecessor retry is admitted only when the immutable candidate
@@ -214,6 +216,42 @@ func fencedDesiredReplacementEligible(snapshot Snapshot, bundle ExecutionBundle,
 		release.ExpectedPreviousImageDigest == stableRecord.ImageDigest && prepared.LKG.Present &&
 		prepared.LKG.ConfigSHA == stableRecord.ConfigSHA && prepared.LKG.ManifestSHA == stableRecord.ConfigSHA &&
 		prepared.LKG.OCIRevision == stableRecord.ConfigSHA && prepared.LKG.ImageRef == release.Artifact.Repository+"@"+stableRecord.ImageDigest
+}
+
+// A failed DesiredRelease may remain fenced after its executor restored the
+// exact LKG but could not prove route health. A successor is admitted only
+// when the failed target, rollout receipt, current LKG, and immutable rollback
+// target all agree and the intent explicitly supersedes that failed config.
+func failedDesiredReplacementEligible(snapshot Snapshot, bundle ExecutionBundle, stableRecord ReleaseRecord) bool {
+	previous := snapshot.PreviousStatus
+	prepared, release := bundle.Prepared, bundle.Release
+	if !knownDegradedHealth(snapshot.Health) || previous == nil || previous.Key() != snapshot.Key ||
+		previous.State != StateRecoveryRequired || previous.RolloutReceiptDigest == "" || previous.RollbackReceiptDigest != "" ||
+		!unprovenLKGReason(previous.Reason) {
+		return false
+	}
+	supersededDesired := release.SupersedesFailedConfigSHA != "" &&
+		release.SupersedesFailedConfigSHA == snapshot.Record.ConfigSHA &&
+		snapshot.Record.LKGRecordDigest == stableRecord.RecordDigest
+	if !supersededDesired {
+		return false
+	}
+	return snapshot.Managed && stableRecord.Key() == snapshot.Key && snapshot.Record.Key() == snapshot.Key &&
+		prepared.DegradedPredecessor && prepared.Component == snapshot.Key.Component &&
+		prepared.ConfigSHA == prepared.Forward.ConfigSHA && snapshot.Desired.RecordDigest == snapshot.Record.RecordDigest &&
+		snapshot.CurrentRecordDigest != snapshot.Desired.RecordDigest && snapshot.CurrentRecordDigest == stableRecord.RecordDigest &&
+		snapshot.LastSuccessfulLKG == stableRecord.RecordDigest && previous.CurrentRecordDigest == snapshot.CurrentRecordDigest &&
+		previous.TargetRecordDigest == snapshot.Desired.RecordDigest && previous.LastSuccessfulLKG == snapshot.CurrentRecordDigest &&
+		release.ExpectedPreviousPresent && release.ExpectedPreviousConfigSHA == stableRecord.ConfigSHA &&
+		release.ExpectedPreviousManifestSHA == stableRecord.ConfigSHA && release.ExpectedPreviousOCIRevision == stableRecord.ConfigSHA &&
+		release.ExpectedPreviousImageDigest == stableRecord.ImageDigest && prepared.LKG.Present &&
+		prepared.LKG.ConfigSHA == stableRecord.ConfigSHA && prepared.LKG.ManifestSHA == stableRecord.ConfigSHA &&
+		prepared.LKG.OCIRevision == stableRecord.ConfigSHA && prepared.LKG.ImageRef == release.Artifact.Repository+"@"+stableRecord.ImageDigest
+}
+
+func unprovenLKGReason(reason string) bool {
+	return reason == "lkg-unproven" || strings.HasPrefix(reason, "lkg-unproven: ") ||
+		strings.HasPrefix(reason, "failed candidate is fenced while LKG health awaits complete evidence")
 }
 
 func knownDegradedHealth(health HealthSnapshot) bool {

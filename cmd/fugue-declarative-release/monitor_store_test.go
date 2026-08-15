@@ -63,9 +63,9 @@ func TestReleaseGuardianIntentBindsCurrentProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode release Guardian intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "f05a325aa72712c05255bcfb79f18a90b845dec7"
-	const lkgImage = "sha256:4fd41e3a796e504faa49023f1363fac748a3c21c2f99c08e88b03ea9b4715b0e"
-	if intent.Generation != 112 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+	const lkgSHA = "b7289fb139a1c4a7d7af1d5aa28cc0d3d1a35294"
+	const lkgImage = "sha256:16a832439dc466f84ae01629514a8ddfa71beca0178cfa3c89bb6274f04543f5"
+	if intent.Generation != 113 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
 		t.Fatalf("release Guardian intent is not bound to the production LKG: %+v", intent)
 	}
