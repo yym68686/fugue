@@ -65,6 +65,7 @@ type GroupCandidateBundle struct {
 	CurrentWorkerSlot       string                           `json:"current_worker_slot,omitempty"`
 	ServingAuthority        *GroupServingAuthorityWitness    `json:"serving_authority,omitempty"`
 	AllowDegradedPrevious   bool                             `json:"allow_degraded_previous,omitempty"`
+	StandbyOnly             bool                             `json:"standby_only,omitempty"`
 	Record                  edgeauthority.RouteBundleRecord  `json:"record"`
 	Bundle                  model.EdgeRouteBundle            `json:"bundle"`
 }
@@ -418,6 +419,9 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 	}
 	if candidate.AllowDegradedPrevious && candidate.ServingAuthority == nil {
 		return errors.New("edge-control group candidate degraded previous authorization is invalid")
+	}
+	if candidate.StandbyOnly && (candidate.ServingAuthority == nil || candidate.AllowDegradedPrevious) {
+		return errors.New("edge-control group candidate standby authorization is invalid")
 	}
 	if candidate.ServingAuthority != nil {
 		if candidate.ServingAuthority.Validate() != nil || candidate.ServingAuthority.WorkerSlot != candidate.CurrentWorkerSlot ||

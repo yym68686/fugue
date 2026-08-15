@@ -148,6 +148,7 @@ func TestWorkerCandidateStageRejectsCrossGroupStaleCASAndInvalidSignature(t *tes
 		"stale-candidate":                    {func(v *GroupCandidateStageRequest) { v.ExpectedCandidateEpoch++ }, http.StatusConflict},
 		"same-slot":                          {func(v *GroupCandidateStageRequest) { v.TargetWorkerSlot = "a" }, http.StatusBadRequest},
 		"degraded-without-serving-authority": {func(v *GroupCandidateStageRequest) { v.AllowDegradedPrevious = true }, http.StatusBadRequest},
+		"standby-without-serving-authority":  {func(v *GroupCandidateStageRequest) { v.StandbyOnly = true }, http.StatusBadRequest},
 		"cross-group":                        {func(v *GroupCandidateStageRequest) { v.GroupID = "edge-group-country-us" }, http.StatusForbidden},
 		"bad-signature":                      {func(v *GroupCandidateStageRequest) {}, http.StatusUnauthorized},
 	} {
@@ -314,6 +315,29 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 	}
 
 	request.ExpectedCandidateEpoch = staged.Epoch
+	request.AllowDegradedPrevious = false
+	request.StandbyOnly = true
+	request.Nonce = strings.Repeat("u", 24)
+	request.Signature = ""
+	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	standbyRecorder := postGroupCandidateStage(t, handler, request)
+	if standbyRecorder.Code != http.StatusOK {
+		t.Fatalf("stage standby status=%d body=%s", standbyRecorder.Code, standbyRecorder.Body.String())
+	}
+	standbyCandidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
+	if err != nil || !exists || !standbyCandidate.StandbyOnly || standbyCandidate.AllowDegradedPrevious {
+		t.Fatalf("standby candidate=%+v exists=%v err=%v", standbyCandidate, exists, err)
+	}
+	var standbyReceipt GroupCandidateStageReceipt
+	if json.Unmarshal(standbyRecorder.Body.Bytes(), &standbyReceipt) != nil || !standbyReceipt.StandbyOnly || standbyReceipt.AllowDegradedPrevious {
+		t.Fatalf("standby receipt omitted non-promotable authorization: %+v", standbyReceipt)
+	}
+
+	request.ExpectedCandidateEpoch = standbyCandidate.Epoch
+	request.StandbyOnly = false
+	request.AllowDegradedPrevious = true
 	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
 		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
 		BundleVersion: groupPublicationVersion(servingAuthority.Published.Bundle.Generation, servingAuthority.Published.PublicationSequence+100, servingAuthority.Published.RecoveryEpoch),

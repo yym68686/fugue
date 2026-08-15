@@ -75,6 +75,7 @@ type GroupCandidateStageRequest struct {
 	TargetWorkerSlot              string                        `json:"target_worker_slot"`
 	ServingAuthority              *GroupServingAuthorityWitness `json:"serving_authority,omitempty"`
 	AllowDegradedPrevious         bool                          `json:"allow_degraded_previous,omitempty"`
+	StandbyOnly                   bool                          `json:"standby_only,omitempty"`
 	WorkerSourceSHA               string                        `json:"worker_source_sha"`
 	WorkerImageDigest             string                        `json:"worker_image_digest"`
 	ReleaseRecordDigest           string                        `json:"release_record_digest"`
@@ -99,6 +100,7 @@ type GroupCandidateStageReceipt struct {
 	CurrentPublicationSequence   uint64 `json:"current_publication_sequence"`
 	CurrentRecoveryEpoch         uint64 `json:"current_recovery_epoch"`
 	AllowDegradedPrevious        bool   `json:"allow_degraded_previous,omitempty"`
+	StandbyOnly                  bool   `json:"standby_only,omitempty"`
 	OrdinaryTrafficMutation      bool   `json:"ordinary_traffic_mutation"`
 }
 
@@ -266,7 +268,7 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 		ReleaseRecordDigest: request.ReleaseRecordDigest, WorkerSourceSHA: request.WorkerSourceSHA, WorkerImageDigest: request.WorkerImageDigest,
 		WorkerSlot: request.TargetWorkerSlot, PublishedAt: now, CurrentRecord: &currentRecord,
 		CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: request.ExpectedCurrentWorkerSlot,
-		ServingAuthority: request.ServingAuthority, AllowDegradedPrevious: request.AllowDegradedPrevious,
+		ServingAuthority: request.ServingAuthority, AllowDegradedPrevious: request.AllowDegradedPrevious, StandbyOnly: request.StandbyOnly,
 		Record: record, Bundle: signed}
 	return publisher.Store.PutGroupStagedCurrentLKGCandidateCAS(ctx, request.GroupID, currentEpoch, request.ExpectedAuthoritySequence,
 		request.ExpectedPublicationSequence, request.ExpectedRecoveryEpoch, request.ExpectedPublishedBundleDigest, request.ServingAuthority, candidate)
@@ -277,6 +279,7 @@ func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request Group
 		candidate.ReleaseRecordDigest == request.ReleaseRecordDigest && candidate.WorkerSourceSHA == request.WorkerSourceSHA &&
 		candidate.WorkerImageDigest == request.WorkerImageDigest && candidate.WorkerSlot == request.TargetWorkerSlot &&
 		candidate.CurrentWorkerSlot == request.ExpectedCurrentWorkerSlot && candidate.AllowDegradedPrevious == request.AllowDegradedPrevious &&
+		candidate.StandbyOnly == request.StandbyOnly &&
 		servingAuthorityWitnessesEqual(candidate.ServingAuthority, request.ServingAuthority)
 }
 
@@ -286,7 +289,7 @@ func groupCandidateStageReceipt(candidate GroupCandidateBundle, request GroupCan
 		WorkerSourceSHA: candidate.WorkerSourceSHA, WorkerImageDigest: candidate.WorkerImageDigest, WorkerSlot: candidate.WorkerSlot,
 		CurrentWorkerSlot: candidate.CurrentWorkerSlot, CurrentPublishedBundleDigest: candidate.CurrentRecord.BundleDigest,
 		CurrentPublicationSequence: uint64(candidate.CurrentRecord.Epoch), CurrentRecoveryEpoch: request.ExpectedRecoveryEpoch,
-		AllowDegradedPrevious: candidate.AllowDegradedPrevious, OrdinaryTrafficMutation: false}
+		AllowDegradedPrevious: candidate.AllowDegradedPrevious, StandbyOnly: candidate.StandbyOnly, OrdinaryTrafficMutation: false}
 }
 
 func validateGroupCandidateStageRequest(request GroupCandidateStageRequest) error {
@@ -306,6 +309,9 @@ func validateGroupCandidateStageRequest(request GroupCandidateStageRequest) erro
 	}
 	if request.AllowDegradedPrevious && request.ServingAuthority == nil {
 		return errors.New("edge-control degraded previous authorization requires serving authority")
+	}
+	if request.StandbyOnly && (request.ServingAuthority == nil || request.AllowDegradedPrevious) {
+		return errors.New("edge-control standby candidate requires serving authority without degraded recovery authorization")
 	}
 	return nil
 }
