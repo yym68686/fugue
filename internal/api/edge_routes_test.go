@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 func TestEdgePodLiveServingStateSuppressesRecentCaddyRestart(t *testing.T) {
@@ -503,21 +506,47 @@ func TestEdgeRoutesScopedSyncRecoversStaleNodeActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create stale scoped edge: %v", err)
 	}
-
-	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token, nil)
-	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected stale scoped edge to bootstrap with status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	assertRouteStatus := func(path, want string) model.EdgeRouteBundle {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected route bundle status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		var bundle model.EdgeRouteBundle
+		mustDecodeJSON(t, recorder, &bundle)
+		route := edgeRouteByHostAndKind(bundle.Routes, app.Route.Hostname, model.EdgeRouteKindPlatform)
+		if route == nil || route.Status != want {
+			t.Fatalf("route %s status = %+v, want %s", app.Route.Hostname, route, want)
+		}
+		return bundle
 	}
-	var bundle model.EdgeRouteBundle
-	mustDecodeJSON(t, recorder, &bundle)
+
+	bundle := assertRouteStatus("/v1/edge/routes?token="+token, model.EdgeRouteStatusActive)
 	if bundle.EdgeID != node.ID || bundle.EdgeGroupID != node.EdgeGroupID || len(bundle.Routes) == 0 || bundle.Signature == "" {
 		t.Fatalf("scoped recovery bundle is incomplete: %+v", bundle)
 	}
 	updated, _, err := storeState.GetEdgeNode(node.ID)
 	if err != nil || updated.LastSeenAt == nil || !updated.LastSeenAt.After(stale) || updated.LastHeartbeatAt == nil || !updated.LastHeartbeatAt.Equal(stale) {
 		t.Fatalf("successful scoped sync did not refresh only route activity: node=%+v err=%v", updated, err)
+	}
+	assertRouteStatus("/v1/edge/routes?token=edge-secret", model.EdgeRouteStatusActive)
+}
+
+func TestEdgeRouteInventoryFallbackRequiresLegacyAuthority(t *testing.T) {
+	t.Parallel()
+
+	fencingErr := fmt.Errorf("partial migration: %w", store.ErrEdgeInstanceFencingNotReady)
+	legacy := model.EdgeActivationState{RouteAuthority: model.EdgeRouteAuthorityLegacy}
+	if !edgeRouteInventoryAllowsLegacyFallback(fencingErr, legacy, nil) {
+		t.Fatal("legacy route authority must preserve its inventory during a fencing migration")
+	}
+	active := model.EdgeActivationState{RouteAuthority: model.EdgeRouteAuthorityActiveEpoch}
+	if edgeRouteInventoryAllowsLegacyFallback(fencingErr, active, nil) {
+		t.Fatal("active-epoch route authority must remain fail-closed on fencing errors")
+	}
+	if edgeRouteInventoryAllowsLegacyFallback(fencingErr, legacy, errors.New("activation unavailable")) {
+		t.Fatal("unproven activation state must remain fail-closed")
 	}
 }
 

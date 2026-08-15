@@ -135,12 +135,9 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		)
 	}
 	if requestedEdgeGroupID != "" && !healthyEdgeGroups[requestedEdgeGroupID] {
-		nodes, _, err := s.store.ListActiveEdgeNodes(requestedEdgeGroupID)
+		nodes, _, err := s.listRouteInventoryNodes(requestedEdgeGroupID)
 		if err != nil {
-			if !errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
-				return model.EdgeRouteBundle{}, err
-			}
-			nodes = nil
+			return model.EdgeRouteBundle{}, err
 		}
 		now := time.Now().UTC()
 		for _, node := range nodes {
@@ -1143,11 +1140,8 @@ func (s *Server) edgeRouteHealthyEdgeGroupInventory() (map[string]bool, map[stri
 }
 
 func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string, map[string]bool, map[string]int, error) {
-	nodes, _, err := s.store.ListActiveEdgeNodes("")
+	nodes, _, err := s.listRouteInventoryNodes("")
 	if err != nil {
-		if errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
-			return map[string]bool{}, map[string][]string{}, map[string]bool{}, map[string]int{}, nil
-		}
 		return nil, nil, nil, nil, err
 	}
 	healthyBeforeQuarantine := make(map[string]bool)
@@ -1197,6 +1191,26 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 		sort.Strings(healthyNodeIDsByGroup[groupID])
 	}
 	return healthy, healthyNodeIDsByGroup, expectedNonEmpty, expectedMinTrafficRoutes, nil
+}
+
+// listRouteInventoryNodes keeps legacy-authoritative deployments serving while
+// the instance-fencing schema is unavailable. Once active-epoch authority is
+// enabled, fencing errors remain fail-closed and are returned to the caller.
+func (s *Server) listRouteInventoryNodes(edgeGroupID string) ([]model.EdgeNode, []model.EdgeGroup, error) {
+	nodes, groups, err := s.store.ListActiveEdgeNodes(edgeGroupID)
+	if !errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
+		return nodes, groups, err
+	}
+	activation, activationErr := s.store.GetEdgeActivationState()
+	if !edgeRouteInventoryAllowsLegacyFallback(err, activation, activationErr) {
+		return nil, nil, err
+	}
+	return s.store.ListEdgeNodes(edgeGroupID)
+}
+
+func edgeRouteInventoryAllowsLegacyFallback(inventoryErr error, activation model.EdgeActivationState, activationErr error) bool {
+	return errors.Is(inventoryErr, store.ErrEdgeInstanceFencingNotReady) &&
+		activationErr == nil && activation.RouteAuthority == model.EdgeRouteAuthorityLegacy
 }
 
 func applyEdgeRouteInventoryBlastRadiusCap(beforeHealthy map[string]bool, beforeIDs map[string][]string, afterHealthy map[string]bool, afterIDs map[string][]string) (map[string]bool, map[string][]string) {

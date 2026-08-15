@@ -93,6 +93,33 @@ func TestEdgeRouteBundleInvariantRejectsNoTrafficBundleForStaleEdgeGroup(t *test
 	}
 }
 
+func TestEdgeRouteBundleInvariantRejectsUnavailableTrafficRoutes(t *testing.T) {
+	t.Parallel()
+
+	err := validateEdgeRouteBundleForPublish(model.EdgeRouteBundle{
+		Version:     "routegen_unavailable",
+		Generation:  "routegen_unavailable",
+		GeneratedAt: time.Now().UTC(),
+		Routes: []model.EdgeRouteBinding{{
+			Hostname:        "demo.fugue.pro",
+			EdgeGroupID:     "edge-group-country-us",
+			RoutePolicy:     model.EdgeRoutePolicyEnabled,
+			Status:          model.EdgeRouteStatusUnavailable,
+			RouteGeneration: "route_demo",
+		}},
+	}, edgeRouteBundleInvariantInput{
+		Apps: []model.App{
+			{ID: "app_demo", Route: &model.AppRoute{Hostname: "demo.fugue.pro"}},
+		},
+		HealthyEdgeGroups:          map[string]bool{"edge-group-country-us": false},
+		ExpectedNonEmptyEdgeGroups: map[string]bool{"edge-group-country-us": true},
+		Options:                    edgeRouteBundleOptions{EdgeGroupID: "edge-group-country-us"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "without traffic routes") {
+		t.Fatalf("expected unavailable traffic routes to block publication, got %v", err)
+	}
+}
+
 func TestEdgeRouteBundleInvariantRejectsAbnormalTrafficDrop(t *testing.T) {
 	t.Parallel()
 
