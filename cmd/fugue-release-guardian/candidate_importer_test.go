@@ -292,6 +292,43 @@ func TestCandidateImporterRejectsDegradedPreviousAuthorizationWithoutServingWitn
 	}
 }
 
+func TestCandidateImporterAcceptsDegradedServingAuthorityWithinCurrentRecovery(t *testing.T) {
+	now := time.Date(2026, 8, 14, 20, 50, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
+	envelope.AllowDegradedPrevious = true
+	envelope.Bundle.Generation = envelope.CurrentBundle.Generation
+	envelope.Bundle.Version = envelope.Bundle.Generation + ".p5.r0"
+	envelope.Bundle.PreviousGeneration = envelope.CurrentBundle.Generation
+	envelope.Record.BundleDigest = candidateBundleDigest(envelope.Bundle)
+	record, err := envelope.Record.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Record = record
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), AuthorityEpoch: 23,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "41", FrontGeneration: 8,
+		BundleVersion: "routes-pruned.p3.r0", WorkerSlot: envelope.CurrentWorkerSlot, WorkerSourceSHA: strings.Repeat("b", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("c", 64)}
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("degraded serving publication in current recovery window was rejected: %v", err)
+	}
+
+	envelope.ServingAuthority.BundleVersion = "routes-future.p4.r0"
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("non-historical degraded serving publication was accepted")
+	}
+	envelope.ServingAuthority.BundleVersion = "routes-previous-recovery.p3.r1"
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("cross-recovery degraded serving publication was accepted")
+	}
+	envelope.ServingAuthority.BundleVersion = "routes-pruned.p3.r0"
+	envelope.AllowDegradedPrevious = false
+	envelope.StandbyOnly = true
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("standby envelope used degraded serving publication fallback")
+	}
+}
+
 func TestCandidateImporterAcceptsTheSharedEdgeControlRecordIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 12, 5, 0, 0, 0, time.UTC)
 	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)

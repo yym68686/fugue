@@ -65,9 +65,10 @@ type candidateEnvelope struct {
 
 // candidateServingAuthorityWitness is the read-only Guardian projection of
 // Edge Control's optional serving witness. Older Controls omit it. Newer
-// Controls use it to prove that a candidate was derived from the exact
-// historical publication still serving behind Front, rather than from a
-// newer Control publication that has not acquired ordinary traffic.
+// Controls use it to bind the envelope to the exact Guardian CurrentAuthority
+// and Front activation. Exact historical publications remain preferred; an
+// explicitly degraded recovery may use the current signed Control publication
+// only when the historical bundle was pruned inside the same recovery epoch.
 type candidateServingAuthorityWitness struct {
 	CurrentRecordDigest string                        `json:"current_record_digest"`
 	AuthorityEpoch      int64                         `json:"authority_epoch"`
@@ -360,8 +361,20 @@ func validateCandidateServingAuthorityEnvelope(envelope candidateEnvelope) error
 		!exactSourceSHA(witness.WorkerSourceSHA) || !exactSHA256Digest(witness.WorkerImageDigest) {
 		return errors.New("candidate serving authority identity is invalid")
 	}
-	if _, _, err := parseAuthorityBundleVersion(envelope.Bundle.Generation, witness.BundleVersion); err != nil {
+	witnessGeneration, witnessPublication, witnessRecovery, err := parseUnboundAuthorityBundleVersion(witness.BundleVersion)
+	if err != nil {
 		return errors.New("candidate serving publication is invalid")
+	}
+	if witnessGeneration == envelope.Bundle.Generation {
+		return nil
+	}
+	if !envelope.AllowDegradedPrevious || envelope.StandbyOnly || envelope.CurrentBundle == nil ||
+		envelope.Bundle.Generation != envelope.CurrentBundle.Generation {
+		return errors.New("candidate serving publication is invalid")
+	}
+	currentPublication, currentRecovery, err := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
+	if err != nil || witnessPublication >= currentPublication || witnessRecovery != currentRecovery {
+		return errors.New("candidate serving publication is outside the current recovery window")
 	}
 	return nil
 }
@@ -382,21 +395,30 @@ func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, curren
 }
 
 func parseAuthorityBundleVersion(generation, version string) (uint64, uint64, error) {
-	prefix := strings.TrimSpace(generation) + ".p"
-	if strings.TrimSpace(generation) == "" || !strings.HasPrefix(version, prefix) {
-		return 0, 0, errors.New("authority bundle version is invalid")
-	}
-	remainder := strings.TrimPrefix(version, prefix)
-	separator := strings.LastIndex(remainder, ".r")
-	if separator < 1 || separator == len(remainder)-2 {
-		return 0, 0, errors.New("authority bundle version is invalid")
-	}
-	sequence, sequenceErr := strconv.ParseUint(remainder[:separator], 10, 64)
-	recoveryEpoch, recoveryErr := strconv.ParseUint(remainder[separator+2:], 10, 64)
-	if sequenceErr != nil || recoveryErr != nil || sequence == 0 {
+	parsedGeneration, sequence, recoveryEpoch, err := parseUnboundAuthorityBundleVersion(version)
+	if err != nil || strings.TrimSpace(generation) == "" || parsedGeneration != strings.TrimSpace(generation) {
 		return 0, 0, errors.New("authority bundle version is invalid")
 	}
 	return sequence, recoveryEpoch, nil
+}
+
+func parseUnboundAuthorityBundleVersion(version string) (string, uint64, uint64, error) {
+	version = strings.TrimSpace(version)
+	recoverySeparator := strings.LastIndex(version, ".r")
+	if recoverySeparator <= 0 || recoverySeparator+2 >= len(version) {
+		return "", 0, 0, errors.New("authority bundle version is invalid")
+	}
+	publicationSeparator := strings.LastIndex(version[:recoverySeparator], ".p")
+	if publicationSeparator <= 0 || publicationSeparator+2 >= recoverySeparator {
+		return "", 0, 0, errors.New("authority bundle version is invalid")
+	}
+	generation := version[:publicationSeparator]
+	sequence, sequenceErr := strconv.ParseUint(version[publicationSeparator+2:recoverySeparator], 10, 64)
+	recoveryEpoch, recoveryErr := strconv.ParseUint(version[recoverySeparator+2:], 10, 64)
+	if sequenceErr != nil || recoveryErr != nil || sequence == 0 {
+		return "", 0, 0, errors.New("authority bundle version is invalid")
+	}
+	return generation, sequence, recoveryEpoch, nil
 }
 
 func candidateBundleDigest(bundle model.EdgeRouteBundle) string {
