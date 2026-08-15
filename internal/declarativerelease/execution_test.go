@@ -12,28 +12,29 @@ import (
 )
 
 type fakeCluster struct {
-	observations        []Observation
-	observationErrors   []error
-	observedManifests   [][]byte
-	cas                 []Observation
-	casManifests        [][]byte
-	degraded            []Observation
-	verifiedTargets     []TargetIdentity
-	verifyErrors        []error
-	dryRuns             int
-	applies             int
-	applyErrors         []error
-	deleteCreated       int
-	health              []Observation
-	healthErrors        []error
-	healthTargets       []TargetIdentity
-	healthPrewrite      []bool
-	converged           [][]byte
-	convergedErrors     []error
-	monitorConverged    [][]byte
-	monitorErrors       []error
-	rollbackDriftChecks int
-	rollbackDriftErrors []error
+	observations         []Observation
+	observationErrors    []error
+	observedManifests    [][]byte
+	cas                  []Observation
+	casManifests         [][]byte
+	degraded             []Observation
+	verifiedTargets      []TargetIdentity
+	verifyErrors         []error
+	dryRuns              int
+	applies              int
+	applyErrors          []error
+	deleteCreated        int
+	health               []Observation
+	healthErrors         []error
+	healthTargets        []TargetIdentity
+	healthPrewrite       []bool
+	healthPreservedRoute []bool
+	converged            [][]byte
+	convergedErrors      []error
+	monitorConverged     [][]byte
+	monitorErrors        []error
+	rollbackDriftChecks  int
+	rollbackDriftErrors  []error
 }
 
 func (fake *fakeCluster) Observe(_ context.Context, _ PlanRelease, _ TargetIdentity, manifest []byte) (Observation, error) {
@@ -119,6 +120,7 @@ func (fake *fakeCluster) ClearOwnershipTakeoverForwardOnlyFields(context.Context
 func (fake *fakeCluster) WaitHealthy(ctx context.Context, _ PlanRelease, target TargetIdentity, _ []byte) (Observation, error) {
 	fake.healthTargets = append(fake.healthTargets, target)
 	fake.healthPrewrite = append(fake.healthPrewrite, IsPrewritePredecessorHealthWait(ctx))
+	fake.healthPreservedRoute = append(fake.healthPreservedRoute, IsPreservedRouteHealthWait(ctx))
 	var value Observation
 	if len(fake.health) > 0 {
 		value = fake.health[0]
@@ -433,6 +435,74 @@ func TestPrepareFailedAtomSuccessorAdvancesFromTypedReadyCountMismatch(t *testin
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
 	if result.Status != "verified" || result.Reason != "forward-verified" || result.ForwardApplyCount != 1 || fake.applies != 1 {
 		t.Fatalf("failed-atom degraded predecessor did not execute: result=%+v applies=%d", result, fake.applies)
+	}
+}
+
+func TestDegradedPredecessorPreservesOnlyPreexistingPublicRouteFailure(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	plan.Releases[0].SupersedesFailedConfigSHA = strings.Repeat("f", 40)
+	plan.Releases[0].Health = append(plan.Releases[0].Health, HealthProbe{
+		Type: "public-route-http", Name: "edge-group-country-de", Address: "192.0.2.10:443",
+		Host: "fugue.pro", Path: "/healthz", Expected: "ok",
+	})
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, forward := executionFixtureForPlan(t, plan)
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{
+		observations: []Observation{lkg},
+		healthErrors: []error{
+			fmt.Errorf("%w: %w: public route canary response is invalid", ErrDegradedPredecessorHealth, ErrPublicRouteHealth),
+		},
+		cas: []Observation{degraded, degraded},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Now().UTC())
+	if err != nil || !prepared.DegradedPredecessor || !prepared.DegradedRoute {
+		t.Fatalf("prepare route-degraded predecessor: plan=%+v err=%v", prepared, err)
+	}
+	encoded, err := CanonicalJSON(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = DecodeExecutionPlan(bytes.NewReader(encoded), plan, rendered.Forward, rendered.LKG)
+	if err != nil {
+		t.Fatalf("decode route-degraded execution plan: %v", err)
+	}
+	current := casOnlyObservation(lkg)
+	current.ResourceVersion = "11"
+	current.Resources[0].ResourceVersion = "11"
+	fake.cas = []Observation{current}
+	fake.health = []Observation{forward}
+	fake.healthErrors = []error{fmt.Errorf("%w: public route canary response is invalid", ErrPublicRouteHealth)}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "verified" || result.Reason != "forward-verified-with-preserved-route-degradation" ||
+		result.ForwardApplyCount != 1 || result.LKGApplyCount != 0 || fake.applies != 1 ||
+		len(fake.healthPreservedRoute) == 0 || !fake.healthPreservedRoute[len(fake.healthPreservedRoute)-1] {
+		t.Fatalf("route-degraded predecessor was not preserved exactly: result=%+v applies=%d route_waits=%v", result, fake.applies, fake.healthPreservedRoute)
+	}
+}
+
+func TestExecutionPlanRejectsUnprovenDegradedRoute(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := retryExecutionFixture(t)
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{cas: []Observation{degraded, degraded}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Now().UTC())
+	if err != nil || !prepared.DegradedPredecessor {
+		t.Fatalf("prepare degraded predecessor: plan=%+v err=%v", prepared, err)
+	}
+	prepared.DegradedRoute = true
+	prepared.PlanDigest = ""
+	unsigned, err := CanonicalJSON(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.PlanDigest = digestOf(unsigned)
+	if err := prepared.Validate(plan, rendered.Forward, rendered.LKG); err == nil || !strings.Contains(err.Error(), "degraded route recovery is not authorized") {
+		t.Fatalf("execution plan accepted route recovery without a public route probe: %v", err)
 	}
 }
 

@@ -79,6 +79,7 @@ type ExecutionPlan struct {
 	Prewrite            Observation    `json:"prewrite"`
 	AlreadyConverged    bool           `json:"alreadyConverged"`
 	DegradedPredecessor bool           `json:"degradedPredecessor,omitempty"`
+	DegradedRoute       bool           `json:"degradedRoute,omitempty"`
 	PreparedAt          string         `json:"preparedAt"`
 	PlanDigest          string         `json:"planDigest"`
 }
@@ -116,7 +117,14 @@ type Cluster interface {
 
 var ErrDegradedPredecessorHealth = errors.New("declarative predecessor health is degraded")
 
+// ErrPublicRouteHealth identifies only an independent public route probe
+// failure. It lets an exact degraded-predecessor recovery preserve an already
+// degraded route while still requiring the replacement workload and every
+// other reviewed resource to converge.
+var ErrPublicRouteHealth = errors.New("independent public route health is degraded")
+
 type prewritePredecessorHealthWaitKey struct{}
+type preservedRouteHealthWaitKey struct{}
 
 // WithPrewritePredecessorHealthWait marks only the immutable predecessor
 // health wait performed before any production mutation. Kubernetes adapters
@@ -129,6 +137,15 @@ func WithPrewritePredecessorHealthWait(ctx context.Context) context.Context {
 
 func IsPrewritePredecessorHealthWait(ctx context.Context) bool {
 	marked, _ := ctx.Value(prewritePredecessorHealthWaitKey{}).(bool)
+	return marked
+}
+
+func withPreservedRouteHealthWait(ctx context.Context) context.Context {
+	return context.WithValue(ctx, preservedRouteHealthWaitKey{}, true)
+}
+
+func IsPreservedRouteHealthWait(ctx context.Context) bool {
+	marked, _ := ctx.Value(preservedRouteHealthWaitKey{}).(bool)
 	return marked
 }
 
@@ -234,6 +251,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	var prewrite Observation
 	alreadyConverged := false
 	degradedPredecessor := false
+	degradedRoute := false
 	if release.RetrySameLKG && release.ExpectedPreviousPresent {
 		prewrite, err = cluster.Observe(ctx, release, forward, rendered.Forward)
 		if err == nil && prewrite.Matches(forward, release, false) {
@@ -268,12 +286,14 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 			degradedPredecessor = err == nil
 		}
 		if release.ExpectedPreviousPresent && errors.Is(lkgObserveErr, ErrDegradedPredecessorHealth) {
+			degradedRoute = errors.Is(lkgObserveErr, ErrPublicRouteHealth)
 			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
 			degradedPredecessor = err == nil
 		} else if release.ExpectedPreviousPresent && lkgObserveErr != nil {
 			var healthyLKG Observation
 			healthyLKG, err = cluster.WaitHealthy(WithPrewritePredecessorHealthWait(ctx), release, lkg, rendered.LKG)
 			if errors.Is(err, ErrDegradedPredecessorHealth) {
+				degradedRoute = errors.Is(err, ErrPublicRouteHealth)
 				prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
 				degradedPredecessor = err == nil
 			} else if err == nil && healthyLKG.Matches(lkg, release, true) {
@@ -290,6 +310,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 				if !lkgHealthVerified {
 					_, err = cluster.WaitHealthy(WithPrewritePredecessorHealthWait(ctx), release, lkg, rendered.LKG)
 					if errors.Is(err, ErrDegradedPredecessorHealth) {
+						degradedRoute = errors.Is(err, ErrPublicRouteHealth)
 						prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
 						degradedPredecessor = err == nil
 					}
@@ -371,7 +392,8 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		ReleasePlanDigest: releasePlan.PlanDigest, IntentDigest: release.IntentDigest,
 		ArtifactDigest: artifact.ReceiptDigest, Forward: forward, LKG: lkg,
 		Prewrite: prewrite, AlreadyConverged: alreadyConverged, DegradedPredecessor: degradedPredecessor,
-		PreparedAt: now.UTC().Format(time.RFC3339Nano),
+		DegradedRoute: degradedPredecessor && degradedRoute,
+		PreparedAt:    now.UTC().Format(time.RFC3339Nano),
 	}
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {
@@ -603,11 +625,18 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	}
 	result.ForwardApplyCount = 1
 	applyErr := cluster.Apply(ctx, release, prepared.Forward, forwardCAS)
-	forwardObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.Forward, forwardManifest)
+	healthCtx := ctx
+	if prepared.DegradedRoute {
+		healthCtx = withPreservedRouteHealthWait(ctx)
+	}
+	forwardObservation, healthErr := cluster.WaitHealthy(healthCtx, release, prepared.Forward, forwardManifest)
 	convergedErr := errors.Join(cluster.Converged(ctx, release, forwardManifest), cluster.VerifyOwnershipConverged(ctx, release, forwardManifest))
-	if healthErr == nil && convergedErr == nil && forwardObservation.Matches(prepared.Forward, release, false) {
+	preservedRoute := applyErr == nil && prepared.DegradedRoute && errors.Is(healthErr, ErrPublicRouteHealth)
+	if (healthErr == nil || preservedRoute) && convergedErr == nil && forwardObservation.Matches(prepared.Forward, release, false) {
 		result.Status = "verified"
-		if applyErr != nil {
+		if preservedRoute {
+			result.Reason = "forward-verified-with-preserved-route-degradation"
+		} else if applyErr != nil {
 			result.Reason = "forward-commit-unknown-reconciled"
 		} else {
 			result.Reason = "forward-verified"
@@ -907,6 +936,9 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 	} else if err := plan.Prewrite.ValidateMustBeStable(); err != nil {
 		return err
 	}
+	if plan.DegradedRoute && (!plan.DegradedPredecessor || !releaseHasHealthProbe(release, "public-route-http")) {
+		return errors.New("degraded route recovery is not authorized")
+	}
 	if plan.AlreadyConverged {
 		if !plan.Prewrite.Matches(plan.Forward, release, false) {
 			return errors.New("already-converged execution plan is not bound to the forward target")
@@ -915,6 +947,15 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 		return errors.New("execution plan prewrite is not bound to the LKG")
 	}
 	return nil
+}
+
+func releaseHasHealthProbe(release PlanRelease, probeType string) bool {
+	for _, probe := range release.Health {
+		if probe.Type == probeType {
+			return true
+		}
+	}
+	return false
 }
 
 func (observation Observation) ValidateDegradedPredecessor(release PlanRelease) error {

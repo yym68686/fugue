@@ -897,16 +897,17 @@ func TestTypedHealthShortCircuitIsRestrictedToTheExactPrewritePredecessor(t *tes
 	forward := predecessor
 	forward.ConfigSHA = strings.Repeat("2", 40)
 	for _, test := range []struct {
-		name   string
-		ctx    context.Context
-		target declarativerelease.TargetIdentity
-		err    error
-		want   bool
+		name      string
+		ctx       context.Context
+		target    declarativerelease.TargetIdentity
+		err       error
+		want      bool
+		wantRoute bool
 	}{
 		{name: "exact typed predecessor", ctx: marked, target: predecessor, err: typed, want: true},
 		{name: "exact workload service predecessor", ctx: marked, target: predecessor, err: serviceDegraded, want: true},
 		{name: "exact service proxy predecessor", ctx: marked, target: predecessor, err: serviceProxyDegraded, want: true},
-		{name: "exact public route predecessor", ctx: marked, target: predecessor, err: publicRouteDegraded, want: true},
+		{name: "exact public route predecessor", ctx: marked, target: predecessor, err: publicRouteDegraded, want: true, wantRoute: true},
 		{name: "forward typed zero ready", ctx: marked, target: forward, err: typed},
 		{name: "forward workload service failure", ctx: marked, target: forward, err: serviceDegraded},
 		{name: "forward service proxy failure", ctx: marked, target: forward, err: serviceProxyDegraded},
@@ -925,6 +926,9 @@ func TestTypedHealthShortCircuitIsRestrictedToTheExactPrewritePredecessor(t *tes
 			typedErr := typedPrewritePredecessorHealth(test.ctx, release, test.target, test.err)
 			if (typedErr != nil) != test.want || (test.want && !errors.Is(typedErr, declarativerelease.ErrDegradedPredecessorHealth)) {
 				t.Fatalf("typed predecessor error=%v, want classified=%v", typedErr, test.want)
+			}
+			if got := errors.Is(typedErr, declarativerelease.ErrPublicRouteHealth); got != test.wantRoute {
+				t.Fatalf("public route classification=%v, want %v: %v", got, test.wantRoute, typedErr)
 			}
 		})
 	}

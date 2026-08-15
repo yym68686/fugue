@@ -1528,6 +1528,9 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 		if err != nil {
 			lastFailure = err
 		}
+		if declarativerelease.IsPreservedRouteHealthWait(ctx) && errors.Is(err, errPublicRouteHTTPHealth) {
+			return observation, fmt.Errorf("%w: %v", declarativerelease.ErrPublicRouteHealth, err)
+		}
 		if typed := typedPrewritePredecessorHealth(ctx, release, target, err); typed != nil {
 			return observation, typed
 		}
@@ -1694,7 +1697,7 @@ func typedPrewritePredecessorHealth(ctx context.Context, release declarativerele
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
 	if errors.Is(err, errPublicRouteHTTPHealth) {
-		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
+		return fmt.Errorf("%w: %w: %v", declarativerelease.ErrDegradedPredecessorHealth, declarativerelease.ErrPublicRouteHealth, err)
 	}
 	if errors.Is(err, errEdgeGroupAuthorityHealth) {
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
