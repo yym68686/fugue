@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/edgecontrol"
+	"fugue/internal/releaseguardian"
 )
 
 func TestReadEdgeCandidateStageStatusAcceptsFullAuthorityResponse(t *testing.T) {
@@ -49,6 +51,66 @@ func TestPostEdgeCandidateStageDoesNotReflectUntrustedErrorBody(t *testing.T) {
 	_, err := postEdgeCandidateStage(context.Background(), server.URL, edgeCandidateStageRequest{})
 	if err == nil || err.Error() != "stage edge Worker candidate: HTTP 409" {
 		t.Fatalf("untrusted edge-control error body was reflected: %v", err)
+	}
+}
+
+func TestEdgeCandidateStageRequestMatchesControlServingAuthoritySchema(t *testing.T) {
+	witness := edgeServingAuthorityWitness{CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64), AuthorityEpoch: 9,
+		CurrentAuthorityUID: "current-uid", CurrentAuthorityRV: "123", FrontGeneration: 7,
+		BundleVersion: "routes.p5.r2", WorkerSlot: "b", WorkerSourceSHA: strings.Repeat("2", 40), WorkerImageDigest: "sha256:" + strings.Repeat("3", 64)}
+	local := edgeCandidateStageRequest{Schema: edgeCandidateStageSchema, KeyID: "key-1", GroupID: "edge-group-country-de",
+		ExpectedAuthoritySequence: 11, ExpectedPublicationSequence: 10, ExpectedRecoveryEpoch: 2,
+		ExpectedPublishedBundleDigest: "sha256:" + strings.Repeat("4", 64), ExpectedCandidateEpoch: 12,
+		ExpectedCurrentWorkerSlot: "b", TargetWorkerSlot: "a", ServingAuthority: &witness,
+		WorkerSourceSHA: strings.Repeat("5", 40), WorkerImageDigest: "sha256:" + strings.Repeat("6", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), IssuedAtUnix: 100, ExpiresAtUnix: 160,
+		Nonce: "nonce", Reason: "stage immutable candidate", Signature: "signature"}
+	control := edgecontrol.GroupCandidateStageRequest{Schema: local.Schema, KeyID: local.KeyID, GroupID: local.GroupID,
+		ExpectedAuthoritySequence: local.ExpectedAuthoritySequence, ExpectedPublicationSequence: local.ExpectedPublicationSequence,
+		ExpectedRecoveryEpoch: local.ExpectedRecoveryEpoch, ExpectedPublishedBundleDigest: local.ExpectedPublishedBundleDigest,
+		ExpectedCandidateEpoch: local.ExpectedCandidateEpoch, ExpectedCurrentWorkerSlot: local.ExpectedCurrentWorkerSlot,
+		TargetWorkerSlot: local.TargetWorkerSlot, ServingAuthority: &edgecontrol.GroupServingAuthorityWitness{
+			CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
+			CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV,
+			FrontGeneration: witness.FrontGeneration, BundleVersion: witness.BundleVersion, WorkerSlot: witness.WorkerSlot,
+			WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest,
+		}, WorkerSourceSHA: local.WorkerSourceSHA, WorkerImageDigest: local.WorkerImageDigest,
+		ReleaseRecordDigest: local.ReleaseRecordDigest, IssuedAtUnix: local.IssuedAtUnix, ExpiresAtUnix: local.ExpiresAtUnix,
+		Nonce: local.Nonce, Reason: local.Reason, Signature: local.Signature}
+	localRaw, _ := json.Marshal(local)
+	controlRaw, _ := json.Marshal(control)
+	if string(localRaw) != string(controlRaw) {
+		t.Fatalf("candidate request JSON differs from Edge Control schema:\nlocal=%s\ncontrol=%s", localRaw, controlRaw)
+	}
+}
+
+func TestServingAuthorityWitnessAcceptsCompensatedFrontGeneration(t *testing.T) {
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
+		CurrentWorkerSlot: releaseguardian.AuthoritySlotB, CurrentFrontGeneration: 8, CurrentBundleGeneration: "routes.p5.r2",
+		CurrentWorkerSourceSHA: strings.Repeat("2", 40), CurrentWorkerImageDigest: "sha256:" + strings.Repeat("3", 64), AuthorityEpoch: 9}
+	health := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 12, BundleGeneration: current.CurrentBundleGeneration,
+		WorkerSourceCommit: current.CurrentWorkerSourceSHA, WorkerImageDigest: current.CurrentWorkerImageDigest, RouteAuthority: edgeActivationAuthority}
+	before := edgeGroupState{ActiveSlot: "b", FrontHealth: map[string]edgeFrontHealth{"node-1": health}}
+	witness, err := edgeServingAuthorityWitnessFromCurrent(before, current, current.GroupID, "current-uid", "123")
+	if err != nil || witness == nil || witness.FrontGeneration != current.CurrentFrontGeneration || witness.BundleVersion != current.CurrentBundleGeneration || witness.WorkerSlot != "b" {
+		t.Fatalf("serving authority witness=%+v err=%v", witness, err)
+	}
+
+	health.Generation = 11
+	before.FrontHealth["node-1"] = health
+	if _, err := edgeServingAuthorityWitnessFromCurrent(before, current, current.GroupID, "current-uid", "123"); err == nil || !strings.Contains(err.Error(), "Front evidence") {
+		t.Fatalf("odd uncompensated Front generation was accepted: %v", err)
+	}
+}
+
+func TestServingAuthorityWitnessOmitsLegacyUnboundFront(t *testing.T) {
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
+		CurrentWorkerSlot: releaseguardian.AuthoritySlotB, AuthorityEpoch: 9}
+	witness, err := edgeServingAuthorityWitnessFromCurrent(edgeGroupState{ActiveSlot: "b"}, current, current.GroupID, "", "")
+	if err != nil || witness != nil {
+		t.Fatalf("legacy unbound Front witness=%+v err=%v", witness, err)
 	}
 }
 

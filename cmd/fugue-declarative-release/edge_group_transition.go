@@ -15,13 +15,17 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/releaseguardian"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -40,25 +44,40 @@ const (
 	edgeCandidateReceiptSchema  = "edge-control-group-worker-candidate-receipt/v1"
 )
 
+var edgeServingAuthorityTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,255}$`)
+
+type edgeServingAuthorityWitness struct {
+	CurrentRecordDigest string `json:"current_record_digest"`
+	AuthorityEpoch      int64  `json:"authority_epoch"`
+	CurrentAuthorityUID string `json:"current_authority_uid"`
+	CurrentAuthorityRV  string `json:"current_authority_resource_version"`
+	FrontGeneration     uint64 `json:"front_generation"`
+	BundleVersion       string `json:"bundle_version"`
+	WorkerSlot          string `json:"worker_slot"`
+	WorkerSourceSHA     string `json:"worker_source_sha"`
+	WorkerImageDigest   string `json:"worker_image_digest"`
+}
+
 type edgeCandidateStageRequest struct {
-	Schema                        string `json:"schema"`
-	KeyID                         string `json:"key_id"`
-	GroupID                       string `json:"edge_group_id"`
-	ExpectedAuthoritySequence     uint64 `json:"expected_authority_sequence"`
-	ExpectedPublicationSequence   uint64 `json:"expected_publication_sequence"`
-	ExpectedRecoveryEpoch         uint64 `json:"expected_recovery_epoch"`
-	ExpectedPublishedBundleDigest string `json:"expected_published_bundle_digest"`
-	ExpectedCandidateEpoch        uint64 `json:"expected_candidate_epoch"`
-	ExpectedCurrentWorkerSlot     string `json:"expected_current_worker_slot"`
-	TargetWorkerSlot              string `json:"target_worker_slot"`
-	WorkerSourceSHA               string `json:"worker_source_sha"`
-	WorkerImageDigest             string `json:"worker_image_digest"`
-	ReleaseRecordDigest           string `json:"release_record_digest"`
-	IssuedAtUnix                  int64  `json:"issued_at_unix"`
-	ExpiresAtUnix                 int64  `json:"expires_at_unix"`
-	Nonce                         string `json:"nonce"`
-	Reason                        string `json:"reason"`
-	Signature                     string `json:"signature"`
+	Schema                        string                       `json:"schema"`
+	KeyID                         string                       `json:"key_id"`
+	GroupID                       string                       `json:"edge_group_id"`
+	ExpectedAuthoritySequence     uint64                       `json:"expected_authority_sequence"`
+	ExpectedPublicationSequence   uint64                       `json:"expected_publication_sequence"`
+	ExpectedRecoveryEpoch         uint64                       `json:"expected_recovery_epoch"`
+	ExpectedPublishedBundleDigest string                       `json:"expected_published_bundle_digest"`
+	ExpectedCandidateEpoch        uint64                       `json:"expected_candidate_epoch"`
+	ExpectedCurrentWorkerSlot     string                       `json:"expected_current_worker_slot"`
+	TargetWorkerSlot              string                       `json:"target_worker_slot"`
+	ServingAuthority              *edgeServingAuthorityWitness `json:"serving_authority,omitempty"`
+	WorkerSourceSHA               string                       `json:"worker_source_sha"`
+	WorkerImageDigest             string                       `json:"worker_image_digest"`
+	ReleaseRecordDigest           string                       `json:"release_record_digest"`
+	IssuedAtUnix                  int64                        `json:"issued_at_unix"`
+	ExpiresAtUnix                 int64                        `json:"expires_at_unix"`
+	Nonce                         string                       `json:"nonce"`
+	Reason                        string                       `json:"reason"`
+	Signature                     string                       `json:"signature"`
 }
 
 type edgeCandidateStageReceipt struct {
@@ -353,6 +372,10 @@ func (runtime *kubectlEdgeGroupRuntime) StageCandidate(ctx context.Context, befo
 	if !strings.HasPrefix(recordDigest, "sha256:") || len(recordDigest) != 71 {
 		return edgeCandidateStageReceipt{}, errors.New("Guardian release record digest is invalid")
 	}
+	servingAuthority, err := runtime.readServingAuthorityWitness(ctx, before)
+	if err != nil {
+		return edgeCandidateStageReceipt{}, err
+	}
 	nonceRaw := make([]byte, 24)
 	if _, err := rand.Read(nonceRaw); err != nil {
 		return edgeCandidateStageReceipt{}, errors.New("generate candidate staging nonce")
@@ -362,13 +385,66 @@ func (runtime *kubectlEdgeGroupRuntime) StageCandidate(ctx context.Context, befo
 		GroupID: runtime.transition.GroupID, ExpectedAuthoritySequence: status.AuthoritySequence,
 		ExpectedPublicationSequence: status.CurrentPublicationSequence, ExpectedRecoveryEpoch: status.RecoveryEpoch,
 		ExpectedPublishedBundleDigest: status.PublishedBundleDigest, ExpectedCandidateEpoch: status.CandidateEpoch,
-		ExpectedCurrentWorkerSlot: before.ActiveSlot, TargetWorkerSlot: inactiveSlot, WorkerSourceSHA: target.ConfigSHA,
+		ExpectedCurrentWorkerSlot: before.ActiveSlot, TargetWorkerSlot: inactiveSlot, ServingAuthority: servingAuthority, WorkerSourceSHA: target.ConfigSHA,
 		WorkerImageDigest: digest, ReleaseRecordDigest: recordDigest, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(),
 		Nonce: base64.RawURLEncoding.EncodeToString(nonceRaw), Reason: "stage immutable Worker candidate for independent route canary"}
 	if err := signEdgeCandidateStageRequest(runtime.transition.CandidateKeyring, &request, now); err != nil {
 		return edgeCandidateStageReceipt{}, err
 	}
 	return postEdgeCandidateStage(ctx, runtime.transition.CandidateStageURL, request)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.Context, before edgeGroupState) (*edgeServingAuthorityWitness, error) {
+	resource := runtime.client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace(runtime.release.Workload.Namespace)
+	object, err := resource.Get(ctx, "fugue-current-authority-"+runtime.transition.GroupID, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read Guardian current authority: %w", err)
+	}
+	data, found, err := unstructured.NestedStringMap(object.Object, "data")
+	if err != nil || !found || strings.TrimSpace(data["authority.json"]) == "" {
+		return nil, errors.New("Guardian current authority payload is unavailable")
+	}
+	var current releaseguardian.CurrentAuthority
+	if err := decodeStrictJSON([]byte(data["authority.json"]), &current); err != nil {
+		return nil, errors.New("Guardian current authority payload is invalid")
+	}
+	return edgeServingAuthorityWitnessFromCurrent(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion())
+}
+
+func edgeServingAuthorityWitnessFromCurrent(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string) (*edgeServingAuthorityWitness, error) {
+	if current.Validate() != nil || current.GroupID != groupID {
+		return nil, errors.New("Guardian current authority payload is invalid")
+	}
+	if current.CurrentFrontGeneration == 0 {
+		return nil, nil
+	}
+	if !edgeServingAuthorityTokenPattern.MatchString(uid) || !edgeServingAuthorityTokenPattern.MatchString(resourceVersion) {
+		return nil, errors.New("Guardian current authority CAS identity is invalid")
+	}
+	if before.ActiveSlot != string(current.CurrentWorkerSlot) || len(before.FrontHealth) == 0 {
+		return nil, errors.New("Guardian current authority does not match the serving Front slot")
+	}
+	for _, health := range before.FrontHealth {
+		if !edgeFrontHealthMatchesServingAuthority(health, current) {
+			return nil, errors.New("Guardian current authority does not match serving Front evidence")
+		}
+	}
+	return &edgeServingAuthorityWitness{
+		CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+		CurrentAuthorityUID: uid, CurrentAuthorityRV: resourceVersion, FrontGeneration: current.CurrentFrontGeneration,
+		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: string(current.CurrentWorkerSlot),
+		WorkerSourceSHA: current.CurrentWorkerSourceSHA, WorkerImageDigest: current.CurrentWorkerImageDigest,
+	}, nil
+}
+
+func edgeFrontHealthMatchesServingAuthority(health edgeFrontHealth, current releaseguardian.CurrentAuthority) bool {
+	return health.ActivationPresent && health.ActiveSlot == string(current.CurrentWorkerSlot) &&
+		health.Generation >= current.CurrentFrontGeneration && (health.Generation-current.CurrentFrontGeneration)%2 == 0 &&
+		health.BundleGeneration == current.CurrentBundleGeneration && health.WorkerSourceCommit == current.CurrentWorkerSourceSHA &&
+		health.WorkerImageDigest == current.CurrentWorkerImageDigest && health.RouteAuthority == edgeActivationAuthority
 }
 
 func edgeCandidateStatusURL(stageURL, groupID string) (string, error) {
