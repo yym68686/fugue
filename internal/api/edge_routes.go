@@ -71,6 +71,12 @@ func (s *Server) handleEdgeRoutes(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if options.AuthenticatedEdgeID != "" {
+		if err := s.store.RecordEdgeRouteSync(options.AuthenticatedEdgeID); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
 
 	etag := edgeRouteBundleETag(bundle.Version)
 	w.Header().Set("ETag", etag)
@@ -118,6 +124,15 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	requestedEdgeGroupID := strings.TrimSpace(options.EdgeGroupID)
 	if requestedEdgeGroupID == "" {
 		requestedEdgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
+	}
+	// A scoped node must be able to fetch the bundle that lets it recover from
+	// stale state. Admit its authenticated identity only within this response;
+	// global route health changes after the successful sync is recorded below.
+	if requestedEdgeGroupID != "" && options.AuthenticatedEdgeID != "" && !healthyEdgeGroups[requestedEdgeGroupID] {
+		healthyEdgeGroups[requestedEdgeGroupID] = true
+		healthyEdgeNodeIDsByGroup[requestedEdgeGroupID] = appendUniqueString(
+			healthyEdgeNodeIDsByGroup[requestedEdgeGroupID], options.AuthenticatedEdgeID,
+		)
 	}
 	if requestedEdgeGroupID != "" && !healthyEdgeGroups[requestedEdgeGroupID] {
 		nodes, _, err := s.store.ListActiveEdgeNodes(requestedEdgeGroupID)

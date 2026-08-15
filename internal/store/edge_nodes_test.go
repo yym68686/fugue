@@ -3,9 +3,46 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
+
+func TestEdgeRouteSyncActivityRequiresSuccessfulFetch(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	node, secret, err := s.CreateEdgeNodeToken(model.EdgeNode{ID: "edge-route-sync", EdgeGroupID: "edge-group-country-us", Status: model.EdgeHealthHealthy, Healthy: true})
+	if err != nil {
+		t.Fatalf("create edge token: %v", err)
+	}
+	old := time.Now().UTC().Add(-10 * time.Minute)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		index := findEdgeNode(state, node.ID)
+		state.EdgeNodes[index].LastSeenAt = &old
+		state.EdgeNodes[index].LastHeartbeatAt = &old
+		return nil
+	}); err != nil {
+		t.Fatalf("seed stale edge activity: %v", err)
+	}
+	if _, err := s.AuthenticateEdgeNode(secret); err != nil {
+		t.Fatalf("authenticate edge token: %v", err)
+	}
+	afterAuth, _, err := s.GetEdgeNode(node.ID)
+	if err != nil || afterAuth.LastSeenAt == nil || !afterAuth.LastSeenAt.Equal(old) {
+		t.Fatalf("authentication changed freshness evidence: node=%+v err=%v", afterAuth, err)
+	}
+	if err := s.RecordEdgeRouteSync(node.ID); err != nil {
+		t.Fatalf("record successful route sync: %v", err)
+	}
+	afterSync, _, err := s.GetEdgeNode(node.ID)
+	if err != nil || afterSync.LastSeenAt == nil || !afterSync.LastSeenAt.After(old) || afterSync.LastHeartbeatAt == nil || !afterSync.LastHeartbeatAt.Equal(old) {
+		t.Fatalf("successful route sync did not update only last_seen_at: node=%+v err=%v", afterSync, err)
+	}
+}
 
 func TestEdgeNodeControlStateSurvivesHeartbeat(t *testing.T) {
 	t.Parallel()

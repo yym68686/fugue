@@ -114,15 +114,12 @@ func (s *Store) AuthenticateEdgeNode(secret string) (model.EdgeNode, error) {
 	}
 
 	var node model.EdgeNode
-	err := s.withLockedState(true, func(state *model.State) error {
+	err := s.withLockedState(false, func(state *model.State) error {
 		hash := model.HashSecret(secret)
-		now := time.Now().UTC()
 		for idx := range state.EdgeNodes {
 			if strings.TrimSpace(state.EdgeNodes[idx].TokenHash) == "" || state.EdgeNodes[idx].TokenHash != hash {
 				continue
 			}
-			state.EdgeNodes[idx].LastSeenAt = &now
-			state.EdgeNodes[idx].UpdatedAt = now
 			node = state.EdgeNodes[idx]
 			return nil
 		}
@@ -132,6 +129,29 @@ func (s *Store) AuthenticateEdgeNode(secret string) (model.EdgeNode, error) {
 		return model.EdgeNode{}, err
 	}
 	return redactEdgeNode(node), nil
+}
+
+// RecordEdgeRouteSync records freshness only after route-bundle validation.
+// Authentication is intentionally read-only so failed sync attempts cannot
+// keep a stale edge in the serving inventory.
+func (s *Store) RecordEdgeRouteSync(edgeID string) error {
+	edgeID = normalizeEdgeID(edgeID)
+	if edgeID == "" {
+		return ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgRecordEdgeRouteSync(edgeID)
+	}
+	return s.withLockedState(true, func(state *model.State) error {
+		index := findEdgeNode(state, edgeID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		now := time.Now().UTC()
+		state.EdgeNodes[index].LastSeenAt = &now
+		state.EdgeNodes[index].UpdatedAt = now
+		return nil
+	})
 }
 
 func (s *Store) UpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, model.EdgeGroup, error) {

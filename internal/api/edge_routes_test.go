@@ -482,6 +482,45 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	}
 }
 
+func TestEdgeRoutesScopedSyncRecoversStaleNodeActivity(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	deployAppForEdgeRouteTest(t, storeState, app)
+	stale := time.Now().UTC().Add(-10 * time.Minute)
+	node, token, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID:                  "edge-stale-sync",
+		EdgeGroupID:         "edge-group-country-us",
+		Status:              model.EdgeHealthHealthy,
+		Healthy:             true,
+		RouteBundleVersion:  "routegen_stale",
+		CaddyRouteCount:     1,
+		CaddyAppliedVersion: "routegen_stale",
+		TLSStatus:           model.EdgeTLSStatusReady,
+		LastSeenAt:          &stale,
+		LastHeartbeatAt:     &stale,
+	})
+	if err != nil {
+		t.Fatalf("create stale scoped edge: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token, nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected stale scoped edge to bootstrap with status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeRouteBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	if bundle.EdgeID != node.ID || bundle.EdgeGroupID != node.EdgeGroupID || len(bundle.Routes) == 0 || bundle.Signature == "" {
+		t.Fatalf("scoped recovery bundle is incomplete: %+v", bundle)
+	}
+	updated, _, err := storeState.GetEdgeNode(node.ID)
+	if err != nil || updated.LastSeenAt == nil || !updated.LastSeenAt.After(stale) || updated.LastHeartbeatAt == nil || !updated.LastHeartbeatAt.Equal(stale) {
+		t.Fatalf("successful scoped sync did not refresh only route activity: node=%+v err=%v", updated, err)
+	}
+}
+
 func TestEdgeRoutePolicyUnhealthyPolicyGroupDoesNotDowngradeToRouteA(t *testing.T) {
 	t.Parallel()
 

@@ -116,14 +116,7 @@ func (s *Store) pgCreateEdgeNodeToken(node model.EdgeNode) (model.EdgeNode, stri
 func (s *Store) pgAuthenticateEdgeNode(secret string) (model.EdgeNode, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.EdgeNode{}, fmt.Errorf("begin authenticate edge node transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	node, err := scanEdgeNode(tx.QueryRowContext(ctx, `
+	node, err := scanEdgeNode(s.db.QueryRowContext(ctx, `
 SELECT id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, public_probe_last_error, public_probe_last_at,
 	region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
@@ -135,18 +128,27 @@ WHERE token_hash = $1 AND token_hash <> ''
 	if err != nil {
 		return model.EdgeNode{}, mapDBErr(err)
 	}
-	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `
-UPDATE fugue_edge_nodes SET last_seen_at = $2, updated_at = $2 WHERE id = $1
-`, node.ID, now); err != nil {
-		return model.EdgeNode{}, mapDBErr(err)
-	}
-	node.LastSeenAt = &now
-	node.UpdatedAt = now
-	if err := tx.Commit(); err != nil {
-		return model.EdgeNode{}, fmt.Errorf("commit authenticate edge node transaction: %w", err)
-	}
 	return redactEdgeNode(node), nil
+}
+
+func (s *Store) pgRecordEdgeRouteSync(edgeID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE fugue_edge_nodes SET last_seen_at = $2, updated_at = $2 WHERE id = $1
+`, edgeID, now)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check edge route sync activity update: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) pgUpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, model.EdgeGroup, error) {

@@ -72,14 +72,9 @@ func nodeHeartbeatFresh(lastHeartbeatAt, lastSeenAt *time.Time, now time.Time) b
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	// last_seen_at records authenticated API activity, including failed route
-	// sync attempts. It is not proof that the node is serving a valid bundle.
-	// Prefer the explicit heartbeat whenever it exists; only use last_seen_at
-	// for older workers that do not report a heartbeat at all.
-	seen := lastHeartbeatAt
-	if seen == nil || seen.IsZero() {
-		seen = lastSeenAt
-	}
+	// last_seen_at is advanced only after a node successfully receives a valid
+	// route bundle. Failed authentication or route fetches must never update it.
+	seen := latestNodeActivity(lastHeartbeatAt, lastSeenAt)
 	if seen == nil || seen.IsZero() {
 		return false
 	}
@@ -89,4 +84,19 @@ func nodeHeartbeatFresh(lastHeartbeatAt, lastSeenAt *time.Time, now time.Time) b
 		return true
 	}
 	return now.Sub(seenAt) <= platformNodeHeartbeatStaleAfter
+}
+
+func latestNodeActivity(values ...*time.Time) *time.Time {
+	var latest *time.Time
+	for _, value := range values {
+		if value == nil || value.IsZero() {
+			continue
+		}
+		candidate := value.UTC()
+		if latest == nil || candidate.After(*latest) {
+			copy := candidate
+			latest = &copy
+		}
+	}
+	return latest
 }

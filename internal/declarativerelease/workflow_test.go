@@ -113,6 +113,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	for _, required := range []string{
 		"\"${RELEASE_TOOL}\" prepare", "\"${RELEASE_TOOL}\" emit-delivery", "\"${RELEASE_TOOL}\" execute", "\"${RELEASE_TOOL}\" guardian-submit", "\"${RELEASE_TOOL}\" reconcile",
 		"Upload the durable prewrite plan before mutation", "Upload terminal component receipt",
+		"cache: false",
 		"continue-on-error: true", "if: steps.delivery.outputs.writer == 'direct' && steps.execute_direct.outcome == 'failure'",
 		"if: steps.delivery.outputs.writer == 'guardian'",
 	} {
