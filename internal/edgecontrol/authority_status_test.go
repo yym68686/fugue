@@ -1,6 +1,7 @@
 package edgecontrol
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,6 +9,33 @@ import (
 	"testing"
 	"time"
 )
+
+func TestAuthorityGroupReadyPreservesStrictInventoryCursorContract(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, _, _, authority := groupPromotionFixture(t, groupID, now)
+	handler, err := NewAuthorityStatusHandler(store, []string{groupID}, NewAuthorityRuntimeState(func() time.Time { return now }), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, authorityGroupReadyPath(groupID), nil)
+	request.Header.Set("Accept", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if bytes.Contains(recorder.Body.Bytes(), []byte(`"serving_healthy"`)) ||
+		bytes.Contains(recorder.Body.Bytes(), []byte(`"authority_sequence"`)) ||
+		bytes.Contains(recorder.Body.Bytes(), []byte(`"candidate_epoch"`)) {
+		t.Fatalf("inventory cursor response leaked newer fields: %s", recorder.Body.String())
+	}
+	decoder := json.NewDecoder(bytes.NewReader(recorder.Body.Bytes()))
+	decoder.DisallowUnknownFields()
+	var cursor authorityInventoryCursorStatus
+	if err := decoder.Decode(&cursor); err != nil || cursor.GroupID != groupID || cursor.InventorySequence == 0 ||
+		cursor.PublicationSequence != authority.LedgerHead.Sequence {
+		t.Fatalf("strict inventory cursor decode: cursor=%+v err=%v body=%s", cursor, err, recorder.Body.String())
+	}
+}
 
 func TestAuthorityStatusReadsEachGroupStateExactlyOnce(t *testing.T) {
 	t.Parallel()

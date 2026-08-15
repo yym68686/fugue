@@ -68,6 +68,29 @@ type AuthorityGroupStatus struct {
 	FailureCode                 string     `json:"failure_code,omitempty"`
 }
 
+// authorityInventoryCursorStatus preserves the original group readiness wire
+// shape used by deployed inventory producers that reject unknown JSON fields.
+// Rich control-plane readers omit Accept and continue to receive the complete
+// AuthorityGroupStatus projection.
+type authorityInventoryCursorStatus struct {
+	GroupID                     string     `json:"edge_group_id"`
+	Status                      string     `json:"status"`
+	Ready                       bool       `json:"ready"`
+	InventorySequence           uint64     `json:"inventory_sequence,omitempty"`
+	InventoryGeneration         string     `json:"inventory_generation,omitempty"`
+	InventoryProducerGeneration uint64     `json:"inventory_producer_generation,omitempty"`
+	InventoryProducerNodes      int        `json:"inventory_producer_nodes,omitempty"`
+	InventoryHeartbeatAt        *time.Time `json:"inventory_heartbeat_at,omitempty"`
+	PublicationSequence         uint64     `json:"publication_sequence,omitempty"`
+	PublicationDecision         string     `json:"publication_decision,omitempty"`
+	BundleGeneration            string     `json:"bundle_generation,omitempty"`
+	PublishedBundleDigest       string     `json:"published_bundle_digest,omitempty"`
+	RecoveryEpoch               uint64     `json:"recovery_epoch"`
+	BundleValidUntil            *time.Time `json:"bundle_valid_until,omitempty"`
+	LKGState                    string     `json:"lkg_state"`
+	FailureCode                 string     `json:"failure_code,omitempty"`
+}
+
 type AuthorityStatusSnapshot struct {
 	Schema                    string                 `json:"schema"`
 	Status                    string                 `json:"status"`
@@ -182,6 +205,10 @@ func (handler *authorityStatusHandler) ServeHTTP(w http.ResponseWriter, request 
 		if !group.Ready {
 			status = http.StatusServiceUnavailable
 		}
+		if strings.TrimSpace(request.Header.Get("Accept")) == "application/json" {
+			writeJSON(w, status, authorityInventoryCursorProjection(group))
+			return
+		}
 		writeJSON(w, status, group)
 		return
 	}
@@ -190,6 +217,18 @@ func (handler *authorityStatusHandler) ServeHTTP(w http.ResponseWriter, request 
 		return
 	}
 	writeJSON(w, http.StatusOK, handler.snapshot(request.Context()))
+}
+
+func authorityInventoryCursorProjection(group AuthorityGroupStatus) authorityInventoryCursorStatus {
+	return authorityInventoryCursorStatus{
+		GroupID: group.GroupID, Status: group.Status, Ready: group.Ready,
+		InventorySequence: group.InventorySequence, InventoryGeneration: group.InventoryGeneration,
+		InventoryProducerGeneration: group.InventoryProducerGeneration, InventoryProducerNodes: group.InventoryProducerNodes,
+		InventoryHeartbeatAt: group.InventoryHeartbeatAt, PublicationSequence: group.PublicationSequence,
+		PublicationDecision: group.PublicationDecision, BundleGeneration: group.BundleGeneration,
+		PublishedBundleDigest: group.PublishedBundleDigest, RecoveryEpoch: group.RecoveryEpoch,
+		BundleValidUntil: group.BundleValidUntil, LKGState: group.LKGState, FailureCode: group.FailureCode,
+	}
 }
 
 func (handler *authorityStatusHandler) snapshot(ctx context.Context) AuthorityStatusSnapshot {
