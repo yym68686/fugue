@@ -120,6 +120,32 @@ func TestEdgeRouteBundleInvariantRejectsUnavailableTrafficRoutes(t *testing.T) {
 	}
 }
 
+func TestEdgeRouteBundleInvariantAllowsBootstrapBeforeAnyTrafficState(t *testing.T) {
+	t.Parallel()
+
+	err := validateEdgeRouteBundleForPublish(model.EdgeRouteBundle{
+		Version:     "routegen_bootstrap",
+		Generation:  "routegen_bootstrap",
+		GeneratedAt: time.Now().UTC(),
+		Routes: []model.EdgeRouteBinding{{
+			Hostname:        "demo.fugue.pro",
+			EdgeGroupID:     "edge-group-country-us",
+			RoutePolicy:     model.EdgeRoutePolicyEnabled,
+			Status:          model.EdgeRouteStatusUnavailable,
+			RouteGeneration: "route_demo",
+		}},
+	}, edgeRouteBundleInvariantInput{
+		Apps: []model.App{
+			{ID: "app_demo", Route: &model.AppRoute{Hostname: "demo.fugue.pro"}},
+		},
+		HealthyEdgeGroups: map[string]bool{"edge-group-country-us": true},
+		Options:           edgeRouteBundleOptions{EdgeGroupID: "edge-group-country-us"},
+	})
+	if err != nil {
+		t.Fatalf("bootstrap edge without prior route state must receive a bundle: %v", err)
+	}
+}
+
 func TestEdgeRouteBundleInvariantRejectsAbnormalTrafficDrop(t *testing.T) {
 	t.Parallel()
 
