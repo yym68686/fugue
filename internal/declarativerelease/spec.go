@@ -692,7 +692,7 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 // BindIntents turns a path-only plan into the immutable server-side plan used
 // by build and deploy jobs. current contains intents from HeadSHA. previous
 // contains intents from BaseSHA after the first v2 production atom.
-func BindIntents(registry Registry, plan Plan, current, previous map[string]Intent, previousConfigSHA map[string]string) (Plan, error) {
+func BindIntents(registry Registry, plan Plan, current, previous map[string]Intent, previousConfigSHA map[string]string, superseded ...map[string]Intent) (Plan, error) {
 	if plan.PlanDigest != "" {
 		return Plan{}, errors.New("release plan is already bound")
 	}
@@ -729,9 +729,16 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			normalSuccessor := intent.ExpectedPreviousPresent && shaPattern.MatchString(priorConfigSHA) &&
 				intent.ExpectedPreviousConfigSHA == priorConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == priorConfigSHA && intent.ExpectedPreviousOCIRevision == priorConfigSHA
-			failedAtomSuccessor := intent.SupersedesFailedConfigSHA == priorConfigSHA &&
-				intent.ExpectedPreviousPresent && intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousManifestSHA &&
-				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousOCIRevision
+			var failedIntent Intent
+			failedIntentFound := false
+			if len(superseded) == 1 {
+				failedIntent, failedIntentFound = superseded[0][intent.SupersedesFailedConfigSHA]
+			}
+			immediateFailedAtom := intent.SupersedesFailedConfigSHA == priorConfigSHA && sameIntentPredecessor(intent, prior)
+			historicalFailedAtom := failedIntentFound && intent.SupersedesFailedConfigSHA != "" &&
+				failedIntent.Validate() == nil && failedIntent.Component == component.ID && failedIntent.Generation <= prior.Generation &&
+				intent.ExpectedPreviousPresent && sameIntentPredecessor(intent, prior) && sameIntentPredecessor(intent, failedIntent)
+			failedAtomSuccessor := immediateFailedAtom || historicalFailedAtom
 			retrySameLKG = intent.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
 				intent.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
@@ -788,6 +795,14 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 	digest := sha256.Sum256(unsigned)
 	plan.PlanDigest = fmt.Sprintf("sha256:%x", digest)
 	return plan, nil
+}
+
+func sameIntentPredecessor(left, right Intent) bool {
+	return left.ExpectedPreviousPresent == right.ExpectedPreviousPresent &&
+		left.ExpectedPreviousConfigSHA == right.ExpectedPreviousConfigSHA &&
+		left.ExpectedPreviousManifestSHA == right.ExpectedPreviousManifestSHA &&
+		left.ExpectedPreviousOCIRevision == right.ExpectedPreviousOCIRevision &&
+		left.ExpectedPreviousImageDigest == right.ExpectedPreviousImageDigest && left.Rollback == right.Rollback
 }
 
 func normalizeRepositoryPath(value string) (string, error) {

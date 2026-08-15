@@ -52,6 +52,25 @@ func TestAPIGuardianHandoffBindsProductionLKG(t *testing.T) {
 	}
 }
 
+func TestReleaseGuardianIntentBindsCurrentProductionLKG(t *testing.T) {
+	t.Chdir("../..")
+	file, err := os.Open("deploy/releases/guardian/intent.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, decodeErr := declarativerelease.DecodeIntent(file)
+	closeErr := file.Close()
+	if decodeErr != nil || closeErr != nil {
+		t.Fatalf("decode release Guardian intent: %v close: %v", decodeErr, closeErr)
+	}
+	const lkgSHA = "9b7a34beeeab8cebef52bc4c1eb726c1109e72df"
+	const lkgImage = "sha256:d044277d12d6c03275c7c625945c5027fe53fb0efded48b076b60936baf704d2"
+	if intent.Generation != 108 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
+		t.Fatalf("release Guardian intent is not bound to the production LKG: %+v", intent)
+	}
+}
+
 func TestMonitorStorePersistsImmutableRecordAndCASState(t *testing.T) {
 	files, terminal, release := monitorBundleFixture(t)
 	client := kubernetesfake.NewSimpleClientset()

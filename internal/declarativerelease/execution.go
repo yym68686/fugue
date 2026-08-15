@@ -258,6 +258,15 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		prewrite, lkgObserveErr = cluster.Observe(ctx, release, lkg, lkgObservationManifest)
 		lkgMatched := lkgObserveErr == nil && prewrite.Matches(lkg, release, true)
 		lkgHealthVerified := false
+		if release.ExpectedPreviousPresent && lkgObserveErr == nil && !lkgMatched &&
+			prewrite.MatchesSupersededFailedAtom(release) {
+			prewrite, err = prepareOwnedDegradedPredecessor(ctx, cluster, release, rendered.Forward,
+				errors.New("live workload is the exact superseded failed atom"))
+			if err == nil && !prewrite.MatchesSupersededFailedAtom(release) {
+				err = errors.New("superseded failed atom identity changed during validation")
+			}
+			degradedPredecessor = err == nil
+		}
 		if release.ExpectedPreviousPresent && errors.Is(lkgObserveErr, ErrDegradedPredecessorHealth) {
 			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
 			degradedPredecessor = err == nil
@@ -938,6 +947,19 @@ func (observation Observation) ValidateDegradedPredecessor(release PlanRelease) 
 		}
 	}
 	return observation.validateResourceCAS()
+}
+
+// MatchesSupersededFailedAtom identifies only the immutable workload produced
+// by the immediately preceding failed production atom. It does not authorize
+// recovery by itself; callers must still use the degraded-predecessor CAS and
+// ownership checks before mutating the workload.
+func (observation Observation) MatchesSupersededFailedAtom(release PlanRelease) bool {
+	failed := release.SupersedesFailedConfigSHA
+	imagePrefix := release.Artifact.Repository + "@"
+	return shaPattern.MatchString(failed) && observation.Present &&
+		observation.ConfigSHA == failed && observation.ManifestSHA == failed && observation.OCIRevision == failed &&
+		strings.HasPrefix(observation.ImageRef, imagePrefix) &&
+		digestPattern.MatchString(strings.TrimPrefix(observation.ImageRef, imagePrefix))
 }
 
 func (observation Observation) Validate(release PlanRelease) error {

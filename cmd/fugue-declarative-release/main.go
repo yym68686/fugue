@@ -196,6 +196,7 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	current := make(map[string]declarativerelease.Intent, len(plan.Releases))
 	previous := make(map[string]declarativerelease.Intent, len(plan.Releases))
+	superseded := make(map[string]declarativerelease.Intent, len(plan.Releases))
 	previousConfigSHA := make(map[string]string, len(plan.Releases))
 	for _, release := range plan.Releases {
 		intent, intentErr := loadIntent(release.IntentPath)
@@ -212,9 +213,21 @@ func runPlan(args []string, output io.Writer) error {
 			previousConfigSHA[release.ComponentID] = priorSHA
 		}
 		if intent.SupersedesFailedConfigSHA != "" {
-			if !found || intent.SupersedesFailedConfigSHA != priorSHA {
-				return fmt.Errorf("component %q superseded failed atom is not the immediately prior component intent", release.ComponentID)
+			if !found {
+				return fmt.Errorf("component %q superseded failed atom has no prior component intent", release.ComponentID)
 			}
+			if err := exec.Command("git", "merge-base", "--is-ancestor", intent.SupersedesFailedConfigSHA, baseSHA).Run(); err != nil {
+				return fmt.Errorf("component %q superseded failed atom is not in the trusted base ancestry", release.ComponentID)
+			}
+			failedIntent, failedErr := loadGitIntentAt(intent.SupersedesFailedConfigSHA, release.IntentPath)
+			if failedErr != nil {
+				return fmt.Errorf("load component %q superseded failed atom: %w", release.ComponentID, failedErr)
+			}
+			failedRaw, failedErr := exec.Command("git", "rev-list", "-1", intent.SupersedesFailedConfigSHA, "--", release.IntentPath).CombinedOutput()
+			if failedErr != nil || strings.TrimSpace(string(failedRaw)) != intent.SupersedesFailedConfigSHA {
+				return fmt.Errorf("component %q superseded failed atom is not an exact production intent atom", release.ComponentID)
+			}
+			superseded[intent.SupersedesFailedConfigSHA] = failedIntent
 			if err := exec.Command("git", "merge-base", "--is-ancestor", intent.ExpectedPreviousConfigSHA, baseSHA).Run(); err != nil {
 				return fmt.Errorf("component %q recovered predecessor is not in the trusted base ancestry", release.ComponentID)
 			}
@@ -224,7 +237,7 @@ func runPlan(args []string, output io.Writer) error {
 			}
 		}
 	}
-	bound, err := declarativerelease.BindIntents(registry, plan, current, previous, previousConfigSHA)
+	bound, err := declarativerelease.BindIntents(registry, plan, current, previous, previousConfigSHA, superseded)
 	if err != nil {
 		return err
 	}
@@ -1043,4 +1056,19 @@ func loadGitIntent(baseSHA, filename string) (declarativerelease.Intent, string,
 		return declarativerelease.Intent{}, "", false, errors.New("previous component intent commit is invalid")
 	}
 	return intent, commit, true, nil
+}
+
+func loadGitIntentAt(commitSHA, filename string) (declarativerelease.Intent, error) {
+	clean := filepath.ToSlash(filepath.Clean(filename))
+	if clean != filename || strings.HasPrefix(clean, "../") || filepath.IsAbs(clean) {
+		return declarativerelease.Intent{}, errors.New("intent path is invalid")
+	}
+	if len(commitSHA) != 40 || strings.Trim(commitSHA, "0123456789abcdef") != "" {
+		return declarativerelease.Intent{}, errors.New("intent commit is invalid")
+	}
+	content, err := exec.Command("git", "show", commitSHA+":"+clean).CombinedOutput()
+	if err != nil {
+		return declarativerelease.Intent{}, err
+	}
+	return declarativerelease.DecodeIntent(bytes.NewReader(content))
 }

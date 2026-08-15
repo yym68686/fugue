@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -843,8 +844,11 @@ func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 			"replicas": 2,
 			"selector": map[string]any{"matchLabels": map[string]any{"app": "api"}},
 			"template": map[string]any{
-				"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": strings.Repeat("1", 40)}},
-				"spec":     map[string]any{"containers": []any{map[string]any{"name": "api", "image": "ghcr.io/example/fugue-api@sha256:" + strings.Repeat("a", 64)}}},
+				"metadata": map[string]any{"annotations": map[string]any{
+					"fugue.pro/source-commit": strings.Repeat("1", 40),
+					"fugue.pro/oci-revision":  strings.Repeat("1", 40),
+				}},
+				"spec": map[string]any{"containers": []any{map[string]any{"name": "api", "image": "ghcr.io/example/fugue-api@sha256:" + strings.Repeat("a", 64)}}},
 			},
 		},
 		"status": map[string]any{"observedGeneration": 7, "updatedReplicas": 2, "readyReplicas": 2, "availableReplicas": 2, "unavailableReplicas": 0},
@@ -859,6 +863,7 @@ func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 	}
 	if observation.UID != "api-uid" || observation.ResourceVersion != "42" || observation.Desired != 2 || observation.Ready != 2 ||
 		observation.ImageID != "sha256:"+strings.Repeat("b", 64) || observation.ConfigSHA != strings.Repeat("1", 40) ||
+		observation.OCIRevision != strings.Repeat("1", 40) ||
 		len(observation.FieldManagers) != 1 || observation.FieldManagers[0] != "fugue-api-declarative" {
 		t.Fatalf("unexpected observation: %+v", observation)
 	}
@@ -1336,6 +1341,39 @@ func TestDeclaredArtifactImageIDsAcceptVerifiedPlatformManifest(t *testing.T) {
 	pods["items"].([]any)[0].(map[string]any)["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["imageID"] = "containerd://sha256:" + strings.Repeat("c", 64)
 	if err := verifyDeclaredArtifactImageIDs(mustJSON(t, pods), manifest, release, image, platformDigest); err == nil {
 		t.Fatal("unverified runtime digest was accepted")
+	}
+}
+
+func TestObservedFailedAtomImageIDsRequireVerifiedLiveWorkloadAndPods(t *testing.T) {
+	topDigest := "sha256:" + strings.Repeat("a", 64)
+	platformDigest := "sha256:" + strings.Repeat("b", 64)
+	image := "ghcr.io/example/fugue-api@" + topDigest
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api",
+	}}
+	workload := mustJSON(t, map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{"name": "fugue-fugue-api", "namespace": "fugue-system"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+			"containers": []any{map[string]any{"name": "api", "image": image}},
+		}}},
+	})
+	pods := map[string]any{"items": []any{map[string]any{
+		"metadata": map[string]any{"name": "api-1"},
+		"status": map[string]any{"containerStatuses": []any{map[string]any{
+			"name": "api", "imageID": "containerd://" + platformDigest,
+		}}},
+	}}}
+	if err := verifyObservedArtifactImageIDs(mustJSON(t, pods), workload, release, image, platformDigest); err != nil {
+		t.Fatalf("verified failed atom workload was rejected: %v", err)
+	}
+	pods["items"].([]any)[0].(map[string]any)["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["imageID"] = "containerd://sha256:" + strings.Repeat("c", 64)
+	if err := verifyObservedArtifactImageIDs(mustJSON(t, pods), workload, release, image, platformDigest); err == nil {
+		t.Fatal("failed atom Pod with an unverified imageID was accepted")
+	}
+	driftedWorkload := bytes.Replace(workload, []byte(image), []byte("ghcr.io/example/fugue-api@sha256:"+strings.Repeat("d", 64)), 1)
+	if err := verifyObservedArtifactImageIDs(mustJSON(t, pods), driftedWorkload, release, image, platformDigest); err == nil {
+		t.Fatal("failed atom workload with a different immutable image was accepted")
 	}
 }
 

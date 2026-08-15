@@ -174,8 +174,8 @@ jobs:
         with: {component: telemetry, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_api:
-    needs: [prepush, component-build, deploy_schema]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'api') }}
+    needs: [prepush, component-build, deploy_schema, deploy_release_guardian]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && (needs.deploy_release_guardian.result == 'success' || needs.deploy_release_guardian.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'api') }}
     timeout-minutes: 15
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production

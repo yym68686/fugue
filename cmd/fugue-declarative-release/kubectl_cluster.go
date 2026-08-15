@@ -1837,7 +1837,16 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 		return declarativerelease.Observation{}, err
 	}
 	verificationImage := partial.ImageRef
-	arguments := []string{"python3", cluster.verifier, "--image", verificationImage, "--platform", "linux/amd64", "--expected-revision", expectedOCI}
+	verificationRevision := expectedOCI
+	supersededFailedAtom := partial.MatchesSupersededFailedAtom(release)
+	if supersededFailedAtom {
+		// A failed atom may have reached the workload before Guardian could
+		// settle it as current. Verify that exact immutable image by its own
+		// reviewed revision so PrepareExecution can route it through the
+		// existing owned-degraded CAS recovery path.
+		verificationRevision = partial.OCIRevision
+	}
+	arguments := []string{"python3", cluster.verifier, "--image", verificationImage, "--platform", "linux/amd64", "--expected-revision", verificationRevision}
 	arguments = append(arguments, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1")
 	verificationRaw, err := cluster.run(ctx, nil, arguments[0], arguments[1:]...)
 	if err != nil {
@@ -1847,13 +1856,21 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if verification.Image != verificationImage || verification.OCIRevision != expectedOCI {
+	if verification.Image != verificationImage || verification.OCIRevision != verificationRevision {
 		return declarativerelease.Observation{}, errors.New("live registry identity mismatch")
 	}
-	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release, verification.Image, verification.ManifestDigest); err != nil {
-		return declarativerelease.Observation{}, err
+	var runtimeImageErr error
+	if supersededFailedAtom {
+		runtimeImageErr = verifyObservedArtifactImageIDs(podsRaw, workloadRaw, release, verification.Image, verification.ManifestDigest)
+	} else {
+		runtimeImageErr = verifyDeclaredArtifactImageIDs(podsRaw, manifest, release, verification.Image, verification.ManifestDigest)
 	}
-	partial.OCIRevision = expectedOCI
+	if runtimeImageErr != nil {
+		return declarativerelease.Observation{}, runtimeImageErr
+	}
+	if !supersededFailedAtom {
+		partial.OCIRevision = expectedOCI
+	}
 	resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -2301,7 +2318,6 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 	if !strings.Contains(verifiedImage, "@sha256:") || !strings.HasPrefix(platformManifestDigest, "sha256:") || len(platformManifestDigest) != len("sha256:")+64 {
 		return errors.New("verified artifact runtime identity is invalid")
 	}
-	topDigest := verifiedImage[strings.LastIndex(verifiedImage, "@")+1:]
 	identity := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	desired, err := declarativerelease.ResourceSetItem(manifest, identity)
 	if err != nil {
@@ -2334,6 +2350,50 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 		}
 		expected["container\x00"+release.Workload.Container] = image
 	}
+	return verifyArtifactPodImageIDs(podsRaw, expected, verifiedImage, platformManifestDigest)
+}
+
+func verifyObservedArtifactImageIDs(podsRaw, workloadRaw []byte, release declarativerelease.PlanRelease, verifiedImage, platformManifestDigest string) error {
+	if !strings.Contains(verifiedImage, "@sha256:") || !strings.HasPrefix(platformManifestDigest, "sha256:") || len(platformManifestDigest) != len("sha256:")+64 {
+		return errors.New("verified artifact runtime identity is invalid")
+	}
+	workload, err := decodeJSONObject(workloadRaw)
+	if err != nil {
+		return err
+	}
+	identity := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
+	expected := make(map[string]string)
+	for _, target := range release.ArtifactTargets {
+		if target.APIVersion != identity.APIVersion || target.Kind != identity.Kind || target.Namespace != identity.Namespace || target.Name != identity.Name {
+			continue
+		}
+		image, found, imageErr := declaredContainerImageOptional(workload, target.Container, target.ContainerType)
+		if imageErr != nil {
+			return imageErr
+		}
+		if !found {
+			continue
+		}
+		if image != verifiedImage {
+			return fmt.Errorf("observed workload container %s is not bound to the verified failed atom", target.Container)
+		}
+		expected[target.ContainerType+"\x00"+target.Container] = image
+	}
+	if len(expected) == 0 {
+		image, imageErr := declaredContainerImage(workload, release.Workload.Container, "container")
+		if imageErr != nil {
+			return imageErr
+		}
+		if image != verifiedImage {
+			return errors.New("observed workload primary image is not bound to the verified failed atom")
+		}
+		expected["container\x00"+release.Workload.Container] = image
+	}
+	return verifyArtifactPodImageIDs(podsRaw, expected, verifiedImage, platformManifestDigest)
+}
+
+func verifyArtifactPodImageIDs(podsRaw []byte, expected map[string]string, verifiedImage, platformManifestDigest string) error {
+	topDigest := verifiedImage[strings.LastIndex(verifiedImage, "@")+1:]
 	list, err := decodeJSONObject(podsRaw)
 	if err != nil {
 		return err
@@ -2769,6 +2829,7 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 		UID: stringValue(metadata["uid"]), ResourceVersion: stringValue(metadata["resourceVersion"]),
 		Generation: int64Value(metadata["generation"]), ObservedGeneration: int64Value(status["observedGeneration"]),
 		ImageRef: image, ConfigSHA: configSHA, ManifestSHA: manifestSHA,
+		OCIRevision:    templateAnnotations["fugue.pro/oci-revision"],
 		TemplateDigest: digestJSON(template), FieldManagers: managedFieldManagers(metadata),
 	}
 	switch release.Workload.Kind {

@@ -494,6 +494,74 @@ func TestPrepareFailedAtomSuccessorAdoptsOwnedManifestDriftFromHealthyLKG(t *tes
 	}
 }
 
+func TestPrepareFailedAtomSuccessorRecoversExactFailedWorkloadBeforeLKGObservation(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	failedSHA := strings.Repeat("f", 40)
+	plan.Releases[0].SupersedesFailedConfigSHA = failedSHA
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	failed := lkg
+	failed.ConfigSHA = failedSHA
+	failed.ManifestSHA = failedSHA
+	failed.OCIRevision = failedSHA
+	failed.ImageRef = plan.Releases[0].Artifact.Repository + "@" + testDigest
+	owned := casOnlyObservation(failed)
+	owned.ImageRef = failed.ImageRef
+	owned.ConfigSHA = failedSHA
+	owned.ManifestSHA = failedSHA
+	owned.OCIRevision = failedSHA
+	owned.TemplateDigest = failed.TemplateDigest
+	owned.FieldManagers = append([]string(nil), failed.FieldManagers...)
+	fake := &fakeCluster{
+		observations:    []Observation{failed},
+		degraded:        []Observation{owned, owned},
+		convergedErrors: []error{nil},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Now().UTC())
+	if err != nil || !prepared.DegradedPredecessor || prepared.AlreadyConverged || prepared.Prewrite.OCIRevision != failedSHA || fake.dryRuns != 2 {
+		t.Fatalf("exact failed workload was not recovered: prepared=%+v dry_runs=%d err=%v", prepared, fake.dryRuns, err)
+	}
+	if len(fake.healthTargets) != 0 || len(fake.converged) != 1 || len(fake.degraded) != 0 {
+		t.Fatalf("failed workload recovery used unexpected evidence: health=%+v converged=%d degraded_remaining=%d",
+			fake.healthTargets, len(fake.converged), len(fake.degraded))
+	}
+}
+
+func TestMatchesSupersededFailedAtomRejectsPartialIdentity(t *testing.T) {
+	failedSHA := strings.Repeat("f", 40)
+	release := PlanRelease{
+		SupersedesFailedConfigSHA: failedSHA,
+		Artifact:                  Artifact{Repository: "ghcr.io/example/fugue-api"},
+	}
+	exact := Observation{
+		Present: true, ConfigSHA: failedSHA, ManifestSHA: failedSHA, OCIRevision: failedSHA,
+		ImageRef: release.Artifact.Repository + "@" + testDigest,
+	}
+	if !exact.MatchesSupersededFailedAtom(release) {
+		t.Fatal("exact superseded failed atom was rejected")
+	}
+	for name, mutate := range map[string]func(*Observation){
+		"config":   func(value *Observation) { value.ConfigSHA = strings.Repeat("e", 40) },
+		"manifest": func(value *Observation) { value.ManifestSHA = strings.Repeat("e", 40) },
+		"revision": func(value *Observation) { value.OCIRevision = strings.Repeat("e", 40) },
+		"tag":      func(value *Observation) { value.ImageRef = "ghcr.io/example/fugue-api:latest" },
+		"repo":     func(value *Observation) { value.ImageRef = "ghcr.io/example/other@" + testDigest },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := exact
+			mutate(&candidate)
+			if candidate.MatchesSupersededFailedAtom(release) {
+				t.Fatal("partial failed atom identity was accepted")
+			}
+		})
+	}
+}
+
 func TestPrepareOrdinarySuccessorRejectsOwnedManifestDriftFromHealthyLKG(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	owned := casOnlyObservation(lkg)

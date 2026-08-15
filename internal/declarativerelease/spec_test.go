@@ -313,7 +313,7 @@ func TestBindIntentsAllowsExplicitFailedAtomSupersession(t *testing.T) {
 	failedSHA := "3333333333333333333333333333333333333333"
 	previous := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 2, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest, Rollback: "previous-git-lkg"}
 	current := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 3, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest, SupersedesFailedConfigSHA: failedSHA, Rollback: "previous-git-lkg"}
-	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": failedSHA})
+	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "4444444444444444444444444444444444444444"}, map[string]Intent{failedSHA: previous})
 	if err != nil {
 		t.Fatalf("explicit failed atom supersession was rejected: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestBindIntentsAllowsExplicitFailedAtomSupersession(t *testing.T) {
 		t.Fatalf("failed atom supersession was not bound exactly: %+v", got)
 	}
 	current.SupersedesFailedConfigSHA = testSHA2
-	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": failedSHA}); err == nil {
+	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "4444444444444444444444444444444444444444"}, map[string]Intent{failedSHA: previous}); err == nil {
 		t.Fatal("wrong failed atom identity was accepted")
 	}
 }
