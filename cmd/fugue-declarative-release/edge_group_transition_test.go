@@ -170,6 +170,31 @@ func TestParseEdgeGroupPodsRequiresOneReadyGroupBoundPodPerNode(t *testing.T) {
 	}
 }
 
+func TestParseEdgeGroupPodsSnapshotPreservesUnreadyImmutableIdentity(t *testing.T) {
+	pod := edgeGroupPodFixture("worker-b", "uid-b", "node-1", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64))
+	pod["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": "Ready", "status": "False"}}
+	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
+
+	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", false, ""); err == nil || !strings.Contains(err.Error(), "readiness") {
+		t.Fatalf("strict worker read accepted an unready active slot: %v", err)
+	}
+	got, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := got["node-1"]
+	if worker.Ready || worker.UID != "uid-b" || worker.ResourceVersion != "42" || worker.SourceCommit != strings.Repeat("1", 40) ||
+		worker.ImageRef != "ghcr.io/example/fugue-edge@sha256:"+strings.Repeat("a", 64) || worker.ImageID == "" {
+		t.Fatalf("unready worker identity was not preserved exactly: %+v", worker)
+	}
+
+	delete(pod["metadata"].(map[string]any), "uid")
+	raw, _ = json.Marshal(map[string]any{"items": []any{pod}})
+	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false, "", false); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("lenient snapshot accepted missing immutable identity: %v", err)
+	}
+}
+
 func TestParseEdgeGroupPodsAcceptsReadyLKGWithHistoricalRestarts(t *testing.T) {
 	pod := edgeGroupPodFixture("worker-1", "uid-1", "node-1", "edge-group-country-de", strings.Repeat("1", 40), strings.Repeat("a", 64))
 	pod["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["restartCount"] = 2

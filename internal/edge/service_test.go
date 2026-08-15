@@ -1778,6 +1778,36 @@ func TestExpiredLKGServingRequiresValidSignatureAndBoundedAge(t *testing.T) {
 	}
 }
 
+func TestLoadCacheKeepsRouteAvailableDuringProlongedControlPlaneOutage(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	key := "edge-route-signing-key-material"
+	now := time.Now().UTC()
+	bundle := testBundle("routegen_prolonged_outage")
+	bundle.GeneratedAt = now.Add(-10 * 24 * time.Hour)
+	bundle = bundleauth.SignEdgeRouteBundle(bundle, key, "control-plane", 24*time.Hour)
+	writeTestCache(t, cachePath, bundle, quoteETag(bundle.Version))
+	service := NewService(config.EdgeConfig{
+		APIURL: "https://api.example.invalid", EdgeToken: "edge-secret", CachePath: cachePath,
+		MaxStale: time.Hour, BundleSigningKey: key, BundleSigningKeyID: "control-plane",
+	}, log.New(ioDiscard{}, "", 0))
+	if err := service.LoadCache(); err != nil {
+		t.Fatalf("signed LKG should survive a prolonged outage: %v", err)
+	}
+	got, ok := service.Bundle()
+	if !ok || got.Version != bundle.Version {
+		t.Fatalf("expected the signed LKG to remain routable, ok=%v bundle=%+v", ok, got)
+	}
+	if status := service.Status(); status.Healthy || !status.MaxStaleExceeded || status.RouteCount != 1 {
+		t.Fatalf("prolonged-outage LKG must remain unhealthy but loaded: %+v", status)
+	}
+	route, ok, _ := service.routeForHost("demo.fugue.pro")
+	if !ok || route.UpstreamURL == "" {
+		t.Fatalf("expected loaded LKG route to be selectable, ok=%v route=%+v", ok, route)
+	}
+}
+
 func TestSyncErrorsAndLogsRedactEdgeToken(t *testing.T) {
 	t.Parallel()
 

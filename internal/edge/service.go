@@ -38,7 +38,11 @@ import (
 
 const cacheFileVersion = 2
 
-const edgeEmergencyLKGMaxAge = 7 * 24 * time.Hour
+// Keep a signed last-known-good route snapshot available through prolonged
+// control-plane or candidate-authority outages. The snapshot remains marked
+// unhealthy and never extends its signed validity; this bound only prevents a
+// worker restart from turning every public hostname into an edge 404.
+const edgeEmergencyLKGMaxAge = 30 * 24 * time.Hour
 
 const edgePeerFallbackHeader = "X-Fugue-Edge-Peer-Fallback"
 const edgeClientRemoteAddrHeader = "X-Fugue-Edge-Client-Remote-Addr"

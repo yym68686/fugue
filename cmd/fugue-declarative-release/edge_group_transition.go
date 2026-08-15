@@ -596,11 +596,11 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 	if err != nil {
 		return edgeGroupState{}, err
 	}
-	workerA, err := cluster.readEdgeDaemonSetPods(ctx, release, transition.WorkerAName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
+	workerA, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, transition.WorkerAName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID)
 	if err != nil {
 		return edgeGroupState{}, err
 	}
-	workerB, err := cluster.readEdgeDaemonSetPods(ctx, release, transition.WorkerBName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
+	workerB, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, transition.WorkerBName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID)
 	if err != nil {
 		return edgeGroupState{}, err
 	}
@@ -625,6 +625,23 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 		return edgeGroupState{}, errors.New("edge group active slot is invalid")
 	}
 	return edgeGroupState{Front: front, FrontHealth: frontHealth, WorkerA: workerA, WorkerB: workerB, ActiveSlot: activeSlot}, nil
+}
+
+// A worker can be the currently active slot while its readiness probe is
+// failing during an outage. Preserve its immutable pod identity so the
+// transition planner can recover that slot instead of failing before it can
+// publish the signed LKG candidate.
+func (cluster *kubectlCluster) readEdgeDaemonSetPodsForSnapshot(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string) (map[string]edgeGroupPod, error) {
+	pods, err := cluster.readEdgeDaemonSetPodsWithReadiness(ctx, release, name, container, expectedNodes, groupID, false, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, pod := range pods {
+		if !pod.Ready {
+			return pods, nil
+		}
+	}
+	return cluster.readEdgeDaemonSetPods(ctx, release, name, container, expectedNodes, groupID, true)
 }
 
 func (cluster *kubectlCluster) readEdgeDaemonSetPods(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string, includeWorkerHealth bool) (map[string]edgeGroupPod, error) {
