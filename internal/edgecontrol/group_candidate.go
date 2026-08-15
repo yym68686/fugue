@@ -434,7 +434,8 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 		if ok && !exactHistoricalPublication && candidate.AllowDegradedPrevious && !candidate.StandbyOnly && candidate.CurrentBundle != nil &&
 			candidate.Bundle.Generation == candidate.CurrentBundle.Generation {
 			_, currentPublication, currentRecovery, currentOK := parseGroupPublicationVersion(candidate.CurrentBundle.Version)
-			degradedRecoveryPublication = currentOK && servingAuthorityWithinCurrentRecovery(candidate.ServingAuthority.BundleVersion, currentPublication, currentRecovery)
+			degradedRecoveryPublication = currentOK && servingAuthorityWithinCurrentRecovery(candidate.ServingAuthority.BundleVersion,
+				candidate.CurrentBundle.Version, currentPublication, currentRecovery)
 		}
 		if !exactHistoricalPublication && !degradedRecoveryPublication {
 			return errors.New("edge-control group candidate serving publication is invalid")
