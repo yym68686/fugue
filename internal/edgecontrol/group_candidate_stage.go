@@ -302,10 +302,12 @@ func groupCandidateCASConflict(reason string) error {
 }
 
 func servingAuthorityWithinCurrentRecovery(version, currentVersion string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {
-	_, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
-	_, currentVersionPublication, currentVersionRecovery, currentOK := parseGroupPublicationVersion(currentVersion)
-	return ok && currentOK && currentVersionPublication == currentPublicationSequence && currentVersionRecovery == currentRecoveryEpoch &&
-		recoveryEpoch == currentRecoveryEpoch && (publicationSequence < currentPublicationSequence || version == currentVersion)
+	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
+	currentGeneration, currentVersionPublication, currentVersionRecovery, currentOK := parseGroupPublicationVersion(currentVersion)
+	return ok && currentOK && currentVersionPublication <= currentPublicationSequence && currentVersionRecovery == currentRecoveryEpoch &&
+		recoveryEpoch == currentRecoveryEpoch &&
+		(publicationSequence < currentPublicationSequence ||
+			(publicationSequence == currentPublicationSequence && generation == currentGeneration))
 }
 
 func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request GroupCandidateStageRequest, authority GroupAuthorityState) bool {

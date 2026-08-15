@@ -403,26 +403,28 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 func TestServingAuthorityWithinCurrentRecovery(t *testing.T) {
 	currentGeneration := "edgegroupbundle_" + strings.Repeat("a", 64)
 	currentVersion := groupPublicationVersion(currentGeneration, 12238, 142)
+	currentPublicationSequence := uint64(12244)
 	tests := []struct {
 		name    string
 		version string
 		want    bool
 	}{
-		{name: "exact current publication", version: currentVersion, want: true},
+		{name: "stored current bundle publication", version: currentVersion, want: true},
 		{name: "older publication", version: groupPublicationVersion("pruned-generation", 12237, 142), want: true},
-		{name: "same sequence different generation", version: groupPublicationVersion("other-generation", 12238, 142)},
-		{name: "future publication", version: groupPublicationVersion(currentGeneration, 12239, 142)},
+		{name: "exact republished current generation", version: groupPublicationVersion(currentGeneration, currentPublicationSequence, 142), want: true},
+		{name: "same sequence different generation", version: groupPublicationVersion("other-generation", currentPublicationSequence, 142)},
+		{name: "future publication", version: groupPublicationVersion(currentGeneration, currentPublicationSequence+1, 142)},
 		{name: "previous recovery", version: groupPublicationVersion(currentGeneration, 12237, 141)},
 		{name: "malformed", version: "not-a-publication"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := servingAuthorityWithinCurrentRecovery(test.version, currentVersion, 12238, 142); got != test.want {
+			if got := servingAuthorityWithinCurrentRecovery(test.version, currentVersion, currentPublicationSequence, 142); got != test.want {
 				t.Fatalf("servingAuthorityWithinCurrentRecovery(%q)=%t want %t", test.version, got, test.want)
 			}
 		})
 	}
-	if servingAuthorityWithinCurrentRecovery(currentVersion, groupPublicationVersion(currentGeneration, 12239, 142), 12238, 142) {
+	if servingAuthorityWithinCurrentRecovery(currentVersion, groupPublicationVersion(currentGeneration, currentPublicationSequence+1, 142), currentPublicationSequence, 142) {
 		t.Fatal("current version metadata mismatch was accepted")
 	}
 }
