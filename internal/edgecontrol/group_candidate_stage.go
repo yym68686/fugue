@@ -74,6 +74,7 @@ type GroupCandidateStageRequest struct {
 	ExpectedCurrentWorkerSlot     string                        `json:"expected_current_worker_slot"`
 	TargetWorkerSlot              string                        `json:"target_worker_slot"`
 	ServingAuthority              *GroupServingAuthorityWitness `json:"serving_authority,omitempty"`
+	AllowDegradedPrevious         bool                          `json:"allow_degraded_previous,omitempty"`
 	WorkerSourceSHA               string                        `json:"worker_source_sha"`
 	WorkerImageDigest             string                        `json:"worker_image_digest"`
 	ReleaseRecordDigest           string                        `json:"release_record_digest"`
@@ -97,6 +98,7 @@ type GroupCandidateStageReceipt struct {
 	CurrentPublishedBundleDigest string `json:"current_published_bundle_digest"`
 	CurrentPublicationSequence   uint64 `json:"current_publication_sequence"`
 	CurrentRecoveryEpoch         uint64 `json:"current_recovery_epoch"`
+	AllowDegradedPrevious        bool   `json:"allow_degraded_previous,omitempty"`
 	OrdinaryTrafficMutation      bool   `json:"ordinary_traffic_mutation"`
 }
 
@@ -264,7 +266,8 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 		ReleaseRecordDigest: request.ReleaseRecordDigest, WorkerSourceSHA: request.WorkerSourceSHA, WorkerImageDigest: request.WorkerImageDigest,
 		WorkerSlot: request.TargetWorkerSlot, PublishedAt: now, CurrentRecord: &currentRecord,
 		CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: request.ExpectedCurrentWorkerSlot,
-		ServingAuthority: request.ServingAuthority, Record: record, Bundle: signed}
+		ServingAuthority: request.ServingAuthority, AllowDegradedPrevious: request.AllowDegradedPrevious,
+		Record: record, Bundle: signed}
 	return publisher.Store.PutGroupStagedCurrentLKGCandidateCAS(ctx, request.GroupID, currentEpoch, request.ExpectedAuthoritySequence,
 		request.ExpectedPublicationSequence, request.ExpectedRecoveryEpoch, request.ExpectedPublishedBundleDigest, request.ServingAuthority, candidate)
 }
@@ -273,7 +276,8 @@ func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request Group
 	return candidateHasStagedWorkerIdentity(candidate) && candidateBindsCurrentAuthority(candidate, authority) &&
 		candidate.ReleaseRecordDigest == request.ReleaseRecordDigest && candidate.WorkerSourceSHA == request.WorkerSourceSHA &&
 		candidate.WorkerImageDigest == request.WorkerImageDigest && candidate.WorkerSlot == request.TargetWorkerSlot &&
-		candidate.CurrentWorkerSlot == request.ExpectedCurrentWorkerSlot && servingAuthorityWitnessesEqual(candidate.ServingAuthority, request.ServingAuthority)
+		candidate.CurrentWorkerSlot == request.ExpectedCurrentWorkerSlot && candidate.AllowDegradedPrevious == request.AllowDegradedPrevious &&
+		servingAuthorityWitnessesEqual(candidate.ServingAuthority, request.ServingAuthority)
 }
 
 func groupCandidateStageReceipt(candidate GroupCandidateBundle, request GroupCandidateStageRequest) GroupCandidateStageReceipt {
@@ -281,7 +285,8 @@ func groupCandidateStageReceipt(candidate GroupCandidateBundle, request GroupCan
 		CandidateEpoch: candidate.Epoch, CandidateRecordDigest: candidate.Record.RecordDigest, ReleaseRecordDigest: candidate.ReleaseRecordDigest,
 		WorkerSourceSHA: candidate.WorkerSourceSHA, WorkerImageDigest: candidate.WorkerImageDigest, WorkerSlot: candidate.WorkerSlot,
 		CurrentWorkerSlot: candidate.CurrentWorkerSlot, CurrentPublishedBundleDigest: candidate.CurrentRecord.BundleDigest,
-		CurrentPublicationSequence: uint64(candidate.CurrentRecord.Epoch), CurrentRecoveryEpoch: request.ExpectedRecoveryEpoch, OrdinaryTrafficMutation: false}
+		CurrentPublicationSequence: uint64(candidate.CurrentRecord.Epoch), CurrentRecoveryEpoch: request.ExpectedRecoveryEpoch,
+		AllowDegradedPrevious: candidate.AllowDegradedPrevious, OrdinaryTrafficMutation: false}
 }
 
 func validateGroupCandidateStageRequest(request GroupCandidateStageRequest) error {
@@ -298,6 +303,9 @@ func validateGroupCandidateStageRequest(request GroupCandidateStageRequest) erro
 	if request.ServingAuthority != nil && (request.ServingAuthority.Validate() != nil ||
 		request.ServingAuthority.WorkerSlot != request.ExpectedCurrentWorkerSlot) {
 		return errors.New("edge-control worker candidate serving authority is invalid")
+	}
+	if request.AllowDegradedPrevious && request.ServingAuthority == nil {
+		return errors.New("edge-control degraded previous authorization requires serving authority")
 	}
 	return nil
 }

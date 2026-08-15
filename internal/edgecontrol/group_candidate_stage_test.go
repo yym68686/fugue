@@ -145,10 +145,11 @@ func TestWorkerCandidateStageRejectsCrossGroupStaleCASAndInvalidSignature(t *tes
 		mutate func(*GroupCandidateStageRequest)
 		want   int
 	}{
-		"stale-candidate": {func(v *GroupCandidateStageRequest) { v.ExpectedCandidateEpoch++ }, http.StatusConflict},
-		"same-slot":       {func(v *GroupCandidateStageRequest) { v.TargetWorkerSlot = "a" }, http.StatusBadRequest},
-		"cross-group":     {func(v *GroupCandidateStageRequest) { v.GroupID = "edge-group-country-us" }, http.StatusForbidden},
-		"bad-signature":   {func(v *GroupCandidateStageRequest) {}, http.StatusUnauthorized},
+		"stale-candidate":                    {func(v *GroupCandidateStageRequest) { v.ExpectedCandidateEpoch++ }, http.StatusConflict},
+		"same-slot":                          {func(v *GroupCandidateStageRequest) { v.TargetWorkerSlot = "a" }, http.StatusBadRequest},
+		"degraded-without-serving-authority": {func(v *GroupCandidateStageRequest) { v.AllowDegradedPrevious = true }, http.StatusBadRequest},
+		"cross-group":                        {func(v *GroupCandidateStageRequest) { v.GroupID = "edge-group-country-us" }, http.StatusForbidden},
+		"bad-signature":                      {func(v *GroupCandidateStageRequest) {}, http.StatusUnauthorized},
 	} {
 		t.Run(name, func(t *testing.T) {
 			value := base
@@ -284,7 +285,8 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 		ExpectedAuthoritySequence: current.LedgerHead.Sequence, ExpectedPublicationSequence: current.Published.PublicationSequence,
 		ExpectedRecoveryEpoch: current.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: current.Published.Digest,
 		ExpectedCandidateEpoch: 0, ExpectedCurrentWorkerSlot: "b", TargetWorkerSlot: "a", ServingAuthority: witness,
-		WorkerSourceSHA: strings.Repeat("6", 40), WorkerImageDigest: "sha256:" + strings.Repeat("7", 64),
+		AllowDegradedPrevious: true,
+		WorkerSourceSHA:       strings.Repeat("6", 40), WorkerImageDigest: "sha256:" + strings.Repeat("7", 64),
 		ReleaseRecordDigest: "sha256:" + strings.Repeat("8", 64), IssuedAtUnix: stageAt.Unix(),
 		ExpiresAtUnix: stageAt.Add(time.Minute).Unix(), Nonce: strings.Repeat("s", 24), Reason: "stage from exact serving historical publication"}
 	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
@@ -297,7 +299,7 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 	staged, exists, err := store.ReadGroupCandidate(ctx, groupID)
 	if err != nil || !exists || staged.Bundle.Generation != servingAuthority.Published.Bundle.Generation ||
 		staged.Bundle.Generation == current.Published.Bundle.Generation || staged.CandidateLedgerSequence != servingAuthority.Published.CandidateLedgerSequence ||
-		!servingAuthorityWitnessesEqual(staged.ServingAuthority, witness) || staged.CurrentRecord == nil ||
+		!servingAuthorityWitnessesEqual(staged.ServingAuthority, witness) || !staged.AllowDegradedPrevious || staged.CurrentRecord == nil ||
 		staged.CurrentRecord.BundleDigest != current.Published.Digest || staged.CurrentBundle == nil ||
 		signedGroupBundleDigest(*staged.CurrentBundle) != current.Published.Digest {
 		t.Fatalf("historical serving candidate was not bound exactly: staged=%+v exists=%v err=%v", staged, exists, err)
@@ -305,6 +307,10 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 	authorityAfter, err := store.ReadGroupAuthority(ctx, groupID)
 	if err != nil || !reflect.DeepEqual(authorityAfter, authorityBefore) {
 		t.Fatalf("historical staging changed current Control authority: before=%+v after=%+v err=%v", authorityBefore, authorityAfter, err)
+	}
+	var receipt GroupCandidateStageReceipt
+	if json.Unmarshal(recorder.Body.Bytes(), &receipt) != nil || !receipt.AllowDegradedPrevious {
+		t.Fatalf("historical staging receipt omitted degraded previous authorization: %+v", receipt)
 	}
 
 	request.ExpectedCandidateEpoch = staged.Epoch
