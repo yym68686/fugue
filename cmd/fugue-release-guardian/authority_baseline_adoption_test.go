@@ -137,6 +137,7 @@ func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *t
 	}
 	oldRead, oldRoute := readAuthorityBaselineJSON, requestAuthorityBaselineRoute
 	defer func() { readAuthorityBaselineJSON, requestAuthorityBaselineRoute = oldRead, oldRoute }()
+	candidateBundleLoaded := true
 	readAuthorityBaselineJSON = func(_ context.Context, _ string, destination any) error {
 		switch value := destination.(type) {
 		case *baselineFrontHealth:
@@ -144,7 +145,7 @@ func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *t
 				WorkerSourceCommit: newSource, WorkerImageDigest: newImage, RouteAuthority: "edge-control"}
 		case *baselineWorkerHealth:
 			*value = baselineWorkerHealth{Healthy: true, EdgeGroupID: group, BundleVersion: "new.p11.r0", PublicationSequence: 11,
-				ServingGeneration: "new", CandidateBundleLoaded: true, CandidateRecordDigest: newRecord.RecordDigest, CandidateWorkerSlot: "b"}
+				ServingGeneration: "new", CandidateBundleLoaded: candidateBundleLoaded, CandidateRecordDigest: newRecord.RecordDigest, CandidateWorkerSlot: "b"}
 		}
 		return nil
 	}
@@ -169,6 +170,51 @@ func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *t
 	}
 	if next, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), object.Name, metav1.GetOptions{}); err != nil || next.Data["normalization-receipt.json"] == "" {
 		t.Fatalf("normalization receipt missing: %v", err)
+	}
+	candidateBundleLoaded = false
+	if done, err := adoptAuthorityBaselineOnce(context.Background(), store, client, "fugue-system", config, now.Add(time.Minute)); err != nil || !done {
+		t.Fatalf("established current without candidate flag done=%v err=%v", done, err)
+	}
+}
+
+func TestBaselineWorkerHealthMatchesOnlyExactEstablishedCurrent(t *testing.T) {
+	record := "sha256:" + strings.Repeat("a", 64)
+	source := strings.Repeat("b", 40)
+	image := "sha256:" + strings.Repeat("c", 64)
+	health := baselineWorkerHealth{Healthy: true, EdgeGroupID: "edge-pool-a", BundleVersion: "routes.p12.r3", PublicationSequence: 12,
+		ServingGeneration: "routes", CandidateRecordDigest: record, CandidateWorkerSlot: "b"}
+	front := baselineFrontHealth{Status: "ok", ActiveSlot: "b", Generation: 9, BundleGeneration: health.BundleVersion,
+		WorkerSourceCommit: source, WorkerImageDigest: image, RouteAuthority: "edge-control"}
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-pool-a", CurrentRecordDigest: record, CurrentWorkerSlot: releaseguardian.AuthoritySlotB,
+		CurrentFrontGeneration: front.Generation, CurrentBundleGeneration: health.BundleVersion,
+		CurrentWorkerSourceSHA: source, CurrentWorkerImageDigest: image, AuthorityEpoch: 8,
+		BaselineReceiptDigest: "sha256:" + strings.Repeat("d", 64)}
+	if !baselineWorkerHealthMatchesCurrent(health, front, releaseguardian.AuthoritySlotB, current) {
+		t.Fatal("exact established current was rejected")
+	}
+	for name, mutate := range map[string]func(*releaseguardian.CurrentAuthority){
+		"no baseline": func(value *releaseguardian.CurrentAuthority) { value.BaselineReceiptDigest = "" },
+		"wrong slot": func(value *releaseguardian.CurrentAuthority) {
+			value.CurrentWorkerSlot = releaseguardian.AuthoritySlotA
+		},
+		"wrong record": func(value *releaseguardian.CurrentAuthority) {
+			value.CurrentRecordDigest = "sha256:" + strings.Repeat("e", 64)
+		},
+		"wrong generation": func(value *releaseguardian.CurrentAuthority) { value.CurrentFrontGeneration++ },
+		"wrong bundle":     func(value *releaseguardian.CurrentAuthority) { value.CurrentBundleGeneration = "other.p12.r3" },
+		"wrong source":     func(value *releaseguardian.CurrentAuthority) { value.CurrentWorkerSourceSHA = strings.Repeat("f", 40) },
+		"wrong image": func(value *releaseguardian.CurrentAuthority) {
+			value.CurrentWorkerImageDigest = "sha256:" + strings.Repeat("1", 64)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := current
+			mutate(&changed)
+			if baselineWorkerHealthMatchesCurrent(health, front, releaseguardian.AuthoritySlotB, changed) {
+				t.Fatal("drifted established current was accepted")
+			}
+		})
 	}
 }
 

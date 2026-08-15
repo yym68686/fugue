@@ -167,6 +167,9 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	if err != nil && !currentMissing {
 		return false, fmt.Errorf("load current authority: %w", err)
 	}
+	if !currentMissing && candidateEnvelopeMatchesSettledCurrent(envelope, current) {
+		return false, nil
+	}
 	if envelope.ServingAuthority != nil {
 		if currentMissing || validateCandidateServingAuthorityBinding(envelope, current, currentUID, currentRV) != nil {
 			return false, errors.New("candidate serving authority does not match Guardian current authority")
@@ -245,6 +248,19 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		changed = true
 	}
 	return changed, nil
+}
+
+func candidateEnvelopeMatchesSettledCurrent(envelope candidateEnvelope, current releaseguardian.CurrentAuthority) bool {
+	witness := envelope.ServingAuthority
+	return !envelope.StandbyOnly && witness != nil &&
+		current.AuthorityEpoch > witness.AuthorityEpoch && current.AuthorityEpoch-witness.AuthorityEpoch == 1 &&
+		current.CurrentRecordDigest == envelope.Record.RecordDigest && current.CurrentWorkerSlot == envelope.WorkerSlot &&
+		current.CurrentFrontGeneration > witness.FrontGeneration && current.CurrentFrontGeneration-witness.FrontGeneration == 1 &&
+		current.CurrentBundleGeneration == envelope.Bundle.Version &&
+		current.CurrentWorkerSourceSHA == envelope.WorkerSourceSHA && current.CurrentWorkerImageDigest == envelope.WorkerImageDigest &&
+		current.PreviousRecordDigest == witness.CurrentRecordDigest && current.PreviousWorkerSlot == witness.WorkerSlot &&
+		current.PreviousFrontGeneration == witness.FrontGeneration && current.PreviousBundleGeneration == witness.BundleVersion &&
+		current.PreviousWorkerSourceSHA == witness.WorkerSourceSHA && current.PreviousWorkerImageDigest == witness.WorkerImageDigest
 }
 
 func candidateImportEdgeID(ctx context.Context, client kubernetes.Interface, groupID string) (string, error) {

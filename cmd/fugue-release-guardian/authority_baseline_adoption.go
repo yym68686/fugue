@@ -159,7 +159,7 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 	if activeSlot.Validate() != nil {
 		return false, errors.New("Front baseline has an invalid active authority")
 	}
-	workers, recordDigest, epoch, witnesses, err := observeBaselineWorkers(ctx, client, namespace, config, activeSlot, fronts)
+	workers, recordDigest, epoch, witnesses, err := observeBaselineWorkers(ctx, client, namespace, config, activeSlot, fronts, before)
 	if err != nil {
 		return false, err
 	}
@@ -249,7 +249,7 @@ func observeBaselineFronts(ctx context.Context, client kubernetes.Interface, nam
 	return result, nil
 }
 
-func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, namespace string, config authorityBaselineConfig, slot releaseguardian.AuthoritySlot, fronts map[string]observedBaselineFront) (map[string]corev1.Pod, string, int64, []releaseguardian.AuthorityBaselineNodeWitness, error) {
+func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, namespace string, config authorityBaselineConfig, slot releaseguardian.AuthoritySlot, fronts map[string]observedBaselineFront, current releaseguardian.CurrentAuthority) (map[string]corev1.Pod, string, int64, []releaseguardian.AuthorityBaselineNodeWitness, error) {
 	selector := labels.Set{"fugue.io/edge-group-id": config.GroupID, "fugue.io/edge-slot": string(slot)}.AsSelector().String()
 	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(config.ExpectedNodes + 1)})
 	if err != nil || list.Continue != "" || len(list.Items) != config.ExpectedNodes {
@@ -267,9 +267,10 @@ func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, na
 		}
 		var health baselineWorkerHealth
 		if err := readAuthorityBaselineJSON(ctx, "http://"+pod.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil || !health.Healthy ||
-			health.EdgeGroupID != config.GroupID || !health.CandidateBundleLoaded || health.CandidateWorkerSlot != string(slot) ||
+			health.EdgeGroupID != config.GroupID || health.CandidateWorkerSlot != string(slot) ||
 			!exactSHA256Digest(health.CandidateRecordDigest) || health.PublicationSequence == 0 ||
-			!strings.HasPrefix(health.BundleVersion, health.ServingGeneration+".p") || !strings.Contains(health.BundleVersion, ".p"+strconv.FormatUint(health.PublicationSequence, 10)+".") {
+			!strings.HasPrefix(health.BundleVersion, health.ServingGeneration+".p") || !strings.Contains(health.BundleVersion, ".p"+strconv.FormatUint(health.PublicationSequence, 10)+".") ||
+			(!health.CandidateBundleLoaded && !baselineWorkerHealthMatchesCurrent(health, front.health, slot, current)) {
 			return nil, "", 0, nil, errors.New("active worker baseline health is invalid")
 		}
 		source := strings.TrimSpace(pod.Annotations["fugue.pro/source-commit"])
@@ -289,6 +290,14 @@ func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, na
 			WorkerSourceSHA: source, WorkerImageDigest: image})
 	}
 	return workers, recordDigest, int64(epoch), witnesses, nil
+}
+
+func baselineWorkerHealthMatchesCurrent(health baselineWorkerHealth, front baselineFrontHealth, slot releaseguardian.AuthoritySlot, current releaseguardian.CurrentAuthority) bool {
+	return current.BaselineReceiptDigest != "" && current.CurrentWorkerSlot == slot &&
+		current.CurrentRecordDigest == health.CandidateRecordDigest &&
+		current.CurrentFrontGeneration == front.Generation &&
+		current.CurrentBundleGeneration == health.BundleVersion && current.CurrentBundleGeneration == front.BundleGeneration &&
+		current.CurrentWorkerSourceSHA == front.WorkerSourceCommit && current.CurrentWorkerImageDigest == front.WorkerImageDigest
 }
 
 func edgeRuntimeImageDigest(pod corev1.Pod) string {
