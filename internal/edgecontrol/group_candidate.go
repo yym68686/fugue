@@ -428,14 +428,14 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 			candidate.ServingAuthority.WorkerSlot == candidate.WorkerSlot {
 			return errors.New("edge-control group candidate serving authority witness is invalid")
 		}
-		generation, _, _, ok := parseGroupPublicationVersion(candidate.ServingAuthority.BundleVersion)
+		generation, publicationSequence, _, ok := parseGroupPublicationVersion(candidate.ServingAuthority.BundleVersion)
 		exactHistoricalPublication := ok && generation == candidate.Bundle.Generation
 		degradedRecoveryPublication := false
 		if ok && !exactHistoricalPublication && candidate.AllowDegradedPrevious && !candidate.StandbyOnly && candidate.CurrentBundle != nil &&
-			candidate.Bundle.Generation == candidate.CurrentBundle.Generation {
-			_, currentPublication, currentRecovery, currentOK := parseGroupPublicationVersion(candidate.CurrentBundle.Version)
-			degradedRecoveryPublication = currentOK && servingAuthorityWithinCurrentRecovery(candidate.ServingAuthority.BundleVersion,
-				candidate.CurrentBundle.Version, currentPublication, currentRecovery)
+			candidate.CurrentRecord != nil && candidate.CurrentRecord.Epoch > 0 && candidate.Bundle.Generation == candidate.CurrentBundle.Generation {
+			currentPublication := uint64(candidate.CurrentRecord.Epoch)
+			degradedRecoveryPublication = publicationSequence < currentPublication ||
+				(publicationSequence == currentPublication && generation == candidate.CurrentBundle.Generation)
 		}
 		if !exactHistoricalPublication && !degradedRecoveryPublication {
 			return errors.New("edge-control group candidate serving publication is invalid")

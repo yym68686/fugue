@@ -240,7 +240,7 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	} else {
 		servingVersion := groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch)
 		fallback := !snapshot.ServingExists && request.AllowDegradedPrevious && !request.StandbyOnly &&
-			servingAuthorityWithinCurrentRecovery(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Version,
+			servingAuthorityWithinCurrentRecovery(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
 				authority.Published.PublicationSequence, authority.Published.RecoveryEpoch)
 		if fallback {
 			head = currentHead
@@ -301,11 +301,9 @@ func groupCandidateCASConflict(reason string) error {
 	return fmt.Errorf("%s: %w", reason, ErrGroupAuthorityCandidateCAS)
 }
 
-func servingAuthorityWithinCurrentRecovery(version, currentVersion string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {
+func servingAuthorityWithinCurrentRecovery(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {
 	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
-	currentGeneration, currentVersionPublication, currentVersionRecovery, currentOK := parseGroupPublicationVersion(currentVersion)
-	return ok && currentOK && currentVersionPublication <= currentPublicationSequence && currentVersionRecovery == currentRecoveryEpoch &&
-		recoveryEpoch == currentRecoveryEpoch &&
+	return ok && strings.TrimSpace(currentGeneration) != "" && recoveryEpoch == currentRecoveryEpoch &&
 		(publicationSequence < currentPublicationSequence ||
 			(publicationSequence == currentPublicationSequence && generation == currentGeneration))
 }
