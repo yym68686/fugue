@@ -429,7 +429,14 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 			return errors.New("edge-control group candidate serving authority witness is invalid")
 		}
 		generation, _, _, ok := parseGroupPublicationVersion(candidate.ServingAuthority.BundleVersion)
-		if !ok || generation != candidate.Bundle.Generation {
+		exactHistoricalPublication := ok && generation == candidate.Bundle.Generation
+		degradedRecoveryPublication := false
+		if ok && !exactHistoricalPublication && candidate.AllowDegradedPrevious && !candidate.StandbyOnly && candidate.CurrentBundle != nil &&
+			candidate.Bundle.Generation == candidate.CurrentBundle.Generation {
+			_, currentPublication, currentRecovery, currentOK := parseGroupPublicationVersion(candidate.CurrentBundle.Version)
+			degradedRecoveryPublication = currentOK && servingAuthorityWithinCurrentRecovery(candidate.ServingAuthority.BundleVersion, currentPublication, currentRecovery)
+		}
+		if !exactHistoricalPublication && !degradedRecoveryPublication {
 			return errors.New("edge-control group candidate serving publication is invalid")
 		}
 	}

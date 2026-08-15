@@ -340,7 +340,7 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 	request.AllowDegradedPrevious = true
 	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
 		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
-		BundleVersion: groupPublicationVersion(current.Published.Bundle.Generation, current.Published.PublicationSequence+100, current.Published.RecoveryEpoch),
+		BundleVersion: groupPublicationVersion("pruned-serving-generation", current.Published.PublicationSequence-1, current.Published.RecoveryEpoch),
 		WorkerSlot:    witness.WorkerSlot, WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest}
 	request.Nonce = strings.Repeat("v", 24)
 	request.Signature = ""
@@ -376,7 +376,7 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 	request.StandbyOnly = false
 	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
 		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
-		BundleVersion: groupPublicationVersion(servingAuthority.Published.Bundle.Generation, servingAuthority.Published.PublicationSequence+100, servingAuthority.Published.RecoveryEpoch),
+		BundleVersion: groupPublicationVersion("future-serving-generation", current.Published.PublicationSequence+1, current.Published.RecoveryEpoch),
 		WorkerSlot:    witness.WorkerSlot, WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest}
 	request.Nonce = strings.Repeat("t", 24)
 	request.Signature = ""
@@ -385,7 +385,18 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 	}
 	rejected := postGroupCandidateStage(t, handler, request)
 	if rejected.Code != http.StatusConflict {
-		t.Fatalf("unknown serving publication status=%d body=%s", rejected.Code, rejected.Body.String())
+		t.Fatalf("future serving publication status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+
+	request.ServingAuthority.BundleVersion = groupPublicationVersion("previous-recovery-generation", current.Published.PublicationSequence-1, current.Published.RecoveryEpoch-1)
+	request.Nonce = strings.Repeat("r", 24)
+	request.Signature = ""
+	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	crossRecoveryRejected := postGroupCandidateStage(t, handler, request)
+	if crossRecoveryRejected.Code != http.StatusConflict {
+		t.Fatalf("cross-recovery serving publication status=%d body=%s", crossRecoveryRejected.Code, crossRecoveryRejected.Body.String())
 	}
 }
 

@@ -240,16 +240,17 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	} else {
 		servingVersion := groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch)
 		fallback := !snapshot.ServingExists && request.AllowDegradedPrevious && !request.StandbyOnly &&
-			servingAuthorityGenerationMatches(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation)
+			servingAuthorityWithinCurrentRecovery(request.ServingAuthority.BundleVersion, authority.Published.PublicationSequence, authority.Published.RecoveryEpoch)
 		if fallback {
 			head = currentHead
 		} else if !snapshot.ServingExists || snapshot.ServingCandidate.Bundle == nil || snapshot.ServingCandidate.BundleArchived ||
 			snapshot.ServingCandidate.Status != GroupShadowStatusCompiled || snapshot.ServingCandidate.ActiveSlot != request.ExpectedCurrentWorkerSlot ||
 			request.ServingAuthority.WorkerSlot != request.ExpectedCurrentWorkerSlot || servingVersion != request.ServingAuthority.BundleVersion {
-			return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("serving_authority_history_mismatch exists=%t bundle_present=%t archived=%t status=%s expected_slot=%s candidate_slot=%s witness_slot=%s expected_version=%s actual_version=%s",
+			_, witnessPublication, witnessRecovery, witnessParsed := parseGroupPublicationVersion(request.ServingAuthority.BundleVersion)
+			return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("serving_authority_history_mismatch exists=%t bundle_present=%t archived=%t status=%s expected_slot=%s candidate_slot=%s witness_slot=%s expected_version=%s actual_version=%s witness_parsed=%t witness_publication=%d current_publication=%d witness_recovery=%d current_recovery=%d",
 				snapshot.ServingExists, snapshot.ServingCandidate.Bundle != nil, snapshot.ServingCandidate.BundleArchived, snapshot.ServingCandidate.Status,
 				request.ExpectedCurrentWorkerSlot, snapshot.ServingCandidate.ActiveSlot, request.ServingAuthority.WorkerSlot, request.ServingAuthority.BundleVersion,
-				servingVersion))
+				servingVersion, witnessParsed, witnessPublication, authority.Published.PublicationSequence, witnessRecovery, authority.Published.RecoveryEpoch))
 		} else {
 			head = snapshot.ServingCandidate
 		}
@@ -299,9 +300,9 @@ func groupCandidateCASConflict(reason string) error {
 	return fmt.Errorf("%s: %w", reason, ErrGroupAuthorityCandidateCAS)
 }
 
-func servingAuthorityGenerationMatches(version, generation string) bool {
-	parsedGeneration, _, _, ok := parseGroupPublicationVersion(version)
-	return ok && parsedGeneration == generation
+func servingAuthorityWithinCurrentRecovery(version string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {
+	_, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
+	return ok && publicationSequence < currentPublicationSequence && recoveryEpoch == currentRecoveryEpoch
 }
 
 func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request GroupCandidateStageRequest, authority GroupAuthorityState) bool {
