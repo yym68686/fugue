@@ -7,15 +7,15 @@ import (
 	"fugue/internal/model"
 )
 
-func TestNodeHeartbeatFreshUsesNewestActivityEvidence(t *testing.T) {
+func TestNodeHeartbeatFreshDoesNotTrustRecentAuthenticatedActivityOverStaleHeartbeat(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, time.August, 14, 23, 5, 0, 0, time.UTC)
 	staleHeartbeat := now.Add(-7 * 24 * time.Hour)
 	recentRouteSync := now.Add(-30 * time.Second)
 
-	if !nodeHeartbeatFresh(&staleHeartbeat, &recentRouteSync, now) {
-		t.Fatal("recent last_seen_at must keep a node fresh when heartbeat timestamp is stale")
+	if nodeHeartbeatFresh(&staleHeartbeat, &recentRouteSync, now) {
+		t.Fatal("recent last_seen_at from a failed route sync must not keep a stale heartbeat fresh")
 	}
 }
 
@@ -30,7 +30,7 @@ func TestNodeHeartbeatFreshFallsBackToHeartbeatWhenLastSeenMissing(t *testing.T)
 	}
 }
 
-func TestEdgeNodeRouteServingCapableUsesRecentAuthenticatedActivity(t *testing.T) {
+func TestEdgeNodeRouteServingCapableRequiresFreshHeartbeatWhenPresent(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, time.August, 14, 23, 5, 0, 0, time.UTC)
@@ -47,18 +47,7 @@ func TestEdgeNodeRouteServingCapableUsesRecentAuthenticatedActivity(t *testing.T
 		RouteBundleVersion: "routegen_current",
 	}
 
-	if !edgeNodeRouteServingCapable(node, now) {
-		t.Fatal("recent authenticated route sync must keep an otherwise healthy edge route-capable")
-	}
-}
-
-func TestLatestNodeActivityIgnoresZeroValues(t *testing.T) {
-	t.Parallel()
-
-	zero := time.Time{}
-	recent := time.Date(2026, time.August, 14, 23, 4, 0, 0, time.UTC)
-	got := latestNodeActivity(&zero, &recent)
-	if got == nil || !got.Equal(recent) {
-		t.Fatalf("expected latest non-zero activity %s, got %v", recent, got)
+	if edgeNodeRouteServingCapable(node, now) {
+		t.Fatal("recent authenticated route sync must not make an edge with a stale heartbeat route-capable")
 	}
 }
