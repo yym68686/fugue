@@ -42,9 +42,14 @@ const (
 	edgeCandidateStagePath      = "/v1/authority/group-worker-candidates"
 	edgeCandidateStageSchema    = "edge-control-group-worker-candidate-request/v1"
 	edgeCandidateReceiptSchema  = "edge-control-group-worker-candidate-receipt/v1"
+	edgeCandidateStageAttempts  = 4
+	edgeCandidateStageRetryBase = 200 * time.Millisecond
 )
 
-var edgeServingAuthorityTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,255}$`)
+var (
+	edgeServingAuthorityTokenPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,255}$`)
+	errEdgeCandidateStageSequenceConflict = errors.New("stage edge Worker candidate: HTTP 409 (sequence_conflict)")
+)
 
 type edgeServingAuthorityWitness struct {
 	CurrentRecordDigest string `json:"current_record_digest"`
@@ -398,6 +403,36 @@ func (runtime *kubectlEdgeGroupRuntime) StageStandby(ctx context.Context, before
 }
 
 func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool) (edgeCandidateStageReceipt, error) {
+	var lastErr error
+	for attempt := 0; attempt < edgeCandidateStageAttempts; attempt++ {
+		receipt, err := runtime.stageCandidateOnce(ctx, before, inactiveSlot, target, standbyOnly)
+		if err == nil {
+			return receipt, nil
+		}
+		if !errors.Is(err, errEdgeCandidateStageSequenceConflict) {
+			return edgeCandidateStageReceipt{}, err
+		}
+		lastErr = err
+		if attempt+1 == edgeCandidateStageAttempts {
+			break
+		}
+		timer := time.NewTimer(edgeCandidateStageRetryBase * time.Duration(attempt+1))
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return edgeCandidateStageReceipt{}, errors.Join(lastErr, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return edgeCandidateStageReceipt{}, lastErr
+}
+
+func (runtime *kubectlEdgeGroupRuntime) stageCandidateOnce(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool) (edgeCandidateStageReceipt, error) {
 	status, err := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
 	if err != nil {
 		return edgeCandidateStageReceipt{}, err
@@ -576,7 +611,11 @@ func postEdgeCandidateStage(ctx context.Context, endpoint string, value edgeCand
 		if readErr == nil {
 			var failure edgeControlError
 			if decodeEdgeCandidateStageResponse(rawResponse, &failure) == nil && failure.Schema == "edge-control-error/v1" && validEdgeControlErrorCode(failure.Error) {
-				lastErr = fmt.Errorf("stage edge Worker candidate: HTTP %d (%s)", response.StatusCode, failure.Error)
+				if response.StatusCode == http.StatusConflict && failure.Error == "sequence_conflict" {
+					lastErr = errEdgeCandidateStageSequenceConflict
+				} else {
+					lastErr = fmt.Errorf("stage edge Worker candidate: HTTP %d (%s)", response.StatusCode, failure.Error)
+				}
 			}
 		}
 		if response.StatusCode != http.StatusServiceUnavailable {

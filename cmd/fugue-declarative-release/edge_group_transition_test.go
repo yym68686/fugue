@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +17,8 @@ import (
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgecontrol"
 	"fugue/internal/releaseguardian"
+	"k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
 func TestReadEdgeCandidateStageStatusAcceptsFullAuthorityResponse(t *testing.T) {
@@ -36,8 +42,66 @@ func TestPostEdgeCandidateStageReportsTrustedControlErrorCode(t *testing.T) {
 	}))
 	defer server.Close()
 	_, err := postEdgeCandidateStage(context.Background(), server.URL, edgeCandidateStageRequest{})
-	if err == nil || err.Error() != "stage edge Worker candidate: HTTP 409 (sequence_conflict)" {
+	if !errors.Is(err, errEdgeCandidateStageSequenceConflict) || err.Error() != "stage edge Worker candidate: HTTP 409 (sequence_conflict)" {
 		t.Fatalf("trusted edge-control error code was lost: %v", err)
+	}
+}
+
+func TestStageCandidateRefreshesCASStateAfterSequenceConflict(t *testing.T) {
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("7", 64))
+	now := time.Now().UTC()
+	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
+	keyring := edgeCandidateKeyring{Schema: "edge-control-group-recovery-keyring/v1", Generation: 1,
+		GroupID: "edge-group-country-de", Keys: []edgeCandidateKey{{KeyID: "key-1",
+			Secret:        base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("s", 32))),
+			NotBeforeUnix: now.Add(-time.Hour).Unix(), NotAfterUnix: now.Add(time.Hour).Unix()}}}
+	rawKeyring, _ := json.Marshal(keyring)
+	if err := os.WriteFile(keyringPath, rawKeyring, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	statusReads := 0
+	postedEpochs := make([]uint64, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodGet {
+			statusReads++
+			_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":10,"candidate_epoch":%d,"published_bundle_digest":"sha256:%s","recovery_epoch":2}`,
+				6+statusReads, strings.Repeat("4", 64))
+			return
+		}
+		var staged edgeCandidateStageRequest
+		if err := json.NewDecoder(request.Body).Decode(&staged); err != nil {
+			t.Errorf("decode staged request: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		postedEpochs = append(postedEpochs, staged.ExpectedCandidateEpoch)
+		if len(postedEpochs) == 1 {
+			writer.WriteHeader(http.StatusConflict)
+			_, _ = writer.Write([]byte(`{"schema":"edge-control-error/v1","error":"sequence_conflict"}`))
+			return
+		}
+		receipt := edgeCandidateStageReceipt{Schema: edgeCandidateReceiptSchema, GroupID: staged.GroupID,
+			CandidateEpoch: staged.ExpectedCandidateEpoch + 1, CandidateRecordDigest: "sha256:" + strings.Repeat("8", 64),
+			ReleaseRecordDigest: staged.ReleaseRecordDigest, WorkerSourceSHA: staged.WorkerSourceSHA,
+			WorkerImageDigest: staged.WorkerImageDigest, WorkerSlot: staged.TargetWorkerSlot,
+			CurrentWorkerSlot: staged.ExpectedCurrentWorkerSlot, CurrentPublishedBundleDigest: staged.ExpectedPublishedBundleDigest,
+			CurrentPublicationSequence: staged.ExpectedPublicationSequence, CurrentRecoveryEpoch: staged.ExpectedRecoveryEpoch,
+			AllowDegradedPrevious: staged.AllowDegradedPrevious, StandbyOnly: staged.StandbyOnly}
+		_ = json.NewEncoder(writer).Encode(receipt)
+	}))
+	defer server.Close()
+
+	runtime := kubectlEdgeGroupRuntime{client: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		release: declarativerelease.PlanRelease{Workload: declarativerelease.Workload{Namespace: "fugue-system"}},
+		transition: declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-de",
+			CandidateStageURL: server.URL + edgeCandidateStagePath, CandidateKeyring: keyringPath}}
+	target := declarativerelease.TargetIdentity{ConfigSHA: strings.Repeat("5", 40),
+		ImageRef: "ghcr.io/yym68686/fugue-edge@sha256:" + strings.Repeat("6", 64)}
+	receipt, err := runtime.StageCandidate(context.Background(), edgeGroupState{ActiveSlot: "a"}, "b", target)
+	if err != nil || receipt.WorkerSlot != "b" || statusReads != 2 || len(postedEpochs) != 2 || postedEpochs[0] != 7 || postedEpochs[1] != 8 {
+		t.Fatalf("candidate CAS retry did not refresh state: receipt=%+v reads=%d epochs=%v err=%v", receipt, statusReads, postedEpochs, err)
 	}
 }
 
