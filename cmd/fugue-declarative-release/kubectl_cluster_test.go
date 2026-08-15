@@ -648,57 +648,219 @@ func TestEmergencyOwnershipCleanupRemovesOnlyExactKubectlSetCPUEntry(t *testing.
 	}
 }
 
-func TestLegacyProbeOwnershipPatchRemovesOnlyConflictingPathLeaves(t *testing.T) {
+func TestLegacyProbeValuePatchMovesOnlyExactConflictingPaths(t *testing.T) {
 	liveness := "/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path"
 	readiness := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"
 	image := "/spec/template/spec/containers[name=edge]/image"
 	port := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/port"
+	desired := map[string]any{
+		"metadata": map[string]any{"uid": "worker-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "edge", "image": "target",
+			"livenessProbe":  map[string]any{"httpGet": map[string]any{"path": "/livez", "port": "health"}},
+			"readinessProbe": map[string]any{"httpGet": map[string]any{"path": "/readyz", "port": "health"}},
+		}}}}},
+	}
 	entry := map[string]any{
 		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
 		"fieldsV1": managedFieldsTree(t, []string{liveness, readiness, image, port}),
 	}
-	live := map[string]any{"metadata": map[string]any{
-		"uid": "worker-uid", "resourceVersion": "42",
-		"managedFields": []any{
-			map[string]any{"manager": "declarative", "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
-			entry,
-		},
-	}}
+	live := deepCopyJSONMap(t, desired)
+	liveMetadata := mapField(live, "metadata")
+	liveMetadata["managedFields"] = []any{
+		map[string]any{"manager": "declarative", "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
+		entry,
+	}
+	edge := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	mapField(mapField(edge, "livenessProbe"), "httpGet")["path"] = "/healthz"
+	mapField(mapField(edge, "readinessProbe"), "httpGet")["path"] = "/healthz"
 	allowed := []string{liveness, readiness, image}
 	applyErr := errors.New(strings.Join([]string{
 		"Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:",
 		"- " + ssaFieldForPointer(liveness),
 		"- " + ssaFieldForPointer(readiness),
 	}, "\n"))
-	if err := validateEmergencyOwnershipConflictEvidence(map[string]any{"metadata": map[string]any{
-		"uid": "worker-uid", "resourceVersion": "42",
-	}}, live, allowed, applyErr); err != nil {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
 		t.Fatalf("exact legacy probe conflicts were rejected: %v", err)
 	}
-	patch, found, err := nextLegacyProbeOwnershipPatch(live, allowed, applyErr)
+	patch, found, err := nextLegacyProbeValuePatch(desired, live, allowed, applyErr)
 	if err != nil || !found {
-		t.Fatalf("legacy probe ownership patch was not produced: found=%v err=%v", found, err)
+		t.Fatalf("legacy probe value patch was not produced: patch=%v found=%v err=%v", patch, found, err)
 	}
-	removed := make(map[string]bool)
+	if len(patch) != 7 || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" ||
+		patch[2]["path"] != "/spec/template/spec/containers/0/name" {
+		t.Fatalf("legacy probe value patch lacks exact CAS tests: %v", patch)
+	}
+	replacements := make(map[string]any)
 	for _, operation := range patch {
-		if operation["op"] == "remove" {
-			removed[fmt.Sprint(operation["path"])] = true
+		path := fmt.Sprint(operation["path"])
+		if strings.Contains(path, "/managedFields/") {
+			t.Fatalf("legacy probe patch mutates managedFields internals: %v", patch)
+		}
+		if operation["op"] == "replace" {
+			replacements[path] = operation["value"]
 		}
 	}
-	for _, pointer := range []string{liveness, readiness} {
-		path, pathErr := managedFieldsJSONPatchPath(1, pointer)
-		if pathErr != nil || !removed[path] {
-			t.Fatalf("patch does not remove exact probe path %s: path=%s err=%v patch=%v", pointer, path, pathErr, patch)
-		}
+	if replacements["/spec/template/spec/containers/0/livenessProbe/httpGet/path"] != "/livez" ||
+		replacements["/spec/template/spec/containers/0/readinessProbe/httpGet/path"] != "/readyz" {
+		t.Fatalf("legacy probe patch moved unexpected values: %v", patch)
 	}
-	if removed["/metadata/managedFields/1"] {
-		t.Fatalf("legacy managedFields entry would be removed wholesale: %v", patch)
+	mixed := errors.New(strings.Join([]string{
+		"Apply failed with 2 conflicts:",
+		`conflict with "helm" using apps/v1: ` + ssaFieldForPointer(liveness),
+		`conflict with "kubectl" using apps/v1: ` + ssaFieldForPointer(image),
+	}, "\n"))
+	if _, _, err := nextLegacyProbeValuePatch(desired, live, allowed, mixed); err == nil || !strings.Contains(err.Error(), "cannot be mixed") {
+		t.Fatalf("mixed legacy and emergency ownership transfer was accepted: %v", err)
 	}
-	for _, pointer := range []string{image, port} {
-		path, pathErr := managedFieldsJSONPatchPath(1, pointer)
-		if pathErr == nil && removed[path] {
-			t.Fatalf("patch expands beyond conflicting probe path %s: %v", pointer, patch)
-		}
+}
+
+func TestLegacyProbeOwnershipConvergenceUsesCASBoundValueMove(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	livePath := filepath.Join(directory, "live.json")
+	bridgedPath := filepath.Join(directory, "bridged.json")
+	cleanPath := filepath.Join(directory, "clean.json")
+	bridgedMarker := filepath.Join(directory, "bridged")
+	cleanedMarker := filepath.Join(directory, "cleaned")
+	applyInputPath := filepath.Join(directory, "apply-input.json")
+	argumentsPath := filepath.Join(directory, "apply-arguments.log")
+	patchesPath := filepath.Join(directory, "patches.log")
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a",
+		Container: "edge", FieldManager: "fugue-edge-worker-de-declarative",
+	}}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a"}
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": "worker-a", "namespace": "fugue-system", "uid": "worker-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("a", 64),
+			"livenessProbe":  map[string]any{"httpGet": map[string]any{"path": "/livez", "port": "health"}},
+			"readinessProbe": map[string]any{"httpGet": map[string]any{"path": "/readyz", "port": "health"}},
+		}}}}},
+	}
+	liveness := "/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path"
+	readiness := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"
+	allowed := emergencyOwnershipPointers(release, identity, desired)
+	live := deepCopyJSONMap(t, desired)
+	liveMetadata := mapField(live, "metadata")
+	liveMetadata["generation"] = json.Number("7")
+	containers := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])
+	edge := containers[0].(map[string]any)
+	mapField(mapField(edge, "livenessProbe"), "httpGet")["path"] = "/healthz"
+	mapField(mapField(edge, "readinessProbe"), "httpGet")["path"] = "/healthz"
+	liveMetadata["managedFields"] = []any{
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
+		map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
+	}
+	bridged := deepCopyJSONMap(t, desired)
+	bridgedMetadata := mapField(bridged, "metadata")
+	bridgedMetadata["resourceVersion"] = "43"
+	bridgedMetadata["generation"] = json.Number("8")
+	bridgedMetadata["managedFields"] = []any{
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
+		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
+	}
+	clean := deepCopyJSONMap(t, bridged)
+	cleanMetadata := mapField(clean, "metadata")
+	cleanMetadata["resourceVersion"] = "44"
+	cleanMetadata["managedFields"] = []any{
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
+	}
+	if err := os.WriteFile(livePath, mustJSON(t, live), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cleanPath, mustJSON(t, clean), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bridgedPath, mustJSON(t, bridged), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	program := `#!/bin/sh
+set -eu
+case "$1" in
+  apply)
+    printf '%s\n' "$*" >>"$APPLY_ARGUMENTS"
+	if test -e "$CLEANED"; then
+	  cat >"$APPLY_INPUT"
+	  cat "$CLEAN_JSON"
+	else
+	  cat >/dev/null
+	  printf '%s\n' 'Apply failed with 2 conflicts: conflicts with "helm" using apps/v1:' >&2
+	  printf '%s\n' '- .spec.template.spec.containers[name="edge"].livenessProbe.httpGet.path' >&2
+	  printf '%s\n' '- .spec.template.spec.containers[name="edge"].readinessProbe.httpGet.path' >&2
+	  exit 1
+	fi
+    ;;
+  get)
+	if test -e "$CLEANED"; then cat "$CLEAN_JSON"
+	elif test -e "$BRIDGED"; then cat "$BRIDGED_JSON"
+	else cat "$LIVE_JSON"
+	fi
+	;;
+  patch)
+	printf '%s\n' "$*" >>"$PATCHES"
+	case " $* " in
+	  *" --field-manager kubectl-patch "*)
+	    : >"$BRIDGED"
+	    cat "$BRIDGED_JSON"
+	    ;;
+	  *)
+	    : >"$CLEANED"
+	    cat "$CLEAN_JSON"
+	    ;;
+	esac
+    ;;
+  *) exit 52 ;;
+esac
+`
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIVE_JSON", livePath)
+	t.Setenv("BRIDGED_JSON", bridgedPath)
+	t.Setenv("CLEAN_JSON", cleanPath)
+	t.Setenv("BRIDGED", bridgedMarker)
+	t.Setenv("CLEANED", cleanedMarker)
+	t.Setenv("APPLY_INPUT", applyInputPath)
+	t.Setenv("APPLY_ARGUMENTS", argumentsPath)
+	t.Setenv("PATCHES", patchesPath)
+	encoded := mustJSON(t, desired)
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	if err := cluster.applyResourceWithOwnershipConvergence(context.Background(), release, identity, desired, encoded, false); err != nil {
+		t.Fatalf("exact legacy probe ownership transfer failed: %v", err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(arguments)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("unexpected apply sequence: %q", arguments)
+	}
+	patches, err := os.ReadFile(patchesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchLines := strings.Split(strings.TrimSpace(string(patches)), "\n")
+	if len(patchLines) != 2 || !strings.Contains(patchLines[0], "--field-manager kubectl-patch") ||
+		!strings.Contains(patchLines[0], `"path":"/metadata/uid"`) ||
+		!strings.Contains(patchLines[0], `"op":"replace"`) || strings.Contains(patchLines[0], "/managedFields/") ||
+		!strings.Contains(patchLines[1], "/metadata/managedFields/") {
+		t.Fatalf("unexpected legacy bridge patches: %q", patches)
+	}
+	applyInput, err := os.ReadFile(applyInputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rebound map[string]any
+	if err := json.Unmarshal(applyInput, &rebound); err != nil {
+		t.Fatal(err)
+	}
+	metadata := mapField(rebound, "metadata")
+	if stringValue(metadata["uid"]) != "worker-uid" || stringValue(metadata["resourceVersion"]) != "44" {
+		t.Fatalf("ordinary apply was not rebound to the exact post-bridge CAS: %s", applyInput)
 	}
 }
 

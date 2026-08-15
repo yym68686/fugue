@@ -803,12 +803,12 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 }
 
 // applyResourceWithOwnershipConvergence is the one bounded recovery path for
-// emergency kubectl writes. It never force-applies an unreviewed field. A
-// typed SSA conflict must exactly match the release-owned annotation, image,
-// or HTTP probe path allowlist and an Update managedFields entry. Execute
-// removes an emergency entry or only the conflicting legacy probe path leaf
-// with UID/RV/entry JSON-Patch tests, then retries ordinary SSA. Prepare
-// remains read-only and accepts only the same typed proof.
+// emergency kubectl writes. A typed SSA conflict must exactly match the
+// release-owned annotation, image, or HTTP probe path allowlist and an Update
+// managedFields entry. Execute removes an exact emergency entry, or moves only
+// proven legacy HTTP probe values through a UID/RV-bound JSON Patch before the
+// ordinary declarative apply. Prepare remains read-only and accepts only the
+// same typed proof.
 func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
 	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
 	if applyErr != nil {
@@ -845,7 +845,7 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if dryRun {
 			return nil
 		}
-		legacyPatch, legacyFound, legacyErr := nextLegacyProbeOwnershipPatch(live, allowed, applyErr)
+		legacyPatch, legacyFound, legacyErr := nextLegacyProbeValuePatch(desired, live, allowed, applyErr)
 		if legacyErr != nil {
 			return legacyErr
 		}
@@ -855,10 +855,12 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 				return encodeErr
 			}
 			if _, patchErr := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
-				"--namespace", identity.Namespace, "--type=json", "--patch", string(encodedPatch), "--output", "json"); patchErr != nil {
-				return fmt.Errorf("remove exact legacy probe ownership: %w", patchErr)
+				"--namespace", identity.Namespace, "--type=json", "--field-manager", "kubectl-patch",
+				"--patch", string(encodedPatch), "--output", "json"); patchErr != nil {
+				return fmt.Errorf("move exact legacy probe values: %w", patchErr)
 			}
-		} else if cleanupErr := cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, false); cleanupErr != nil {
+		}
+		if cleanupErr := cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, false); cleanupErr != nil {
 			return cleanupErr
 		}
 		freshRaw, getErr := cluster.getResource(ctx, identity)
@@ -869,7 +871,14 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if decodeErr != nil {
 			return decodeErr
 		}
-		rebound, rebindErr := rebindDesiredResourceVersionAfterOwnershipCleanup(desired, live, fresh)
+		rebindBefore := live
+		if legacyFound {
+			rebindBefore, legacyErr = expectedStateAfterLegacyProbeMove(desired, live, fresh, allowed, applyErr)
+			if legacyErr != nil {
+				return legacyErr
+			}
+		}
+		rebound, rebindErr := rebindDesiredResourceVersionAfterOwnershipCleanup(desired, rebindBefore, fresh)
 		if rebindErr != nil {
 			return rebindErr
 		}
@@ -1110,7 +1119,7 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 	return nil
 }
 
-func nextLegacyProbeOwnershipPatch(live map[string]any, allowed []string, applyErr error) ([]map[string]any, bool, error) {
+func nextLegacyProbeValuePatch(desired, live map[string]any, allowed []string, applyErr error) ([]map[string]any, bool, error) {
 	conflicts, err := parseEmergencySSAConflicts(applyErr)
 	if err != nil {
 		return nil, false, err
@@ -1118,7 +1127,7 @@ func nextLegacyProbeOwnershipPatch(live map[string]any, allowed []string, applyE
 	metadata := mapField(live, "metadata")
 	uid, rv := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"])
 	if uid == "" || rv == "" {
-		return nil, false, errors.New("legacy probe ownership cleanup lacks UID/RV")
+		return nil, false, errors.New("legacy probe value move lacks UID/RV")
 	}
 	hasLegacy, hasOther := false, false
 	for _, conflict := range conflicts {
@@ -1134,66 +1143,95 @@ func nextLegacyProbeOwnershipPatch(live map[string]any, allowed []string, applyE
 	if hasOther {
 		return nil, false, errors.New("legacy probe ownership conflicts cannot be mixed with emergency ownership conflicts")
 	}
-	type removal struct {
-		entryIndex int
-		entry      map[string]any
-		pointer    string
+	type replacement struct {
+		namePath     string
+		name         string
+		valuePath    string
+		liveValue    string
+		desiredValue string
 	}
-	removals := make([]removal, 0, len(conflicts))
+	replacements := make([]replacement, 0, len(conflicts))
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
 		if !emergencyProbePathPointer(pointer) {
 			return nil, false, fmt.Errorf("legacy ownership conflict %s:%s is outside the exact HTTP probe path allowlist", conflict.manager, conflict.field)
 		}
-		foundIndex := -1
-		var foundEntry map[string]any
-		for index, rawEntry := range anySlice(metadata["managedFields"]) {
-			entry, _ := rawEntry.(map[string]any)
-			if stringValue(entry["manager"]) != conflict.manager || stringValue(entry["operation"]) != "Update" ||
-				stringValue(entry["subresource"]) != "" || !managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), []string{pointer}, true) {
-				continue
-			}
-			if foundIndex >= 0 {
-				return nil, false, errors.New("legacy probe ownership witness is ambiguous")
-			}
-			foundIndex, foundEntry = index, entry
+		desiredValue, desiredFound := emergencyRuntimePointerValue(desired, pointer)
+		liveValue, liveFound := emergencyRuntimePointerValue(live, pointer)
+		if !desiredFound || !liveFound || desiredValue == liveValue {
+			return nil, false, errors.New("legacy probe value move lacks an exact differing value")
 		}
-		if foundIndex < 0 {
-			return nil, false, errors.New("legacy probe ownership conflict lacks an exact Update managedFields witness")
+		field, name, tail, ok := emergencyContainerPointerParts(pointer)
+		probe, ok := probePathTail(tail)
+		if !ok {
+			return nil, false, errors.New("legacy probe value move pointer is invalid")
 		}
-		removals = append(removals, removal{entryIndex: foundIndex, entry: foundEntry, pointer: pointer})
+		index := -1
+		for candidate, raw := range anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")[field]) {
+			container, _ := raw.(map[string]any)
+			if stringValue(container["name"]) == name {
+				if index >= 0 {
+					return nil, false, errors.New("legacy probe value move container identity is ambiguous")
+				}
+				index = candidate
+			}
+		}
+		if index < 0 {
+			return nil, false, errors.New("legacy probe value move container is absent")
+		}
+		base := "/spec/template/spec/" + field + "/" + strconv.Itoa(index)
+		replacements = append(replacements, replacement{
+			namePath: base + "/name", name: name,
+			valuePath: base + "/" + probe + "/httpGet/path", liveValue: liveValue, desiredValue: desiredValue,
+		})
 	}
-	if len(removals) == 0 {
-		return nil, false, nil
-	}
+	sort.Slice(replacements, func(i, j int) bool { return replacements[i].valuePath < replacements[j].valuePath })
 	patch := []map[string]any{
 		{"op": "test", "path": "/metadata/uid", "value": uid},
 		{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
 	}
-	testedEntries := make(map[int]bool)
-	for _, item := range removals {
-		if testedEntries[item.entryIndex] {
-			continue
+	testedNames := make(map[string]bool)
+	for _, item := range replacements {
+		if !testedNames[item.namePath] {
+			testedNames[item.namePath] = true
+			patch = append(patch, map[string]any{"op": "test", "path": item.namePath, "value": item.name})
 		}
-		testedEntries[item.entryIndex] = true
-		patch = append(patch, map[string]any{
-			"op": "test", "path": "/metadata/managedFields/" + strconv.Itoa(item.entryIndex), "value": item.entry,
-		})
-	}
-	sort.Slice(removals, func(i, j int) bool {
-		if removals[i].entryIndex != removals[j].entryIndex {
-			return removals[i].entryIndex < removals[j].entryIndex
-		}
-		return removals[i].pointer < removals[j].pointer
-	})
-	for _, item := range removals {
-		path, pathErr := managedFieldsJSONPatchPath(item.entryIndex, item.pointer)
-		if pathErr != nil {
-			return nil, false, pathErr
-		}
-		patch = append(patch, map[string]any{"op": "remove", "path": path})
+		patch = append(patch,
+			map[string]any{"op": "test", "path": item.valuePath, "value": item.liveValue},
+			map[string]any{"op": "replace", "path": item.valuePath, "value": item.desiredValue},
+		)
 	}
 	return patch, true, nil
+}
+
+func expectedStateAfterLegacyProbeMove(desired, before, fresh map[string]any, allowed []string, applyErr error) (map[string]any, error) {
+	beforeMetadata, freshMetadata := mapField(before, "metadata"), mapField(fresh, "metadata")
+	beforeUID, freshUID := stringValue(beforeMetadata["uid"]), stringValue(freshMetadata["uid"])
+	beforeGeneration, freshGeneration := int64Value(beforeMetadata["generation"]), int64Value(freshMetadata["generation"])
+	if beforeUID == "" || beforeUID != freshUID || beforeGeneration < 1 || freshGeneration != beforeGeneration+1 {
+		return nil, errors.New("legacy probe value move changed resource identity or generation unexpectedly")
+	}
+	raw, err := declarativerelease.CanonicalJSON(before)
+	if err != nil {
+		return nil, err
+	}
+	expected, err := decodeJSONObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	conflicts, err := parseEmergencySSAConflicts(applyErr)
+	if err != nil {
+		return nil, err
+	}
+	for _, conflict := range conflicts {
+		pointer := pointerForEmergencySSAField(conflict.field, allowed)
+		value, found := emergencyRuntimePointerValue(desired, pointer)
+		if !found || !setEmergencyRuntimePointerValue(expected, pointer, value) {
+			return nil, errors.New("legacy probe value move expected state is invalid")
+		}
+	}
+	mapField(expected, "metadata")["generation"] = freshMetadata["generation"]
+	return expected, nil
 }
 
 func emergencyProbePathPointer(pointer string) bool {
@@ -1203,32 +1241,6 @@ func emergencyProbePathPointer(pointer string) bool {
 	}
 	_, ok = probePathTail(tail)
 	return ok
-}
-
-func managedFieldsJSONPatchPath(entryIndex int, pointer string) (string, error) {
-	if entryIndex < 0 || !strings.HasPrefix(pointer, "/") {
-		return "", errors.New("managedFields patch path identity is invalid")
-	}
-	path := "/metadata/managedFields/" + strconv.Itoa(entryIndex) + "/fieldsV1"
-	for _, encoded := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
-		token := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
-		field, selector := token, ""
-		if open := strings.Index(token, "[name="); open > 0 && strings.HasSuffix(token, "]") {
-			field, selector = token[:open], token[open+len("[name="):len(token)-1]
-		}
-		if field == "" {
-			return "", errors.New("managedFields patch path contains an empty field")
-		}
-		path += "/" + escapeJSONPointerToken("f:"+field)
-		if selector != "" {
-			encodedSelector, err := json.Marshal(selector)
-			if err != nil {
-				return "", err
-			}
-			path += "/" + escapeJSONPointerToken("k:{\"name\":"+string(encodedSelector)+"}")
-		}
-	}
-	return path, nil
 }
 
 func (cluster *kubectlCluster) cleanupEmergencyOwnership(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, requireDeclarativeOwner bool) error {
