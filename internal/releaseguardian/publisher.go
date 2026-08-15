@@ -189,9 +189,19 @@ func degradedPredecessorPublishEligible(snapshot Snapshot, bundle ExecutionBundl
 func fencedDesiredReplacementEligible(snapshot Snapshot, bundle ExecutionBundle, stableRecord ReleaseRecord) bool {
 	previous := snapshot.PreviousStatus
 	prepared, release := bundle.Prepared, bundle.Release
-	if !knownDegradedHealth(snapshot.Health) || previous == nil || previous.State != StateDegraded || previous.Key() != snapshot.Key ||
-		previous.RolloutReceiptDigest != "" || previous.RollbackReceiptDigest != "" || !bundle.Release.RetrySameLKG ||
-		!strings.HasPrefix(previous.Reason, "desired rollout is fenced because the current release dependencies are degraded") {
+	if !knownDegradedHealth(snapshot.Health) || previous == nil || previous.Key() != snapshot.Key ||
+		previous.RolloutReceiptDigest != "" || previous.RollbackReceiptDigest != "" {
+		return false
+	}
+	supersededDesired := release.SupersedesFailedConfigSHA != "" && release.SupersedesFailedConfigSHA == snapshot.Record.ConfigSHA &&
+		prepared.Prewrite.MatchesSupersededFailedAtom(release) &&
+		prepared.Prewrite.ImageRef == release.Artifact.Repository+"@"+snapshot.Record.ImageDigest
+	dependencyFenced := previous.State == StateDegraded &&
+		strings.HasPrefix(previous.Reason, "desired rollout is fenced because the current release dependencies are degraded") &&
+		(release.RetrySameLKG || supersededDesired)
+	componentFenced := previous.State == StateRecoveryRequired &&
+		strings.HasPrefix(previous.Reason, "desired rollout is fenced because the current component is degraded") && supersededDesired
+	if !dependencyFenced && !componentFenced {
 		return false
 	}
 	return snapshot.Managed && stableRecord.Key() == snapshot.Key && prepared.DegradedPredecessor && prepared.Component == snapshot.Key.Component &&

@@ -258,6 +258,52 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 			}
 		})
 	}
+	localFenced := fenced
+	failedImageDigest := "sha256:" + strings.Repeat("e", 64)
+	bundle.Prepared.Forward.ImageRef = repository + "@" + failedImageDigest
+	localFenced.Record = ReleaseRecord{
+		Component: key.Component, Group: key.Group, ConfigSHA: targetSHA,
+		ImageDigest: failedImageDigest, RecordDigest: otherDigest,
+	}
+	localFenced.PreviousStatus = &ReleaseStatus{
+		Component: key.Component, Group: key.Group, State: StateRecoveryRequired, CurrentRecordDigest: testDigest,
+		TargetRecordDigest: otherDigest, LastSuccessfulLKG: testDigest,
+		Reason: "desired rollout is fenced because the current component is degraded",
+	}
+	bundle.Release.RetrySameLKG = false
+	bundle.Release.SupersedesFailedConfigSHA = targetSHA
+	bundle.Prepared.Prewrite = declarativerelease.Observation{
+		Present: true, ConfigSHA: targetSHA, ManifestSHA: targetSHA, OCIRevision: targetSHA,
+		ImageRef: bundle.Prepared.Forward.ImageRef,
+	}
+	if !fencedDesiredReplacementEligible(localFenced, bundle, record) || !publishDesiredEligible(localFenced, bundle, record) {
+		t.Fatal("exact superseded local failure was rejected")
+	}
+	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
+		"not superseded": func(_ *Snapshot, value *ExecutionBundle) { value.Release.SupersedesFailedConfigSHA = "" },
+		"wrong failed SHA": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Release.SupersedesFailedConfigSHA = strings.Repeat("3", 40)
+		},
+		"prewrite drift": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Prepared.Prewrite.ConfigSHA = strings.Repeat("3", 40)
+		},
+		"image drift": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Prepared.Prewrite.ImageRef = repository + "@" + otherDigest
+		},
+		"ordinary recovery": func(value *Snapshot, _ *ExecutionBundle) {
+			value.PreviousStatus.Reason = "another recovery-required reason"
+		},
+	} {
+		t.Run("local fenced "+name, func(t *testing.T) {
+			candidateSnapshot, candidateBundle := localFenced, bundle
+			previous := *localFenced.PreviousStatus
+			candidateSnapshot.PreviousStatus = &previous
+			mutate(&candidateSnapshot, &candidateBundle)
+			if fencedDesiredReplacementEligible(candidateSnapshot, candidateBundle, record) || publishDesiredEligible(candidateSnapshot, candidateBundle, record) {
+				t.Fatal("unsafe local failed DesiredRelease replacement was accepted")
+			}
+		})
+	}
 	healthy := snapshot
 	healthy.Managed = false
 	healthy.Health = testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now)
