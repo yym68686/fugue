@@ -429,7 +429,8 @@ func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, cand
 		result.CurrentPublicationSequence != candidate.CurrentPublicationSequence || result.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
 		result.CurrentBundleDigest != candidate.CurrentBundleDigest || result.CurrentServingGeneration != candidate.CurrentServingGeneration || result.CandidateEpoch != candidate.CandidateEpoch ||
 		result.BundleGeneration != candidate.BundleGeneration || result.ServingGeneration != candidate.ServingGeneration ||
-		result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
+		result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest ||
+		result.AllowDegradedPrevious != candidate.AllowDegradedPrevious {
 		return CandidateCanaryResult{}, errors.New("candidate canary object binding is invalid")
 	}
 	return result, nil
@@ -469,7 +470,8 @@ func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context
 			result.CurrentPublicationSequence != candidate.CurrentPublicationSequence || result.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
 			result.CurrentBundleDigest != candidate.CurrentBundleDigest || result.CurrentServingGeneration != candidate.CurrentServingGeneration || result.CandidateEpoch != candidate.CandidateEpoch ||
 			result.BundleGeneration != candidate.BundleGeneration || result.ServingGeneration != candidate.ServingGeneration ||
-			result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
+			result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest ||
+			result.AllowDegradedPrevious != candidate.AllowDegradedPrevious {
 			continue
 		}
 		expiresAt, _ := time.Parse(time.RFC3339Nano, result.ExpiresAt)

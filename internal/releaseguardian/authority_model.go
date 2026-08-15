@@ -71,6 +71,7 @@ type CandidateAuthority struct {
 	ReleaseRecordDigest        string                  `json:"releaseRecordDigest"`
 	WorkerSourceSHA            string                  `json:"workerSourceSha,omitempty"`
 	WorkerImageDigest          string                  `json:"workerImageDigest,omitempty"`
+	AllowDegradedPrevious      bool                    `json:"allowDegradedPrevious,omitempty"`
 	State                      CandidateAuthorityState `json:"state"`
 	Generation                 int64                   `json:"generation"`
 	CanaryResultDigest         string                  `json:"canaryResultDigest,omitempty"`
@@ -116,6 +117,9 @@ func (candidate CandidateAuthority) Validate() error {
 	if (candidate.WorkerSourceSHA == "") != (candidate.WorkerImageDigest == "") ||
 		(candidate.WorkerSourceSHA != "" && (!shaPattern.MatchString(candidate.WorkerSourceSHA) || !digestPattern.MatchString(candidate.WorkerImageDigest))) {
 		return errors.New("candidate Worker release identity is invalid")
+	}
+	if candidate.AllowDegradedPrevious && (!candidate.HasPromotionWitness() || !candidate.HasWorkerReleaseIdentity()) {
+		return errors.New("candidate degraded previous authorization is invalid")
 	}
 	return nil
 }
@@ -213,6 +217,8 @@ type CandidateCanaryResult struct {
 	ReleaseRecordDigest        string        `json:"releaseRecordDigest"`
 	RouteState                 HealthState   `json:"routeState"`
 	DependencyState            HealthState   `json:"dependencyState"`
+	AllowDegradedPrevious      bool          `json:"allowDegradedPrevious,omitempty"`
+	DegradedPreviousRecovery   bool          `json:"degradedPreviousRecovery,omitempty"`
 	EvidenceDigest             string        `json:"evidenceDigest"`
 	ObservedAt                 string        `json:"observedAt"`
 	ExpiresAt                  string        `json:"expiresAt"`
@@ -344,6 +350,9 @@ func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 	}
 	if !now.IsZero() && now.UTC().After(expiresAt) {
 		return errors.New("candidate canary result is expired")
+	}
+	if result.DegradedPreviousRecovery && (!result.AllowDegradedPrevious || result.RouteState != HealthHealthy || result.DependencyState != HealthHealthy) {
+		return errors.New("candidate canary degraded previous recovery is invalid")
 	}
 	return nil
 }

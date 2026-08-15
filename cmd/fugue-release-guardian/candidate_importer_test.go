@@ -135,6 +135,7 @@ func TestCandidateImporterAcceptsExactServingAuthorityWitness(t *testing.T) {
 		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "41", FrontGeneration: current.CurrentFrontGeneration,
 		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: current.CurrentWorkerSlot, WorkerSourceSHA: current.CurrentWorkerSourceSHA,
 		WorkerImageDigest: current.CurrentWorkerImageDigest}
+	envelope.AllowDegradedPrevious = true
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(envelope) }))
 	defer server.Close()
 	tokenFile := filepath.Join(t.TempDir(), "token")
@@ -158,6 +159,11 @@ func TestCandidateImporterAcceptsExactServingAuthorityWitness(t *testing.T) {
 	loaded, uid, rv, err := store.LoadCurrent(context.Background(), groupID)
 	if err != nil || loaded != current || string(uid) != envelope.ServingAuthority.CurrentAuthorityUID || rv != envelope.ServingAuthority.CurrentAuthorityRV {
 		t.Fatalf("importer changed serving authority: current=%+v uid=%s rv=%s err=%v", loaded, uid, rv, err)
+	}
+	setMutableAuthorityFixture(t, client, "fugue-candidate-authority-"+groupID, "candidate-authority", "42")
+	candidate, _, _, err := store.LoadCandidate(context.Background(), groupID)
+	if err != nil || !candidate.AllowDegradedPrevious {
+		t.Fatalf("importer omitted degraded previous authorization: candidate=%+v err=%v", candidate, err)
 	}
 }
 
@@ -262,6 +268,15 @@ func TestCandidateImporterRejectsMissingCurrentBundleWithoutPanic(t *testing.T) 
 	envelope.CurrentBundle = nil
 	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
 		t.Fatal("candidate envelope without current bundle was accepted")
+	}
+}
+
+func TestCandidateImporterRejectsDegradedPreviousAuthorizationWithoutServingWitness(t *testing.T) {
+	now := time.Date(2026, 8, 14, 20, 45, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
+	envelope.AllowDegradedPrevious = true
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("degraded previous authorization without serving witness was accepted")
 	}
 }
 

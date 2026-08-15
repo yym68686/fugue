@@ -46,7 +46,8 @@ func candidateResultFixture(candidate CandidateAuthority, now time.Time, route, 
 		CurrentBundleDigest: candidate.CurrentBundleDigest, CurrentServingGeneration: candidate.CurrentServingGeneration, CandidateEpoch: candidate.CandidateEpoch,
 		WorkerSlot: candidate.WorkerSlot, WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest, WorkerCohortDigest: otherDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: route, DependencyState: dependency,
-		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
+		AllowDegradedPrevious: candidate.AllowDegradedPrevious,
+		EvidenceDigest:        testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
 		KeyID: "candidate-canary-v1",
 	}
 }
@@ -144,6 +145,11 @@ func TestCandidateCanaryStoreScopesLookupAndPrunesOnlyExpiredValidResults(t *tes
 	latest, err := store.LoadLatestCandidateCanaryResult(ctx, candidate, now.Add(29*time.Second))
 	if err != nil || latest.ResultDigest != result.ResultDigest {
 		t.Fatalf("latest result=%+v err=%v", latest, err)
+	}
+	authorizedCandidate := candidate
+	authorizedCandidate.AllowDegradedPrevious = true
+	if _, err := store.LoadLatestCandidateCanaryResult(ctx, authorizedCandidate, now); !errors.Is(err, ErrCandidateCanaryUnavailable) {
+		t.Fatalf("canary result with mismatched degraded previous authorization was selected: %v", err)
 	}
 	otherCandidate := candidate
 	otherCandidate.RecordDigest = otherDigest

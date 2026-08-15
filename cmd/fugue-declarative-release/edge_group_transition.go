@@ -70,6 +70,7 @@ type edgeCandidateStageRequest struct {
 	ExpectedCurrentWorkerSlot     string                       `json:"expected_current_worker_slot"`
 	TargetWorkerSlot              string                       `json:"target_worker_slot"`
 	ServingAuthority              *edgeServingAuthorityWitness `json:"serving_authority,omitempty"`
+	AllowDegradedPrevious         bool                         `json:"allow_degraded_previous,omitempty"`
 	WorkerSourceSHA               string                       `json:"worker_source_sha"`
 	WorkerImageDigest             string                       `json:"worker_image_digest"`
 	ReleaseRecordDigest           string                       `json:"release_record_digest"`
@@ -93,6 +94,7 @@ type edgeCandidateStageReceipt struct {
 	CurrentPublishedBundleDigest string `json:"current_published_bundle_digest"`
 	CurrentPublicationSequence   uint64 `json:"current_publication_sequence"`
 	CurrentRecoveryEpoch         uint64 `json:"current_recovery_epoch"`
+	AllowDegradedPrevious        bool   `json:"allow_degraded_previous,omitempty"`
 	OrdinaryTrafficMutation      bool   `json:"ordinary_traffic_mutation"`
 }
 
@@ -298,7 +300,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return fmt.Errorf("stage inactive Worker candidate: %w", err)
 	}
 	if stage.WorkerSlot != inactiveSlot || stage.CurrentWorkerSlot != activeSlot || stage.WorkerSourceSHA != target.ConfigSHA ||
-		stage.WorkerImageDigest != desiredDigest || stage.OrdinaryTrafficMutation {
+		stage.WorkerImageDigest != desiredDigest || stage.AllowDegradedPrevious != (release.SupersedesFailedConfigSHA != "") || stage.OrdinaryTrafficMutation {
 		return errors.New("inactive Worker candidate receipt is invalid")
 	}
 	if err := runtime.ApplyCandidateResources(ctx, inactiveSlot); err != nil {
@@ -385,7 +387,8 @@ func (runtime *kubectlEdgeGroupRuntime) StageCandidate(ctx context.Context, befo
 		GroupID: runtime.transition.GroupID, ExpectedAuthoritySequence: status.AuthoritySequence,
 		ExpectedPublicationSequence: status.CurrentPublicationSequence, ExpectedRecoveryEpoch: status.RecoveryEpoch,
 		ExpectedPublishedBundleDigest: status.PublishedBundleDigest, ExpectedCandidateEpoch: status.CandidateEpoch,
-		ExpectedCurrentWorkerSlot: before.ActiveSlot, TargetWorkerSlot: inactiveSlot, ServingAuthority: servingAuthority, WorkerSourceSHA: target.ConfigSHA,
+		ExpectedCurrentWorkerSlot: before.ActiveSlot, TargetWorkerSlot: inactiveSlot, ServingAuthority: servingAuthority,
+		AllowDegradedPrevious: runtime.release.SupersedesFailedConfigSHA != "", WorkerSourceSHA: target.ConfigSHA,
 		WorkerImageDigest: digest, ReleaseRecordDigest: recordDigest, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(),
 		Nonce: base64.RawURLEncoding.EncodeToString(nonceRaw), Reason: "stage immutable Worker candidate for independent route canary"}
 	if err := signEdgeCandidateStageRequest(runtime.transition.CandidateKeyring, &request, now); err != nil {

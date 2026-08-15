@@ -57,6 +57,7 @@ type candidateEnvelope struct {
 	CurrentBundle           *model.EdgeRouteBundle             `json:"current_bundle"`
 	CurrentWorkerSlot       releaseguardian.AuthoritySlot      `json:"current_worker_slot"`
 	ServingAuthority        *candidateServingAuthorityWitness  `json:"serving_authority,omitempty"`
+	AllowDegradedPrevious   bool                               `json:"allow_degraded_previous,omitempty"`
 	Record                  releaseguardian.RouteBundleRecord  `json:"record"`
 	Bundle                  model.EdgeRouteBundle              `json:"bundle"`
 }
@@ -193,7 +194,8 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		CurrentBundleDigest: envelope.CurrentRecord.BundleDigest, CurrentServingGeneration: envelope.CurrentBundle.Generation, CandidateEpoch: envelope.Epoch,
 		WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
 		WorkerSourceSHA: envelope.WorkerSourceSHA, WorkerImageDigest: envelope.WorkerImageDigest,
-		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
+		AllowDegradedPrevious: envelope.AllowDegradedPrevious,
+		State:                 releaseguardian.CandidateAuthorityLoaded, Generation: 1,
 	}
 	if !candidate.HasWorkerReleaseIdentity() {
 		return false, errors.New("candidate envelope lacks an explicitly staged Worker release")
@@ -208,7 +210,8 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		existingCandidate.AuthoritySequence != candidate.AuthoritySequence || existingCandidate.CandidateSequence != candidate.CandidateSequence ||
 		existingCandidate.CurrentPublicationSequence != candidate.CurrentPublicationSequence || existingCandidate.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
 		existingCandidate.CurrentBundleDigest != candidate.CurrentBundleDigest || existingCandidate.CurrentServingGeneration != candidate.CurrentServingGeneration || existingCandidate.CandidateEpoch != candidate.CandidateEpoch ||
-		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
+		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest ||
+		existingCandidate.AllowDegradedPrevious != candidate.AllowDegradedPrevious)
 	candidateChanged = candidateChanged || existingCandidate.WorkerSourceSHA != candidate.WorkerSourceSHA || existingCandidate.WorkerImageDigest != candidate.WorkerImageDigest
 	if candidateMissing {
 		if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
@@ -329,6 +332,9 @@ func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now t
 	}
 	if envelope.ServingAuthority != nil && validateCandidateServingAuthorityEnvelope(envelope) != nil {
 		return errors.New("candidate envelope serving authority is invalid")
+	}
+	if envelope.AllowDegradedPrevious && envelope.ServingAuthority == nil {
+		return errors.New("candidate envelope degraded previous authorization is invalid")
 	}
 	return nil
 }

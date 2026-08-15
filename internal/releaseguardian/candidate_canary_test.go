@@ -138,6 +138,33 @@ func TestCandidateCanaryAttributesSharedOriginFailureToDependency(t *testing.T) 
 	}
 }
 
+func TestCandidateCanaryAllowsSignedRecoveryFromDegradedPreviousRoute(t *testing.T) {
+	candidate, current, now := candidateCanaryFixture(t)
+	candidate.AllowDegradedPrevious = true
+	previous := candidate
+	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
+	result, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, true, true), routeSamples(previous, now, false, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RouteState != HealthHealthy || result.DependencyState != HealthHealthy || !result.AllowDegradedPrevious || !result.DegradedPreviousRecovery {
+		t.Fatalf("authorized degraded previous recovery was not explicit: %+v", result)
+	}
+}
+
+func TestCandidateCanaryDoesNotRecoverDegradedPreviousWithoutAuthorization(t *testing.T) {
+	candidate, current, now := candidateCanaryFixture(t)
+	previous := candidate
+	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
+	result, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, true, true), routeSamples(previous, now, false, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RouteState != HealthDegraded || result.DependencyState != HealthDegraded || result.AllowDegradedPrevious || result.DegradedPreviousRecovery {
+		t.Fatalf("unauthorized degraded previous route was accepted: %+v", result)
+	}
+}
+
 func TestCandidateCanaryRejectsCrossCandidateReplayAndStaleSamples(t *testing.T) {
 	candidate, current, now := candidateCanaryFixture(t)
 	previous := candidate

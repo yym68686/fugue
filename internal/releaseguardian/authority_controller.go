@@ -314,6 +314,9 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 	if err != nil || result.KeyID != verifier.KeyID || result.VerifySignature(verifier.Key) != nil {
 		return AuthorityTransitionReceipt{}, errors.New("candidate canary attestation is invalid")
 	}
+	if result.DegradedPreviousRecovery && (!candidate.AllowDegradedPrevious || !result.AllowDegradedPrevious) {
+		return AuthorityTransitionReceipt{}, errors.New("candidate degraded previous recovery is unauthorized")
+	}
 	if result.RouteState != HealthHealthy || result.DependencyState != HealthHealthy {
 		if candidate.State != CandidateAuthorityLoaded {
 			return AuthorityTransitionReceipt{}, errors.New("terminal candidate cannot be rejected again")

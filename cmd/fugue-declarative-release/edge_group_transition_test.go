@@ -61,7 +61,7 @@ func TestEdgeCandidateStageRequestMatchesControlServingAuthoritySchema(t *testin
 	local := edgeCandidateStageRequest{Schema: edgeCandidateStageSchema, KeyID: "key-1", GroupID: "edge-group-country-de",
 		ExpectedAuthoritySequence: 11, ExpectedPublicationSequence: 10, ExpectedRecoveryEpoch: 2,
 		ExpectedPublishedBundleDigest: "sha256:" + strings.Repeat("4", 64), ExpectedCandidateEpoch: 12,
-		ExpectedCurrentWorkerSlot: "b", TargetWorkerSlot: "a", ServingAuthority: &witness,
+		ExpectedCurrentWorkerSlot: "b", TargetWorkerSlot: "a", ServingAuthority: &witness, AllowDegradedPrevious: true,
 		WorkerSourceSHA: strings.Repeat("5", 40), WorkerImageDigest: "sha256:" + strings.Repeat("6", 64),
 		ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), IssuedAtUnix: 100, ExpiresAtUnix: 160,
 		Nonce: "nonce", Reason: "stage immutable candidate", Signature: "signature"}
@@ -69,7 +69,8 @@ func TestEdgeCandidateStageRequestMatchesControlServingAuthoritySchema(t *testin
 		ExpectedAuthoritySequence: local.ExpectedAuthoritySequence, ExpectedPublicationSequence: local.ExpectedPublicationSequence,
 		ExpectedRecoveryEpoch: local.ExpectedRecoveryEpoch, ExpectedPublishedBundleDigest: local.ExpectedPublishedBundleDigest,
 		ExpectedCandidateEpoch: local.ExpectedCandidateEpoch, ExpectedCurrentWorkerSlot: local.ExpectedCurrentWorkerSlot,
-		TargetWorkerSlot: local.TargetWorkerSlot, ServingAuthority: &edgecontrol.GroupServingAuthorityWitness{
+		AllowDegradedPrevious: local.AllowDegradedPrevious,
+		TargetWorkerSlot:      local.TargetWorkerSlot, ServingAuthority: &edgecontrol.GroupServingAuthorityWitness{
 			CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
 			CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV,
 			FrontGeneration: witness.FrontGeneration, BundleVersion: witness.BundleVersion, WorkerSlot: witness.WorkerSlot,

@@ -199,10 +199,13 @@ func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthor
 		return CandidateCanaryResult{}, err
 	}
 	routeState, dependencyState := HealthDegraded, HealthHealthy
+	degradedPreviousRecovery := false
 	if candidateHealthy && previousHealthy {
 		routeState = HealthHealthy
 	}
-	if !previousHealthy {
+	if candidateHealthy && !previousHealthy && candidate.AllowDegradedPrevious {
+		routeState, dependencyState, degradedPreviousRecovery = HealthHealthy, HealthHealthy, true
+	} else if !previousHealthy {
 		dependencyState = HealthDegraded
 	}
 	return SignCandidateCanaryResult(CandidateCanaryResult{
@@ -213,6 +216,7 @@ func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthor
 		BundleGeneration: candidate.BundleGeneration, ServingGeneration: candidate.ServingGeneration, WorkerSourceSHA: cohort.WorkerSourceSHA,
 		WorkerImageDigest: cohort.WorkerImageDigest, WorkerCohortDigest: cohort.CohortDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: routeState, DependencyState: dependencyState,
+		AllowDegradedPrevious: candidate.AllowDegradedPrevious, DegradedPreviousRecovery: degradedPreviousRecovery,
 		EvidenceDigest: digest(evidence), ObservedAt: observedAt.Format(time.RFC3339Nano),
 		ExpiresAt: observedAt.Add(ttl).Format(time.RFC3339Nano), KeyID: keyID,
 	}, signingKey)
