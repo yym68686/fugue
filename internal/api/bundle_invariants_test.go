@@ -129,6 +129,8 @@ func TestEdgeRouteBundleInvariantRejectsAbnormalTrafficDrop(t *testing.T) {
 			Hostname:        host,
 			EdgeGroupID:     "edge-group-country-us",
 			RoutePolicy:     model.EdgeRoutePolicyEnabled,
+			Status:          model.EdgeRouteStatusActive,
+			UpstreamURL:     "http://origin.internal:8080",
 			RouteGeneration: "route_" + strings.TrimSuffix(host, ".fugue.pro"),
 		})
 	}

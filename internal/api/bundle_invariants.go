@@ -113,7 +113,7 @@ func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeR
 	}
 	if edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
 		trafficRoutes := edgeRouteBundleTrafficRouteCount(bundle, input.Options)
-		if edgeRouteSelectorIsScoped(input.Options) && trafficRoutes == 0 && input.ExplicitlyExcludedRoutes == 0 {
+		if edgeRouteSelectorHadTraffic(input.Options, input.ExpectedNonEmptyEdgeGroups) && trafficRoutes == 0 && input.ExplicitlyExcludedRoutes == 0 {
 			return newBundleInvariantError("edge_route_bundle", "route_bundle_traffic_routes", "edge_route_bundle", "at least one traffic route for non-empty routable inventory", fmt.Sprintf("traffic_routes=0 expected_hosts=%d excluded_routes=%d", edgeRouteBundleExpectedRoutableHosts(input), input.ExplicitlyExcludedRoutes), "refusing to publish route bundle without traffic routes for non-empty routable inventory", nil)
 		}
 		if minimum := edgeRouteExpectedMinTrafficRoutes(input.Options, input.ExpectedMinTrafficRoutes); minimum >= 5 {
@@ -130,9 +130,12 @@ func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeR
 	return nil
 }
 
-func edgeRouteSelectorIsScoped(options edgeRouteBundleOptions) bool {
-	return strings.TrimSpace(options.EdgeGroupID) != "" || strings.TrimSpace(options.EdgeID) != "" ||
-		strings.TrimSpace(options.AuthenticatedEdgeID) != ""
+func edgeRouteSelectorHadTraffic(options edgeRouteBundleOptions, expectedNonEmptyEdgeGroups map[string]bool) bool {
+	edgeGroupID := strings.TrimSpace(options.EdgeGroupID)
+	if edgeGroupID == "" {
+		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
+	}
+	return edgeGroupID != "" && expectedNonEmptyEdgeGroups[edgeGroupID]
 }
 
 func edgeRouteBundleExpectedRoutableHosts(input edgeRouteBundleInvariantInput) int {
