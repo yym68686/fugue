@@ -181,6 +181,7 @@ func (handler *groupCandidateStageHandler) ServeHTTP(w http.ResponseWriter, requ
 			writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 			return
 		}
+		log.Printf("edge-control worker candidate stage unavailable group=%s detail=%v", value.GroupID, err)
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_unavailable")
 		return
 	}
@@ -237,16 +238,21 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 			return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("bootstrap_active_slot_mismatch expected=%s actual=%s", request.ExpectedCurrentWorkerSlot, head.ActiveSlot))
 		}
 	} else {
-		if !snapshot.ServingExists || snapshot.ServingCandidate.Bundle == nil || snapshot.ServingCandidate.BundleArchived ||
+		servingVersion := groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch)
+		fallback := !snapshot.ServingExists && request.AllowDegradedPrevious && !request.StandbyOnly &&
+			servingAuthorityGenerationMatches(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation)
+		if fallback {
+			head = currentHead
+		} else if !snapshot.ServingExists || snapshot.ServingCandidate.Bundle == nil || snapshot.ServingCandidate.BundleArchived ||
 			snapshot.ServingCandidate.Status != GroupShadowStatusCompiled || snapshot.ServingCandidate.ActiveSlot != request.ExpectedCurrentWorkerSlot ||
-			request.ServingAuthority.WorkerSlot != request.ExpectedCurrentWorkerSlot ||
-			groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch) != request.ServingAuthority.BundleVersion {
+			request.ServingAuthority.WorkerSlot != request.ExpectedCurrentWorkerSlot || servingVersion != request.ServingAuthority.BundleVersion {
 			return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("serving_authority_history_mismatch exists=%t bundle_present=%t archived=%t status=%s expected_slot=%s candidate_slot=%s witness_slot=%s expected_version=%s actual_version=%s",
 				snapshot.ServingExists, snapshot.ServingCandidate.Bundle != nil, snapshot.ServingCandidate.BundleArchived, snapshot.ServingCandidate.Status,
 				request.ExpectedCurrentWorkerSlot, snapshot.ServingCandidate.ActiveSlot, request.ServingAuthority.WorkerSlot, request.ServingAuthority.BundleVersion,
-				groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch)))
+				servingVersion))
+		} else {
+			head = snapshot.ServingCandidate
 		}
-		head = snapshot.ServingCandidate
 	}
 	sequence := head.Sequence
 	epoch := authority.Published.PublicationSequence + 1
@@ -291,6 +297,11 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 
 func groupCandidateCASConflict(reason string) error {
 	return fmt.Errorf("%s: %w", reason, ErrGroupAuthorityCandidateCAS)
+}
+
+func servingAuthorityGenerationMatches(version, generation string) bool {
+	parsedGeneration, _, _, ok := parseGroupPublicationVersion(version)
+	return ok && parsedGeneration == generation
 }
 
 func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request GroupCandidateStageRequest, authority GroupAuthorityState) bool {

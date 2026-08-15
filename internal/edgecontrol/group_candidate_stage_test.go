@@ -340,6 +340,42 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 	request.AllowDegradedPrevious = true
 	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
 		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
+		BundleVersion: groupPublicationVersion(current.Published.Bundle.Generation, current.Published.PublicationSequence+100, current.Published.RecoveryEpoch),
+		WorkerSlot:    witness.WorkerSlot, WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest}
+	request.Nonce = strings.Repeat("v", 24)
+	request.Signature = ""
+	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	fallbackRecorder := postGroupCandidateStage(t, handler, request)
+	if fallbackRecorder.Code != http.StatusOK {
+		t.Fatalf("pruned serving publication fallback status=%d body=%s", fallbackRecorder.Code, fallbackRecorder.Body.String())
+	}
+	fallbackCandidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
+	if err != nil || !exists || !fallbackCandidate.AllowDegradedPrevious || fallbackCandidate.StandbyOnly ||
+		fallbackCandidate.Bundle.Generation != current.Published.Bundle.Generation ||
+		fallbackCandidate.CandidateLedgerSequence != current.Published.CandidateLedgerSequence ||
+		!servingAuthorityWitnessesEqual(fallbackCandidate.ServingAuthority, request.ServingAuthority) {
+		t.Fatalf("pruned serving publication fallback candidate=%+v exists=%v err=%v", fallbackCandidate, exists, err)
+	}
+
+	request.ExpectedCandidateEpoch = fallbackCandidate.Epoch
+	request.AllowDegradedPrevious = false
+	request.StandbyOnly = true
+	request.Nonce = strings.Repeat("w", 24)
+	request.Signature = ""
+	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	standbyFallbackRejected := postGroupCandidateStage(t, handler, request)
+	if standbyFallbackRejected.Code != http.StatusConflict {
+		t.Fatalf("standby used pruned serving publication fallback status=%d body=%s", standbyFallbackRejected.Code, standbyFallbackRejected.Body.String())
+	}
+
+	request.AllowDegradedPrevious = true
+	request.StandbyOnly = false
+	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
+		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
 		BundleVersion: groupPublicationVersion(servingAuthority.Published.Bundle.Generation, servingAuthority.Published.PublicationSequence+100, servingAuthority.Published.RecoveryEpoch),
 		WorkerSlot:    witness.WorkerSlot, WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest}
 	request.Nonce = strings.Repeat("t", 24)

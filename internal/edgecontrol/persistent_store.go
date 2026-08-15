@@ -387,11 +387,17 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 				return groupCandidateCASConflict("store_serving_authority_witness_invalid")
 			}
 			_, servingHead, exists := persistentPublishedCandidateByVersion(state, serving.BundleVersion)
-			if !exists || servingHead.ActiveSlot != serving.WorkerSlot {
+			fallback := !exists && candidate.AllowDegradedPrevious && !candidate.StandbyOnly &&
+				servingAuthorityGenerationMatches(serving.BundleVersion, state.Published.Bundle.Generation) &&
+				candidate.CandidateLedgerSequence == state.Published.CandidateLedgerSequence
+			if fallback {
+				head = state.Ledger[state.Published.CandidateLedgerSequence-1]
+			} else if !exists || servingHead.ActiveSlot != serving.WorkerSlot {
 				return groupCandidateCASConflict(fmt.Sprintf("store_serving_authority_history_mismatch version=%s exists=%t expected_slot=%s actual_slot=%s",
 					serving.BundleVersion, exists, serving.WorkerSlot, servingHead.ActiveSlot))
+			} else {
+				head = servingHead
 			}
-			head = servingHead
 		} else if candidate.ServingAuthority != nil || candidate.CandidateLedgerSequence != state.Published.CandidateLedgerSequence {
 			return groupCandidateCASConflict("store_bootstrap_candidate_binding_invalid")
 		}
@@ -1104,8 +1110,11 @@ func validatePersistentCandidateBinding(state persistentGroupState, groupID stri
 	}
 	if candidate.ServingAuthority != nil {
 		authority, servingCandidate, exists := persistentPublishedCandidateByVersion(&state, candidate.ServingAuthority.BundleVersion)
-		if !exists || authority.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
-			servingCandidate.ActiveSlot != candidate.ServingAuthority.WorkerSlot {
+		fallback := !exists && candidate.AllowDegradedPrevious && !candidate.StandbyOnly && state.Published != nil &&
+			servingAuthorityGenerationMatches(candidate.ServingAuthority.BundleVersion, state.Published.Bundle.Generation) &&
+			state.Published.CandidateLedgerSequence == candidate.CandidateLedgerSequence
+		if !fallback && (!exists || authority.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
+			servingCandidate.ActiveSlot != candidate.ServingAuthority.WorkerSlot) {
 			return errors.New("edge-control persistent candidate lost its serving authority witness")
 		}
 	}
