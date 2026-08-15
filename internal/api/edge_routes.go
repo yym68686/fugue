@@ -1194,23 +1194,32 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 }
 
 // listRouteInventoryNodes keeps legacy-authoritative deployments serving while
-// the instance-fencing schema is unavailable. Once active-epoch authority is
-// enabled, fencing errors remain fail-closed and are returned to the caller.
+// the instance-fencing inventory is unavailable or has not materialized any
+// active rows yet. Once active-epoch authority is enabled, empty/fencing
+// results remain fail-closed and are returned to the caller.
 func (s *Server) listRouteInventoryNodes(edgeGroupID string) ([]model.EdgeNode, []model.EdgeGroup, error) {
 	nodes, groups, err := s.store.ListActiveEdgeNodes(edgeGroupID)
-	if !errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
+	if err == nil && len(nodes) > 0 {
 		return nodes, groups, err
 	}
 	activation, activationErr := s.store.GetEdgeActivationState()
-	if !edgeRouteInventoryAllowsLegacyFallback(err, activation, activationErr) {
+	if !edgeRouteInventoryAllowsLegacyFallback(err, nodes, activation, activationErr) {
+		if err != nil {
+			return nil, nil, err
+		}
+		if activationErr != nil {
+			return nil, nil, activationErr
+		}
 		return nil, nil, err
 	}
 	return s.store.ListEdgeNodes(edgeGroupID)
 }
 
-func edgeRouteInventoryAllowsLegacyFallback(inventoryErr error, activation model.EdgeActivationState, activationErr error) bool {
-	return errors.Is(inventoryErr, store.ErrEdgeInstanceFencingNotReady) &&
-		activationErr == nil && activation.RouteAuthority == model.EdgeRouteAuthorityLegacy
+func edgeRouteInventoryAllowsLegacyFallback(inventoryErr error, activeNodes []model.EdgeNode, activation model.EdgeActivationState, activationErr error) bool {
+	if activationErr != nil || activation.RouteAuthority != model.EdgeRouteAuthorityLegacy {
+		return false
+	}
+	return errors.Is(inventoryErr, store.ErrEdgeInstanceFencingNotReady) || (inventoryErr == nil && len(activeNodes) == 0)
 }
 
 func applyEdgeRouteInventoryBlastRadiusCap(beforeHealthy map[string]bool, beforeIDs map[string][]string, afterHealthy map[string]bool, afterIDs map[string][]string) (map[string]bool, map[string][]string) {

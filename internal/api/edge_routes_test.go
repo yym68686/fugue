@@ -538,14 +538,17 @@ func TestEdgeRouteInventoryFallbackRequiresLegacyAuthority(t *testing.T) {
 
 	fencingErr := fmt.Errorf("partial migration: %w", store.ErrEdgeInstanceFencingNotReady)
 	legacy := model.EdgeActivationState{RouteAuthority: model.EdgeRouteAuthorityLegacy}
-	if !edgeRouteInventoryAllowsLegacyFallback(fencingErr, legacy, nil) {
+	if !edgeRouteInventoryAllowsLegacyFallback(fencingErr, nil, legacy, nil) {
 		t.Fatal("legacy route authority must preserve its inventory during a fencing migration")
 	}
+	if !edgeRouteInventoryAllowsLegacyFallback(nil, nil, legacy, nil) {
+		t.Fatal("legacy route authority must recover when active inventory is empty")
+	}
 	active := model.EdgeActivationState{RouteAuthority: model.EdgeRouteAuthorityActiveEpoch}
-	if edgeRouteInventoryAllowsLegacyFallback(fencingErr, active, nil) {
+	if edgeRouteInventoryAllowsLegacyFallback(fencingErr, nil, active, nil) {
 		t.Fatal("active-epoch route authority must remain fail-closed on fencing errors")
 	}
-	if edgeRouteInventoryAllowsLegacyFallback(fencingErr, legacy, errors.New("activation unavailable")) {
+	if edgeRouteInventoryAllowsLegacyFallback(fencingErr, nil, legacy, errors.New("activation unavailable")) {
 		t.Fatal("unproven activation state must remain fail-closed")
 	}
 }
