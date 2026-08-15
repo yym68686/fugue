@@ -35,12 +35,12 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	if err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, err
 	}
-	if !publishDesiredEligible(snapshot, bundle) {
-		return ReleaseRecord{}, DesiredRelease{}, errors.New("current component is not a healthy settled release")
-	}
 	stableRecord, stableMonitor, err := canonicalStableReleaseRecord(key, snapshot.CurrentMonitorData)
 	if err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	if !publishDesiredEligible(snapshot, bundle, stableRecord) {
+		return ReleaseRecord{}, DesiredRelease{}, errors.New("current component is not a healthy settled release")
 	}
 	if !bundle.Prepared.LKG.Present || bundle.Release.ExpectedPreviousConfigSHA != stableMonitor.ConfigSHA ||
 		bundle.Release.ExpectedPreviousManifestSHA != stableMonitor.ConfigSHA ||
@@ -159,21 +159,19 @@ func canonicalStableReleaseRecord(key Key, data map[string]string) (ReleaseRecor
 	return record, monitor, nil
 }
 
-func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle) bool {
+func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle, stableRecord ReleaseRecord) bool {
 	settled := snapshot.CurrentRecordDigest == snapshot.Desired.RecordDigest
 	if settled && snapshot.Health.Local.State == HealthHealthy && snapshot.Health.Dependency.State == HealthHealthy && snapshot.Health.Route.State == HealthHealthy {
 		return true
 	}
-	return degradedPredecessorPublishEligible(snapshot, bundle)
+	return degradedPredecessorPublishEligible(snapshot, bundle) || fencedDesiredReplacementEligible(snapshot, bundle, stableRecord)
 }
 
 // A degraded predecessor retry is admitted only when the immutable candidate
 // and every mutable Guardian pointer still bind the same current LKG. The
 // recorded prewrite plan remains the workload CAS authority during rollout.
 func degradedPredecessorPublishEligible(snapshot Snapshot, bundle ExecutionBundle) bool {
-	health := snapshot.Health
-	if health.Local.State == HealthUnknown || health.Dependency.State == HealthUnknown || health.Route.State == HealthUnknown ||
-		(health.Local.State != HealthDegraded && health.Dependency.State != HealthDegraded && health.Route.State != HealthDegraded) {
+	if !knownDegradedHealth(snapshot.Health) {
 		return false
 	}
 	prepared, release := bundle.Prepared, bundle.Release
@@ -186,6 +184,31 @@ func degradedPredecessorPublishEligible(snapshot Snapshot, bundle ExecutionBundl
 		prepared.LKG.Present && prepared.LKG.ConfigSHA == snapshot.Record.ConfigSHA &&
 		prepared.LKG.ManifestSHA == snapshot.Record.ConfigSHA && prepared.LKG.OCIRevision == snapshot.Record.ConfigSHA &&
 		prepared.LKG.ImageRef == release.Artifact.Repository+"@"+snapshot.Record.ImageDigest
+}
+
+func fencedDesiredReplacementEligible(snapshot Snapshot, bundle ExecutionBundle, stableRecord ReleaseRecord) bool {
+	previous := snapshot.PreviousStatus
+	prepared, release := bundle.Prepared, bundle.Release
+	if !knownDegradedHealth(snapshot.Health) || previous == nil || previous.State != StateDegraded || previous.Key() != snapshot.Key ||
+		previous.RolloutReceiptDigest != "" || previous.RollbackReceiptDigest != "" || !bundle.Release.RetrySameLKG ||
+		!strings.HasPrefix(previous.Reason, "desired rollout is fenced because the current release dependencies are degraded") {
+		return false
+	}
+	return snapshot.Managed && stableRecord.Key() == snapshot.Key && prepared.DegradedPredecessor && prepared.Component == snapshot.Key.Component &&
+		prepared.ConfigSHA == prepared.Forward.ConfigSHA && snapshot.Desired.RecordDigest == snapshot.Record.RecordDigest &&
+		snapshot.CurrentRecordDigest != snapshot.Desired.RecordDigest && snapshot.CurrentRecordDigest == stableRecord.RecordDigest &&
+		snapshot.LastSuccessfulLKG == stableRecord.RecordDigest && previous.CurrentRecordDigest == snapshot.CurrentRecordDigest &&
+		previous.TargetRecordDigest == snapshot.Desired.RecordDigest && previous.LastSuccessfulLKG == snapshot.CurrentRecordDigest &&
+		release.ExpectedPreviousPresent && release.ExpectedPreviousConfigSHA == stableRecord.ConfigSHA &&
+		release.ExpectedPreviousManifestSHA == stableRecord.ConfigSHA && release.ExpectedPreviousOCIRevision == stableRecord.ConfigSHA &&
+		release.ExpectedPreviousImageDigest == stableRecord.ImageDigest && prepared.LKG.Present &&
+		prepared.LKG.ConfigSHA == stableRecord.ConfigSHA && prepared.LKG.ManifestSHA == stableRecord.ConfigSHA &&
+		prepared.LKG.OCIRevision == stableRecord.ConfigSHA && prepared.LKG.ImageRef == release.Artifact.Repository+"@"+stableRecord.ImageDigest
+}
+
+func knownDegradedHealth(health HealthSnapshot) bool {
+	return health.Local.State != HealthUnknown && health.Dependency.State != HealthUnknown && health.Route.State != HealthUnknown &&
+		(health.Local.State == HealthDegraded || health.Dependency.State == HealthDegraded || health.Route.State == HealthDegraded)
 }
 
 func immutableReleaseRecordMatches(observed, expected *corev1.ConfigMap, key Key, record ReleaseRecord) bool {

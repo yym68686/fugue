@@ -202,7 +202,7 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 			ExpectedPreviousImageDigest: imageDigest, Artifact: declarativerelease.Artifact{Repository: repository},
 		},
 	}
-	if !degradedPredecessorPublishEligible(snapshot, bundle) || !publishDesiredEligible(snapshot, bundle) {
+	if !degradedPredecessorPublishEligible(snapshot, bundle) || !publishDesiredEligible(snapshot, bundle, record) {
 		t.Fatal("exact degraded predecessor candidate was rejected")
 	}
 	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
@@ -224,15 +224,44 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			candidateSnapshot, candidateBundle := snapshot, bundle
 			mutate(&candidateSnapshot, &candidateBundle)
-			if degradedPredecessorPublishEligible(candidateSnapshot, candidateBundle) || publishDesiredEligible(candidateSnapshot, candidateBundle) {
+			if degradedPredecessorPublishEligible(candidateSnapshot, candidateBundle) || publishDesiredEligible(candidateSnapshot, candidateBundle, record) {
 				t.Fatal("drifted degraded predecessor candidate was accepted")
+			}
+		})
+	}
+	fenced := snapshot
+	fenced.Record = ReleaseRecord{Component: key.Component, Group: key.Group, RecordDigest: otherDigest}
+	fenced.Desired.RecordDigest = otherDigest
+	fenced.PreviousStatus = &ReleaseStatus{
+		Component: key.Component, Group: key.Group, State: StateDegraded, CurrentRecordDigest: testDigest,
+		TargetRecordDigest: otherDigest, LastSuccessfulLKG: testDigest,
+		Reason: "desired rollout is fenced because the current release dependencies are degraded",
+	}
+	bundle.Release.RetrySameLKG = true
+	if !fencedDesiredReplacementEligible(fenced, bundle, record) || !publishDesiredEligible(fenced, bundle, record) {
+		t.Fatal("exact fenced DesiredRelease replacement was rejected")
+	}
+	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
+		"not retry":       func(_ *Snapshot, value *ExecutionBundle) { value.Release.RetrySameLKG = false },
+		"rollout receipt": func(value *Snapshot, _ *ExecutionBundle) { value.PreviousStatus.RolloutReceiptDigest = testDigest },
+		"wrong state":     func(value *Snapshot, _ *ExecutionBundle) { value.PreviousStatus.State = StateRecoveryRequired },
+		"current drift":   func(value *Snapshot, _ *ExecutionBundle) { value.CurrentRecordDigest = otherDigest },
+		"target drift":    func(value *Snapshot, _ *ExecutionBundle) { value.PreviousStatus.TargetRecordDigest = testDigest },
+	} {
+		t.Run("fenced "+name, func(t *testing.T) {
+			candidateSnapshot, candidateBundle := fenced, bundle
+			previous := *fenced.PreviousStatus
+			candidateSnapshot.PreviousStatus = &previous
+			mutate(&candidateSnapshot, &candidateBundle)
+			if fencedDesiredReplacementEligible(candidateSnapshot, candidateBundle, record) || publishDesiredEligible(candidateSnapshot, candidateBundle, record) {
+				t.Fatal("unsafe fenced DesiredRelease replacement was accepted")
 			}
 		})
 	}
 	healthy := snapshot
 	healthy.Managed = false
 	healthy.Health = testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now)
-	if !publishDesiredEligible(healthy, ExecutionBundle{}) {
+	if !publishDesiredEligible(healthy, ExecutionBundle{}, record) {
 		t.Fatal("ordinary healthy settled release was rejected")
 	}
 }
