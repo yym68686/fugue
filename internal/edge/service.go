@@ -38,6 +38,8 @@ import (
 
 const cacheFileVersion = 2
 
+const edgeEmergencyLKGMaxAge = 7 * 24 * time.Hour
+
 const edgePeerFallbackHeader = "X-Fugue-Edge-Peer-Fallback"
 const edgeClientRemoteAddrHeader = "X-Fugue-Edge-Client-Remote-Addr"
 const edgeRequestIDHeader = "X-Fugue-Edge-Request-Id"
@@ -810,14 +812,25 @@ func (s *Service) LoadCache() error {
 		}
 		return err
 	}
-	if err := s.verifyCachedBundle(cached, time.Now().UTC()); err != nil {
-		err = fmt.Errorf("verify edge route cache: %w", err)
-		s.recordCacheLoad("error")
-		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
-			s.recordCacheCorruptGeneration(edgeCacheGeneration(cached.Bundle))
-			return nil
+	now := time.Now().UTC()
+	if err := s.verifyCachedBundle(cached, now); err != nil {
+		// A signed route bundle remains a usable last-known-good data-plane
+		// snapshot after MaxStale. Keep serving it while reporting unhealthy so
+		// route selection and heartbeats can quarantine this edge. This prevents
+		// a control-plane outage or worker restart from turning every hostname
+		// into an edge 404.
+		if fallbackErr := s.verifyCachedBundleForServing(cached, now); fallbackErr != nil {
+			err = fmt.Errorf("verify edge route cache: %w", err)
+			s.recordCacheLoad("error")
+			if previousErr := s.LoadPreviousCache(); previousErr == nil {
+				s.recordCacheCorruptGeneration(edgeCacheGeneration(cached.Bundle))
+				return nil
+			}
+			return err
 		}
-		return err
+		if s.Logger != nil {
+			s.Logger.Printf("edge route cache loaded past max_stale; serving signed LKG while unhealthy; version=%s", cached.Bundle.Version)
+		}
 	}
 	if err := s.validateCachedRouteSource(cached); err != nil {
 		err = fmt.Errorf("verify edge route cache source: %w", err)
@@ -833,6 +846,21 @@ func (s *Service) LoadCache() error {
 	s.logCacheLoaded(cached)
 	s.recordEdgeServeLKGWAL("load_cache", nil)
 	return nil
+}
+
+func (s *Service) verifyCachedBundleForServing(cached cacheFile, now time.Time) error {
+	validUntil := cached.Bundle.ValidUntil.UTC()
+	now = now.UTC()
+	if validUntil.IsZero() || now.IsZero() || now.Before(validUntil) || now.Sub(validUntil) > edgeEmergencyLKGMaxAge {
+		return bundleauth.ErrExpiredBundle
+	}
+	// Verify at the end of the original validity window. This path can retain
+	// a signed LKG for emergency serving, but it cannot extend its validity.
+	verifyAt := validUntil.Add(-time.Nanosecond)
+	if s.edgeControlRouteSourceEnabled() && routePublicationFromCache(cached).Source == "" {
+		return errors.New("legacy route cache is forbidden for an edge-control route source")
+	}
+	return s.verifyBundle(cached.Bundle, verifyAt)
 }
 
 func (s *Service) Handler() http.Handler {
@@ -3724,10 +3752,13 @@ func (s *Service) LoadPreviousCache() error {
 			s.recordCacheLoad("error")
 			continue
 		}
-		if err := s.verifyCachedBundle(cached, time.Now().UTC()); err != nil {
-			lastErr = fmt.Errorf("verify previous edge route cache %s: %w", candidate.Path, err)
-			s.recordCacheLoad("error")
-			continue
+		now := time.Now().UTC()
+		if err := s.verifyCachedBundle(cached, now); err != nil {
+			if fallbackErr := s.verifyCachedBundleForServing(cached, now); fallbackErr != nil {
+				lastErr = fmt.Errorf("verify previous edge route cache %s: %w", candidate.Path, err)
+				s.recordCacheLoad("error")
+				continue
+			}
 		}
 		if err := s.validateCachedRouteSource(cached); err != nil {
 			lastErr = fmt.Errorf("verify previous edge route cache source %s: %w", candidate.Path, err)

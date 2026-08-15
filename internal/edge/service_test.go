@@ -1735,6 +1735,49 @@ func TestLivenessStaysUpWhenMaxStaleExceedsServingReadiness(t *testing.T) {
 	}
 }
 
+func TestLoadCacheServesSignedLKGAfterMaxStaleWhileUnhealthy(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	key := "edge-route-signing-key-material"
+	now := time.Now().UTC()
+	bundle := testBundle("routegen_expired_lkg")
+	bundle.GeneratedAt = now.Add(-72 * time.Hour)
+	bundle = bundleauth.SignEdgeRouteBundle(bundle, key, "control-plane", 24*time.Hour)
+	writeTestCache(t, cachePath, bundle, quoteETag(bundle.Version))
+	service := NewService(config.EdgeConfig{APIURL: "https://api.example.invalid", EdgeToken: "edge-secret", CachePath: cachePath, MaxStale: time.Hour, BundleSigningKey: key, BundleSigningKeyID: "control-plane"}, log.New(ioDiscard{}, "", 0))
+	if err := service.LoadCache(); err != nil {
+		t.Fatalf("expired signed LKG was rejected: %v", err)
+	}
+	status := service.Status()
+	if status.BundleVersion != bundle.Version || status.Healthy || !status.MaxStaleExceeded || status.Status != "unhealthy" {
+		t.Fatalf("expired LKG must remain available but unhealthy: %+v", status)
+	}
+}
+
+func TestExpiredLKGServingRequiresValidSignatureAndBoundedAge(t *testing.T) {
+	t.Parallel()
+
+	key := "edge-route-signing-key-material"
+	now := time.Now().UTC()
+	signed := testBundle("routegen_emergency_lkg")
+	signed.GeneratedAt = now.Add(-72 * time.Hour)
+	signed = bundleauth.SignEdgeRouteBundle(signed, key, "control-plane", 24*time.Hour)
+	service := NewService(config.EdgeConfig{BundleSigningKey: key, BundleSigningKeyID: "control-plane"}, log.New(ioDiscard{}, "", 0))
+	cached := cacheFile{Version: cacheFileVersion, Bundle: signed}
+	if err := service.verifyCachedBundleForServing(cached, now); err != nil {
+		t.Fatalf("bounded signed LKG was rejected: %v", err)
+	}
+	tampered := cached
+	tampered.Bundle.Routes[0].UpstreamURL = "http://tampered.invalid"
+	if err := service.verifyCachedBundleForServing(tampered, now); err == nil {
+		t.Fatal("tampered expired LKG was accepted")
+	}
+	if err := service.verifyCachedBundleForServing(cached, signed.ValidUntil.Add(edgeEmergencyLKGMaxAge+time.Second)); err == nil {
+		t.Fatal("expired LKG outside the emergency window was accepted")
+	}
+}
+
 func TestSyncErrorsAndLogsRedactEdgeToken(t *testing.T) {
 	t.Parallel()
 
