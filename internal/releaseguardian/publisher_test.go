@@ -168,6 +168,67 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 	}
 }
 
+func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
+	now := time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC)
+	key := Key{Component: "edge-control-de", Group: "de"}
+	stableSHA, targetSHA := strings.Repeat("1", 40), strings.Repeat("2", 40)
+	imageDigest := "sha256:" + strings.Repeat("d", 64)
+	record := ReleaseRecord{Component: key.Component, Group: key.Group, ConfigSHA: stableSHA, ImageDigest: imageDigest, RecordDigest: testDigest}
+	snapshot := Snapshot{
+		Key: key, Record: record,
+		Desired:             DesiredRelease{Component: key.Component, Group: key.Group, RecordDigest: testDigest},
+		CurrentRecordDigest: testDigest, LastSuccessfulLKG: testDigest, Managed: true,
+		Health: testHealth(HealthHealthy, HealthHealthy, HealthDegraded, now),
+	}
+	repository := "ghcr.io/example/edge-control"
+	bundle := ExecutionBundle{
+		Prepared: declarativerelease.ExecutionPlan{
+			Component: key.Component, ConfigSHA: targetSHA, DegradedPredecessor: true,
+			Forward: declarativerelease.TargetIdentity{ConfigSHA: targetSHA},
+			LKG: declarativerelease.TargetIdentity{Present: true, ConfigSHA: stableSHA, ManifestSHA: stableSHA,
+				OCIRevision: stableSHA, ImageRef: repository + "@" + imageDigest},
+		},
+		Release: declarativerelease.PlanRelease{
+			ComponentID: key.Component, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: stableSHA,
+			ExpectedPreviousManifestSHA: stableSHA, ExpectedPreviousOCIRevision: stableSHA,
+			ExpectedPreviousImageDigest: imageDigest, Artifact: declarativerelease.Artifact{Repository: repository},
+		},
+	}
+	if !degradedPredecessorPublishEligible(snapshot, bundle) || !publishDesiredEligible(snapshot, bundle) {
+		t.Fatal("exact degraded predecessor candidate was rejected")
+	}
+	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
+		"unmanaged":       func(value *Snapshot, _ *ExecutionBundle) { value.Managed = false },
+		"unknown health":  func(value *Snapshot, _ *ExecutionBundle) { value.Health.Route.State = HealthUnknown },
+		"desired drift":   func(value *Snapshot, _ *ExecutionBundle) { value.Desired.RecordDigest = otherDigest },
+		"current drift":   func(value *Snapshot, _ *ExecutionBundle) { value.CurrentRecordDigest = otherDigest },
+		"lkg drift":       func(value *Snapshot, _ *ExecutionBundle) { value.LastSuccessfulLKG = otherDigest },
+		"component drift": func(_ *Snapshot, value *ExecutionBundle) { value.Prepared.Component = "other" },
+		"forward drift":   func(_ *Snapshot, value *ExecutionBundle) { value.Prepared.Forward.ConfigSHA = stableSHA },
+		"predecessor drift": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Release.ExpectedPreviousConfigSHA = strings.Repeat("3", 40)
+		},
+		"image drift": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Prepared.LKG.ImageRef = repository + "@" + otherDigest
+		},
+		"not degraded plan": func(_ *Snapshot, value *ExecutionBundle) { value.Prepared.DegradedPredecessor = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidateSnapshot, candidateBundle := snapshot, bundle
+			mutate(&candidateSnapshot, &candidateBundle)
+			if degradedPredecessorPublishEligible(candidateSnapshot, candidateBundle) || publishDesiredEligible(candidateSnapshot, candidateBundle) {
+				t.Fatal("drifted degraded predecessor candidate was accepted")
+			}
+		})
+	}
+	healthy := snapshot
+	healthy.Managed = false
+	healthy.Health = testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now)
+	if !publishDesiredEligible(healthy, ExecutionBundle{}) {
+		t.Fatal("ordinary healthy settled release was rejected")
+	}
+}
+
 func guardianCandidateWithResourceVersion(t *testing.T, candidate map[string][]byte, resourceVersion string) map[string][]byte {
 	t.Helper()
 	result := make(map[string][]byte, len(candidate))
