@@ -74,6 +74,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"edge_client_matrix",
 		"edge_worker_matrix",
 		"needs: [prepush, component-build, deploy_controller]",
+		"Download Go modules before the bounded test budget",
 		"'23 18 * * *'",
 		"Run the full asynchronous audit",
 	} {

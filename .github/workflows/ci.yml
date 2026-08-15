@@ -38,6 +38,8 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.0
+      - name: Download Go modules before the bounded test budget
+        run: go mod download
       - name: Run the repository prepush contract
         env:
           PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
