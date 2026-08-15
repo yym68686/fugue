@@ -193,6 +193,14 @@ func TestParseEdgeGroupPodsSnapshotPreservesUnreadyImmutableIdentity(t *testing.
 	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false, "", false); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("lenient snapshot accepted missing immutable identity: %v", err)
 	}
+
+	pod = edgeGroupPodFixture("worker-b", "uid-b", "node-1", "edge-group-country-us", "", strings.Repeat("a", 64))
+	delete(pod["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any), "imageID")
+	delete(pod["metadata"].(map[string]any)["annotations"].(map[string]any), "fugue.pro/source-commit")
+	raw, _ = json.Marshal(map[string]any{"items": []any{pod}})
+	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false, "", false); err != nil {
+		t.Fatalf("snapshot rejected pod without runtime-only evidence: %v", err)
+	}
 }
 
 func TestParseEdgeGroupPodsAcceptsReadyLKGWithHistoricalRestarts(t *testing.T) {

@@ -780,7 +780,15 @@ func parseEdgeGroupPodsWithReadiness(raw []byte, container string, expectedNodes
 				pod.ImageID = stringValue(entry["imageID"])
 			}
 		}
-		if pod.Name == "" || pod.UID == "" || pod.ResourceVersion == "" || pod.NodeName == "" || pod.SourceCommit == "" || pod.ImageRef == "" || pod.ImageID == "" || (requireReady && !pod.Ready) {
+		// Snapshot reads are used to recover an active slot whose readiness is
+		// already broken. Pod-level source annotations and container imageID are
+		// runtime evidence, not the immutable identity needed for an exact delete
+		// or node-cohort comparison; strict health reads still require both.
+		identityIncomplete := pod.Name == "" || pod.UID == "" || pod.ResourceVersion == "" || pod.NodeName == "" || pod.ImageRef == ""
+		if requireReady {
+			identityIncomplete = identityIncomplete || pod.SourceCommit == "" || pod.ImageID == "" || !pod.Ready
+		}
+		if identityIncomplete {
 			return nil, errors.New("pod identity or readiness is incomplete")
 		}
 		if _, exists := pods[node]; exists {
