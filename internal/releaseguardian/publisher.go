@@ -38,18 +38,18 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	if !publishDesiredEligible(snapshot, bundle) {
 		return ReleaseRecord{}, DesiredRelease{}, errors.New("current component is not a healthy settled release")
 	}
-	var stableMonitor declarativerelease.MonitorRecord
-	if err := decodeStrict([]byte(snapshot.CurrentMonitorData["record.json"]), &stableMonitor); err != nil || stableMonitor.RecordDigest == "" {
-		return ReleaseRecord{}, DesiredRelease{}, errors.New("current stable monitor record is invalid")
+	stableRecord, stableMonitor, err := canonicalStableReleaseRecord(key, snapshot.CurrentMonitorData)
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
 	}
 	if !bundle.Prepared.LKG.Present || bundle.Release.ExpectedPreviousConfigSHA != stableMonitor.ConfigSHA ||
 		bundle.Release.ExpectedPreviousManifestSHA != stableMonitor.ConfigSHA ||
 		bundle.Release.ExpectedPreviousOCIRevision != stableMonitor.ConfigSHA ||
-		bundle.Release.ExpectedPreviousImageDigest != snapshot.Bundle.Artifact.TopDigest ||
+		bundle.Release.ExpectedPreviousImageDigest != stableRecord.ImageDigest ||
 		digest(bundle.LKG) != stableMonitor.ForwardManifestDigest {
 		return ReleaseRecord{}, DesiredRelease{}, errors.New("Guardian candidate LKG is not the exact current stable release")
 	}
-	record, err := bundle.ReleaseRecord(key, snapshot.CurrentRecordDigest)
+	record, err := bundle.ReleaseRecord(key, stableRecord.RecordDigest)
 	if err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, err
 	}
@@ -141,6 +141,22 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("advance DesiredRelease with resourceVersion CAS: %w", err)
 	}
 	return record, next, nil
+}
+
+func canonicalStableReleaseRecord(key Key, data map[string]string) (ReleaseRecord, declarativerelease.MonitorRecord, error) {
+	plan, artifact, prepared, monitor, _, _, err := decodeStableRecord(data)
+	if err != nil || len(plan.Releases) != 1 || prepared.Component != key.Component || monitor.Component != key.Component {
+		return ReleaseRecord{}, declarativerelease.MonitorRecord{}, errors.New("current stable monitor record is invalid")
+	}
+	healthRaw, err := declarativerelease.CanonicalJSON(plan.Releases[0].Health)
+	if err != nil {
+		return ReleaseRecord{}, declarativerelease.MonitorRecord{}, err
+	}
+	record, err := NewReleaseRecord(key, prepared.ConfigSHA, artifact.TopDigest, monitor.ForwardManifestDigest, monitor.RecordDigest, digest(healthRaw))
+	if err != nil {
+		return ReleaseRecord{}, declarativerelease.MonitorRecord{}, err
+	}
+	return record, monitor, nil
 }
 
 func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle) bool {

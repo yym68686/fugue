@@ -62,6 +62,14 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	canonicalStable, canonicalMonitor, err := canonicalStableReleaseRecord(key, stableData)
+	if err != nil || canonicalStable != stableGuardian || canonicalMonitor != stableRecord {
+		t.Fatalf("canonical stable record=%+v monitor=%+v err=%v", canonicalStable, canonicalMonitor, err)
+	}
+	equivalentAlias, err := NewReleaseRecord(key, stableTarget.ConfigSHA, stableArtifact.TopDigest, stableRecord.ForwardManifestDigest, otherDigest, digest(healthRaw))
+	if err != nil || equivalentAlias.RecordDigest == canonicalStable.RecordDigest {
+		t.Fatalf("equivalent historical alias was not distinct: alias=%+v err=%v", equivalentAlias, err)
+	}
 	canary, err := NewCanaryResult(stableGuardian, HealthHealthy, testDigest, now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
