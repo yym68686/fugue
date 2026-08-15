@@ -61,7 +61,7 @@ func TestEdgeCandidateStageRequestMatchesControlServingAuthoritySchema(t *testin
 	local := edgeCandidateStageRequest{Schema: edgeCandidateStageSchema, KeyID: "key-1", GroupID: "edge-group-country-de",
 		ExpectedAuthoritySequence: 11, ExpectedPublicationSequence: 10, ExpectedRecoveryEpoch: 2,
 		ExpectedPublishedBundleDigest: "sha256:" + strings.Repeat("4", 64), ExpectedCandidateEpoch: 12,
-		ExpectedCurrentWorkerSlot: "b", TargetWorkerSlot: "a", ServingAuthority: &witness, AllowDegradedPrevious: true,
+		ExpectedCurrentWorkerSlot: "b", TargetWorkerSlot: "a", ServingAuthority: &witness, AllowDegradedPrevious: true, StandbyOnly: false,
 		WorkerSourceSHA: strings.Repeat("5", 40), WorkerImageDigest: "sha256:" + strings.Repeat("6", 64),
 		ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), IssuedAtUnix: 100, ExpiresAtUnix: 160,
 		Nonce: "nonce", Reason: "stage immutable candidate", Signature: "signature"}
@@ -69,8 +69,8 @@ func TestEdgeCandidateStageRequestMatchesControlServingAuthoritySchema(t *testin
 		ExpectedAuthoritySequence: local.ExpectedAuthoritySequence, ExpectedPublicationSequence: local.ExpectedPublicationSequence,
 		ExpectedRecoveryEpoch: local.ExpectedRecoveryEpoch, ExpectedPublishedBundleDigest: local.ExpectedPublishedBundleDigest,
 		ExpectedCandidateEpoch: local.ExpectedCandidateEpoch, ExpectedCurrentWorkerSlot: local.ExpectedCurrentWorkerSlot,
-		AllowDegradedPrevious: local.AllowDegradedPrevious,
-		TargetWorkerSlot:      local.TargetWorkerSlot, ServingAuthority: &edgecontrol.GroupServingAuthorityWitness{
+		AllowDegradedPrevious: local.AllowDegradedPrevious, StandbyOnly: local.StandbyOnly,
+		TargetWorkerSlot: local.TargetWorkerSlot, ServingAuthority: &edgecontrol.GroupServingAuthorityWitness{
 			CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
 			CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV,
 			FrontGeneration: witness.FrontGeneration, BundleVersion: witness.BundleVersion, WorkerSlot: witness.WorkerSlot,
@@ -122,8 +122,10 @@ type fakeEdgeGroupRuntime struct {
 	calls           []string
 	requests        []edgeActivationRequest
 	rollAuthority   []bool
+	rollUnready     []bool
 	activationState *edgeActivationState
 	declared        map[string]declarativerelease.TargetIdentity
+	stageDegraded   bool
 }
 
 func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, error) {
@@ -145,7 +147,15 @@ func (fake *fakeEdgeGroupRuntime) StageCandidate(_ context.Context, before edgeG
 	fake.calls = append(fake.calls, "stage:"+inactive)
 	digest, _ := immutableDigestFromRef(target.ImageRef)
 	return edgeCandidateStageReceipt{Schema: edgeCandidateReceiptSchema,
-		WorkerSlot: inactive, CurrentWorkerSlot: before.ActiveSlot, WorkerSourceSHA: target.ConfigSHA, WorkerImageDigest: digest}, nil
+		WorkerSlot: inactive, CurrentWorkerSlot: before.ActiveSlot, WorkerSourceSHA: target.ConfigSHA, WorkerImageDigest: digest,
+		AllowDegradedPrevious: fake.stageDegraded}, nil
+}
+
+func (fake *fakeEdgeGroupRuntime) StageStandby(_ context.Context, before edgeGroupState, inactive string, target declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error) {
+	fake.calls = append(fake.calls, "stage-standby:"+inactive)
+	digest, _ := immutableDigestFromRef(target.ImageRef)
+	return edgeCandidateStageReceipt{Schema: edgeCandidateReceiptSchema,
+		WorkerSlot: inactive, CurrentWorkerSlot: before.ActiveSlot, WorkerSourceSHA: target.ConfigSHA, WorkerImageDigest: digest, StandbyOnly: true}, nil
 }
 
 func (fake *fakeEdgeGroupRuntime) DeclaredTarget(name string) (declarativerelease.TargetIdentity, error) {
@@ -156,9 +166,10 @@ func (fake *fakeEdgeGroupRuntime) DeclaredTarget(name string) (declarativereleas
 	return target, nil
 }
 
-func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, _ declarativerelease.TargetIdentity, requireGroupAuthority bool) (map[string]edgeGroupPod, error) {
+func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, _ declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool) (map[string]edgeGroupPod, error) {
 	fake.calls = append(fake.calls, "roll:"+name)
 	fake.rollAuthority = append(fake.rollAuthority, requireGroupAuthority)
+	fake.rollUnready = append(fake.rollUnready, replaceUnready)
 	value, exists := fake.rolls[name]
 	if !exists {
 		return nil, fmt.Errorf("unexpected roll %s", name)
@@ -328,26 +339,31 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "snapshot"}
+	want := []string{"snapshot", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
 	if len(runtime.requests) != 0 {
 		t.Fatalf("edge forward performed a direct Front activation CAS: %+v", runtime.requests)
 	}
-	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true]"; got != want {
+	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true true]"; got != want {
 		t.Fatalf("edge authority gates=%s want=%s", got, want)
+	}
+	if got, want := fmt.Sprint(runtime.rollUnready), "[false false true]"; got != want {
+		t.Fatalf("edge replace-unready gates=%s want=%s", got, want)
 	}
 }
 
 func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 	transition := edgeTransitionFixture()
 	old := edgeTargetFixture("1", "a")
-	target := edgeTargetFixture("2", "b")
-	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
+	failed := edgeTargetFixture("2", "b")
+	target := edgeTargetFixture("3", "c")
+	before := edgeStateFixture("a", failed, edgeFrontHealth{ActiveSlot: "a"})
+	before.WorkerB = edgeStateFixture("b", old, edgeFrontHealth{ActiveSlot: "b"}).WorkerB
 	finalHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 4, WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target), RouteAuthority: edgeActivationAuthority}
 	final := edgeStateFixture("b", target, finalHealth)
-	final.WorkerA = before.WorkerA
+	final.WorkerA = edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"}).WorkerA
 	runtime := &fakeEdgeGroupRuntime{
 		snapshots: []edgeGroupState{before, final},
 		rolls: map[string]map[string]edgeGroupPod{
@@ -355,15 +371,20 @@ func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 			transition.FrontName:   final.Front,
 			transition.WorkerAName: final.WorkerA,
 		},
-		waits:    []map[string]edgeFrontHealth{{"node-1": finalHealth}},
-		declared: map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
+		waits:         []map[string]edgeFrontHealth{{"node-1": finalHealth}},
+		declared:      map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
+		stageDegraded: true,
 	}
-	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
+	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, SupersedesFailedConfigSHA: failed.ConfigSHA,
+		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
 	if got := final.WorkerA["node-1"].SourceCommit; got != old.ConfigSHA {
 		t.Fatalf("previous authority slot changed from LKG: %s", got)
+	}
+	if got, want := fmt.Sprint(runtime.rollUnready), "[true false true]"; got != want {
+		t.Fatalf("failed successor replace-unready gates=%s want=%s", got, want)
 	}
 }
 

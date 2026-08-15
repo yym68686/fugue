@@ -165,6 +165,18 @@ func TestCandidateImporterAcceptsExactServingAuthorityWitness(t *testing.T) {
 	if err != nil || !candidate.AllowDegradedPrevious {
 		t.Fatalf("importer omitted degraded previous authorization: candidate=%+v err=%v", candidate, err)
 	}
+	envelope.AllowDegradedPrevious = false
+	envelope.StandbyOnly = true
+	changed, err = importCandidateOnce(context.Background(), store, client, candidateImportConfig{
+		GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile,
+	}, now.Add(time.Second))
+	if err != nil || changed {
+		t.Fatalf("standby import changed promotable state: changed=%v err=%v", changed, err)
+	}
+	unchanged, _, _, err := store.LoadCandidate(context.Background(), groupID)
+	if err != nil || unchanged != candidate {
+		t.Fatalf("standby import replaced candidate: before=%+v after=%+v err=%v", candidate, unchanged, err)
+	}
 }
 
 func TestCandidateImporterRejectsServingAuthorityCASDriftBeforeWritingRecords(t *testing.T) {

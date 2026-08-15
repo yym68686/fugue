@@ -58,6 +58,7 @@ type candidateEnvelope struct {
 	CurrentWorkerSlot       releaseguardian.AuthoritySlot      `json:"current_worker_slot"`
 	ServingAuthority        *candidateServingAuthorityWitness  `json:"serving_authority,omitempty"`
 	AllowDegradedPrevious   bool                               `json:"allow_degraded_previous,omitempty"`
+	StandbyOnly             bool                               `json:"standby_only,omitempty"`
 	Record                  releaseguardian.RouteBundleRecord  `json:"record"`
 	Bundle                  model.EdgeRouteBundle              `json:"bundle"`
 }
@@ -169,6 +170,11 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		if currentMissing || validateCandidateServingAuthorityBinding(envelope, current, currentUID, currentRV) != nil {
 			return false, errors.New("candidate serving authority does not match Guardian current authority")
 		}
+	}
+	// Standby envelopes restore the inactive LKG route source after promotion.
+	// They are verified here but never enter Guardian's promotable state.
+	if envelope.StandbyOnly {
+		return false, nil
 	}
 	currentPublicationSequence, currentRecoveryEpoch, _ := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
 	// Immutable records are idempotent. Persist both sides before creating the
@@ -335,6 +341,9 @@ func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now t
 	}
 	if envelope.AllowDegradedPrevious && envelope.ServingAuthority == nil {
 		return errors.New("candidate envelope degraded previous authorization is invalid")
+	}
+	if envelope.StandbyOnly && (envelope.ServingAuthority == nil || envelope.AllowDegradedPrevious) {
+		return errors.New("candidate envelope standby authorization is invalid")
 	}
 	return nil
 }

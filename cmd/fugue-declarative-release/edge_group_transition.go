@@ -71,6 +71,7 @@ type edgeCandidateStageRequest struct {
 	TargetWorkerSlot              string                       `json:"target_worker_slot"`
 	ServingAuthority              *edgeServingAuthorityWitness `json:"serving_authority,omitempty"`
 	AllowDegradedPrevious         bool                         `json:"allow_degraded_previous,omitempty"`
+	StandbyOnly                   bool                         `json:"standby_only,omitempty"`
 	WorkerSourceSHA               string                       `json:"worker_source_sha"`
 	WorkerImageDigest             string                       `json:"worker_image_digest"`
 	ReleaseRecordDigest           string                       `json:"release_record_digest"`
@@ -95,6 +96,7 @@ type edgeCandidateStageReceipt struct {
 	CurrentPublicationSequence   uint64 `json:"current_publication_sequence"`
 	CurrentRecoveryEpoch         uint64 `json:"current_recovery_epoch"`
 	AllowDegradedPrevious        bool   `json:"allow_degraded_previous,omitempty"`
+	StandbyOnly                  bool   `json:"standby_only,omitempty"`
 	OrdinaryTrafficMutation      bool   `json:"ordinary_traffic_mutation"`
 }
 
@@ -221,8 +223,9 @@ type edgeGroupTransitionRuntime interface {
 	Snapshot(context.Context) (edgeGroupState, error)
 	ApplyCandidateResources(context.Context, string) error
 	StageCandidate(context.Context, edgeGroupState, string, declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error)
+	StageStandby(context.Context, edgeGroupState, string, declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error)
 	DeclaredTarget(string) (declarativerelease.TargetIdentity, error)
-	Roll(context.Context, string, declarativerelease.TargetIdentity, bool) (map[string]edgeGroupPod, error)
+	Roll(context.Context, string, declarativerelease.TargetIdentity, bool, bool) (map[string]edgeGroupPod, error)
 	SelectCASExecutor(context.Context, ...edgeGroupPod) (edgeGroupPod, error)
 	ReadActivation(context.Context, edgeGroupPod) (edgeActivationState, bool, error)
 	WaitFront(context.Context, string, string, string) (map[string]edgeFrontHealth, error)
@@ -289,7 +292,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 			if targetErr != nil {
 				return targetErr
 			}
-			if _, err := runtime.Roll(ctx, name, declared, name != transition.FrontName); err != nil {
+			if _, err := runtime.Roll(ctx, name, declared, name != transition.FrontName, true); err != nil {
 				return fmt.Errorf("restore exact edge LKG workload %s: %w", name, err)
 			}
 		}
@@ -300,34 +303,62 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return fmt.Errorf("stage inactive Worker candidate: %w", err)
 	}
 	if stage.WorkerSlot != inactiveSlot || stage.CurrentWorkerSlot != activeSlot || stage.WorkerSourceSHA != target.ConfigSHA ||
-		stage.WorkerImageDigest != desiredDigest || stage.AllowDegradedPrevious != (release.SupersedesFailedConfigSHA != "") || stage.OrdinaryTrafficMutation {
+		stage.WorkerImageDigest != desiredDigest || stage.AllowDegradedPrevious != (release.SupersedesFailedConfigSHA != "") || stage.StandbyOnly || stage.OrdinaryTrafficMutation {
 		return errors.New("inactive Worker candidate receipt is invalid")
 	}
 	if err := runtime.ApplyCandidateResources(ctx, inactiveSlot); err != nil {
 		return err
 	}
-	if _, err := runtime.Roll(ctx, inactiveName, target, true); err != nil {
+	candidatePods, err := runtime.Roll(ctx, inactiveName, target, true, release.SupersedesFailedConfigSHA != "")
+	if err != nil {
 		return fmt.Errorf("roll inactive edge slot %s: %w", inactiveSlot, err)
 	}
-	if _, err := runtime.WaitFront(ctx, inactiveSlot, target.ConfigSHA, desiredDigest); err != nil {
+	frontHealth, err := runtime.WaitFront(ctx, inactiveSlot, target.ConfigSHA, desiredDigest)
+	if err != nil {
 		return fmt.Errorf("wait Guardian authority switch: %w", err)
 	}
 	if err := runtime.ApplyCandidateResources(ctx, transition.FrontName); err != nil {
 		return fmt.Errorf("apply Front candidate after Guardian authority switch: %w", err)
 	}
-	if _, err := runtime.Roll(ctx, transition.FrontName, target, true); err != nil {
+	frontPods, err := runtime.Roll(ctx, transition.FrontName, target, true, false)
+	if err != nil {
 		return fmt.Errorf("roll edge front after Guardian authority switch: %w", err)
 	}
 	if err := runtime.WaitActiveWorkerAuthority(ctx, inactiveName, target); err != nil {
 		return fmt.Errorf("verify active edge worker authority: %w", err)
 	}
+	previousName := edgeWorkerName(transition, activeSlot)
+	previousTarget, err := runtime.DeclaredTarget(previousName)
+	if err != nil {
+		return err
+	}
+	serving := edgeGroupState{Front: frontPods, FrontHealth: frontHealth, ActiveSlot: inactiveSlot}
+	if inactiveSlot == "a" {
+		serving.WorkerA, serving.WorkerB = candidatePods, before.WorkerB
+	} else {
+		serving.WorkerA, serving.WorkerB = before.WorkerA, candidatePods
+	}
+	standby, err := runtime.StageStandby(ctx, serving, activeSlot, previousTarget)
+	if err != nil {
+		return fmt.Errorf("stage previous LKG standby: %w", err)
+	}
+	previousDigest, err := immutableDigestFromRef(previousTarget.ImageRef)
+	if err != nil {
+		return err
+	}
+	if standby.WorkerSlot != activeSlot || standby.CurrentWorkerSlot != inactiveSlot || standby.WorkerSourceSHA != previousTarget.ConfigSHA ||
+		standby.WorkerImageDigest != previousDigest || standby.AllowDegradedPrevious || !standby.StandbyOnly || standby.OrdinaryTrafficMutation {
+		return errors.New("previous LKG standby receipt is invalid")
+	}
+	if err := runtime.ApplyCandidateResources(ctx, previousName); err != nil {
+		return fmt.Errorf("apply previous LKG standby resources: %w", err)
+	}
+	if _, err := runtime.Roll(ctx, previousName, previousTarget, true, true); err != nil {
+		return fmt.Errorf("restore previous LKG standby: %w", err)
+	}
 	final, err := runtime.Snapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("capture final edge group state: %w", err)
-	}
-	previousTarget, err := runtime.DeclaredTarget(edgeWorkerName(transition, activeSlot))
-	if err != nil {
-		return err
 	}
 	if !edgePodsMatchTarget(final.Front, target) || !edgePodsMatchTarget(edgeWorkerPods(final, inactiveSlot), target) ||
 		!edgePodsMatchTarget(edgeWorkerPods(final, activeSlot), previousTarget) {
@@ -359,6 +390,14 @@ func (runtime *kubectlEdgeGroupRuntime) DeclaredTarget(name string) (declarative
 }
 
 func (runtime *kubectlEdgeGroupRuntime) StageCandidate(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error) {
+	return runtime.stageCandidate(ctx, before, inactiveSlot, target, false)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) StageStandby(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error) {
+	return runtime.stageCandidate(ctx, before, inactiveSlot, target, true)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool) (edgeCandidateStageReceipt, error) {
 	status, err := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
 	if err != nil {
 		return edgeCandidateStageReceipt{}, err
@@ -388,9 +427,12 @@ func (runtime *kubectlEdgeGroupRuntime) StageCandidate(ctx context.Context, befo
 		ExpectedPublicationSequence: status.CurrentPublicationSequence, ExpectedRecoveryEpoch: status.RecoveryEpoch,
 		ExpectedPublishedBundleDigest: status.PublishedBundleDigest, ExpectedCandidateEpoch: status.CandidateEpoch,
 		ExpectedCurrentWorkerSlot: before.ActiveSlot, TargetWorkerSlot: inactiveSlot, ServingAuthority: servingAuthority,
-		AllowDegradedPrevious: runtime.release.SupersedesFailedConfigSHA != "", WorkerSourceSHA: target.ConfigSHA,
+		AllowDegradedPrevious: !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "", StandbyOnly: standbyOnly, WorkerSourceSHA: target.ConfigSHA,
 		WorkerImageDigest: digest, ReleaseRecordDigest: recordDigest, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(),
 		Nonce: base64.RawURLEncoding.EncodeToString(nonceRaw), Reason: "stage immutable Worker candidate for independent route canary"}
+	if standbyOnly {
+		request.Reason = "restore previous Worker LKG as non-promotable standby"
+	}
 	if err := signEdgeCandidateStageRequest(runtime.transition.CandidateKeyring, &request, now); err != nil {
 		return edgeCandidateStageReceipt{}, err
 	}
@@ -613,8 +655,8 @@ func zeroEdgeCandidateSecret(value []byte) {
 	}
 }
 
-func (runtime *kubectlEdgeGroupRuntime) Roll(ctx context.Context, name string, target declarativerelease.TargetIdentity, requireGroupAuthority bool) (map[string]edgeGroupPod, error) {
-	return runtime.cluster.rollEdgeDaemonSetTarget(ctx, runtime.client, runtime.release, runtime.transition, name, target, requireGroupAuthority)
+func (runtime *kubectlEdgeGroupRuntime) Roll(ctx context.Context, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool) (map[string]edgeGroupPod, error) {
+	return runtime.cluster.rollEdgeDaemonSetTarget(ctx, runtime.client, runtime.release, runtime.transition, name, target, requireGroupAuthority, replaceUnready)
 }
 
 func (runtime *kubectlEdgeGroupRuntime) SelectCASExecutor(ctx context.Context, candidates ...edgeGroupPod) (edgeGroupPod, error) {
@@ -997,10 +1039,10 @@ func (cluster *kubectlCluster) readEdgeFrontHealth(ctx context.Context, pod edge
 }
 
 func (cluster *kubectlCluster) rollEdgeDaemonSet(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error) {
-	return cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, name, target, true)
+	return cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, name, target, true, false)
 }
 
-func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity, requireGroupAuthority bool) (map[string]edgeGroupPod, error) {
+func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool) (map[string]edgeGroupPod, error) {
 	container := transition.WorkerContainer
 	// Inactive workers may be pre-authority during adoption, but their
 	// immutable bundle generation is still required by the activation CAS.
@@ -1011,13 +1053,19 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 		container = "edge-front"
 		includeHealth = false
 	}
-	current, err := cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
+	var current map[string]edgeGroupPod
+	var err error
+	if replaceUnready && name != transition.FrontName {
+		current, err = cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID)
+	} else {
+		current, err = cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
+	}
 	if err != nil {
 		return nil, err
 	}
 	for _, node := range sortedEdgeNodes(current) {
 		pod := current[node]
-		if edgePodMatchesTarget(pod, target) {
+		if edgePodMatchesTarget(pod, target) && (!replaceUnready || pod.Ready && (!includeHealth || edgePodHasGroupAuthority(pod))) {
 			continue
 		}
 		if err := deleteEdgePodExact(ctx, client, release.Workload.Namespace, pod); err != nil {
