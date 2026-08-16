@@ -10,6 +10,7 @@ github_output="${2:-}"
 changed=false
 while IFS= read -r path; do
   case "${path}" in
+    .github/workflows/ci.yml|\
     scripts/apply_fugue_traffic_safety.sh|\
     scripts/export_fugue_traffic_state.sh|\
     scripts/probe_fugue_public_dns.sh|\
