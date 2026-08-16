@@ -189,9 +189,6 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 		s.recordInventoryProducerInactive()
 		return nil
 	}
-	if activation.WorkerSourceCommit != strings.TrimSpace(edgeConfig.EdgeReleaseEpoch) {
-		return errors.New("Edge inventory producer release epoch is not active")
-	}
 	token, err := issueBoundInventoryProducerIdentity(s.InventoryProducer.IdentityKeyringFile, edgeConfig, time.Now().UTC())
 	if err != nil {
 		return err
@@ -227,7 +224,7 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 			Schema: groupInventorySchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Sequence: sequence + 1,
 			Generation: producerInventoryEnvelopeGeneration(nextProducerGeneration), ObservedAt: now,
 			ActiveEpoch: groupActiveEpoch{
-				GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Slot: activation.ActiveSlot, ReleaseEpoch: activation.WorkerSourceCommit,
+				GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Slot: activation.ActiveSlot, ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
 				FenceSequence: activation.Generation, MinHealthyInstances: 1,
 			},
 			Instances: []groupInstance{{
