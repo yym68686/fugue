@@ -148,6 +148,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 			}
 		}
 	}
+	routePublicationEdgeGroups := edgeRoutePublicationGroups(healthyEdgeGroups, expectedNonEmptyEdgeGroups)
 
 	runtimeByID := make(map[string]model.Runtime, len(runtimes))
 	for _, runtimeObj := range runtimes {
@@ -187,13 +188,13 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
-		for _, platformBinding := range expandDefaultPlatformRouteBindings(binding, healthyEdgeGroups) {
+		for _, platformBinding := range expandDefaultPlatformRouteBindings(binding, routePublicationEdgeGroups) {
 			routes = append(routes, platformBinding)
 		}
 	}
 
 	for _, platformRoute := range s.platformRoutes {
-		for _, binding := range edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups, healthyEdgeNodeIDsByGroup) {
+		for _, binding := range edgeRouteBindingsForPlatformRoute(platformRoute, routePublicationEdgeGroups, healthyEdgeGroups, healthyEdgeNodeIDsByGroup) {
 			routes = append(routes, binding)
 		}
 	}
@@ -222,7 +223,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		binding = applyCustomDomainReadiness(binding, domain)
 		binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
-		for _, expandedBinding := range expandDefaultPlatformRouteBindings(binding, healthyEdgeGroups) {
+		for _, expandedBinding := range expandDefaultPlatformRouteBindings(binding, routePublicationEdgeGroups) {
 			routes = append(routes, expandedBinding)
 		}
 		tlsAllowlist = append(tlsAllowlist, model.EdgeTLSAllowlistEntry{
@@ -255,7 +256,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 				binding = applyCustomDomainReadiness(binding, *domain)
 			}
 			binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
-			for _, expandedBinding := range expandDefaultPlatformRouteBindings(binding, healthyEdgeGroups) {
+			for _, expandedBinding := range expandDefaultPlatformRouteBindings(binding, routePublicationEdgeGroups) {
 				routes = append(routes, expandedBinding)
 			}
 		}
@@ -979,7 +980,7 @@ func applyCustomDomainReadiness(binding model.EdgeRouteBinding, domain model.App
 	return binding
 }
 
-func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string) []model.EdgeRouteBinding {
+func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, routePublicationEdgeGroups, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string) []model.EdgeRouteBinding {
 	base := model.EdgeRouteBinding{
 		Hostname:      route.Hostname,
 		PathPrefix:    "/",
@@ -1004,15 +1005,17 @@ func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGro
 		base.EdgeGroupID = strings.TrimSpace(route.EdgeGroupID)
 		healthyEdgeNodeCount = edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyEdgeNodeIDsByGroup, []string{base.EdgeGroupID}, edgeRouteExclusions{})
 		base = applyEdgeRouteRedundancyStatus(base, healthyEdgeNodeCount, minHealthyEdgeNodes)
-		if base.EdgeGroupID == "" || !healthyEdgeGroups[base.EdgeGroupID] {
+		if base.EdgeGroupID == "" {
 			base.Status = model.EdgeRouteStatusUnavailable
-			base.StatusReason = "edge group has no healthy edge nodes"
+			base.StatusReason = "pinned edge group is required"
 			base.UpstreamURL = ""
+		} else if !healthyEdgeGroups[base.EdgeGroupID] && base.Status == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(base.RoutePolicy) {
+			retainEdgeRouteWhileDNSWithdrawn(&base, base.EdgeGroupID, "pinned platform route retained while DNS lacks verified edge readiness")
 		}
 		base.RouteGeneration = edgeRouteGeneration(base)
 		return []model.EdgeRouteBinding{base}
 	default:
-		groups := sortedHealthyEdgeGroups(healthyEdgeGroups)
+		groups := sortedHealthyEdgeGroups(routePublicationEdgeGroups)
 		if len(groups) == 0 {
 			base.Status = model.EdgeRouteStatusUnavailable
 			base.StatusReason = "no healthy edge groups"
@@ -1090,6 +1093,23 @@ func sortedHealthyEdgeGroups(healthyEdgeGroups map[string]bool) []string {
 	}
 	sort.Strings(candidates)
 	return candidates
+}
+
+func edgeRoutePublicationGroups(healthyEdgeGroups, expectedNonEmptyEdgeGroups map[string]bool) map[string]bool {
+	groups := make(map[string]bool, len(healthyEdgeGroups)+len(expectedNonEmptyEdgeGroups))
+	for edgeGroupID, healthy := range healthyEdgeGroups {
+		edgeGroupID = strings.TrimSpace(edgeGroupID)
+		if edgeGroupID != "" && healthy {
+			groups[edgeGroupID] = true
+		}
+	}
+	for edgeGroupID, previouslyServing := range expectedNonEmptyEdgeGroups {
+		edgeGroupID = strings.TrimSpace(edgeGroupID)
+		if edgeGroupID != "" && previouslyServing {
+			groups[edgeGroupID] = true
+		}
+	}
+	return groups
 }
 
 func (s *Server) edgeRouteHealthyEdgeGroups() (map[string]bool, error) {

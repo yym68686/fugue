@@ -287,7 +287,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			continue
 		}
 		latencyProfile := latencyProfiles.globalProfile(hostname)
-		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups, healthyEdgeNodeIDsByGroup))
+		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups, healthyEdgeGroups, healthyEdgeNodeIDsByGroup))
 		answerIPs := edgeDNSAnswerIPsForPlatformRoute(platformRoute, options, edgeAnswerIPsByGroup)
 		if policy, ok := policyByHostname[hostname]; ok {
 			answerIPs = edgeDNSFilterAnswerIPsForExclusions(answerIPs, edgeRoutePolicyActiveExclusions(policy, now), edgeCandidateByIP)

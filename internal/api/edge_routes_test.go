@@ -848,6 +848,63 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}
 }
 
+func TestPlatformRoutesRetainPreviouslyServingUnhealthyEdgeGroups(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	deployAppForEdgeRouteTest(t, storeState, app)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
+		ID:                  "edge-de-1",
+		EdgeGroupID:         "edge-group-country-de",
+		Status:              model.EdgeHealthDegraded,
+		Healthy:             false,
+		RouteBundleVersion:  "routegen_previous",
+		CaddyAppliedVersion: "routegen_previous",
+		CaddyRouteCount:     1,
+	}); err != nil {
+		t.Fatalf("record previously serving DE edge node: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-us", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeRouteBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	for _, edgeGroupID := range []string{"edge-group-country-us", "edge-group-country-de"} {
+		route := edgeRouteByHostKindAndGroup(bundle.Routes, app.Route.Hostname, model.EdgeRouteKindPlatform, edgeGroupID)
+		if route == nil || route.Status != model.EdgeRouteStatusActive || route.UpstreamURL == "" {
+			t.Fatalf("previously serving group %s must retain its Host route: %+v", edgeGroupID, bundle.Routes)
+		}
+	}
+}
+
+func TestConfiguredPlatformRouteRetainsPreviouslyServingUnhealthyGroup(t *testing.T) {
+	t.Parallel()
+
+	route := model.PlatformRoute{
+		Hostname:      "api.fugue.pro",
+		Kind:          model.EdgeRouteKindControlPlaneAPI,
+		RoutePolicy:   model.EdgeRoutePolicyEnabled,
+		UpstreamURL:   "http://fugue-fugue.fugue-system.svc.cluster.local:80",
+		Status:        model.EdgeRouteStatusActive,
+		EdgeGroupMode: model.PlatformRouteEdgeGroupModeAllHealthy,
+	}
+	routes := edgeRouteBindingsForPlatformRoute(
+		route,
+		map[string]bool{"edge-group-country-us": true, "edge-group-country-de": true},
+		map[string]bool{"edge-group-country-us": true, "edge-group-country-de": false},
+		map[string][]string{"edge-group-country-us": []string{"edge-us-1"}},
+	)
+	de := edgeRouteByHostKindAndGroup(routes, route.Hostname, route.Kind, "edge-group-country-de")
+	if de == nil || de.Status != model.EdgeRouteStatusActive || de.UpstreamURL != route.UpstreamURL {
+		t.Fatalf("previously serving DE group must retain the configured platform route: %+v", routes)
+	}
+}
+
 func TestEdgeRoutePolicyExclusionDrainsDNSWithoutFilteringRouteBundle(t *testing.T) {
 	t.Parallel()
 
