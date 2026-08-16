@@ -117,9 +117,10 @@ func (s *Server) handleExplainTrafficSafety(w http.ResponseWriter, r *http.Reque
 	}
 	minHealthy := queryIntDefault(r, "min_healthy_edges", 1)
 	eligible, gated := trafficSafetyEdgeGroups(explain)
-	healthyEdgeCount := trafficSafetyHealthyEdgeNodeCount(explain)
-	if healthyEdgeCount == 0 {
-		healthyEdgeCount = len(eligible)
+	healthyEdgeCount, err := s.trafficSafetyEligibleEdgeNodeCount(hostname)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
 	}
 	gateReasons := trafficSafetyHardGateReasons(explain)
 	blockers := []string{}
@@ -155,6 +156,27 @@ func (s *Server) handleExplainTrafficSafety(w http.ResponseWriter, r *http.Reque
 		GeneratedAt:         time.Now().UTC(),
 	}
 	httpx.WriteJSON(w, http.StatusOK, model.TrafficSafetyExplainResponse{State: state})
+}
+
+func (s *Server) trafficSafetyEligibleEdgeNodeCount(hostname string) (int, error) {
+	_, healthyNodeIDsByGroup, _, _, err := s.edgeRouteGroupInventory()
+	if err != nil {
+		return 0, err
+	}
+	policies, err := s.store.ListEdgeRoutePolicies()
+	if err != nil {
+		return 0, err
+	}
+	policy := edgeRoutePolicyByHostname(policies)[normalizeExternalAppDomain(hostname)]
+	now, err := s.store.EdgeRoutePolicyTime()
+	if err != nil {
+		return 0, err
+	}
+	exclusions := edgeRoutePolicyActiveExclusions(policy, now)
+	if groupID := strings.TrimSpace(policy.EdgeGroupID); groupID != "" {
+		return edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyNodeIDsByGroup, []string{groupID}, exclusions), nil
+	}
+	return edgeRouteHealthyNodeCountAfterExclusions(healthyNodeIDsByGroup, exclusions), nil
 }
 
 func (s *Server) handleExplainRequest(w http.ResponseWriter, r *http.Request) {
@@ -353,19 +375,6 @@ func trafficSafetyEdgeGroups(explain model.RouteExplainResponse) ([]string, []st
 		}
 	}
 	return sortedKeys(eligibleSet), sortedKeys(gatedSet)
-}
-
-func trafficSafetyHealthyEdgeNodeCount(explain model.RouteExplainResponse) int {
-	healthy := 0
-	for _, route := range explain.Routes {
-		if route.HealthyEdgeNodeCount > healthy {
-			healthy = route.HealthyEdgeNodeCount
-		}
-	}
-	if explain.Route != nil && explain.Route.HealthyEdgeNodeCount > healthy {
-		healthy = explain.Route.HealthyEdgeNodeCount
-	}
-	return healthy
 }
 
 func trafficSafetyHardGateReasons(explain model.RouteExplainResponse) map[string]string {

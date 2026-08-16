@@ -296,6 +296,46 @@ func TestGroupShadowCompilerCandidateGenerationIsCanonical(t *testing.T) {
 	}
 }
 
+func TestGroupShadowCompilerRetainsRoutesDuringTrafficExclusion(t *testing.T) {
+	t.Parallel()
+
+	const groupID = "edge-group-country-us"
+	intent := routeIntentFixture()
+	intent.Routes[0].ExcludedEdgeIDs = []string{"edge-" + groupID}
+	intent.Routes[0].ExcludedEdgeGroupIDs = []string{groupID}
+	intent.Routes[0].ExclusionReason = "operator traffic drain"
+
+	ledger := NewMemoryGroupShadowLedger()
+	compiler := GroupShadowCompiler{
+		Inventory: &shadowInventoryReader{snapshots: map[string]GroupInventorySnapshot{
+			groupID: groupInventoryFixture(groupID, "b", "epoch-us-b", "inventory-us-1", false),
+		}},
+		Ledger: ledger,
+	}
+	batch, err := compiler.Reconcile(context.Background(), intent, []string{groupID})
+	if err != nil || batch.Succeeded != 1 || len(batch.Results) != 1 {
+		t.Fatalf("Reconcile() = %+v, %v", batch, err)
+	}
+	history := ledger.History(groupID)
+	if len(history) != 1 || history[0].Bundle == nil {
+		t.Fatalf("expected compiled route bundle, got %+v", history)
+	}
+	bundle := history[0].Bundle
+	if len(bundle.Routes) != 1 {
+		t.Fatalf("traffic exclusion removed the active route: %+v", bundle.Routes)
+	}
+	route := bundle.Routes[0]
+	if route.Hostname != "all.example.test" || route.Status != model.EdgeRouteStatusActive || !routeHasUpstream(route) {
+		t.Fatalf("traffic exclusion changed serving route material: %+v", route)
+	}
+	if route.HealthyEdgeNodeCount != 1 || len(route.ExcludedEdgeIDs) != 1 || len(route.ExcludedEdgeGroupIDs) != 1 {
+		t.Fatalf("traffic drain metadata or healthy inventory was lost: %+v", route)
+	}
+	if len(bundle.TLSAllowlist) != 1 || bundle.TLSAllowlist[0].Hostname != route.Hostname {
+		t.Fatalf("traffic exclusion removed TLS readiness for retained route: %+v", bundle.TLSAllowlist)
+	}
+}
+
 func TestMemoryGroupShadowLedgerRejectsCASAndLKGForgery(t *testing.T) {
 	t.Parallel()
 
