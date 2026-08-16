@@ -1564,10 +1564,19 @@ func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.Robustn
 	sort.Strings(keys)
 	checks := make([]model.RobustnessCheck, 0, len(keys)+1)
 	atRisk := 0
+	eligibleByHostname := map[string]int{}
 	for _, key := range keys {
 		route := latestBySubject[key]
 		minHealthy := route.MinHealthyEdgeNodes
-		healthy := route.HealthyEdgeNodeCount
+		hostname := normalizeExternalAppDomain(route.Hostname)
+		healthy, ok := eligibleByHostname[hostname]
+		if !ok {
+			healthy, err = s.trafficSafetyEligibleEdgeNodeCount(hostname)
+			if err != nil {
+				return nil, err
+			}
+			eligibleByHostname[hostname] = healthy
+		}
 		pass := healthy >= minHealthy
 		if !pass {
 			atRisk++
@@ -1579,7 +1588,7 @@ func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.Robustn
 				severity = model.RobustnessSeverityBlockPublish
 			}
 		}
-		subject := "hostname:" + normalizeExternalAppDomain(route.Hostname)
+		subject := "hostname:" + hostname
 		if path := strings.TrimSpace(route.PathPrefix); path != "" {
 			subject += path
 		}
@@ -1588,13 +1597,12 @@ func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.Robustn
 			Pass:       pass,
 			Severity:   severity,
 			Subject:    subject,
-			Expected:   fmt.Sprintf("healthy_edge_node_count >= min_healthy_edge_nodes (%d)", minHealthy),
-			Observed:   fmt.Sprintf("healthy_edge_node_count=%d min_healthy_edge_nodes=%d route_kind=%s edge_group=%s status=%s", healthy, minHealthy, route.RouteKind, route.EdgeGroupID, route.Status),
-			Message:    route.EdgeRedundancyReason,
-			Evidence:   map[string]string{"guardian": "traffic-safety", "hostname": normalizeExternalAppDomain(route.Hostname), "path_prefix": strings.TrimSpace(route.PathPrefix), "route_kind": strings.TrimSpace(route.RouteKind), "edge_group_id": strings.TrimSpace(route.EdgeGroupID), "route_generation": strings.TrimSpace(route.RouteGeneration), "edge_redundancy_status": strings.TrimSpace(route.EdgeRedundancyStatus)},
-			RepairHint: "restore or add a healthy edge, or explicitly lower the service minimum if the single-edge risk is accepted",
+			Expected:   fmt.Sprintf("DNS-eligible healthy edge count >= min_healthy_edge_nodes (%d)", minHealthy),
+			Observed:   fmt.Sprintf("dns_eligible_healthy_edge_count=%d min_healthy_edge_nodes=%d route_kind=%s edge_group=%s status=%s", healthy, minHealthy, route.RouteKind, route.EdgeGroupID, route.Status),
+			Evidence:   map[string]string{"guardian": "traffic-safety", "hostname": hostname, "path_prefix": strings.TrimSpace(route.PathPrefix), "route_kind": strings.TrimSpace(route.RouteKind), "edge_group_id": strings.TrimSpace(route.EdgeGroupID), "route_generation": strings.TrimSpace(route.RouteGeneration), "edge_redundancy_status": map[bool]string{true: "ok", false: "at_risk"}[pass]},
+			RepairHint: "restore or add a DNS-eligible healthy edge, or explicitly lower the service minimum if the single-edge risk is accepted",
 		}
-		if check.Message == "" && !pass {
+		if !pass {
 			check.Message = fmt.Sprintf("healthy eligible edge nodes %d below minimum %d", healthy, minHealthy)
 		}
 		checks = append(checks, check)
