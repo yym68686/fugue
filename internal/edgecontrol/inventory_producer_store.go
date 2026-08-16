@@ -70,14 +70,12 @@ func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
 			switch {
 			case epoch.FenceSequence < producer.ActiveEpoch.FenceSequence:
 				return ErrGroupInventoryProducerEpoch
-			case epoch.FenceSequence == producer.ActiveEpoch.FenceSequence && !equalGroupActiveEpoch(epoch, producer.ActiveEpoch):
+			case epoch.FenceSequence == producer.ActiveEpoch.FenceSequence && !equalGroupServingEpoch(epoch, producer.ActiveEpoch):
 				return ErrGroupInventoryProducerEpoch
 			}
 		}
 		producer.Generation = heartbeat.ProducerGeneration
-		if producer.ActiveEpoch.FenceSequence == 0 || epoch.FenceSequence > producer.ActiveEpoch.FenceSequence {
-			producer.ActiveEpoch = epoch
-		}
+		producer.ActiveEpoch = epoch
 		producer.RecentNonces = append(producer.RecentNonces, heartbeat.Nonce)
 		if len(producer.RecentNonces) > maxGroupInventoryProducerNonces {
 			producer.RecentNonces = append([]string(nil), producer.RecentNonces[len(producer.RecentNonces)-maxGroupInventoryProducerNonces:]...)
@@ -185,8 +183,8 @@ func cloneGroupInventoryProducerState(value GroupInventoryProducerState) GroupIn
 	return value
 }
 
-func equalGroupActiveEpoch(left, right GroupActiveEpoch) bool {
-	return left.GroupID == right.GroupID && left.Slot == right.Slot && left.ReleaseEpoch == right.ReleaseEpoch &&
+func equalGroupServingEpoch(left, right GroupActiveEpoch) bool {
+	return left.GroupID == right.GroupID && left.Slot == right.Slot &&
 		left.FenceSequence == right.FenceSequence && left.MinHealthyInstances == right.MinHealthyInstances
 }
 
