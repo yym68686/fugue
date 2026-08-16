@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -37,6 +39,27 @@ append_unique_ip() {
     fi
   done
   answer_ips+=("${candidate}")
+}
+
+query_public_dns() {
+  local resolver="$1"
+  local hostname="$2"
+  local record_type="$3"
+
+  if [[ -n "${dns_query_bin}" ]]; then
+    "${dns_query_bin}" "${resolver}" "${hostname}" "${record_type}" "${dig_timeout}"
+    return
+  fi
+  if command -v dig >/dev/null 2>&1; then
+    dig +short +time="${dig_timeout}" +tries=1 @"${resolver}" "${hostname}" "${record_type}" |
+      awk '
+        /^[0-9]+(\.[0-9]+){3}$/ { print; next }
+        /^[0-9A-Fa-f:]+$/ && /:/ { print }
+      '
+    return
+  fi
+  require_command go
+  go run "${SCRIPT_DIR}/public_dns_query.go" "${resolver}" "${hostname}" "${record_type}" "${dig_timeout}"
 }
 
 array_contains() {
@@ -97,7 +120,6 @@ if [[ ! "${hostname}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "${hostnam
 fi
 
 require_command curl
-require_command dig
 require_command jq
 
 fugue_bin="${FUGUE_BIN:-fugue}"
@@ -118,6 +140,10 @@ done < <(printf '%s\n' "${resolver_list}")
 connect_timeout="${FUGUE_PUBLIC_DNS_CONNECT_TIMEOUT_SECONDS:-5}"
 request_timeout="${FUGUE_PUBLIC_DNS_REQUEST_TIMEOUT_SECONDS:-15}"
 dig_timeout="${FUGUE_PUBLIC_DNS_QUERY_TIMEOUT_SECONDS:-3}"
+dns_query_bin="${FUGUE_PUBLIC_DNS_QUERY_BIN:-}"
+if [[ -n "${dns_query_bin}" && ! -x "${dns_query_bin}" ]]; then
+  fail "public DNS query binary is not executable: ${dns_query_bin}"
+fi
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "${tmpdir}"' EXIT
@@ -146,13 +172,7 @@ for resolver in "${resolvers[@]}"; do
       [[ -n "${ip}" ]] || continue
       resolver_answers+=("${ip}")
       append_unique_ip "${ip}"
-    done < <(
-      dig +short +time="${dig_timeout}" +tries=1 @"${resolver}" "${hostname}" "${record_type}" |
-        awk '
-          /^[0-9]+(\.[0-9]+){3}$/ { print; next }
-          /^[0-9A-Fa-f:]+$/ && /:/ { print }
-        '
-    )
+    done < <(query_public_dns "${resolver}" "${hostname}" "${record_type}")
   done
   (( ${#resolver_answers[@]} > 0 )) || fail "public resolver ${resolver} returned no A/AAAA answer for ${hostname}"
   printf 'public_dns resolver=%s hostname=%s answers=%s pass=true\n' \
