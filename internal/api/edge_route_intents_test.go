@@ -128,6 +128,38 @@ func TestEdgeRouteIntentSnapshotIsIndependentOfMixedEdgeInventory(t *testing.T) 
 	}
 }
 
+func TestEdgeRouteIntentTreatsTrafficPlacementAsDNSDrain(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 16, 22, 0, 0, 0, time.UTC)
+	binding := model.EdgeRouteBinding{
+		Hostname:   "api.0-0.pro",
+		PathPrefix: "/",
+		AppID:      "app-api",
+		TenantID:   "tenant-platform",
+		RouteKind:  model.EdgeRouteKindPlatform,
+		Status:     model.EdgeRouteStatusActive,
+	}
+	policy := model.EdgeRoutePolicy{
+		AppID:                binding.AppID,
+		TenantID:             binding.TenantID,
+		EdgeGroupID:          "edge-group-country-us",
+		ExcludedEdgeIDs:      []string{"vps-de"},
+		ExcludedEdgeGroupIDs: []string{"edge-group-country-de"},
+		ExclusionReason:      "traffic-safety-stage0",
+		RoutePolicy:          model.EdgeRoutePolicyEnabled,
+		Enabled:              true,
+	}
+
+	intent := edgeRouteIntentFromBinding(binding, policy, now)
+	if intent.TargetGroupMode != model.EdgeRouteIntentGroupModeAllGroups || intent.PinnedEdgeGroupID != "" {
+		t.Fatalf("traffic placement revoked Edge routes: %+v", intent)
+	}
+	if !reflect.DeepEqual(intent.ExcludedEdgeIDs, policy.ExcludedEdgeIDs) || !reflect.DeepEqual(intent.ExcludedEdgeGroupIDs, policy.ExcludedEdgeGroupIDs) {
+		t.Fatalf("traffic drain evidence was not preserved: %+v", intent)
+	}
+}
+
 func TestEdgeRouteIntentEndpointDoesNotMutateLegacyRouteBundle(t *testing.T) {
 	t.Parallel()
 

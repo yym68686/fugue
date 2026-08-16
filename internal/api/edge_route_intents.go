@@ -222,10 +222,6 @@ func edgeRouteIntentFromBinding(binding model.EdgeRouteBinding, policy model.Edg
 		if policy.MinHealthyEdgeNodes > 0 {
 			minHealthy = policy.MinHealthyEdgeNodes
 		}
-		if model.EdgeRoutePolicyAllowsTraffic(routePolicy) && strings.TrimSpace(policy.EdgeGroupID) != "" {
-			targetMode = model.EdgeRouteIntentGroupModePinnedGroup
-			pinnedGroupID = strings.TrimSpace(policy.EdgeGroupID)
-		}
 	}
 	intent := model.EdgeRouteIntent{
 		Hostname: binding.Hostname, PathPrefix: model.NormalizeAppRoutePathPrefix(binding.PathPrefix), RouteKind: binding.RouteKind,
