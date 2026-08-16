@@ -148,6 +148,59 @@ func TestPersistentGroupStoreCompactsCandidateBundlesWithoutLosingSequence(t *te
 	}
 }
 
+func TestPersistentGroupStoreCompactsLargeRecoveryWindowBelowDurableLimit(t *testing.T) {
+	t.Parallel()
+
+	groupID := "edge-group-country-us"
+	state := persistentGroupState{Schema: persistentGroupStateSchemaV1, GroupID: groupID, Revision: 1}
+	for index := 0; index < retainedGroupCandidateBundles+2; index++ {
+		generation := fmt.Sprintf("generation-%02d", index+1)
+		bundle := model.EdgeRouteBundle{
+			EdgeGroupID: groupID,
+			Generation:  generation,
+			Issuer:      groupShadowIssuer,
+			Routes: []model.EdgeRouteBinding{{
+				Hostname:     "api.example.com",
+				StatusReason: strings.Repeat(fmt.Sprintf("%x", index%16), 4<<20),
+			}},
+		}
+		entry := GroupShadowLedgerEntry{
+			Schema: GroupShadowLedgerSchemaV1, GroupID: groupID, Status: GroupShadowStatusCompiled,
+			RouteIntentGeneration: generation, InputDigest: "sha256:" + strings.Repeat(fmt.Sprintf("%x", index%16), 64),
+			BundleGeneration: generation, LastSuccessfulBundleGeneration: generation, Authority: "none",
+			RecordedAt: time.Date(2026, 8, 16, 0, index, 0, 0, time.UTC), Bundle: &bundle,
+		}
+		appended, err := prepareGroupShadowLedgerAppend(groupID, uint64(index), state.Ledger, entry)
+		if err != nil {
+			t.Fatalf("append candidate %d: %v", index+1, err)
+		}
+		state.Ledger = append(state.Ledger, appended)
+	}
+	compactPersistentGroupState(&state)
+	if err := compactPersistentGroupStateForSize(&state); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > targetPersistentGroupStateBytes {
+		t.Fatalf("compacted state bytes=%d target=%d", len(encoded), targetPersistentGroupStateBytes)
+	}
+	retained := 0
+	for _, entry := range state.Ledger {
+		if entry.Bundle != nil {
+			retained++
+		}
+	}
+	if retained >= retainedGroupCandidateBundles {
+		t.Fatalf("large recovery window retained %d full bundles", retained)
+	}
+	if state.Ledger[len(state.Ledger)-1].Bundle == nil {
+		t.Fatal("newest candidate bundle was archived")
+	}
+}
+
 func TestPersistentGroupStoreCachesOnlyValidatedCurrentSummary(t *testing.T) {
 	t.Parallel()
 

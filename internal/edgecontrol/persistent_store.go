@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	persistentGroupStateSchemaV1  = "edge-control-persistent-group-state/v1"
-	maxPersistentGroupStateBytes  = 32 << 20
-	retainedGroupCandidateBundles = 8
+	persistentGroupStateSchemaV1          = "edge-control-persistent-group-state/v1"
+	maxPersistentGroupStateBytes          = 32 << 20
+	targetPersistentGroupStateBytes       = 24 << 20
+	retainedGroupCandidateBundles         = 8
+	persistentGroupStateDigestPlaceholder = "sha256:" + "0000000000000000000000000000000000000000000000000000000000000000"
 )
 
 var (
@@ -729,6 +731,9 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 	}
 	compactPersistentGroupState(&state)
 	state.Revision++
+	if err := compactPersistentGroupStateForSize(&state); err != nil {
+		return err
+	}
 	if err := store.writeGroupState(statePath, state); err != nil {
 		return err
 	}
@@ -916,6 +921,77 @@ func compactPersistentGroupState(state *persistentGroupState) {
 		entry.Bundle = nil
 		entry.BundleArchived = true
 	}
+}
+
+// compactPersistentGroupStateForSize preserves the serving and newest
+// candidates while shrinking older recovery copies before the hard durable
+// state limit can reject a write.
+func compactPersistentGroupStateForSize(state *persistentGroupState) error {
+	if state == nil {
+		return nil
+	}
+	encodedSize := func() (int, error) {
+		copy := *state
+		copy.Digest = persistentGroupStateDigestPlaceholder
+		data, err := json.Marshal(copy)
+		if err != nil {
+			return 0, fmt.Errorf("encode edge-control group state for compaction: %w", err)
+		}
+		return len(data), nil
+	}
+	size, err := encodedSize()
+	if err != nil || size <= targetPersistentGroupStateBytes {
+		return err
+	}
+	for size > targetPersistentGroupStateBytes && len(state.CandidateHistory) > 0 {
+		state.CandidateHistory = append([]GroupCandidateBundle(nil), state.CandidateHistory[1:]...)
+		compactPersistentGroupState(state)
+		size, err = encodedSize()
+		if err != nil {
+			return err
+		}
+	}
+	mandatory := make(map[uint64]struct{}, 3+len(state.CandidateHistory))
+	if state.Published != nil && state.Published.CandidateLedgerSequence > 0 {
+		mandatory[state.Published.CandidateLedgerSequence] = struct{}{}
+	}
+	if state.Candidate != nil && state.Candidate.CandidateLedgerSequence > 0 {
+		mandatory[state.Candidate.CandidateLedgerSequence] = struct{}{}
+	}
+	for index := range state.CandidateHistory {
+		if state.CandidateHistory[index].CandidateLedgerSequence > 0 {
+			mandatory[state.CandidateHistory[index].CandidateLedgerSequence] = struct{}{}
+		}
+	}
+	for index := len(state.Ledger) - 1; index >= 0; index-- {
+		entry := state.Ledger[index]
+		if entry.Status == GroupShadowStatusCompiled && entry.Bundle != nil {
+			mandatory[entry.Sequence] = struct{}{}
+			break
+		}
+	}
+	for index := range state.Ledger {
+		if size <= targetPersistentGroupStateBytes {
+			break
+		}
+		entry := &state.Ledger[index]
+		if entry.Status != GroupShadowStatusCompiled || entry.Bundle == nil {
+			continue
+		}
+		if _, retained := mandatory[entry.Sequence]; retained {
+			continue
+		}
+		entry.Bundle = nil
+		entry.BundleArchived = true
+		size, err = encodedSize()
+		if err != nil {
+			return err
+		}
+	}
+	if size > maxPersistentGroupStateBytes {
+		return errors.New("edge-control group state exceeds durable size limit after compaction")
+	}
+	return nil
 }
 
 func (store *PersistentGroupStore) writeGroupState(path string, state persistentGroupState) error {
