@@ -76,18 +76,29 @@ while IFS= read -r encoded_pin; do
     200)
       expected_generation="$(jq -r '.policy.exclusion_generation // 0' "${current_file}")"
       expected_fence="$(jq -r '.policy.exclusion_fence // ""' "${current_file}")"
+      existing_edge_ids="$(jq -c '.policy.excluded_edge_ids // []' "${current_file}")"
+      existing_edge_group_ids="$(jq -c '.policy.excluded_edge_group_ids // []' "${current_file}")"
       ;;
     404)
       expected_generation=0
       expected_fence=""
+      existing_edge_ids='[]'
+      existing_edge_group_ids='[]'
       ;;
     *)
       fail "read current policy for ${hostname} returned HTTP ${status}"
       ;;
   esac
+  effective_pin="$(jq -cn \
+    --argjson pin "${pin}" \
+    --argjson existing_edge_ids "${existing_edge_ids}" \
+    --argjson existing_edge_group_ids "${existing_edge_group_ids}" \
+    '$pin
+      | .drainedEdgeIds = (($existing_edge_ids + .drainedEdgeIds) | unique)
+      | .drainedEdgeGroupIds = (($existing_edge_group_ids + .drainedEdgeGroupIds) | unique)')"
   expires_at="$(python3 -c 'import datetime,sys; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1]))).isoformat().replace("+00:00","Z"))' "$(jq -r '.exclusionTTLSeconds' <<<"${pin}")")"
   payload="$(jq -n \
-    --argjson pin "${pin}" \
+    --argjson pin "${effective_pin}" \
     --arg expires_at "${expires_at}" \
     --arg expected_fence "${expected_fence}" \
     --argjson expected_generation "${expected_generation}" \
@@ -101,12 +112,12 @@ while IFS= read -r encoded_pin; do
     --request PUT --header "Authorization: Bearer ${api_key}" --header 'Content-Type: application/json' \
     --data "${payload}" "${policy_url}")"
   [[ "${status}" == "200" ]] || fail "apply policy for ${hostname} returned HTTP ${status}"
-  jq -e --argjson pin "${pin}" '
+  jq -e --argjson pin "${effective_pin}" '
     .policy.hostname == $pin.hostname and .policy.edge_group_id == $pin.edgeGroupId and
     .policy.route_policy == $pin.routePolicy and
     ((.policy.excluded_edge_ids // []) | sort) == ($pin.drainedEdgeIds | sort) and
     ((.policy.excluded_edge_group_ids // []) | sort) == ($pin.drainedEdgeGroupIds | sort)
   ' "${result_file}" >/dev/null || fail "server response did not preserve the exact safety pin for ${hostname}"
   printf 'hostname=%s edge_group=%s drained_groups=%s applied=true\n' \
-    "${hostname}" "$(jq -r '.edgeGroupId' <<<"${pin}")" "$(jq -r '.drainedEdgeGroupIds|join(",")' <<<"${pin}")"
+    "${hostname}" "$(jq -r '.edgeGroupId' <<<"${effective_pin}")" "$(jq -r '.drainedEdgeGroupIds|join(",")' <<<"${effective_pin}")"
 done < <(jq -r '.pins[] | @base64' "${config_path}")
