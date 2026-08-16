@@ -177,12 +177,9 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
-	// Route publication is intentionally global unless a hostname explicitly
-	// excludes an edge or edge group. Edge group IDs steer DNS, policy, and
-	// telemetry, but every non-excluded edge retains host routes so stale or
-	// alternate DNS answers do not 404.
+	// Route publication is intentionally global. Traffic exclusions steer DNS
+	// placement, but every edge retains host routes so stale answers do not 404.
 	routes := make([]model.EdgeRouteBinding, 0, len(apps)+len(domains)+len(s.platformRoutes))
-	explicitlyExcludedRoutes := 0
 	for _, app := range appByID {
 		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
 			continue
@@ -190,11 +187,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
-		for _, platformBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup) {
-			if !edgeRouteBindingAllowedForRequest(platformBinding, options) {
-				explicitlyExcludedRoutes++
-				continue
-			}
+		for _, platformBinding := range expandDefaultPlatformRouteBindings(binding, healthyEdgeGroups) {
 			routes = append(routes, platformBinding)
 		}
 	}
@@ -229,24 +222,16 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		binding = applyCustomDomainReadiness(binding, domain)
 		binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
-		addedRoute := false
-		for _, expandedBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup) {
-			if !edgeRouteBindingAllowedForRequest(expandedBinding, options) {
-				explicitlyExcludedRoutes++
-				continue
-			}
+		for _, expandedBinding := range expandDefaultPlatformRouteBindings(binding, healthyEdgeGroups) {
 			routes = append(routes, expandedBinding)
-			addedRoute = true
 		}
-		if addedRoute {
-			tlsAllowlist = append(tlsAllowlist, model.EdgeTLSAllowlistEntry{
-				Hostname:  hostname,
-				AppID:     domain.AppID,
-				TenantID:  domain.TenantID,
-				Status:    domain.Status,
-				TLSStatus: domain.TLSStatus,
-			})
-		}
+		tlsAllowlist = append(tlsAllowlist, model.EdgeTLSAllowlistEntry{
+			Hostname:  hostname,
+			AppID:     domain.AppID,
+			TenantID:  domain.TenantID,
+			Status:    domain.Status,
+			TLSStatus: domain.TLSStatus,
+		})
 	}
 
 	for _, table := range projectRouteTables {
@@ -270,11 +255,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 				binding = applyCustomDomainReadiness(binding, *domain)
 			}
 			binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
-			for _, expandedBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup) {
-				if !edgeRouteBindingAllowedForRequest(expandedBinding, options) {
-					explicitlyExcludedRoutes++
-					continue
-				}
+			for _, expandedBinding := range expandDefaultPlatformRouteBindings(binding, healthyEdgeGroups) {
 				routes = append(routes, expandedBinding)
 			}
 		}
@@ -317,7 +298,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		HealthyEdgeGroups:          healthyEdgeGroups,
 		ExpectedNonEmptyEdgeGroups: expectedNonEmptyEdgeGroups,
 		ExpectedMinTrafficRoutes:   expectedMinTrafficRoutes,
-		ExplicitlyExcludedRoutes:   explicitlyExcludedRoutes,
+		ExplicitlyExcludedRoutes:   0,
 		Options:                    options,
 	}); err != nil {
 		return model.EdgeRouteBundle{}, err
@@ -643,12 +624,11 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 		binding.ExclusionReason = strings.TrimSpace(policy.ExclusionReason)
 		binding.ExclusionExpiresAt = policy.ExclusionExpiresAt
 	}
-	effectiveHealthyEdgeGroups := edgeRouteHealthyGroupsAfterExclusions(healthyEdgeGroups, healthyEdgeNodeIDsByGroup, exclusions)
-	healthyEdgeNodeCount := edgeRouteHealthyNodeCountAfterExclusions(healthyEdgeNodeIDsByGroup, exclusions)
+	healthyEdgeNodeCount := edgeRouteHealthyNodeCountAfterExclusions(healthyEdgeNodeIDsByGroup, edgeRouteExclusions{})
 	if policyMatches && strings.TrimSpace(policy.EdgeGroupID) != "" {
-		healthyEdgeNodeCount = edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyEdgeNodeIDsByGroup, []string{policy.EdgeGroupID}, exclusions)
+		healthyEdgeNodeCount = edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyEdgeNodeIDsByGroup, []string{policy.EdgeGroupID}, edgeRouteExclusions{})
 	}
-	selection := selectEdgeGroupForRoute(runtimeEdgeGroupID, effectiveHealthyEdgeGroups)
+	selection := selectEdgeGroupForRoute(runtimeEdgeGroupID, healthyEdgeGroups)
 	servingEdgeGroupID := selection.EdgeGroupID
 	minHealthyEdgeNodes := defaultMinHealthyEdgeNodesForBinding(binding)
 	if policyMatches && policy.MinHealthyEdgeNodes > 0 {
@@ -665,7 +645,7 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 		lifecycle := model.EdgeRoutePolicyExclusionLifecycleAt(policy, now)
 		if policyMatches && (lifecycle == model.EdgeExclusionLifecycleExpiredHold || lifecycle == model.EdgeExclusionLifecycleLegacyHold) {
 			binding.EdgeRedundancyStatus = "at_risk"
-			holdReason := "edge exclusion remains fail-closed in " + lifecycle
+			holdReason := "DNS traffic drain remains fail-closed in " + lifecycle
 			if binding.EdgeRedundancyReason == "" {
 				binding.EdgeRedundancyReason = holdReason
 			} else {
@@ -688,10 +668,7 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 					binding.FallbackEdgeGroupID = servingEdgeGroupID
 				}
 			} else {
-				binding.Status = model.EdgeRouteStatusUnavailable
-				binding.StatusReason = "edge group has no healthy edge nodes"
-				binding.UpstreamURL = ""
-				binding.FallbackEdgeGroupID = ""
+				retainEdgeRouteWhileDNSWithdrawn(&binding, firstNonEmpty(binding.EdgeGroupID, runtimeEdgeGroupID), "route retained while DNS has no verified healthy edge group")
 			}
 		} else {
 			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
@@ -706,31 +683,14 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 	}
 	if model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) && strings.TrimSpace(policy.EdgeGroupID) != "" {
 		policyEdgeGroupID := strings.TrimSpace(policy.EdgeGroupID)
-		if servingEdgeGroupID == "" {
-			binding.Status = model.EdgeRouteStatusUnavailable
-			binding.StatusReason = "edge group has no healthy non-excluded edge nodes"
-			binding.FallbackReason = firstNonEmpty(selection.FallbackReason, "no healthy edge group")
-			binding.UpstreamURL = ""
-			binding.RouteGeneration = edgeRouteGeneration(binding)
-			return binding
-		}
-		if !effectiveHealthyEdgeGroups[policyEdgeGroupID] {
-			binding.Status = model.EdgeRouteStatusUnavailable
-			if exclusions.ExcludesEdgeGroup(policyEdgeGroupID) {
-				binding.StatusReason = "policy edge group is excluded for this hostname"
-			} else {
-				binding.StatusReason = "edge group has no healthy non-excluded edge nodes"
-			}
-			binding.SelectedEdgeGroup = servingEdgeGroupID
-			binding.FallbackReason = firstNonEmpty(selection.FallbackReason, "policy edge group unhealthy")
-			binding.UpstreamURL = ""
-			binding.RouteGeneration = edgeRouteGeneration(binding)
-			return binding
-		}
 		binding.EdgeGroupID = policyEdgeGroupID
 		binding.SelectedEdgeGroup = policyEdgeGroupID
-		binding.SelectionReason = "policy edge group is healthy"
-		if runtimeEdgeGroupID != "" && !strings.EqualFold(policyEdgeGroupID, runtimeEdgeGroupID) {
+		if healthyEdgeGroups[policyEdgeGroupID] {
+			binding.SelectionReason = "policy edge group is healthy"
+		} else {
+			retainEdgeRouteWhileDNSWithdrawn(&binding, policyEdgeGroupID, "policy route retained while DNS lacks verified edge readiness")
+		}
+		if healthyEdgeGroups[policyEdgeGroupID] && runtimeEdgeGroupID != "" && !strings.EqualFold(policyEdgeGroupID, runtimeEdgeGroupID) {
 			binding.FallbackReason = "policy edge group overrides runtime locality"
 		}
 		binding.FallbackEdgeGroupID = ""
@@ -742,16 +702,34 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 				binding.FallbackEdgeGroupID = servingEdgeGroupID
 			}
 		} else {
-			binding.Status = model.EdgeRouteStatusUnavailable
-			binding.StatusReason = "edge group has no healthy non-excluded edge nodes"
-			binding.UpstreamURL = ""
-			binding.FallbackEdgeGroupID = ""
+			retainEdgeRouteWhileDNSWithdrawn(&binding, firstNonEmpty(binding.EdgeGroupID, runtimeEdgeGroupID), "route retained while DNS has no verified healthy edge group")
 		}
 	} else {
 		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 	}
+	if !exclusions.Empty() {
+		binding.SelectionReason = strings.TrimSpace(binding.SelectionReason + "; exclusions are traffic_drain and do not revoke routes")
+	}
 	binding.RouteGeneration = edgeRouteGeneration(binding)
 	return binding
+}
+
+func retainEdgeRouteWhileDNSWithdrawn(binding *model.EdgeRouteBinding, edgeGroupID, reason string) {
+	edgeGroupID = strings.TrimSpace(edgeGroupID)
+	if edgeGroupID != "" {
+		binding.EdgeGroupID = edgeGroupID
+		binding.SelectedEdgeGroup = edgeGroupID
+	}
+	binding.SelectionReason = reason
+	binding.FallbackReason = "DNS traffic requires verified Edge route readiness"
+	binding.FallbackEdgeGroupID = ""
+	binding.EdgeRedundancyStatus = "at_risk"
+	const risk = "Edge inventory has no verified healthy route-serving node; existing Host route retained"
+	if binding.EdgeRedundancyReason == "" {
+		binding.EdgeRedundancyReason = risk
+	} else if !strings.Contains(binding.EdgeRedundancyReason, risk) {
+		binding.EdgeRedundancyReason += "; " + risk
+	}
 }
 
 func edgeRoutePolicyMatchesBinding(policy model.EdgeRoutePolicy, binding model.EdgeRouteBinding) bool {
@@ -764,12 +742,19 @@ func edgeRoutePolicyMatchesBinding(policy model.EdgeRoutePolicy, binding model.E
 }
 
 func expandDefaultPlatformEdgeBindings(binding model.EdgeRouteBinding, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string) []model.EdgeRouteBinding {
+	return expandDefaultPlatformBindingsForGroups(binding, sortedHealthyEdgeGroups(edgeRouteHealthyGroupsForBinding(healthyEdgeGroups, healthyEdgeNodeIDsByGroup, binding)))
+}
+
+func expandDefaultPlatformRouteBindings(binding model.EdgeRouteBinding, healthyEdgeGroups map[string]bool) []model.EdgeRouteBinding {
+	return expandDefaultPlatformBindingsForGroups(binding, sortedHealthyEdgeGroups(healthyEdgeGroups))
+}
+
+func expandDefaultPlatformBindingsForGroups(binding model.EdgeRouteBinding, groups []string) []model.EdgeRouteBinding {
 	if !isDefaultEdgeRouteKind(binding.RouteKind) ||
 		binding.RoutePolicy != model.EdgeRoutePolicyEnabled ||
 		strings.TrimSpace(binding.PolicyEdgeGroupID) != "" {
 		return []model.EdgeRouteBinding{binding}
 	}
-	groups := sortedHealthyEdgeGroups(edgeRouteHealthyGroupsForBinding(healthyEdgeGroups, healthyEdgeNodeIDsByGroup, binding))
 	if len(groups) == 0 {
 		return []model.EdgeRouteBinding{binding}
 	}
@@ -934,28 +919,6 @@ func edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyEdgeNodeIDsByGroup
 		}
 	}
 	return len(seen)
-}
-
-func edgeRouteBindingAllowedForRequest(binding model.EdgeRouteBinding, options edgeRouteBundleOptions) bool {
-	exclusions := edgeRouteExclusionsFromBinding(binding)
-	if exclusions.Empty() {
-		return true
-	}
-	edgeID := strings.TrimSpace(options.AuthenticatedEdgeID)
-	if edgeID == "" {
-		edgeID = strings.TrimSpace(options.EdgeID)
-	}
-	if exclusions.ExcludesEdge(edgeID) {
-		return false
-	}
-	edgeGroupID := strings.TrimSpace(options.EdgeGroupID)
-	if edgeGroupID == "" {
-		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
-	}
-	if exclusions.ExcludesEdgeGroup(edgeGroupID) {
-		return false
-	}
-	return true
 }
 
 func isDefaultEdgeRouteKind(routeKind string) bool {

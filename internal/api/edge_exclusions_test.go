@@ -11,7 +11,7 @@ import (
 	"fugue/internal/store"
 )
 
-func TestExpiredAndLegacyExclusionsRemainFailClosedInRoutes(t *testing.T) {
+func TestExpiredAndLegacyExclusionsDrainTrafficWithoutRevokingRoutes(t *testing.T) {
 	now := time.Date(2026, 8, 2, 8, 0, 0, 0, time.UTC)
 	expired := now.Add(-time.Second)
 	base := model.EdgeRouteBinding{
@@ -33,8 +33,8 @@ func TestExpiredAndLegacyExclusionsRemainFailClosedInRoutes(t *testing.T) {
 			if len(got.ExcludedEdgeGroupIDs) != 1 || got.ExcludedEdgeGroupIDs[0] != "edge-group-country-de" {
 				t.Fatalf("%s exclusion silently cleared: %+v", tc.want, got)
 			}
-			if got.Status != model.EdgeRouteStatusUnavailable {
-				t.Fatalf("unsafe group remained routable: %+v", got)
+			if got.Status != model.EdgeRouteStatusActive {
+				t.Fatalf("traffic exclusion revoked the existing route: %+v", got)
 			}
 			if got.EdgeRedundancyStatus != "at_risk" || !strings.Contains(got.EdgeRedundancyReason, tc.want) {
 				t.Fatalf("hold not explicit in route redundancy: %+v", got)
@@ -229,7 +229,7 @@ func TestEdgeExclusionMetricsAreLowCardinalityAndAlertOnRedundancy(t *testing.T)
 	}
 }
 
-func TestExpiredHoldKeepsSafeFallbackAndNeverReenablesDoubleFailure(t *testing.T) {
+func TestExpiredHoldRetainsRoutesWhileDNSExclusionsAccumulate(t *testing.T) {
 	now := time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
 	expired := now.Add(-24 * time.Hour)
 	base := model.EdgeRouteBinding{Hostname: "api.example.test", AppID: "app", TenantID: "tenant", RuntimeEdgeGroupID: "edge-group-country-de", EdgeGroupID: "edge-group-country-de", RouteKind: model.EdgeRouteKindPlatform, RoutePolicy: model.EdgeRoutePolicyEnabled, Status: model.EdgeRouteStatusActive}
@@ -237,13 +237,13 @@ func TestExpiredHoldKeepsSafeFallbackAndNeverReenablesDoubleFailure(t *testing.T
 	healthyNodes := map[string][]string{"edge-group-country-de": {"edge-de-1"}, "edge-group-country-us": {"edge-us-1"}}
 	policy := model.EdgeRoutePolicy{Hostname: base.Hostname, AppID: base.AppID, TenantID: base.TenantID, ExcludedEdgeGroupIDs: []string{"edge-group-country-de"}, ExclusionReason: "DE TLS failure", ExclusionOwnerDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ExclusionGeneration: 4, ExclusionFence: "fence", ExclusionExpiresAt: &expired, RoutePolicy: model.EdgeRoutePolicyEnabled}
 	fallback := applyEdgeRoutePolicy(base, map[string]model.EdgeRoutePolicy{base.Hostname: policy}, healthyGroups, healthyNodes, now)
-	if fallback.Status != model.EdgeRouteStatusActive || fallback.EdgeGroupID != "edge-group-country-us" {
-		t.Fatalf("expired DE hold did not preserve safe US fallback: %+v", fallback)
+	if fallback.Status != model.EdgeRouteStatusActive || fallback.EdgeGroupID != "edge-group-country-de" {
+		t.Fatalf("traffic drain changed the retained DE route: %+v", fallback)
 	}
 	policy.ExcludedEdgeGroupIDs = []string{"edge-group-country-de", "edge-group-country-us"}
 	blocked := applyEdgeRoutePolicy(base, map[string]model.EdgeRoutePolicy{base.Hostname: policy}, healthyGroups, healthyNodes, now.Add(30*24*time.Hour))
-	if blocked.Status != model.EdgeRouteStatusUnavailable || blocked.SelectedEdgeGroup != "" {
-		t.Fatalf("double-group hold unsafely re-enabled a route: %+v", blocked)
+	if blocked.Status != model.EdgeRouteStatusActive || blocked.SelectedEdgeGroup == "" {
+		t.Fatalf("double-group DNS drain revoked the retained route: %+v", blocked)
 	}
 }
 

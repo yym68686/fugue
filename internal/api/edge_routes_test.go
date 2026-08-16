@@ -553,7 +553,7 @@ func TestEdgeRouteInventoryFallbackRequiresLegacyAuthority(t *testing.T) {
 	}
 }
 
-func TestEdgeRoutePolicyUnhealthyPolicyGroupDoesNotDowngradeToRouteA(t *testing.T) {
+func TestEdgeRoutePolicyUnhealthyPolicyGroupRetainsHostRoute(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -579,8 +579,11 @@ func TestEdgeRoutePolicyUnhealthyPolicyGroupDoesNotDowngradeToRouteA(t *testing.
 	if route == nil {
 		t.Fatalf("expected platform route in bundle: %+v", bundle.Routes)
 	}
-	if route.RoutePolicy != model.EdgeRoutePolicyCanary || route.Status != model.EdgeRouteStatusUnavailable {
-		t.Fatalf("expected unavailable canary route to remain edge traffic policy, got %+v", route)
+	if route.RoutePolicy != model.EdgeRoutePolicyCanary || route.Status != model.EdgeRouteStatusActive || route.EdgeGroupID != "edge-group-country-hk" {
+		t.Fatalf("expected canary Host route to remain loaded while DNS withdraws traffic, got %+v", route)
+	}
+	if route.EdgeRedundancyStatus != "at_risk" || !strings.Contains(route.SelectionReason, "route retained") {
+		t.Fatalf("expected missing inventory to remain explicit without revoking the route, got %+v", route)
 	}
 }
 
@@ -610,9 +613,10 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 	initialRoute := initialBundle.Routes[0]
 	if initialRoute.EdgeGroupID != "edge-group-country-hk" ||
 		initialRoute.RoutePolicy != model.EdgeRoutePolicyEnabled ||
-		initialRoute.Status != model.EdgeRouteStatusUnavailable ||
-		initialRoute.StatusReason != "edge group has no healthy edge nodes" {
-		t.Fatalf("expected default HK edge binding to degrade without healthy edges, got %+v", initialRoute)
+		initialRoute.Status != model.EdgeRouteStatusActive ||
+		initialRoute.EdgeRedundancyStatus != "at_risk" ||
+		!strings.Contains(initialRoute.SelectionReason, "route retained") {
+		t.Fatalf("expected default HK Host route to remain loaded without healthy inventory, got %+v", initialRoute)
 	}
 
 	hkBefore := httptest.NewRecorder()
@@ -844,7 +848,7 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}
 }
 
-func TestEdgeRoutePolicyCanExcludeOneEdgeNodeFromRouteBundle(t *testing.T) {
+func TestEdgeRoutePolicyExclusionDrainsDNSWithoutFilteringRouteBundle(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -877,8 +881,12 @@ func TestEdgeRoutePolicyCanExcludeOneEdgeNodeFromRouteBundle(t *testing.T) {
 	}
 	var excludedBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, excluded, &excludedBundle)
-	if route := edgeRouteByHostKindAndGroup(excludedBundle.Routes, app.Route.Hostname, model.EdgeRouteKindPlatform, "edge-group-country-de"); route != nil {
-		t.Fatalf("excluded edge must not receive the hostname route, got %+v in %+v", route, excludedBundle.Routes)
+	excludedRoute := edgeRouteByHostKindAndGroup(excludedBundle.Routes, app.Route.Hostname, model.EdgeRouteKindPlatform, "edge-group-country-de")
+	if excludedRoute == nil || excludedRoute.Status != model.EdgeRouteStatusActive {
+		t.Fatalf("traffic-drained edge must retain the hostname route, got %+v", excludedBundle.Routes)
+	}
+	if !testStringSliceContainsFold(excludedRoute.ExcludedEdgeIDs, "edge-de-1") {
+		t.Fatalf("traffic drain metadata missing from retained route: %+v", excludedRoute)
 	}
 
 	allowed := httptest.NewRecorder()
@@ -899,11 +907,8 @@ func TestEdgeRoutePolicyCanExcludeOneEdgeNodeFromRouteBundle(t *testing.T) {
 	if route.EdgeGroupID != "edge-group-country-us" {
 		t.Fatalf("expected excluded single-node DE group to be removed from selection, got %+v", route)
 	}
-	if route.MinHealthyEdgeNodes != 2 || route.HealthyEdgeNodeCount != 1 || route.EdgeRedundancyStatus != "at_risk" {
-		t.Fatalf("expected route to expose single-edge redundancy risk, got %+v", route)
-	}
-	if !strings.Contains(route.EdgeRedundancyReason, "below minimum 2") {
-		t.Fatalf("expected route redundancy reason to explain minimum, got %+v", route)
+	if route.MinHealthyEdgeNodes != 2 || route.HealthyEdgeNodeCount != 2 || route.EdgeRedundancyStatus != "ok" {
+		t.Fatalf("expected route health to count route-serving nodes independent of DNS drain, got %+v", route)
 	}
 
 	explain := performJSONRequest(t, server, http.MethodGet, "/v1/admin/traffic-safety/explain/"+app.Route.Hostname+"?min_healthy_edges=2", platformAdminKey, nil)
@@ -1000,11 +1005,11 @@ func TestEdgeRoutePolicyExclusionAppliesToSharedHostnameRoutes(t *testing.T) {
 	}
 	var excludedBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, excluded, &excludedBundle)
-	if route := edgeRouteByHostKindAndPath(excludedBundle.Routes, "shared.example.com", model.EdgeRouteKindCustomDomain, "/"); route != nil {
-		t.Fatalf("excluded edge must not receive shared hostname root route, got %+v in %+v", route, excludedBundle.Routes)
+	if route := edgeRouteByHostKindAndPath(excludedBundle.Routes, "shared.example.com", model.EdgeRouteKindCustomDomain, "/"); route == nil || route.Status != model.EdgeRouteStatusActive {
+		t.Fatalf("traffic-drained edge must retain shared hostname root route, got %+v", excludedBundle.Routes)
 	}
-	if route := edgeRouteByHostKindAndPath(excludedBundle.Routes, "shared.example.com", model.EdgeRouteKindPlatform, "/v1"); route != nil {
-		t.Fatalf("excluded edge must not receive shared hostname /v1 route, got %+v in %+v", route, excludedBundle.Routes)
+	if route := edgeRouteByHostKindAndPath(excludedBundle.Routes, "shared.example.com", model.EdgeRouteKindPlatform, "/v1"); route == nil || route.Status != model.EdgeRouteStatusActive {
+		t.Fatalf("traffic-drained edge must retain shared hostname /v1 route, got %+v", excludedBundle.Routes)
 	}
 
 	allowed := httptest.NewRecorder()
@@ -1024,8 +1029,7 @@ func TestEdgeRoutePolicyExclusionAppliesToSharedHostnameRoutes(t *testing.T) {
 		t.Fatalf("non-excluded edge should receive shared hostname /v1 route, got %+v", allowedBundle.Routes)
 	}
 	for _, route := range []*model.EdgeRouteBinding{rootRoute, apiRoute} {
-		if route.EdgeGroupID != "edge-group-country-us" ||
-			!testStringSliceContainsFold(route.ExcludedEdgeIDs, "edge-de-1") ||
+		if !testStringSliceContainsFold(route.ExcludedEdgeIDs, "edge-de-1") ||
 			route.ExclusionReason != "shared-hostname-edge-exclusion" {
 			t.Fatalf("expected shared hostname exclusion metadata on allowed route, got %+v", route)
 		}
