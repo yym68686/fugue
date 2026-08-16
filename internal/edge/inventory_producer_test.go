@@ -28,8 +28,9 @@ func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *te
 	now := time.Now().UTC().Truncate(time.Second)
 	groupID := "edge-group-country-us"
 	nodeID := "edge-node-us-1"
-	sourceCommit := strings.Repeat("a", 40)
-	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotB, sourceCommit)
+	activationSourceCommit := strings.Repeat("a", 40)
+	workerSourceCommit := strings.Repeat("b", 40)
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotB, activationSourceCommit)
 	keyringFile, activeKey := writeInventoryProducerKeyringFixture(t, groupID)
 	identityKeyring := platformcontrol.DerivePlatformComponentIdentityKeyring(activeKey, "inventory-platform-current", "", "", nil)
 
@@ -64,8 +65,9 @@ func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *te
 			}
 			if heartbeat.GroupID != groupID || heartbeat.ProducerNodeID != nodeID || heartbeat.ProducerGeneration != 8 ||
 				heartbeat.ExpectedSequence != 9 || heartbeat.Inventory.Sequence != 10 || heartbeat.Inventory.ActiveEpoch.FenceSequence != 1 ||
-				heartbeat.Inventory.ActiveEpoch.ReleaseEpoch != sourceCommit || len(heartbeat.Inventory.Instances) != 1 ||
-				heartbeat.Inventory.Instances[0].EdgeID != nodeID || heartbeat.Inventory.Instances[0].InstanceUID != "pod-uid-us-b" {
+				heartbeat.Inventory.ActiveEpoch.ReleaseEpoch != workerSourceCommit || len(heartbeat.Inventory.Instances) != 1 ||
+				heartbeat.Inventory.Instances[0].EdgeID != nodeID || heartbeat.Inventory.Instances[0].InstanceUID != "pod-uid-us-b" ||
+				heartbeat.Inventory.Instances[0].ReleaseEpoch != workerSourceCommit {
 				t.Fatalf("heartbeat is not group/node/cursor bound: %+v", heartbeat)
 			}
 			return inventoryJSONResponse(http.StatusCreated, edgecontrol.GroupInventoryHeartbeatReceipt{
@@ -80,7 +82,7 @@ func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *te
 	})}
 
 	edgeConfig := config.EdgeConfig{
-		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-us-b", EdgeReleaseEpoch: sourceCommit,
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-us-b", EdgeReleaseEpoch: workerSourceCommit,
 		HTTPTimeout: time.Second,
 	}
 	producer := InventoryProducerConfig{
