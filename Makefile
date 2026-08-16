@@ -11,6 +11,8 @@ test:
 	env GOCACHE=$(GOCACHE) go test ./internal/declarativerelease ./cmd/fugue-declarative-release
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 	bash ./scripts/test_render_fugue_systemd_units.sh
+	bash ./scripts/test_probe_fugue_public_dns.sh
+	bash ./scripts/test_traffic_safety_stage0.sh
 	python3 ./scripts/test_validate_managed_app_crd_transition.py
 	env GOCACHE=$(GOCACHE) go test ./...
 
@@ -18,6 +20,8 @@ test-scripts:
 	python3 -m scripts.test_prepush
 	python3 ./scripts/test_verify_registry_image.py
 	bash ./scripts/test_render_fugue_systemd_units.sh
+	bash ./scripts/test_probe_fugue_public_dns.sh
+	bash ./scripts/test_traffic_safety_stage0.sh
 	python3 ./scripts/test_validate_managed_app_crd_transition.py
 
 prepush:

@@ -25,6 +25,7 @@ jobs:
       edge_control_matrix: ${{ steps.release.outputs.edge_control_matrix }}
       edge_worker_count: ${{ steps.release.outputs.edge_worker_count }}
       edge_worker_matrix: ${{ steps.release.outputs.edge_worker_matrix }}
+      traffic_safety_changed: ${{ steps.release.outputs.traffic_safety_changed }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -61,6 +62,7 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           git diff --no-renames --name-only "${base}...HEAD" -- >"${CHANGED}"
+          scripts/emit_traffic_safety_changed.sh "${CHANGED}" "${GITHUB_OUTPUT}"
           go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
           "${RELEASE_TOOL}" plan deploy/releases/components.json "${base}" "${GITHUB_SHA}" "${CHANGED}" >"${PLAN}"
           "${RELEASE_TOOL}" emit-github-output "${PLAN}" "${GITHUB_OUTPUT}"
@@ -130,6 +132,55 @@ jobs:
           if-no-files-found: error
           include-hidden-files: false
           retention-days: 7
+
+  traffic_safety_stage0:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.traffic_safety_changed == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    timeout-minutes: 30
+    concurrency: {group: fugue-production-traffic-safety-stage0, cancel-in-progress: false}
+    permissions: {actions: write, contents: read}
+    steps:
+      - name: Checkout exact safety configuration
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Materialize the environment-owned traffic safety configuration
+        env:
+          FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON: ${{ secrets.FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON }}
+        run: |
+          test -n "${FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON}"
+          printf '%s\n' "${FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON}" >"${RUNNER_TEMP}/fugue-traffic-safety-stage0.json"
+          scripts/apply_fugue_traffic_safety.sh --check "${RUNNER_TEMP}/fugue-traffic-safety-stage0.json"
+      - name: Export current traffic and authority state before mutation
+        env:
+          EXPORT_DIR: ${{ runner.temp }}/fugue-traffic-state-${{ github.run_id }}-${{ github.run_attempt }}
+        run: scripts/export_fugue_traffic_state.sh "${EXPORT_DIR}"
+      - name: Upload immutable pre-mutation state
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-traffic-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-traffic-state-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 90
+      - name: Apply the atomic US traffic pin and DE DNS drain
+        env:
+          FUGUE_API_URL: https://${{ vars.FUGUE_API_PUBLIC_DOMAIN }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: scripts/apply_fugue_traffic_safety.sh --apply "${RUNNER_TEMP}/fugue-traffic-safety-stage0.json"
+      - name: Verify the real public DNS path once after apply
+        env:
+          FUGUE_API_URL: https://${{ vars.FUGUE_API_PUBLIC_DOMAIN }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          go build -trimpath -o "${RUNNER_TEMP}/fugue" ./cmd/fugue
+          required_ips="$(jq -r '.publicDNSGate.requiredAnswerIPs|join(",")' "${RUNNER_TEMP}/fugue-traffic-safety-stage0.json")"
+          forbidden_ips="$(jq -r '.publicDNSGate.forbiddenAnswerIPs|join(",")' "${RUNNER_TEMP}/fugue-traffic-safety-stage0.json")"
+          while IFS= read -r hostname; do
+            FUGUE_BIN="${RUNNER_TEMP}/fugue" FUGUE_PUBLIC_DNS_REQUIRED_IPS="${required_ips}" FUGUE_PUBLIC_DNS_FORBIDDEN_IPS="${forbidden_ips}" \
+              scripts/probe_fugue_public_dns.sh "${hostname}"
+          done < <(jq -r '.pins[].hostname' "${RUNNER_TEMP}/fugue-traffic-safety-stage0.json")
 
   deploy_release_guardian:
     needs: [prepush, component-build]

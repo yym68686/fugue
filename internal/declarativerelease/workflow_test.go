@@ -49,7 +49,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "prepush",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "prepush", "traffic_safety_stage0",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -78,6 +78,9 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"Download Go modules before the bounded test budget",
 		"'23 18 * * *'",
 		"Run the full asynchronous audit",
+		"needs.prepush.outputs.traffic_safety_changed == 'true'",
+		"FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON",
+		"scripts/apply_fugue_traffic_safety.sh --apply",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("CI workflow is missing %q", required)
