@@ -387,9 +387,10 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 				return groupCandidateCASConflict("store_serving_authority_witness_invalid")
 			}
 			_, servingHead, exists := persistentPublishedCandidateByVersion(state, serving.BundleVersion)
-			fallback := !exists && candidate.AllowDegradedPrevious && !candidate.StandbyOnly &&
+			fallback := !exists &&
 				servingAuthorityWithinCurrentRecovery(serving.BundleVersion, state.Published.Bundle.Generation,
-					state.Published.PublicationSequence, state.Published.RecoveryEpoch) &&
+					state.Published.PublicationSequence, state.Published.RecoveryEpoch,
+					candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
 				candidate.CandidateLedgerSequence == state.Published.CandidateLedgerSequence
 			if fallback {
 				head = state.Ledger[state.Published.CandidateLedgerSequence-1]
@@ -1111,9 +1112,10 @@ func validatePersistentCandidateBinding(state persistentGroupState, groupID stri
 	}
 	if candidate.ServingAuthority != nil {
 		authority, servingCandidate, exists := persistentPublishedCandidateByVersion(&state, candidate.ServingAuthority.BundleVersion)
-		fallback := !exists && candidate.AllowDegradedPrevious && !candidate.StandbyOnly && state.Published != nil &&
+		fallback := !exists && state.Published != nil &&
 			servingAuthorityWithinCurrentRecovery(candidate.ServingAuthority.BundleVersion, state.Published.Bundle.Generation,
-				state.Published.PublicationSequence, state.Published.RecoveryEpoch) &&
+				state.Published.PublicationSequence, state.Published.RecoveryEpoch,
+				candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
 			state.Published.CandidateLedgerSequence == candidate.CandidateLedgerSequence
 		if !fallback && (!exists || authority.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
 			servingCandidate.ActiveSlot != candidate.ServingAuthority.WorkerSlot) {
