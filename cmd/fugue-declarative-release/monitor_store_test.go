@@ -43,11 +43,10 @@ func TestAPIGuardianHandoffBindsProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode API intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "a4638e5aab328f993d0410c4380f05e57b290ea8"
-	const lkgImage = "sha256:519b479b145c759220613f26114d500253538ab6efda6aaf5cb5c72240349957"
-	const failedAtom = "1084fe137fee64d0e6aa04336a217d6924ec8591"
-	if intent.Generation != 41 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
-		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != failedAtom {
+	const lkgSHA = "b1770923e3dc154508464f552f43a64185c86aa2"
+	const lkgImage = "sha256:82b6677c060a5b193578950f1646c78bc427d5aabd04e062ecc3e3ad98609ad8"
+	if intent.Generation != 42 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
 		t.Fatalf("API Guardian intent is not bound to the production LKG: %+v", intent)
 	}
 }
@@ -63,9 +62,9 @@ func TestReleaseGuardianIntentBindsCurrentProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode release Guardian intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "c51bc15f9f7dc9b9316a0942fddfc5cb3cf0dce6"
-	const lkgImage = "sha256:3d9d182bd62df9a43df16b83c6b53e05c9179e8a172f3de05c60f088901214ad"
-	if intent.Generation != 121 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+	const lkgSHA = "8abfcc2d62a42e1adc1e1d7adadfcf8dbaa2c4bb"
+	const lkgImage = "sha256:651595f3fe9479ebb9f5524eafdaaba70c0d7941607a88645c7d676d9c2baf9d"
+	if intent.Generation != 122 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
 		t.Fatalf("release Guardian intent is not bound to the production LKG: %+v", intent)
 	}
