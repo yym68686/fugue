@@ -80,6 +80,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"Run the full asynchronous audit",
 		"needs.prepush.outputs.traffic_safety_changed == 'true'",
 		"FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON",
+		"Setup Go for the public DNS verifier",
 		"scripts/apply_fugue_traffic_safety.sh --apply",
 	} {
 		if !strings.Contains(source, required) {
