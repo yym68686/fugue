@@ -76,3 +76,8 @@ printf 'docs/readme.md\nscripts/probe_fugue_public_dns.sh\n' >"${tmpdir}/changed
 : >"${tmpdir}/github-output"
 bash "${REPO_ROOT}/scripts/emit_traffic_safety_changed.sh" "${tmpdir}/changed" "${tmpdir}/github-output"
 grep -qx 'traffic_safety_changed=true' "${tmpdir}/github-output"
+
+printf '.github/workflows/ci.yml\n' >"${tmpdir}/changed"
+: >"${tmpdir}/github-output"
+bash "${REPO_ROOT}/scripts/emit_traffic_safety_changed.sh" "${tmpdir}/changed" "${tmpdir}/github-output"
+grep -qx 'traffic_safety_changed=true' "${tmpdir}/github-output"
