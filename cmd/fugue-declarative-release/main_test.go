@@ -317,6 +317,105 @@ func TestPlanCommandAcceptsMergeCommitAsLivePredecessor(t *testing.T) {
 	}
 }
 
+func TestPlanCommandAcceptsMergeCommitAsSupersededFailedAtom(t *testing.T) {
+	root := t.TempDir()
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	runGit(t, "init", "--initial-branch=main")
+	runGit(t, "config", "user.email", "release@example.test")
+	runGit(t, "config", "user.name", "Release Test")
+	writeFile(t, "go.mod", []byte("module example.test/release\n\ngo 1.22\n"))
+
+	registry := declarativerelease.Registry{APIVersion: declarativerelease.RegistryAPIVersion, Kind: declarativerelease.RegistryKind, Components: []declarativerelease.Component{{
+		ID: "api", Family: "control-plane", IntentPath: "deploy/releases/api/intent.json", ManifestPath: "deploy/releases/api/deployment.json",
+		SourceRoots: []string{"Dockerfile.api", "cmd/fugue-api"}, Artifact: declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-api", Dockerfile: "Dockerfile.api", Context: ".", BuildPackage: "./cmd/fugue-api"},
+		Workload: declarativerelease.Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api", FieldManager: "fugue-api-declarative", Replicas: 2, RolloutMode: "rolling"},
+		Health:   []declarativerelease.HealthProbe{{Type: "deployment", Name: "fugue-fugue-api"}}, Concurrency: "fugue-production-api",
+	}}}
+	writeJSON(t, "deploy/releases/components.json", registry)
+	writeFile(t, "Dockerfile.api", []byte("FROM scratch\n"))
+	writeFile(t, "cmd/fugue-api/main.go", []byte("package main\nfunc main() {}\n"))
+	writeJSON(t, "deploy/releases/api/intent.json", declarativerelease.Intent{
+		APIVersion: declarativerelease.IntentAPIVersion, Kind: declarativerelease.IntentKind, Component: "api",
+		Generation: 1, ExpectedPreviousPresent: false, Rollback: "previous-git-lkg",
+	})
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "release api lkg")
+	lkg := runGit(t, "rev-parse", "HEAD")
+
+	runGit(t, "checkout", "-b", "failed-v2")
+	writeFile(t, "cmd/fugue-api/main.go", []byte("package main\nfunc main() { println(\"failed\") }\n"))
+	writeJSON(t, "deploy/releases/api/intent.json", declarativerelease.Intent{
+		APIVersion: declarativerelease.IntentAPIVersion, Kind: declarativerelease.IntentKind, Component: "api",
+		Generation: 2, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: lkg,
+		ExpectedPreviousManifestSHA: lkg, ExpectedPreviousOCIRevision: lkg,
+		ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("a", 64), Rollback: "previous-git-lkg",
+	})
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "release failed api v2")
+	runGit(t, "checkout", "main")
+	runGit(t, "merge", "--no-ff", "failed-v2", "-m", "merge failed api v2")
+	failedMerge := runGit(t, "rev-parse", "HEAD")
+
+	runGit(t, "checkout", "-b", "recovery-v3")
+	writeFile(t, "cmd/fugue-api/main.go", []byte("package main\nfunc main() { println(\"recovered\") }\n"))
+	writeJSON(t, "deploy/releases/api/intent.json", declarativerelease.Intent{
+		APIVersion: declarativerelease.IntentAPIVersion, Kind: declarativerelease.IntentKind, Component: "api",
+		Generation: 3, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: lkg,
+		ExpectedPreviousManifestSHA: lkg, ExpectedPreviousOCIRevision: lkg,
+		ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("a", 64), SupersedesFailedConfigSHA: failedMerge,
+		Rollback: "previous-git-lkg",
+	})
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "recover api v3")
+	head := runGit(t, "rev-parse", "HEAD")
+	writeFile(t, "changed.txt", []byte("cmd/fugue-api/main.go\ndeploy/releases/api/intent.json\n"))
+
+	var output bytes.Buffer
+	if err := run([]string{"plan", "deploy/releases/components.json", failedMerge, head, "changed.txt"}, &output); err != nil {
+		t.Fatalf("plan after failed merge release: %v", err)
+	}
+	var plan declarativerelease.Plan
+	if err := json.Unmarshal(output.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Releases) != 1 || plan.Releases[0].ExpectedPreviousConfigSHA != lkg ||
+		plan.Releases[0].SupersedesFailedConfigSHA != failedMerge || plan.Releases[0].RetrySameLKG {
+		t.Fatalf("failed merge successor was not preserved: %+v", plan.Releases)
+	}
+}
+
+func TestExactIntentAtomOrMergeRejectsUnrelatedSingleParent(t *testing.T) {
+	root := t.TempDir()
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	runGit(t, "init", "--initial-branch=main")
+	runGit(t, "config", "user.email", "release@example.test")
+	runGit(t, "config", "user.name", "Release Test")
+	writeFile(t, "deploy/releases/api/intent.json", []byte("{}\n"))
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "intent")
+	writeFile(t, "README.md", []byte("unrelated\n"))
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "unrelated")
+
+	if isExactIntentAtomOrMerge(runGit(t, "rev-parse", "HEAD"), "deploy/releases/api/intent.json") {
+		t.Fatal("unrelated single-parent commit was accepted as a production intent atom")
+	}
+}
+
 func TestPlanCommandIncludesRuntimeChangesSinceProductionOCIRevision(t *testing.T) {
 	root := t.TempDir()
 	previousDirectory, err := os.Getwd()

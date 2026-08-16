@@ -223,8 +223,7 @@ func runPlan(args []string, output io.Writer) error {
 			if failedErr != nil {
 				return fmt.Errorf("load component %q superseded failed atom: %w", release.ComponentID, failedErr)
 			}
-			failedRaw, failedErr := exec.Command("git", "rev-list", "-1", intent.SupersedesFailedConfigSHA, "--", release.IntentPath).CombinedOutput()
-			if failedErr != nil || strings.TrimSpace(string(failedRaw)) != intent.SupersedesFailedConfigSHA {
+			if !isExactIntentAtomOrMerge(intent.SupersedesFailedConfigSHA, release.IntentPath) {
 				return fmt.Errorf("component %q superseded failed atom is not an exact production intent atom", release.ComponentID)
 			}
 			superseded[intent.SupersedesFailedConfigSHA] = failedIntent
@@ -247,6 +246,15 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	_, err = output.Write(append(encoded, '\n'))
 	return err
+}
+
+func isExactIntentAtomOrMerge(revision, intentPath string) bool {
+	raw, err := exec.Command("git", "rev-list", "-1", revision, "--", intentPath).CombinedOutput()
+	if err == nil && strings.TrimSpace(string(raw)) == revision {
+		return true
+	}
+	parents, err := exec.Command("git", "rev-list", "--parents", "-n", "1", revision).Output()
+	return err == nil && len(strings.Fields(string(parents))) >= 3
 }
 
 func resolvePreviousConfigSHA(baseSHA, intentPath string, current, previous declarativerelease.Intent, previousIntentSHA string) string {
