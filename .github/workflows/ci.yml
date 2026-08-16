@@ -149,6 +149,21 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+      - name: Provision public DNS verifier dependencies
+        run: |
+          if command -v dig >/dev/null 2>&1; then
+            exit 0
+          fi
+          command -v apt-get >/dev/null 2>&1
+          if [[ "$(id -u)" == "0" ]]; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y dnsutils
+          else
+            command -v sudo >/dev/null 2>&1
+            sudo apt-get update
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y dnsutils
+          fi
+          command -v dig >/dev/null 2>&1
       - name: Materialize the environment-owned traffic safety configuration
         env:
           FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON: ${{ secrets.FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON }}
