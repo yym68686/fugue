@@ -145,6 +145,10 @@ jobs:
       - name: Checkout exact safety configuration
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Setup Go for the public DNS verifier
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
       - name: Materialize the environment-owned traffic safety configuration
         env:
           FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON: ${{ secrets.FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON }}
