@@ -4,8 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-grep -q 'Provision public DNS verifier dependencies' "${REPO_ROOT}/.github/workflows/ci.yml"
-grep -q 'apt-get install -y dnsutils' "${REPO_ROOT}/.github/workflows/ci.yml"
+grep -q 'go build -trimpath -o "${RUNNER_TEMP}/fugue-public-dns-query" ./scripts/public_dns_query.go' "${REPO_ROOT}/.github/workflows/ci.yml"
+grep -q 'FUGUE_PUBLIC_DNS_QUERY_BIN="${RUNNER_TEMP}/fugue-public-dns-query"' "${REPO_ROOT}/.github/workflows/ci.yml"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "${tmpdir}"' EXIT
 CONFIG="${tmpdir}/traffic-safety-stage0.json"

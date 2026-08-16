@@ -149,21 +149,6 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-      - name: Provision public DNS verifier dependencies
-        run: |
-          if command -v dig >/dev/null 2>&1; then
-            exit 0
-          fi
-          command -v apt-get >/dev/null 2>&1
-          if [[ "$(id -u)" == "0" ]]; then
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y dnsutils
-          else
-            command -v sudo >/dev/null 2>&1
-            sudo apt-get update
-            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y dnsutils
-          fi
-          command -v dig >/dev/null 2>&1
       - name: Materialize the environment-owned traffic safety configuration
         env:
           FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON: ${{ secrets.FUGUE_TRAFFIC_SAFETY_STAGE0_CONFIG_JSON }}
@@ -194,10 +179,12 @@ jobs:
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
         run: |
           go build -trimpath -o "${RUNNER_TEMP}/fugue" ./cmd/fugue
+          go build -trimpath -o "${RUNNER_TEMP}/fugue-public-dns-query" ./scripts/public_dns_query.go
           required_ips="$(jq -r '.publicDNSGate.requiredAnswerIPs|join(",")' "${RUNNER_TEMP}/fugue-traffic-safety-stage0.json")"
           forbidden_ips="$(jq -r '.publicDNSGate.forbiddenAnswerIPs|join(",")' "${RUNNER_TEMP}/fugue-traffic-safety-stage0.json")"
           while IFS= read -r hostname; do
-            FUGUE_BIN="${RUNNER_TEMP}/fugue" FUGUE_PUBLIC_DNS_REQUIRED_IPS="${required_ips}" FUGUE_PUBLIC_DNS_FORBIDDEN_IPS="${forbidden_ips}" \
+            FUGUE_BIN="${RUNNER_TEMP}/fugue" FUGUE_PUBLIC_DNS_QUERY_BIN="${RUNNER_TEMP}/fugue-public-dns-query" \
+              FUGUE_PUBLIC_DNS_REQUIRED_IPS="${required_ips}" FUGUE_PUBLIC_DNS_FORBIDDEN_IPS="${forbidden_ips}" \
               scripts/probe_fugue_public_dns.sh "${hostname}"
           done < <(jq -r '.pins[].hostname' "${RUNNER_TEMP}/fugue-traffic-safety-stage0.json")
 
