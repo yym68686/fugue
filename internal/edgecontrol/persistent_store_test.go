@@ -161,7 +161,7 @@ func TestPersistentGroupStoreCompactsLargeRecoveryWindowBelowDurableLimit(t *tes
 			Issuer:      groupShadowIssuer,
 			Routes: []model.EdgeRouteBinding{{
 				Hostname:     "api.example.com",
-				StatusReason: strings.Repeat(fmt.Sprintf("%x", index%16), 4<<20),
+				StatusReason: strings.Repeat(fmt.Sprintf("%x", index%16), 7<<20),
 			}},
 		}
 		entry := GroupShadowLedgerEntry{

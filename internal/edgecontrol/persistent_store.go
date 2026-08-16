@@ -22,8 +22,8 @@ import (
 
 const (
 	persistentGroupStateSchemaV1          = "edge-control-persistent-group-state/v1"
-	maxPersistentGroupStateBytes          = 32 << 20
-	targetPersistentGroupStateBytes       = 24 << 20
+	maxPersistentGroupStateBytes          = 64 << 20
+	targetPersistentGroupStateBytes       = 48 << 20
 	retainedGroupCandidateBundles         = 8
 	persistentGroupStateDigestPlaceholder = "sha256:" + "0000000000000000000000000000000000000000000000000000000000000000"
 )

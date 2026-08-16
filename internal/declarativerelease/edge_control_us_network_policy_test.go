@@ -62,11 +62,19 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 			if got := usResources["requests"].(map[string]any)["cpu"]; got != "100m" {
 				t.Fatalf("US Control CPU request=%v, want 100m", got)
 			}
+			if got := usResources["limits"].(map[string]any)["memory"]; got != "1Gi" {
+				t.Fatalf("US Control memory limit=%v, want 1Gi", got)
+			}
+			if got := usResources["requests"].(map[string]any)["memory"]; got != "256Mi" {
+				t.Fatalf("US Control memory request=%v, want 256Mi", got)
+			}
 			copyUS := cloneJSONMap(t, usItems[index])
 			copyContainer := copyUS["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
 			copyResources := copyContainer["resources"].(map[string]any)
 			copyResources["limits"].(map[string]any)["cpu"] = sharedResources["limits"].(map[string]any)["cpu"]
 			copyResources["requests"].(map[string]any)["cpu"] = sharedResources["requests"].(map[string]any)["cpu"]
+			copyResources["limits"].(map[string]any)["memory"] = sharedResources["limits"].(map[string]any)["memory"]
+			copyResources["requests"].(map[string]any)["memory"] = sharedResources["requests"].(map[string]any)["memory"]
 			got, gotErr := CanonicalJSON(copyUS)
 			wantRaw, wantErr := CanonicalJSON(sharedItems[index])
 			if gotErr != nil || wantErr != nil || !bytes.Equal(got, wantRaw) {
@@ -109,10 +117,10 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	const failedAtomSHA = "99b5f268e0874d6a1ab8d01858c78159f1493894"
-	if intent.Generation != 24 || intent.ExpectedPreviousConfigSHA != "63264ec329125fc6a7ef90d5772fd664094d7a4f" ||
+	const failedAtomSHA = "4945aeea3b1f918f35ad0a8bbffd60d8959a0c5d"
+	if intent.Generation != 26 || intent.ExpectedPreviousConfigSHA != "1debc81105af430338709c7458f18c4eff7aa06f" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:49d8ac7037332760f768a22daf6dad9682629ab229ea2e59a32c57e2de503e18" ||
+		intent.ExpectedPreviousImageDigest != "sha256:24ae68dd9f56b61172cfba4f8aeec8d4a057cc02231eff5aedeb14e27a801ea0" ||
 		intent.SupersedesFailedConfigSHA != failedAtomSHA || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
@@ -125,7 +133,7 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 23
+	prior.Generation = 25
 	prior.SupersedesFailedConfigSHA = ""
 	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior},
 		map[string]string{us.Control.ID: failedAtomSHA})
