@@ -534,14 +534,8 @@ func compileGroupRouteBinding(intent model.EdgeRouteIntent, routeIntentGeneratio
 	if strings.TrimSpace(intent.Generation) == "" || hostname == "" || strings.TrimSpace(intent.RouteKind) == "" || policy == "" {
 		return model.EdgeRouteBinding{}, false, fmt.Errorf("%w: invalid route intent identity", errGroupInventoryInvalid)
 	}
-	excludedIDs := normalizeIdentitySet(intent.ExcludedEdgeIDs)
-	allowedHealthy := 0
-	for _, edgeID := range healthyEdgeIDs {
-		if _, excluded := excludedIDs[normalizeEdgeIdentity(edgeID)]; !excluded {
-			allowedHealthy++
-		}
-	}
-	if allowedHealthy == 0 {
+	healthyCount := len(normalizeIdentitySlice(healthyEdgeIDs))
+	if healthyCount == 0 {
 		return model.EdgeRouteBinding{}, false, nil
 	}
 	status := strings.TrimSpace(intent.OriginStatus)
@@ -556,8 +550,8 @@ func compileGroupRouteBinding(intent model.EdgeRouteIntent, routeIntentGeneratio
 		SelectedEdgeGroup: groupID, EdgeGroupID: groupID,
 		ExcludedEdgeIDs: normalizeIdentitySlice(intent.ExcludedEdgeIDs), ExcludedEdgeGroupIDs: normalizeGroupIDSlice(intent.ExcludedEdgeGroupIDs),
 		ExclusionReason: strings.TrimSpace(intent.ExclusionReason), ExclusionExpiresAt: intent.ExclusionExpiresAt,
-		MinHealthyEdgeNodes: intent.MinHealthyEdgeNodes, HealthyEdgeNodeCount: allowedHealthy,
-		RoutePolicy: policy, SelectionReason: "active epoch inventory is healthy",
+		MinHealthyEdgeNodes: intent.MinHealthyEdgeNodes, HealthyEdgeNodeCount: healthyCount,
+		RoutePolicy: policy, SelectionReason: "active epoch inventory is healthy; exclusions drain DNS traffic only",
 		UpstreamKind: strings.TrimSpace(intent.UpstreamKind), UpstreamScope: strings.TrimSpace(intent.UpstreamScope),
 		UpstreamURL: strings.TrimSpace(intent.UpstreamURL), Upstreams: cloneRouteUpstreams(intent.Upstreams), ServicePort: intent.ServicePort,
 		TLSPolicy: strings.TrimSpace(intent.TLSPolicy), CachePolicyID: strings.TrimSpace(intent.CachePolicyID),
@@ -566,9 +560,9 @@ func compileGroupRouteBinding(intent model.EdgeRouteIntent, routeIntentGeneratio
 		Status: status, StatusReason: strings.TrimSpace(intent.OriginStatusReason), CreatedAt: intent.CreatedAt, UpdatedAt: intent.UpdatedAt,
 	}
 	binding.EdgeRedundancyStatus = "ok"
-	if binding.MinHealthyEdgeNodes > 0 && allowedHealthy < binding.MinHealthyEdgeNodes {
+	if binding.MinHealthyEdgeNodes > 0 && healthyCount < binding.MinHealthyEdgeNodes {
 		binding.EdgeRedundancyStatus = "at_risk"
-		binding.EdgeRedundancyReason = fmt.Sprintf("healthy active edge instances %d below minimum %d", allowedHealthy, binding.MinHealthyEdgeNodes)
+		binding.EdgeRedundancyReason = fmt.Sprintf("healthy active edge instances %d below minimum %d", healthyCount, binding.MinHealthyEdgeNodes)
 	}
 	if binding.Status != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) {
 		binding.UpstreamURL = ""
@@ -583,11 +577,6 @@ func compileGroupRouteBinding(intent model.EdgeRouteIntent, routeIntentGeneratio
 }
 
 func routeIntentAppliesToGroup(intent model.EdgeRouteIntent, groupID string) (bool, error) {
-	for _, excluded := range normalizeGroupIDSlice(intent.ExcludedEdgeGroupIDs) {
-		if excluded == groupID {
-			return false, nil
-		}
-	}
 	switch strings.TrimSpace(intent.TargetGroupMode) {
 	case model.EdgeRouteIntentGroupModeAllGroups:
 		return true, nil
