@@ -210,7 +210,7 @@ func runPlan(args []string, output io.Writer) error {
 		}
 		if found {
 			previous[release.ComponentID] = prior
-			previousConfigSHA[release.ComponentID] = priorSHA
+			previousConfigSHA[release.ComponentID] = resolvePreviousConfigSHA(baseSHA, release.IntentPath, intent, prior, priorSHA)
 		}
 		if intent.SupersedesFailedConfigSHA != "" {
 			if !found {
@@ -247,6 +247,21 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	_, err = output.Write(append(encoded, '\n'))
 	return err
+}
+
+func resolvePreviousConfigSHA(baseSHA, intentPath string, current, previous declarativerelease.Intent, previousIntentSHA string) string {
+	declared := current.ExpectedPreviousConfigSHA
+	if !current.ExpectedPreviousPresent || declared == "" || declared == previousIntentSHA {
+		return previousIntentSHA
+	}
+	if err := exec.Command("git", "merge-base", "--is-ancestor", declared, baseSHA).Run(); err != nil {
+		return previousIntentSHA
+	}
+	declaredIntent, err := loadGitIntentAt(declared, intentPath)
+	if err != nil || declaredIntent != previous {
+		return previousIntentSHA
+	}
+	return declared
 }
 
 func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA string, changed []string) ([]string, error) {
