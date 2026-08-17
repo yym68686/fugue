@@ -36,6 +36,7 @@ const (
 	defaultKubectlReadAttempts   = 2
 	defaultKubectlReadRetryDelay = 250 * time.Millisecond
 	probeBridgeManagerPrefix     = "fugue-probe-bridge-"
+	trustedCurrentArtifactEnv    = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
 )
 
 var (
@@ -98,6 +99,7 @@ type kubectlCluster struct {
 	readRetryDelay time.Duration
 	serviceHTTPURL func(string, string, int) string
 	metadata       metadataclient.Interface
+	trustedCurrent *declarativerelease.ArtifactReceipt
 }
 
 type healthSoakTracker struct {
@@ -142,7 +144,23 @@ func newKubectlCluster() (*kubectlCluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes metadata client: %w", err)
 	}
-	return &kubectlCluster{kubectl: kubectl, verifier: verifier, timeout: 120 * time.Second, metadata: metadata}, nil
+	trustedCurrent, err := trustedCurrentArtifactFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return &kubectlCluster{kubectl: kubectl, verifier: verifier, timeout: 120 * time.Second, metadata: metadata, trustedCurrent: trustedCurrent}, nil
+}
+
+func trustedCurrentArtifactFromEnv() (*declarativerelease.ArtifactReceipt, error) {
+	raw := strings.TrimSpace(os.Getenv(trustedCurrentArtifactEnv))
+	if raw == "" {
+		return nil, nil
+	}
+	artifact, err := declarativerelease.DecodeArtifactReceipt(strings.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("decode trusted current artifact receipt: %w", err)
+	}
+	return &artifact, nil
 }
 
 func (cluster *kubectlCluster) Observe(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
@@ -422,20 +440,9 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	verificationArgs := []string{"--image", observation.ImageRef, "--platform", "linux/amd64", "--expected-revision", observation.OCIRevision}
-	verificationArgs = append(verificationArgs, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
-		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
-	commandArgs := append([]string{cluster.verifier}, verificationArgs...)
-	verificationRaw, err := cluster.run(ctx, nil, "python3", commandArgs...)
+	_, err = cluster.verifyRuntimeArtifact(ctx, observation.ImageRef, observation.OCIRevision)
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("verify degraded predecessor registry identity: %w", err)
-	}
-	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	if verification.Image != observation.ImageRef || verification.OCIRevision != observation.OCIRevision {
-		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
 	}
 	return observation, nil
 }
@@ -444,21 +451,36 @@ func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarat
 	if !target.Present || target.ImageRef == "" || target.OCIRevision == "" {
 		return errors.New("registry target identity is incomplete")
 	}
+	if _, err := cluster.verifyRuntimeArtifact(ctx, target.ImageRef, target.OCIRevision); err != nil {
+		return fmt.Errorf("verify registry target: %w", err)
+	}
+	return nil
+}
+
+func (cluster *kubectlCluster) verifyRuntimeArtifact(ctx context.Context, image, revision string) (declarativerelease.RegistryVerification, error) {
+	image, revision = strings.TrimSpace(image), strings.TrimSpace(revision)
+	if artifact := cluster.trustedCurrent; artifact != nil && artifact.ImmutableRef == image && artifact.OCIRevision == revision {
+		return declarativerelease.RegistryVerification{
+			Image: image, IndexDigest: artifact.TopDigest, ManifestDigest: artifact.PlatformManifestDigest,
+			ConfigDigest: artifact.ConfigDigest, OCIRevision: revision, Platform: artifact.Platform,
+			Verification: "sealed_current_artifact_receipt",
+		}, nil
+	}
 	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier,
-		"--image", target.ImageRef, "--platform", "linux/amd64", "--expected-revision", target.OCIRevision,
+		"--image", image, "--platform", "linux/amd64", "--expected-revision", revision,
 		"--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
 		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
 	if err != nil {
-		return fmt.Errorf("verify registry target: %w", err)
+		return declarativerelease.RegistryVerification{}, err
 	}
 	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
 	if err != nil {
-		return err
+		return declarativerelease.RegistryVerification{}, err
 	}
-	if verification.Image != target.ImageRef || verification.OCIRevision != target.OCIRevision {
-		return errors.New("registry target identity mismatch")
+	if verification.Image != image || verification.OCIRevision != revision {
+		return declarativerelease.RegistryVerification{}, errors.New("registry target identity mismatch")
 	}
-	return nil
+	return verification, nil
 }
 
 func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
@@ -1914,18 +1936,9 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 		// existing owned-degraded CAS recovery path.
 		verificationRevision = partial.OCIRevision
 	}
-	arguments := []string{"python3", cluster.verifier, "--image", verificationImage, "--platform", "linux/amd64", "--expected-revision", verificationRevision}
-	arguments = append(arguments, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1")
-	verificationRaw, err := cluster.run(ctx, nil, arguments[0], arguments[1:]...)
+	verification, err := cluster.verifyRuntimeArtifact(ctx, verificationImage, verificationRevision)
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("verify live image provenance: %w", err)
-	}
-	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	if verification.Image != verificationImage || verification.OCIRevision != verificationRevision {
-		return declarativerelease.Observation{}, errors.New("live registry identity mismatch")
 	}
 	var runtimeImageErr error
 	if supersededFailedAtom {

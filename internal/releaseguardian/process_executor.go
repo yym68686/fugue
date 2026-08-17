@@ -28,6 +28,8 @@ var (
 	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
+const trustedCurrentArtifactEnv = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
+
 func NewProcessExecutor(binary, podUID string) (*ProcessExecutor, error) {
 	binary, podUID = strings.TrimSpace(binary), strings.TrimSpace(podUID)
 	if binary == "" || !filepath.IsAbs(binary) || podUID == "" || len(podUID) > 80 || strings.ContainsAny(podUID, "\r\n:\x00") {
@@ -112,6 +114,11 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		"FUGUE_RELEASE_GUARDIAN_POD_UID="+executor.PodUID,
 		"FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST="+snapshot.Record.RecordDigest,
 	)
+	trustedArtifact, err := trustedCurrentArtifact(snapshot.CurrentMonitorData)
+	if err != nil {
+		return ExecutionReceipt{}, err
+	}
+	command.Env = setEnvironment(command.Env, trustedCurrentArtifactEnv, trustedArtifact)
 	var stdout, stderr boundedBuffer
 	stdout.limit, stderr.limit = 1<<20, 1<<20
 	command.Stdout, command.Stderr = &stdout, &stderr
@@ -166,6 +173,22 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		recordDigest = snapshot.Record.LKGRecordDigest
 	}
 	return ExecutionReceipt{Status: result.Status, Reason: guardianTerminalReason(result), RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil
+}
+
+func trustedCurrentArtifact(data map[string]string) (string, error) {
+	raw := strings.TrimSpace(data["artifact-receipt.json"])
+	if raw == "" {
+		return "", errors.New("Guardian current artifact receipt is unavailable")
+	}
+	artifact, err := declarativerelease.DecodeArtifactReceipt(strings.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("decode Guardian current artifact receipt: %w", err)
+	}
+	canonical, err := declarativerelease.CanonicalJSON(artifact)
+	if err != nil {
+		return "", fmt.Errorf("encode Guardian current artifact receipt: %w", err)
+	}
+	return string(canonical), nil
 }
 
 func guardianTerminalReason(result declarativerelease.ExecutionResult) string {
