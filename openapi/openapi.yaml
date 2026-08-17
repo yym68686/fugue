@@ -561,6 +561,144 @@ paths:
             application/json:
               schema:
                 type: object
+  /v1/admin/traffic-overrides:
+    get:
+      operationId: adminListTrafficOverrides
+      summary: List staged and revoked emergency traffic overrides
+      tags: [Admin, DNS]
+      x-fugue-handler: handleAdminListTrafficOverrides
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Independent emergency traffic override inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficOverrideListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/traffic-overrides/{hostname}:
+    get:
+      operationId: adminGetTrafficOverride
+      summary: Get one emergency traffic override
+      tags: [Admin, DNS]
+      x-fugue-handler: handleAdminGetTrafficOverride
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Emergency traffic override
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficOverrideResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: adminPutTrafficOverride
+      summary: Stage a signed emergency traffic override
+      description: Stores a signed override independently from the normal TrafficEpoch and release state machines. Staged overrides are not served until the separate overlay activation path is enabled.
+      tags: [Admin, DNS]
+      x-fugue-handler: handleAdminPutTrafficOverride
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrafficOverridePutRequest"
+      responses:
+        '200':
+          description: Signed staged emergency traffic override
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficOverrideResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/traffic-overrides/{hostname}/revoke:
+    post:
+      operationId: adminRevokeTrafficOverride
+      summary: Revoke an emergency traffic override with CAS
+      tags: [Admin, DNS]
+      x-fugue-handler: handleAdminRevokeTrafficOverride
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrafficOverrideRevokeRequest"
+      responses:
+        '200':
+          description: Signed revoked emergency traffic override
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficOverrideResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/traffic-override-signing-key:
+    get:
+      operationId: adminGetTrafficOverrideSigningKey
+      summary: Inspect emergency traffic override signing key metadata
+      tags: [Admin, DNS]
+      x-fugue-handler: handleAdminGetTrafficOverrideSigningKey
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Signing key metadata without secret key material
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficOverrideSigningKeyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/traffic-override-signing-key/rotate:
+    post:
+      operationId: adminRotateTrafficOverrideSigningKey
+      summary: Rotate the emergency traffic override signing key with CAS
+      tags: [Admin, DNS]
+      x-fugue-handler: handleAdminRotateTrafficOverrideSigningKey
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrafficOverrideSigningKeyRotateRequest"
+      responses:
+        '200':
+          description: Rotated signing key metadata without secret key material
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficOverrideSigningKeyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/edge/release-evidence:
     get:
       operationId: adminGetPlatformReleaseEvidence
@@ -14023,6 +14161,173 @@ components:
       properties:
         policy:
           $ref: "#/components/schemas/EdgeRoutePolicy"
+    TrafficOverride:
+      type: object
+      additionalProperties: false
+      required: [schema, hostname, generation, state, answers, required_host_routes, route_generation, route_digest, expires_at, reason, operator, artifact_digest, key_id, signature, signed_at, created_at, updated_at]
+      properties:
+        schema:
+          type: string
+          enum: [traffic-override.fugue.dev/v1]
+        hostname:
+          type: string
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        state:
+          type: string
+          enum: [staged, revoked]
+        answers:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+        required_host_routes:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+        route_generation:
+          type: string
+        route_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        expires_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        operator:
+          type: string
+        artifact_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        key_id:
+          type: string
+        signature:
+          type: string
+          pattern: '^ed25519:[A-Za-z0-9+/]{86}$'
+        signed_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TrafficOverridePutRequest:
+      type: object
+      additionalProperties: false
+      required: [answers, required_host_routes, route_generation, route_digest, expires_at, reason, expected_generation]
+      properties:
+        answers:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+        required_host_routes:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+        route_generation:
+          type: string
+        route_digest:
+          type: string
+          pattern: '^sha256:[0-9a-fA-F]{64}$'
+        expires_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          minLength: 8
+        expected_generation:
+          type: integer
+          format: int64
+          minimum: 0
+    TrafficOverrideRevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, expected_generation]
+      properties:
+        reason:
+          type: string
+          minLength: 8
+        expected_generation:
+          type: integer
+          format: int64
+          minimum: 1
+    TrafficOverrideResponse:
+      type: object
+      additionalProperties: false
+      required: [override]
+      properties:
+        override:
+          $ref: "#/components/schemas/TrafficOverride"
+    TrafficOverrideListResponse:
+      type: object
+      additionalProperties: false
+      required: [overrides]
+      properties:
+        overrides:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrafficOverride"
+    TrafficOverrideSigningKeyStatus:
+      type: object
+      additionalProperties: false
+      required: [schema, generation, current_key_id, current_public_key, created_at, updated_at]
+      properties:
+        schema:
+          type: string
+          enum: [traffic-override-signing.fugue.dev/v1]
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        current_key_id:
+          type: string
+        current_public_key:
+          type: string
+        previous_key_id:
+          type: string
+        previous_public_key:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        rotated_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TrafficOverrideSigningKeyResponse:
+      type: object
+      additionalProperties: false
+      required: [signing_key]
+      properties:
+        signing_key:
+          $ref: "#/components/schemas/TrafficOverrideSigningKeyStatus"
+    TrafficOverrideSigningKeyRotateRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_generation]
+      properties:
+        expected_generation:
+          type: integer
+          format: int64
+          minimum: 1
     PlatformDomainBinding:
       type: object
       additionalProperties: false
