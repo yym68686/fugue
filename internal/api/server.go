@@ -151,6 +151,7 @@ type Server struct {
 	edgeDNSArtifactErrorCount              int64
 	edgeDNSArtifactLastError               string
 	ready                                  atomic.Bool
+	trafficOverrideRouteProbe              trafficOverrideRouteProbeFunc
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {

@@ -189,6 +189,10 @@ func (s *Server) handleAdminPutTrafficOverride(w http.ResponseWriter, r *http.Re
 		CreatedAt:          createdAt,
 		UpdatedAt:          now,
 	}
+	if err := s.validateTrafficOverrideRoutes(r.Context(), candidate.Answers, candidate.RequiredHostRoutes); err != nil {
+		httpx.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	candidate, err = trafficoverride.Sign(candidate, keyring.CurrentPrivateKey, keyring.CurrentKeyID)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "traffic override signer unavailable")
