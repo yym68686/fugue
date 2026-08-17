@@ -133,7 +133,7 @@ func TestEdgeRouteIntentTreatsTrafficPlacementAsDNSDrain(t *testing.T) {
 
 	now := time.Date(2026, 8, 16, 22, 0, 0, 0, time.UTC)
 	binding := model.EdgeRouteBinding{
-		Hostname:   "api.0-0.pro",
+		Hostname:   "api.example.test",
 		PathPrefix: "/",
 		AppID:      "app-api",
 		TenantID:   "tenant-platform",
