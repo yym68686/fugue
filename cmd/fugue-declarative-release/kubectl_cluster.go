@@ -80,17 +80,6 @@ func emergencyOwnershipManager(manager string) bool {
 	return true
 }
 
-func probeBridgeManager(release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) (string, error) {
-	metadata := mapField(desired, "metadata")
-	uid, rv := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"])
-	if uid == "" || rv == "" || release.Workload.FieldManager == "" {
-		return "", errors.New("probe ownership bridge manager lacks an exact transaction identity")
-	}
-	seed := strings.Join([]string{release.Workload.FieldManager, identity.APIVersion, identity.Kind, identity.Namespace, identity.Name, uid, rv}, "\x00")
-	digest := sha256.Sum256([]byte(seed))
-	return probeBridgeManagerPrefix + fmt.Sprintf("%x", digest[:8]), nil
-}
-
 type kubectlCluster struct {
 	kubectl        string
 	verifier       string
@@ -947,10 +936,12 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 // applyResourceWithOwnershipConvergence is the one bounded recovery path for
 // emergency kubectl writes. A typed SSA conflict must exactly match the
 // release-owned annotation, image, HTTP probe path, or declared environment
-// value allowlist and an Update managedFields entry. Execute removes an exact
-// emergency entry, or moves only proven legacy scalar values through a
-// UID/RV-bound JSON Patch before the ordinary declarative apply. Prepare
-// remains read-only and accepts only the same typed proof.
+// value allowlist and an Update managedFields entry. Execute moves only exact
+// string-valued runtime fields through a UID/RV-bound JSON Patch using the
+// declarative field manager, then retries ordinary SSA with the fresh RV. This
+// transfers ownership without editing API server-owned managedFields or using
+// unconditional conflict takeover. Prepare remains read-only and accepts only
+// the same typed proof.
 func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
 	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
 	if applyErr != nil {
@@ -966,7 +957,7 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 				return errors.Join(applyErr, reconcileErr)
 			}
 			if converged {
-				return cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, true)
+				return nil
 			}
 		}
 		allowed := ownershipConvergencePointers(release, identity, desired)
@@ -991,51 +982,40 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if transferErr != nil {
 			return transferErr
 		}
-		if transferFound {
-			encodedPatch, encodeErr := declarativerelease.CanonicalJSON(transferPatch)
-			if encodeErr != nil {
-				return encodeErr
-			}
-			bridgeManager, managerErr := probeBridgeManager(release, identity, desired)
-			if managerErr != nil {
-				return managerErr
-			}
-			if _, patchErr := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
-				"--namespace", identity.Namespace, "--type=json", "--field-manager", bridgeManager,
-				"--patch", string(encodedPatch), "--output", "json"); patchErr != nil {
-				return fmt.Errorf("transfer exact scalar ownership: %w", patchErr)
-			}
+		if !transferFound {
+			return errors.New("exact ownership conflict has no scalar transfer path")
 		}
-		if cleanupErr := cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, false); cleanupErr != nil {
-			return cleanupErr
+		encodedPatch, encodeErr := declarativerelease.CanonicalJSON(transferPatch)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if _, patchErr := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
+			"--namespace", identity.Namespace, "--type=json", "--field-manager", release.Workload.FieldManager,
+			"--patch", string(encodedPatch), "--output", "json"); patchErr != nil {
+			return fmt.Errorf("transfer exact scalar ownership: %w", patchErr)
 		}
 		freshRaw, getErr := cluster.getResource(ctx, identity)
 		if getErr != nil || resourceAbsent(freshRaw) {
-			return fmt.Errorf("read resource after emergency ownership cleanup: %w", getErr)
+			return fmt.Errorf("read resource after exact scalar ownership transfer: %w", getErr)
 		}
 		fresh, decodeErr := decodeJSONObject(freshRaw)
 		if decodeErr != nil {
 			return decodeErr
 		}
-		rebindBefore := live
-		if transferFound {
-			rebindBefore, transferErr = expectedStateAfterLegacyOwnershipTransfer(desired, live, fresh, allowed, applyErr)
-			if transferErr != nil {
-				return transferErr
-			}
+		expected, transferErr := expectedStateAfterLegacyOwnershipTransfer(desired, live, fresh, allowed, applyErr)
+		if transferErr != nil {
+			return transferErr
 		}
-		rebound, rebindErr := rebindDesiredResourceVersionAfterOwnershipCleanup(desired, rebindBefore, fresh)
+		rebound, rebindErr := rebindDesiredResourceVersionAfterScalarTransfer(desired, expected, fresh)
 		if rebindErr != nil {
 			return rebindErr
 		}
 		if _, retryErr := cluster.kubectlRun(ctx, rebound, applyArguments(release, false)...); retryErr != nil {
-			return fmt.Errorf("ordinary apply after exact emergency ownership cleanup: %w", retryErr)
+			return fmt.Errorf("ordinary apply after exact scalar ownership transfer: %w", retryErr)
 		}
-	}
-	if dryRun {
 		return nil
 	}
-	return cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, true)
+	return nil
 }
 
 func (cluster *kubectlCluster) reconcileApplyCommitUnknown(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) (bool, error) {
@@ -1078,11 +1058,11 @@ func (cluster *kubectlCluster) reconcileApplyCommitUnknown(ctx context.Context, 
 	return false, nil
 }
 
-// rebindDesiredResourceVersionAfterOwnershipCleanup permits exactly the RV
-// change caused by removing reviewed emergency managedFields entries. The
-// live object must otherwise be byte-equivalent after removing Kubernetes
-// observation metadata, and UID/generation remain explicit CAS witnesses.
-func rebindDesiredResourceVersionAfterOwnershipCleanup(desired, before, fresh map[string]any) ([]byte, error) {
+// rebindDesiredResourceVersionAfterScalarTransfer permits exactly the RV
+// change caused by a reviewed scalar transfer. The live object must otherwise
+// be byte-equivalent after removing Kubernetes observation metadata, and
+// UID/generation remain explicit CAS witnesses.
+func rebindDesiredResourceVersionAfterScalarTransfer(desired, before, fresh map[string]any) ([]byte, error) {
 	desiredMetadata := mapField(desired, "metadata")
 	beforeMetadata := mapField(before, "metadata")
 	freshMetadata := mapField(fresh, "metadata")
@@ -1091,16 +1071,16 @@ func rebindDesiredResourceVersionAfterOwnershipCleanup(desired, before, fresh ma
 	freshUID, freshRV := stringValue(freshMetadata["uid"]), stringValue(freshMetadata["resourceVersion"])
 	beforeGeneration, freshGeneration := int64Value(beforeMetadata["generation"]), int64Value(freshMetadata["generation"])
 	if desiredUID == "" || desiredRV == "" || desiredUID != beforeUID || desiredRV != beforeRV {
-		return nil, errors.New("ownership cleanup rebind is not bound to the original desired UID/RV")
+		return nil, errors.New("scalar transfer rebind is not bound to the original desired UID/RV")
 	}
 	if freshUID == "" || freshRV == "" || freshUID != beforeUID || freshRV == beforeRV {
-		return nil, errors.New("ownership cleanup did not produce the expected fresh UID/RV")
+		return nil, errors.New("scalar transfer did not produce the expected fresh UID/RV")
 	}
 	if beforeGeneration <= 0 || freshGeneration != beforeGeneration {
-		return nil, errors.New("ownership cleanup changed the workload generation")
+		return nil, errors.New("scalar transfer changed the workload generation")
 	}
 	if digestJSON(sanitizeObservedResource(before)) != digestJSON(sanitizeObservedResource(fresh)) {
-		return nil, errors.New("ownership cleanup changed the live resource outside observation metadata")
+		return nil, errors.New("scalar transfer changed the live resource outside observation metadata")
 	}
 	copyRaw, err := declarativerelease.CanonicalJSON(desired)
 	if err != nil {
@@ -1415,50 +1395,62 @@ func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []st
 		if !desiredFound || !liveFound {
 			return nil, false, errors.New("legacy ownership transfer lacks an exact scalar value")
 		}
-		field, name, tail, ok := emergencyContainerPointerParts(pointer)
-		if !ok {
+		selectors := []selectorTest(nil)
+		valuePath := pointer
+		field, name, tail, containerPointer := emergencyContainerPointerParts(pointer)
+		if containerPointer {
+			containerIndex := -1
+			var liveContainer map[string]any
+			for candidate, raw := range anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")[field]) {
+				container, _ := raw.(map[string]any)
+				if stringValue(container["name"]) == name {
+					if containerIndex >= 0 {
+						return nil, false, errors.New("legacy ownership transfer container identity is ambiguous")
+					}
+					containerIndex = candidate
+					liveContainer = container
+				}
+			}
+			if containerIndex < 0 {
+				return nil, false, errors.New("legacy ownership transfer container is absent")
+			}
+			base := "/spec/template/spec/" + field + "/" + strconv.Itoa(containerIndex)
+			selectors = []selectorTest{{path: base + "/name", value: name}}
+			switch {
+			case tail == "image":
+				valuePath = base + "/image"
+			case emergencyProbePathPointer(pointer):
+				probe, _ := probePathTail(tail)
+				valuePath = base + "/" + probe + "/httpGet/path"
+			case emergencyEnvValuePointer(pointer):
+				envName, _ := envValueTail(tail)
+				envIndex := -1
+				for candidate, raw := range anySlice(liveContainer["env"]) {
+					env, _ := raw.(map[string]any)
+					if stringValue(env["name"]) != envName {
+						continue
+					}
+					if envIndex >= 0 {
+						return nil, false, errors.New("legacy ownership transfer environment identity is ambiguous")
+					}
+					envIndex = candidate
+				}
+				if envIndex < 0 {
+					return nil, false, errors.New("legacy ownership transfer environment value is absent")
+				}
+				envBase := base + "/env/" + strconv.Itoa(envIndex)
+				selectors = append(selectors, selectorTest{path: envBase + "/name", value: envName})
+				valuePath = envBase + "/value"
+			default:
+				scope, resource, resourceOK := resourceCPUTail(tail)
+				if !resourceOK {
+					return nil, false, errors.New("legacy ownership transfer pointer is not scalar")
+				}
+				valuePath = base + "/resources/" + scope + "/" + resource
+			}
+		} else if !strings.HasPrefix(pointer, "/metadata/annotations/") &&
+			!strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
 			return nil, false, errors.New("legacy ownership transfer pointer is invalid")
-		}
-		containerIndex := -1
-		var liveContainer map[string]any
-		for candidate, raw := range anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")[field]) {
-			container, _ := raw.(map[string]any)
-			if stringValue(container["name"]) == name {
-				if containerIndex >= 0 {
-					return nil, false, errors.New("legacy ownership transfer container identity is ambiguous")
-				}
-				containerIndex = candidate
-				liveContainer = container
-			}
-		}
-		if containerIndex < 0 {
-			return nil, false, errors.New("legacy ownership transfer container is absent")
-		}
-		base := "/spec/template/spec/" + field + "/" + strconv.Itoa(containerIndex)
-		selectors := []selectorTest{{path: base + "/name", value: name}}
-		valuePath := ""
-		if probe, probeOK := probePathTail(tail); probeOK {
-			valuePath = base + "/" + probe + "/httpGet/path"
-		} else if envName, envOK := envValueTail(tail); envOK {
-			envIndex := -1
-			for candidate, raw := range anySlice(liveContainer["env"]) {
-				env, _ := raw.(map[string]any)
-				if stringValue(env["name"]) != envName {
-					continue
-				}
-				if envIndex >= 0 {
-					return nil, false, errors.New("legacy ownership transfer environment identity is ambiguous")
-				}
-				envIndex = candidate
-			}
-			if envIndex < 0 {
-				return nil, false, errors.New("legacy ownership transfer environment value is absent")
-			}
-			envBase := base + "/env/" + strconv.Itoa(envIndex)
-			selectors = append(selectors, selectorTest{path: envBase + "/name", value: envName})
-			valuePath = envBase + "/value"
-		} else {
-			return nil, false, errors.New("legacy ownership transfer pointer is not scalar")
 		}
 		replacements = append(replacements, replacement{
 			selectors: selectors, valuePath: valuePath, liveValue: liveValue, desiredValue: desiredValue,
@@ -1545,85 +1537,11 @@ func emergencyEnvValuePointer(pointer string) bool {
 }
 
 func legacyOwnershipTransferPointer(pointer string) bool {
-	return emergencyProbePathPointer(pointer) || emergencyEnvValuePointer(pointer)
-}
-
-func (cluster *kubectlCluster) cleanupEmergencyOwnership(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, requireDeclarativeOwner bool) error {
-	allowed := ownershipConvergencePointers(release, identity, desired)
-	if len(allowed) == 0 {
-		return nil
+	if strings.HasPrefix(pointer, "/metadata/annotations/") || strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
+		return true
 	}
-	for attempts := 0; attempts < 4; attempts++ {
-		liveRaw, err := cluster.getResource(ctx, identity)
-		if err != nil || resourceAbsent(liveRaw) {
-			return fmt.Errorf("read post-apply ownership: %w", err)
-		}
-		live, err := decodeJSONObject(liveRaw)
-		if err != nil {
-			return err
-		}
-		patch, found, err := nextEmergencyOwnershipPatch(live, release.Workload.FieldManager, allowed, requireDeclarativeOwner)
-		if err != nil {
-			return err
-		}
-		if !found {
-			return nil
-		}
-		encoded, err := declarativerelease.CanonicalJSON(patch)
-		if err != nil {
-			return err
-		}
-		if _, err := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
-			"--namespace", identity.Namespace, "--type=json", "--patch", string(encoded), "--output", "json"); err != nil {
-			return fmt.Errorf("remove exact emergency managedFields entry: %w", err)
-		}
-	}
-	return errors.New("emergency ownership cleanup exceeded bounded entry count")
-}
-
-func nextEmergencyOwnershipPatch(live map[string]any, declarativeManager string, allowed []string, requireDeclarativeOwner bool) ([]map[string]any, bool, error) {
-	metadata := mapField(live, "metadata")
-	uid, rv := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"])
-	if uid == "" || rv == "" {
-		return nil, false, errors.New("emergency ownership cleanup lacks UID/RV")
-	}
-	entries := anySlice(metadata["managedFields"])
-	cleanupAllowed := ownershipCleanupPointers(allowed)
-	unsafeOverlap := false
-	for index, rawEntry := range entries {
-		entry, _ := rawEntry.(map[string]any)
-		manager := stringValue(entry["manager"])
-		if !emergencyOwnershipManager(manager) || stringValue(entry["operation"]) != "Update" || stringValue(entry["subresource"]) != "" {
-			continue
-		}
-		pointers, err := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
-		if err != nil || len(pointers) == 0 {
-			continue
-		}
-		overlapsReviewedRuntime := stringsOverlap(pointers, allowed)
-		overlapsBridgeScaffolding := strings.HasPrefix(manager, probeBridgeManagerPrefix) && stringsOverlap(pointers, cleanupAllowed)
-		if !overlapsReviewedRuntime && !overlapsBridgeScaffolding {
-			continue
-		}
-		if !stringSubset(pointers, cleanupAllowed) {
-			unsafeOverlap = true
-			continue
-		}
-		if requireDeclarativeOwner && !managedFieldsOwnPointers(metadata, declarativeManager, pointers) {
-			return nil, false, errors.New("emergency ownership cleanup lacks declarative co-ownership")
-		}
-		path := "/metadata/managedFields/" + strconv.Itoa(index)
-		return []map[string]any{
-			{"op": "test", "path": "/metadata/uid", "value": uid},
-			{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
-			{"op": "test", "path": path, "value": entry},
-			{"op": "remove", "path": path},
-		}, true, nil
-	}
-	if unsafeOverlap {
-		return nil, false, errors.New("emergency managedFields cleanup would remove unreviewed ownership")
-	}
-	return nil, false, nil
+	_, _, _, ok := emergencyContainerPointerParts(pointer)
+	return ok
 }
 
 func parseEmergencySSAConflicts(applyErr error) ([]emergencySSAConflict, error) {
@@ -1893,9 +1811,8 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 // CheckHealthyOnce performs one bounded controller reconciliation. It is used
 // by the asynchronous monitor, where repeated scheduled observations provide
 // the failure threshold; it deliberately does not repeat the synchronous
-// rollout soak or wait loop. After exact target, probe, and manifest
-// convergence are proven, it removes only reviewed emergency Update ownership
-// by UID/RV/entry CAS without changing resource values.
+// rollout soak or wait loop. It verifies the exact target, probes, manifest,
+// and declarative runtime-field ownership without mutating ownership metadata.
 func (cluster *kubectlCluster) CheckHealthyOnce(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
 	observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest)
 	if err != nil {
@@ -1912,56 +1829,10 @@ func (cluster *kubectlCluster) CheckHealthyOnce(ctx context.Context, release dec
 	if err := cluster.MonitorConverged(ctx, release, manifest); err != nil {
 		return observation, err
 	}
-	boundManifest, err := declarativerelease.BindManifestCAS(manifest, observation)
-	if err != nil {
-		return observation, err
-	}
-	if err := cluster.convergeMonitoredEmergencyOwnership(ctx, release, boundManifest); err != nil {
-		return observation, err
-	}
 	if err := cluster.VerifyOwnershipConverged(ctx, release, manifest); err != nil {
 		return observation, err
 	}
 	return observation, nil
-}
-
-func (cluster *kubectlCluster) convergeMonitoredEmergencyOwnership(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
-	identities, err := declarativerelease.ResourceSetIdentities(manifest)
-	if err != nil {
-		return err
-	}
-	for _, identity := range identities {
-		desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
-		if desiredErr != nil {
-			return desiredErr
-		}
-		if len(ownershipConvergencePointers(release, identity, desired)) == 0 {
-			continue
-		}
-		liveRaw, getErr := cluster.getResource(ctx, identity)
-		if getErr != nil || resourceAbsent(liveRaw) {
-			return fmt.Errorf("read monitored emergency ownership for %s/%s: %w", identity.Kind, identity.Name, getErr)
-		}
-		live, decodeErr := decodeJSONObject(liveRaw)
-		if decodeErr != nil {
-			return decodeErr
-		}
-		_, found, ownershipErr := nextEmergencyOwnershipPatch(live, release.Workload.FieldManager, ownershipConvergencePointers(release, identity, desired), false)
-		if ownershipErr != nil {
-			return fmt.Errorf("review monitored emergency ownership for %s/%s: %w", identity.Kind, identity.Name, ownershipErr)
-		}
-		if !found {
-			continue
-		}
-		encoded, encodeErr := declarativerelease.CanonicalJSON(desired)
-		if encodeErr != nil {
-			return encodeErr
-		}
-		if applyErr := cluster.applyResourceWithOwnershipConvergence(ctx, release, identity, desired, encoded, false); applyErr != nil {
-			return fmt.Errorf("converge monitored emergency ownership for %s/%s: %w", identity.Kind, identity.Name, applyErr)
-		}
-	}
-	return nil
 }
 
 func (cluster *kubectlCluster) MonitorConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
@@ -2112,22 +1983,6 @@ func verifyNoEmergencyOwnership(release declarativerelease.PlanRelease, identity
 		return nil
 	}
 	metadata := mapField(live, "metadata")
-	cleanupAllowed := ownershipCleanupPointers(allowed)
-	for _, rawEntry := range anySlice(metadata["managedFields"]) {
-		entry, _ := rawEntry.(map[string]any)
-		manager := stringValue(entry["manager"])
-		if !emergencyOwnershipManager(manager) || stringValue(entry["subresource"]) != "" {
-			continue
-		}
-		pointers, err := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
-		if err != nil {
-			return err
-		}
-		if stringsOverlap(pointers, allowed) ||
-			(strings.HasPrefix(manager, probeBridgeManagerPrefix) && stringsOverlap(pointers, cleanupAllowed)) {
-			return fmt.Errorf("declared resource %s/%s retains emergency field ownership", identity.Kind, identity.Name)
-		}
-	}
 	if !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, allowed) {
 		return fmt.Errorf("declared resource %s/%s lacks declarative ownership of the exact runtime allowlist", identity.Kind, identity.Name)
 	}
