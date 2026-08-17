@@ -738,7 +738,11 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			historicalFailedAtom := failedIntentFound && intent.SupersedesFailedConfigSHA != "" &&
 				failedIntent.Validate() == nil && failedIntent.Component == component.ID && failedIntent.Generation <= prior.Generation &&
 				intent.ExpectedPreviousPresent && sameIntentPredecessor(intent, prior) && sameIntentPredecessor(intent, failedIntent)
-			failedAtomSuccessor := immediateFailedAtom || historicalFailedAtom
+			correctedFailedPreflightAtom := failedIntentFound && intent.SupersedesFailedConfigSHA == priorConfigSHA &&
+				failedIntent == prior && intent.ExpectedPreviousPresent &&
+				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousManifestSHA &&
+				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousOCIRevision
+			failedAtomSuccessor := immediateFailedAtom || historicalFailedAtom || correctedFailedPreflightAtom
 			retrySameLKG = intent.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
 				intent.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
