@@ -379,10 +379,25 @@ func (publisher GroupCandidatePublisher) publishCurrentLKGCandidate(ctx context.
 
 func candidateBindsCurrentAuthority(candidate GroupCandidateBundle, authority GroupAuthorityState) bool {
 	return authority.LedgerExists && authority.PublishedExists && candidate.CurrentRecord != nil && candidate.CurrentBundle != nil &&
-		candidate.AuthorityLedgerSequence == authority.LedgerHead.Sequence &&
+		authorityHeadPreservesPublishedAuthority(authority, candidate.AuthorityLedgerSequence) &&
 		candidate.Epoch > authority.Published.PublicationSequence && candidate.CurrentRecord.Epoch == int64(authority.Published.PublicationSequence) &&
 		candidate.CurrentRecord.BundleDigest == authority.Published.Digest && candidate.CurrentBundle.Generation == authority.Published.Bundle.Generation &&
 		signedGroupBundleDigest(*candidate.CurrentBundle) == authority.Published.Digest
+}
+
+// Failed audit entries may advance the authority ledger without changing the
+// published route LKG. They must not invalidate a candidate that is still
+// byte-bound to that exact publication. Persistent CAS paths additionally
+// validate every intervening ledger entry before committing a mutation.
+func authorityHeadPreservesPublishedAuthority(authority GroupAuthorityState, expectedSequence uint64) bool {
+	if !authority.LedgerExists || !authority.PublishedExists || expectedSequence == 0 || authority.LedgerHead.Sequence < expectedSequence {
+		return false
+	}
+	if authority.LedgerHead.Sequence == expectedSequence {
+		return true
+	}
+	return authority.LedgerHead.Status == GroupAuthorityStatusFailed && authority.LedgerHead.RecoveryEpoch == 0 &&
+		authority.LedgerHead.LastPublishedBundleGeneration == authority.Published.Bundle.Generation
 }
 
 func candidateRecordMatchesIdentity(record edgeauthority.RouteBundleRecord, identity CandidateReleaseIdentity) bool {

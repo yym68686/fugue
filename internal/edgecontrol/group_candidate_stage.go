@@ -201,7 +201,7 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	if !authority.LedgerExists || !authority.PublishedExists || validateGroupPublishedBundle(request.GroupID, authority.Published) != nil {
 		return GroupCandidateBundle{}, groupCandidateCASConflict("published_authority_unavailable")
 	}
-	if authority.LedgerHead.Sequence != request.ExpectedAuthoritySequence || authority.Published.PublicationSequence != request.ExpectedPublicationSequence ||
+	if !authorityHeadPreservesPublishedAuthority(authority, request.ExpectedAuthoritySequence) || authority.Published.PublicationSequence != request.ExpectedPublicationSequence ||
 		authority.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch || authority.Published.Digest != request.ExpectedPublishedBundleDigest {
 		return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("published_authority_mismatch expected_ledger=%d actual_ledger=%d expected_publication=%d actual_publication=%d expected_recovery=%d actual_recovery=%d expected_digest=%s actual_digest=%s",
 			request.ExpectedAuthoritySequence, authority.LedgerHead.Sequence, request.ExpectedPublicationSequence, authority.Published.PublicationSequence,
@@ -294,7 +294,7 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 		CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: request.ExpectedCurrentWorkerSlot,
 		ServingAuthority: request.ServingAuthority, AllowDegradedPrevious: request.AllowDegradedPrevious, StandbyOnly: request.StandbyOnly,
 		Record: record, Bundle: signed}
-	return publisher.Store.PutGroupStagedCurrentLKGCandidateCAS(ctx, request.GroupID, currentEpoch, request.ExpectedAuthoritySequence,
+	return publisher.Store.PutGroupStagedCurrentLKGCandidateCAS(ctx, request.GroupID, currentEpoch, authority.LedgerHead.Sequence,
 		request.ExpectedPublicationSequence, request.ExpectedRecoveryEpoch, request.ExpectedPublishedBundleDigest, request.ServingAuthority, candidate)
 }
 
