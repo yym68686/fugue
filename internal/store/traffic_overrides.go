@@ -185,7 +185,8 @@ func normalizeTrafficOverride(candidate model.TrafficOverride, now time.Time) (m
 	}
 	candidate.RouteGeneration = strings.TrimSpace(candidate.RouteGeneration)
 	candidate.RouteDigest = strings.TrimSpace(strings.ToLower(candidate.RouteDigest))
-	if candidate.RouteGeneration == "" || !validTrafficOverrideDigest(candidate.RouteDigest) {
+	candidate.PreparedDigest = strings.TrimSpace(strings.ToLower(candidate.PreparedDigest))
+	if candidate.RouteGeneration == "" || !validTrafficOverrideDigest(candidate.RouteDigest) || !validTrafficOverrideDigest(candidate.PreparedDigest) {
 		return model.TrafficOverride{}, ErrInvalidInput
 	}
 	candidate.Reason = strings.TrimSpace(candidate.Reason)
@@ -198,10 +199,14 @@ func normalizeTrafficOverride(candidate model.TrafficOverride, now time.Time) (m
 	}
 	now = now.UTC()
 	candidate.ExpiresAt = candidate.ExpiresAt.UTC()
+	candidate.ActivateAt = candidate.ActivateAt.UTC()
 	candidate.SignedAt = candidate.SignedAt.UTC()
 	candidate.CreatedAt = candidate.CreatedAt.UTC()
 	candidate.UpdatedAt = candidate.UpdatedAt.UTC()
 	if candidate.ExpiresAt.IsZero() || !candidate.ExpiresAt.After(now) || candidate.ExpiresAt.After(now.Add(trafficOverrideMaxLifetime)) || candidate.SignedAt.IsZero() || candidate.CreatedAt.IsZero() || candidate.UpdatedAt.IsZero() {
+		return model.TrafficOverride{}, ErrInvalidInput
+	}
+	if candidate.State == model.TrafficOverrideStateStaged && (candidate.ActivateAt.IsZero() || !candidate.ActivateAt.After(now) || !candidate.ActivateAt.Before(candidate.ExpiresAt)) {
 		return model.TrafficOverride{}, ErrInvalidInput
 	}
 	return candidate, nil

@@ -37,6 +37,7 @@ func TestTrafficOverrideStoreCASAndSigningKeyRotation(t *testing.T) {
 		RequiredHostRoutes: []string{"app.example.com"},
 		RouteGeneration:    "route-generation-1",
 		RouteDigest:        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ActivateAt:         now.Add(time.Minute),
 		ExpiresAt:          now.Add(time.Hour),
 		Reason:             "emergency route test",
 		Operator:           "api-key/admin",

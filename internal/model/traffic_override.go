@@ -22,6 +22,8 @@ type TrafficOverride struct {
 	RequiredHostRoutes []string  `json:"required_host_routes"`
 	RouteGeneration    string    `json:"route_generation"`
 	RouteDigest        string    `json:"route_digest"`
+	PreparedDigest     string    `json:"prepared_digest"`
+	ActivateAt         time.Time `json:"activate_at"`
 	ExpiresAt          time.Time `json:"expires_at"`
 	Reason             string    `json:"reason"`
 	Operator           string    `json:"operator"`
