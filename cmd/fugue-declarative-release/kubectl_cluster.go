@@ -99,6 +99,7 @@ type kubectlCluster struct {
 	readRetryDelay time.Duration
 	serviceHTTPURL func(string, string, int) string
 	metadata       metadataclient.Interface
+	resources      dynamic.Interface
 	trustedCurrent *declarativerelease.ArtifactReceipt
 }
 
@@ -144,11 +145,18 @@ func newKubectlCluster() (*kubectlCluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes metadata client: %w", err)
 	}
+	resources, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("create Kubernetes dynamic client: %w", err)
+	}
 	trustedCurrent, err := trustedCurrentArtifactFromEnv()
 	if err != nil {
 		return nil, err
 	}
-	return &kubectlCluster{kubectl: kubectl, verifier: verifier, timeout: 120 * time.Second, metadata: metadata, trustedCurrent: trustedCurrent}, nil
+	return &kubectlCluster{
+		kubectl: kubectl, verifier: verifier, timeout: 120 * time.Second,
+		metadata: metadata, resources: resources, trustedCurrent: trustedCurrent,
+	}, nil
 }
 
 func trustedCurrentArtifactFromEnv() (*declarativerelease.ArtifactReceipt, error) {
@@ -732,6 +740,21 @@ func resourceGVR(identity declarativerelease.ResourceIdentity) (schema.GroupVers
 	gvr, exists := known[identity.APIVersion+"/"+identity.Kind]
 	if !exists {
 		return schema.GroupVersionResource{}, fmt.Errorf("resource %s/%s is not in the declarative deletion allowlist", identity.APIVersion, identity.Kind)
+	}
+	return gvr, nil
+}
+
+func resourceReadGVR(identity declarativerelease.ResourceIdentity) (schema.GroupVersionResource, error) {
+	if gvr, err := resourceGVR(identity); err == nil {
+		return gvr, nil
+	}
+	known := map[string]schema.GroupVersionResource{
+		"rbac.authorization.k8s.io/v1/Role":        {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"},
+		"rbac.authorization.k8s.io/v1/RoleBinding": {Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"},
+	}
+	gvr, exists := known[identity.APIVersion+"/"+identity.Kind]
+	if !exists {
+		return schema.GroupVersionResource{}, fmt.Errorf("resource %s/%s is not in the declarative read allowlist", identity.APIVersion, identity.Kind)
 	}
 	return gvr, nil
 }
@@ -2008,6 +2031,54 @@ func resourceAbsent(raw []byte) bool {
 }
 
 func (cluster *kubectlCluster) getResource(ctx context.Context, identity declarativerelease.ResourceIdentity) ([]byte, error) {
+	if cluster.resources != nil {
+		gvr, err := resourceReadGVR(identity)
+		if err != nil {
+			return nil, err
+		}
+		timeout := cluster.readTimeout
+		if timeout <= 0 {
+			timeout = defaultKubectlReadTimeout
+		}
+		attempts := cluster.readAttempts
+		if attempts <= 0 {
+			attempts = defaultKubectlReadAttempts
+		}
+		delay := cluster.readRetryDelay
+		if delay <= 0 {
+			delay = defaultKubectlReadRetryDelay
+		}
+		var lastErr error
+		for attempt := 0; attempt < attempts; attempt++ {
+			readCtx, cancel := context.WithTimeout(ctx, timeout)
+			resource, getErr := cluster.resources.Resource(gvr).Namespace(identity.Namespace).Get(readCtx, identity.Name, metav1.GetOptions{})
+			cancel()
+			if apierrors.IsNotFound(getErr) {
+				return []byte("null"), nil
+			}
+			if getErr == nil {
+				raw, marshalErr := json.Marshal(resource.Object)
+				if marshalErr != nil {
+					return nil, fmt.Errorf("encode read-only Kubernetes resource: %w", marshalErr)
+				}
+				return raw, nil
+			}
+			lastErr = getErr
+			if ctx.Err() != nil || attempt+1 == attempts {
+				break
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		return nil, fmt.Errorf("read-only Kubernetes get failed after %d attempts: %w", attempts, lastErr)
+	}
 	return cluster.kubectlRun(ctx, nil, "get", strings.ToLower(identity.Kind), identity.Name,
 		"--namespace", identity.Namespace, "--output", "json", "--show-managed-fields", "--ignore-not-found")
 }
