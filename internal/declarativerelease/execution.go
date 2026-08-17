@@ -710,7 +710,10 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	result.Reason = "lkg-unproven"
-	result.FailureDetail = lkgFailureDetail(lkgHealthErr, lkgConvergedErr, lkgObservation, prepared.LKG, release)
+	result.FailureDetail = combinedFailureDetail(
+		result.FailureDetail,
+		lkgFailureDetail(lkgHealthErr, lkgConvergedErr, lkgObservation, prepared.LKG, release),
+	)
 	result.Final = lkgObservation
 	return sealResult(result)
 }
@@ -811,6 +814,27 @@ func boundedFailureDetail(detail string) string {
 		return detail[:512]
 	}
 	return detail
+}
+
+func combinedFailureDetail(forward, rollback string) string {
+	forward = boundedFailureDetail(forward)
+	rollback = boundedFailureDetail(rollback)
+	if forward == "" {
+		return rollback
+	}
+	if rollback == "" {
+		return forward
+	}
+	const labelBytes = len("forward: ; rollback: ")
+	const totalBytes = 512
+	partBytes := (totalBytes - labelBytes) / 2
+	if len(forward) > partBytes {
+		forward = forward[:partBytes]
+	}
+	if len(rollback) > partBytes {
+		rollback = rollback[:partBytes]
+	}
+	return "forward: " + forward + "; rollback: " + rollback
 }
 
 func forwardFailureDetail(applyErr, healthErr, convergedErr error) string {
