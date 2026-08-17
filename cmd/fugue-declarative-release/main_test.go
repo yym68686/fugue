@@ -416,6 +416,34 @@ func TestExactIntentAtomOrMergeRejectsUnrelatedSingleParent(t *testing.T) {
 	}
 }
 
+func TestExactIntentAtomOrMergeAcceptsProductionMerge(t *testing.T) {
+	root := t.TempDir()
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	runGit(t, "init", "--initial-branch=main")
+	runGit(t, "config", "user.email", "release@example.test")
+	runGit(t, "config", "user.name", "Release Test")
+	writeFile(t, "deploy/releases/api/intent.json", []byte("{}\n"))
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "bootstrap intent")
+	runGit(t, "checkout", "-b", "release")
+	writeFile(t, "deploy/releases/api/intent.json", []byte("{\"generation\":2}\n"))
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "release intent")
+	runGit(t, "checkout", "main")
+	runGit(t, "merge", "--no-ff", "release", "-m", "merge release intent")
+	merge := runGit(t, "rev-parse", "HEAD")
+	if !isExactIntentAtomOrMerge(merge, "deploy/releases/api/intent.json") {
+		t.Fatal("production merge intent atom was rejected")
+	}
+}
+
 func TestPlanCommandIncludesRuntimeChangesSinceProductionOCIRevision(t *testing.T) {
 	root := t.TempDir()
 	previousDirectory, err := os.Getwd()
