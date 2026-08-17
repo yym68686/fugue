@@ -296,6 +296,9 @@ func TestFailedEdgeGroupTransitionSkipsMixedIdentityHealthCheck(t *testing.T) {
 	if detail := forwardFailureDetail(applyErr, errors.New("secondary health error"), errors.New("secondary convergence error")); detail != applyErr.Error() {
 		t.Fatalf("apply failure was masked in terminal detail: %q", detail)
 	}
+	if class := forwardFailureClass(applyErr, healthErr, convergedErr, observed, TargetIdentity{}, release); class != "forward_apply" {
+		t.Fatalf("transition apply failure was misclassified: %q", class)
+	}
 }
 
 func TestPrepareObservesTheLivePredecessorAgainstTheLKGManifest(t *testing.T) {
