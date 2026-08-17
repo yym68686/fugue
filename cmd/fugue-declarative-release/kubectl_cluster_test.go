@@ -522,13 +522,7 @@ func TestWorkloadOriginatedServiceProbeParsersAreExact(t *testing.T) {
 	}
 }
 
-func TestMonitorConvergesOnlyReviewedEmergencyOwnership(t *testing.T) {
-	directory := t.TempDir()
-	kubectl := filepath.Join(directory, "kubectl")
-	livePath := filepath.Join(directory, "live.json")
-	cleanPath := filepath.Join(directory, "clean.json")
-	statePath := filepath.Join(directory, "cleaned")
-	logPath := filepath.Join(directory, "patch.log")
+func TestMonitorAcceptsDeclarativeOwnershipWithoutDeletingManagedFields(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		Workload: declarativerelease.Workload{
 			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
@@ -569,58 +563,12 @@ func TestMonitorConvergesOnlyReviewedEmergencyOwnership(t *testing.T) {
 	emergencyPointer := "/spec/template/spec/containers[name=api]/image"
 	emergencyEntry := map[string]any{"manager": "kubectl", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{emergencyPointer})}
 	metadata["managedFields"] = []any{declarativeEntry, emergencyEntry}
-	clean := deepCopyJSONMap(t, live)
-	mapField(clean, "metadata")["resourceVersion"] = "43"
-	mapField(clean, "metadata")["managedFields"] = []any{declarativeEntry}
-	if err := os.WriteFile(livePath, mustJSON(t, live), 0o600); err != nil {
-		t.Fatal(err)
+	if err := verifyNoEmergencyOwnership(release, identity, desired, live); err != nil {
+		t.Fatalf("declarative ownership with harmless Update history was rejected: %v", err)
 	}
-	if err := os.WriteFile(cleanPath, mustJSON(t, clean), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	program := `#!/bin/sh
-set -eu
-case "$1" in
-  get)
-    if test -e "$CLEANED"; then cat "$CLEAN_JSON"; else cat "$LIVE_JSON"; fi
-    ;;
-  patch)
-    printf '%s\n' "$*" > "$PATCH_LOG"
-    : > "$CLEANED"
-    cat "$CLEAN_JSON"
-    ;;
-  apply)
-    if test -e "$CLEANED"; then
-      cat "$CLEAN_JSON"
-    else
-      printf '%s\n' 'Apply failed with 1 conflict: conflict with "kubectl" using apps/v1: .spec.template.spec.containers[name="api"].image' >&2
-      exit 1
-    fi
-    ;;
-  *) exit 51 ;;
-esac
-`
-	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("LIVE_JSON", livePath)
-	t.Setenv("CLEAN_JSON", cleanPath)
-	t.Setenv("CLEANED", statePath)
-	t.Setenv("PATCH_LOG", logPath)
-	manifest := mustJSON(t, map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{desired}})
-	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
-	if err := cluster.convergeMonitoredEmergencyOwnership(context.Background(), release, manifest); err != nil {
-		t.Fatal(err)
-	}
-	patchLog, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(patchLog), "--type=json") || !strings.Contains(string(patchLog), `"op":"remove"`) {
-		t.Fatalf("monitor ownership cleanup was not an exact JSON patch: %s", patchLog)
-	}
-	if err := verifyNoEmergencyOwnership(release, identity, desired, clean); err != nil {
-		t.Fatalf("post-cleanup ownership did not converge: %v", err)
+	metadata["managedFields"] = []any{emergencyEntry}
+	if err := verifyNoEmergencyOwnership(release, identity, desired, live); err == nil || !strings.Contains(err.Error(), "lacks declarative ownership") {
+		t.Fatalf("missing declarative ownership was accepted: %v", err)
 	}
 }
 
@@ -769,28 +717,6 @@ func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *test
 	}
 }
 
-func TestEmergencyOwnershipCleanupRemovesOnlyExactKubectlSetCPUEntry(t *testing.T) {
-	limit := "/spec/template/spec/containers[name=edge-control]/resources/limits/cpu"
-	request := "/spec/template/spec/containers[name=edge-control]/resources/requests/cpu"
-	allowed := []string{limit, request}
-	declarative := map[string]any{"manager": "fugue-edge-control-us-declarative", "operation": "Apply", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, allowed)}
-	emergency := map[string]any{"manager": "kubectl-set", "operation": "Update", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, allowed)}
-	live := map[string]any{"metadata": map[string]any{"uid": "control-uid", "resourceVersion": "42",
-		"managedFields": []any{declarative, emergency}}}
-	patch, found, err := nextEmergencyOwnershipPatch(live, "fugue-edge-control-us-declarative", allowed, true)
-	if err != nil || !found || len(patch) != 4 || patch[3]["op"] != "remove" || patch[3]["path"] != "/metadata/managedFields/1" {
-		t.Fatalf("exact CPU ownership cleanup patch=%+v found=%v err=%v", patch, found, err)
-	}
-
-	expanded := deepCopyJSONMap(t, live)
-	mapField(anySlice(mapField(expanded, "metadata")["managedFields"])[1].(map[string]any), "fieldsV1")["f:unreviewed"] = map[string]any{}
-	if _, _, err := nextEmergencyOwnershipPatch(expanded, "fugue-edge-control-us-declarative", allowed, true); err == nil {
-		t.Fatal("expanded kubectl-set ownership was accepted")
-	}
-}
-
 func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 	liveness := "/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path"
 	readiness := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"
@@ -853,8 +779,8 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 		`conflict with "helm" using apps/v1: ` + ssaFieldForPointer(liveness),
 		`conflict with "kubectl" using apps/v1: ` + ssaFieldForPointer(image),
 	}, "\n"))
-	if _, _, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, mixed); err == nil || !strings.Contains(err.Error(), "cannot be mixed") {
-		t.Fatalf("mixed legacy and emergency ownership transfer was accepted: %v", err)
+	if patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, mixed); err != nil || !found || len(patch) == 0 {
+		t.Fatalf("mixed reviewed scalar ownership transfer was rejected: patch=%v found=%v err=%v", patch, found, err)
 	}
 }
 
@@ -936,10 +862,8 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactEnvironmentValues(t *testing.
 	}
 }
 
-func TestEmergencyOwnershipCleanupAcceptsOnlyReviewedAssociativeIdentityLeaves(t *testing.T) {
+func TestExistingBridgeOwnershipTransfersOnlyReviewedAssociativeValue(t *testing.T) {
 	enabled := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value"
-	containerItem := "/spec/template/spec/containers[name=dns]"
-	envItem := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]"
 	containerName := "/spec/template/spec/containers[name=dns]/name"
 	envName := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/name"
 	desired := map[string]any{
@@ -959,25 +883,13 @@ func TestEmergencyOwnershipCleanupAcceptsOnlyReviewedAssociativeIdentityLeaves(t
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{enabled}, applyErr); err != nil {
 		t.Fatalf("reviewed associative identity conflict was rejected: %v", err)
 	}
-	patch, found, err := nextEmergencyOwnershipPatch(live, "declarative", []string{enabled}, false)
-	if err != nil || !found || len(patch) != 4 || patch[3]["path"] != "/metadata/managedFields/0" {
-		t.Fatalf("reviewed associative identity cleanup failed: patch=%v found=%v err=%v", patch, found, err)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{enabled}, applyErr)
+	if err != nil || !found {
+		t.Fatalf("reviewed associative value transfer failed: patch=%v found=%v err=%v", patch, found, err)
 	}
-	structuralOnly := deepCopyJSONMap(t, live)
-	structuralEntry := anySlice(mapField(structuralOnly, "metadata")["managedFields"])[0].(map[string]any)
-	structuralEntry["fieldsV1"] = managedFieldsTree(t, []string{containerName, envName})
-	if patch, found, err := nextEmergencyOwnershipPatch(structuralOnly, "declarative", []string{enabled}, false); err != nil || !found || len(patch) != 4 {
-		t.Fatalf("transaction bridge scaffolding residue was not removable: patch=%v found=%v err=%v", patch, found, err)
-	}
-	dotOnly := deepCopyJSONMap(t, live)
-	dotEntry := anySlice(mapField(dotOnly, "metadata")["managedFields"])[0].(map[string]any)
-	dotEntry["fieldsV1"] = managedFieldsTree(t, []string{containerItem, envItem})
-	if pointers, err := managedFieldsEntryPointers(mapField(dotEntry, "fieldsV1")); err != nil ||
-		!stringSubset([]string{containerItem, envItem}, pointers) {
-		t.Fatalf("associative item ownership was not flattened exactly: pointers=%v err=%v", pointers, err)
-	}
-	if patch, found, err := nextEmergencyOwnershipPatch(dotOnly, "declarative", []string{enabled}, false); err != nil || !found || len(patch) != 4 {
-		t.Fatalf("transaction bridge item-marker residue was not removable: patch=%v found=%v err=%v", patch, found, err)
+	encoded := string(mustJSON(t, patch))
+	if strings.Contains(encoded, "/managedFields/") || !strings.Contains(encoded, `"path":"/spec/template/spec/containers/0/env/0/value"`) {
+		t.Fatalf("associative transfer was not an exact value patch: %s", encoded)
 	}
 
 	expanded := deepCopyJSONMap(t, live)
@@ -986,8 +898,8 @@ func TestEmergencyOwnershipCleanupAcceptsOnlyReviewedAssociativeIdentityLeaves(t
 		containerName, envName, enabled,
 		"/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_MAX_STALE]/name",
 	})
-	if _, _, err := nextEmergencyOwnershipPatch(expanded, "declarative", []string{enabled}, false); err == nil || !strings.Contains(err.Error(), "unreviewed ownership") {
-		t.Fatalf("unreviewed associative identity cleanup was accepted: %v", err)
+	if err := validateEmergencyOwnershipConflictEvidence(desired, expanded, []string{enabled}, applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("unreviewed associative ownership was accepted: %v", err)
 	}
 }
 
@@ -1033,24 +945,11 @@ func TestProbeOwnershipTransferAcceptsAlreadyDesiredBroadEmergencyManager(t *tes
 	if replaces != 2 {
 		t.Fatalf("already-desired transfer did not rewrite both exact paths: %v", patch)
 	}
-	if _, _, err := nextEmergencyOwnershipPatch(live, "declarative", allowed, false); err == nil || !strings.Contains(err.Error(), "unreviewed ownership") {
-		t.Fatalf("broad emergency entry was removable as a whole: %v", err)
-	}
 }
 
-func TestProbeBridgeManagerIsTransactionScopedAndRecognized(t *testing.T) {
-	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{FieldManager: "fugue-edge-worker-de-declarative"}}
-	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a"}
-	desired := map[string]any{"metadata": map[string]any{"uid": "worker-uid", "resourceVersion": "43"}}
-	manager, err := probeBridgeManager(release, identity, desired)
-	if err != nil || !emergencyOwnershipManager(manager) || !strings.HasPrefix(manager, probeBridgeManagerPrefix) {
-		t.Fatalf("probe bridge manager=%q err=%v", manager, err)
-	}
-	changed := deepCopyJSONMap(t, desired)
-	mapField(changed, "metadata")["resourceVersion"] = "44"
-	next, err := probeBridgeManager(release, identity, changed)
-	if err != nil || next == manager {
-		t.Fatalf("probe bridge manager was not transaction-scoped: current=%q next=%q err=%v", manager, next, err)
+func TestExistingProbeBridgeManagerNamesRemainRecognized(t *testing.T) {
+	if !emergencyOwnershipManager(probeBridgeManagerPrefix + "0123456789abcdef") {
+		t.Fatal("existing transaction bridge manager was not recognized for migration")
 	}
 	for _, invalid := range []string{probeBridgeManagerPrefix + "1234", probeBridgeManagerPrefix + "0123456789abcdeg", probeBridgeManagerPrefix + "0123456789ABCDEf"} {
 		if emergencyOwnershipManager(invalid) {
@@ -1063,10 +962,8 @@ func TestLegacyProbeOwnershipConvergenceUsesCASBoundValueMove(t *testing.T) {
 	directory := t.TempDir()
 	kubectl := filepath.Join(directory, "kubectl")
 	livePath := filepath.Join(directory, "live.json")
-	bridgedPath := filepath.Join(directory, "bridged.json")
-	cleanPath := filepath.Join(directory, "clean.json")
-	bridgedMarker := filepath.Join(directory, "bridged")
-	cleanedMarker := filepath.Join(directory, "cleaned")
+	transferredPath := filepath.Join(directory, "transferred.json")
+	transferredMarker := filepath.Join(directory, "transferred")
 	applyInputPath := filepath.Join(directory, "apply-input.json")
 	argumentsPath := filepath.Join(directory, "apply-arguments.log")
 	patchesPath := filepath.Join(directory, "patches.log")
@@ -1087,10 +984,6 @@ func TestLegacyProbeOwnershipConvergenceUsesCASBoundValueMove(t *testing.T) {
 	liveness := "/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path"
 	readiness := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"
 	allowed := emergencyOwnershipPointers(release, identity, desired)
-	bridgeManager, err := probeBridgeManager(release, identity, desired)
-	if err != nil {
-		t.Fatal(err)
-	}
 	live := deepCopyJSONMap(t, desired)
 	liveMetadata := mapField(live, "metadata")
 	liveMetadata["generation"] = json.Number("7")
@@ -1102,27 +995,18 @@ func TestLegacyProbeOwnershipConvergenceUsesCASBoundValueMove(t *testing.T) {
 		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
 		map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
 	}
-	bridged := deepCopyJSONMap(t, desired)
-	bridgedMetadata := mapField(bridged, "metadata")
-	bridgedMetadata["resourceVersion"] = "43"
-	bridgedMetadata["generation"] = json.Number("8")
-	bridgedMetadata["managedFields"] = []any{
+	transferred := deepCopyJSONMap(t, desired)
+	transferredMetadata := mapField(transferred, "metadata")
+	transferredMetadata["resourceVersion"] = "43"
+	transferredMetadata["generation"] = json.Number("8")
+	transferredMetadata["managedFields"] = []any{
 		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
-		map[string]any{"manager": bridgeManager, "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
-	}
-	clean := deepCopyJSONMap(t, bridged)
-	cleanMetadata := mapField(clean, "metadata")
-	cleanMetadata["resourceVersion"] = "44"
-	cleanMetadata["managedFields"] = []any{
-		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
 	}
 	if err := os.WriteFile(livePath, mustJSON(t, live), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cleanPath, mustJSON(t, clean), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(bridgedPath, mustJSON(t, bridged), 0o600); err != nil {
+	if err := os.WriteFile(transferredPath, mustJSON(t, transferred), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	program := `#!/bin/sh
@@ -1130,9 +1014,9 @@ set -eu
 case "$1" in
   apply)
     printf '%s\n' "$*" >>"$APPLY_ARGUMENTS"
-	if test -e "$CLEANED"; then
+	if test -e "$TRANSFERRED"; then
 	  cat >"$APPLY_INPUT"
-	  cat "$CLEAN_JSON"
+	  cat "$TRANSFERRED_JSON"
 	else
 	  cat >/dev/null
 	  printf '%s\n' 'Apply failed with 2 conflicts: conflicts with "helm" using apps/v1:' >&2
@@ -1142,23 +1026,13 @@ case "$1" in
 	fi
     ;;
   get)
-	if test -e "$CLEANED"; then cat "$CLEAN_JSON"
-	elif test -e "$BRIDGED"; then cat "$BRIDGED_JSON"
-	else cat "$LIVE_JSON"
-	fi
+	if test -e "$TRANSFERRED"; then cat "$TRANSFERRED_JSON"; else cat "$LIVE_JSON"; fi
 	;;
   patch)
 	printf '%s\n' "$*" >>"$PATCHES"
-	case " $* " in
-	  *" --field-manager fugue-probe-bridge-"*)
-	    : >"$BRIDGED"
-	    cat "$BRIDGED_JSON"
-	    ;;
-	  *)
-	    : >"$CLEANED"
-	    cat "$CLEAN_JSON"
-	    ;;
-	esac
+	case " $* " in *" --field-manager fugue-edge-worker-de-declarative "*) ;; *) exit 53 ;; esac
+	: >"$TRANSFERRED"
+	cat "$TRANSFERRED_JSON"
     ;;
   *) exit 52 ;;
 esac
@@ -1167,10 +1041,8 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("LIVE_JSON", livePath)
-	t.Setenv("BRIDGED_JSON", bridgedPath)
-	t.Setenv("CLEAN_JSON", cleanPath)
-	t.Setenv("BRIDGED", bridgedMarker)
-	t.Setenv("CLEANED", cleanedMarker)
+	t.Setenv("TRANSFERRED_JSON", transferredPath)
+	t.Setenv("TRANSFERRED", transferredMarker)
 	t.Setenv("APPLY_INPUT", applyInputPath)
 	t.Setenv("APPLY_ARGUMENTS", argumentsPath)
 	t.Setenv("PATCHES", patchesPath)
@@ -1192,11 +1064,10 @@ esac
 		t.Fatal(err)
 	}
 	patchLines := strings.Split(strings.TrimSpace(string(patches)), "\n")
-	if len(patchLines) != 2 || !strings.Contains(patchLines[0], "--field-manager "+bridgeManager) ||
+	if len(patchLines) != 1 || !strings.Contains(patchLines[0], "--field-manager "+release.Workload.FieldManager) ||
 		!strings.Contains(patchLines[0], `"path":"/metadata/uid"`) ||
-		!strings.Contains(patchLines[0], `"op":"replace"`) || strings.Contains(patchLines[0], "/managedFields/") ||
-		!strings.Contains(patchLines[1], "/metadata/managedFields/") {
-		t.Fatalf("unexpected legacy bridge patches: %q", patches)
+		!strings.Contains(patchLines[0], `"op":"replace"`) || strings.Contains(patchLines[0], "/managedFields/") {
+		t.Fatalf("unexpected same-manager scalar transfer patch: %q", patches)
 	}
 	applyInput, err := os.ReadFile(applyInputPath)
 	if err != nil {
@@ -1207,8 +1078,8 @@ esac
 		t.Fatal(err)
 	}
 	metadata := mapField(rebound, "metadata")
-	if stringValue(metadata["uid"]) != "worker-uid" || stringValue(metadata["resourceVersion"]) != "44" {
-		t.Fatalf("ordinary apply was not rebound to the exact post-bridge CAS: %s", applyInput)
+	if stringValue(metadata["uid"]) != "worker-uid" || stringValue(metadata["resourceVersion"]) != "43" {
+		t.Fatalf("ordinary apply was not rebound to the exact post-transfer CAS: %s", applyInput)
 	}
 }
 
@@ -1216,10 +1087,8 @@ func TestProbeOwnershipConvergenceRecoversBroadKubectlPatchIntermediate(t *testi
 	directory := t.TempDir()
 	kubectl := filepath.Join(directory, "kubectl")
 	livePath := filepath.Join(directory, "live.json")
-	bridgedPath := filepath.Join(directory, "bridged.json")
-	cleanPath := filepath.Join(directory, "clean.json")
-	bridgedMarker := filepath.Join(directory, "bridged")
-	cleanedMarker := filepath.Join(directory, "cleaned")
+	transferredPath := filepath.Join(directory, "transferred.json")
+	transferredMarker := filepath.Join(directory, "transferred")
 	applyInputPath := filepath.Join(directory, "apply-input.json")
 	patchesPath := filepath.Join(directory, "patches.log")
 	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
@@ -1240,10 +1109,6 @@ func TestProbeOwnershipConvergenceRecoversBroadKubectlPatchIntermediate(t *testi
 	readiness := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"
 	unreviewed := "/spec/template/spec/containers[name=edge]/env[name=EXTRA]/value"
 	image := "/spec/template/spec/containers[name=edge]/image"
-	bridgeManager, err := probeBridgeManager(release, identity, desired)
-	if err != nil {
-		t.Fatal(err)
-	}
 	live := deepCopyJSONMap(t, desired)
 	liveMetadata := mapField(live, "metadata")
 	liveMetadata["generation"] = json.Number("8")
@@ -1251,23 +1116,16 @@ func TestProbeOwnershipConvergenceRecoversBroadKubectlPatchIntermediate(t *testi
 		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image})},
 		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness, unreviewed})},
 	}
-	bridged := deepCopyJSONMap(t, desired)
-	bridgedMetadata := mapField(bridged, "metadata")
-	bridgedMetadata["resourceVersion"] = "44"
-	bridgedMetadata["generation"] = json.Number("8")
-	bridgedMetadata["managedFields"] = []any{
+	transferred := deepCopyJSONMap(t, desired)
+	transferredMetadata := mapField(transferred, "metadata")
+	transferredMetadata["resourceVersion"] = "44"
+	transferredMetadata["generation"] = json.Number("8")
+	transferredMetadata["managedFields"] = []any{
 		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image})},
 		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{unreviewed})},
-		map[string]any{"manager": bridgeManager, "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
 	}
-	clean := deepCopyJSONMap(t, bridged)
-	cleanMetadata := mapField(clean, "metadata")
-	cleanMetadata["resourceVersion"] = "45"
-	cleanMetadata["managedFields"] = []any{
-		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image})},
-		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{unreviewed})},
-	}
-	for filename, value := range map[string]map[string]any{livePath: live, bridgedPath: bridged, cleanPath: clean} {
+	for filename, value := range map[string]map[string]any{livePath: live, transferredPath: transferred} {
 		if err := os.WriteFile(filename, mustJSON(t, value), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -1276,9 +1134,9 @@ func TestProbeOwnershipConvergenceRecoversBroadKubectlPatchIntermediate(t *testi
 set -eu
 case "$1" in
   apply)
-	if test -e "$CLEANED"; then
+	if test -e "$TRANSFERRED"; then
 	  cat >"$APPLY_INPUT"
-	  cat "$CLEAN_JSON"
+	  cat "$TRANSFERRED_JSON"
 	else
 	  cat >/dev/null
 	  printf '%s\n' 'Apply failed with 2 conflicts: conflicts with "kubectl-patch" using apps/v1:' >&2
@@ -1288,23 +1146,13 @@ case "$1" in
 	fi
     ;;
   get)
-	if test -e "$CLEANED"; then cat "$CLEAN_JSON"
-	elif test -e "$BRIDGED"; then cat "$BRIDGED_JSON"
-	else cat "$LIVE_JSON"
-	fi
+	if test -e "$TRANSFERRED"; then cat "$TRANSFERRED_JSON"; else cat "$LIVE_JSON"; fi
 	;;
   patch)
 	printf '%s\n' "$*" >>"$PATCHES"
-	case " $* " in
-	  *" --field-manager fugue-probe-bridge-"*)
-	    : >"$BRIDGED"
-	    cat "$BRIDGED_JSON"
-	    ;;
-	  *)
-	    : >"$CLEANED"
-	    cat "$CLEAN_JSON"
-	    ;;
-	esac
+	case " $* " in *" --field-manager fugue-edge-worker-de-declarative "*) ;; *) exit 53 ;; esac
+	: >"$TRANSFERRED"
+	cat "$TRANSFERRED_JSON"
     ;;
   *) exit 52 ;;
 esac
@@ -1313,10 +1161,8 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("LIVE_JSON", livePath)
-	t.Setenv("BRIDGED_JSON", bridgedPath)
-	t.Setenv("CLEAN_JSON", cleanPath)
-	t.Setenv("BRIDGED", bridgedMarker)
-	t.Setenv("CLEANED", cleanedMarker)
+	t.Setenv("TRANSFERRED_JSON", transferredPath)
+	t.Setenv("TRANSFERRED", transferredMarker)
 	t.Setenv("APPLY_INPUT", applyInputPath)
 	t.Setenv("PATCHES", patchesPath)
 	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
@@ -1328,9 +1174,9 @@ esac
 		t.Fatal(err)
 	}
 	patchLines := strings.Split(strings.TrimSpace(string(patches)), "\n")
-	if len(patchLines) != 2 || !strings.Contains(patchLines[0], "--field-manager "+bridgeManager) ||
-		strings.Contains(patchLines[0], "/managedFields/") || !strings.Contains(patchLines[1], "/metadata/managedFields/2") {
-		t.Fatalf("unexpected broad-manager recovery patches: %q", patches)
+	if len(patchLines) != 1 || !strings.Contains(patchLines[0], "--field-manager "+release.Workload.FieldManager) ||
+		strings.Contains(patchLines[0], "/managedFields/") {
+		t.Fatalf("unexpected broad-manager scalar transfer patch: %q", patches)
 	}
 	applyInput, err := os.ReadFile(applyInputPath)
 	if err != nil {
@@ -1341,7 +1187,7 @@ esac
 		t.Fatal(err)
 	}
 	metadata := mapField(rebound, "metadata")
-	if stringValue(metadata["uid"]) != "worker-uid" || stringValue(metadata["resourceVersion"]) != "45" ||
+	if stringValue(metadata["uid"]) != "worker-uid" || stringValue(metadata["resourceVersion"]) != "44" ||
 		int64Value(metadata["generation"]) != 0 {
 		t.Fatalf("ordinary apply was not rebound to the exact recovered CAS: %s", applyInput)
 	}
@@ -1701,9 +1547,10 @@ func TestEmergencyOwnershipConvergenceIsExactAndCASBound(t *testing.T) {
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
 		t.Fatalf("exact emergency conflict rejected: %v", err)
 	}
-	patch, found, err := nextEmergencyOwnershipPatch(live, release.Workload.FieldManager, allowed, true)
-	if err != nil || !found || len(patch) != 4 || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" || patch[3]["path"] != "/metadata/managedFields/1" {
-		t.Fatalf("unexpected cleanup patch: patch=%v found=%v err=%v", patch, found, err)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
+	if err != nil || !found || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" ||
+		strings.Contains(string(mustJSON(t, patch)), "/managedFields/") {
+		t.Fatalf("unexpected exact scalar transfer patch: patch=%v found=%v err=%v", patch, found, err)
 	}
 
 	extra := append(append([]string(nil), allowed...), "/spec/replicas")
@@ -1711,12 +1558,9 @@ func TestEmergencyOwnershipConvergenceIsExactAndCASBound(t *testing.T) {
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
 		t.Fatalf("expanded emergency manager was accepted: %v", err)
 	}
-	if _, _, err := nextEmergencyOwnershipPatch(live, release.Workload.FieldManager, allowed, true); err == nil || !strings.Contains(err.Error(), "unreviewed") {
-		t.Fatalf("cleanup accepted expanded ownership: %v", err)
-	}
 }
 
-func TestOwnershipCleanupRebindsOnlyFreshResourceVersion(t *testing.T) {
+func TestScalarTransferRebindsOnlyFreshResourceVersion(t *testing.T) {
 	desired := map[string]any{
 		"apiVersion": "apps/v1", "kind": "Deployment",
 		"metadata": map[string]any{"name": "edge-control-us", "namespace": "fugue-system", "uid": "control-uid", "resourceVersion": "42"},
@@ -1737,7 +1581,7 @@ func TestOwnershipCleanupRebindsOnlyFreshResourceVersion(t *testing.T) {
 	freshMetadata["managedFields"] = []any{map[string]any{"manager": "fugue-edge-control-us-declarative", "operation": "Apply"}}
 	mapField(fresh, "status")["readyReplicas"] = 0
 
-	reboundRaw, err := rebindDesiredResourceVersionAfterOwnershipCleanup(desired, before, fresh)
+	reboundRaw, err := rebindDesiredResourceVersionAfterScalarTransfer(desired, before, fresh)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1762,7 +1606,7 @@ func TestOwnershipCleanupRebindsOnlyFreshResourceVersion(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			changed := deepCopyJSONMap(t, fresh)
 			mutate(changed)
-			if _, err := rebindDesiredResourceVersionAfterOwnershipCleanup(desired, before, changed); err == nil {
+			if _, err := rebindDesiredResourceVersionAfterScalarTransfer(desired, before, changed); err == nil {
 				t.Fatal("unsafe post-cleanup state was accepted")
 			}
 		})
@@ -1772,7 +1616,7 @@ func TestOwnershipCleanupRebindsOnlyFreshResourceVersion(t *testing.T) {
 func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 	allowed := []string{"/spec/template/spec/containers[name=edge-control]/image"}
 	for _, failure := range []error{
-		errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="edge-control"].image`),
+		errors.New(`Apply failed with 1 conflict: conflict with "controller" using apps/v1: .spec.template.spec.containers[name="edge-control"].image`),
 		errors.New(`Apply failed with 1 conflict: conflict with "kubectl" using apps/v1: .spec.replicas`),
 	} {
 		desired := map[string]any{"metadata": map[string]any{"uid": "u", "resourceVersion": "1"}}
