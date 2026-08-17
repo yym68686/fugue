@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -123,9 +128,10 @@ func (c *CLI) newAdminDNSStatusCommand() *cobra.Command {
 
 func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 	opts := struct {
-		Hostname string
-		ClientIP string
-		Explain  bool
+		Hostname  string
+		QueryName string
+		ClientIP  string
+		Explain   bool
 	}{}
 	cmd := &cobra.Command{
 		Use:   "answer-check <hostname>",
@@ -140,7 +146,7 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 			if strings.TrimSpace(opts.ClientIP) != "" && net.ParseIP(strings.TrimSpace(opts.ClientIP)) == nil {
 				return fmt.Errorf("--client-ip must be an IP address")
 			}
-			report, err := c.checkDNSAnswersWithClientIP(client, opts.Hostname, opts.ClientIP)
+			report, err := c.checkDNSAnswersWithQueryName(client, opts.Hostname, opts.QueryName, opts.ClientIP)
 			if err != nil {
 				return err
 			}
@@ -157,6 +163,7 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 			return writeDNSAnswerCheck(c.stdout, report)
 		},
 	}
+	cmd.Flags().StringVar(&opts.QueryName, "query-name", "", "Authoritative Fugue name to query while preserving <hostname> as TLS SNI and HTTP Host")
 	cmd.Flags().StringVar(&opts.ClientIP, "client-ip", "", "EDNS client subnet IP to use when probing authoritative answers")
 	cmd.Flags().BoolVar(&opts.Explain, "explain", false, "Include scoped edge quality ranking explanation")
 	return cmd
@@ -301,30 +308,55 @@ func writeDNSFullZonePreflight(w io.Writer, response model.DNSFullZonePreflightR
 }
 
 type dnsAnswerCheckReport struct {
-	Hostname             string                         `json:"hostname"`
-	QueryName            string                         `json:"query_name,omitempty"`
-	ClientIP             string                         `json:"client_ip,omitempty"`
-	PolicyReason         string                         `json:"policy_reason,omitempty"`
-	GeneratedAt          time.Time                      `json:"generated_at"`
-	Pass                 bool                           `json:"pass"`
-	RouteExplain         model.RouteExplainResponse     `json:"route_explain"`
-	QualityRank          *model.EdgeQualityRankResponse `json:"quality_rank,omitempty"`
-	RouteReadyEdgeGroups []string                       `json:"route_ready_edge_groups,omitempty"`
-	Nodes                []dnsAnswerCheckNode           `json:"nodes"`
+	Hostname                string                         `json:"hostname"`
+	QueryName               string                         `json:"query_name,omitempty"`
+	ClientIP                string                         `json:"client_ip,omitempty"`
+	PolicyReason            string                         `json:"policy_reason,omitempty"`
+	GeneratedAt             time.Time                      `json:"generated_at"`
+	Pass                    bool                           `json:"pass"`
+	AuthoritativeConsistent bool                           `json:"authoritative_consistent"`
+	AuthoritativeAnswerSets []dnsAuthoritativeAnswerSet    `json:"authoritative_answer_sets"`
+	FailureReasons          []string                       `json:"failure_reasons,omitempty"`
+	RouteExplain            model.RouteExplainResponse     `json:"route_explain"`
+	QualityRank             *model.EdgeQualityRankResponse `json:"quality_rank,omitempty"`
+	RouteReadyEdgeGroups    []string                       `json:"route_ready_edge_groups,omitempty"`
+	RouteGenerations        map[string]string              `json:"route_generations,omitempty"`
+	HostProbes              []dnsAnswerCheckHostProbe      `json:"host_probes,omitempty"`
+	Nodes                   []dnsAnswerCheckNode           `json:"nodes"`
 }
 
 type dnsAnswerCheckNode struct {
-	DNSNodeID  string   `json:"dns_node_id"`
-	Zone       string   `json:"zone"`
-	PublicIP   string   `json:"public_ip,omitempty"`
-	Status     string   `json:"status"`
-	Healthy    bool     `json:"healthy"`
-	TLSStatus  string   `json:"tls_status,omitempty"`
-	Answers    []string `json:"answers,omitempty"`
-	EdgeGroups []string `json:"edge_groups,omitempty"`
-	RouteReady bool     `json:"route_ready"`
-	Pass       bool     `json:"pass"`
-	Message    string   `json:"message,omitempty"`
+	DNSNodeID        string   `json:"dns_node_id"`
+	EdgeGroupID      string   `json:"edge_group_id,omitempty"`
+	Zone             string   `json:"zone"`
+	PublicIP         string   `json:"public_ip,omitempty"`
+	Status           string   `json:"status"`
+	Healthy          bool     `json:"healthy"`
+	QueryOK          bool     `json:"query_ok"`
+	TLSStatus        string   `json:"tls_status,omitempty"`
+	Answers          []string `json:"answers"`
+	EdgeGroups       []string `json:"edge_groups,omitempty"`
+	RouteGenerations []string `json:"route_generations,omitempty"`
+	RouteReady       bool     `json:"route_ready"`
+	HostReady        bool     `json:"host_ready"`
+	Pass             bool     `json:"pass"`
+	Message          string   `json:"message,omitempty"`
+}
+
+type dnsAuthoritativeAnswerSet struct {
+	Answers      []string `json:"answers"`
+	DNSNodeIDs   []string `json:"dns_node_ids"`
+	EdgeGroupIDs []string `json:"edge_group_ids,omitempty"`
+}
+
+type dnsAnswerCheckHostProbe struct {
+	Hostname      string `json:"hostname"`
+	IP            string `json:"ip"`
+	TLSReady      bool   `json:"tls_ready"`
+	StatusCode    int    `json:"status_code,omitempty"`
+	RouteNotFound bool   `json:"route_not_found"`
+	Pass          bool   `json:"pass"`
+	Message       string `json:"message,omitempty"`
 }
 
 func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckReport, error) {
@@ -332,6 +364,10 @@ func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckRe
 }
 
 func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP string) (dnsAnswerCheckReport, error) {
+	return c.checkDNSAnswersWithQueryName(client, hostname, "", clientIP)
+}
+
+func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQueryName, clientIP string) (dnsAnswerCheckReport, error) {
 	explain, err := client.ExplainRoute(hostname)
 	if err != nil {
 		return dnsAnswerCheckReport{}, err
@@ -348,20 +384,33 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 	}
 	edgeGroupsByIP := edgeGroupsByIPFromEdgeNodes(edgeNodes.Nodes)
 	edgeNodesByIP := edgeNodesByIPFromEdgeNodes(edgeNodes.Nodes)
-	queryName := dnsAnswerCheckQueryHostname(hostname, dnsNodes.Nodes)
+	queryName := normalizeDNSHostname(explicitQueryName)
+	if queryName == "" {
+		queryName = dnsAnswerCheckQueryHostname(hostname, dnsNodes.Nodes)
+	}
 
 	nodes := make([]dnsAnswerCheckNode, 0, len(dnsNodes.Nodes))
 	pass := len(routeReady) > 0 || dnsTargetOnly
+	routeGenerations := map[string]string{}
+	for _, edgeNode := range edgeNodes.Nodes {
+		groupID := strings.TrimSpace(edgeNode.EdgeGroupID)
+		generation := firstNonEmpty(strings.TrimSpace(edgeNode.RouteBundleVersion), strings.TrimSpace(edgeNode.ServingGeneration))
+		if groupID != "" && generation != "" && routeGenerations[groupID] == "" {
+			routeGenerations[groupID] = generation
+		}
+	}
 	for _, node := range dnsNodes.Nodes {
 		if !dnsNodeServesHostname(node, queryName) {
 			continue
 		}
 		nodeReport := dnsAnswerCheckNode{
-			DNSNodeID: strings.TrimSpace(node.ID),
-			Zone:      strings.TrimSpace(node.Zone),
-			PublicIP:  firstNonEmpty(strings.TrimSpace(node.PublicIPv4), strings.TrimSpace(node.PublicIPv6)),
-			Status:    strings.TrimSpace(node.Status),
-			Healthy:   node.Healthy,
+			DNSNodeID:   strings.TrimSpace(node.ID),
+			EdgeGroupID: strings.TrimSpace(node.EdgeGroupID),
+			Zone:        strings.TrimSpace(node.Zone),
+			PublicIP:    firstNonEmpty(strings.TrimSpace(node.PublicIPv4), strings.TrimSpace(node.PublicIPv6)),
+			Status:      strings.TrimSpace(node.Status),
+			Healthy:     node.Healthy,
+			Answers:     []string{},
 		}
 		answers, warnings, err := queryDNSNodeAnswers(queryName, node, clientIP)
 		if err != nil {
@@ -371,6 +420,7 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 			nodes = append(nodes, nodeReport)
 			continue
 		}
+		nodeReport.QueryOK = true
 		nodeReport.Answers = answers
 		if len(warnings) > 0 {
 			nodeReport.Message = appendMessage(nodeReport.Message, strings.Join(warnings, "; "))
@@ -386,6 +436,9 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 				}
 			}
 			if len(groups) == 0 {
+				nodePass = false
+				pass = false
+				nodeReport.Message = appendMessage(nodeReport.Message, fmt.Sprintf("answer %s is absent from current edge inventory", answer))
 				continue
 			}
 			edgeReady := dnsAnswerEdgeReady(groups, routeReady, dnsTargetOnly)
@@ -395,6 +448,10 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 				nodeReport.Message = appendMessage(nodeReport.Message, fmt.Sprintf("answer %s is mapped to edge groups %s but none are route-ready", answer, strings.Join(groups, ", ")))
 			}
 			if hasNode {
+				generation := firstNonEmpty(strings.TrimSpace(edgeNode.RouteBundleVersion), strings.TrimSpace(edgeNode.ServingGeneration))
+				if generation != "" && !stringSliceContains(nodeReport.RouteGenerations, generation) {
+					nodeReport.RouteGenerations = append(nodeReport.RouteGenerations, generation)
+				}
 				if nodeReport.TLSStatus == "" {
 					nodeReport.TLSStatus = firstNonEmpty(strings.TrimSpace(edgeNode.TLSStatus), "-")
 				}
@@ -411,28 +468,80 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 		if dnsTargetOnly && nodeReport.Message == "" {
 			nodeReport.Message = "dns target hostname is not an HTTP route; validated answers against healthy edge inventory"
 		}
-		nodeReport.RouteReady = nodePass
-		nodeReport.Pass = nodePass
-		if nodeReport.Message == "" && len(nodeReport.Answers) == 0 {
-			nodeReport.Message = "no A/AAAA answers"
-			nodeReport.Pass = false
+		if len(nodeReport.Answers) == 0 {
+			nodePass = false
+			if nodeReport.Message == "" {
+				nodeReport.Message = "no A/AAAA answers"
+			}
 			pass = false
 		}
+		nodeReport.RouteReady = nodePass
+		nodeReport.Pass = nodePass
 		nodes = append(nodes, nodeReport)
 	}
 	if len(nodes) == 0 {
 		pass = false
 	}
+	consistent, answerSets, consensusReasons := summarizeAuthoritativeAnswerSets(nodes)
+	if !consistent {
+		pass = false
+	}
+	hostProbes := probeDNSAnswerHosts(hostname, nodes)
+	hostProbesByIP := make(map[string]dnsAnswerCheckHostProbe, len(hostProbes))
+	for _, probe := range hostProbes {
+		hostProbesByIP[probe.IP] = probe
+		if !probe.Pass {
+			pass = false
+		}
+	}
+	for index := range nodes {
+		hostReady := len(nodes[index].Answers) > 0
+		for _, answer := range nodes[index].Answers {
+			probe, ok := hostProbesByIP[answer]
+			if !ok || !probe.Pass {
+				hostReady = false
+				message := "host probe missing"
+				if ok {
+					message = firstNonEmpty(probe.Message, "host probe failed")
+				}
+				nodes[index].Message = appendMessage(nodes[index].Message, fmt.Sprintf("answer %s: %s", answer, message))
+			}
+		}
+		nodes[index].HostReady = hostReady
+		nodes[index].Pass = nodes[index].Pass && hostReady
+		if !nodes[index].Pass {
+			pass = false
+		}
+	}
+	failureReasons := append([]string{}, consensusReasons...)
+	for _, probe := range hostProbes {
+		if !probe.Pass {
+			failureReasons = append(failureReasons, fmt.Sprintf("real Host probe failed for %s via %s: %s", hostname, probe.IP, firstNonEmpty(probe.Message, "unknown error")))
+		}
+	}
+	if len(nodes) == 0 {
+		failureReasons = append(failureReasons, fmt.Sprintf("no registered authoritative DNS node serves %s", queryName))
+	}
+	for _, node := range nodes {
+		if !node.Pass {
+			failureReasons = append(failureReasons, fmt.Sprintf("DNS node %s (%s) failed: %s", node.DNSNodeID, firstNonEmpty(node.EdgeGroupID, "unknown-group"), firstNonEmpty(node.Message, "unknown error")))
+		}
+	}
 	return dnsAnswerCheckReport{
-		Hostname:             hostname,
-		QueryName:            queryName,
-		ClientIP:             strings.TrimSpace(clientIP),
-		PolicyReason:         strings.Join(explain.Reasons, "; "),
-		GeneratedAt:          time.Now().UTC(),
-		Pass:                 pass,
-		RouteExplain:         explain,
-		RouteReadyEdgeGroups: sortedBoolSetKeys(routeReady),
-		Nodes:                nodes,
+		Hostname:                hostname,
+		QueryName:               queryName,
+		ClientIP:                strings.TrimSpace(clientIP),
+		PolicyReason:            strings.Join(explain.Reasons, "; "),
+		GeneratedAt:             time.Now().UTC(),
+		Pass:                    pass,
+		AuthoritativeConsistent: consistent,
+		AuthoritativeAnswerSets: answerSets,
+		FailureReasons:          uniqueStringsPreserveOrder(failureReasons),
+		RouteExplain:            explain,
+		RouteReadyEdgeGroups:    sortedBoolSetKeys(routeReady),
+		RouteGenerations:        routeGenerations,
+		HostProbes:              hostProbes,
+		Nodes:                   nodes,
 	}, nil
 }
 
@@ -443,6 +552,8 @@ func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 		kvPair{Key: "client_ip", Value: firstNonEmpty(report.ClientIP, "-")},
 		kvPair{Key: "policy_reason", Value: firstNonEmpty(report.PolicyReason, "-")},
 		kvPair{Key: "pass", Value: fmt.Sprintf("%t", report.Pass)},
+		kvPair{Key: "authoritative_consistent", Value: fmt.Sprintf("%t", report.AuthoritativeConsistent)},
+		kvPair{Key: "failure_reasons", Value: strings.Join(report.FailureReasons, " | ")},
 		kvPair{Key: "route_ready_edge_groups", Value: strings.Join(report.RouteReadyEdgeGroups, ", ")},
 		kvPair{Key: "generated_at", Value: formatTime(report.GeneratedAt)},
 	); err != nil {
@@ -466,6 +577,18 @@ func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
+	if err := writeDNSAuthoritativeAnswerSetTable(w, report.AuthoritativeAnswerSets); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	if err := writeDNSAnswerCheckHostProbeTable(w, report.HostProbes); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
 	if err := writeDNSAnswerCheckTable(w, report.Nodes); err != nil {
 		return err
 	}
@@ -480,18 +603,22 @@ func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 
 func writeDNSAnswerCheckTable(w io.Writer, nodes []dnsAnswerCheckNode) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "DNS_NODE\tZONE\tSTATUS\tHEALTHY\tTLS\tANSWERS\tEDGE_GROUPS\tPASS\tMESSAGE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "DNS_NODE\tDNS_GROUP\tZONE\tSTATUS\tHEALTHY\tTLS\tANSWERS\tEDGE_GROUPS\tROUTE_GENERATIONS\tROUTE_READY\tHOST_READY\tPASS\tMESSAGE"); err != nil {
 		return err
 	}
 	for _, node := range nodes {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%s\t%t\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\t%s\t%s\t%t\t%t\t%t\t%s\n",
 			node.DNSNodeID,
+			node.EdgeGroupID,
 			node.Zone,
 			node.Status,
 			node.Healthy,
 			firstNonEmpty(node.TLSStatus, "-"),
 			strings.Join(node.Answers, ", "),
 			strings.Join(node.EdgeGroups, ", "),
+			strings.Join(node.RouteGenerations, ", "),
+			node.RouteReady,
+			node.HostReady,
 			node.Pass,
 			firstNonEmpty(node.Message, "-"),
 		); err != nil {
@@ -499,6 +626,185 @@ func writeDNSAnswerCheckTable(w io.Writer, nodes []dnsAnswerCheckNode) error {
 		}
 	}
 	return tw.Flush()
+}
+
+func writeDNSAuthoritativeAnswerSetTable(w io.Writer, sets []dnsAuthoritativeAnswerSet) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "AUTHORITATIVE_ANSWERS\tDNS_NODES\tDNS_GROUPS"); err != nil {
+		return err
+	}
+	for _, set := range sets {
+		answers := strings.Join(set.Answers, ", ")
+		if answers == "" {
+			answers = "<empty>"
+		}
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\n", answers, strings.Join(set.DNSNodeIDs, ", "), strings.Join(set.EdgeGroupIDs, ", ")); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeDNSAnswerCheckHostProbeTable(w io.Writer, probes []dnsAnswerCheckHostProbe) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "HOST\tIP\tTLS_READY\tSTATUS\tROUTE_NOT_FOUND\tPASS\tMESSAGE"); err != nil {
+		return err
+	}
+	for _, probe := range probes {
+		status := "-"
+		if probe.StatusCode > 0 {
+			status = strconv.Itoa(probe.StatusCode)
+		}
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%t\t%s\t%t\t%t\t%s\n", probe.Hostname, probe.IP, probe.TLSReady, status, probe.RouteNotFound, probe.Pass, firstNonEmpty(probe.Message, "-")); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func summarizeAuthoritativeAnswerSets(nodes []dnsAnswerCheckNode) (bool, []dnsAuthoritativeAnswerSet, []string) {
+	type answerSetAccumulator struct {
+		answers []string
+		nodes   map[string]struct{}
+		groups  map[string]struct{}
+	}
+	setsByKey := map[string]*answerSetAccumulator{}
+	failedNodes := []string{}
+	queriedNodes := 0
+	for _, node := range nodes {
+		if !node.QueryOK {
+			failedNodes = append(failedNodes, firstNonEmpty(node.DNSNodeID, node.PublicIP, "unknown"))
+			continue
+		}
+		queriedNodes++
+		answers := append([]string(nil), node.Answers...)
+		sort.Strings(answers)
+		key := strings.Join(answers, "\x00")
+		set := setsByKey[key]
+		if set == nil {
+			set = &answerSetAccumulator{answers: answers, nodes: map[string]struct{}{}, groups: map[string]struct{}{}}
+			setsByKey[key] = set
+		}
+		if node.DNSNodeID != "" {
+			set.nodes[node.DNSNodeID] = struct{}{}
+		}
+		if node.EdgeGroupID != "" {
+			set.groups[node.EdgeGroupID] = struct{}{}
+		}
+	}
+	keys := make([]string, 0, len(setsByKey))
+	for key := range setsByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	sets := make([]dnsAuthoritativeAnswerSet, 0, len(keys))
+	for _, key := range keys {
+		set := setsByKey[key]
+		sets = append(sets, dnsAuthoritativeAnswerSet{
+			Answers:      append([]string{}, set.answers...),
+			DNSNodeIDs:   sortedStringSetKeys(set.nodes),
+			EdgeGroupIDs: sortedStringSetKeys(set.groups),
+		})
+	}
+	reasons := []string{}
+	if len(nodes) < 2 {
+		reasons = append(reasons, fmt.Sprintf("authoritative consensus requires at least 2 nodes; found %d", len(nodes)))
+	}
+	if len(failedNodes) > 0 {
+		sort.Strings(failedNodes)
+		reasons = append(reasons, "authoritative query failed on nodes: "+strings.Join(failedNodes, ", "))
+	}
+	if len(sets) > 1 {
+		parts := make([]string, 0, len(sets))
+		for _, set := range sets {
+			answers := strings.Join(set.Answers, ",")
+			if answers == "" {
+				answers = "<empty>"
+			}
+			parts = append(parts, fmt.Sprintf("nodes=%s groups=%s answers=%s", strings.Join(set.DNSNodeIDs, ","), strings.Join(set.EdgeGroupIDs, ","), answers))
+		}
+		reasons = append(reasons, "authoritative answer split: "+strings.Join(parts, " | "))
+	}
+	consistent := len(nodes) >= 2 && queriedNodes == len(nodes) && len(sets) == 1
+	return consistent, sets, reasons
+}
+
+func probeDNSAnswerHosts(hostname string, nodes []dnsAnswerCheckNode) []dnsAnswerCheckHostProbe {
+	hostname = normalizeDNSHostname(hostname)
+	answerSet := map[string]struct{}{}
+	for _, node := range nodes {
+		for _, answer := range node.Answers {
+			if parsed := net.ParseIP(strings.TrimSpace(answer)); parsed != nil {
+				answerSet[parsed.String()] = struct{}{}
+			}
+		}
+	}
+	answers := sortedStringSetKeys(answerSet)
+	probes := make([]dnsAnswerCheckHostProbe, 0, len(answers))
+	for _, answer := range answers {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		probe := probeDNSAnswerHost(ctx, hostname, answer)
+		cancel()
+		probes = append(probes, probe)
+	}
+	return probes
+}
+
+func probeDNSAnswerHost(ctx context.Context, hostname, answerIP string) dnsAnswerCheckHostProbe {
+	probe := dnsAnswerCheckHostProbe{Hostname: normalizeDNSHostname(hostname), IP: strings.TrimSpace(answerIP)}
+	parsedIP := net.ParseIP(probe.IP)
+	if probe.Hostname == "" || parsedIP == nil {
+		probe.Message = "hostname and answer IP are required"
+		return probe
+	}
+	probe.IP = parsedIP.String()
+	dialer := net.Dialer{}
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(probe.IP, "443"))
+		},
+		TLSClientConfig: &tls.Config{ServerName: probe.Hostname, MinVersion: tls.VersionTLS12},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	requestURL := (&url.URL{Scheme: "https", Host: probe.Hostname, Path: "/"}).String()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		probe.Message = "build Host probe: " + err.Error()
+		return probe
+	}
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", "fugue-dns-answer-check/1")
+	resp, err := client.Do(req)
+	if err != nil {
+		probe.Message = err.Error()
+		return probe
+	}
+	defer resp.Body.Close()
+	probe.StatusCode = resp.StatusCode
+	probe.TLSReady = resp.TLS != nil && resp.TLS.HandshakeComplete
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		probe.Message = "read Host probe response: " + err.Error()
+		return probe
+	}
+	probe.RouteNotFound = bytes.Contains(bytes.ToLower(body), []byte("edge route not found"))
+	probe.Pass = probe.TLSReady && !probe.RouteNotFound
+	switch {
+	case !probe.TLSReady:
+		probe.Message = "TLS handshake did not complete"
+	case probe.RouteNotFound:
+		probe.Message = "response body contains edge route not found"
+	default:
+		probe.Message = fmt.Sprintf("HTTP %d with valid TLS/SNI/Host routing", probe.StatusCode)
+	}
+	return probe
 }
 
 func queryDNSNodeAnswers(hostname string, node model.DNSNode, clientIP string) ([]string, []string, error) {
@@ -513,32 +819,37 @@ func queryDNSNodeAnswers(hostname string, node model.DNSNode, clientIP string) (
 	}
 	answers := []string{}
 	warnings := []string{}
+	successfulQueries := 0
 	if udpAnswers, err := queryAuthoritativeDNSRecord(hostname, address, "udp", miekgdns.TypeA, clientIP); err == nil {
+		successfulQueries++
 		answers = append(answers, udpAnswers...)
 	} else {
 		warnings = append(warnings, fmt.Sprintf("udp A query failed: %v", err))
 	}
 	if tcpAnswers, err := queryAuthoritativeDNSRecord(hostname, address, "tcp", miekgdns.TypeA, clientIP); err == nil {
+		successfulQueries++
 		answers = append(answers, tcpAnswers...)
 	} else {
 		warnings = append(warnings, fmt.Sprintf("tcp A query failed: %v", err))
 	}
 	if udpAAAA, err := queryAuthoritativeDNSRecord(hostname, address, "udp", miekgdns.TypeAAAA, clientIP); err == nil {
+		successfulQueries++
 		answers = append(answers, udpAAAA...)
 	} else {
 		warnings = append(warnings, fmt.Sprintf("udp AAAA query failed: %v", err))
 	}
 	if tcpAAAA, err := queryAuthoritativeDNSRecord(hostname, address, "tcp", miekgdns.TypeAAAA, clientIP); err == nil {
+		successfulQueries++
 		answers = append(answers, tcpAAAA...)
 	} else {
 		warnings = append(warnings, fmt.Sprintf("tcp AAAA query failed: %v", err))
 	}
 	answers = uniqueStringsPreserveOrder(answers)
-	if len(answers) == 0 {
-		if len(warnings) == 0 {
-			warnings = append(warnings, "no A/AAAA answers")
-		}
+	if successfulQueries == 0 {
 		return nil, warnings, fmt.Errorf("%s", strings.Join(warnings, "; "))
+	}
+	if len(answers) == 0 {
+		warnings = append(warnings, "no A/AAAA answers")
 	}
 	return answers, warnings, nil
 }
