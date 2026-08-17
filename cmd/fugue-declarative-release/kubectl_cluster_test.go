@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,54 @@ print(json.dumps({"image": image, "index_digest": "sha256:" + "b" * 64, "manifes
 	cluster := &kubectlCluster{verifier: script, timeout: time.Second}
 	if err := cluster.VerifyTarget(context.Background(), declarativerelease.TargetIdentity{Present: true, ImageRef: image, OCIRevision: revision}); err != nil {
 		t.Fatalf("verify exact immutable predecessor: %v", err)
+	}
+}
+
+func TestTrustedCurrentArtifactBypassesRegistryOnlyForExactIdentity(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	repository := "ghcr.io/example/edge-worker"
+	artifact := declarativerelease.ArtifactReceipt{
+		APIVersion: declarativerelease.ArtifactReceiptAPIVersion, Kind: declarativerelease.ArtifactReceiptKind,
+		Component: "edge-worker-de", ConfigSHA: revision, SourceSHA: revision, SourceTag: revision,
+		Repository: repository, TopDigest: "sha256:" + strings.Repeat("b", 64),
+		PlatformManifestDigest: "sha256:" + strings.Repeat("c", 64), ConfigDigest: "sha256:" + strings.Repeat("d", 64),
+		OCIRevision: revision, Platform: "linux/amd64", Verification: "registry_manifest_config_and_layer_get",
+		PlanDigest: "sha256:" + strings.Repeat("e", 64), IntentDigest: "sha256:" + strings.Repeat("f", 64),
+	}
+	artifact.ImmutableRef = repository + "@" + artifact.TopDigest
+	unsigned, err := declarativerelease.CanonicalJSON(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact.ReceiptDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(unsigned))
+	raw, err := declarativerelease.CanonicalJSON(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(trustedCurrentArtifactEnv, string(raw))
+	trusted, err := trustedCurrentArtifactFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "registry-called")
+	verifier := filepath.Join(t.TempDir(), "verify.py")
+	if err := os.WriteFile(verifier, []byte("import os\nopen(os.environ['MARKER'], 'w').close()\nraise SystemExit(19)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MARKER", marker)
+	cluster := &kubectlCluster{verifier: verifier, trustedCurrent: trusted}
+	verification, err := cluster.verifyRuntimeArtifact(context.Background(), artifact.ImmutableRef, revision)
+	if err != nil || verification.ManifestDigest != artifact.PlatformManifestDigest || verification.Verification != "sealed_current_artifact_receipt" {
+		t.Fatalf("trusted verification=%+v err=%v", verification, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("exact trusted identity called registry verifier: %v", err)
+	}
+	if _, err := cluster.verifyRuntimeArtifact(context.Background(), artifact.ImmutableRef, strings.Repeat("9", 40)); err == nil {
+		t.Fatal("mismatched revision bypassed registry verification")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("mismatched identity did not call registry verifier: %v", err)
 	}
 }
 

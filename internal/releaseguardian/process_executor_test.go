@@ -221,10 +221,7 @@ func processSnapshot(t *testing.T) Snapshot {
 	for _, name := range executionFileNames {
 		files[name] = []byte("{}")
 	}
-	monitor := map[string]string{}
-	for _, name := range []string{"artifact-receipt.json", "execution-plan.json", "forward.json", "lkg.json", "record.json", "release-plan.json", "terminal-result.json"} {
-		monitor[name] = "{}"
-	}
+	monitor, _, _, _ := guardianStableFixture(t, key, time.Now().UTC())
 	return Snapshot{
 		Key: key, Record: record,
 		Bundle:             ExecutionBundle{Prepared: declarativerelease.ExecutionPlan{Component: key.Component, ConfigSHA: testSHA}, Files: files},
@@ -273,7 +270,7 @@ func writeExecutorFixture(t *testing.T, operation, recordDigest string, result d
 	if operation == "restore-monitor" || operation == "repair-monitor" {
 		extraArgument = fmt.Sprintf("test $# = 3\ntest \"$3\" = %q", processSnapshot(t).LKGMonitorRecordDigest)
 	}
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntest \"$1\" = %q\n%s\ntest \"$FUGUE_COMPONENT_LEASE_OWNER\" = guardian\ntest \"$FUGUE_RELEASE_GUARDIAN_POD_UID\" = pod-uid\ntest \"$FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST\" = %q\ntest -f \"$KUBECONFIG\"\ntest \"${KUBECONFIG%%/*}\" != \"$2\"\ntest \"$(find \"$2\" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')\" = %d\ngrep -F \"tokenFile: $FUGUE_TEST_TOKEN_FILE\" \"$KUBECONFIG\" >/dev/null\n! grep -F \"$FUGUE_TEST_TOKEN_VALUE\" \"$KUBECONFIG\" >/dev/null\nprintf '%%s\\n' %q\n", operation, extraArgument, recordDigest, expectedFiles, string(raw))
+	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntest \"$1\" = %q\n%s\ntest \"$FUGUE_COMPONENT_LEASE_OWNER\" = guardian\ntest \"$FUGUE_RELEASE_GUARDIAN_POD_UID\" = pod-uid\ntest \"$FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST\" = %q\ntest -n \"$FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT\"\ntest -f \"$KUBECONFIG\"\ntest \"${KUBECONFIG%%/*}\" != \"$2\"\ntest \"$(find \"$2\" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')\" = %d\ngrep -F \"tokenFile: $FUGUE_TEST_TOKEN_FILE\" \"$KUBECONFIG\" >/dev/null\n! grep -F \"$FUGUE_TEST_TOKEN_VALUE\" \"$KUBECONFIG\" >/dev/null\nprintf '%%s\\n' %q\n", operation, extraArgument, recordDigest, expectedFiles, string(raw))
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
