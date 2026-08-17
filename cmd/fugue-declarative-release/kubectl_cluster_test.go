@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func TestVerifyTargetUsesFixedMetadataOnlyRegistryEvidence(t *testing.T) {
@@ -157,6 +158,44 @@ esac
 	}
 	if raw, err := os.ReadFile(writeCount); err != nil || strings.TrimSpace(string(raw)) != "1" {
 		t.Fatalf("mutating attempts=%q err=%v", raw, err)
+	}
+}
+
+func TestGetResourceUsesRetriedNativeKubernetesRead(t *testing.T) {
+	resource := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "DaemonSet",
+		"metadata": map[string]any{
+			"name": "edge-worker", "namespace": "fugue-system", "uid": "uid-1", "resourceVersion": "42",
+			"managedFields": []any{map[string]any{"manager": "fugue", "operation": "Apply"}},
+		},
+	}}
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), resource)
+	reads := 0
+	client.PrependReactor("get", "daemonsets", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		reads++
+		if reads == 1 {
+			return true, nil, errors.New("transient read failure")
+		}
+		return false, nil, nil
+	})
+	cluster := &kubectlCluster{resources: client, readTimeout: time.Second, readAttempts: 2, readRetryDelay: time.Millisecond}
+	raw, err := cluster.getResource(context.Background(), declarativerelease.ResourceIdentity{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker",
+	})
+	if err != nil || reads != 2 {
+		t.Fatalf("native read raw=%s reads=%d err=%v", raw, reads, err)
+	}
+	value, err := decodeJSONObject(raw)
+	if err != nil || stringValue(mapField(value, "metadata")["resourceVersion"]) != "42" || len(anySlice(mapField(value, "metadata")["managedFields"])) != 1 {
+		t.Fatalf("native read lost resource evidence: value=%+v err=%v", value, err)
+	}
+
+	missing, err := cluster.getResource(context.Background(), declarativerelease.ResourceIdentity{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "missing",
+	})
+	if err != nil || string(missing) != "null" {
+		t.Fatalf("native not-found raw=%q err=%v", missing, err)
 	}
 }
 
