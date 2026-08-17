@@ -925,6 +925,8 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactEnvironmentValues(t *testing.
 
 func TestEmergencyOwnershipCleanupAcceptsOnlyReviewedAssociativeIdentityLeaves(t *testing.T) {
 	enabled := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value"
+	containerItem := "/spec/template/spec/containers[name=dns]"
+	envItem := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]"
 	containerName := "/spec/template/spec/containers[name=dns]/name"
 	envName := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/name"
 	desired := map[string]any{
@@ -953,6 +955,16 @@ func TestEmergencyOwnershipCleanupAcceptsOnlyReviewedAssociativeIdentityLeaves(t
 	structuralEntry["fieldsV1"] = managedFieldsTree(t, []string{containerName, envName})
 	if patch, found, err := nextEmergencyOwnershipPatch(structuralOnly, "declarative", []string{enabled}, false); err != nil || !found || len(patch) != 4 {
 		t.Fatalf("transaction bridge scaffolding residue was not removable: patch=%v found=%v err=%v", patch, found, err)
+	}
+	dotOnly := deepCopyJSONMap(t, live)
+	dotEntry := anySlice(mapField(dotOnly, "metadata")["managedFields"])[0].(map[string]any)
+	dotEntry["fieldsV1"] = managedFieldsTree(t, []string{containerItem, envItem})
+	if pointers, err := managedFieldsEntryPointers(mapField(dotEntry, "fieldsV1")); err != nil ||
+		!stringSubset([]string{containerItem, envItem}, pointers) {
+		t.Fatalf("associative item ownership was not flattened exactly: pointers=%v err=%v", pointers, err)
+	}
+	if patch, found, err := nextEmergencyOwnershipPatch(dotOnly, "declarative", []string{enabled}, false); err != nil || !found || len(patch) != 4 {
+		t.Fatalf("transaction bridge item-marker residue was not removable: patch=%v found=%v err=%v", patch, found, err)
 	}
 
 	expanded := deepCopyJSONMap(t, live)
@@ -1822,6 +1834,7 @@ func managedFieldsTree(t *testing.T, pointers []string) map[string]any {
 				current = next
 			}
 		}
+		current["."] = map[string]any{}
 	}
 	return root
 }

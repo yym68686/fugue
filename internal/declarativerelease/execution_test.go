@@ -994,8 +994,17 @@ func TestExecuteRetainsRecoveryRequiredWhenLKGUnproven(t *testing.T) {
 	fake.healthErrors = []error{errors.New("forward unhealthy"), errors.New("LKG unknown")}
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
 	if result.Status != "recovery-required" || result.Reason != "lkg-unproven" ||
-		!strings.Contains(result.FailureDetail, "LKG health: LKG unknown") || fake.applies != 2 {
+		!strings.Contains(result.FailureDetail, "forward: forward unhealthy") ||
+		!strings.Contains(result.FailureDetail, "rollback: LKG health: LKG unknown") || fake.applies != 2 {
 		t.Fatalf("unproven rollback was not retained: %+v", result)
+	}
+}
+
+func TestCombinedFailureDetailRetainsBothBoundedFailures(t *testing.T) {
+	detail := combinedFailureDetail(strings.Repeat("f", 600), strings.Repeat("r", 600))
+	if len(detail) > 512 || !strings.HasPrefix(detail, "forward: ") || !strings.Contains(detail, "; rollback: ") ||
+		!strings.HasSuffix(detail, strings.Repeat("r", 245)) {
+		t.Fatalf("combined failure detail lost a terminal phase: len=%d detail=%q", len(detail), detail)
 	}
 }
 

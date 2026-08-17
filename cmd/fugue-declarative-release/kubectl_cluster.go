@@ -1204,10 +1204,11 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 	return allowed
 }
 
-// ownershipCleanupPointers includes only the associative-list identity leaves
-// Kubernetes records when a JSON Patch updates an exact container or env
-// scalar. These name leaves are structural witnesses for an already-reviewed
-// pointer, not additional runtime values that the release may change.
+// ownershipCleanupPointers includes only the associative-list identities and
+// identity leaves Kubernetes records when a JSON Patch updates an exact
+// container or env scalar. The selector root is the flattened form of a
+// FieldsV1 "." item marker; neither it nor the name leaf authorizes changing
+// an additional runtime value.
 func ownershipCleanupPointers(allowed []string) []string {
 	cleanupSet := make(map[string]bool, len(allowed)*2)
 	for _, pointer := range allowed {
@@ -1221,6 +1222,7 @@ func ownershipCleanupPointers(allowed []string) []string {
 				continue
 			}
 			prefix := "/" + strings.Join(parts[:index+1], "/")
+			cleanupSet[prefix] = true
 			cleanupSet[prefix+"/name"] = true
 		}
 	}
@@ -1687,6 +1689,13 @@ func managedFieldsEntryPointers(fields map[string]any) ([]string, error) {
 	result := make([]string, 0)
 	var walk func(map[string]any, []string) error
 	walk = func(node map[string]any, path []string) error {
+		_, ownsItem := node["."]
+		if ownsItem {
+			if _, ok := node["."].(map[string]any); !ok || len(path) == 0 {
+				return errors.New("managedFields item marker is invalid")
+			}
+			result = append(result, "/"+strings.Join(path, "/"))
+		}
 		keys := make([]string, 0, len(node))
 		for key := range node {
 			if key != "." {
@@ -1695,6 +1704,9 @@ func managedFieldsEntryPointers(fields map[string]any) ([]string, error) {
 		}
 		sort.Strings(keys)
 		if len(keys) == 0 {
+			if ownsItem {
+				return nil
+			}
 			if len(path) == 0 {
 				return errors.New("managedFields entry has an empty root")
 			}
