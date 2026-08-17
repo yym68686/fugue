@@ -124,7 +124,7 @@ func TestSummarizeAuthoritativeAnswerSetsFailsClosedOnQueryFailure(t *testing.T)
 func TestProbeDNSAnswerHostRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 
-	probe := probeDNSAnswerHost(t.Context(), "0-0.pro", "not-an-ip")
+	probe := probeDNSAnswerHost(t.Context(), "app.example.com", "not-an-ip")
 	if probe.Pass || probe.Message == "" {
 		t.Fatalf("expected invalid candidate IP to fail with evidence, got %+v", probe)
 	}
