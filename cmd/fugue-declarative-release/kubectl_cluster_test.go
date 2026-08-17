@@ -548,7 +548,7 @@ func TestMonitorConvergesOnlyReviewedEmergencyOwnership(t *testing.T) {
 		}},
 	}
 	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"}
-	allowed := emergencyOwnershipPointers(release, identity, desired)
+	allowed := ownershipConvergencePointers(release, identity, desired)
 	live := deepCopyJSONMap(t, desired)
 	metadata := mapField(live, "metadata")
 	metadata["uid"], metadata["resourceVersion"], metadata["generation"] = "api-uid", "42", json.Number("7")
@@ -637,7 +637,7 @@ func TestEmergencyOwnershipAllowlistIncludesPrimaryWorkloadImageWithoutArtifactT
 	}
 }
 
-func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePathsAndCPUResources(t *testing.T) {
+func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		Workload: declarativerelease.Workload{
 			APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker",
@@ -654,6 +654,13 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePathsAndCPUResources(t 
 		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
 			"containers": []any{map[string]any{
 				"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("b", 64),
+				"env": []any{
+					map[string]any{"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "value": "true"},
+					map[string]any{"name": "FUGUE_DNS_TOKEN", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "dns-token", "key": "token"}}},
+					map[string]any{"name": "INVALID-NAME", "value": "false"},
+					map[string]any{"name": "DUPLICATE", "value": "first"},
+					map[string]any{"name": "DUPLICATE", "value": "second"},
+				},
 				"resources": map[string]any{
 					"limits":   map[string]any{"cpu": "2", "memory": "512Mi"},
 					"requests": map[string]any{"cpu": "100m", "memory": "128Mi"},
@@ -664,7 +671,11 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePathsAndCPUResources(t 
 			}},
 		}}},
 	}
-	allowed := emergencyOwnershipPointers(release, identity, desired)
+	allowed := ownershipConvergencePointers(release, identity, desired)
+	envPointer := "/spec/template/spec/containers[name=edge]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value"
+	if stringSubset([]string{envPointer}, emergencyOwnershipPointers(release, identity, desired)) {
+		t.Fatalf("environment value entered the emergency rollback allowlist: %s", envPointer)
+	}
 	want := []string{
 		"/spec/template/spec/containers[name=edge]/image",
 		"/spec/template/spec/containers[name=edge]/resources/limits/cpu",
@@ -672,9 +683,10 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePathsAndCPUResources(t 
 		"/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path",
 		"/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path",
 		"/spec/template/spec/containers[name=edge]/startupProbe/httpGet/path",
+		envPointer,
 	}
 	if !stringSubset(want, allowed) {
-		t.Fatalf("probe paths missing from emergency allowlist: allowed=%v want=%v", allowed, want)
+		t.Fatalf("reviewed runtime scalars missing from ownership convergence allowlist: allowed=%v want=%v", allowed, want)
 	}
 	for _, forbidden := range []string{
 		"/spec/template/spec/containers[name=edge]/livenessProbe/periodSeconds",
@@ -682,9 +694,12 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePathsAndCPUResources(t 
 		"/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/port",
 		"/spec/template/spec/containers[name=edge]/resources/limits/memory",
 		"/spec/template/spec/containers[name=edge]/resources/requests/memory",
+		"/spec/template/spec/containers[name=edge]/env[name=FUGUE_DNS_TOKEN]/value",
+		"/spec/template/spec/containers[name=edge]/env[name=INVALID-NAME]/value",
+		"/spec/template/spec/containers[name=edge]/env[name=DUPLICATE]/value",
 	} {
 		if stringSubset([]string{forbidden}, allowed) {
-			t.Fatalf("unreviewed workload field entered emergency allowlist: %s in %v", forbidden, allowed)
+			t.Fatalf("unreviewed workload field entered ownership convergence allowlist: %s in %v", forbidden, allowed)
 		}
 	}
 	live := deepCopyJSONMap(t, desired)
@@ -706,6 +721,15 @@ func TestEmergencyOwnershipAllowlistIncludesOnlyHTTPProbePathsAndCPUResources(t 
 	}
 	if value, ok := emergencyRuntimePointerValue(live, cpuPointer); !ok || value != "1500m" {
 		t.Fatalf("CPU resource pointer write was not observable: value=%q ok=%v", value, ok)
+	}
+	if value, ok := emergencyRuntimePointerValue(live, envPointer); !ok || value != "true" {
+		t.Fatalf("environment value pointer read failed: value=%q ok=%v", value, ok)
+	}
+	if !setEmergencyRuntimePointerValue(live, envPointer, "false") {
+		t.Fatal("environment value pointer write failed")
+	}
+	if value, ok := emergencyRuntimePointerValue(live, envPointer); !ok || value != "false" {
+		t.Fatalf("environment value pointer write was not observable: value=%q ok=%v", value, ok)
 	}
 	missingResources := deepCopyJSONMap(t, live)
 	delete(anySlice(mapField(mapField(mapField(missingResources, "spec"), "template"), "spec")["containers"])[0].(map[string]any), "resources")
@@ -736,7 +760,7 @@ func TestEmergencyOwnershipCleanupRemovesOnlyExactKubectlSetCPUEntry(t *testing.
 	}
 }
 
-func TestProbeOwnershipTransferPatchMovesOnlyExactConflictingPaths(t *testing.T) {
+func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 	liveness := "/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path"
 	readiness := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"
 	image := "/spec/template/spec/containers[name=edge]/image"
@@ -771,7 +795,7 @@ func TestProbeOwnershipTransferPatchMovesOnlyExactConflictingPaths(t *testing.T)
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
 		t.Fatalf("exact legacy probe conflicts were rejected: %v", err)
 	}
-	patch, found, err := nextProbeOwnershipTransferPatch(desired, live, allowed, applyErr)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
 	if err != nil || !found {
 		t.Fatalf("legacy probe value patch was not produced: patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -798,8 +822,86 @@ func TestProbeOwnershipTransferPatchMovesOnlyExactConflictingPaths(t *testing.T)
 		`conflict with "helm" using apps/v1: ` + ssaFieldForPointer(liveness),
 		`conflict with "kubectl" using apps/v1: ` + ssaFieldForPointer(image),
 	}, "\n"))
-	if _, _, err := nextProbeOwnershipTransferPatch(desired, live, allowed, mixed); err == nil || !strings.Contains(err.Error(), "cannot be mixed") {
+	if _, _, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, mixed); err == nil || !strings.Contains(err.Error(), "cannot be mixed") {
 		t.Fatalf("mixed legacy and emergency ownership transfer was accepted: %v", err)
+	}
+}
+
+func TestLegacyOwnershipTransferPatchMovesOnlyExactEnvironmentValues(t *testing.T) {
+	enabled := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value"
+	timeout := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT]/value"
+	unreviewed := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_MAX_STALE]/value"
+	desired := map[string]any{
+		"metadata": map[string]any{"uid": "dns-uid", "resourceVersion": "42", "generation": json.Number("7")},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "dns",
+			"env": []any{
+				map[string]any{"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "value": "true"},
+				map[string]any{"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT", "value": "2s"},
+				map[string]any{"name": "FUGUE_DNS_MAX_STALE", "value": "24h"},
+			},
+		}}}}},
+	}
+	live := deepCopyJSONMap(t, desired)
+	liveMetadata := mapField(live, "metadata")
+	liveMetadata["managedFields"] = []any{map[string]any{
+		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{enabled, timeout, unreviewed}),
+	}}
+	dns := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	anySlice(dns["env"])[0].(map[string]any)["value"] = "false"
+	anySlice(dns["env"])[1].(map[string]any)["value"] = "250ms"
+	allowed := []string{enabled, timeout}
+	applyErr := errors.New(strings.Join([]string{
+		"Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:",
+		"- " + ssaFieldForPointer(enabled),
+		"- " + ssaFieldForPointer(timeout),
+	}, "\n"))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
+		t.Fatalf("exact legacy environment conflicts were rejected: %v", err)
+	}
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
+	if err != nil || !found {
+		t.Fatalf("legacy environment value patch was not produced: patch=%v found=%v err=%v", patch, found, err)
+	}
+	if len(patch) != 9 || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" ||
+		patch[2]["path"] != "/spec/template/spec/containers/0/name" ||
+		patch[3]["path"] != "/spec/template/spec/containers/0/env/0/name" ||
+		patch[6]["path"] != "/spec/template/spec/containers/0/env/1/name" {
+		t.Fatalf("legacy environment patch lacks exact identity tests: %v", patch)
+	}
+	replacements := make(map[string]any)
+	for _, operation := range patch {
+		path := fmt.Sprint(operation["path"])
+		if strings.Contains(path, "/managedFields/") {
+			t.Fatalf("legacy environment patch mutates managedFields internals: %v", patch)
+		}
+		if operation["op"] == "replace" {
+			replacements[path] = operation["value"]
+		}
+	}
+	if replacements["/spec/template/spec/containers/0/env/0/value"] != "true" ||
+		replacements["/spec/template/spec/containers/0/env/1/value"] != "2s" {
+		t.Fatalf("legacy environment patch moved unexpected values: %v", patch)
+	}
+	fresh := deepCopyJSONMap(t, desired)
+	mapField(fresh, "metadata")["resourceVersion"] = "43"
+	mapField(fresh, "metadata")["generation"] = json.Number("8")
+	expected, err := expectedStateAfterLegacyOwnershipTransfer(desired, live, fresh, allowed, applyErr)
+	if err != nil {
+		t.Fatalf("legacy environment expected state failed: %v", err)
+	}
+	if value, ok := emergencyRuntimePointerValue(expected, enabled); !ok || value != "true" {
+		t.Fatalf("expected environment state did not contain enabled probe: value=%q ok=%v", value, ok)
+	}
+
+	ambiguous := deepCopyJSONMap(t, live)
+	ambiguousDNS := anySlice(mapField(mapField(mapField(ambiguous, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	ambiguousDNS["env"] = append(anySlice(ambiguousDNS["env"]), map[string]any{
+		"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "value": "false",
+	})
+	if _, _, err := nextLegacyOwnershipTransferPatch(desired, ambiguous, allowed, applyErr); err == nil {
+		t.Fatalf("ambiguous environment identity was accepted: %v", err)
 	}
 }
 
@@ -829,7 +931,7 @@ func TestProbeOwnershipTransferAcceptsAlreadyDesiredBroadEmergencyManager(t *tes
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
 		t.Fatalf("broad emergency probe witness was rejected before exact transfer: %v", err)
 	}
-	patch, found, err := nextProbeOwnershipTransferPatch(desired, live, allowed, applyErr)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
 	if err != nil || !found {
 		t.Fatalf("already-desired probe transfer patch=%v found=%v err=%v", patch, found, err)
 	}
