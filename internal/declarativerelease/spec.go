@@ -742,7 +742,17 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 				failedIntent == prior && intent.ExpectedPreviousPresent &&
 				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousManifestSHA &&
 				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousOCIRevision
-			failedAtomSuccessor := immediateFailedAtom || historicalFailedAtom || correctedFailedPreflightAtom
+			// A failed preflight can leave Guardian serving a newer forward
+			// target than the predecessor recorded by the failed intent. An
+			// explicit supersede may repair that metadata by naming the live
+			// Guardian LKG; execution still verifies those exact bytes through
+			// LoadStableLKG before any mutation.
+			liveLKGRepairAtom := failedIntentFound && failedIntent == prior &&
+				intent.SupersedesFailedConfigSHA != "" && intent.ExpectedPreviousPresent &&
+				shaPattern.MatchString(intent.ExpectedPreviousConfigSHA) &&
+				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousManifestSHA &&
+				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousOCIRevision
+			failedAtomSuccessor := immediateFailedAtom || historicalFailedAtom || correctedFailedPreflightAtom || liveLKGRepairAtom
 			retrySameLKG = intent.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
 				intent.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&

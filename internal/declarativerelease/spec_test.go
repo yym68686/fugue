@@ -364,6 +364,39 @@ func TestBindIntentsAllowsImmediateFailedPreflightPredecessorCorrection(t *testi
 	}
 }
 
+func TestBindIntentsAllowsFailedPreflightRepairAgainstLiveGuardianLKG(t *testing.T) {
+	registry := testRegistry()
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/api/intent.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedSHA := "3333333333333333333333333333333333333333"
+	staleSHA := "4444444444444444444444444444444444444444"
+	previous := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 2,
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: staleSHA, ExpectedPreviousManifestSHA: staleSHA,
+		ExpectedPreviousOCIRevision: staleSHA, ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("c", 64), Rollback: "previous-git-lkg"}
+	current := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 3,
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1,
+		ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest,
+		SupersedesFailedConfigSHA: failedSHA, Rollback: "previous-git-lkg"}
+	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous},
+		map[string]string{"api": staleSHA}, map[string]Intent{failedSHA: previous})
+	if err != nil {
+		t.Fatalf("live Guardian LKG repair was rejected: %v", err)
+	}
+	if got := bound.Releases[0]; got.ExpectedPreviousConfigSHA != testSHA1 || got.ExpectedPreviousImageDigest != testDigest ||
+		got.SupersedesFailedConfigSHA != failedSHA || got.RetrySameLKG {
+		t.Fatalf("live Guardian LKG repair was not bound exactly: %+v", got)
+	}
+
+	wrongFailed := previous
+	wrongFailed.Generation = 1
+	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous},
+		map[string]string{"api": staleSHA}, map[string]Intent{failedSHA: wrongFailed}); err == nil {
+		t.Fatal("live LKG repair from a different failed intent was accepted")
+	}
+}
+
 func TestBindIntentsAllowsAbsentLKGRetry(t *testing.T) {
 	registry := testRegistry()
 	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/api/intent.json"})
