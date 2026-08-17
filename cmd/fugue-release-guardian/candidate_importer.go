@@ -68,7 +68,8 @@ type candidateEnvelope struct {
 // Controls use it to bind the envelope to the exact Guardian CurrentAuthority
 // and Front activation. Exact historical publications remain preferred; an
 // explicitly degraded recovery may use the current signed Control publication
-// only when the historical bundle was pruned inside the same recovery epoch.
+// when the historical bundle was pruned inside the same recovery epoch or the
+// live Front authority was normalized ahead of Control's retained history.
 type candidateServingAuthorityWitness struct {
 	CurrentRecordDigest string                        `json:"current_record_digest"`
 	AuthorityEpoch      int64                         `json:"authority_epoch"`
@@ -389,10 +390,17 @@ func validateCandidateServingAuthorityEnvelope(envelope candidateEnvelope) error
 		return errors.New("candidate serving publication is invalid")
 	}
 	currentPublication, currentRecovery, err := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
-	if err != nil || witnessPublication >= currentPublication || witnessRecovery != currentRecovery {
+	if err != nil || !servingAuthorityCanUseCurrentControlPublication(witnessPublication, witnessRecovery, currentPublication, currentRecovery) {
 		return errors.New("candidate serving publication is outside the current recovery window")
 	}
 	return nil
+}
+
+func servingAuthorityCanUseCurrentControlPublication(witnessPublication, witnessRecovery, currentPublication, currentRecovery uint64) bool {
+	if witnessPublication < currentPublication && witnessRecovery == currentRecovery {
+		return true
+	}
+	return witnessPublication > currentPublication && witnessRecovery == 0
 }
 
 func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, current releaseguardian.CurrentAuthority, uid types.UID, resourceVersion string) error {

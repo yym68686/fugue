@@ -418,6 +418,42 @@ func TestCandidateImporterAcceptsDegradedServingAuthorityWithinCurrentRecovery(t
 	}
 }
 
+func TestCandidateImporterAcceptsNormalizedServingAuthorityAheadOfControl(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 30, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
+	envelope.AllowDegradedPrevious = true
+	envelope.Bundle.Generation = envelope.CurrentBundle.Generation
+	envelope.Bundle.Version = envelope.Bundle.Generation + ".p5.r0"
+	envelope.Bundle.PreviousGeneration = envelope.CurrentBundle.Generation
+	envelope.Record.BundleDigest = candidateBundleDigest(envelope.Bundle)
+	record, err := envelope.Record.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Record = record
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), AuthorityEpoch: 24,
+		CurrentAuthorityUID: "normalized-current", CurrentAuthorityRV: "51", FrontGeneration: 132,
+		BundleVersion: "routes-normalized.p8.r0", WorkerSlot: envelope.CurrentWorkerSlot, WorkerSourceSHA: strings.Repeat("b", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("c", 64)}
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("normalized serving authority ahead of Control was rejected: %v", err)
+	}
+
+	envelope.ServingAuthority.BundleVersion = "routes-recovery.p8.r1"
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("future serving authority with a nonzero recovery epoch was accepted")
+	}
+	envelope.ServingAuthority.BundleVersion = "routes-normalized.p4.r0"
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("cross-generation serving authority at the current publication was accepted")
+	}
+	envelope.ServingAuthority.BundleVersion = "routes-normalized.p8.r0"
+	envelope.AllowDegradedPrevious = false
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("normalized serving authority without degraded recovery authorization was accepted")
+	}
+}
+
 func TestCandidateImporterAcceptsTheSharedEdgeControlRecordIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 12, 5, 0, 0, 0, time.UTC)
 	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
