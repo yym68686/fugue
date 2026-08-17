@@ -390,7 +390,7 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 			}
 			_, servingHead, exists := persistentPublishedCandidateByVersion(state, serving.BundleVersion)
 			fallback := !exists &&
-				servingAuthorityWithinCurrentRecovery(serving.BundleVersion, state.Published.Bundle.Generation,
+				servingAuthorityCanUseCurrentPublishedFallback(serving.BundleVersion, state.Published.Bundle.Generation,
 					state.Published.PublicationSequence, state.Published.RecoveryEpoch,
 					candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
 				candidate.CandidateLedgerSequence == state.Published.CandidateLedgerSequence
@@ -1189,7 +1189,7 @@ func validatePersistentCandidateBinding(state persistentGroupState, groupID stri
 	if candidate.ServingAuthority != nil {
 		authority, servingCandidate, exists := persistentPublishedCandidateByVersion(&state, candidate.ServingAuthority.BundleVersion)
 		fallback := !exists && state.Published != nil &&
-			servingAuthorityWithinCurrentRecovery(candidate.ServingAuthority.BundleVersion, state.Published.Bundle.Generation,
+			servingAuthorityCanUseCurrentPublishedFallback(candidate.ServingAuthority.BundleVersion, state.Published.Bundle.Generation,
 				state.Published.PublicationSequence, state.Published.RecoveryEpoch,
 				candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
 			state.Published.CandidateLedgerSequence == candidate.CandidateLedgerSequence

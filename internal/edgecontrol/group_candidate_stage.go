@@ -240,7 +240,7 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	} else {
 		servingVersion := groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch)
 		fallback := !snapshot.ServingExists &&
-			servingAuthorityWithinCurrentRecovery(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
+			servingAuthorityCanUseCurrentPublishedFallback(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
 				authority.Published.PublicationSequence, authority.Published.RecoveryEpoch,
 				request.AllowDegradedPrevious && !request.StandbyOnly)
 		if fallback {
@@ -302,11 +302,19 @@ func groupCandidateCASConflict(reason string) error {
 	return fmt.Errorf("%s: %w", reason, ErrGroupAuthorityCandidateCAS)
 }
 
-func servingAuthorityWithinCurrentRecovery(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64, allowOlder bool) bool {
+func servingAuthorityCanUseCurrentPublishedFallback(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64, allowFallback bool) bool {
 	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
-	return ok && strings.TrimSpace(currentGeneration) != "" && recoveryEpoch == currentRecoveryEpoch &&
-		((allowOlder && publicationSequence < currentPublicationSequence) ||
-			(publicationSequence == currentPublicationSequence && generation == currentGeneration))
+	if !ok || strings.TrimSpace(currentGeneration) == "" {
+		return false
+	}
+	if publicationSequence == currentPublicationSequence && recoveryEpoch == currentRecoveryEpoch {
+		return generation == currentGeneration
+	}
+	if !allowFallback {
+		return false
+	}
+	return (recoveryEpoch == currentRecoveryEpoch && publicationSequence < currentPublicationSequence) ||
+		(currentRecoveryEpoch != 0 && recoveryEpoch == 0 && publicationSequence > currentPublicationSequence)
 }
 
 func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request GroupCandidateStageRequest, authority GroupAuthorityState) bool {
