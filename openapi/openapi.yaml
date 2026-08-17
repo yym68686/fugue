@@ -604,7 +604,7 @@ paths:
     put:
       operationId: adminPutTrafficOverride
       summary: Stage a signed emergency traffic override
-      description: Stores a signed override independently from the normal TrafficEpoch and release state machines. Staged overrides are not served until the separate overlay activation path is enabled.
+      description: Stores a signed override independently from the normal TrafficEpoch and release state machines. Each candidate answer is verified against every required TLS/SNI/Host route before signing. Staged overrides are not served until the separate overlay activation path is enabled.
       tags: [Admin, DNS]
       x-fugue-handler: handleAdminPutTrafficOverride
       security:

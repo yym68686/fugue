@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +18,12 @@ func TestTrafficOverrideAdminLifecycleIsSignedCASAndSecretSafe(t *testing.T) {
 	t.Parallel()
 	stateStore, server, _, adminKey, _, _ := setupAppDomainTestServerWithDomains(t, "example.com")
 	hostname := "app.example.com"
+	server.trafficOverrideRouteProbe = func(_ context.Context, route, answer string) error {
+		if route != hostname || answer != "192.0.2.10" {
+			t.Fatalf("unexpected route probe %s -> %s", answer, route)
+		}
+		return nil
+	}
 	request := map[string]any{
 		"answers":              []string{"192.0.2.10"},
 		"required_host_routes": []string{hostname},
@@ -96,6 +104,12 @@ func TestDNSTrafficOverrideFeedIsScopedSignedAndExcludesRevokedArtifacts(t *test
 	t.Parallel()
 	stateStore, server, _, adminKey, _, _ := setupAppDomainTestServerWithDomains(t, "example.com")
 	hostname := "app.example.com"
+	server.trafficOverrideRouteProbe = func(_ context.Context, route, answer string) error {
+		if route != hostname || answer != "192.0.2.10" {
+			t.Fatalf("unexpected route probe %s -> %s", answer, route)
+		}
+		return nil
+	}
 	request := map[string]any{
 		"answers":              []string{"192.0.2.10"},
 		"required_host_routes": []string{hostname},
@@ -146,5 +160,26 @@ func TestDNSTrafficOverrideFeedIsScopedSignedAndExcludesRevokedArtifacts(t *test
 	mustDecodeJSON(t, feed, &feedBody)
 	if len(feedBody.Feed.Overrides) != 0 {
 		t.Fatalf("revoked override remained in DNS feed: %+v", feedBody.Feed.Overrides)
+	}
+}
+
+func TestTrafficOverrideRejectsCandidateWithoutVerifiedHostRoute(t *testing.T) {
+	t.Parallel()
+	_, server, _, adminKey, _, _ := setupAppDomainTestServerWithDomains(t, "example.com")
+	server.trafficOverrideRouteProbe = func(context.Context, string, string) error {
+		return errors.New("route not loaded")
+	}
+	recorder := performJSONRequest(t, server, http.MethodPut, "/v1/admin/traffic-overrides/alias.example.com", adminKey, map[string]any{
+		"answers":              []string{"192.0.2.10"},
+		"required_host_routes": []string{"app.example.com"},
+		"route_generation":     "route-generation-probe-failure",
+		"route_digest":         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"activate_at":          time.Now().UTC().Add(time.Minute).Format(time.RFC3339),
+		"expires_at":           time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		"reason":               "candidate route probe failure",
+		"expected_generation":  0,
+	})
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected route validation failure, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
