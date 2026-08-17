@@ -26,6 +26,20 @@ func TestDNSFromEnvDefaultsEdgeHealthProbeEnabled(t *testing.T) {
 	}
 }
 
+func TestDNSFromEnvTrafficOverrideIsDisabledByDefault(t *testing.T) {
+	t.Setenv("FUGUE_DNS_TRAFFIC_OVERRIDE_ENABLED", "")
+	cfg := DNSFromEnv()
+	if cfg.TrafficOverrideEnabled {
+		t.Fatal("traffic override overlay must be disabled by default")
+	}
+	if cfg.TrafficOverrideInterval != 5*time.Second {
+		t.Fatalf("unexpected traffic override poll interval: %s", cfg.TrafficOverrideInterval)
+	}
+	if cfg.TrafficOverridePath == "" {
+		t.Fatal("traffic override path must have a safe default")
+	}
+}
+
 func TestDNSFromEnvAllowsDisablingEdgeHealthProbe(t *testing.T) {
 	t.Setenv("FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "false")
 

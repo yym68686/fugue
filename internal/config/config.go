@@ -306,6 +306,9 @@ type DNSConfig struct {
 	BundleSigningPreviousKey   string
 	BundleSigningPreviousKeyID string
 	BundleRevokedKeyIDs        []string
+	TrafficOverrideEnabled     bool
+	TrafficOverrideInterval    time.Duration
+	TrafficOverridePath        string
 }
 
 type DNSGeoIPOverride struct {
@@ -702,6 +705,9 @@ func DNSFromEnv() DNSConfig {
 		BundleSigningPreviousKey:   strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
 		BundleSigningPreviousKeyID: strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
 		BundleRevokedKeyIDs:        getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
+		TrafficOverrideEnabled:     getenvBool("FUGUE_DNS_TRAFFIC_OVERRIDE_ENABLED", false),
+		TrafficOverrideInterval:    getenvDuration("FUGUE_DNS_TRAFFIC_OVERRIDE_INTERVAL", 5*time.Second),
+		TrafficOverridePath:        getenv("FUGUE_DNS_TRAFFIC_OVERRIDE_PATH", "/var/lib/fugue/dns/traffic-override.json"),
 	}
 }
 

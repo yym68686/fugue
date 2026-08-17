@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -87,5 +88,61 @@ func TestTrafficOverrideAdminLifecycleIsSignedCASAndSecretSafe(t *testing.T) {
 		if !actions[action] {
 			t.Fatalf("missing traffic override audit action %q: %+v", action, actions)
 		}
+	}
+}
+
+func TestDNSTrafficOverrideFeedIsScopedSignedAndExcludesRevokedArtifacts(t *testing.T) {
+	t.Parallel()
+	stateStore, server, _, adminKey, _, _ := setupAppDomainTestServerWithDomains(t, "example.com")
+	hostname := "app.example.com"
+	request := map[string]any{
+		"answers":              []string{"192.0.2.10"},
+		"required_host_routes": []string{hostname},
+		"route_generation":     "route-generation-feed-1",
+		"route_digest":         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"expires_at":           time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		"reason":               "emergency feed verification",
+		"expected_generation":  0,
+	}
+	created := performJSONRequest(t, server, http.MethodPut, "/v1/admin/traffic-overrides/"+hostname, adminKey, request)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create override: %d body=%s", created.Code, created.Body.String())
+	}
+	feed := httptest.NewRecorder()
+	feedReq := httptest.NewRequest(http.MethodGet, "/v1/dns/traffic-overrides?token=edge-secret&zone=example.com", nil)
+	server.Handler().ServeHTTP(feed, feedReq)
+	if feed.Code != http.StatusOK {
+		t.Fatalf("fetch DNS override feed: %d body=%s", feed.Code, feed.Body.String())
+	}
+	var feedBody struct {
+		Feed model.TrafficOverrideFeed `json:"feed"`
+	}
+	mustDecodeJSON(t, feed, &feedBody)
+	if len(feedBody.Feed.Overrides) != 1 || feedBody.Feed.Overrides[0].Hostname != hostname {
+		t.Fatalf("unexpected override feed: %+v", feedBody.Feed)
+	}
+	keyring, err := stateStore.GetTrafficOverrideSigningKeyring()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(feed.Body.String(), keyring.CurrentPrivateKey) {
+		t.Fatal("DNS override feed leaked private signing material")
+	}
+	if err := trafficoverride.Verify(feedBody.Feed.Overrides[0], feedBody.Feed.SigningKey.CurrentPublicKey, feedBody.Feed.SigningKey.CurrentKeyID); err != nil {
+		t.Fatalf("DNS override feed signature failed: %v", err)
+	}
+
+	revoked := performJSONRequest(t, server, http.MethodPost, "/v1/admin/traffic-overrides/"+hostname+"/revoke", adminKey, map[string]any{
+		"reason":              "feed test completed",
+		"expected_generation": 1,
+	})
+	if revoked.Code != http.StatusOK {
+		t.Fatalf("revoke override: %d body=%s", revoked.Code, revoked.Body.String())
+	}
+	feed = httptest.NewRecorder()
+	server.Handler().ServeHTTP(feed, feedReq)
+	mustDecodeJSON(t, feed, &feedBody)
+	if len(feedBody.Feed.Overrides) != 0 {
+		t.Fatalf("revoked override remained in DNS feed: %+v", feedBody.Feed.Overrides)
 	}
 }

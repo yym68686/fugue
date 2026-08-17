@@ -5,6 +5,7 @@ import "time"
 const (
 	TrafficOverrideSchemaV1          = "traffic-override.fugue.dev/v1"
 	TrafficOverrideSigningSchemaV1   = "traffic-override-signing.fugue.dev/v1"
+	TrafficOverrideFeedSchemaV1      = "traffic-override-feed.fugue.dev/v1"
 	TrafficOverrideStateStaged       = "staged"
 	TrafficOverrideStateRevoked      = "revoked"
 	TrafficOverrideMaxAnswers        = 16
@@ -59,6 +60,17 @@ type TrafficOverrideSigningKeyStatus struct {
 	CreatedAt         time.Time `json:"created_at"`
 	RotatedAt         time.Time `json:"rotated_at,omitempty"`
 	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// TrafficOverrideFeed is the read-only payload consumed by the optional DNS
+// overlay. It is intentionally separate from the admin inventory response so
+// DNS nodes never need platform-admin credentials or private signing material.
+type TrafficOverrideFeed struct {
+	Schema      string                          `json:"schema"`
+	Generation  uint64                          `json:"generation"`
+	GeneratedAt time.Time                       `json:"generated_at"`
+	Overrides   []TrafficOverride               `json:"overrides"`
+	SigningKey  TrafficOverrideSigningKeyStatus `json:"signing_key"`
 }
 
 func (keyring TrafficOverrideSigningKeyring) Status() TrafficOverrideSigningKeyStatus {

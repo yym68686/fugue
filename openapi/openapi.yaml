@@ -2782,6 +2782,48 @@ paths:
                 $ref: "#/components/schemas/DNSNodeListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/traffic-overrides:
+    get:
+      operationId: dnsTrafficOverrideFeed
+      summary: Get the independently signed DNS traffic override feed
+      description: >-
+        Returns active signed emergency traffic overrides for an authorized DNS
+        node. The normal DNS bundle remains authoritative unless the optional
+        overlay consumer is explicitly enabled on that node.
+      tags: [DNS]
+      x-fugue-handler: handleDNSTrafficOverrideFeed
+      security:
+        - EdgeToken: []
+      parameters:
+        - in: query
+          name: token
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: dns_node_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: edge_group_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: zone
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Active signed emergency traffic overrides
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficOverrideFeedResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/dns/acme-challenges:
     get:
       operationId: listDNSACMEChallenges
@@ -14283,6 +14325,34 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TrafficOverride"
+    TrafficOverrideFeed:
+      type: object
+      additionalProperties: false
+      required: [schema, generation, generated_at, overrides, signing_key]
+      properties:
+        schema:
+          type: string
+          enum: [traffic-override-feed.fugue.dev/v1]
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        generated_at:
+          type: string
+          format: date-time
+        overrides:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrafficOverride"
+        signing_key:
+          $ref: "#/components/schemas/TrafficOverrideSigningKeyStatus"
+    TrafficOverrideFeedResponse:
+      type: object
+      additionalProperties: false
+      required: [feed]
+      properties:
+        feed:
+          $ref: "#/components/schemas/TrafficOverrideFeed"
     TrafficOverrideSigningKeyStatus:
       type: object
       additionalProperties: false
