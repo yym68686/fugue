@@ -70,6 +70,10 @@ type Service struct {
 	zoneServices map[string]*Service
 	staticZones  map[string]struct{}
 	zoneCancels  map[string]context.CancelFunc
+	overrideMu   sync.RWMutex
+	overrides    map[string]model.TrafficOverride
+	overrideGen  uint64
+	override     trafficOverrideSettings
 }
 
 type Status struct {
@@ -213,6 +217,8 @@ func NewService(cfg config.DNSConfig, logger *log.Logger) *Service {
 		edgeHealth:    map[string]edgeHealthObservation{},
 		peerHealth:    map[string]model.PeerHealthDecision{},
 		walFilterLast: map[string]time.Time{},
+		overrides:     map[string]model.TrafficOverride{},
+		override:      trafficOverrideSettingsFromEnv(),
 		snapshot: Status{
 			Status:      "unhealthy",
 			DNSNodeID:   strings.TrimSpace(cfg.DNSNodeID),
@@ -233,6 +239,11 @@ func NewService(cfg config.DNSConfig, logger *log.Logger) *Service {
 		service.staticZones[zone] = struct{}{}
 	}
 	service.zoneCancels = map[string]context.CancelFunc{}
+	if service.override.enabled {
+		if err := service.loadTrafficOverrideCache(); err != nil && logger != nil {
+			logger.Printf("dns traffic override cache unavailable; continuing with normal DNS: %v", err)
+		}
+	}
 	return service
 }
 
@@ -548,6 +559,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.startZoneServiceLoops(ctx, child)
 	}
 	s.startHeartbeatLoop(ctx)
+	s.startTrafficOverrideLoop(ctx)
 	defer s.stopZoneServiceLoops()
 
 	ticker := time.NewTicker(s.syncInterval())
@@ -783,6 +795,27 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 	if !nameWithinZone(name, zone) {
 		resp.Rcode = miekgdns.RcodeRefused
 		rcode = miekgdns.RcodeToString[resp.Rcode]
+		s.applyECSResponseScope(resp, r, w)
+		_ = w.WriteMsg(resp)
+		return
+	}
+	if records := s.overlayRecords(name, question.Qtype); len(records) > 0 {
+		for _, record := range records {
+			for _, value := range record.Values {
+				switch record.Type {
+				case "A":
+					resp.Answer = append(resp.Answer, &miekgdns.A{
+						Hdr: miekgdns.RR_Header{Name: fqdn(record.Name), Rrtype: miekgdns.TypeA, Class: miekgdns.ClassINET, Ttl: uint32(record.TTL)},
+						A:   net.ParseIP(value).To4(),
+					})
+				case "AAAA":
+					resp.Answer = append(resp.Answer, &miekgdns.AAAA{
+						Hdr:  miekgdns.RR_Header{Name: fqdn(record.Name), Rrtype: miekgdns.TypeAAAA, Class: miekgdns.ClassINET, Ttl: uint32(record.TTL)},
+						AAAA: net.ParseIP(value),
+					})
+				}
+			}
+		}
 		s.applyECSResponseScope(resp, r, w)
 		_ = w.WriteMsg(resp)
 		return
