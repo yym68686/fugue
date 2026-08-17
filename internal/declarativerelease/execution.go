@@ -629,8 +629,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	if prepared.DegradedRoute {
 		healthCtx = withPreservedRouteHealthWait(ctx)
 	}
-	forwardObservation, healthErr := cluster.WaitHealthy(healthCtx, release, prepared.Forward, forwardManifest)
-	convergedErr := errors.Join(cluster.Converged(ctx, release, forwardManifest), cluster.VerifyOwnershipConverged(ctx, release, forwardManifest))
+	forwardObservation, healthErr, convergedErr := observeForwardResult(healthCtx, cluster, release, prepared.Forward, forwardManifest, applyErr)
 	preservedRoute := applyErr == nil && prepared.DegradedRoute && errors.Is(healthErr, ErrPublicRouteHealth)
 	if (healthErr == nil || preservedRoute) && convergedErr == nil && forwardObservation.Matches(prepared.Forward, release, false) {
 		result.Status = "verified"
@@ -670,7 +669,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	}
 	rollbackBase := forwardObservation
 	result.FailureClass = forwardFailureClass(applyErr, healthErr, convergedErr, forwardObservation, prepared.Forward, release)
-	result.FailureDetail = forwardFailureDetail(healthErr, convergedErr)
+	result.FailureDetail = forwardFailureDetail(applyErr, healthErr, convergedErr)
 	if !rollbackBase.Present || rollbackBase.UID == "" || !resourceVersionPattern.MatchString(rollbackBase.ResourceVersion) {
 		rollbackBase, err = cluster.ObserveCAS(ctx, release, forwardManifest)
 		if err != nil {
@@ -714,6 +713,25 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	result.FailureDetail = lkgFailureDetail(lkgHealthErr, lkgConvergedErr, lkgObservation, prepared.LKG, release)
 	result.Final = lkgObservation
 	return sealResult(result)
+}
+
+func observeForwardResult(ctx context.Context, cluster Cluster, release PlanRelease, target TargetIdentity, manifest []byte, applyErr error) (Observation, error, error) {
+	if applyErr != nil && release.Transition != nil && release.Transition.Type == "edge-group-ab" {
+		observed, observeErr := cluster.ObserveCAS(ctx, release, manifest)
+		if observeErr != nil {
+			return observed, errors.Join(applyErr, fmt.Errorf("observe failed edge group transition: %w", observeErr)), nil
+		}
+		// The transition only returns nil after Front, active Worker, standby
+		// Worker, and serving authority converge. Until then the primary Front
+		// can intentionally remain at the LKG while the inactive slot runs the
+		// new image. A generic target health check would compare that old Front
+		// with the new OCI revision and replace the actual transition failure
+		// with a false provenance mismatch.
+		return observed, applyErr, nil
+	}
+	observed, healthErr := cluster.WaitHealthy(ctx, release, target, manifest)
+	convergedErr := errors.Join(cluster.Converged(ctx, release, manifest), cluster.VerifyOwnershipConverged(ctx, release, manifest))
+	return observed, healthErr, convergedErr
 }
 
 func lkgFailureDetail(healthErr, convergedErr error, observed Observation, target TargetIdentity, release PlanRelease) string {
@@ -795,9 +813,11 @@ func boundedFailureDetail(detail string) string {
 	return detail
 }
 
-func forwardFailureDetail(healthErr, convergedErr error) string {
+func forwardFailureDetail(applyErr, healthErr, convergedErr error) string {
 	var detail string
-	if healthErr != nil {
+	if applyErr != nil {
+		detail = applyErr.Error()
+	} else if healthErr != nil {
 		detail = healthErr.Error()
 	} else if convergedErr != nil {
 		detail = convergedErr.Error()

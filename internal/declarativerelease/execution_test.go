@@ -274,6 +274,30 @@ func TestExecuteRetainsApplyFailureWhenNoProductionWriteOccurred(t *testing.T) {
 	}
 }
 
+func TestFailedEdgeGroupTransitionSkipsMixedIdentityHealthCheck(t *testing.T) {
+	applyErr := errors.New("wait Guardian authority switch: transition timed out")
+	partial := stableObservation("1", "11", "ghcr.io/example/fugue-edge@"+testDigest, testSHA1)
+	release := PlanRelease{Transition: &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{}}}
+	fake := &fakeCluster{
+		cas:          []Observation{partial},
+		healthErrors: []error{errors.New("false live image provenance mismatch")},
+	}
+
+	observed, healthErr, convergedErr := observeForwardResult(context.Background(), fake, release, TargetIdentity{
+		Present: true, ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("b", 64), ConfigSHA: testSHA2,
+	}, []byte(`{"kind":"ComponentResourceSet"}`), applyErr)
+
+	if !errors.Is(healthErr, applyErr) || convergedErr != nil || observed.ResourceVersion != partial.ResourceVersion {
+		t.Fatalf("transition failure was not preserved: observed=%+v health=%v converged=%v", observed, healthErr, convergedErr)
+	}
+	if len(fake.healthTargets) != 0 || len(fake.converged) != 0 {
+		t.Fatalf("mixed edge transition ran generic target checks: health=%d converged=%d", len(fake.healthTargets), len(fake.converged))
+	}
+	if detail := forwardFailureDetail(applyErr, errors.New("secondary health error"), errors.New("secondary convergence error")); detail != applyErr.Error() {
+		t.Fatalf("apply failure was masked in terminal detail: %q", detail)
+	}
+}
+
 func TestPrepareObservesTheLivePredecessorAgainstTheLKGManifest(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
