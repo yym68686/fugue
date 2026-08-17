@@ -83,7 +83,6 @@ func (s *Service) startTrafficOverrideLoop(ctx context.Context) {
 				if err := s.syncTrafficOverrides(ctx); err != nil {
 					s.logTrafficOverrideError(err)
 				}
-				s.activatePrepared(time.Now().UTC())
 			}
 		}
 	}()
@@ -125,9 +124,8 @@ func (s *Service) syncTrafficOverrides(ctx context.Context) error {
 		return err
 	}
 	s.overrideMu.Lock()
-	s.prepared = active
+	s.overrides = active
 	s.overrideGen = payload.Feed.Generation
-	s.activatePreparedLocked(time.Now().UTC())
 	s.overrideMu.Unlock()
 	return nil
 }
@@ -172,9 +170,6 @@ func validateTrafficOverrideFeed(feed trafficOverrideFeed, now time.Time, zone s
 	for _, override := range feed.Overrides {
 		if override.State != model.TrafficOverrideStateStaged || !override.ExpiresAt.After(now) {
 			continue
-		}
-		if override.ActivateAt.IsZero() || !override.ActivateAt.Before(override.ExpiresAt) {
-			return nil, fmt.Errorf("traffic override %q has invalid activate_at", override.Hostname)
 		}
 		if zone != "" && !trafficOverrideNameWithinZone(override.Hostname, zone) {
 			return nil, fmt.Errorf("traffic override hostname %q is outside zone", override.Hostname)
@@ -280,42 +275,10 @@ func (s *Service) loadTrafficOverrideCache() error {
 		return err
 	}
 	s.overrideMu.Lock()
-	s.prepared = active
+	s.overrides = active
 	s.overrideGen = cache.Generation
-	s.activatePreparedLocked(time.Now().UTC())
 	s.overrideMu.Unlock()
 	return nil
-}
-
-func (s *Service) activatePrepared(now time.Time) {
-	s.overrideMu.Lock()
-	s.activatePreparedLocked(now.UTC())
-	s.overrideMu.Unlock()
-}
-
-// activatePreparedLocked keeps the currently serving overlay until the
-// prepared artifact's activation time. A node that misses a future feed never
-// replaces a positive LKG with an empty answer.
-func (s *Service) activatePreparedLocked(now time.Time) {
-	active := make(map[string]model.TrafficOverride, len(s.overrides)+len(s.prepared))
-	for hostname, override := range s.overrides {
-		active[hostname] = override
-	}
-	for hostname, override := range s.prepared {
-		if !override.ExpiresAt.After(now) {
-			delete(active, hostname)
-			continue
-		}
-		if !override.ActivateAt.After(now) {
-			active[hostname] = override
-		}
-	}
-	for hostname := range active {
-		if _, prepared := s.prepared[hostname]; !prepared {
-			delete(active, hostname)
-		}
-	}
-	s.overrides = active
 }
 
 func (s *Service) overlayRecords(name string, qtype uint16) []model.EdgeDNSRecord {
