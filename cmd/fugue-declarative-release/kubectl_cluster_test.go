@@ -1083,6 +1083,146 @@ esac
 	}
 }
 
+func TestScalarOwnershipApplyRetriesStatusOnlyResourceVersionConflict(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	livePath := filepath.Join(directory, "live.json")
+	transferredPath := filepath.Join(directory, "transferred.json")
+	racedPath := filepath.Join(directory, "raced.json")
+	applyInputPath := filepath.Join(directory, "apply-input.json")
+	secondApplyInputPath := filepath.Join(directory, "second-apply-input.json")
+	applyCountPath := filepath.Join(directory, "apply-count")
+	patchesPath := filepath.Join(directory, "patches.log")
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a",
+		Container: "edge", FieldManager: "fugue-edge-worker-de-declarative",
+	}}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a"}
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": "worker-a", "namespace": "fugue-system", "uid": "worker-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("a", 64),
+		}}}}},
+	}
+	image := "/spec/template/spec/containers[name=edge]/image"
+	live := deepCopyJSONMap(t, desired)
+	liveMetadata := mapField(live, "metadata")
+	liveMetadata["generation"] = json.Number("7")
+	liveContainers := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])
+	liveContainers[0].(map[string]any)["image"] = "ghcr.io/example/edge@sha256:" + strings.Repeat("b", 64)
+	liveMetadata["managedFields"] = []any{
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image})},
+		map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image})},
+	}
+	transferred := deepCopyJSONMap(t, desired)
+	transferredMetadata := mapField(transferred, "metadata")
+	transferredMetadata["resourceVersion"] = "43"
+	transferredMetadata["generation"] = json.Number("8")
+	transferredMetadata["managedFields"] = []any{map[string]any{
+		"manager": release.Workload.FieldManager, "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image}),
+	}}
+	raced := deepCopyJSONMap(t, transferred)
+	racedMetadata := mapField(raced, "metadata")
+	racedMetadata["resourceVersion"] = "44"
+	racedMetadata["managedFields"] = []any{map[string]any{
+		"manager": release.Workload.FieldManager, "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image}),
+	}}
+	for filename, value := range map[string]map[string]any{livePath: live, transferredPath: transferred, racedPath: raced} {
+		if err := os.WriteFile(filename, mustJSON(t, value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	program := `#!/bin/sh
+set -eu
+case "$1" in
+  apply)
+    count=0
+    if test -f "$APPLY_COUNT"; then count=$(cat "$APPLY_COUNT"); fi
+    count=$((count + 1))
+    printf '%s' "$count" >"$APPLY_COUNT"
+    case "$count" in
+      1) cat >/dev/null; printf '%s\n' 'Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="edge"].image' >&2; exit 1 ;;
+      2) cat >"$APPLY_INPUT"; printf '%s\n' 'The request is invalid: Operation cannot be fulfilled on daemonsets.apps "worker-a": the object has been modified; please apply your changes to the latest version and try again' >&2; exit 1 ;;
+      3) cat >"$SECOND_APPLY_INPUT"; cat "$RACED_JSON" ;;
+      *) exit 52 ;;
+    esac
+    ;;
+  get)
+    if test -f "$TRANSFERRED"; then
+      count=0
+      if test -f "$APPLY_COUNT"; then count=$(cat "$APPLY_COUNT"); fi
+      if test "$count" -ge 2; then cat "$RACED_JSON"; else cat "$TRANSFERRED_JSON"; fi
+    else
+      cat "$LIVE_JSON"
+    fi
+    ;;
+  patch)
+    printf '%s\n' "$*" >>"$PATCHES"
+    : >"$TRANSFERRED"
+    cat "$TRANSFERRED_JSON"
+    ;;
+  *) exit 52 ;;
+esac
+`
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transferredMarker := filepath.Join(directory, "transferred")
+	t.Setenv("LIVE_JSON", livePath)
+	t.Setenv("TRANSFERRED_JSON", transferredPath)
+	t.Setenv("TRANSFERRED", transferredMarker)
+	t.Setenv("RACED_JSON", racedPath)
+	t.Setenv("APPLY_INPUT", applyInputPath)
+	t.Setenv("SECOND_APPLY_INPUT", secondApplyInputPath)
+	t.Setenv("APPLY_COUNT", applyCountPath)
+	t.Setenv("PATCHES", patchesPath)
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	if err := cluster.applyResourceWithOwnershipConvergence(context.Background(), release, identity, desired, mustJSON(t, desired), false); err != nil {
+		t.Fatalf("status-only resourceVersion conflict was not retried: %v", err)
+	}
+	firstRetry, err := os.ReadFile(applyInputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRetry, err := os.ReadFile(secondApplyInputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first, second map[string]any
+	if err := json.Unmarshal(firstRetry, &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(secondRetry, &second); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringValue(mapField(first, "metadata")["resourceVersion"]); got != "43" {
+		t.Fatalf("first retry resourceVersion=%q, want 43", got)
+	}
+	if got := stringValue(mapField(second, "metadata")["resourceVersion"]); got != "44" {
+		t.Fatalf("second retry resourceVersion=%q, want 44", got)
+	}
+}
+
+func TestManagedFieldsOwnershipMaySpanDeclarativeApplyAndUpdateEntries(t *testing.T) {
+	manager := "fugue-edge-client-us-declarative"
+	pointers := []string{
+		"/spec/template/spec/containers[name=edge]/image",
+		"/spec/template/spec/containers[name=edge]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value",
+	}
+	metadata := map[string]any{"managedFields": []any{
+		map[string]any{"manager": manager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, pointers[:1])},
+		map[string]any{"manager": manager, "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, pointers[1:])},
+	}}
+	if !managedFieldsOwnPointers(metadata, manager, pointers) {
+		t.Fatalf("same declarative manager ownership was not aggregated across Apply and Update entries: %v", pointers)
+	}
+	metadata["managedFields"].([]any)[1].(map[string]any)["manager"] = "helm"
+	if managedFieldsOwnPointers(metadata, manager, pointers) {
+		t.Fatal("legacy manager ownership was incorrectly accepted as declarative")
+	}
+}
+
 func TestProbeOwnershipConvergenceRecoversBroadKubectlPatchIntermediate(t *testing.T) {
 	directory := t.TempDir()
 	kubectl := filepath.Join(directory, "kubectl")

@@ -31,12 +31,13 @@ import (
 )
 
 const (
-	maxKubernetesOutputBytes     = 4 << 20
-	defaultKubectlReadTimeout    = 15 * time.Second
-	defaultKubectlReadAttempts   = 2
-	defaultKubectlReadRetryDelay = 250 * time.Millisecond
-	probeBridgeManagerPrefix     = "fugue-probe-bridge-"
-	trustedCurrentArtifactEnv    = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
+	maxKubernetesOutputBytes        = 4 << 20
+	defaultKubectlReadTimeout       = 15 * time.Second
+	defaultKubectlReadAttempts      = 2
+	defaultKubectlReadRetryDelay    = 250 * time.Millisecond
+	maxScalarOwnershipApplyAttempts = 4
+	probeBridgeManagerPrefix        = "fugue-probe-bridge-"
+	trustedCurrentArtifactEnv       = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
 )
 
 var (
@@ -1006,16 +1007,53 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if transferErr != nil {
 			return transferErr
 		}
-		rebound, rebindErr := rebindDesiredResourceVersionAfterScalarTransfer(desired, expected, fresh)
-		if rebindErr != nil {
-			return rebindErr
-		}
-		if _, retryErr := cluster.kubectlRun(ctx, rebound, applyArguments(release, false)...); retryErr != nil {
-			return fmt.Errorf("ordinary apply after exact scalar ownership transfer: %w", retryErr)
+		if retryErr := cluster.applyAfterScalarOwnershipTransfer(ctx, release, identity, desired, expected, fresh); retryErr != nil {
+			return retryErr
 		}
 		return nil
 	}
 	return nil
+}
+
+func (cluster *kubectlCluster) applyAfterScalarOwnershipTransfer(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired, before, fresh map[string]any) error {
+	currentDesired, currentBefore, currentFresh := desired, before, fresh
+	for attempt := 1; attempt <= maxScalarOwnershipApplyAttempts; attempt++ {
+		rebound, err := rebindDesiredResourceVersionAfterScalarTransfer(currentDesired, currentBefore, currentFresh)
+		if err != nil {
+			return err
+		}
+		if _, applyErr := cluster.kubectlRun(ctx, rebound, applyArguments(release, false)...); applyErr == nil {
+			return nil
+		} else if !objectModifiedConflict(applyErr) || attempt == maxScalarOwnershipApplyAttempts {
+			return fmt.Errorf("ordinary apply after exact scalar ownership transfer: %w", applyErr)
+		}
+
+		latestRaw, getErr := cluster.getResource(ctx, identity)
+		if getErr != nil {
+			return fmt.Errorf("read resource after scalar apply CAS conflict: %w", getErr)
+		}
+		if resourceAbsent(latestRaw) {
+			return errors.New("resource disappeared after scalar apply CAS conflict")
+		}
+		latest, decodeErr := decodeJSONObject(latestRaw)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		reboundDesired, decodeErr := decodeJSONObject(rebound)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		currentDesired, currentBefore, currentFresh = reboundDesired, currentFresh, latest
+	}
+	return errors.New("ordinary apply after exact scalar ownership transfer exhausted bounded attempts")
+}
+
+func objectModifiedConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(err.Error())
+	return strings.Contains(raw, "operation cannot be fulfilled") && strings.Contains(raw, "the object has been modified")
 }
 
 func (cluster *kubectlCluster) reconcileApplyCommitUnknown(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) (bool, error) {
@@ -1676,14 +1714,29 @@ func managedFieldsEntryPointers(fields map[string]any) ([]string, error) {
 }
 
 func managedFieldsOwnPointers(metadata map[string]any, manager string, pointers []string) bool {
+	if manager == "" || len(pointers) == 0 {
+		return false
+	}
+	owned := make([]bool, len(pointers))
 	for _, rawEntry := range anySlice(metadata["managedFields"]) {
 		entry, _ := rawEntry.(map[string]any)
-		if stringValue(entry["manager"]) == manager && stringValue(entry["operation"]) == "Apply" && stringValue(entry["subresource"]) == "" &&
-			managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), pointers, true) {
-			return true
+		operation := stringValue(entry["operation"])
+		if stringValue(entry["manager"]) != manager || stringValue(entry["subresource"]) != "" || (operation != "Apply" && operation != "Update") {
+			continue
+		}
+		fields := mapField(entry, "fieldsV1")
+		for index, pointer := range pointers {
+			if !owned[index] && managedFieldsEntryOwnsPointers(fields, []string{pointer}, true) {
+				owned[index] = true
+			}
 		}
 	}
-	return false
+	for _, found := range owned {
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func managedFieldsEntryOwnsPointers(fields map[string]any, pointers []string, requireAll bool) bool {
