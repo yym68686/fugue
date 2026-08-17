@@ -688,6 +688,24 @@ func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *test
 	if !stringSubset(want, allowed) {
 		t.Fatalf("reviewed runtime scalars missing from ownership convergence allowlist: allowed=%v want=%v", allowed, want)
 	}
+	cleanupAllowed := ownershipCleanupPointers(allowed)
+	for _, structural := range []string{
+		"/spec/template/spec/containers[name=edge]/name",
+		"/spec/template/spec/containers[name=edge]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/name",
+	} {
+		if !stringSubset([]string{structural}, cleanupAllowed) {
+			t.Fatalf("associative-list identity leaf missing from cleanup allowlist: %s in %v", structural, cleanupAllowed)
+		}
+	}
+	for _, forbidden := range []string{
+		"/spec/template/spec/containers[name=edge]/env[name=FUGUE_DNS_TOKEN]/name",
+		"/spec/template/spec/containers[name=other]/name",
+		"/spec/template/spec/containers[name=edge]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/valueFrom",
+	} {
+		if stringSubset([]string{forbidden}, cleanupAllowed) {
+			t.Fatalf("unreviewed structural field entered ownership cleanup allowlist: %s in %v", forbidden, cleanupAllowed)
+		}
+	}
 	for _, forbidden := range []string{
 		"/spec/template/spec/containers[name=edge]/livenessProbe/periodSeconds",
 		"/spec/template/spec/containers[name=edge]/readinessProbe/timeoutSeconds",
@@ -902,6 +920,49 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactEnvironmentValues(t *testing.
 	})
 	if _, _, err := nextLegacyOwnershipTransferPatch(desired, ambiguous, allowed, applyErr); err == nil {
 		t.Fatalf("ambiguous environment identity was accepted: %v", err)
+	}
+}
+
+func TestEmergencyOwnershipCleanupAcceptsOnlyReviewedAssociativeIdentityLeaves(t *testing.T) {
+	enabled := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value"
+	containerName := "/spec/template/spec/containers[name=dns]/name"
+	envName := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/name"
+	desired := map[string]any{
+		"metadata": map[string]any{"uid": "dns-uid", "resourceVersion": "43"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "dns", "env": []any{map[string]any{
+				"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "value": "false",
+			}},
+		}}}}},
+	}
+	live := deepCopyJSONMap(t, desired)
+	mapField(live, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": "fugue-probe-bridge-0123456789abcdef", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{containerName, envName, enabled}),
+	}}
+	applyErr := errors.New("Apply failed with 1 conflict: conflict with \"fugue-probe-bridge-0123456789abcdef\" using apps/v1: " + ssaFieldForPointer(enabled))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{enabled}, applyErr); err != nil {
+		t.Fatalf("reviewed associative identity conflict was rejected: %v", err)
+	}
+	patch, found, err := nextEmergencyOwnershipPatch(live, "declarative", []string{enabled}, false)
+	if err != nil || !found || len(patch) != 4 || patch[3]["path"] != "/metadata/managedFields/0" {
+		t.Fatalf("reviewed associative identity cleanup failed: patch=%v found=%v err=%v", patch, found, err)
+	}
+	structuralOnly := deepCopyJSONMap(t, live)
+	structuralEntry := anySlice(mapField(structuralOnly, "metadata")["managedFields"])[0].(map[string]any)
+	structuralEntry["fieldsV1"] = managedFieldsTree(t, []string{containerName, envName})
+	if patch, found, err := nextEmergencyOwnershipPatch(structuralOnly, "declarative", []string{enabled}, false); err != nil || !found || len(patch) != 4 {
+		t.Fatalf("transaction bridge scaffolding residue was not removable: patch=%v found=%v err=%v", patch, found, err)
+	}
+
+	expanded := deepCopyJSONMap(t, live)
+	entry := anySlice(mapField(expanded, "metadata")["managedFields"])[0].(map[string]any)
+	entry["fieldsV1"] = managedFieldsTree(t, []string{
+		containerName, envName, enabled,
+		"/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_MAX_STALE]/name",
+	})
+	if _, _, err := nextEmergencyOwnershipPatch(expanded, "declarative", []string{enabled}, false); err == nil || !strings.Contains(err.Error(), "unreviewed ownership") {
+		t.Fatalf("unreviewed associative identity cleanup was accepted: %v", err)
 	}
 }
 
