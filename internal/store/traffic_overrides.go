@@ -180,7 +180,7 @@ func normalizeTrafficOverride(candidate model.TrafficOverride, now time.Time) (m
 		routes = append(routes, route)
 	}
 	candidate.RequiredHostRoutes = uniqueSortedStoreStrings(routes)
-	if len(candidate.RequiredHostRoutes) == 0 || len(candidate.RequiredHostRoutes) > model.TrafficOverrideMaxRequiredRoutes || !stringSliceContainsStore(candidate.RequiredHostRoutes, candidate.Hostname) {
+	if len(candidate.RequiredHostRoutes) == 0 || len(candidate.RequiredHostRoutes) > model.TrafficOverrideMaxRequiredRoutes {
 		return model.TrafficOverride{}, ErrInvalidInput
 	}
 	candidate.RouteGeneration = strings.TrimSpace(candidate.RouteGeneration)
