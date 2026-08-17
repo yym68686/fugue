@@ -242,8 +242,8 @@ func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
 		EdgeHealthProbeEnabled: true,
 		EdgeHealthProbeTimeout: 10 * time.Millisecond,
 	}, log.New(ioDiscard{}, "", 0))
-	service.edgeProbe = func(ctx context.Context, ip string) bool {
-		return ip == "203.0.113.11"
+	service.edgeProbe = func(ctx context.Context, hostname, ip string) bool {
+		return hostname == "app.dns.fugue.pro" && ip == "203.0.113.11"
 	}
 	service.setBundle(model.EdgeDNSBundle{
 		Version: "dnsgen_probe",
@@ -256,6 +256,10 @@ func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
 				TTL:        60,
 				RecordKind: model.EdgeDNSRecordKindPlatform,
 				Status:     model.EdgeRouteStatusActive,
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "203.0.113.10", Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "203.0.113.11", Healthy: true, RouteReady: true, TLSReady: true},
+				},
 			},
 		},
 	}, `"dnsgen_probe"`, false, "")
@@ -274,6 +278,127 @@ func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
 	}
 }
 
+func TestServiceFailsClosedBeforeHostProbeEvidence(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:                   "dns.fugue.pro",
+		TTL:                    60,
+		Nameservers:            []string{"ns1.dns.fugue.pro"},
+		EdgeHealthProbeEnabled: true,
+	}, log.New(ioDiscard{}, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_unknown_probe",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{{
+			Name:       "app.dns.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			TTL:        60,
+			RecordKind: model.EdgeDNSRecordKindPlatform,
+			Status:     model.EdgeRouteStatusActive,
+			Candidates: []model.EdgeDNSAnswerCandidate{{
+				IP: "203.0.113.10", Healthy: true, RouteReady: true, TLSReady: true,
+			}},
+		}},
+	}, `"dnsgen_unknown_probe"`, false, "")
+
+	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 0 {
+		t.Fatalf("expected unknown host probe evidence to fail closed, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
+	}
+}
+
+func TestServiceKeepsStaticProbeRecordOutsideBusinessHealthFilter(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:                   "dns.fugue.pro",
+		TTL:                    60,
+		Nameservers:            []string{"ns1.dns.fugue.pro"},
+		EdgeHealthProbeEnabled: true,
+	}, log.New(ioDiscard{}, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_static_probe",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{{
+			Name:       "probe.dns.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.10"},
+			TTL:        60,
+			RecordKind: model.EdgeDNSRecordKindProbe,
+			Status:     model.EdgeRouteStatusActive,
+		}},
+	}, `"dnsgen_static_probe"`, false, "")
+
+	answer := dnsQuery(t, service, "probe.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 1 {
+		t.Fatalf("expected static bootstrap probe record to remain available, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
+	}
+}
+
+func TestEdgeHealthEvidenceIsFreshAndHostSpecific(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{}, log.New(ioDiscard{}, "", 0))
+	key := edgeHealthKey("app.dns.fugue.pro", "203.0.113.10")
+	service.edgeHealthMu.Lock()
+	service.edgeHealth[key] = edgeHealthObservation{Healthy: true, CheckedAt: time.Now().UTC()}
+	service.edgeHealthMu.Unlock()
+
+	if !service.edgeTargetHealthy("app.dns.fugue.pro", "203.0.113.10") {
+		t.Fatal("expected fresh evidence for the exact Host and IP to pass")
+	}
+	if service.edgeTargetHealthy("other.dns.fugue.pro", "203.0.113.10") {
+		t.Fatal("expected the same IP under a different Host to require independent evidence")
+	}
+
+	service.edgeHealthMu.Lock()
+	service.edgeHealth[key] = edgeHealthObservation{Healthy: true, CheckedAt: time.Now().Add(-edgeHealthObservationTTL - time.Second)}
+	service.edgeHealthMu.Unlock()
+	if service.edgeTargetHealthy("app.dns.fugue.pro", "203.0.113.10") {
+		t.Fatal("expected stale Host and IP evidence to fail closed")
+	}
+}
+
+func TestEdgeHealthProbeTargetsIncludeScopedCandidatesAndNormalizeWildcards(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{}, log.New(ioDiscard{}, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_probe_targets",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "app.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Candidates: []model.EdgeDNSAnswerCandidate{{IP: "203.0.113.10"}},
+			},
+			{
+				Name: "*.apps.dns.fugue.pro",
+				Type: model.EdgeDNSRecordTypeA,
+				ScopedCandidates: []model.EdgeDNSScopedAnswerCandidates{{
+					ScopeKey:   "country:us",
+					Candidates: []model.EdgeDNSAnswerCandidate{{IP: "203.0.113.11"}},
+				}},
+			},
+		},
+	}, `"dnsgen_probe_targets"`, false, "")
+
+	targets := service.edgeHealthProbeTargets()
+	want := []edgeHealthProbeTarget{
+		{Hostname: "app.dns.fugue.pro", IP: "203.0.113.10"},
+		{Hostname: "probe.apps.dns.fugue.pro", IP: "203.0.113.11"},
+	}
+	if len(targets) != len(want) {
+		t.Fatalf("expected %d unique Host and IP targets, got %+v", len(want), targets)
+	}
+	for i := range want {
+		if targets[i] != want[i] {
+			t.Fatalf("expected sorted target %+v at %d, got %+v", want[i], i, targets[i])
+		}
+	}
+}
+
 func TestServiceFallsBackToNextLiveHealthyCandidateBeforeLimiting(t *testing.T) {
 	t.Parallel()
 
@@ -285,8 +410,8 @@ func TestServiceFallsBackToNextLiveHealthyCandidateBeforeLimiting(t *testing.T) 
 		EdgeHealthProbeEnabled: true,
 		EdgeHealthProbeTimeout: 10 * time.Millisecond,
 	}, log.New(ioDiscard{}, "", 0))
-	service.edgeProbe = func(ctx context.Context, ip string) bool {
-		return ip == "51.38.126.103"
+	service.edgeProbe = func(ctx context.Context, hostname, ip string) bool {
+		return hostname == "app.dns.fugue.pro" && ip == "51.38.126.103"
 	}
 	service.setBundle(model.EdgeDNSBundle{
 		Version: "dnsgen_live_fallback",
@@ -628,14 +753,14 @@ func TestSelectionAuditAttributesOnlyTheExactExplorationCandidate(t *testing.T) 
 		t.Fatal("expected a deterministic bucket that explores the DE candidate")
 	}
 
-	answered, filtered, decision := edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, exploredAt, func(ip string) bool {
+	answered, filtered, decision := edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, exploredAt, func(_ string, ip string) bool {
 		return ip != "5.102.124.125"
 	}, nil)
 	if result := edgeDNSSelectionResult(decision, answered, filtered); result != "selected_cross_group_exploration" {
 		t.Fatalf("unrelated HK filtering must not be attributed to the DE explorer, got result=%s decision=%+v filtered=%+v", result, decision, filtered)
 	}
 
-	answered, filtered, decision = edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, exploredAt, func(ip string) bool {
+	answered, filtered, decision = edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, exploredAt, func(_ string, ip string) bool {
 		return ip != "51.38.126.103"
 	}, nil)
 	if result := edgeDNSSelectionResult(decision, answered, filtered); result != "selected_primary_after_exploration_filtered" {
@@ -676,14 +801,14 @@ func TestSelectionAuditAttributesExactSameGroupExplorationCandidate(t *testing.T
 		t.Fatal("expected a deterministic bucket that explores the same-group sibling")
 	}
 
-	answered, filtered, decision := edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, exploredAt, func(ip string) bool {
+	answered, filtered, decision := edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, exploredAt, func(_ string, ip string) bool {
 		return ip != "51.38.126.103"
 	}, nil)
 	if result := edgeDNSSelectionResult(decision, answered, filtered); result != "selected_same_group_exploration" {
 		t.Fatalf("unrelated DE filtering must not be attributed to the same-group explorer, got result=%s decision=%+v filtered=%+v", result, decision, filtered)
 	}
 
-	answered, filtered, decision = edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, exploredAt, func(ip string) bool {
+	answered, filtered, decision = edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, exploredAt, func(_ string, ip string) bool {
 		return ip != "95.169.10.156"
 	}, nil)
 	if result := edgeDNSSelectionResult(decision, answered, filtered); result != "selected_primary_after_exploration_filtered" {
@@ -922,8 +1047,8 @@ func TestServiceFiltersUnhealthyLiveCandidateAndLogsDNSAnswerAudit(t *testing.T)
 		},
 	}, `"dnsgen_live"`, false, "")
 	service.edgeHealthMu.Lock()
-	service.edgeHealth["15.204.94.71"] = edgeHealthObservation{Healthy: false, CheckedAt: time.Now().UTC()}
-	service.edgeHealth["51.38.126.103"] = edgeHealthObservation{Healthy: true, CheckedAt: time.Now().UTC()}
+	service.edgeHealth[edgeHealthKey("app.dns.fugue.pro", "15.204.94.71")] = edgeHealthObservation{Healthy: false, CheckedAt: time.Now().UTC()}
+	service.edgeHealth[edgeHealthKey("app.dns.fugue.pro", "51.38.126.103")] = edgeHealthObservation{Healthy: true, CheckedAt: time.Now().UTC()}
 	service.edgeHealthMu.Unlock()
 
 	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)

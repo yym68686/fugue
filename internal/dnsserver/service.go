@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,9 +39,11 @@ const dnsCacheEnvelopeFallbackTTL = 24 * time.Hour
 
 const edgeHealthProbeTTL = 15 * time.Second
 
+const edgeHealthObservationTTL = 2 * edgeHealthProbeTTL
+
 const dnsTemporaryFilterWALInterval = time.Minute
 
-type edgeDNSLiveHealthFunc func(string) bool
+type edgeDNSLiveHealthFunc func(string, string) bool
 type edgeDNSPeerHealthFunc func(model.EdgeDNSAnswerCandidate) string
 
 type Service struct {
@@ -121,7 +124,12 @@ type telemetry struct {
 	ScopeResolutionTotal  map[string]uint64
 }
 
-type edgeHealthProbeFunc func(context.Context, string) bool
+type edgeHealthProbeFunc func(context.Context, string, string) bool
+
+type edgeHealthProbeTarget struct {
+	Hostname string
+	IP       string
+}
 
 type edgeHealthObservation struct {
 	Healthy   bool
@@ -498,6 +506,12 @@ func (s *Service) Run(ctx context.Context) error {
 	for _, child := range s.childZoneServices() {
 		if err := child.LoadCache(); err != nil {
 			child.Logger.Printf("dns bundle cache unavailable; zone=%s error=%v", normalizeName(child.Config.Zone), err)
+		}
+	}
+	if s.Config.EdgeHealthProbeEnabled {
+		s.refreshEdgeHealth(ctx)
+		for _, child := range s.childZoneServices() {
+			child.refreshEdgeHealth(ctx)
 		}
 	}
 
@@ -1203,8 +1217,8 @@ func (s *Service) startEdgeHealthProbeLoop(ctx context.Context) {
 }
 
 func (s *Service) refreshEdgeHealth(ctx context.Context) {
-	ips := s.edgeHealthProbeIPs()
-	if len(ips) == 0 {
+	targets := s.edgeHealthProbeTargets()
+	if len(targets) == 0 {
 		return
 	}
 	now := time.Now().UTC()
@@ -1212,59 +1226,78 @@ func (s *Service) refreshEdgeHealth(ctx context.Context) {
 	if timeout <= 0 {
 		timeout = 250 * time.Millisecond
 	}
-	for _, ip := range ips {
-		probeCtx, cancel := context.WithTimeout(ctx, timeout)
-		healthy := false
-		if s.edgeProbe != nil {
-			healthy = s.edgeProbe(probeCtx, ip)
-		} else {
-			healthy = s.dialEdgeIP(probeCtx, ip)
-		}
-		cancel()
-		s.edgeHealthMu.Lock()
-		if s.edgeHealth == nil {
-			s.edgeHealth = map[string]edgeHealthObservation{}
-		}
-		s.edgeHealth[ip] = edgeHealthObservation{Healthy: healthy, CheckedAt: now}
-		s.edgeHealthMu.Unlock()
+	observations := make(map[string]edgeHealthObservation, len(targets))
+	var observationsMu sync.Mutex
+	var probes sync.WaitGroup
+	limit := make(chan struct{}, 16)
+	for _, target := range targets {
+		target := target
+		probes.Add(1)
+		go func() {
+			defer probes.Done()
+			select {
+			case limit <- struct{}{}:
+				defer func() { <-limit }()
+			case <-ctx.Done():
+				return
+			}
+			probeCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			healthy := false
+			if s.edgeProbe != nil {
+				healthy = s.edgeProbe(probeCtx, target.Hostname, target.IP)
+			} else {
+				healthy = s.probeEdgeTarget(probeCtx, target.Hostname, target.IP)
+			}
+			observationsMu.Lock()
+			observations[edgeHealthKey(target.Hostname, target.IP)] = edgeHealthObservation{Healthy: healthy, CheckedAt: now}
+			observationsMu.Unlock()
+		}()
 	}
+	probes.Wait()
+	s.edgeHealthMu.Lock()
+	s.edgeHealth = observations
+	s.edgeHealthMu.Unlock()
 }
 
-func (s *Service) edgeHealthProbeIPs() []string {
+func (s *Service) edgeHealthProbeTargets() []edgeHealthProbeTarget {
 	bundle := s.currentBundle()
 	if bundle == nil {
 		return nil
 	}
 	seen := map[string]struct{}{}
-	ips := make([]string, 0)
-	add := func(raw string) {
+	targets := make([]edgeHealthProbeTarget, 0)
+	add := func(hostname, raw string) {
+		hostname = edgeHealthProbeHostname(hostname)
 		ip := net.ParseIP(strings.TrimSpace(raw))
-		if ip == nil {
+		if hostname == "" || ip == nil {
 			return
 		}
 		normalized := ip.String()
-		if _, ok := seen[normalized]; ok {
+		key := edgeHealthKey(hostname, normalized)
+		if _, ok := seen[key]; ok {
 			return
 		}
-		seen[normalized] = struct{}{}
-		ips = append(ips, normalized)
+		seen[key] = struct{}{}
+		targets = append(targets, edgeHealthProbeTarget{Hostname: hostname, IP: normalized})
 	}
 	for _, record := range bundle.Records {
 		for _, candidate := range record.Candidates {
-			add(candidate.IP)
+			add(record.Name, candidate.IP)
 		}
-		if len(record.Candidates) > 0 {
-			continue
-		}
-		switch strings.ToUpper(record.Type) {
-		case model.EdgeDNSRecordTypeA, model.EdgeDNSRecordTypeAAAA:
-			for _, value := range record.Values {
-				add(value)
+		for _, scoped := range record.ScopedCandidates {
+			for _, candidate := range scoped.Candidates {
+				add(record.Name, candidate.IP)
 			}
 		}
 	}
-	sort.Strings(ips)
-	return ips
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].Hostname == targets[j].Hostname {
+			return targets[i].IP < targets[j].IP
+		}
+		return targets[i].Hostname < targets[j].Hostname
+	})
+	return targets
 }
 
 func (s *Service) HeartbeatOnce(ctx context.Context) error {
@@ -1790,10 +1823,10 @@ func (s *Service) ttl() int {
 	return s.Config.TTL
 }
 
-func (s *Service) edgeDNSRecordsForQuestion(ctx context.Context, bundle *model.EdgeDNSBundle, name string, qtype uint16, msg *miekgdns.Msg, writer miekgdns.ResponseWriter) ([]miekgdns.RR, bool) {
+func (s *Service) edgeDNSRecordsForQuestion(_ context.Context, bundle *model.EdgeDNSBundle, name string, qtype uint16, msg *miekgdns.Msg, writer miekgdns.ResponseWriter) ([]miekgdns.RR, bool) {
 	var liveHealth edgeDNSLiveHealthFunc
 	if s.Config.EdgeHealthProbeEnabled {
-		liveHealth = s.edgeIPHealthy
+		liveHealth = s.edgeTargetHealthy
 	}
 	var peerHealth edgeDNSPeerHealthFunc
 	if s.hasPeerHealthDecisions() {
@@ -1805,7 +1838,7 @@ func (s *Service) edgeDNSRecordsForQuestion(ctx context.Context, bundle *model.E
 	if qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA {
 		return answers, nameExists
 	}
-	return s.filterHealthyEdgeAnswers(ctx, answers), nameExists
+	return answers, nameExists
 }
 
 func (s *Service) recordDNSScopeResolution(audits []edgeDNSAnswerAudit) {
@@ -1822,33 +1855,6 @@ func (s *Service) recordDNSScopeResolution(audits []edgeDNSAnswerAudit) {
 		s.metrics.ScopeResolutionTotal = make(map[string]uint64)
 	}
 	s.metrics.ScopeResolutionTotal[resolution]++
-}
-
-func (s *Service) filterHealthyEdgeAnswers(_ context.Context, answers []miekgdns.RR) []miekgdns.RR {
-	if len(answers) == 0 || !s.Config.EdgeHealthProbeEnabled {
-		return answers
-	}
-	filtered := make([]miekgdns.RR, 0, len(answers))
-	for _, rr := range answers {
-		ip := ""
-		switch typed := rr.(type) {
-		case *miekgdns.A:
-			if typed.A != nil {
-				ip = typed.A.String()
-			}
-		case *miekgdns.AAAA:
-			if typed.AAAA != nil {
-				ip = typed.AAAA.String()
-			}
-		default:
-			filtered = append(filtered, rr)
-			continue
-		}
-		if ip == "" || s.edgeIPHealthy(ip) {
-			filtered = append(filtered, rr)
-		}
-	}
-	return filtered
 }
 
 func (s *Service) logDNSAnswerAudits(bundle *model.EdgeDNSBundle, queryName string, qtype uint16, audits []edgeDNSAnswerAudit) {
@@ -2003,18 +2009,18 @@ func dnsTypeString(qtype uint16) string {
 	return fmt.Sprintf("TYPE%d", qtype)
 }
 
-func (s *Service) edgeIPHealthy(ip string) bool {
-	ip = strings.TrimSpace(ip)
-	if ip == "" {
+func (s *Service) edgeTargetHealthy(hostname, ip string) bool {
+	key := edgeHealthKey(hostname, ip)
+	if key == "" {
 		return false
 	}
 	s.edgeHealthMu.Lock()
-	observation, ok := s.edgeHealth[ip]
+	observation, ok := s.edgeHealth[key]
 	s.edgeHealthMu.Unlock()
-	if ok {
-		return observation.Healthy
+	if !ok || time.Since(observation.CheckedAt) > edgeHealthObservationTTL {
+		return false
 	}
-	return true
+	return observation.Healthy
 }
 
 func (s *Service) SetPeerHealthDecisions(decisions []model.PeerHealthDecision) {
@@ -2070,18 +2076,61 @@ func (s *Service) peerHealthFilterReason(candidate model.EdgeDNSAnswerCandidate)
 	}
 }
 
-func (s *Service) dialEdgeIP(ctx context.Context, ip string) bool {
+func edgeHealthProbeHostname(hostname string) string {
+	hostname = normalizeName(hostname)
+	if strings.HasPrefix(hostname, "*.") {
+		hostname = "probe." + strings.TrimPrefix(hostname, "*.")
+	}
+	return hostname
+}
+
+func edgeHealthKey(hostname, ip string) string {
+	hostname = edgeHealthProbeHostname(hostname)
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if hostname == "" || parsed == nil {
+		return ""
+	}
+	return hostname + "|" + parsed.String()
+}
+
+func (s *Service) probeEdgeTarget(ctx context.Context, hostname, ip string) bool {
+	hostname = edgeHealthProbeHostname(hostname)
+	parsedIP := net.ParseIP(strings.TrimSpace(ip))
+	if hostname == "" || parsedIP == nil {
+		return false
+	}
 	port := s.Config.EdgeHealthProbePort
 	if port <= 0 {
 		port = 443
 	}
 	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)))
+	transport := &http.Transport{
+		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(parsedIP.String(), strconv.Itoa(port)))
+		},
+		TLSClientConfig: &tls.Config{ServerName: hostname, MinVersion: tls.VersionTLS12},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, (&url.URL{Scheme: "https", Host: hostname, Path: "/"}).String(), nil)
 	if err != nil {
 		return false
 	}
-	_ = conn.Close()
-	return true
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return false
+	}
+	return !bytes.Contains(bytes.ToLower(body), []byte("edge route not found"))
 }
 
 func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc) ([]miekgdns.RR, bool) {
@@ -2444,7 +2493,7 @@ func edgeDNSAnswerCandidateDecision(record model.EdgeDNSRecord, hint dnsGeoHint,
 	if liveHealth != nil && len(ordered) > 0 {
 		filtered := ordered[:0]
 		for _, candidate := range ordered {
-			if candidate.IP == "" || liveHealth(candidate.IP) {
+			if candidate.IP == "" || liveHealth(record.Name, candidate.IP) {
 				filtered = append(filtered, candidate)
 				continue
 			}
