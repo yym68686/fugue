@@ -281,7 +281,7 @@ func RestoreMonitoredLKG(ctx context.Context, cluster Cluster, plan Plan, prepar
 		return sealResult(result)
 	}
 	result.Reason = "continuous-rollback-lkg-unproven"
-	result.FailureDetail = forwardFailureDetail(healthErr, convergedErr)
+	result.FailureDetail = forwardFailureDetail(nil, healthErr, convergedErr)
 	return sealResult(result)
 }
 
@@ -313,7 +313,7 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 			return sealResult(result)
 		}
 		result.Reason = "continuous-repair-forward-unproven"
-		result.FailureDetail = forwardFailureDetail(healthErr, convergedErr)
+		result.FailureDetail = forwardFailureDetail(nil, healthErr, convergedErr)
 		return sealResult(result)
 	}
 	if forwardErr == nil {
@@ -370,7 +370,7 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 		}
 		return sealResult(result)
 	}
-	result.FailureDetail = forwardFailureDetail(healthErr, convergedErr)
+	result.FailureDetail = forwardFailureDetail(applyErr, healthErr, convergedErr)
 	if !prepared.LKG.Present {
 		result.Reason = "continuous-repair-forward-unproven"
 		return sealResult(result)
