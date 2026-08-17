@@ -79,7 +79,35 @@ printf 'docs/readme.md\nscripts/probe_fugue_public_dns.sh\n' >"${tmpdir}/changed
 bash "${REPO_ROOT}/scripts/emit_traffic_safety_changed.sh" "${tmpdir}/changed" "${tmpdir}/github-output"
 grep -qx 'traffic_safety_changed=true' "${tmpdir}/github-output"
 
+git init -q "${tmpdir}/repo"
+git -C "${tmpdir}/repo" config user.email traffic-safety-test@example.com
+git -C "${tmpdir}/repo" config user.name traffic-safety-test
+mkdir -p "${tmpdir}/repo/.github/workflows"
+cp "${REPO_ROOT}/.github/workflows/ci.yml" "${tmpdir}/repo/.github/workflows/ci.yml"
+git -C "${tmpdir}/repo" add .github/workflows/ci.yml
+git -C "${tmpdir}/repo" commit -qm base
+base_revision="$(git -C "${tmpdir}/repo" rev-parse HEAD)"
+sed -i.bak 's/PREPUSH_TIMEOUT_SECONDS: "240"/PREPUSH_TIMEOUT_SECONDS: "239"/' "${tmpdir}/repo/.github/workflows/ci.yml"
+rm "${tmpdir}/repo/.github/workflows/ci.yml.bak"
+git -C "${tmpdir}/repo" add .github/workflows/ci.yml
+git -C "${tmpdir}/repo" commit -qm budget-only
+budget_revision="$(git -C "${tmpdir}/repo" rev-parse HEAD)"
+
 printf '.github/workflows/ci.yml\n' >"${tmpdir}/changed"
 : >"${tmpdir}/github-output"
-bash "${REPO_ROOT}/scripts/emit_traffic_safety_changed.sh" "${tmpdir}/changed" "${tmpdir}/github-output"
+FUGUE_REPO_ROOT="${tmpdir}/repo" bash "${REPO_ROOT}/scripts/emit_traffic_safety_changed.sh" "${tmpdir}/changed" "${tmpdir}/github-output" "${base_revision}" "${budget_revision}"
+grep -qx 'traffic_safety_changed=false' "${tmpdir}/github-output"
+
+sed -i.bak 's/timeout-minutes: 30/timeout-minutes: 31/' "${tmpdir}/repo/.github/workflows/ci.yml"
+rm "${tmpdir}/repo/.github/workflows/ci.yml.bak"
+git -C "${tmpdir}/repo" add .github/workflows/ci.yml
+git -C "${tmpdir}/repo" commit -qm traffic-job
+traffic_revision="$(git -C "${tmpdir}/repo" rev-parse HEAD)"
+: >"${tmpdir}/github-output"
+FUGUE_REPO_ROOT="${tmpdir}/repo" bash "${REPO_ROOT}/scripts/emit_traffic_safety_changed.sh" "${tmpdir}/changed" "${tmpdir}/github-output" "${budget_revision}" "${traffic_revision}"
 grep -qx 'traffic_safety_changed=true' "${tmpdir}/github-output"
+
+printf 'scripts/emit_traffic_safety_changed.sh\n' >"${tmpdir}/changed"
+: >"${tmpdir}/github-output"
+bash "${REPO_ROOT}/scripts/emit_traffic_safety_changed.sh" "${tmpdir}/changed" "${tmpdir}/github-output"
+grep -qx 'traffic_safety_changed=false' "${tmpdir}/github-output"
