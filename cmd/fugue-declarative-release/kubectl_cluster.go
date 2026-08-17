@@ -973,13 +973,13 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if decodeErr != nil {
 			return decodeErr
 		}
-		if evidenceErr := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); evidenceErr != nil {
+		if evidenceErr := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, applyErr); evidenceErr != nil {
 			return evidenceErr
 		}
 		if dryRun {
 			return nil
 		}
-		transferPatch, transferFound, transferErr := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
+		transferPatch, transferFound, transferErr := nextLegacyOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
 		if transferErr != nil {
 			return transferErr
 		}
@@ -1340,7 +1340,7 @@ func addDeclaredContainerEnvValuePointers(desired map[string]any, containerType,
 	}
 }
 
-func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, allowed []string, applyErr error) error {
+func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, allowed []string, declarativeManager string, applyErr error) error {
 	desiredMetadata, liveMetadata := mapField(desired, "metadata"), mapField(live, "metadata")
 	if stringValue(desiredMetadata["uid"]) == "" || stringValue(desiredMetadata["uid"]) != stringValue(liveMetadata["uid"]) ||
 		stringValue(desiredMetadata["resourceVersion"]) == "" || stringValue(desiredMetadata["resourceVersion"]) != stringValue(liveMetadata["resourceVersion"]) {
@@ -1353,7 +1353,8 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 	seen := make(map[string]bool, len(conflicts))
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
-		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !legacyOwnershipManagers[conflict.manager]) {
+		ownDeclarativeUpdate := declarativeManager != "" && conflict.manager == declarativeManager
+		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !legacyOwnershipManagers[conflict.manager] && !ownDeclarativeUpdate) {
 			return fmt.Errorf("emergency ownership conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
 		}
 		if legacyOwnershipManagers[conflict.manager] && !legacyOwnershipTransferPointer(pointer) {
@@ -1373,6 +1374,7 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 			}
 			pointers, flattenErr := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
 			if flattenErr != nil || len(pointers) == 0 ||
+				(ownDeclarativeUpdate && !stringSubset(pointers, ownershipCleanupPointers(allowed))) ||
 				(emergencyOwnershipManager(conflict.manager) && !emergencyProbePathPointer(pointer) &&
 					!stringSubset(pointers, ownershipCleanupPointers(allowed))) {
 				return errors.New("emergency managedFields entry expands beyond the exact allowlist")
@@ -1386,7 +1388,7 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 	return nil
 }
 
-func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []string, applyErr error) ([]map[string]any, bool, error) {
+func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []string, declarativeManager string, applyErr error) ([]map[string]any, bool, error) {
 	conflicts, err := parseEmergencySSAConflicts(applyErr)
 	if err != nil {
 		return nil, false, err
@@ -1400,7 +1402,8 @@ func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []st
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
 		if pointer != "" && legacyOwnershipTransferPointer(pointer) &&
-			(legacyOwnershipManagers[conflict.manager] || emergencyOwnershipManager(conflict.manager)) {
+			(legacyOwnershipManagers[conflict.manager] || emergencyOwnershipManager(conflict.manager) ||
+				(declarativeManager != "" && conflict.manager == declarativeManager)) {
 			hasTransfer = true
 		} else {
 			hasOther = true
