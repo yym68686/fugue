@@ -749,10 +749,10 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 		"- " + ssaFieldForPointer(liveness),
 		"- " + ssaFieldForPointer(readiness),
 	}, "\n"))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err != nil {
 		t.Fatalf("exact legacy probe conflicts were rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", applyErr)
 	if err != nil || !found {
 		t.Fatalf("legacy probe value patch was not produced: patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -779,7 +779,7 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 		`conflict with "helm" using apps/v1: ` + ssaFieldForPointer(liveness),
 		`conflict with "kubectl" using apps/v1: ` + ssaFieldForPointer(image),
 	}, "\n"))
-	if patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, mixed); err != nil || !found || len(patch) == 0 {
+	if patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", mixed); err != nil || !found || len(patch) == 0 {
 		t.Fatalf("mixed reviewed scalar ownership transfer was rejected: patch=%v found=%v err=%v", patch, found, err)
 	}
 }
@@ -814,10 +814,10 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactEnvironmentValues(t *testing.
 		"- " + ssaFieldForPointer(enabled),
 		"- " + ssaFieldForPointer(timeout),
 	}, "\n"))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err != nil {
 		t.Fatalf("exact legacy environment conflicts were rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", applyErr)
 	if err != nil || !found {
 		t.Fatalf("legacy environment value patch was not produced: patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -857,7 +857,7 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactEnvironmentValues(t *testing.
 	ambiguousDNS["env"] = append(anySlice(ambiguousDNS["env"]), map[string]any{
 		"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "value": "false",
 	})
-	if _, _, err := nextLegacyOwnershipTransferPatch(desired, ambiguous, allowed, applyErr); err == nil {
+	if _, _, err := nextLegacyOwnershipTransferPatch(desired, ambiguous, allowed, "", applyErr); err == nil {
 		t.Fatalf("ambiguous environment identity was accepted: %v", err)
 	}
 }
@@ -880,10 +880,10 @@ func TestExistingBridgeOwnershipTransfersOnlyReviewedAssociativeValue(t *testing
 		"fieldsV1": managedFieldsTree(t, []string{containerName, envName, enabled}),
 	}}
 	applyErr := errors.New("Apply failed with 1 conflict: conflict with \"fugue-probe-bridge-0123456789abcdef\" using apps/v1: " + ssaFieldForPointer(enabled))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{enabled}, applyErr); err != nil {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{enabled}, "", applyErr); err != nil {
 		t.Fatalf("reviewed associative identity conflict was rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{enabled}, applyErr)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{enabled}, "", applyErr)
 	if err != nil || !found {
 		t.Fatalf("reviewed associative value transfer failed: patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -898,7 +898,7 @@ func TestExistingBridgeOwnershipTransfersOnlyReviewedAssociativeValue(t *testing
 		containerName, envName, enabled,
 		"/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_MAX_STALE]/name",
 	})
-	if err := validateEmergencyOwnershipConflictEvidence(desired, expanded, []string{enabled}, applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, expanded, []string{enabled}, "", applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
 		t.Fatalf("unreviewed associative ownership was accepted: %v", err)
 	}
 }
@@ -926,10 +926,10 @@ func TestProbeOwnershipTransferAcceptsAlreadyDesiredBroadEmergencyManager(t *tes
 		"- " + ssaFieldForPointer(liveness),
 		"- " + ssaFieldForPointer(readiness),
 	}, "\n"))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err != nil {
 		t.Fatalf("broad emergency probe witness was rejected before exact transfer: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", applyErr)
 	if err != nil || !found {
 		t.Fatalf("already-desired probe transfer patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -1220,6 +1220,50 @@ func TestManagedFieldsOwnershipMaySpanDeclarativeApplyAndUpdateEntries(t *testin
 	metadata["managedFields"].([]any)[1].(map[string]any)["manager"] = "helm"
 	if managedFieldsOwnPointers(metadata, manager, pointers) {
 		t.Fatal("legacy manager ownership was incorrectly accepted as declarative")
+	}
+}
+
+func TestDeclarativeUpdateOwnershipTransfersOnlyExactEnvironmentValue(t *testing.T) {
+	manager := "fugue-edge-client-us-declarative"
+	enabled := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value"
+	desired := map[string]any{
+		"metadata": map[string]any{"uid": "dns-uid", "resourceVersion": "42", "generation": json.Number("7")},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "dns", "env": []any{map[string]any{
+				"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "value": "true",
+			}},
+		}}}}},
+	}
+	live := deepCopyJSONMap(t, desired)
+	mapField(live, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": manager, "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{enabled}),
+	}}
+	dns := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	anySlice(dns["env"])[0].(map[string]any)["value"] = "false"
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "` + manager + `" using apps/v1: ` + ssaFieldForPointer(enabled))
+
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{enabled}, manager, applyErr); err != nil {
+		t.Fatalf("exact declarative Update ownership was rejected: %v", err)
+	}
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{enabled}, manager, applyErr)
+	if err != nil || !found {
+		t.Fatalf("exact declarative Update ownership did not produce a scalar transfer: patch=%v found=%v err=%v", patch, found, err)
+	}
+	encoded := string(mustJSON(t, patch))
+	if !strings.Contains(encoded, `"path":"/spec/template/spec/containers/0/env/0/value"`) ||
+		!strings.Contains(encoded, `"value":"true"`) || strings.Contains(encoded, "/managedFields/") {
+		t.Fatalf("declarative Update ownership transfer was not an exact value patch: %s", encoded)
+	}
+
+	expanded := deepCopyJSONMap(t, live)
+	entry := anySlice(mapField(expanded, "metadata")["managedFields"])[0].(map[string]any)
+	entry["fieldsV1"] = managedFieldsTree(t, []string{
+		enabled,
+		"/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_MAX_STALE]/name",
+	})
+	if err := validateEmergencyOwnershipConflictEvidence(desired, expanded, []string{enabled}, manager, applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("expanded declarative Update ownership was accepted: %v", err)
 	}
 }
 
@@ -1684,10 +1728,10 @@ func TestEmergencyOwnershipConvergenceIsExactAndCASBound(t *testing.T) {
 		conflictLines = append(conflictLines, "- "+ssaFieldForPointer(pointer))
 	}
 	applyErr := errors.New(strings.Join(conflictLines, "\n"))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err != nil {
 		t.Fatalf("exact emergency conflict rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, applyErr)
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", applyErr)
 	if err != nil || !found || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" ||
 		strings.Contains(string(mustJSON(t, patch)), "/managedFields/") {
 		t.Fatalf("unexpected exact scalar transfer patch: patch=%v found=%v err=%v", patch, found, err)
@@ -1695,7 +1739,7 @@ func TestEmergencyOwnershipConvergenceIsExactAndCASBound(t *testing.T) {
 
 	extra := append(append([]string(nil), allowed...), "/spec/replicas")
 	metadata["managedFields"].([]any)[1].(map[string]any)["fieldsV1"] = managedFieldsTree(t, extra)
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
 		t.Fatalf("expanded emergency manager was accepted: %v", err)
 	}
 }
@@ -1761,7 +1805,7 @@ func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 	} {
 		desired := map[string]any{"metadata": map[string]any{"uid": "u", "resourceVersion": "1"}}
 		live := map[string]any{"metadata": map[string]any{"uid": "u", "resourceVersion": "1", "managedFields": []any{}}}
-		if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, failure); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
+		if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", failure); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
 			t.Fatalf("unknown ownership conflict was accepted: %v", err)
 		}
 	}
