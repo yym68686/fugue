@@ -34,6 +34,16 @@ type rotateTrafficOverrideSigningKeyRequest struct {
 	ExpectedGeneration uint64 `json:"expected_generation"`
 }
 
+const dnsTrafficOverrideFeedSchemaV1 = "traffic-override-feed.fugue.dev/v1"
+
+type dnsTrafficOverrideFeed struct {
+	Schema      string                                `json:"schema"`
+	Generation  uint64                                `json:"generation"`
+	GeneratedAt time.Time                             `json:"generated_at"`
+	Overrides   []model.TrafficOverride               `json:"overrides"`
+	SigningKey  model.TrafficOverrideSigningKeyStatus `json:"signing_key"`
+}
+
 func (s *Server) handleAdminListTrafficOverrides(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requirePlatformAdmin(w, r); !ok {
 		return
@@ -44,6 +54,80 @@ func (s *Server) handleAdminListTrafficOverrides(w http.ResponseWriter, r *http.
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"overrides": overrides})
+}
+
+// handleDNSTrafficOverrideFeed serves the independent, signed overlay feed.
+// It is scoped by the existing edge token and is inert unless a DNS consumer
+// explicitly opts into the overlay path.
+func (s *Server) handleDNSTrafficOverrideFeed(w http.ResponseWriter, r *http.Request) {
+	authContext, ok := s.authorizeEdgeRequest(w, r)
+	if !ok {
+		return
+	}
+	requestedGroup := strings.TrimSpace(r.URL.Query().Get("edge_group_id"))
+	if authContext.Scoped {
+		if requestedGroup == "" {
+			requestedGroup = authContext.EdgeGroupID
+		}
+		if !strings.EqualFold(requestedGroup, authContext.EdgeGroupID) {
+			httpx.WriteError(w, http.StatusForbidden, "edge token cannot access another edge_group_id")
+			return
+		}
+	}
+	overrides, err := s.store.ListTrafficOverrides()
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	zone := normalizeExternalAppDomain(r.URL.Query().Get("zone"))
+	nodeID := strings.TrimSpace(r.URL.Query().Get("dns_node_id"))
+	if nodeID != "" {
+		node, nodeErr := s.store.GetDNSNode(nodeID)
+		if nodeErr != nil && !errors.Is(nodeErr, store.ErrNotFound) {
+			s.writeStoreError(w, nodeErr)
+			return
+		}
+		if nodeErr == nil {
+			if requestedGroup != "" && !strings.EqualFold(strings.TrimSpace(node.EdgeGroupID), requestedGroup) {
+				httpx.WriteError(w, http.StatusForbidden, "dns node is outside the requested edge group")
+				return
+			}
+			if zone != "" && node.Zone != "" && !strings.EqualFold(normalizeExternalAppDomain(node.Zone), zone) {
+				httpx.WriteError(w, http.StatusForbidden, "dns node is outside the requested zone")
+				return
+			}
+		}
+	}
+	now := time.Now().UTC()
+	active := make([]model.TrafficOverride, 0, len(overrides))
+	for _, override := range overrides {
+		if override.State != model.TrafficOverrideStateStaged || !override.ExpiresAt.After(now) {
+			continue
+		}
+		if zone != "" && !nameWithinDNSZone(override.Hostname, zone) {
+			continue
+		}
+		active = append(active, override)
+	}
+	keyring, err := s.store.GetTrafficOverrideSigningKeyring()
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	feed := dnsTrafficOverrideFeed{
+		Schema:      dnsTrafficOverrideFeedSchemaV1,
+		Generation:  keyring.Generation,
+		GeneratedAt: now,
+		Overrides:   active,
+		SigningKey:  keyring.Status(),
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"feed": feed})
+}
+
+func nameWithinDNSZone(name, zone string) bool {
+	name = normalizeExternalAppDomain(name)
+	zone = normalizeExternalAppDomain(zone)
+	return name != "" && zone != "" && (name == zone || strings.HasSuffix(name, "."+zone))
 }
 
 func (s *Server) handleAdminGetTrafficOverride(w http.ResponseWriter, r *http.Request) {

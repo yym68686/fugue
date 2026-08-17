@@ -302,6 +302,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/dns/heartbeat", http.HandlerFunc(s.handleDNSHeartbeat))
 	mux.Handle("GET /v1/dns/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListDNSNodes)))
 	mux.Handle("GET /v1/dns/nodes/{dns_node_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetDNSNode)))
+	mux.Handle("GET /v1/dns/traffic-overrides", http.HandlerFunc(s.handleDNSTrafficOverrideFeed))
 	mux.Handle("GET /v1/dns/zones", s.auth.RequireAPI(http.HandlerFunc(s.handleListHostedDNSZones)))
 	mux.Handle("POST /v1/dns/zones", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateHostedDNSZone)))
 	mux.Handle("GET /v1/dns/zones/{zone}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetHostedDNSZone)))
