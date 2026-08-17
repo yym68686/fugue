@@ -183,3 +183,23 @@ func TestTrafficOverrideRejectsCandidateWithoutVerifiedHostRoute(t *testing.T) {
 		t.Fatalf("expected route validation failure, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestTrafficOverrideRejectsMismatchedPreparedDigestAsInputError(t *testing.T) {
+	t.Parallel()
+	_, server, _, adminKey, _, _ := setupAppDomainTestServerWithDomains(t, "example.com")
+	server.trafficOverrideRouteProbe = func(context.Context, string, string) error { return nil }
+	recorder := performJSONRequest(t, server, http.MethodPut, "/v1/admin/traffic-overrides/alias.example.com", adminKey, map[string]any{
+		"answers":              []string{"192.0.2.10"},
+		"required_host_routes": []string{"app.example.com"},
+		"route_generation":     "route-generation-prepared-digest",
+		"route_digest":         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"prepared_digest":      "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"activate_at":          time.Now().UTC().Add(time.Minute).Format(time.RFC3339),
+		"expires_at":           time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		"reason":               "prepared digest validation",
+		"expected_generation":  0,
+	})
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "prepared_digest") {
+		t.Fatalf("expected prepared digest input error, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
