@@ -632,16 +632,30 @@ func (store *AuthorityStore) NormalizeCurrentBaseline(ctx context.Context, autho
 	configMaps := store.client.CoreV1().ConfigMaps(store.namespace)
 	current, err := configMaps.Get(ctx, currentAuthorityName(authority.GroupID), metav1.GetOptions{})
 	if err != nil || current.UID != expectedUID || current.ResourceVersion != expectedResourceVersion ||
-		current.Labels["fugue.pro/group"] != authority.GroupID || len(current.Data) != 2 {
+		current.Labels["fugue.pro/group"] != authority.GroupID || (len(current.Data) != 2 && len(current.Data) != 3) {
+		return "", "", errors.New("authority normalization CAS changed")
+	}
+	authorityPayload, hasAuthority := current.Data["authority.json"]
+	baselinePayload, hasBaseline := current.Data["baseline-receipt.json"]
+	previousNormalizationPayload, hasPreviousNormalization := current.Data["normalization-receipt.json"]
+	if !hasAuthority || !hasBaseline || len(current.Data) == 3 && !hasPreviousNormalization {
 		return "", "", errors.New("authority normalization CAS changed")
 	}
 	var before CurrentAuthority
 	var baseline AuthorityBaselineReceipt
-	if decodeStrict([]byte(current.Data["authority.json"]), &before) != nil || before != receipt.Before || before.Validate() != nil ||
-		decodeStrict([]byte(current.Data["baseline-receipt.json"]), &baseline) != nil || baseline.Validate() != nil ||
+	if decodeStrict([]byte(authorityPayload), &before) != nil || before != receipt.Before || before.Validate() != nil ||
+		decodeStrict([]byte(baselinePayload), &baseline) != nil || baseline.Validate() != nil ||
 		baseline.ReceiptDigest != receipt.BaselineReceiptDigest || before.BaselineReceiptDigest != baseline.ReceiptDigest ||
 		before.PreviousRecordDigest == "" || before.PreviousWorkerSlot == "" {
 		return "", "", errors.New("authority normalization predecessor changed")
+	}
+	if hasPreviousNormalization {
+		var previousNormalization AuthorityNormalizationReceipt
+		if decodeStrict([]byte(previousNormalizationPayload), &previousNormalization) != nil || previousNormalization.Validate() != nil ||
+			previousNormalization.GroupID != authority.GroupID || previousNormalization.BaselineReceiptDigest != baseline.ReceiptDigest ||
+			before.AuthorityEpoch < previousNormalization.After.AuthorityEpoch {
+			return "", "", errors.New("authority normalization predecessor changed")
+		}
 	}
 	authorityRaw, err := declarativerelease.CanonicalJSON(authority)
 	if err != nil {
@@ -653,7 +667,7 @@ func (store *AuthorityStore) NormalizeCurrentBaseline(ctx context.Context, autho
 	}
 	updated := current.DeepCopy()
 	updated.Data = map[string]string{
-		"authority.json": string(authorityRaw), "baseline-receipt.json": current.Data["baseline-receipt.json"],
+		"authority.json": string(authorityRaw), "baseline-receipt.json": baselinePayload,
 		"normalization-receipt.json": string(receiptRaw),
 	}
 	updated.Labels = authorityLabels(authority.GroupID)
