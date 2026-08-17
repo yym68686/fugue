@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -66,5 +67,65 @@ func TestUniqueStringsPreserveOrder(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("expected order %+v, got %+v", want, got)
 		}
+	}
+}
+
+func TestSummarizeAuthoritativeAnswerSetsReportsUSDEAnswerSplit(t *testing.T) {
+	t.Parallel()
+
+	consistent, sets, reasons := summarizeAuthoritativeAnswerSets([]dnsAnswerCheckNode{
+		{DNSNodeID: "dns-us", EdgeGroupID: "edge-group-country-us", QueryOK: true, Answers: []string{}},
+		{DNSNodeID: "dns-de", EdgeGroupID: "edge-group-country-de", QueryOK: true, Answers: []string{"15.204.94.71"}},
+	})
+	if consistent {
+		t.Fatal("expected divergent US/DE answers to fail authoritative consistency")
+	}
+	if len(sets) != 2 {
+		t.Fatalf("expected two authoritative answer sets, got %+v", sets)
+	}
+	joined := strings.Join(reasons, " | ")
+	for _, want := range []string{"authoritative answer split", "edge-group-country-us", "edge-group-country-de", "<empty>", "15.204.94.71"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected split reason to contain %q, got %q", want, joined)
+		}
+	}
+}
+
+func TestSummarizeAuthoritativeAnswerSetsIgnoresAnswerOrder(t *testing.T) {
+	t.Parallel()
+
+	consistent, sets, reasons := summarizeAuthoritativeAnswerSets([]dnsAnswerCheckNode{
+		{DNSNodeID: "dns-us", EdgeGroupID: "edge-group-country-us", QueryOK: true, Answers: []string{"2001:db8::1", "15.204.94.71"}},
+		{DNSNodeID: "dns-de", EdgeGroupID: "edge-group-country-de", QueryOK: true, Answers: []string{"15.204.94.71", "2001:db8::1"}},
+	})
+	if !consistent {
+		t.Fatalf("expected identical answer sets to be consistent, reasons=%v", reasons)
+	}
+	if len(sets) != 1 || len(sets[0].DNSNodeIDs) != 2 {
+		t.Fatalf("expected one answer set shared by two nodes, got %+v", sets)
+	}
+}
+
+func TestSummarizeAuthoritativeAnswerSetsFailsClosedOnQueryFailure(t *testing.T) {
+	t.Parallel()
+
+	consistent, _, reasons := summarizeAuthoritativeAnswerSets([]dnsAnswerCheckNode{
+		{DNSNodeID: "dns-us", EdgeGroupID: "edge-group-country-us", QueryOK: false},
+		{DNSNodeID: "dns-de", EdgeGroupID: "edge-group-country-de", QueryOK: true, Answers: []string{"15.204.94.71"}},
+	})
+	if consistent {
+		t.Fatal("expected a failed authoritative query to fail consistency")
+	}
+	if joined := strings.Join(reasons, " | "); !strings.Contains(joined, "authoritative query failed on nodes: dns-us") {
+		t.Fatalf("expected failed node evidence, got %q", joined)
+	}
+}
+
+func TestProbeDNSAnswerHostRejectsInvalidInput(t *testing.T) {
+	t.Parallel()
+
+	probe := probeDNSAnswerHost(t.Context(), "0-0.pro", "not-an-ip")
+	if probe.Pass || probe.Message == "" {
+		t.Fatalf("expected invalid candidate IP to fail with evidence, got %+v", probe)
 	}
 }
