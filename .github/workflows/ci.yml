@@ -62,7 +62,7 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           git diff --no-renames --name-only "${base}...HEAD" -- >"${CHANGED}"
-          scripts/emit_traffic_safety_changed.sh "${CHANGED}" "${GITHUB_OUTPUT}"
+          scripts/emit_traffic_safety_changed.sh "${CHANGED}" "${GITHUB_OUTPUT}" "${base}" "${GITHUB_SHA}"
           go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
           "${RELEASE_TOOL}" plan deploy/releases/components.json "${base}" "${GITHUB_SHA}" "${CHANGED}" >"${PLAN}"
           "${RELEASE_TOOL}" emit-github-output "${PLAN}" "${GITHUB_OUTPUT}"
