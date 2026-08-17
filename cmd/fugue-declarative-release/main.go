@@ -230,8 +230,7 @@ func runPlan(args []string, output io.Writer) error {
 			if err := exec.Command("git", "merge-base", "--is-ancestor", intent.ExpectedPreviousConfigSHA, baseSHA).Run(); err != nil {
 				return fmt.Errorf("component %q recovered predecessor is not in the trusted base ancestry", release.ComponentID)
 			}
-			recoveredRaw, recoveredErr := exec.Command("git", "rev-list", "-1", intent.ExpectedPreviousConfigSHA, "--", release.IntentPath).CombinedOutput()
-			if recoveredErr != nil || strings.TrimSpace(string(recoveredRaw)) != intent.ExpectedPreviousConfigSHA {
+			if !isExactIntentAtomOrMerge(intent.ExpectedPreviousConfigSHA, release.IntentPath) {
 				return fmt.Errorf("component %q recovered predecessor is not an exact production intent atom", release.ComponentID)
 			}
 		}
