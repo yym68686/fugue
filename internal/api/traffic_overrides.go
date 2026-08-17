@@ -20,6 +20,8 @@ type putTrafficOverrideRequest struct {
 	RequiredHostRoutes []string  `json:"required_host_routes"`
 	RouteGeneration    string    `json:"route_generation"`
 	RouteDigest        string    `json:"route_digest"`
+	PreparedDigest     string    `json:"prepared_digest"`
+	ActivateAt         time.Time `json:"activate_at"`
 	ExpiresAt          time.Time `json:"expires_at"`
 	Reason             string    `json:"reason"`
 	ExpectedGeneration uint64    `json:"expected_generation"`
@@ -178,6 +180,8 @@ func (s *Server) handleAdminPutTrafficOverride(w http.ResponseWriter, r *http.Re
 		RequiredHostRoutes: normalizeTrafficOverrideHostnames(req.RequiredHostRoutes),
 		RouteGeneration:    strings.TrimSpace(req.RouteGeneration),
 		RouteDigest:        strings.TrimSpace(strings.ToLower(req.RouteDigest)),
+		PreparedDigest:     strings.TrimSpace(strings.ToLower(req.PreparedDigest)),
+		ActivateAt:         req.ActivateAt.UTC(),
 		ExpiresAt:          req.ExpiresAt.UTC(),
 		Reason:             strings.TrimSpace(req.Reason),
 		Operator:           strings.TrimSpace(principal.ActorType + "/" + principal.ActorID),
@@ -226,6 +230,7 @@ func (s *Server) handleAdminRevokeTrafficOverride(w http.ResponseWriter, r *http
 	now := time.Now().UTC()
 	current.Generation++
 	current.State = model.TrafficOverrideStateRevoked
+	current.PreparedDigest = ""
 	current.Reason = strings.TrimSpace(req.Reason)
 	current.Operator = strings.TrimSpace(principal.ActorType + "/" + principal.ActorID)
 	current.SignedAt = now

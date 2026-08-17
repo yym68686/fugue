@@ -72,6 +72,7 @@ type Service struct {
 	zoneCancels  map[string]context.CancelFunc
 	overrideMu   sync.RWMutex
 	overrides    map[string]model.TrafficOverride
+	prepared     map[string]model.TrafficOverride
 	overrideGen  uint64
 	override     trafficOverrideSettings
 }
@@ -218,6 +219,7 @@ func NewService(cfg config.DNSConfig, logger *log.Logger) *Service {
 		peerHealth:    map[string]model.PeerHealthDecision{},
 		walFilterLast: map[string]time.Time{},
 		overrides:     map[string]model.TrafficOverride{},
+		prepared:      map[string]model.TrafficOverride{},
 		override:      trafficOverrideSettingsFromEnv(),
 		snapshot: Status{
 			Status:      "unhealthy",

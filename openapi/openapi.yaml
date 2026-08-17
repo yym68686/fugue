@@ -14206,7 +14206,7 @@ components:
     TrafficOverride:
       type: object
       additionalProperties: false
-      required: [schema, hostname, generation, state, answers, required_host_routes, route_generation, route_digest, expires_at, reason, operator, artifact_digest, key_id, signature, signed_at, created_at, updated_at]
+      required: [schema, hostname, generation, state, answers, required_host_routes, route_generation, route_digest, prepared_digest, activate_at, expires_at, reason, operator, artifact_digest, key_id, signature, signed_at, created_at, updated_at]
       properties:
         schema:
           type: string
@@ -14239,6 +14239,12 @@ components:
         route_digest:
           type: string
           pattern: '^sha256:[0-9a-f]{64}$'
+        prepared_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        activate_at:
+          type: string
+          format: date-time
         expires_at:
           type: string
           format: date-time
@@ -14266,7 +14272,7 @@ components:
     TrafficOverridePutRequest:
       type: object
       additionalProperties: false
-      required: [answers, required_host_routes, route_generation, route_digest, expires_at, reason, expected_generation]
+      required: [answers, required_host_routes, route_generation, route_digest, activate_at, expires_at, reason, expected_generation]
       properties:
         answers:
           type: array
@@ -14287,6 +14293,12 @@ components:
         route_digest:
           type: string
           pattern: '^sha256:[0-9a-fA-F]{64}$'
+        prepared_digest:
+          type: string
+          pattern: '^sha256:[0-9a-fA-F]{64}$'
+        activate_at:
+          type: string
+          format: date-time
         expires_at:
           type: string
           format: date-time

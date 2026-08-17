@@ -33,6 +33,7 @@ func TestTrafficOverrideConsumerAtomicallyCachesAndRetainsLKGOnPullFailure(t *te
 		RequiredHostRoutes: []string{"app.example.com"},
 		RouteGeneration:    "route-generation-1",
 		RouteDigest:        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ActivateAt:         now.Add(time.Minute),
 		ExpiresAt:          now.Add(time.Hour),
 		Reason:             "test atomic DNS overlay",
 		Operator:           "test/operator",
@@ -69,6 +70,10 @@ func TestTrafficOverrideConsumerAtomicallyCachesAndRetainsLKGOnPullFailure(t *te
 	if err := service.syncTrafficOverrides(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if got := service.overlayRecords("app.example.com", miekgdns.TypeA); len(got) != 0 {
+		t.Fatalf("future prepared override activated before activate_at: %+v", got)
+	}
+	service.activatePrepared(now.Add(2 * time.Minute))
 	if got := service.overlayRecords("app.example.com", miekgdns.TypeA); len(got) != 1 || got[0].Values[0] != "192.0.2.10" {
 		t.Fatalf("expected cached overlay answer, got %+v", got)
 	}
