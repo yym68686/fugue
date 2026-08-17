@@ -13,6 +13,33 @@ import (
 	"time"
 )
 
+type failedAuditTailCandidateStore struct {
+	GroupCandidateStore
+	store             *PersistentGroupStore
+	groupID           string
+	candidateSequence uint64
+	recordedAt        time.Time
+}
+
+func (store *failedAuditTailCandidateStore) PutGroupStagedCurrentLKGCandidateCAS(ctx context.Context, groupID string,
+	expectedEpoch, expectedAuthoritySequence, expectedPublicationSequence, expectedRecoveryEpoch uint64, expectedPublishedDigest string,
+	serving *GroupServingAuthorityWitness, candidate GroupCandidateBundle) (GroupCandidateBundle, error) {
+	authority, err := store.store.ReadGroupAuthority(ctx, store.groupID)
+	if err != nil {
+		return GroupCandidateBundle{}, err
+	}
+	failed := GroupAuthorityLedgerEntry{Schema: GroupAuthorityLedgerSchemaV1, GroupID: store.groupID, Status: GroupAuthorityStatusFailed,
+		CandidateLedgerSequence: store.candidateSequence, RouteIntentGeneration: "cas-race-audit-tail",
+		LastPublishedBundleGeneration: authority.Published.Bundle.Generation, FailureCode: GroupAuthorityFailureSigning,
+		Authority: "edge-control", PublicationEnabled: true, RecordedAt: store.recordedAt}
+	if _, err := store.store.AppendGroupAuthorityCAS(ctx, store.groupID, authority.LedgerHead.Sequence,
+		store.candidateSequence, failed, nil); err != nil {
+		return GroupCandidateBundle{}, err
+	}
+	return store.GroupCandidateStore.PutGroupStagedCurrentLKGCandidateCAS(ctx, groupID, expectedEpoch, expectedAuthoritySequence,
+		expectedPublicationSequence, expectedRecoveryEpoch, expectedPublishedDigest, serving, candidate)
+}
+
 func TestWorkerCandidateStageBindsExactReleaseAndPreservesCurrentAuthority(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
@@ -108,6 +135,60 @@ func TestWorkerCandidateStageBindsExactReleaseAndPreservesCurrentAuthority(t *te
 	afterReplay, _, _ := store.ReadGroupCandidate(ctx, groupID)
 	if !reflect.DeepEqual(afterReplay, staged) {
 		t.Fatalf("exact replay changed candidate: before=%+v after=%+v", staged, afterReplay)
+	}
+}
+
+func TestWorkerCandidateStageAcceptsFailedAuditTailThatPreservesPublication(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 8, 30, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, signer, existing, authority := groupPromotionFixture(t, groupID, now)
+	inventory, err := store.ReadGroupInventory(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory.ActiveEpoch.Slot = "a"
+	inventory.ActiveEpoch.ReleaseEpoch = strings.Repeat("a", 40)
+	inventory.ObservedAt = now.Add(time.Minute)
+	expectedInventorySequence := inventory.Sequence
+	inventory.Sequence++
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, expectedInventorySequence, inventory); err != nil {
+		t.Fatal(err)
+	}
+	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64)}
+	request := GroupCandidateStageRequest{Schema: GroupCandidateStageRequestSchemaV1, GroupID: groupID,
+		ExpectedAuthoritySequence: authority.LedgerHead.Sequence, ExpectedPublicationSequence: authority.Published.PublicationSequence,
+		ExpectedRecoveryEpoch: authority.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: authority.Published.Digest,
+		ExpectedCandidateEpoch: existing.Epoch, ExpectedCurrentWorkerSlot: "a", TargetWorkerSlot: "b",
+		WorkerSourceSHA: strings.Repeat("6", 40), WorkerImageDigest: "sha256:" + strings.Repeat("7", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("8", 64), Reason: "stage after publication-preserving audit failure"}
+	failed := GroupAuthorityLedgerEntry{Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Status: GroupAuthorityStatusFailed,
+		CandidateLedgerSequence: authority.Published.CandidateLedgerSequence, RouteIntentGeneration: "audit-tail",
+		LastPublishedBundleGeneration: authority.Published.Bundle.Generation, FailureCode: GroupAuthorityFailureSigning,
+		Authority: "edge-control", PublicationEnabled: true, RecordedAt: now.Add(30 * time.Second)}
+	if _, err := store.AppendGroupAuthorityCAS(ctx, groupID, authority.LedgerHead.Sequence,
+		authority.Published.CandidateLedgerSequence, failed, nil); err != nil {
+		t.Fatal(err)
+	}
+	authorityAfterAudit, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || authorityAfterAudit.LedgerHead.Sequence != request.ExpectedAuthoritySequence+1 {
+		t.Fatalf("failed audit tail was not appended: authority=%+v err=%v", authorityAfterAudit, err)
+	}
+	stagingStore := &failedAuditTailCandidateStore{GroupCandidateStore: store, store: store, groupID: groupID,
+		candidateSequence: authority.Published.CandidateLedgerSequence, recordedAt: now.Add(45 * time.Second)}
+	publisher := GroupCandidatePublisher{Store: stagingStore, Signer: signer,
+		CurrentLKG: &GroupAuthorityPublisher{Store: store, Signer: signer}, Identity: identity}
+	staged, err := publisher.stageWorkerCurrentLKG(ctx, request, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("stage across failed audit tail: %v", err)
+	}
+	authorityAfterStage, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || authorityAfterStage.LedgerHead.Sequence != authorityAfterAudit.LedgerHead.Sequence+1 ||
+		staged.AuthorityLedgerSequence != authorityAfterAudit.LedgerHead.Sequence || !candidateBindsCurrentAuthority(staged, authorityAfterStage) {
+		t.Fatalf("candidate lost publication binding across failed audit CAS race: candidate=%+v before=%+v after=%+v err=%v",
+			staged, authorityAfterAudit, authorityAfterStage, err)
 	}
 }
 
