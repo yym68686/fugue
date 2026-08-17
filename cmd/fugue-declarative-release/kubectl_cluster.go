@@ -1204,6 +1204,34 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 	return allowed
 }
 
+// ownershipCleanupPointers includes only the associative-list identity leaves
+// Kubernetes records when a JSON Patch updates an exact container or env
+// scalar. These name leaves are structural witnesses for an already-reviewed
+// pointer, not additional runtime values that the release may change.
+func ownershipCleanupPointers(allowed []string) []string {
+	cleanupSet := make(map[string]bool, len(allowed)*2)
+	for _, pointer := range allowed {
+		if pointer == "" {
+			continue
+		}
+		cleanupSet[pointer] = true
+		parts := strings.Split(strings.TrimPrefix(pointer, "/"), "/")
+		for index, part := range parts {
+			if !strings.Contains(part, "[name=") || !strings.HasSuffix(part, "]") {
+				continue
+			}
+			prefix := "/" + strings.Join(parts[:index+1], "/")
+			cleanupSet[prefix+"/name"] = true
+		}
+	}
+	cleanup := make([]string, 0, len(cleanupSet))
+	for pointer := range cleanupSet {
+		cleanup = append(cleanup, pointer)
+	}
+	sort.Strings(cleanup)
+	return cleanup
+}
+
 // addDeclaredContainerCPUResourcePointers admits only the two scalar CPU
 // leaves that kubectl set resources can own. Memory, ephemeral storage,
 // resource maps and every other container field remain outside the recovery
@@ -1325,7 +1353,8 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 			}
 			pointers, flattenErr := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
 			if flattenErr != nil || len(pointers) == 0 ||
-				(emergencyOwnershipManager(conflict.manager) && !emergencyProbePathPointer(pointer) && !stringSubset(pointers, allowed)) {
+				(emergencyOwnershipManager(conflict.manager) && !emergencyProbePathPointer(pointer) &&
+					!stringSubset(pointers, ownershipCleanupPointers(allowed))) {
 				return errors.New("emergency managedFields entry expands beyond the exact allowlist")
 			}
 			matchedEntry = true
@@ -1557,6 +1586,7 @@ func nextEmergencyOwnershipPatch(live map[string]any, declarativeManager string,
 		return nil, false, errors.New("emergency ownership cleanup lacks UID/RV")
 	}
 	entries := anySlice(metadata["managedFields"])
+	cleanupAllowed := ownershipCleanupPointers(allowed)
 	unsafeOverlap := false
 	for index, rawEntry := range entries {
 		entry, _ := rawEntry.(map[string]any)
@@ -1565,10 +1595,15 @@ func nextEmergencyOwnershipPatch(live map[string]any, declarativeManager string,
 			continue
 		}
 		pointers, err := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
-		if err != nil || len(pointers) == 0 || !stringsOverlap(pointers, allowed) {
+		if err != nil || len(pointers) == 0 {
 			continue
 		}
-		if !stringSubset(pointers, allowed) {
+		overlapsReviewedRuntime := stringsOverlap(pointers, allowed)
+		overlapsBridgeScaffolding := strings.HasPrefix(manager, probeBridgeManagerPrefix) && stringsOverlap(pointers, cleanupAllowed)
+		if !overlapsReviewedRuntime && !overlapsBridgeScaffolding {
+			continue
+		}
+		if !stringSubset(pointers, cleanupAllowed) {
 			unsafeOverlap = true
 			continue
 		}
@@ -2065,16 +2100,19 @@ func verifyNoEmergencyOwnership(release declarativerelease.PlanRelease, identity
 		return nil
 	}
 	metadata := mapField(live, "metadata")
+	cleanupAllowed := ownershipCleanupPointers(allowed)
 	for _, rawEntry := range anySlice(metadata["managedFields"]) {
 		entry, _ := rawEntry.(map[string]any)
-		if !emergencyOwnershipManager(stringValue(entry["manager"])) || stringValue(entry["subresource"]) != "" {
+		manager := stringValue(entry["manager"])
+		if !emergencyOwnershipManager(manager) || stringValue(entry["subresource"]) != "" {
 			continue
 		}
 		pointers, err := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
 		if err != nil {
 			return err
 		}
-		if stringsOverlap(pointers, allowed) {
+		if stringsOverlap(pointers, allowed) ||
+			(strings.HasPrefix(manager, probeBridgeManagerPrefix) && stringsOverlap(pointers, cleanupAllowed)) {
 			return fmt.Errorf("declared resource %s/%s retains emergency field ownership", identity.Kind, identity.Name)
 		}
 	}
