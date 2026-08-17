@@ -356,6 +356,113 @@ func TestCurrentAuthorityCASRequiresExactPreviousAndSlotSwitch(t *testing.T) {
 	}
 }
 
+func TestNormalizeCurrentBaselineCanReplaceAValidatedPreviousReceipt(t *testing.T) {
+	ctx := context.Background()
+	groupID := "edge-pool-a"
+	baseline, err := (AuthorityBaselineReceipt{
+		GroupID: groupID, BeforeRecordDigest: otherDigest, BeforeWorkerSlot: AuthoritySlotB, BeforeAuthorityEpoch: 1,
+		RecordDigest: testDigest, WorkerSlot: AuthoritySlotA, AuthorityEpoch: 2,
+		Nodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-old-uid", FrontResourceVersion: "10",
+			WorkerPodUID: "worker-old-uid", WorkerResourceVersion: "11", ActivationGeneration: 1,
+			BundleGeneration: "baseline-bundle-1", ServingGeneration: "baseline-serving-1", WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest}},
+		ObservedAt: time.Unix(1_000, 0).UTC().Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousBefore := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: groupID,
+		CurrentRecordDigest: otherDigest, CurrentWorkerSlot: AuthoritySlotB, CurrentFrontGeneration: 1,
+		CurrentBundleGeneration: "legacy-bundle-1", CurrentWorkerSourceSHA: testSHA, CurrentWorkerImageDigest: testDigest,
+		PreviousRecordDigest: testDigest, PreviousWorkerSlot: AuthoritySlotA, PreviousFrontGeneration: 1,
+		PreviousBundleGeneration: "legacy-bundle-0", PreviousWorkerSourceSHA: testSHA, PreviousWorkerImageDigest: otherDigest,
+		AuthorityEpoch: 3, BaselineReceiptDigest: baseline.ReceiptDigest}
+	previousAfter := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: groupID,
+		CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, CurrentFrontGeneration: 2,
+		CurrentBundleGeneration: "normalized-bundle-2", CurrentWorkerSourceSHA: testSHA, CurrentWorkerImageDigest: testDigest,
+		AuthorityEpoch: 4, BaselineReceiptDigest: baseline.ReceiptDigest}
+	previousReceipt, err := (AuthorityNormalizationReceipt{GroupID: groupID, BaselineReceiptDigest: baseline.ReceiptDigest,
+		Before: previousBefore, After: previousAfter,
+		Nodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-uid-1", FrontResourceVersion: "20",
+			WorkerPodUID: "worker-pod-uid-1", WorkerResourceVersion: "21", ActivationGeneration: 2,
+			BundleGeneration: previousAfter.CurrentBundleGeneration, ServingGeneration: "normalized-serving-2",
+			WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest}},
+		ObservedAt: time.Unix(2_000, 0).UTC().Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: groupID,
+		CurrentRecordDigest: otherDigest, CurrentWorkerSlot: AuthoritySlotB, CurrentFrontGeneration: 3,
+		CurrentBundleGeneration: "legacy-bundle-3", CurrentWorkerSourceSHA: testSHA, CurrentWorkerImageDigest: otherDigest,
+		PreviousRecordDigest: testDigest, PreviousWorkerSlot: AuthoritySlotA, PreviousFrontGeneration: 2,
+		PreviousBundleGeneration: previousAfter.CurrentBundleGeneration, PreviousWorkerSourceSHA: testSHA, PreviousWorkerImageDigest: testDigest,
+		AuthorityEpoch: 5, BaselineReceiptDigest: baseline.ReceiptDigest}
+	after := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: groupID,
+		CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, CurrentFrontGeneration: 4,
+		CurrentBundleGeneration: "normalized-bundle-4", CurrentWorkerSourceSHA: testSHA, CurrentWorkerImageDigest: testDigest,
+		AuthorityEpoch: 6, BaselineReceiptDigest: baseline.ReceiptDigest}
+	receipt, err := (AuthorityNormalizationReceipt{GroupID: groupID, BaselineReceiptDigest: baseline.ReceiptDigest,
+		Before: before, After: after,
+		Nodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-uid-2", FrontResourceVersion: "30",
+			WorkerPodUID: "worker-pod-uid-2", WorkerResourceVersion: "31", ActivationGeneration: 4,
+			BundleGeneration: after.CurrentBundleGeneration, ServingGeneration: "normalized-serving-4",
+			WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest}},
+		ObservedAt: time.Unix(3_000, 0).UTC().Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityRaw, _ := declarativerelease.CanonicalJSON(before)
+	baselineRaw, _ := declarativerelease.CanonicalJSON(baseline)
+	previousReceiptRaw, _ := declarativerelease.CanonicalJSON(previousReceipt)
+
+	newStore := func(extraKey string, normalizationRaw []byte) (*AuthorityStore, *fake.Clientset) {
+		data := map[string]string{"authority.json": string(authorityRaw), "baseline-receipt.json": string(baselineRaw),
+			"normalization-receipt.json": string(normalizationRaw)}
+		if extraKey != "" {
+			data[extraKey] = "unexpected"
+		}
+		object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: currentAuthorityName(groupID), Namespace: "fugue-system",
+			UID: types.UID("current-authority-uid"), ResourceVersion: "40", Labels: authorityLabels(groupID)}, Data: data}
+		client := fake.NewSimpleClientset(object)
+		store, _ := NewAuthorityStore(client, "fugue-system")
+		return store, client
+	}
+
+	t.Run("validated previous receipt", func(t *testing.T) {
+		store, client := newStore("", previousReceiptRaw)
+		if _, _, err := store.NormalizeCurrentBaseline(ctx, after, receipt, "current-authority-uid", "40"); err != nil {
+			t.Fatal(err)
+		}
+		loaded, _, _, err := store.LoadCurrent(ctx, groupID)
+		if err != nil || loaded != after {
+			t.Fatalf("loaded authority=%+v err=%v", loaded, err)
+		}
+		object, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, currentAuthorityName(groupID), metav1.GetOptions{})
+		if err != nil || object.Data["normalization-receipt.json"] == string(previousReceiptRaw) {
+			t.Fatalf("normalization receipt was not replaced: %v", err)
+		}
+	})
+
+	t.Run("unknown field", func(t *testing.T) {
+		store, _ := newStore("unexpected.json", previousReceiptRaw)
+		if _, _, err := store.NormalizeCurrentBaseline(ctx, after, receipt, "current-authority-uid", "40"); err == nil ||
+			!strings.Contains(err.Error(), "CAS changed") {
+			t.Fatalf("unknown field was accepted: %v", err)
+		}
+	})
+
+	t.Run("tampered previous receipt", func(t *testing.T) {
+		tampered := append([]byte(nil), previousReceiptRaw...)
+		tampered[len(tampered)-2] ^= 1
+		store, _ := newStore("", tampered)
+		if _, _, err := store.NormalizeCurrentBaseline(ctx, after, receipt, "current-authority-uid", "40"); err == nil ||
+			!strings.Contains(err.Error(), "predecessor changed") {
+			t.Fatalf("tampered receipt was accepted: %v", err)
+		}
+	})
+}
+
 func TestLoadedCandidateReplacementIsBounded(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
