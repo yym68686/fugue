@@ -44,6 +44,7 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 		c.newAdminActionSafetyCommand(),
 		c.newAdminReleaseCommand(),
 		c.newAdminTrafficSafetyCommand(),
+		c.newAdminTrafficOverrideCommand(),
 		c.newAdminRequestCommand(),
 		c.newAdminQuarantineCommand(),
 		c.newAdminSyntheticCommand(),

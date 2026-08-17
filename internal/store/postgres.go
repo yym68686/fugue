@@ -1207,6 +1207,30 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_dns_bundle_artifacts_zone ON fugue_edge_dns_bundle_artifacts (zone, edge_group_id, updated_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_dns_bundle_artifacts_valid_until ON fugue_edge_dns_bundle_artifacts (valid_until DESC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_traffic_override_signing_keys (
+		singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+		schema TEXT NOT NULL,
+		generation BIGINT NOT NULL,
+		current_key_id TEXT NOT NULL,
+		current_private_key TEXT NOT NULL,
+		current_public_key TEXT NOT NULL,
+		previous_key_id TEXT NOT NULL DEFAULT '',
+		previous_private_key TEXT NOT NULL DEFAULT '',
+		previous_public_key TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL,
+		rotated_at TIMESTAMPTZ NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS fugue_traffic_overrides (
+		hostname TEXT PRIMARY KEY,
+		generation BIGINT NOT NULL,
+		state TEXT NOT NULL,
+		artifact_json JSONB NOT NULL,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_traffic_overrides_state_expiry ON fugue_traffic_overrides (state, expires_at, updated_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_dns_nodes (
 		id TEXT PRIMARY KEY,
 		physical_node_id TEXT NOT NULL DEFAULT '',
