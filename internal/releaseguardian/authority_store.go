@@ -335,6 +335,46 @@ func (store *AuthorityStore) LoadCurrent(ctx context.Context, groupID string) (C
 	return authority, object.UID, object.ResourceVersion, nil
 }
 
+// LoadNormalizationReceipt returns a receipt only while it names the exact
+// current authority. Older receipts remain valid audit data, but cannot settle
+// a transition journal after CurrentAuthority has advanced again.
+func (store *AuthorityStore) LoadNormalizationReceipt(ctx context.Context, groupID string) (AuthorityNormalizationReceipt, bool, error) {
+	if !groupPattern.MatchString(groupID) {
+		return AuthorityNormalizationReceipt{}, false, errors.New("authority group identity is invalid")
+	}
+	object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, currentAuthorityName(groupID), metav1.GetOptions{})
+	if err != nil {
+		return AuthorityNormalizationReceipt{}, false, err
+	}
+	if object.Immutable != nil && *object.Immutable || object.UID == "" || strings.TrimSpace(object.ResourceVersion) == "" ||
+		object.Labels["fugue.pro/group"] != groupID || object.Labels["fugue.pro/authority-store"] != "true" ||
+		(len(object.Data) != 2 && len(object.Data) != 3) {
+		return AuthorityNormalizationReceipt{}, false, errors.New("authority normalization object metadata is invalid")
+	}
+	authorityPayload, hasAuthority := object.Data["authority.json"]
+	baselinePayload, hasBaseline := object.Data["baseline-receipt.json"]
+	normalizationPayload, hasNormalization := object.Data["normalization-receipt.json"]
+	if !hasAuthority || !hasBaseline || len(object.Data) == 3 && !hasNormalization {
+		return AuthorityNormalizationReceipt{}, false, errors.New("authority normalization object data is invalid")
+	}
+	var authority CurrentAuthority
+	var baseline AuthorityBaselineReceipt
+	if decodeStrict([]byte(authorityPayload), &authority) != nil || authority.Validate() != nil || authority.GroupID != groupID ||
+		decodeStrict([]byte(baselinePayload), &baseline) != nil || baseline.Validate() != nil || baseline.GroupID != groupID ||
+		authority.BaselineReceiptDigest != baseline.ReceiptDigest {
+		return AuthorityNormalizationReceipt{}, false, errors.New("authority normalization object binding is invalid")
+	}
+	if !hasNormalization {
+		return AuthorityNormalizationReceipt{}, false, nil
+	}
+	var receipt AuthorityNormalizationReceipt
+	if decodeStrict([]byte(normalizationPayload), &receipt) != nil || receipt.Validate() != nil || receipt.GroupID != groupID ||
+		receipt.BaselineReceiptDigest != baseline.ReceiptDigest || receipt.After != authority {
+		return AuthorityNormalizationReceipt{}, false, errors.New("authority normalization receipt binding is invalid")
+	}
+	return receipt, true, nil
+}
+
 func (store *AuthorityStore) LoadBaselineReceipt(ctx context.Context, groupID string) (AuthorityBaselineReceipt, error) {
 	if !groupPattern.MatchString(groupID) {
 		return AuthorityBaselineReceipt{}, errors.New("authority group identity is invalid")

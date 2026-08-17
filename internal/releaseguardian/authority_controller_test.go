@@ -43,11 +43,12 @@ type testFrontTransaction struct {
 }
 type testAuthorityDecisionStore struct {
 	*AuthorityStore
-	baseline    AuthorityBaselineReceipt
-	switchErr   error
-	createErr   error
-	deleteCount *int
-	journal     *AuthorityTransitionJournal
+	baseline      AuthorityBaselineReceipt
+	switchErr     error
+	createErr     error
+	deleteCount   *int
+	journal       *AuthorityTransitionJournal
+	normalization *AuthorityNormalizationReceipt
 }
 
 func (store testAuthorityDecisionStore) LoadBaselineReceipt(context.Context, string) (AuthorityBaselineReceipt, error) {
@@ -59,6 +60,16 @@ func (store testAuthorityDecisionStore) LoadTransitionJournal(context.Context, s
 		return *store.journal, true, nil
 	}
 	return AuthorityTransitionJournal{}, false, nil
+}
+
+func (store testAuthorityDecisionStore) LoadNormalizationReceipt(ctx context.Context, groupID string) (AuthorityNormalizationReceipt, bool, error) {
+	if store.normalization != nil {
+		return *store.normalization, true, nil
+	}
+	if store.AuthorityStore == nil {
+		return AuthorityNormalizationReceipt{}, false, nil
+	}
+	return store.AuthorityStore.LoadNormalizationReceipt(ctx, groupID)
 }
 
 func (store testAuthorityDecisionStore) SwitchCurrent(ctx context.Context, authority CurrentAuthority, uid types.UID, rv string) (types.UID, string, error) {
@@ -496,6 +507,120 @@ func TestAuthorityControllerDropsResumedPreparedJournalAfterTypedPrewriteCASWith
 	candidate, _, _, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
 	if err != nil || candidate.State != CandidateAuthorityVerified {
 		t.Fatalf("resumed typed prewrite CAS did not retain terminal candidate: candidate=%+v err=%v", candidate, err)
+	}
+}
+
+func TestAuthorityControllerDropsPreparedJournalSupersededByExactNormalization(t *testing.T) {
+	journal := AuthorityTransitionJournal{}
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{beginErr: errors.New("activation unavailable")})
+	decisionStore := testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline, journal: &journal}
+	fixture.controller.store = decisionStore
+	if _, err := fixture.controller.VerifyAndSwitch(context.Background(), fixture.group, fixture.result.ResultDigest); err == nil {
+		t.Fatal("prepared fixture unexpectedly activated")
+	}
+	if journal.Phase != AuthorityTransitionPrepared || journal.JournalDigest == "" {
+		t.Fatalf("prepared fixture did not retain its journal: %+v", journal)
+	}
+
+	recoveredDigest := "sha256:" + strings.Repeat("c", 64)
+	recoveredSHA := strings.Repeat("d", 40)
+	recovered := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: fixture.group,
+		CurrentRecordDigest: recoveredDigest, CurrentWorkerSlot: AuthoritySlotB, AuthorityEpoch: fixture.current.AuthorityEpoch + 2,
+		CurrentFrontGeneration: fixture.current.CurrentFrontGeneration + 2, CurrentBundleGeneration: "recovered-bundle-9",
+		CurrentWorkerSourceSHA: recoveredSHA, CurrentWorkerImageDigest: recoveredDigest, BaselineReceiptDigest: fixture.baseline.ReceiptDigest}
+	receipt, err := (AuthorityNormalizationReceipt{GroupID: fixture.group, BaselineReceiptDigest: fixture.baseline.ReceiptDigest,
+		Before: fixture.current, After: recovered, ObservedAt: time.Unix(5_002, 0).UTC().Format(time.RFC3339Nano),
+		Nodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-recovered", FrontResourceVersion: "20",
+			WorkerPodUID: "worker-pod-recovered", WorkerResourceVersion: "21", ActivationGeneration: recovered.CurrentFrontGeneration,
+			BundleGeneration: recovered.CurrentBundleGeneration, ServingGeneration: "recovered-serving-9",
+			WorkerSourceSHA: recovered.CurrentWorkerSourceSHA, WorkerImageDigest: recovered.CurrentWorkerImageDigest}}}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), currentAuthorityName(fixture.group), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.Data["authority.json"] = mustCanonicalJSON(t, recovered)
+	object.Data["normalization-receipt.json"] = mustCanonicalJSON(t, receipt)
+	if _, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group)
+	if err != nil || changed || result.ReceiptDigest != "" || journal.JournalDigest != "" {
+		t.Fatalf("exact normalization did not settle the stale journal: result=%+v changed=%v journal=%+v err=%v", result, changed, journal, err)
+	}
+	current, _, _, err := fixture.store.LoadCurrent(context.Background(), fixture.group)
+	if err != nil || current != recovered {
+		t.Fatalf("journal settlement changed recovered traffic: current=%+v err=%v", current, err)
+	}
+}
+
+func TestAuthorityControllerRejectsInexactNormalizationJournalSettlement(t *testing.T) {
+	journal := AuthorityTransitionJournal{}
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{beginErr: errors.New("activation unavailable")})
+	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline, journal: &journal}
+	if _, err := fixture.controller.VerifyAndSwitch(context.Background(), fixture.group, fixture.result.ResultDigest); err == nil {
+		t.Fatal("prepared fixture unexpectedly activated")
+	}
+	candidate, _, _, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredDigest := "sha256:" + strings.Repeat("c", 64)
+	recovered := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: fixture.group,
+		CurrentRecordDigest: recoveredDigest, CurrentWorkerSlot: AuthoritySlotB, AuthorityEpoch: fixture.current.AuthorityEpoch + 2,
+		CurrentFrontGeneration: fixture.current.CurrentFrontGeneration + 2, CurrentBundleGeneration: "recovered-bundle-9",
+		CurrentWorkerSourceSHA: strings.Repeat("d", 40), CurrentWorkerImageDigest: recoveredDigest, BaselineReceiptDigest: fixture.baseline.ReceiptDigest}
+	valid, err := (AuthorityNormalizationReceipt{GroupID: fixture.group, BaselineReceiptDigest: fixture.baseline.ReceiptDigest,
+		Before: fixture.current, After: recovered, ObservedAt: time.Unix(5_002, 0).UTC().Format(time.RFC3339Nano),
+		Nodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-recovered", FrontResourceVersion: "20",
+			WorkerPodUID: "worker-pod-recovered", WorkerResourceVersion: "21", ActivationGeneration: recovered.CurrentFrontGeneration,
+			BundleGeneration: recovered.CurrentBundleGeneration, ServingGeneration: "recovered-serving-9",
+			WorkerSourceSHA: recovered.CurrentWorkerSourceSHA, WorkerImageDigest: recovered.CurrentWorkerImageDigest}}}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, mutate := range map[string]func(*testing.T, AuthorityNormalizationReceipt) AuthorityNormalizationReceipt{
+		"observed before journal": func(t *testing.T, receipt AuthorityNormalizationReceipt) AuthorityNormalizationReceipt {
+			receipt.ObservedAt = time.Unix(5_000, 0).UTC().Format(time.RFC3339Nano)
+			var err error
+			receipt, err = receipt.Seal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return receipt
+		},
+		"different predecessor": func(t *testing.T, receipt AuthorityNormalizationReceipt) AuthorityNormalizationReceipt {
+			receipt.Before.AuthorityEpoch--
+			var err error
+			receipt, err = receipt.Seal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return receipt
+		},
+		"different current": func(t *testing.T, receipt AuthorityNormalizationReceipt) AuthorityNormalizationReceipt {
+			receipt.After.AuthorityEpoch++
+			var err error
+			receipt, err = receipt.Seal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return receipt
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidateReceipt := mutate(t, valid)
+			deleted := 0
+			controller := &AuthorityController{store: testAuthorityDecisionStore{normalization: &candidateReceipt, deleteCount: &deleted}, now: time.Now}
+			settled, err := controller.settleNormalizedPreparedJournal(context.Background(), candidate, recovered, journal)
+			if err != nil || settled || deleted != 0 {
+				t.Fatalf("inexact normalization settled journal: settled=%v deleted=%d err=%v", settled, deleted, err)
+			}
+		})
 	}
 }
 

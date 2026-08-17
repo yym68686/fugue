@@ -17,6 +17,7 @@ type authorityDecisionStore interface {
 	LoadCandidate(context.Context, string) (CandidateAuthority, types.UID, string, error)
 	LoadCurrent(context.Context, string) (CurrentAuthority, types.UID, string, error)
 	LoadBaselineReceipt(context.Context, string) (AuthorityBaselineReceipt, error)
+	LoadNormalizationReceipt(context.Context, string) (AuthorityNormalizationReceipt, bool, error)
 	LoadTransitionJournal(context.Context, string) (AuthorityTransitionJournal, bool, error)
 	LoadCandidateCanaryResult(context.Context, CandidateAuthority, string, time.Time) (CandidateCanaryResult, error)
 	LoadLatestCandidateCanaryResult(context.Context, CandidateAuthority, time.Time) (CandidateCanaryResult, error)
@@ -89,6 +90,12 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 		return AuthorityTransitionReceipt{}, false, controller.store.DeleteTransitionJournal(ctx, journal)
 	}
 	if journalExists {
+		if current != journal.Before {
+			settled, settleErr := controller.settleNormalizedPreparedJournal(ctx, candidate, current, journal)
+			if settleErr != nil || settled {
+				return AuthorityTransitionReceipt{}, false, settleErr
+			}
+		}
 		receipt, changed, resumeErr := controller.resumeTransition(ctx, current, journal)
 		if resumeErr != nil && controller.isPrewriteCASChanged(groupID, resumeErr) {
 			if settleErr := controller.settlePrewriteCAS(ctx, groupID); settleErr != nil {
@@ -124,6 +131,25 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 		return AuthorityTransitionReceipt{}, false, nil
 	}
 	return receipt, err == nil, err
+}
+
+func (controller *AuthorityController) settleNormalizedPreparedJournal(ctx context.Context, candidate CandidateAuthority, current CurrentAuthority, journal AuthorityTransitionJournal) (bool, error) {
+	if journal.Validate() != nil || journal.Phase != AuthorityTransitionPrepared || journal.Candidate != candidate {
+		return false, nil
+	}
+	receipt, exists, err := controller.store.LoadNormalizationReceipt(ctx, journal.GroupID)
+	if err != nil || !exists {
+		return false, err
+	}
+	createdAt, createdErr := time.Parse(time.RFC3339Nano, journal.CreatedAt)
+	observedAt, observedErr := time.Parse(time.RFC3339Nano, receipt.ObservedAt)
+	if receipt.Validate() != nil || createdErr != nil || observedErr != nil || receipt.Before != journal.Before || receipt.After != current || observedAt.Before(createdAt) {
+		return false, nil
+	}
+	if err := controller.store.DeleteTransitionJournal(ctx, journal); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (controller *AuthorityController) isPrewriteCASChanged(groupID string, err error) bool {
