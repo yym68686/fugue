@@ -113,7 +113,7 @@ func TestSelectorFromWorkloadNarrowsSharedSelectorWithPodComponent(t *testing.T)
 	}
 }
 
-func TestKubectlGetIsBoundedAndRetriedWithoutRetryingWrites(t *testing.T) {
+func TestKubectlGetRetriesReadsWithoutRetryingWrites(t *testing.T) {
 	directory := t.TempDir()
 	kubectl := filepath.Join(directory, "kubectl")
 	getCount := filepath.Join(directory, "get-count")
@@ -126,7 +126,7 @@ case "${1:-}" in
     if test -f "$GET_COUNT"; then read -r count <"$GET_COUNT"; fi
     count=$((count + 1))
     printf '%s\n' "$count" >"$GET_COUNT"
-    if test "$count" -eq 1; then exec sleep 30; fi
+	if test "$count" -eq 1; then exit 42; fi
     printf '%s\n' '{"items":[]}'
     ;;
   *)
@@ -145,10 +145,9 @@ esac
 	cluster := &kubectlCluster{
 		kubectl: kubectl, readTimeout: 2 * time.Second, readAttempts: 2, readRetryDelay: time.Millisecond,
 	}
-	started := time.Now()
 	output, err := cluster.kubectlRun(context.Background(), nil, "get", "pods", "--output", "json")
-	if err != nil || string(output) != "{\"items\":[]}\n" || time.Since(started) >= 5*time.Second {
-		t.Fatalf("bounded read retry output=%q elapsed=%s err=%v", output, time.Since(started), err)
+	if err != nil || string(output) != "{\"items\":[]}\n" {
+		t.Fatalf("read retry output=%q err=%v", output, err)
 	}
 	if raw, err := os.ReadFile(getCount); err != nil || strings.TrimSpace(string(raw)) != "2" {
 		t.Fatalf("read attempts=%q err=%v", raw, err)
@@ -158,6 +157,20 @@ esac
 	}
 	if raw, err := os.ReadFile(writeCount); err != nil || strings.TrimSpace(string(raw)) != "1" {
 		t.Fatalf("mutating attempts=%q err=%v", raw, err)
+	}
+}
+
+func TestKubectlGetTimeoutIsBounded(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cluster := &kubectlCluster{kubectl: kubectl, readTimeout: 250 * time.Millisecond, readAttempts: 1}
+	started := time.Now()
+	_, err := cluster.kubectlRun(context.Background(), nil, "get", "pods", "--output", "json")
+	if err == nil || time.Since(started) >= 2*time.Second {
+		t.Fatalf("bounded read timeout elapsed=%s err=%v", time.Since(started), err)
 	}
 }
 
