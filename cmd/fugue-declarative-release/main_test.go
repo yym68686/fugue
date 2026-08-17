@@ -362,6 +362,10 @@ func TestPlanCommandAcceptsMergeCommitAsSupersededFailedAtom(t *testing.T) {
 	runGit(t, "checkout", "main")
 	runGit(t, "merge", "--no-ff", "failed-v2", "-m", "merge failed api v2")
 	failedMerge := runGit(t, "rev-parse", "HEAD")
+	_, priorProductionAtom, found, err := loadGitIntent(failedMerge, "deploy/releases/api/intent.json")
+	if err != nil || !found || priorProductionAtom != failedMerge {
+		t.Fatalf("failed merge was not resolved as the prior production atom: found=%v atom=%q err=%v", found, priorProductionAtom, err)
+	}
 
 	runGit(t, "checkout", "-b", "recovery-v3")
 	writeFile(t, "cmd/fugue-api/main.go", []byte("package main\nfunc main() { println(\"recovered\") }\n"))

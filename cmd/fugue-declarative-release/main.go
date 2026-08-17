@@ -1069,7 +1069,7 @@ func loadGitIntent(baseSHA, filename string) (declarativerelease.Intent, string,
 	if err != nil {
 		return declarativerelease.Intent{}, "", false, err
 	}
-	commitRaw, err := exec.Command("git", "rev-list", "-1", baseSHA, "--", clean).CombinedOutput()
+	commitRaw, err := exec.Command("git", "rev-list", "--first-parent", "-1", baseSHA, "--", clean).CombinedOutput()
 	if err != nil {
 		return declarativerelease.Intent{}, "", false, err
 	}
