@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -327,6 +328,34 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 	}
 	if edgeDNSRecordByNameAndType(got.Records, "artifact.fugue.pro", model.EdgeDNSRecordTypeA) == nil {
 		t.Fatalf("expected artifact record, got %+v", got.Records)
+	}
+}
+
+func TestEdgeDNSStaticAnswerIPsDoNotBecomeBusinessCandidatesWithoutEvidence(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{}
+	options := edgeDNSBundleOptions{
+		EdgeGroupID: "edge-group-country-us",
+		Zone:        "fugue.pro",
+		AnswerIPs:   []string{"203.0.113.10"},
+	}
+	now := time.Now().UTC()
+
+	byGroup, err := server.edgeDNSAnswerIPsByGroupWithDNSNodes(context.Background(), options, nil, now)
+	if err != nil {
+		t.Fatalf("build answer IPs by group: %v", err)
+	}
+	if len(byGroup) != 0 {
+		t.Fatalf("expected no business answer IPs without inventory and route evidence, got %+v", byGroup)
+	}
+
+	candidates, err := server.edgeDNSAnswerCandidateByIP(context.Background(), options, nil, now)
+	if err != nil {
+		t.Fatalf("build answer candidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("expected no business candidates without inventory and route evidence, got %+v", candidates)
 	}
 }
 

@@ -924,7 +924,6 @@ func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBun
 
 func (s *Server) edgeDNSAnswerIPsByGroupWithDNSNodes(ctx context.Context, options edgeDNSBundleOptions, dnsNodes []model.DNSNode, now time.Time) (map[string][]string, error) {
 	out := map[string][]string{}
-	blockedGroups := map[string]bool{}
 	if s.store != nil {
 		nodes, _, err := s.store.ListActiveEdgeNodes("")
 		if err != nil {
@@ -942,9 +941,6 @@ func (s *Server) edgeDNSAnswerIPsByGroupWithDNSNodes(ctx context.Context, option
 				continue
 			}
 			if !edgeNodeDNSCacheValid(node) {
-				if groupID := strings.TrimSpace(node.EdgeGroupID); groupID != "" {
-					blockedGroups[groupID] = true
-				}
 				continue
 			}
 			groupID := strings.TrimSpace(node.EdgeGroupID)
@@ -955,8 +951,6 @@ func (s *Server) edgeDNSAnswerIPsByGroupWithDNSNodes(ctx context.Context, option
 			out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv6)
 		}
 	}
-	seenDNSGroups := map[string]bool{}
-	healthyDNSGroups := map[string]bool{}
 	for _, node := range dnsNodes {
 		if !edgeDNSNodeMatchesZone(node, options.Zone) {
 			continue
@@ -965,28 +959,17 @@ func (s *Server) edgeDNSAnswerIPsByGroupWithDNSNodes(ctx context.Context, option
 		if groupID == "" {
 			continue
 		}
-		seenDNSGroups[groupID] = true
 		if !edgeDNSNodeServingEligible(node, now) {
 			continue
 		}
-		healthyDNSGroups[groupID] = true
 		out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv4)
 		out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv6)
-	}
-	for groupID := range seenDNSGroups {
-		if !healthyDNSGroups[groupID] && len(out[groupID]) == 0 {
-			blockedGroups[groupID] = true
-		}
-	}
-	if options.EdgeGroupID != "" && len(out[options.EdgeGroupID]) == 0 && !blockedGroups[options.EdgeGroupID] {
-		out[options.EdgeGroupID] = append([]string(nil), options.AnswerIPs...)
 	}
 	return out, nil
 }
 
 func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNSBundleOptions, dnsNodes []model.DNSNode, now time.Time) (map[string]model.EdgeDNSAnswerCandidate, error) {
 	out := map[string]model.EdgeDNSAnswerCandidate{}
-	blockedIPs := map[string]bool{}
 	if s.store != nil {
 		nodes, _, err := s.store.ListActiveEdgeNodes("")
 		if err != nil {
@@ -1004,15 +987,6 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 				continue
 			}
 			if !edgeNodeDNSCacheValid(node) {
-				for _, ip := range []string{node.PublicIPv4, node.PublicIPv6} {
-					normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
-					if normalized == "" {
-						normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, ip)
-					}
-					if normalized != "" {
-						blockedIPs[normalized] = true
-					}
-				}
 				continue
 			}
 			for _, ip := range []string{node.PublicIPv4, node.PublicIPv6} {
@@ -1040,12 +1014,8 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 				continue
 			}
 			if !edgeDNSNodeServingEligible(node, now) {
-				if _, healthy := out[normalized]; !healthy {
-					blockedIPs[normalized] = true
-				}
 				continue
 			}
-			delete(blockedIPs, normalized)
 			if candidate, exists := out[normalized]; exists && strings.TrimSpace(candidate.EdgeID) != "" {
 				continue
 			}
@@ -1058,31 +1028,6 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 				Priority: edgeDNSCandidatePriority(strings.TrimSpace(node.EdgeGroupID), strings.TrimSpace(options.EdgeGroupID), ""),
 				Weight:   100, Reason: "dns_node_inventory", Healthy: true, RouteReady: true, TLSReady: true, DNSEligible: true,
 			}
-		}
-	}
-	for _, ip := range options.AnswerIPs {
-		normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
-		if normalized == "" {
-			normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, ip)
-		}
-		if normalized == "" {
-			continue
-		}
-		if blockedIPs[normalized] {
-			continue
-		}
-		if _, ok := out[normalized]; ok {
-			continue
-		}
-		out[normalized] = model.EdgeDNSAnswerCandidate{
-			IP:          normalized,
-			EdgeGroupID: strings.TrimSpace(options.EdgeGroupID),
-			Priority:    edgeDNSCandidatePriority(strings.TrimSpace(options.EdgeGroupID), strings.TrimSpace(options.EdgeGroupID), ""),
-			Weight:      100,
-			Reason:      "local_dns_node_answer",
-			Healthy:     true,
-			RouteReady:  true,
-			TLSReady:    true,
 		}
 	}
 	return out, nil
