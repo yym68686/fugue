@@ -2588,6 +2588,7 @@ func TestAPIStaticDNSRecordsEnvRenders(t *testing.T) {
 	values := `
 api:
   dnsStaticRecordsJSON: '[{"name":"fugue.pro","type":"MX","values":["10 mail.fugue.pro"],"ttl":300,"record_kind":"protected","status":"active","record_generation":"dnsgen_test"}]'
+  edgeAuthorityServicesJSON: '{"edge-group-country-de":"edge-control-de","edge-group-country-us":"edge-control-us"}'
   platformRoutesJSON: '{"routes":[{"hostname":"api.fugue.pro","kind":"control-plane-api","upstream_url":"http://fugue-fugue.fugue-system.svc.cluster.local:80","edge_group_mode":"region_aware"}]}'
 dns:
   nameservers:
@@ -2611,6 +2612,9 @@ dns:
 	}
 	for _, want := range []string{
 		`name: FUGUE_DNS_STATIC_RECORDS_JSON`,
+		`name: FUGUE_EDGE_AUTHORITY_SERVICES_JSON`,
+		`edge-group-country-de`,
+		`edge-control-us`,
 		`name: FUGUE_PLATFORM_ROUTES_JSON`,
 		`name: FUGUE_DNS_NAMESERVERS`,
 		`ns1.dns.fugue.pro,ns2.dns.fugue.pro`,

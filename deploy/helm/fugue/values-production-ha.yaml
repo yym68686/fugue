@@ -16,6 +16,9 @@ automations:
 
 api:
   replicaCount: 3
+  # The API read model must query the authoritative Edge Control projections;
+  # it must never infer inventory or ACK state from the legacy core database.
+  edgeAuthorityServicesJSON: '{"edge-group-country-de":"edge-control-de","edge-group-country-us":"edge-control-us"}'
   databaseURL: postgres://fugue:replace-me@postgres-ha.example.internal:5432/fugue?sslmode=require
   appBaseDomain: apps.example.com
   apiPublicDomain: api.example.com
