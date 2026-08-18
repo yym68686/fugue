@@ -605,16 +605,110 @@ func (store *PersistentGroupStore) ReadGroupRecoveryTarget(ctx context.Context, 
 				targetCandidateSequence = entry.CandidateLedgerSequence
 			}
 		}
-		if targetCandidateSequence == 0 || targetCandidateSequence > uint64(len(state.Ledger)) || state.Ledger[targetCandidateSequence-1].Bundle == nil {
+		if targetCandidateSequence == 0 || targetCandidateSequence > uint64(len(state.Ledger)) {
 			return errors.New("edge-control recovery target was never published")
 		}
 		candidate = cloneGroupShadowLedgerEntry(state.Ledger[targetCandidateSequence-1])
-		if candidate.Status != GroupShadowStatusCompiled || candidate.Bundle == nil || candidate.BundleGeneration != generation {
+		if candidate.Status != GroupShadowStatusCompiled || candidate.BundleGeneration != generation {
 			return errors.New("edge-control recovery target candidate is invalid")
+		}
+		// Candidate bundles are compacted independently of the authority ledger.
+		// A previously published bundle remains a valid recovery source even when
+		// its shadow candidate payload has been archived. Rehydrate only the exact
+		// published generation; never use a different candidate or current intent.
+		if candidate.Bundle == nil {
+			if !candidate.BundleArchived || state.Published.Bundle.Generation != generation {
+				return errors.New("edge-control recovery target candidate is unavailable")
+			}
+			bundle := cloneEdgeRouteBundle(state.Published.Bundle)
+			candidate.Bundle = &bundle
 		}
 		return nil
 	})
 	return authority, candidate, recoveryEpoch, err
+}
+
+// RecoverPublishedLKG renews only the exact bundle already referenced by the
+// durable published pointer. It is independent of the shadow candidate payload
+// so candidate compaction or a failed compiler audit cannot strand serving
+// traffic behind an expired validity window.
+func (store *PersistentGroupStore) RecoverPublishedLKG(ctx context.Context, groupID string, expectedSequence, expectedRecoveryEpoch uint64,
+	generation string, signed model.EdgeRouteBundle, reason string, recordedAt time.Time) (GroupAuthorityLedgerEntry, error) {
+	groupID = normalizeGroupID(groupID)
+	generation = strings.TrimSpace(generation)
+	reason = strings.TrimSpace(reason)
+	if groupID == "" || generation == "" || signed.Generation != generation || reason == "" || recordedAt.IsZero() {
+		return GroupAuthorityLedgerEntry{}, errors.New("edge-control published LKG recovery input is invalid")
+	}
+	var appended GroupAuthorityLedgerEntry
+	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
+		if state.Published == nil || state.Published.PublicationSequence != expectedSequence ||
+			state.Published.RecoveryEpoch != expectedRecoveryEpoch || state.Published.Bundle.Generation != generation {
+			return ErrGroupAuthorityCASConflict
+		}
+		currentRecoveryEpoch := uint64(0)
+		for _, previous := range state.AuthorityLedger {
+			if previous.RecoveryEpoch > currentRecoveryEpoch {
+				currentRecoveryEpoch = previous.RecoveryEpoch
+			}
+		}
+		if currentRecoveryEpoch != expectedRecoveryEpoch {
+			return ErrGroupAuthorityCASConflict
+		}
+		for _, audit := range state.AuthorityLedger[expectedSequence:] {
+			if audit.Status != GroupAuthorityStatusFailed || audit.RecoveryEpoch != 0 ||
+				audit.LastPublishedBundleGeneration != state.Published.Bundle.Generation {
+				return ErrGroupAuthorityCASConflict
+			}
+		}
+		candidateSequence := state.Published.CandidateLedgerSequence
+		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		candidate := cloneGroupShadowLedgerEntry(state.Ledger[candidateSequence-1])
+		if candidate.Status != GroupShadowStatusCompiled || candidate.BundleGeneration != generation {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		if candidate.Bundle == nil {
+			if !candidate.BundleArchived {
+				return ErrGroupAuthorityCandidateCAS
+			}
+			bundle := cloneEdgeRouteBundle(state.Published.Bundle)
+			candidate.Bundle = &bundle
+		}
+		previousPublished := GroupAuthorityLedgerEntry{}
+		foundPublished := false
+		for index := len(state.AuthorityLedger) - 1; index >= 0; index-- {
+			entry := state.AuthorityLedger[index]
+			if entry.Status == GroupAuthorityStatusPublished && entry.BundleGeneration == generation {
+				previousPublished = entry
+				foundPublished = true
+				break
+			}
+		}
+		if !foundPublished {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		entry := GroupAuthorityLedgerEntry{
+			Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Status: GroupAuthorityStatusPublished,
+			CandidateLedgerSequence: candidateSequence, RouteIntentGeneration: previousPublished.RouteIntentGeneration,
+			InventoryGeneration: previousPublished.InventoryGeneration, BundleGeneration: signed.Generation,
+			LastPublishedBundleGeneration: signed.Generation, PublishedBundleDigest: signedGroupBundleDigest(signed),
+			SigningKeyID: signed.KeyID, RecoveryEpoch: expectedRecoveryEpoch + 1, RecoveryReason: reason,
+			Authority: "edge-control", PublicationEnabled: true, RecordedAt: recordedAt.UTC(),
+		}
+		current := cloneGroupPublishedBundle(*state.Published)
+		var next *GroupPublishedBundle
+		var err error
+		appended, next, err = prepareGroupAuthorityAppend(state.GroupID, uint64(len(state.AuthorityLedger)), state.AuthorityLedger, &current, &candidate, entry, &signed)
+		if err != nil {
+			return err
+		}
+		state.AuthorityLedger = append(state.AuthorityLedger, appended)
+		state.Published = next
+		return nil
+	})
+	return appended, err
 }
 
 func (store *PersistentGroupStore) RecoverGroupAuthorityCAS(ctx context.Context, groupID string, expectedSequence, expectedRecoveryEpoch uint64,
@@ -644,7 +738,7 @@ func (store *PersistentGroupStore) RecoverGroupAuthorityCAS(ctx context.Context,
 			}
 		}
 		candidateSequence := entry.CandidateLedgerSequence
-		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) || state.Ledger[candidateSequence-1].Bundle == nil {
+		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) {
 			return ErrGroupAuthorityCandidateCAS
 		}
 		previouslyPublished := false
@@ -658,6 +752,14 @@ func (store *PersistentGroupStore) RecoverGroupAuthorityCAS(ctx context.Context,
 			return ErrGroupAuthorityCandidateCAS
 		}
 		candidate := cloneGroupShadowLedgerEntry(state.Ledger[candidateSequence-1])
+		if candidate.Bundle == nil {
+			if !candidate.BundleArchived || state.Published == nil ||
+				candidate.BundleGeneration != state.Published.Bundle.Generation || signed.Generation != state.Published.Bundle.Generation {
+				return ErrGroupAuthorityCandidateCAS
+			}
+			bundle := cloneEdgeRouteBundle(state.Published.Bundle)
+			candidate.Bundle = &bundle
+		}
 		var current *GroupPublishedBundle
 		if state.Published != nil {
 			value := cloneGroupPublishedBundle(*state.Published)
@@ -1150,11 +1252,24 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 		if err := validateGroupPublishedBundle(groupID, *state.Published); err != nil {
 			return err
 		}
+		candidateMatchesPublished := false
+		if lastPublishedCandidate > 0 && lastPublishedCandidate <= uint64(len(state.Ledger)) {
+			candidate := state.Ledger[lastPublishedCandidate-1]
+			switch {
+			case candidate.Bundle != nil && !candidate.BundleArchived:
+				candidateMatchesPublished = groupAuthorityCandidateDigest(*candidate.Bundle) == groupAuthorityCandidateDigest(state.Published.Bundle)
+			case candidate.Bundle == nil && candidate.BundleArchived:
+				// Compaction may archive the shadow payload after publication. The
+				// published bundle is the durable recovery source; retain the
+				// binding through its immutable generation instead of rejecting the
+				// whole group state as corrupt.
+				candidateMatchesPublished = candidate.BundleGeneration == state.Published.Bundle.Generation &&
+					candidate.LastSuccessfulBundleGeneration == state.Published.Bundle.Generation
+			}
+		}
 		if state.Published.PublicationSequence != lastPublishedSequence || state.Published.CandidateLedgerSequence != lastPublishedCandidate ||
 			state.Published.Bundle.Generation != lastPublishedGeneration || state.Published.Digest != lastPublishedDigest || state.Published.RecoveryEpoch != lastRecoveryEpoch ||
-			lastPublishedCandidate == 0 || lastPublishedCandidate > uint64(len(state.Ledger)) ||
-			state.Ledger[lastPublishedCandidate-1].Bundle == nil || state.Ledger[lastPublishedCandidate-1].BundleArchived ||
-			groupAuthorityCandidateDigest(*state.Ledger[lastPublishedCandidate-1].Bundle) != groupAuthorityCandidateDigest(state.Published.Bundle) {
+			!candidateMatchesPublished {
 			return errors.New("edge-control persistent group published head does not match authority ledger")
 		}
 	}
