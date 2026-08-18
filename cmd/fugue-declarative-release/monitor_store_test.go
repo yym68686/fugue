@@ -43,10 +43,11 @@ func TestAPIGuardianHandoffBindsProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode API intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "f6d8f9846be5f6310861204a031b0e31b9d5cb26"
-	const lkgImage = "sha256:eb59d21cb88bcb051d798791e9165c8c3e0e44f146bb9d3b36787368fceab36f"
-	if intent.Generation != 50 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
-		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
+	const lkgSHA = "789eb034bc4240f041bc687fda3d2acf8e07fd7d"
+	const lkgImage = "sha256:07c58afce280d7aa214dc56204076f0319af2f1e6bd19cbca644ff80d52c7889"
+	if intent.Generation != 52 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage ||
+		intent.SupersedesFailedConfigSHA != "67ff71d8e3411d16d4692e525d2403f84643b236" {
 		t.Fatalf("API Guardian intent is not bound to the production LKG: %+v", intent)
 	}
 }
@@ -64,7 +65,7 @@ func TestReleaseGuardianIntentBindsCurrentProductionLKG(t *testing.T) {
 	}
 	const lkgSHA = "0b5d6af387f50f2dccafb1934e8aa4cdb064702d"
 	const lkgImage = "sha256:600cfb7621845d2987f61f6587371180a9a60a1ff4c82e4abe190ce16f260ff3"
-	if intent.Generation != 139 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+	if intent.Generation != 140 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
 		t.Fatalf("release Guardian intent is not bound to the production LKG: %+v", intent)
 	}

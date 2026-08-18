@@ -343,33 +343,37 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	} else {
 		serving.WorkerA, serving.WorkerB = before.WorkerA, candidatePods
 	}
-	standby, err := runtime.StageStandby(ctx, serving, activeSlot, previousTarget)
-	if err != nil {
-		return fmt.Errorf("stage previous LKG standby: %w", err)
-	}
-	previousDigest, err := immutableDigestFromRef(previousTarget.ImageRef)
-	if err != nil {
-		return err
-	}
-	if standby.WorkerSlot != activeSlot || standby.CurrentWorkerSlot != inactiveSlot || standby.WorkerSourceSHA != previousTarget.ConfigSHA ||
-		standby.WorkerImageDigest != previousDigest || standby.AllowDegradedPrevious || !standby.StandbyOnly || standby.OrdinaryTrafficMutation {
-		return errors.New("previous LKG standby receipt is invalid")
-	}
-	if err := runtime.ApplyCandidateResources(ctx, previousName); err != nil {
-		return fmt.Errorf("apply previous LKG standby resources: %w", err)
-	}
-	if _, err := runtime.Roll(ctx, previousName, previousTarget, true, true); err != nil {
-		return fmt.Errorf("restore previous LKG standby: %w", err)
+	// Front and the active Worker are already committed to the new authority at
+	// this point.  Standby preparation is maintenance-only: a failed sequence,
+	// receipt, or inactive-slot roll must not send the generic executor down its
+	// workload LKG rollback path and split traffic authority from serving code.
+	standby, standbyErr := runtime.StageStandby(ctx, serving, activeSlot, previousTarget)
+	standbyConverged := false
+	if standbyErr == nil {
+		previousDigest, digestErr := immutableDigestFromRef(previousTarget.ImageRef)
+		receiptValid := digestErr == nil && standby.WorkerSlot == activeSlot && standby.CurrentWorkerSlot == inactiveSlot &&
+			standby.WorkerSourceSHA == previousTarget.ConfigSHA && standby.WorkerImageDigest == previousDigest &&
+			!standby.AllowDegradedPrevious && standby.StandbyOnly && !standby.OrdinaryTrafficMutation
+		if receiptValid && runtime.ApplyCandidateResources(ctx, previousName) == nil {
+			_, standbyErr = runtime.Roll(ctx, previousName, previousTarget, true, true)
+			standbyConverged = standbyErr == nil
+		}
 	}
 	final, err := runtime.Snapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("capture final edge group state: %w", err)
 	}
-	if !edgePodsMatchTarget(final.Front, target) || !edgePodsMatchTarget(edgeWorkerPods(final, inactiveSlot), target) ||
-		!edgePodsMatchTarget(edgeWorkerPods(final, activeSlot), previousTarget) {
+	if !edgePodsMatchTarget(final.Front, target) || !edgePodsMatchTarget(edgeWorkerPods(final, inactiveSlot), target) {
+		return errors.New("edge group did not converge candidate current authority")
+	}
+	if standbyConverged && !edgePodsMatchTarget(edgeWorkerPods(final, activeSlot), previousTarget) {
 		return errors.New("edge group did not converge candidate current and previous LKG")
 	}
-	if err := validateEdgeGroupAuthority(final, transition); err != nil {
+	if standbyConverged {
+		if err := validateEdgeGroupAuthority(final, transition); err != nil {
+			return err
+		}
+	} else if err := validateActiveEdgeGroupAuthority(final, transition); err != nil {
 		return err
 	}
 	if final.ActiveSlot != inactiveSlot {
@@ -1009,21 +1013,33 @@ func edgePodHasActiveInventory(pod edgeGroupPod) bool {
 }
 
 func validateEdgeGroupAuthority(state edgeGroupState, transition declarativerelease.EdgeGroupABTransition) error {
+	if err := validateActiveEdgeGroupAuthority(state, transition); err != nil {
+		return err
+	}
 	for slot, pods := range map[string]map[string]edgeGroupPod{"a": state.WorkerA, "b": state.WorkerB} {
 		for node, pod := range pods {
 			if !edgePodHasGroupAuthority(pod) {
 				return fmt.Errorf("edge group slot %s node %s has no verified group authority publication", slot, node)
 			}
-			if slot == state.ActiveSlot && !edgePodHasActiveInventory(pod) {
-				return fmt.Errorf("edge group active slot %s node %s has no verified inventory heartbeat", slot, node)
-			}
 		}
 	}
+	return nil
+}
+
+func validateActiveEdgeGroupAuthority(state edgeGroupState, transition declarativerelease.EdgeGroupABTransition) error {
 	if state.ActiveSlot != "a" && state.ActiveSlot != "b" {
 		return errors.New("edge group authority active slot is invalid")
 	}
 	if transition.GroupID == "" {
 		return errors.New("edge group authority transition is unbound")
+	}
+	for node, pod := range edgeWorkerPods(state, state.ActiveSlot) {
+		if !edgePodHasGroupAuthority(pod) {
+			return fmt.Errorf("edge group active slot %s node %s has no verified group authority publication", state.ActiveSlot, node)
+		}
+		if !edgePodHasActiveInventory(pod) {
+			return fmt.Errorf("edge group active slot %s node %s has no verified inventory heartbeat", state.ActiveSlot, node)
+		}
 	}
 	return nil
 }
