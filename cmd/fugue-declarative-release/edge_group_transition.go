@@ -606,7 +606,8 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 		return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 	}
 	if len(before.FrontHealth) == 0 {
-		return nil, errors.New("Guardian current authority does not match the serving Front slot")
+		return nil, fmt.Errorf("Guardian current authority does not match the serving Front slot: front_health_empty activation_present=%t active_slot=%s guardian_slot=%s",
+			before.FrontActivation != nil, before.ActiveSlot, current.CurrentWorkerSlot)
 	}
 	if before.ActiveSlot != string(current.CurrentWorkerSlot) {
 		if !allowDegradedRecovery || current.CurrentWorkerSourceSHA == "" || current.CurrentWorkerImageDigest == "" ||
