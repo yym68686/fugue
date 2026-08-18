@@ -261,7 +261,7 @@ func (publisher GroupAuthorityPublisher) publishGroup(ctx context.Context, route
 		// only the exact durable LKG that this authority previously published.
 		// This is not bootstrap eligibility (which remains first-publication
 		// only), and it never compiles current route intent into a new bundle.
-		if failureCode == GroupShadowFailureNoHealthyActive {
+		if failureCode == GroupShadowFailureNoHealthyActive || failureCode == GroupShadowFailureInventoryInvalid {
 			if refreshed, ok := publisher.refreshExpiredPublishedLKG(ctx, groupID, state, now); ok {
 				return refreshed
 			}
