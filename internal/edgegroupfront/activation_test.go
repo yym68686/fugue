@@ -131,6 +131,25 @@ func TestActivationHealthBindsFrontToExactWorkerAndBundle(t *testing.T) {
 	}
 }
 
+func TestActiveSlotWithActivationRefreshesMetadataAfterCASSwitch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "activation.json")
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	if _, err := ApplyActivationCAS(path, activationRequest(ActivationOperationInit, 0, "a", "a", "bundle-a", 0), now); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(Config{}, nil)
+	service.lastActivation = &ActivationState{ActiveSlot: "a", Generation: 1, GroupID: testActivationGroup}
+	cfg := Config{EdgeGroupID: testActivationGroup, ActiveSlotFile: path, DefaultSlot: "a", RequireActivationState: true,
+		Slots: map[string]SlotTargets{"a": {}, "b": {}}}
+	if _, err := ApplyActivationCAS(path, activationRequest(ActivationOperationPromote, 1, "a", "b", "bundle-b", 0), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	slot, activation := service.activeSlotWithActivation(cfg)
+	if slot != "b" || activation == nil || activation.ActiveSlot != "b" || activation.Generation != 2 || activation.BundleGeneration != "bundle-b" {
+		t.Fatalf("active slot evidence was not refreshed atomically: slot=%q activation=%+v", slot, activation)
+	}
+}
+
 func TestFrontFailsClosedBeforeBindingPortsWithoutRequiredActivationState(t *testing.T) {
 	service := NewService(Config{
 		HTTPListenAddr: "127.0.0.1:0", HTTPMode: HTTPModeRedirect,

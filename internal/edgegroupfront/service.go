@@ -263,12 +263,12 @@ func validateConfig(cfg Config) error {
 func (s *Service) startHealthServer(cfg Config, wg *sync.WaitGroup) (func(context.Context) error, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		slot := s.activeSlot(cfg)
+		slot, activation := s.activeSlotWithActivation(cfg)
 		targets := cfg.Slots[slot]
-		s.writeActivationHealth(w, slot, targets.HTTPSAddress)
+		s.writeActivationHealthWithActivation(w, slot, targets.HTTPSAddress, activation)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		slot := s.activeSlot(cfg)
+		slot, activation := s.activeSlotWithActivation(cfg)
 		target := strings.TrimSpace(cfg.Slots[slot].HTTPSAddress)
 		if strings.TrimSpace(cfg.HTTPSListenAddr) == "" {
 			target = strings.TrimSpace(cfg.Slots[slot].HTTPAddress)
@@ -283,7 +283,7 @@ func (s *Service) startHealthServer(cfg Config, wg *sync.WaitGroup) (func(contex
 			return
 		}
 		_ = conn.Close()
-		s.writeActivationHealth(w, slot, "")
+		s.writeActivationHealthWithActivation(w, slot, "", activation)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		s.handleMetrics(w, r, cfg)
@@ -311,19 +311,29 @@ func (s *Service) startHealthServer(cfg Config, wg *sync.WaitGroup) (func(contex
 }
 
 func (s *Service) writeActivationHealth(w http.ResponseWriter, slot, httpsTarget string) {
+	s.writeActivationHealthWithActivation(w, slot, httpsTarget, nil)
+}
+
+func (s *Service) writeActivationHealthWithActivation(w http.ResponseWriter, slot, httpsTarget string, activation *ActivationState) {
 	payload := map[string]any{"status": "ok", "active_slot": slot}
 	if httpsTarget != "" {
 		payload["https_target"] = httpsTarget
 	}
-	s.activationMu.Lock()
-	if s.lastActivation != nil && s.lastActivation.ActiveSlot == slot {
-		payload["activation_generation"] = s.lastActivation.Generation
-		payload["bundle_generation"] = s.lastActivation.BundleGeneration
-		payload["worker_source_commit"] = s.lastActivation.WorkerSourceCommit
-		payload["worker_image_digest"] = s.lastActivation.WorkerImageDigest
-		payload["route_authority"] = s.lastActivation.Authority
+	if activation == nil {
+		s.activationMu.Lock()
+		if s.lastActivation != nil {
+			copy := *s.lastActivation
+			activation = &copy
+		}
+		s.activationMu.Unlock()
 	}
-	s.activationMu.Unlock()
+	if activation != nil && activation.ActiveSlot == slot {
+		payload["activation_generation"] = activation.Generation
+		payload["bundle_generation"] = activation.BundleGeneration
+		payload["worker_source_commit"] = activation.WorkerSourceCommit
+		payload["worker_image_digest"] = activation.WorkerImageDigest
+		payload["route_authority"] = activation.Authority
+	}
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -775,6 +785,15 @@ func sumEdgeFrontActiveSlot(values map[edgeFrontActiveMetricKey]int, slot string
 }
 
 func (s *Service) activeSlot(cfg Config) string {
+	slot, _ := s.activeSlotWithActivation(cfg)
+	return slot
+}
+
+// activeSlotWithActivation returns the slot and the activation record read
+// from the same file. Health endpoints must publish both values from one
+// observation; otherwise a CAS switch after process startup can leave the
+// slot current while the metadata still comes from a stale in-memory record.
+func (s *Service) activeSlotWithActivation(cfg Config) (string, *ActivationState) {
 	if path := strings.TrimSpace(cfg.ActiveSlotFile); path != "" {
 		slot, activation, readErr := readActiveSlot(path, cfg.EdgeGroupID)
 		if readErr == nil && cfg.RequireActivationState && activation == nil {
@@ -788,7 +807,11 @@ func (s *Service) activeSlot(cfg Config) string {
 				s.activationMu.Unlock()
 			}
 			if _, ok := cfg.Slots[slot]; ok {
-				return slot
+				if activation == nil {
+					return slot, nil
+				}
+				copy := *activation
+				return slot, &copy
 			}
 		} else {
 			s.activationMu.Lock()
@@ -797,7 +820,8 @@ func (s *Service) activeSlot(cfg Config) string {
 			if last != nil && last.GroupID == strings.TrimSpace(cfg.EdgeGroupID) {
 				if _, ok := cfg.Slots[last.ActiveSlot]; ok {
 					s.Logger.Printf("edge front activation read failed; serving activation LKG; path=%s generation=%d error=%v", path, last.Generation, readErr)
-					return last.ActiveSlot
+					copy := *last
+					return last.ActiveSlot, &copy
 				}
 			}
 			if !errors.Is(readErr, os.ErrNotExist) {
@@ -807,11 +831,11 @@ func (s *Service) activeSlot(cfg Config) string {
 	}
 	if _, ok := cfg.Slots[cfg.DefaultSlot]; ok {
 		if cfg.RequireActivationState {
-			return ""
+			return "", nil
 		}
-		return cfg.DefaultSlot
+		return cfg.DefaultSlot, nil
 	}
-	return "a"
+	return "a", nil
 }
 
 func readActiveSlot(path, expectedGroupID string) (string, *ActivationState, error) {
