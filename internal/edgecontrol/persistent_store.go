@@ -1314,9 +1314,11 @@ func validatePersistentCandidateBinding(state persistentGroupState, groupID stri
 	if candidate.ServingAuthority != nil {
 		authority, servingCandidate, exists := persistentPublishedCandidateByVersion(&state, candidate.ServingAuthority.BundleVersion)
 		fallback := !exists && state.Published != nil &&
-			servingAuthorityCanUseCurrentPublishedFallback(candidate.ServingAuthority.BundleVersion, state.Published.Bundle.Generation,
-				state.Published.PublicationSequence, state.Published.RecoveryEpoch,
-				candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
+			(servingAuthorityCanUsePrunedCurrentGeneration(candidate.ServingAuthority.BundleVersion, state.Published.Bundle.Generation,
+				state.Published.PublicationSequence, state.Published.RecoveryEpoch) ||
+				servingAuthorityCanUseCurrentPublishedFallback(candidate.ServingAuthority.BundleVersion, state.Published.Bundle.Generation,
+					state.Published.PublicationSequence, state.Published.RecoveryEpoch,
+					candidate.AllowDegradedPrevious && !candidate.StandbyOnly)) &&
 			state.Published.CandidateLedgerSequence == candidate.CandidateLedgerSequence
 		if !fallback && (!exists || authority.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
 			servingCandidate.ActiveSlot != candidate.ServingAuthority.WorkerSlot) {
