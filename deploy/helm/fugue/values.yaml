@@ -198,6 +198,7 @@ api:
   appBaseDomain: ""
   apiPublicDomain: ""
   dnsStaticRecordsJSON: ""
+  edgeAuthorityServicesJSON: ""
   platformRoutesJSON: ""
   edgeQualityRankingMode: shadow
   edgeTLSAskToken: ""

@@ -56,6 +56,7 @@ type Server struct {
 	dnsNameservers                         []string
 	dnsRouteAAnswerIPs                     []string
 	dnsBundleTTL                           int
+	edgeAuthorityServices                  map[string]string
 	platformRoutes                         []model.PlatformRoute
 	edgeQualityRankingMode                 string
 	appSafeZeroDowntimePublicEnabled       bool
@@ -167,6 +168,11 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 	if dnsBundleTTL <= 0 || dnsBundleTTL > 3600 {
 		dnsBundleTTL = defaultEdgeDNSTTL
 	}
+	edgeAuthorityServices, err := parseEdgeAuthorityServices(cfg.EdgeAuthorityServicesJSON)
+	if err != nil {
+		logger.Printf("ignoring FUGUE_EDGE_AUTHORITY_SERVICES_JSON: %v", err)
+		edgeAuthorityServices = nil
+	}
 	imageStoreMinReplicas := cfg.ImageStoreMinReplicas
 	if imageStoreMinReplicas <= 0 {
 		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
@@ -203,6 +209,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		dnsNameservers:                         normalizeDNSNameservers(cfg.DNSNameservers),
 		dnsRouteAAnswerIPs:                     dnsRouteAAnswerIPs,
 		dnsBundleTTL:                           dnsBundleTTL,
+		edgeAuthorityServices:                  edgeAuthorityServices,
 		platformRoutes:                         parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
 		edgeQualityRankingMode:                 normalizeEdgeQualityRankingMode(cfg.EdgeQualityRankingMode),
 		appSafeZeroDowntimePublicEnabled:       cfg.AppSafeZeroDowntimePublicEnabled,

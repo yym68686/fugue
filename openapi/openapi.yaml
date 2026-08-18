@@ -541,6 +541,38 @@ paths:
             application/json:
               schema:
                 type: object
+  /v1/admin/edge/authorities:
+    get:
+      operationId: adminListEdgeAuthorities
+      summary: Inspect real Edge Control authority projections
+      description: >-
+        Read-only diagnostic view of the Edge Control group authority. This
+        endpoint never synthesizes Edge nodes or ACKs from DNS state.
+      tags: [Admin, Edge]
+      x-fugue-handler: handleAdminListEdgeAuthorities
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: edge_group_id
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Edge Control authority projections
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeAuthorityReadResponse"
+        '404':
+          description: Requested authority group is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/edge/activation/remediation:
     post:
       operationId: adminAdvanceEdgeRemediation
@@ -11277,6 +11309,103 @@ components:
       schema:
         type: string
   schemas:
+    EdgeAuthorityReadStatus:
+      type: object
+      additionalProperties: false
+      required: [edge_group_id, status, ready, serving_healthy, bootstrap_eligible, lkg_state]
+      properties:
+        edge_group_id:
+          type: string
+        status:
+          type: string
+        ready:
+          type: boolean
+        serving_healthy:
+          type: boolean
+        bootstrap_eligible:
+          type: boolean
+        bootstrap_valid_until:
+          type: string
+          format: date-time
+        inventory_sequence:
+          type: integer
+          format: int64
+        inventory_generation:
+          type: string
+        inventory_producer_generation:
+          type: integer
+          format: int64
+        inventory_producer_nodes:
+          type: integer
+        inventory_heartbeat_at:
+          type: string
+          format: date-time
+        authority_sequence:
+          type: integer
+          format: int64
+        publication_sequence:
+          type: integer
+          format: int64
+        current_publication_sequence:
+          type: integer
+          format: int64
+        candidate_epoch:
+          type: integer
+          format: int64
+        publication_decision:
+          type: string
+        bundle_generation:
+          type: string
+        published_bundle_digest:
+          type: string
+        recovery_epoch:
+          type: integer
+          format: int64
+        bundle_valid_until:
+          type: string
+          format: date-time
+        lkg_state:
+          type: string
+        failure_code:
+          type: string
+        runtime_failure_code:
+          type: string
+    EdgeAuthorityReadRecord:
+      type: object
+      additionalProperties: false
+      required: [edge_group_id, service, ready, source]
+      properties:
+        edge_group_id:
+          type: string
+        service:
+          type: string
+        ready:
+          type: boolean
+        source:
+          type: string
+          enum: [edge-control-authority]
+        status:
+          $ref: "#/components/schemas/EdgeAuthorityReadStatus"
+        error:
+          type: string
+    EdgeAuthorityReadResponse:
+      type: object
+      additionalProperties: false
+      required: [configured, answer_model, all_ready, authorities]
+      properties:
+        configured:
+          type: boolean
+        answer_model:
+          type: string
+          enum: [edge-control-authority]
+        all_ready:
+          type: boolean
+        authorities:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeAuthorityReadRecord"
+        error:
+          type: string
     ErrorResponse:
       type: object
       additionalProperties: false
