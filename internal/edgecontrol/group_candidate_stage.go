@@ -201,8 +201,8 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	if !authority.LedgerExists || !authority.PublishedExists || validateGroupPublishedBundle(request.GroupID, authority.Published) != nil {
 		return GroupCandidateBundle{}, groupCandidateCASConflict("published_authority_unavailable")
 	}
-	if !authorityHeadPreservesPublishedAuthority(authority, request.ExpectedAuthoritySequence) || authority.Published.PublicationSequence != request.ExpectedPublicationSequence ||
-		authority.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch || authority.Published.Digest != request.ExpectedPublishedBundleDigest {
+	if !authorityHeadPreservesPublishedAuthority(authority, request.ExpectedAuthoritySequence) ||
+		!stagePublicationMatchesAuthority(authority.Published, request, request.ServingAuthority) {
 		return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("published_authority_mismatch expected_ledger=%d actual_ledger=%d expected_publication=%d actual_publication=%d expected_recovery=%d actual_recovery=%d expected_digest=%s actual_digest=%s",
 			request.ExpectedAuthoritySequence, authority.LedgerHead.Sequence, request.ExpectedPublicationSequence, authority.Published.PublicationSequence,
 			request.ExpectedRecoveryEpoch, authority.Published.RecoveryEpoch, request.ExpectedPublishedBundleDigest, authority.Published.Digest))
@@ -296,6 +296,33 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 		Record: record, Bundle: signed}
 	return publisher.Store.PutGroupStagedCurrentLKGCandidateCAS(ctx, request.GroupID, currentEpoch, authority.LedgerHead.Sequence,
 		request.ExpectedPublicationSequence, request.ExpectedRecoveryEpoch, request.ExpectedPublishedBundleDigest, request.ServingAuthority, candidate)
+}
+
+// stagePublicationMatchesAuthority permits a Worker that observed an older
+// publication to stage against an exact, monotonic validity refresh of the
+// same immutable route generation. Bootstrap staging remains exact-CAS only.
+func stagePublicationMatchesAuthority(published GroupPublishedBundle, request GroupCandidateStageRequest, serving *GroupServingAuthorityWitness) bool {
+	if request.ExpectedPublicationSequence == published.PublicationSequence && request.ExpectedRecoveryEpoch == published.RecoveryEpoch &&
+		request.ExpectedPublishedBundleDigest == published.Digest {
+		return true
+	}
+	if serving == nil {
+		return false
+	}
+	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(serving.BundleVersion)
+	return ok && publicationSequence == request.ExpectedPublicationSequence && recoveryEpoch == request.ExpectedRecoveryEpoch &&
+		generation == published.Bundle.Generation && published.PublicationSequence >= request.ExpectedPublicationSequence &&
+		published.RecoveryEpoch >= request.ExpectedRecoveryEpoch &&
+		(published.PublicationSequence > request.ExpectedPublicationSequence || published.RecoveryEpoch > request.ExpectedRecoveryEpoch)
+}
+
+func authorityAuditTailPreservesPublishedAuthority(entry GroupAuthorityLedgerEntry, generation string) bool {
+	if entry.Status == GroupAuthorityStatusFailed {
+		return entry.RecoveryEpoch == 0 && entry.LastPublishedBundleGeneration == generation
+	}
+	return entry.Status == GroupAuthorityStatusPublished && entry.RecoveryEpoch > 0 &&
+		entry.BundleGeneration == generation && entry.LastPublishedBundleGeneration == generation &&
+		entry.RecoveryReason != "" && groupAuthorityDigestPattern.MatchString(entry.PublishedBundleDigest)
 }
 
 func groupCandidateCASConflict(reason string) error {
