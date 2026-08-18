@@ -188,6 +188,7 @@ type fakeEdgeGroupRuntime struct {
 	rollAuthority   []bool
 	rollUnready     []bool
 	activationState *edgeActivationState
+	standbyErr      error
 	declared        map[string]declarativerelease.TargetIdentity
 	stageDegraded   bool
 }
@@ -217,6 +218,9 @@ func (fake *fakeEdgeGroupRuntime) StageCandidate(_ context.Context, before edgeG
 
 func (fake *fakeEdgeGroupRuntime) StageStandby(_ context.Context, before edgeGroupState, inactive string, target declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error) {
 	fake.calls = append(fake.calls, "stage-standby:"+inactive)
+	if fake.standbyErr != nil {
+		return edgeCandidateStageReceipt{}, fake.standbyErr
+	}
 	digest, _ := immutableDigestFromRef(target.ImageRef)
 	return edgeCandidateStageReceipt{Schema: edgeCandidateReceiptSchema,
 		WorkerSlot: inactive, CurrentWorkerSlot: before.ActiveSlot, WorkerSourceSHA: target.ConfigSHA, WorkerImageDigest: digest, StandbyOnly: true}, nil
@@ -449,6 +453,40 @@ func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 	}
 	if got, want := fmt.Sprint(runtime.rollUnready), "[true false true]"; got != want {
 		t.Fatalf("failed successor replace-unready gates=%s want=%s", got, want)
+	}
+}
+
+func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFails(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	target := edgeTargetFixture("2", "b")
+	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
+	finalHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 2,
+		WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target), RouteAuthority: edgeActivationAuthority}
+	final := edgeStateFixture("b", target, finalHealth)
+	final.WorkerA = before.WorkerA
+	runtime := &fakeEdgeGroupRuntime{
+		snapshots: []edgeGroupState{before, final},
+		rolls: map[string]map[string]edgeGroupPod{
+			transition.WorkerBName: final.WorkerB,
+			transition.FrontName:   final.Front,
+		},
+		waits:      []map[string]edgeFrontHealth{{"node-1": finalHealth}},
+		declared:   map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
+		standbyErr: errors.New("standby sequence changed"),
+	}
+	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA,
+		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
+	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"snapshot", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "apply:" + transition.FrontName,
+		"roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "snapshot"}
+	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("post-commit standby failure changed serving workloads: calls=%v want=%v", runtime.calls, want)
+	}
+	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true]"; got != want {
+		t.Fatalf("post-commit standby failure authority gates=%s want=%s", got, want)
 	}
 }
 

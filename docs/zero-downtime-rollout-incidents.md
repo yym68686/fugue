@@ -12,6 +12,13 @@
 - 重点路径：`fugue app deploy`、`fugue app restart --wait`、`fugue app fs put --source live` 之后的 ManagedApp/Deployment rollout
 - 重点风险：带持久化存储的 app 在重启、镜像更新、资源更新、生命周期配置更新时是否会被降级为 `Recreate`，以及 `--wait` 是否会在真正可服务之前提前返回
 
+Edge authority transitions follow the same boundary: once Front and the active
+Worker have committed an authority generation and a real inventory heartbeat,
+inactive-slot standby preparation is maintenance, not a reason to roll back the
+serving workload. A standby staging failure must preserve the active authority
+and leave the inactive slot for a separately reconciled repair; otherwise a
+generic LKG rollback can make the traffic pointer and running Worker disagree.
+
 ## 总结
 
 本轮问题不是 `sample-api-web` 业务代码的 503/504 bug。主要原因在 Fugue 的 ManagedApp rollout 控制面：
