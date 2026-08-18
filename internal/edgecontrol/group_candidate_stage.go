@@ -240,9 +240,11 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	} else {
 		servingVersion := groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch)
 		fallback := !snapshot.ServingExists &&
-			servingAuthorityCanUseCurrentPublishedFallback(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
-				authority.Published.PublicationSequence, authority.Published.RecoveryEpoch,
-				request.AllowDegradedPrevious && !request.StandbyOnly)
+			(servingAuthorityCanUsePrunedCurrentGeneration(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
+				authority.Published.PublicationSequence, authority.Published.RecoveryEpoch) ||
+				servingAuthorityCanUseCurrentPublishedFallback(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
+					authority.Published.PublicationSequence, authority.Published.RecoveryEpoch,
+					request.AllowDegradedPrevious && !request.StandbyOnly))
 		if fallback {
 			head = currentHead
 		} else if !snapshot.ServingExists || snapshot.ServingCandidate.Bundle == nil || snapshot.ServingCandidate.BundleArchived ||
@@ -350,6 +352,12 @@ func servingAuthorityCanUseCurrentPublishedFallback(version, currentGeneration s
 	}
 	return (recoveryEpoch == currentRecoveryEpoch && publicationSequence < currentPublicationSequence) ||
 		(currentRecoveryEpoch != 0 && recoveryEpoch == 0 && publicationSequence > currentPublicationSequence)
+}
+
+func servingAuthorityCanUsePrunedCurrentGeneration(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {
+	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
+	return ok && generation == strings.TrimSpace(currentGeneration) && publicationSequence <= currentPublicationSequence &&
+		recoveryEpoch <= currentRecoveryEpoch
 }
 
 func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request GroupCandidateStageRequest, authority GroupAuthorityState) bool {
