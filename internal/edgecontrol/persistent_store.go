@@ -363,31 +363,32 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 			return groupCandidateCASConflict("store_published_authority_unavailable")
 		}
 		actualAuthoritySequence := state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence
-		if actualAuthoritySequence < expectedAuthoritySequence || state.Published.PublicationSequence != expectedPublicationSequence ||
-			state.Published.RecoveryEpoch != expectedRecoveryEpoch || state.Published.Digest != expectedPublishedDigest {
+		if actualAuthoritySequence < expectedAuthoritySequence || !stagePublicationMatchesAuthority(*state.Published, GroupCandidateStageRequest{
+			ExpectedPublicationSequence: expectedPublicationSequence, ExpectedRecoveryEpoch: expectedRecoveryEpoch,
+			ExpectedPublishedBundleDigest: expectedPublishedDigest,
+		}, serving) {
 			return groupCandidateCASConflict(fmt.Sprintf("store_published_authority_mismatch expected_ledger=%d actual_ledger=%d expected_publication=%d actual_publication=%d expected_recovery=%d actual_recovery=%d expected_digest=%s actual_digest=%s",
 				expectedAuthoritySequence, actualAuthoritySequence, expectedPublicationSequence, state.Published.PublicationSequence,
 				expectedRecoveryEpoch, state.Published.RecoveryEpoch, expectedPublishedDigest, state.Published.Digest))
 		}
 		for _, audit := range state.AuthorityLedger[expectedAuthoritySequence:] {
-			if audit.Status != GroupAuthorityStatusFailed || audit.RecoveryEpoch != 0 ||
-				audit.LastPublishedBundleGeneration != state.Published.Bundle.Generation {
+			if !authorityAuditTailPreservesPublishedAuthority(audit, state.Published.Bundle.Generation) {
 				return groupCandidateCASConflict(fmt.Sprintf("store_authority_audit_tail_changed_publication sequence=%d status=%s recovery=%d expected_generation=%s actual_generation=%s",
 					audit.Sequence, audit.Status, audit.RecoveryEpoch, state.Published.Bundle.Generation, audit.LastPublishedBundleGeneration))
 			}
 		}
 		if state.Published.CandidateLedgerSequence == 0 || state.Published.CandidateLedgerSequence > uint64(len(state.Ledger)) ||
-			candidate.AuthorityLedgerSequence != expectedAuthoritySequence || candidate.CandidateLedgerSequence == 0 ||
+			(candidate.AuthorityLedgerSequence != expectedAuthoritySequence && candidate.AuthorityLedgerSequence != actualAuthoritySequence) || candidate.CandidateLedgerSequence == 0 ||
 			candidate.CandidateLedgerSequence > uint64(len(state.Ledger)) {
 			return groupCandidateCASConflict(fmt.Sprintf("store_candidate_sequence_invalid published=%d candidate=%d ledger_length=%d candidate_authority=%d expected_authority=%d",
 				state.Published.CandidateLedgerSequence, candidate.CandidateLedgerSequence, len(state.Ledger), candidate.AuthorityLedgerSequence, expectedAuthoritySequence))
 		}
-		if candidate.Epoch <= currentEpoch || candidate.Epoch <= expectedPublicationSequence || candidate.CurrentRecord == nil || candidate.CurrentBundle == nil ||
-			candidate.CurrentRecord.BundleDigest != expectedPublishedDigest || candidate.CurrentRecord.Epoch != int64(expectedPublicationSequence) ||
+		if candidate.Epoch <= currentEpoch || candidate.Epoch <= state.Published.PublicationSequence || candidate.CurrentRecord == nil || candidate.CurrentBundle == nil ||
+			candidate.CurrentRecord.BundleDigest != state.Published.Digest || candidate.CurrentRecord.Epoch != int64(state.Published.PublicationSequence) ||
 			candidate.CurrentWorkerSlot == candidate.WorkerSlot || !candidateHasStagedWorkerIdentity(candidate) {
 			return groupCandidateCASConflict(fmt.Sprintf("store_candidate_identity_invalid candidate_epoch=%d current_epoch=%d publication=%d record_present=%t bundle_present=%t record_digest=%s expected_digest=%s record_epoch=%d expected_record_epoch=%d current_slot=%s worker_slot=%s",
 				candidate.Epoch, currentEpoch, expectedPublicationSequence, candidate.CurrentRecord != nil, candidate.CurrentBundle != nil,
-				candidateCurrentRecordDigest(candidate), expectedPublishedDigest, candidateCurrentRecordEpoch(candidate), expectedPublicationSequence,
+				candidateCurrentRecordDigest(candidate), state.Published.Digest, candidateCurrentRecordEpoch(candidate), state.Published.PublicationSequence,
 				candidate.CurrentWorkerSlot, candidate.WorkerSlot))
 		}
 		head := state.Ledger[state.Published.CandidateLedgerSequence-1]
@@ -421,9 +422,9 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 				head.BundleGeneration, candidate.RouteIntentGeneration, head.RouteIntentGeneration, candidate.InventoryGeneration,
 				head.InventoryGeneration, candidate.Record.InventoryDigest, head.InventoryDigest))
 		}
-		if signedGroupBundleDigest(*candidate.CurrentBundle) != expectedPublishedDigest {
+		if signedGroupBundleDigest(*candidate.CurrentBundle) != state.Published.Digest {
 			return groupCandidateCASConflict(fmt.Sprintf("store_current_bundle_digest_mismatch expected=%s actual=%s",
-				expectedPublishedDigest, signedGroupBundleDigest(*candidate.CurrentBundle)))
+				state.Published.Digest, signedGroupBundleDigest(*candidate.CurrentBundle)))
 		}
 		if err := validateGroupCandidateBundle(state.GroupID, candidate); err != nil {
 			return err

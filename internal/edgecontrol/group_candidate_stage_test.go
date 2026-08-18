@@ -138,6 +138,34 @@ func TestWorkerCandidateStageBindsExactReleaseAndPreservesCurrentAuthority(t *te
 	}
 }
 
+func TestWorkerCandidateStageAcceptsMonotonicLKGRefreshForSameGeneration(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	store, _, _, _ := groupPromotionFixture(t, "edge-group-country-de", now)
+	before, err := store.ReadGroupAuthority(ctx, "edge-group-country-de")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serving := &GroupServingAuthorityWitness{
+		CurrentRecordDigest: before.Published.Digest, AuthorityEpoch: 1, CurrentAuthorityUID: "uid-1", CurrentAuthorityRV: "rv-1",
+		FrontGeneration: 1, BundleVersion: before.Published.Bundle.Version, WorkerSlot: "a",
+		WorkerSourceSHA: strings.Repeat("a", 40), WorkerImageDigest: "sha256:" + strings.Repeat("b", 64),
+	}
+	request := GroupCandidateStageRequest{ExpectedPublicationSequence: before.Published.PublicationSequence, ExpectedRecoveryEpoch: before.Published.RecoveryEpoch,
+		ExpectedPublishedBundleDigest: before.Published.Digest}
+	renewed := before.Published
+	renewed.PublicationSequence++
+	renewed.RecoveryEpoch++
+	renewed.Bundle.Version = groupPublicationVersion(renewed.Bundle.Generation, renewed.PublicationSequence, renewed.RecoveryEpoch)
+	if !stagePublicationMatchesAuthority(renewed, request, serving) {
+		t.Fatal("same-generation monotonic LKG refresh was rejected")
+	}
+	renewed.Bundle.Generation = renewed.Bundle.Generation + "-changed"
+	if stagePublicationMatchesAuthority(renewed, request, serving) {
+		t.Fatal("route generation change was accepted as an LKG refresh")
+	}
+}
+
 func TestWorkerCandidateStageAcceptsFailedAuditTailThatPreservesPublication(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 13, 8, 30, 0, 0, time.UTC)
