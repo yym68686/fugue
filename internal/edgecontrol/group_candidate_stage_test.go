@@ -164,6 +164,20 @@ func TestWorkerCandidateStageAcceptsMonotonicLKGRefreshForSameGeneration(t *test
 	if stagePublicationMatchesAuthority(renewed, request, serving) {
 		t.Fatal("route generation change was accepted as an LKG refresh")
 	}
+	if !servingAuthorityCanUsePrunedCurrentGeneration(serving.BundleVersion, before.Published.Bundle.Generation,
+		renewed.PublicationSequence, renewed.RecoveryEpoch) {
+		t.Fatal("same-generation serving witness was rejected after candidate history pruning")
+	}
+	crossGenerationWitness := groupPublicationVersion(renewed.Bundle.Generation, renewed.PublicationSequence, renewed.RecoveryEpoch)
+	if servingAuthorityCanUsePrunedCurrentGeneration(crossGenerationWitness, before.Published.Bundle.Generation,
+		renewed.PublicationSequence, renewed.RecoveryEpoch) {
+		t.Fatal("cross-generation serving witness was accepted by fallback")
+	}
+	futureWitness := groupPublicationVersion(before.Published.Bundle.Generation, renewed.PublicationSequence+1, renewed.RecoveryEpoch)
+	if servingAuthorityCanUsePrunedCurrentGeneration(futureWitness, before.Published.Bundle.Generation,
+		renewed.PublicationSequence, renewed.RecoveryEpoch) {
+		t.Fatal("future serving publication was accepted by pruned-history fallback")
+	}
 }
 
 func TestWorkerCandidateStageAcceptsFailedAuditTailThatPreservesPublication(t *testing.T) {

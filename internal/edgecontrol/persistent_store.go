@@ -398,9 +398,11 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 			}
 			_, servingHead, exists := persistentPublishedCandidateByVersion(state, serving.BundleVersion)
 			fallback := !exists &&
-				servingAuthorityCanUseCurrentPublishedFallback(serving.BundleVersion, state.Published.Bundle.Generation,
-					state.Published.PublicationSequence, state.Published.RecoveryEpoch,
-					candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
+				(servingAuthorityCanUsePrunedCurrentGeneration(serving.BundleVersion, state.Published.Bundle.Generation,
+					state.Published.PublicationSequence, state.Published.RecoveryEpoch) ||
+					servingAuthorityCanUseCurrentPublishedFallback(serving.BundleVersion, state.Published.Bundle.Generation,
+						state.Published.PublicationSequence, state.Published.RecoveryEpoch,
+						candidate.AllowDegradedPrevious && !candidate.StandbyOnly)) &&
 				candidate.CandidateLedgerSequence == state.Published.CandidateLedgerSequence
 			if fallback {
 				head = state.Ledger[state.Published.CandidateLedgerSequence-1]
