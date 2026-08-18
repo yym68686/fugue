@@ -180,6 +180,45 @@ func TestWorkerCandidateStageAcceptsMonotonicLKGRefreshForSameGeneration(t *test
 	}
 }
 
+func TestWorkerCandidateStageAllowsBoundedDegradedPublicationRefresh(t *testing.T) {
+	now := time.Date(2026, 8, 13, 10, 15, 0, 0, time.UTC)
+	store, _, _, _ := groupPromotionFixture(t, "edge-group-country-de", now)
+	authority, err := store.ReadGroupAuthority(context.Background(), "edge-group-country-de")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	published := authority.Published
+	published.PublicationSequence += 2
+	published.RecoveryEpoch += 2
+	published.Bundle.Version = groupPublicationVersion(published.Bundle.Generation, published.PublicationSequence, published.RecoveryEpoch)
+	request := GroupCandidateStageRequest{
+		ExpectedPublicationSequence: published.PublicationSequence - 1,
+		ExpectedRecoveryEpoch:       published.RecoveryEpoch - 1,
+		AllowDegradedPrevious:       true,
+	}
+	serving := &GroupServingAuthorityWitness{
+		BundleVersion: groupPublicationVersion(published.Bundle.Generation, published.PublicationSequence-2, published.RecoveryEpoch-2),
+	}
+
+	if !stagePublicationMatchesAuthority(published, request, serving) {
+		t.Fatal("explicit degraded recovery rejected an older publication of the same immutable generation")
+	}
+	request.AllowDegradedPrevious = false
+	if stagePublicationMatchesAuthority(published, request, serving) {
+		t.Fatal("ordinary transition accepted the degraded publication refresh fallback")
+	}
+	request.AllowDegradedPrevious = true
+	serving.BundleVersion = groupPublicationVersion(published.Bundle.Generation+"-changed", published.PublicationSequence-2, published.RecoveryEpoch-2)
+	if stagePublicationMatchesAuthority(published, request, serving) {
+		t.Fatal("degraded publication refresh accepted a different route generation")
+	}
+	serving.BundleVersion = groupPublicationVersion(published.Bundle.Generation, published.PublicationSequence+1, published.RecoveryEpoch)
+	if stagePublicationMatchesAuthority(published, request, serving) {
+		t.Fatal("degraded publication refresh accepted a future serving publication")
+	}
+}
+
 func TestWorkerCandidateStageAcceptsFailedAuditTailThatPreservesPublication(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 13, 8, 30, 0, 0, time.UTC)
