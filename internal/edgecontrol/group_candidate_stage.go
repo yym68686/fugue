@@ -313,6 +313,14 @@ func servingAuthorityCanUseCurrentPublishedFallback(version, currentGeneration s
 	if !allowFallback {
 		return false
 	}
+	// Republishing an exact bundle generation only advances its authority
+	// sequence, recovery epoch, and validity window. Candidates already bound
+	// to that immutable generation retain their serving witness; requiring
+	// every retained candidate to be rewritten would make LKG renewal depend
+	// on candidate-history mutation.
+	if generation == currentGeneration {
+		return true
+	}
 	return (recoveryEpoch == currentRecoveryEpoch && publicationSequence < currentPublicationSequence) ||
 		(currentRecoveryEpoch != 0 && recoveryEpoch == 0 && publicationSequence > currentPublicationSequence)
 }
