@@ -523,8 +523,12 @@ func TestServingAuthorityCanUseCurrentPublishedFallback(t *testing.T) {
 		{name: "future publication", version: groupPublicationVersion(currentGeneration, currentPublicationSequence+1, 142)},
 		{name: "normalized serving publication ahead", version: groupPublicationVersion("normalized-serving-generation", currentPublicationSequence+388, 0), allowOlder: true, want: true},
 		{name: "normalized serving publication ahead without authorization", version: groupPublicationVersion("normalized-serving-generation", currentPublicationSequence+388, 0)},
+		{name: "same generation normalized serving publication behind refreshed LKG", version: groupPublicationVersion(currentGeneration, currentPublicationSequence-388, 0), allowOlder: true, want: true},
+		{name: "different generation normalized serving publication behind", version: groupPublicationVersion("old-serving-generation", currentPublicationSequence-388, 0), allowOlder: true},
+		{name: "same generation normalized serving publication behind without authorization", version: groupPublicationVersion(currentGeneration, currentPublicationSequence-388, 0)},
 		{name: "future nonzero recovery", version: groupPublicationVersion("future-recovery-generation", currentPublicationSequence+388, 1), allowOlder: true},
-		{name: "previous recovery", version: groupPublicationVersion(currentGeneration, 12237, 141)},
+		{name: "same generation previous recovery with authorization", version: groupPublicationVersion(currentGeneration, 12237, 141), allowOlder: true, want: true},
+		{name: "same generation previous recovery without authorization", version: groupPublicationVersion(currentGeneration, 12237, 141)},
 		{name: "malformed", version: "not-a-publication"},
 	}
 	for _, test := range tests {
