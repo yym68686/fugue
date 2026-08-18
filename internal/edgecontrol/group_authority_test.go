@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -270,6 +271,52 @@ func TestGroupAuthorityReconcileIsIdempotentUntilSignatureRefreshWindow(t *testi
 	authorityHistory, _ := store.AuthorityHistory(ctx, groupID)
 	if len(shadowHistory) != 1 || len(authorityHistory) != 1 {
 		t.Fatalf("unchanged reconcile grew durable ledgers: shadow=%d authority=%d", len(shadowHistory), len(authorityHistory))
+	}
+}
+
+func TestGroupAuthorityClassifiesPublishedLKGRecoveryFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 8, 18, 1, 30, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-de-healthy", false)
+	inventory.ObservedAt = now
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
+		t.Fatal(err)
+	}
+	compiler := GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}
+	compiled, err := compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || compiled.Succeeded != 1 {
+		t.Fatalf("seed compile: batch=%+v err=%v", compiled, err)
+	}
+	goodSigner := &fixtureGroupSigner{keys: map[string][]byte{groupID: bytes.Repeat([]byte{0x44}, 32)}, validFor: 30 * time.Minute}
+	if batch, err := (GroupAuthorityPublisher{Store: store, Signer: goodSigner, Now: func() time.Time { return now }}).Publish(ctx, compiled); err != nil || batch.Published != 1 {
+		t.Fatalf("seed publication: batch=%+v err=%v", batch, err)
+	}
+
+	now = now.Add(31 * time.Minute)
+	serving := false
+	inventory.Sequence++
+	inventory.Generation = "inventory-de-not-serving"
+	inventory.ObservedAt = now
+	inventory.Instances[0].ServingHealthy = &serving
+	inventory.Instances[0].EffectiveHealthy = false
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, inventory.Sequence-1, inventory); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err = compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || compiled.Failed != 1 || compiled.Results[0].FailureCode != GroupShadowFailureNoHealthyActive {
+		t.Fatalf("recovery precondition: batch=%+v err=%v", compiled, err)
+	}
+	badSigner := failingGroupSigner{}
+	result, err := (GroupAuthorityPublisher{Store: store, Signer: badSigner, Now: func() time.Time { return now }}).Publish(ctx, compiled)
+	if err != nil || result.Failed != 1 || result.Results[0].FailureCode != GroupAuthorityFailureSigning {
+		t.Fatalf("recovery failure classification: batch=%+v err=%v", result, err)
 	}
 }
 
@@ -564,6 +611,12 @@ func TestGroupBundleReaderAndRecoveryAreAuthenticatedGroupScopedCAS(t *testing.T
 type fixtureGroupSigner struct {
 	keys     map[string][]byte
 	validFor time.Duration
+}
+
+type failingGroupSigner struct{}
+
+func (failingGroupSigner) SignGroupBundle(context.Context, string, model.EdgeRouteBundle) (model.EdgeRouteBundle, error) {
+	return model.EdgeRouteBundle{}, errors.New("fixture signing unavailable")
 }
 
 func (signer *fixtureGroupSigner) SignGroupBundle(_ context.Context, groupID string, bundle model.EdgeRouteBundle) (model.EdgeRouteBundle, error) {

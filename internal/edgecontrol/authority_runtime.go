@@ -71,6 +71,12 @@ func (runtime AuthorityRuntime) Run(ctx context.Context, interval time.Duration,
 			observation.RouteIntentGeneration = batch.Published.RouteIntentGeneration
 			observation.Published = batch.Published.Published
 			observation.Failed = batch.Published.Failed
+			for _, result := range batch.Published.Results {
+				if result.Status == GroupAuthorityStatusFailed && result.FailureCode != "" {
+					observation.FailureCode = result.FailureCode
+					break
+				}
+			}
 		}
 		if runtime.Status != nil {
 			runtime.Status.Observe(observation)

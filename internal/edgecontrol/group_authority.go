@@ -348,8 +348,15 @@ func (publisher GroupAuthorityPublisher) RefreshPublishedLKG(ctx context.Context
 
 func (publisher GroupAuthorityPublisher) refreshPublishedLKG(ctx context.Context, groupID string, observed GroupAuthorityState, now time.Time, reason string) (GroupAuthorityResult, bool) {
 	if recovery, ok := publisher.Store.(PublishedLKGRecoveryStore); ok {
+		failed := func(code string) (GroupAuthorityResult, bool) {
+			return GroupAuthorityResult{
+				GroupID: groupID, Status: GroupAuthorityStatusFailed, PublicationSequence: observed.LedgerHead.Sequence,
+				CandidateLedgerSequence:       observed.Published.CandidateLedgerSequence,
+				LastPublishedBundleGeneration: observed.Published.Bundle.Generation, FailureCode: code,
+			}, true
+		}
 		if !observed.LedgerExists || !observed.PublishedExists || validateGroupPublishedBundle(groupID, observed.Published) != nil {
-			return GroupAuthorityResult{}, false
+			return failed(GroupAuthorityFailureCandidateRead)
 		}
 		bundle := cloneEdgeRouteBundle(observed.Published.Bundle)
 		bundle.Issuer = groupAuthorityIssuer
@@ -362,12 +369,15 @@ func (publisher GroupAuthorityPublisher) refreshPublishedLKG(ctx context.Context
 		bundle.Version = groupPublicationVersion(bundle.Generation, observed.LedgerHead.Sequence+1, observed.Published.RecoveryEpoch+1)
 		signed, err := publisher.Signer.SignGroupBundle(ctx, groupID, bundle)
 		if err != nil {
-			return GroupAuthorityResult{}, false
+			return failed(GroupAuthorityFailureSigning)
 		}
 		appended, err := recovery.RecoverPublishedLKG(ctx, groupID, observed.Published.PublicationSequence,
 			observed.Published.RecoveryEpoch, observed.Published.Bundle.Generation, signed, reason, now)
 		if err != nil {
-			return GroupAuthorityResult{}, false
+			if errors.Is(err, ErrGroupAuthorityCandidateCAS) {
+				return failed(GroupAuthorityFailureCandidateCAS)
+			}
+			return failed(GroupAuthorityFailurePublicationCAS)
 		}
 		return authorityResultFromEntry(appended), true
 	}
