@@ -2626,6 +2626,35 @@ dns:
 	}
 }
 
+func TestAPIStaticDNSRecordsCanUseConfigSecret(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir,
+		"--set", "configSecret.existingSecretName=fugue-production-config",
+		"--set", "api.dnsStaticRecordsSecretKey=FUGUE_DNS_STATIC_RECORDS_JSON")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	doc := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-api")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing api deployment")
+	}
+	if !strings.Contains(doc, "name: FUGUE_DNS_STATIC_RECORDS_JSON") ||
+		!strings.Contains(doc, "key: \"FUGUE_DNS_STATIC_RECORDS_JSON\"") ||
+		!strings.Contains(doc, "name: fugue-production-config") {
+		t.Fatalf("api deployment did not reference the configured DNS secret key:\n%s", doc)
+	}
+}
+
 func TestNodeLocalDNSDefaultsDisabled(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

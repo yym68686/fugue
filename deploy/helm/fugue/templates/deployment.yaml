@@ -177,7 +177,13 @@ spec:
               value: {{ .Values.api.appBaseDomain | quote }}
             - name: FUGUE_API_PUBLIC_DOMAIN
               value: {{ .Values.api.apiPublicDomain | quote }}
-            {{- if .Values.api.dnsStaticRecordsJSON }}
+            {{- if .Values.api.dnsStaticRecordsSecretKey }}
+            - name: FUGUE_DNS_STATIC_RECORDS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: {{ .Values.api.dnsStaticRecordsSecretKey | quote }}
+            {{- else if .Values.api.dnsStaticRecordsJSON }}
             - name: FUGUE_DNS_STATIC_RECORDS_JSON
               value: {{ .Values.api.dnsStaticRecordsJSON | quote }}
             {{- end }}

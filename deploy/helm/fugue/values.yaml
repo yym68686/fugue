@@ -198,6 +198,9 @@ api:
   appBaseDomain: ""
   apiPublicDomain: ""
   dnsStaticRecordsJSON: ""
+  # When set, the API reads its DNS bundle from this key in configSecret
+  # instead of embedding the bundle in the Deployment manifest.
+  dnsStaticRecordsSecretKey: ""
   edgeAuthorityServicesJSON: ""
   platformRoutesJSON: ""
   edgeQualityRankingMode: shadow

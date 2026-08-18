@@ -19,6 +19,7 @@ api:
   databaseURL: postgres://fugue:replace-me@postgres-ha.example.internal:5432/fugue?sslmode=require
   appBaseDomain: apps.example.com
   apiPublicDomain: api.example.com
+  dnsStaticRecordsSecretKey: FUGUE_DNS_STATIC_RECORDS_JSON
   registryPushBase: registry.fugue.internal:5000
   registryPullBase: registry.fugue.internal:5000
   clusterJoinRegistryEndpoint: http://127.0.0.1:5000
