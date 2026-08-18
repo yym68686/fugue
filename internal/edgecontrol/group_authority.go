@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"regexp"
@@ -29,10 +30,14 @@ const (
 	GroupAuthorityStatusPublished = "published"
 	GroupAuthorityStatusFailed    = "failed"
 
-	GroupAuthorityFailureCandidateRead  = "candidate_read_failed"
-	GroupAuthorityFailureCandidateCAS   = "candidate_cas_failed"
-	GroupAuthorityFailureSigning        = "signing_failed"
-	GroupAuthorityFailurePublicationCAS = "publication_cas_failed"
+	GroupAuthorityFailureCandidateRead         = "candidate_read_failed"
+	GroupAuthorityFailureCandidateCAS          = "candidate_cas_failed"
+	GroupAuthorityFailureSigning               = "signing_failed"
+	GroupAuthorityFailurePublicationCAS        = "publication_cas_failed"
+	GroupAuthorityFailurePublishedPointerCAS   = "published_pointer_cas_failed"
+	GroupAuthorityFailureRecoveryEpochCAS      = "recovery_epoch_cas_failed"
+	GroupAuthorityFailureAuditTailCAS          = "audit_tail_cas_failed"
+	GroupAuthorityFailurePublicationValidation = "publication_validation_failed"
 
 	GroupBundleSigningKeyringSchemaV1 = "edge-control-group-bundle-signing-keyring/v1"
 
@@ -43,10 +48,13 @@ const (
 )
 
 var (
-	ErrGroupAuthorityCASConflict  = errors.New("edge-control group authority ledger CAS conflict")
-	ErrGroupAuthorityCandidateCAS = errors.New("edge-control group authority candidate CAS conflict")
-	groupAuthorityKeyIDPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
-	groupAuthorityDigestPattern   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	ErrGroupAuthorityCASConflict         = errors.New("edge-control group authority ledger CAS conflict")
+	ErrGroupAuthorityCandidateCAS        = errors.New("edge-control group authority candidate CAS conflict")
+	ErrGroupAuthorityPublishedPointerCAS = fmt.Errorf("%w: published pointer changed", ErrGroupAuthorityCASConflict)
+	ErrGroupAuthorityRecoveryEpochCAS    = fmt.Errorf("%w: recovery epoch changed", ErrGroupAuthorityCASConflict)
+	ErrGroupAuthorityAuditTailCAS        = fmt.Errorf("%w: non-preserving audit tail", ErrGroupAuthorityCASConflict)
+	groupAuthorityKeyIDPattern           = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
+	groupAuthorityDigestPattern          = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // GroupAuthorityLedgerEntry is an append-only decision in one group's
@@ -377,7 +385,19 @@ func (publisher GroupAuthorityPublisher) refreshPublishedLKG(ctx context.Context
 			if errors.Is(err, ErrGroupAuthorityCandidateCAS) {
 				return failed(GroupAuthorityFailureCandidateCAS)
 			}
-			return failed(GroupAuthorityFailurePublicationCAS)
+			if errors.Is(err, ErrGroupAuthorityPublishedPointerCAS) {
+				return failed(GroupAuthorityFailurePublishedPointerCAS)
+			}
+			if errors.Is(err, ErrGroupAuthorityRecoveryEpochCAS) {
+				return failed(GroupAuthorityFailureRecoveryEpochCAS)
+			}
+			if errors.Is(err, ErrGroupAuthorityAuditTailCAS) {
+				return failed(GroupAuthorityFailureAuditTailCAS)
+			}
+			if errors.Is(err, ErrGroupAuthorityCASConflict) {
+				return failed(GroupAuthorityFailurePublicationCAS)
+			}
+			return failed(GroupAuthorityFailurePublicationValidation)
 		}
 		return authorityResultFromEntry(appended), true
 	}

@@ -644,7 +644,7 @@ func (store *PersistentGroupStore) RecoverPublishedLKG(ctx context.Context, grou
 	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
 		if state.Published == nil || state.Published.PublicationSequence != expectedSequence ||
 			state.Published.RecoveryEpoch != expectedRecoveryEpoch || state.Published.Bundle.Generation != generation {
-			return ErrGroupAuthorityCASConflict
+			return ErrGroupAuthorityPublishedPointerCAS
 		}
 		currentRecoveryEpoch := uint64(0)
 		for _, previous := range state.AuthorityLedger {
@@ -653,12 +653,12 @@ func (store *PersistentGroupStore) RecoverPublishedLKG(ctx context.Context, grou
 			}
 		}
 		if currentRecoveryEpoch != expectedRecoveryEpoch {
-			return ErrGroupAuthorityCASConflict
+			return ErrGroupAuthorityRecoveryEpochCAS
 		}
 		for _, audit := range state.AuthorityLedger[expectedSequence:] {
 			if audit.Status != GroupAuthorityStatusFailed || audit.RecoveryEpoch != 0 ||
 				audit.LastPublishedBundleGeneration != state.Published.Bundle.Generation {
-				return ErrGroupAuthorityCASConflict
+				return ErrGroupAuthorityAuditTailCAS
 			}
 		}
 		candidateSequence := state.Published.CandidateLedgerSequence
