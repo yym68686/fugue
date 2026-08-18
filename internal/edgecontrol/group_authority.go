@@ -108,6 +108,13 @@ type GroupBundleSigner interface {
 	SignGroupBundle(context.Context, string, model.EdgeRouteBundle) (model.EdgeRouteBundle, error)
 }
 
+// PublishedLKGRecoveryStore is an optional persistent-store capability for
+// renewing the exact durable published bundle after expiry. It deliberately
+// does not accept a RouteIntent or an arbitrary candidate bundle.
+type PublishedLKGRecoveryStore interface {
+	RecoverPublishedLKG(context.Context, string, uint64, uint64, string, model.EdgeRouteBundle, string, time.Time) (GroupAuthorityLedgerEntry, error)
+}
+
 type GroupAuthorityResult struct {
 	GroupID                       string `json:"edge_group_id"`
 	Status                        string `json:"status"`
@@ -340,6 +347,30 @@ func (publisher GroupAuthorityPublisher) RefreshPublishedLKG(ctx context.Context
 }
 
 func (publisher GroupAuthorityPublisher) refreshPublishedLKG(ctx context.Context, groupID string, observed GroupAuthorityState, now time.Time, reason string) (GroupAuthorityResult, bool) {
+	if recovery, ok := publisher.Store.(PublishedLKGRecoveryStore); ok {
+		if !observed.LedgerExists || !observed.PublishedExists || validateGroupPublishedBundle(groupID, observed.Published) != nil {
+			return GroupAuthorityResult{}, false
+		}
+		bundle := cloneEdgeRouteBundle(observed.Published.Bundle)
+		bundle.Issuer = groupAuthorityIssuer
+		bundle.GeneratedAt = now
+		bundle.ValidUntil = time.Time{}
+		bundle.KeyID = ""
+		bundle.Signature = ""
+		bundle.Signatures = nil
+		bundle.PreviousGeneration = ""
+		bundle.Version = groupPublicationVersion(bundle.Generation, observed.LedgerHead.Sequence+1, observed.Published.RecoveryEpoch+1)
+		signed, err := publisher.Signer.SignGroupBundle(ctx, groupID, bundle)
+		if err != nil {
+			return GroupAuthorityResult{}, false
+		}
+		appended, err := recovery.RecoverPublishedLKG(ctx, groupID, observed.Published.PublicationSequence,
+			observed.Published.RecoveryEpoch, observed.Published.Bundle.Generation, signed, reason, now)
+		if err != nil {
+			return GroupAuthorityResult{}, false
+		}
+		return authorityResultFromEntry(appended), true
+	}
 	store, ok := publisher.Store.(GroupRecoveryStore)
 	if !ok {
 		return GroupAuthorityResult{}, false

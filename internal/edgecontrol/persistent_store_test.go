@@ -148,6 +148,86 @@ func TestPersistentGroupStoreCompactsCandidateBundlesWithoutLosingSequence(t *te
 	}
 }
 
+func TestPersistentGroupStoreRehydratesArchivedPublishedRecoveryTarget(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 8, 16, 1, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, signer, candidate, published := groupPromotionFixture(t, groupID, now)
+	path := store.groupStatePath(groupID)
+	state, err := store.readGroupState(path, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Published == nil || state.Published.Bundle.Generation != candidate.Bundle.Generation {
+		t.Fatalf("fixture is not a published candidate: candidate=%+v published=%+v", candidate, state.Published)
+	}
+	sequence := state.Published.CandidateLedgerSequence
+	if sequence == 0 {
+		t.Fatalf("published fixture has no candidate sequence: published=%+v", state.Published)
+	}
+	archived := state.Ledger[sequence-1]
+	archived.Bundle = nil
+	archived.BundleArchived = true
+	state.Ledger[sequence-1] = archived
+	state.Candidate = nil
+	state.CandidateHistory = nil
+	state.Revision++
+	if err := store.writeGroupState(path, state); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := OpenPersistentGroupStore(store.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, recovered, _, err := restarted.ReadGroupRecoveryTarget(ctx, groupID, published.Published.Bundle.Generation)
+	if err != nil {
+		t.Fatalf("archived published recovery target rejected: %v", err)
+	}
+	if recovered.Bundle == nil || recovered.Bundle.Generation != published.Published.Bundle.Generation ||
+		!recovered.BundleArchived || authority.Published.Bundle.Generation != recovered.Bundle.Generation {
+		t.Fatalf("archived published recovery target was not rehydrated exactly: authority=%+v candidate=%+v", authority, recovered)
+	}
+	refreshedAt := published.Published.Bundle.ValidUntil.Add(time.Second)
+	bundle := cloneEdgeRouteBundle(*recovered.Bundle)
+	bundle.Issuer = groupAuthorityIssuer
+	bundle.GeneratedAt = refreshedAt
+	bundle.ValidUntil = time.Time{}
+	bundle.KeyID = ""
+	bundle.Signature = ""
+	bundle.Signatures = nil
+	bundle.PreviousGeneration = ""
+	bundle.Version = groupPublicationVersion(bundle.Generation, authority.LedgerHead.Sequence+1, 1)
+	signed, err := signer.SignGroupBundle(ctx, groupID, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := GroupAuthorityLedgerEntry{Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Status: GroupAuthorityStatusPublished,
+		CandidateLedgerSequence: recovered.Sequence, RouteIntentGeneration: recovered.RouteIntentGeneration,
+		InventoryGeneration: recovered.InventoryGeneration, BundleGeneration: signed.Generation,
+		LastPublishedBundleGeneration: signed.Generation, PublishedBundleDigest: signedGroupBundleDigest(signed),
+		SigningKeyID: signed.KeyID, RecoveryEpoch: 1, RecoveryReason: "test archived published refresh",
+		Authority: "edge-control", PublicationEnabled: true, RecordedAt: refreshedAt}
+	if _, err := restarted.RecoverGroupAuthorityCAS(ctx, groupID, authority.Published.PublicationSequence, 0, entry, signed); err != nil {
+		t.Fatalf("direct archived recovery CAS: %v", err)
+	}
+	// Repeat from the newly recovered publication to exercise the public
+	// maintenance path as production does.
+	refreshedAt = signed.ValidUntil.Add(time.Second)
+	publisher := GroupAuthorityPublisher{Store: restarted, Signer: signer, Now: func() time.Time { return refreshedAt }}
+	result, err := publisher.RefreshPublishedLKG(ctx, groupID, refreshedAt)
+	if err != nil || result.Status != GroupAuthorityStatusPublished {
+		t.Fatalf("refresh archived published recovery target: result=%+v err=%v", result, err)
+	}
+	after, err := restarted.ReadGroupAuthority(ctx, groupID)
+	if err != nil || after.Published.Bundle.Generation != published.Published.Bundle.Generation ||
+		after.Published.RecoveryEpoch != published.Published.RecoveryEpoch+2 || !after.Published.Bundle.ValidUntil.After(refreshedAt) {
+		t.Fatalf("archived published recovery target did not advance exactly: after=%+v err=%v", after, err)
+	}
+}
+
 func TestPersistentGroupStoreCompactsLargeRecoveryWindowBelowDurableLimit(t *testing.T) {
 	t.Parallel()
 
