@@ -195,7 +195,14 @@ func (s *Server) handleAdminPutTrafficOverride(w http.ResponseWriter, r *http.Re
 	}
 	candidate, err = trafficoverride.Sign(candidate, keyring.CurrentPrivateKey, keyring.CurrentKeyID)
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "traffic override signer unavailable")
+		switch {
+		case errors.Is(err, trafficoverride.ErrMissingSigningKey):
+			httpx.WriteError(w, http.StatusServiceUnavailable, "traffic override signing key unavailable")
+		case errors.Is(err, trafficoverride.ErrInvalidSignature):
+			httpx.WriteError(w, http.StatusUnprocessableEntity, "traffic override prepared_digest does not match the route payload")
+		default:
+			httpx.WriteError(w, http.StatusUnprocessableEntity, "traffic override signature payload is invalid")
+		}
 		return
 	}
 	stored, err := s.store.PutTrafficOverrideCAS(candidate, req.ExpectedGeneration)
