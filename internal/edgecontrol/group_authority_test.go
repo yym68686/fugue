@@ -529,6 +529,53 @@ func TestGroupAuthorityFailureServesOnlyThatGroupsDurableLKGAfterRestart(t *test
 	}
 }
 
+func TestGroupAuthorityRefreshesExpiredPublishedLKGWhenInventoryHeartbeatIsStale(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-de-healthy", false)
+	inventory.ObservedAt = now
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
+		t.Fatal(err)
+	}
+	compiler := GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }, InventoryMaxAge: GroupInventoryHeartbeatMaxAge}
+	compiled, err := compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || compiled.Succeeded != 1 {
+		t.Fatalf("seed compile: batch=%+v err=%v", compiled, err)
+	}
+	signer := &fixtureGroupSigner{keys: map[string][]byte{groupID: bytes.Repeat([]byte{0x45}, 32)}, validFor: 30 * time.Minute}
+	publisher := GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now }}
+	if batch, err := publisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
+		t.Fatalf("seed publication: batch=%+v err=%v", batch, err)
+	}
+	before, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !before.PublishedExists {
+		t.Fatalf("seed authority: state=%+v err=%v", before, err)
+	}
+
+	now = now.Add(31 * time.Minute)
+	compiled, err = compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || compiled.Failed != 1 || compiled.Results[0].FailureCode != GroupShadowFailureInventoryInvalid {
+		t.Fatalf("stale inventory precondition: batch=%+v err=%v", compiled, err)
+	}
+	refreshed, err := publisher.Publish(ctx, compiled)
+	if err != nil || refreshed.Published != 1 || refreshed.Failed != 0 {
+		t.Fatalf("expired LKG refresh: batch=%+v err=%v", refreshed, err)
+	}
+	after, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !after.PublishedExists || after.Published.Bundle.Generation != before.Published.Bundle.Generation ||
+		after.Published.Digest == before.Published.Digest || after.Published.RecoveryEpoch != before.Published.RecoveryEpoch+1 ||
+		!after.Published.Bundle.ValidUntil.After(now) {
+		t.Fatalf("refresh changed or lost the exact durable LKG: before=%+v after=%+v err=%v", before.Published, after.Published, err)
+	}
+}
+
 func TestGroupBundleReaderAndRecoveryAreAuthenticatedGroupScopedCAS(t *testing.T) {
 	t.Parallel()
 
