@@ -266,11 +266,14 @@ func (fake *fakeEdgeGroupRuntime) ReadActivation(context.Context, edgeGroupPod) 
 func (fake *fakeEdgeGroupRuntime) ActivationCAS(_ context.Context, _ edgeGroupPod, request edgeActivationRequest) (edgeActivationReceipt, error) {
 	fake.calls = append(fake.calls, "cas:"+request.Operation+":"+request.TargetSlot)
 	fake.requests = append(fake.requests, request)
-	return edgeActivationReceipt{Schema: edgeActivationReceiptSchema, GroupID: request.GroupID, Current: edgeActivationState{
+	state := edgeActivationState{
 		Schema: edgeActivationStateSchema, GroupID: request.GroupID, Generation: request.ExpectedGeneration + 1,
 		ActiveSlot: request.TargetSlot, BundleGeneration: request.BundleGeneration, WorkerSourceCommit: request.WorkerSourceCommit,
 		WorkerImageDigest: request.WorkerImageDigest, Authority: edgeActivationAuthority, Operation: request.Operation,
-	}}, nil
+		RollbackOfGeneration: request.RollbackOfGeneration,
+	}
+	fake.activationState = &state
+	return edgeActivationReceipt{Schema: edgeActivationReceiptSchema, GroupID: request.GroupID, Current: state}, nil
 }
 
 func (fake *fakeEdgeGroupRuntime) WaitFront(_ context.Context, slot, source, digest string) (map[string]edgeFrontHealth, error) {
@@ -487,6 +490,34 @@ func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFa
 	}
 	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true]"; got != want {
 		t.Fatalf("post-commit standby failure authority gates=%s want=%s", got, want)
+	}
+}
+
+func TestExecuteEdgeGroupABCompensatesActivationBeforeAuthorityCommit(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	target := edgeTargetFixture("2", "b")
+	beforeHealth := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 4,
+		BundleGeneration: "old-bundle", WorkerSourceCommit: old.ConfigSHA, WorkerImageDigest: digestFromTarget(t, old), RouteAuthority: edgeActivationAuthority}
+	before := edgeStateFixture("a", old, beforeHealth)
+	runtime := &fakeEdgeGroupRuntime{
+		snapshots: []edgeGroupState{before},
+		rolls:     map[string]map[string]edgeGroupPod{transition.WorkerBName: before.WorkerB},
+		declared:  map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
+		activationState: &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID, Generation: 5,
+			ActiveSlot: "b", BundleGeneration: "new-bundle", WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target),
+			Authority: edgeActivationAuthority, Operation: edgeActivationPromote},
+	}
+	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA,
+		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
+	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err == nil || !strings.Contains(err.Error(), "edge activation compensated") {
+		t.Fatalf("pre-commit failure did not report compensated activation: %v", err)
+	}
+	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationRollback || runtime.requests[0].TargetSlot != "a" || runtime.requests[0].RollbackOfGeneration != 5 {
+		t.Fatalf("compensation request=%+v", runtime.requests)
+	}
+	if runtime.activationState == nil || runtime.activationState.ActiveSlot != "a" || runtime.activationState.Generation != 6 || runtime.activationState.RollbackOfGeneration != 5 {
+		t.Fatalf("activation did not settle at exact pre-transition witness: %+v", runtime.activationState)
 	}
 }
 

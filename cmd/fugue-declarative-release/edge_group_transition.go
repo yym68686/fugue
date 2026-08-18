@@ -235,6 +235,7 @@ type edgeGroupTransitionRuntime interface {
 	ReadActivation(context.Context, edgeGroupPod) (edgeActivationState, bool, error)
 	WaitFront(context.Context, string, string, string) (map[string]edgeFrontHealth, error)
 	WaitActiveWorkerAuthority(context.Context, string, declarativerelease.TargetIdentity) error
+	ActivationCAS(context.Context, edgeGroupPod, edgeActivationRequest) (edgeActivationReceipt, error)
 }
 
 type kubectlEdgeGroupRuntime struct {
@@ -287,6 +288,12 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	if err != nil {
 		return err
 	}
+	compensate := func(cause error) error {
+		if compensationErr := compensateEdgeActivation(ctx, runtime, before, transition); compensationErr != nil {
+			return errors.Join(cause, fmt.Errorf("edge activation compensation is unknown: %w", compensationErr))
+		}
+		return errors.Join(cause, errors.New("edge activation compensated"))
+	}
 
 	if target.ConfigSHA == release.ExpectedPreviousConfigSHA {
 		if err := runtime.ApplyCandidateResources(ctx, ""); err != nil {
@@ -312,25 +319,25 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return errors.New("inactive Worker candidate receipt is invalid")
 	}
 	if err := runtime.ApplyCandidateResources(ctx, inactiveSlot); err != nil {
-		return err
+		return compensate(err)
 	}
 	candidatePods, err := runtime.Roll(ctx, inactiveName, target, true, release.SupersedesFailedConfigSHA != "")
 	if err != nil {
-		return fmt.Errorf("roll inactive edge slot %s: %w", inactiveSlot, err)
+		return compensate(fmt.Errorf("roll inactive edge slot %s: %w", inactiveSlot, err))
 	}
 	frontHealth, err := runtime.WaitFront(ctx, inactiveSlot, target.ConfigSHA, desiredDigest)
 	if err != nil {
-		return fmt.Errorf("wait Guardian authority switch: %w", err)
+		return compensate(fmt.Errorf("wait Guardian authority switch: %w", err))
 	}
 	if err := runtime.ApplyCandidateResources(ctx, transition.FrontName); err != nil {
-		return fmt.Errorf("apply Front candidate after Guardian authority switch: %w", err)
+		return compensate(fmt.Errorf("apply Front candidate after Guardian authority switch: %w", err))
 	}
 	frontPods, err := runtime.Roll(ctx, transition.FrontName, target, true, false)
 	if err != nil {
-		return fmt.Errorf("roll edge front after Guardian authority switch: %w", err)
+		return compensate(fmt.Errorf("roll edge front after Guardian authority switch: %w", err))
 	}
 	if err := runtime.WaitActiveWorkerAuthority(ctx, inactiveName, target); err != nil {
-		return fmt.Errorf("verify active edge worker authority: %w", err)
+		return compensate(fmt.Errorf("verify active edge worker authority: %w", err))
 	}
 	previousName := edgeWorkerName(transition, activeSlot)
 	previousTarget, err := runtime.DeclaredTarget(previousName)
@@ -378,6 +385,74 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	}
 	if final.ActiveSlot != inactiveSlot {
 		return errors.New("edge group activation did not converge to the promoted slot")
+	}
+	return nil
+}
+
+// compensateEdgeActivation restores the activation pointer to the exact
+// Front evidence captured before the transition. This is intentionally
+// limited to failures before the active Worker authority is committed: once
+// that boundary is crossed, rolling the pointer back here would split serving
+// authority from the already-promoted Worker and the Guardian transaction
+// owns compensation instead.
+func compensateEdgeActivation(ctx context.Context, runtime edgeGroupTransitionRuntime, before edgeGroupState, transition declarativerelease.EdgeGroupABTransition) error {
+	if runtime == nil || (before.ActiveSlot != "a" && before.ActiveSlot != "b") || len(before.FrontHealth) == 0 {
+		return errors.New("pre-transition activation evidence is unavailable")
+	}
+	var beforeHealth edgeFrontHealth
+	for _, health := range before.FrontHealth {
+		beforeHealth = health
+		break
+	}
+	if !beforeHealth.ActivationPresent || beforeHealth.Generation == 0 || beforeHealth.BundleGeneration == "" ||
+		beforeHealth.WorkerSourceCommit == "" || beforeHealth.WorkerImageDigest == "" {
+		return errors.New("pre-transition activation evidence is incomplete")
+	}
+	selectorCandidates := make([]edgeGroupPod, 0, len(before.WorkerA)+len(before.WorkerB))
+	for _, pods := range []map[string]edgeGroupPod{before.WorkerA, before.WorkerB} {
+		for _, pod := range pods {
+			selectorCandidates = append(selectorCandidates, pod)
+		}
+	}
+	executor, err := runtime.SelectCASExecutor(ctx, selectorCandidates...)
+	if err != nil {
+		return err
+	}
+	current, exists, err := runtime.ReadActivation(ctx, executor)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("current activation evidence is unavailable")
+	}
+	if current.GroupID != transition.GroupID || current.Authority != edgeActivationAuthority || current.ActiveSlot == "" {
+		return errors.New("current activation identity is invalid")
+	}
+	if current.Generation == beforeHealth.Generation && current.ActiveSlot == before.ActiveSlot &&
+		current.BundleGeneration == beforeHealth.BundleGeneration && current.WorkerSourceCommit == beforeHealth.WorkerSourceCommit &&
+		current.WorkerImageDigest == beforeHealth.WorkerImageDigest {
+		return nil
+	}
+	if current.Generation <= beforeHealth.Generation {
+		return errors.New("current activation generation is not newer than the pre-transition witness")
+	}
+	request := edgeActivationRequest{GroupID: transition.GroupID, ExpectedGeneration: current.Generation,
+		ExpectedSlot: current.ActiveSlot, TargetSlot: before.ActiveSlot, BundleGeneration: beforeHealth.BundleGeneration,
+		WorkerSourceCommit: beforeHealth.WorkerSourceCommit, WorkerImageDigest: beforeHealth.WorkerImageDigest,
+		Operation: edgeActivationRollback, RollbackOfGeneration: current.Generation,
+		Reason: "compensate pre-commit edge group transition failure"}
+	if _, err := runtime.ActivationCAS(ctx, executor, request); err != nil {
+		return err
+	}
+	settled, exists, err := runtime.ReadActivation(ctx, executor)
+	if err != nil || !exists || settled.Generation != current.Generation+1 || settled.ActiveSlot != before.ActiveSlot ||
+		settled.BundleGeneration != beforeHealth.BundleGeneration || settled.WorkerSourceCommit != beforeHealth.WorkerSourceCommit ||
+		settled.WorkerImageDigest != beforeHealth.WorkerImageDigest || settled.Operation != edgeActivationRollback ||
+		settled.RollbackOfGeneration != current.Generation {
+		if err != nil {
+			return errors.Join(errors.New("read compensated activation"), err)
+		}
+		return errors.New("compensated activation is not request-bound")
 	}
 	return nil
 }
