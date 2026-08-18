@@ -570,10 +570,14 @@ func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.
 	if err := decodeStrictJSON([]byte(data["authority.json"]), &current); err != nil {
 		return nil, errors.New("Guardian current authority payload is invalid")
 	}
-	return edgeServingAuthorityWitnessFromCurrent(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion())
+	return edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "")
 }
 
 func edgeServingAuthorityWitnessFromCurrent(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string) (*edgeServingAuthorityWitness, error) {
+	return edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before, current, groupID, uid, resourceVersion, false)
+}
+
+func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string, allowDegradedRecovery bool) (*edgeServingAuthorityWitness, error) {
 	if current.Validate() != nil || current.GroupID != groupID {
 		return nil, errors.New("Guardian current authority payload is invalid")
 	}
@@ -583,8 +587,30 @@ func edgeServingAuthorityWitnessFromCurrent(before edgeGroupState, current relea
 	if !edgeServingAuthorityTokenPattern.MatchString(uid) || !edgeServingAuthorityTokenPattern.MatchString(resourceVersion) {
 		return nil, errors.New("Guardian current authority CAS identity is invalid")
 	}
-	if before.ActiveSlot != string(current.CurrentWorkerSlot) || len(before.FrontHealth) == 0 {
+	if len(before.FrontHealth) == 0 {
 		return nil, errors.New("Guardian current authority does not match the serving Front slot")
+	}
+	if before.ActiveSlot != string(current.CurrentWorkerSlot) {
+		if !allowDegradedRecovery || current.CurrentWorkerSourceSHA == "" || current.CurrentWorkerImageDigest == "" ||
+			current.CurrentBundleGeneration == "" {
+			return nil, errors.New("Guardian current authority does not match the serving Front slot")
+		}
+		for _, health := range before.FrontHealth {
+			if !edgeFrontHealthMatchesDegradedServingAuthority(health, current) {
+				return nil, errors.New("Guardian current authority does not match degraded serving Front evidence")
+			}
+		}
+		var health edgeFrontHealth
+		for _, observed := range before.FrontHealth {
+			health = observed
+			break
+		}
+		return &edgeServingAuthorityWitness{
+			CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+			CurrentAuthorityUID: uid, CurrentAuthorityRV: resourceVersion, FrontGeneration: health.Generation,
+			BundleVersion: health.BundleGeneration, WorkerSlot: before.ActiveSlot,
+			WorkerSourceSHA: health.WorkerSourceCommit, WorkerImageDigest: health.WorkerImageDigest,
+		}, nil
 	}
 	for _, health := range before.FrontHealth {
 		if !edgeFrontHealthMatchesServingAuthority(health, current) {
@@ -597,6 +623,36 @@ func edgeServingAuthorityWitnessFromCurrent(before edgeGroupState, current relea
 		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: string(current.CurrentWorkerSlot),
 		WorkerSourceSHA: current.CurrentWorkerSourceSHA, WorkerImageDigest: current.CurrentWorkerImageDigest,
 	}, nil
+}
+
+func edgeFrontHealthMatchesDegradedServingAuthority(health edgeFrontHealth, current releaseguardian.CurrentAuthority) bool {
+	if !health.ActivationPresent || health.RouteAuthority != edgeActivationAuthority ||
+		(health.ActiveSlot != "a" && health.ActiveSlot != "b") || health.Generation < current.CurrentFrontGeneration ||
+		health.WorkerSourceCommit != current.CurrentWorkerSourceSHA || health.WorkerImageDigest != current.CurrentWorkerImageDigest {
+		return false
+	}
+	currentGeneration, _, _, currentOK := parseEdgePublicationVersion(current.CurrentBundleGeneration)
+	frontGeneration, _, _, frontOK := parseEdgePublicationVersion(health.BundleGeneration)
+	return currentOK && frontOK && currentGeneration == frontGeneration
+}
+
+func parseEdgePublicationVersion(version string) (string, uint64, uint64, bool) {
+	version = strings.TrimSpace(version)
+	pivot := strings.LastIndex(version, ".p")
+	if pivot <= 0 {
+		return "", 0, 0, false
+	}
+	recoveryPivot := strings.LastIndex(version[pivot+2:], ".r")
+	if recoveryPivot <= 0 {
+		return "", 0, 0, false
+	}
+	recoveryPivot += pivot + 2
+	publication, publicationErr := strconv.ParseUint(version[pivot+2:recoveryPivot], 10, 64)
+	recovery, recoveryErr := strconv.ParseUint(version[recoveryPivot+2:], 10, 64)
+	if publicationErr != nil || recoveryErr != nil || publication == 0 {
+		return "", 0, 0, false
+	}
+	return version[:pivot], publication, recovery, true
 }
 
 func edgeFrontHealthMatchesServingAuthority(health edgeFrontHealth, current releaseguardian.CurrentAuthority) bool {
