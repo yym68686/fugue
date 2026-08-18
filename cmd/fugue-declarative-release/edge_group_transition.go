@@ -939,7 +939,7 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 	// started. Read the same CAS state from a group-local Worker mount so the
 	// transition uses an authoritative slot and generation before staging a
 	// candidate. This is independent of DNS and never fabricates an ACK.
-	activation, activationExists, activationErr := cluster.readEdgeGroupActivation(ctx, release, transition, workerA, workerB)
+	activation, activationExists, activationErr := cluster.readEdgeGroupActivation(ctx, release, transition, front, workerA, workerB)
 	if activationErr != nil {
 		return edgeGroupState{}, activationErr
 	}
@@ -966,7 +966,20 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 	return edgeGroupState{Front: front, FrontHealth: frontHealth, FrontActivation: activation, WorkerA: workerA, WorkerB: workerB, ActiveSlot: activeSlot}, nil
 }
 
-func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, workerA, workerB map[string]edgeGroupPod) (*edgeActivationState, bool, error) {
+func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, front, workerA, workerB map[string]edgeGroupPod) (*edgeActivationState, bool, error) {
+	// Front and Worker mount the same activation state, but the Front is the
+	// process that serves it. Read the file from that container first so a
+	// stale Front health cache cannot hide a valid CAS record before candidate
+	// staging. Fall back to a Worker mount for older layouts.
+	for _, node := range sortedEdgeNodes(front) {
+		state, exists, err := cluster.readEdgeActivationStateFromPod(ctx, release, transition, front[node], "edge-front")
+		if err != nil {
+			return nil, false, fmt.Errorf("read Front activation evidence: %w", err)
+		}
+		if exists {
+			return &state, true, nil
+		}
+	}
 	candidates := make([]edgeGroupPod, 0, len(workerA)+len(workerB))
 	for _, pods := range []map[string]edgeGroupPod{workerA, workerB} {
 		for _, pod := range pods {
@@ -1422,7 +1435,11 @@ func (cluster *kubectlCluster) runEdgeActivationCAS(ctx context.Context, release
 }
 
 func (cluster *kubectlCluster) readEdgeActivationState(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, pod edgeGroupPod) (edgeActivationState, bool, error) {
-	raw, err := cluster.kubectlRun(ctx, nil, "exec", "--namespace", release.Workload.Namespace, pod.Name, "--container", transition.WorkerContainer,
+	return cluster.readEdgeActivationStateFromPod(ctx, release, transition, pod, transition.WorkerContainer)
+}
+
+func (cluster *kubectlCluster) readEdgeActivationStateFromPod(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, pod edgeGroupPod, container string) (edgeActivationState, bool, error) {
+	raw, err := cluster.kubectlRun(ctx, nil, "exec", "--namespace", release.Workload.Namespace, pod.Name, "--container", container,
 		"--", "sh", "-ceu", `if [ ! -e "$1" ]; then printf 'absent\n'; exit 0; fi; cat "$1"`, "sh", transition.ActivationStatePath)
 	if err != nil {
 		return edgeActivationState{}, false, err
