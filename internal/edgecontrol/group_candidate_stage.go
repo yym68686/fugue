@@ -312,6 +312,15 @@ func stagePublicationMatchesAuthority(published GroupPublishedBundle, request Gr
 		return false
 	}
 	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(serving.BundleVersion)
+	if request.AllowDegradedPrevious && ok && generation == published.Bundle.Generation &&
+		publicationSequence <= published.PublicationSequence && recoveryEpoch <= published.RecoveryEpoch {
+		// A publication refresh may advance the authority sequence while the
+		// serving Front still presents an older version of the same immutable
+		// bundle. This is safe only for an explicitly authorized degraded
+		// recovery; ordinary transitions remain exact-CAS bound below.
+		return published.PublicationSequence >= request.ExpectedPublicationSequence &&
+			published.RecoveryEpoch >= request.ExpectedRecoveryEpoch
+	}
 	return ok && publicationSequence == request.ExpectedPublicationSequence && recoveryEpoch == request.ExpectedRecoveryEpoch &&
 		generation == published.Bundle.Generation && published.PublicationSequence >= request.ExpectedPublicationSequence &&
 		published.RecoveryEpoch >= request.ExpectedRecoveryEpoch &&
