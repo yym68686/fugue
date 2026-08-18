@@ -23,6 +23,30 @@ var (
 	edgeDNSAuthorityGroupPattern   = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
 )
 
+func parseEdgeAuthorityServices(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var configured map[string]string
+	if err := json.Unmarshal([]byte(raw), &configured); err != nil {
+		return nil, fmt.Errorf("must be a JSON object of edge group to service mappings: %w", err)
+	}
+	if len(configured) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]string, len(configured))
+	for groupID, service := range configured {
+		groupID = strings.TrimSpace(strings.ToLower(groupID))
+		service = strings.TrimSpace(strings.ToLower(service))
+		if !edgeDNSAuthorityGroupPattern.MatchString(groupID) || !edgeDNSAuthorityServicePattern.MatchString(service) {
+			return nil, fmt.Errorf("invalid Edge Control authority mapping for group %q", groupID)
+		}
+		result[groupID] = service
+	}
+	return result, nil
+}
+
 type edgeDNSAuthorityStatus struct {
 	EdgeGroupID            string    `json:"edge_group_id"`
 	Status                 string    `json:"status"`

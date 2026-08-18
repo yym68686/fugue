@@ -39,6 +39,7 @@ type ServerConfig struct {
 	DNSNameservers                         []string
 	DNSRouteAAnswerIPs                     []string
 	DNSBundleTTL                           int
+	EdgeAuthorityServicesJSON              string
 	PlatformRoutesJSON                     string
 	EdgeQualityRankingMode                 string
 	AppSafeZeroDowntimePublicEnabled       bool

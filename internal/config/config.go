@@ -41,6 +41,7 @@ type APIConfig struct {
 	DNSNameservers                         []string
 	DNSRouteAAnswerIPs                     []string
 	DNSBundleTTL                           int
+	EdgeAuthorityServicesJSON              string
 	PlatformRoutesJSON                     string
 	EdgeQualityRankingMode                 string
 	AppSafeZeroDowntimePublicEnabled       bool
@@ -348,6 +349,7 @@ func APIFromEnv() APIConfig {
 		DNSNameservers:                         getenvList("FUGUE_DNS_NAMESERVERS"),
 		DNSRouteAAnswerIPs:                     getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
 		DNSBundleTTL:                           getenvInt("FUGUE_DNS_TTL", 60),
+		EdgeAuthorityServicesJSON:              strings.TrimSpace(os.Getenv("FUGUE_EDGE_AUTHORITY_SERVICES_JSON")),
 		PlatformRoutesJSON:                     strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
 		EdgeQualityRankingMode:                 getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
 		AppSafeZeroDowntimePublicEnabled:       getenvBool("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", true),

@@ -73,6 +73,7 @@ func main() {
 		DNSNameservers:                         cfg.DNSNameservers,
 		DNSRouteAAnswerIPs:                     cfg.DNSRouteAAnswerIPs,
 		DNSBundleTTL:                           cfg.DNSBundleTTL,
+		EdgeAuthorityServicesJSON:              cfg.EdgeAuthorityServicesJSON,
 		PlatformRoutesJSON:                     cfg.PlatformRoutesJSON,
 		EdgeQualityRankingMode:                 cfg.EdgeQualityRankingMode,
 		AppSafeZeroDowntimePublicEnabled:       cfg.AppSafeZeroDowntimePublicEnabled,

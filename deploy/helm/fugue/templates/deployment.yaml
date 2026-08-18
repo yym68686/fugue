@@ -181,6 +181,10 @@ spec:
             - name: FUGUE_DNS_STATIC_RECORDS_JSON
               value: {{ .Values.api.dnsStaticRecordsJSON | quote }}
             {{- end }}
+            {{- if .Values.api.edgeAuthorityServicesJSON }}
+            - name: FUGUE_EDGE_AUTHORITY_SERVICES_JSON
+              value: {{ .Values.api.edgeAuthorityServicesJSON | quote }}
+            {{- end }}
             {{- if .Values.dns.routeAAnswerIPs }}
             - name: FUGUE_DNS_ROUTE_A_ANSWER_IPS
               value: {{ join "," .Values.dns.routeAAnswerIPs | quote }}
