@@ -595,7 +595,8 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 		}
 		if before.ActiveSlot != string(current.CurrentWorkerSlot) {
 			if !allowDegradedRecovery || !edgeFrontHealthMatchesDegradedServingAuthority(health, current) {
-				return nil, errors.New("Guardian current authority does not match the serving Front slot")
+				return nil, fmt.Errorf("Guardian current authority does not match the serving Front slot: %s",
+					edgeDegradedServingAuthorityMismatch(health, current, allowDegradedRecovery))
 			}
 			return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 		}
@@ -640,6 +641,16 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: string(current.CurrentWorkerSlot),
 		WorkerSourceSHA: current.CurrentWorkerSourceSHA, WorkerImageDigest: current.CurrentWorkerImageDigest,
 	}, nil
+}
+
+func edgeDegradedServingAuthorityMismatch(health edgeFrontHealth, current releaseguardian.CurrentAuthority, allowed bool) string {
+	currentGeneration, _, _, currentOK := parseEdgePublicationVersion(current.CurrentBundleGeneration)
+	frontGeneration, _, _, frontOK := parseEdgePublicationVersion(health.BundleGeneration)
+	return fmt.Sprintf("allowed=%t activation_present=%t route_authority_ok=%t slot_ok=%t generation_ok=%t source_ok=%t image_ok=%t bundle_family_ok=%t",
+		allowed, health.ActivationPresent, health.RouteAuthority == edgeActivationAuthority,
+		health.ActiveSlot == "a" || health.ActiveSlot == "b", health.Generation >= current.CurrentFrontGeneration,
+		health.WorkerSourceCommit == current.CurrentWorkerSourceSHA, health.WorkerImageDigest == current.CurrentWorkerImageDigest,
+		currentOK && frontOK && currentGeneration == frontGeneration)
 }
 
 func edgeFrontHealthFromActivation(activation edgeActivationState) edgeFrontHealth {
