@@ -169,6 +169,25 @@ func TestServingAuthorityWitnessAcceptsCompensatedFrontGeneration(t *testing.T) 
 	}
 }
 
+func TestServingAuthorityWitnessAllowsExplicitDegradedPublicationRefresh(t *testing.T) {
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
+		CurrentWorkerSlot: releaseguardian.AuthoritySlotB, CurrentFrontGeneration: 134,
+		CurrentBundleGeneration: "routes.p15765.r151", CurrentWorkerSourceSHA: strings.Repeat("2", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("3", 64), AuthorityEpoch: 12635}
+	health := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 135,
+		BundleGeneration: "routes.p15778.r151", WorkerSourceCommit: current.CurrentWorkerSourceSHA,
+		WorkerImageDigest: current.CurrentWorkerImageDigest, RouteAuthority: edgeActivationAuthority}
+	before := edgeGroupState{ActiveSlot: "a", FrontHealth: map[string]edgeFrontHealth{"node-1": health}}
+	witness, err := edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before, current, current.GroupID, "current-uid", "123", true)
+	if err != nil || witness == nil || witness.WorkerSlot != "a" || witness.BundleVersion != health.BundleGeneration || witness.FrontGeneration != health.Generation {
+		t.Fatalf("degraded publication refresh witness=%+v err=%v", witness, err)
+	}
+	if _, err := edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before, current, current.GroupID, "current-uid", "123", false); err == nil {
+		t.Fatal("degraded witness was accepted without explicit authorization")
+	}
+}
+
 func TestServingAuthorityWitnessOmitsLegacyUnboundFront(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
