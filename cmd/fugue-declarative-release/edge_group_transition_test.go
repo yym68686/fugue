@@ -188,6 +188,22 @@ func TestServingAuthorityWitnessAllowsExplicitDegradedPublicationRefresh(t *test
 	}
 }
 
+func TestServingAuthorityWitnessUsesWorkerActivationEvidenceWhenFrontMetadataLags(t *testing.T) {
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
+		CurrentWorkerSlot: releaseguardian.AuthoritySlotB, CurrentFrontGeneration: 134,
+		CurrentBundleGeneration: "routes.p15765.r151", CurrentWorkerSourceSHA: strings.Repeat("2", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("3", 64), AuthorityEpoch: 12635}
+	activation := edgeActivationState{Schema: edgeActivationStateSchema, GroupID: current.GroupID, Generation: 135,
+		ActiveSlot: "a", BundleGeneration: "routes.p15778.r151", WorkerSourceCommit: current.CurrentWorkerSourceSHA,
+		WorkerImageDigest: current.CurrentWorkerImageDigest, Authority: edgeActivationAuthority, Operation: edgeActivationPromote}
+	before := edgeGroupState{ActiveSlot: "a", FrontActivation: &activation}
+	witness, err := edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before, current, current.GroupID, "current-uid", "123", true)
+	if err != nil || witness == nil || witness.WorkerSlot != "a" || witness.BundleVersion != activation.BundleGeneration || witness.FrontGeneration != activation.Generation {
+		t.Fatalf("worker activation evidence was not accepted for stale Front metadata: witness=%+v err=%v", witness, err)
+	}
+}
+
 func TestServingAuthorityWitnessOmitsLegacyUnboundFront(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),

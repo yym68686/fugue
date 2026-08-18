@@ -217,11 +217,12 @@ type edgeFrontHealth struct {
 }
 
 type edgeGroupState struct {
-	Front       map[string]edgeGroupPod
-	FrontHealth map[string]edgeFrontHealth
-	WorkerA     map[string]edgeGroupPod
-	WorkerB     map[string]edgeGroupPod
-	ActiveSlot  string
+	Front           map[string]edgeGroupPod
+	FrontHealth     map[string]edgeFrontHealth
+	FrontActivation *edgeActivationState
+	WorkerA         map[string]edgeGroupPod
+	WorkerB         map[string]edgeGroupPod
+	ActiveSlot      string
 }
 
 type edgeGroupTransitionRuntime interface {
@@ -587,6 +588,22 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 	if !edgeServingAuthorityTokenPattern.MatchString(uid) || !edgeServingAuthorityTokenPattern.MatchString(resourceVersion) {
 		return nil, errors.New("Guardian current authority CAS identity is invalid")
 	}
+	if before.FrontActivation != nil {
+		health := edgeFrontHealthFromActivation(*before.FrontActivation)
+		if before.ActiveSlot != health.ActiveSlot {
+			return nil, errors.New("edge activation evidence disagrees with serving slot")
+		}
+		if before.ActiveSlot != string(current.CurrentWorkerSlot) {
+			if !allowDegradedRecovery || !edgeFrontHealthMatchesDegradedServingAuthority(health, current) {
+				return nil, errors.New("Guardian current authority does not match the serving Front slot")
+			}
+			return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+		}
+		if !edgeFrontHealthMatchesServingAuthority(health, current) {
+			return nil, errors.New("Guardian current authority does not match serving Front activation evidence")
+		}
+		return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+	}
 	if len(before.FrontHealth) == 0 {
 		return nil, errors.New("Guardian current authority does not match the serving Front slot")
 	}
@@ -623,6 +640,21 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: string(current.CurrentWorkerSlot),
 		WorkerSourceSHA: current.CurrentWorkerSourceSHA, WorkerImageDigest: current.CurrentWorkerImageDigest,
 	}, nil
+}
+
+func edgeFrontHealthFromActivation(activation edgeActivationState) edgeFrontHealth {
+	return edgeFrontHealth{ActiveSlot: activation.ActiveSlot, ActivationPresent: true, Generation: activation.Generation,
+		BundleGeneration: activation.BundleGeneration, WorkerSourceCommit: activation.WorkerSourceCommit,
+		WorkerImageDigest: activation.WorkerImageDigest, RouteAuthority: activation.Authority}
+}
+
+func edgeServingAuthorityWitnessFromFrontHealth(current releaseguardian.CurrentAuthority, uid, resourceVersion string, health edgeFrontHealth) *edgeServingAuthorityWitness {
+	return &edgeServingAuthorityWitness{
+		CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+		CurrentAuthorityUID: uid, CurrentAuthorityRV: resourceVersion, FrontGeneration: health.Generation,
+		BundleVersion: health.BundleGeneration, WorkerSlot: health.ActiveSlot,
+		WorkerSourceSHA: health.WorkerSourceCommit, WorkerImageDigest: health.WorkerImageDigest,
+	}
 }
 
 func edgeFrontHealthMatchesDegradedServingAuthority(health edgeFrontHealth, current releaseguardian.CurrentAuthority) bool {
@@ -902,6 +934,15 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 	if !sameEdgeNodes(front, workerA) || !sameEdgeNodes(front, workerB) {
 		return edgeGroupState{}, errors.New("edge group workloads do not share one exact node cohort")
 	}
+	// The Front /readyz endpoint is useful liveness evidence, but its metadata
+	// can lag an activation CAS performed by a Worker after the Front process
+	// started. Read the same CAS state from a group-local Worker mount so the
+	// transition uses an authoritative slot and generation before staging a
+	// candidate. This is independent of DNS and never fabricates an ACK.
+	activation, activationExists, activationErr := cluster.readEdgeGroupActivation(ctx, release, transition, workerA, workerB)
+	if activationErr != nil {
+		return edgeGroupState{}, activationErr
+	}
 	frontHealth := make(map[string]edgeFrontHealth, len(front))
 	activeSlot := ""
 	for node, pod := range front {
@@ -909,17 +950,41 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 		if healthErr != nil {
 			return edgeGroupState{}, healthErr
 		}
-		if activeSlot == "" {
+		if activeSlot == "" && activation == nil {
 			activeSlot = health.ActiveSlot
-		} else if activeSlot != health.ActiveSlot {
+		} else if activation == nil && activeSlot != health.ActiveSlot {
 			return edgeGroupState{}, errors.New("edge group front nodes disagree on active slot")
 		}
 		frontHealth[node] = health
 	}
+	if activationExists {
+		activeSlot = activation.ActiveSlot
+	}
 	if activeSlot != "a" && activeSlot != "b" {
 		return edgeGroupState{}, errors.New("edge group active slot is invalid")
 	}
-	return edgeGroupState{Front: front, FrontHealth: frontHealth, WorkerA: workerA, WorkerB: workerB, ActiveSlot: activeSlot}, nil
+	return edgeGroupState{Front: front, FrontHealth: frontHealth, FrontActivation: activation, WorkerA: workerA, WorkerB: workerB, ActiveSlot: activeSlot}, nil
+}
+
+func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, workerA, workerB map[string]edgeGroupPod) (*edgeActivationState, bool, error) {
+	candidates := make([]edgeGroupPod, 0, len(workerA)+len(workerB))
+	for _, pods := range []map[string]edgeGroupPod{workerA, workerB} {
+		for _, pod := range pods {
+			candidates = append(candidates, pod)
+		}
+	}
+	executor, err := cluster.selectEdgeCASExecutor(ctx, release.Workload.Namespace, transition, candidates...)
+	if err != nil {
+		return nil, false, fmt.Errorf("select edge activation evidence reader: %w", err)
+	}
+	state, exists, err := cluster.readEdgeActivationState(ctx, release, transition, executor)
+	if err != nil {
+		return nil, false, fmt.Errorf("read edge activation evidence: %w", err)
+	}
+	if !exists {
+		return nil, false, nil
+	}
+	return &state, true, nil
 }
 
 // A worker can be the currently active slot while its readiness probe is
