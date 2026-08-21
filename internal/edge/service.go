@@ -3831,20 +3831,6 @@ func (s *Service) verifyBundle(bundle model.EdgeRouteBundle, now time.Time) erro
 	return nil
 }
 
-func (s *Service) verifyLegacyBundle(bundle model.EdgeRouteBundle, now time.Time) error {
-	keyring := bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)
-	if strings.TrimSpace(keyring.PrimaryKey) == "" {
-		return errors.New("legacy route bundle verifier is absent")
-	}
-	if err := bundleauth.VerifyEdgeRouteBundleWithKeyring(bundle, keyring, now); err != nil {
-		return err
-	}
-	if strings.TrimSpace(bundle.Version) == "" {
-		return errors.New("legacy route bundle version is required")
-	}
-	return nil
-}
-
 func (s *Service) verifyCachedBundle(cached cacheFile, now time.Time) error {
 	verifyAt, err := staleBundleVerificationTime(cached.Bundle.ValidUntil, now, s.Config.MaxStale)
 	if err != nil {
