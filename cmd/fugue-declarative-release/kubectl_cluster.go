@@ -2836,6 +2836,10 @@ func (cluster *kubectlCluster) readyPodHTTPEndpoints(ctx context.Context, releas
 }
 
 func podHTTPEndpointsFromJSON(raw []byte, containerName, portName string) ([]podHTTPEndpoint, error) {
+	return podHTTPEndpointsFromJSONWithReadiness(raw, containerName, portName, true)
+}
+
+func podHTTPEndpointsFromJSONWithReadiness(raw []byte, containerName, portName string, requireReady bool) ([]podHTTPEndpoint, error) {
 	value, err := decodeJSONObject(raw)
 	if err != nil {
 		return nil, err
@@ -2852,7 +2856,7 @@ func podHTTPEndpointsFromJSON(raw []byte, containerName, portName string) ([]pod
 		}
 		metadata := mapField(pod, "metadata")
 		status := mapField(pod, "status")
-		if metadata["deletionTimestamp"] != nil || !podReady(status) {
+		if metadata["deletionTimestamp"] != nil || (requireReady && !podReady(status)) {
 			continue
 		}
 		name, ip := stringValue(metadata["name"]), stringValue(status["podIP"])

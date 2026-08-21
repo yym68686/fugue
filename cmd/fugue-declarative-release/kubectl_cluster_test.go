@@ -2132,6 +2132,24 @@ func TestPodHTTPUsesBoundReadyPodIPAndNamedPort(t *testing.T) {
 	}
 }
 
+func TestPodHTTPSnapshotUsesUnreadyPodIdentityAndNamedPort(t *testing.T) {
+	pod := podFixture("edge-front-1", "pod-uid", strings.Repeat("1", 40), strings.Repeat("a", 64))
+	pod["spec"] = map[string]any{"containers": []any{map[string]any{
+		"name":  "edge-front",
+		"ports": []any{map[string]any{"name": "health", "containerPort": 7835}},
+	}}}
+	pod["status"].(map[string]any)["podIP"] = "10.42.0.17"
+	pod["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": "Ready", "status": "False"}}
+	raw := mustJSON(t, map[string]any{"items": []any{pod}})
+	if _, err := podHTTPEndpointsFromJSON(raw, "edge-front", "health"); err == nil {
+		t.Fatal("strict endpoint parsing accepted an unready Front")
+	}
+	endpoints, err := podHTTPEndpointsFromJSONWithReadiness(raw, "edge-front", "health", false)
+	if err != nil || len(endpoints) != 1 || endpoints[0].Name != "edge-front-1" || endpoints[0].IP != "10.42.0.17" || endpoints[0].Port != 7835 {
+		t.Fatalf("snapshot endpoint parsing lost unready Front identity: endpoints=%+v err=%v", endpoints, err)
+	}
+}
+
 func TestEdgeWorkerHealthUsesCanonicalNamedPort(t *testing.T) {
 	pod := podFixture("edge-worker-a-1", "pod-uid", strings.Repeat("1", 40), strings.Repeat("a", 64))
 	pod["status"].(map[string]any)["podIP"] = "10.42.0.17"

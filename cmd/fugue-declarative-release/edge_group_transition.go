@@ -938,15 +938,18 @@ func (runtime *kubectlEdgeGroupRuntime) WaitActiveWorkerAuthority(ctx context.Co
 }
 
 func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition) (edgeGroupState, error) {
-	front, err := cluster.readEdgeDaemonSetPods(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, false)
+	// A broken active Front is exactly the state this transition is meant to
+	// recover. Keep its immutable pod identity even when readiness is false so
+	// the caller can use the group-local activation CAS as the serving witness.
+	front, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, false)
 	if err != nil {
 		return edgeGroupState{}, err
 	}
-	workerA, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, transition.WorkerAName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID)
+	workerA, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, transition.WorkerAName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
 	if err != nil {
 		return edgeGroupState{}, err
 	}
-	workerB, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, transition.WorkerBName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID)
+	workerB, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, transition.WorkerBName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
 	if err != nil {
 		return edgeGroupState{}, err
 	}
@@ -967,7 +970,16 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 	for node, pod := range front {
 		health, healthErr := cluster.readEdgeFrontHealth(ctx, pod)
 		if healthErr != nil {
-			return edgeGroupState{}, healthErr
+			if !activationExists {
+				return edgeGroupState{}, healthErr
+			}
+			// /readyz depends on the active worker and can be unavailable during
+			// recovery. The activation file is a group-local CAS witness; it does
+			// not claim that traffic is healthy and is only used to plan repair.
+			health = edgeFrontHealthFromActivation(*activation)
+		}
+		if activationExists && health.ActiveSlot != activation.ActiveSlot {
+			return edgeGroupState{}, errors.New("edge front health disagrees with activation evidence")
 		}
 		if activeSlot == "" && activation == nil {
 			activeSlot = health.ActiveSlot
@@ -1019,11 +1031,10 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 	return &state, true, nil
 }
 
-// A worker can be the currently active slot while its readiness probe is
-// failing during an outage. Preserve its immutable pod identity so the
-// transition planner can recover that slot instead of failing before it can
-// publish the signed LKG candidate.
-func (cluster *kubectlCluster) readEdgeDaemonSetPodsForSnapshot(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string) (map[string]edgeGroupPod, error) {
+// An active Worker or Front can be unready during an outage. Preserve its
+// immutable pod identity so the transition planner can recover that slot
+// instead of failing before it can publish the signed LKG candidate.
+func (cluster *kubectlCluster) readEdgeDaemonSetPodsForSnapshot(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string, includeWorkerHealth bool) (map[string]edgeGroupPod, error) {
 	pods, err := cluster.readEdgeDaemonSetPodsWithReadiness(ctx, release, name, container, expectedNodes, groupID, false, false)
 	if err != nil {
 		return nil, err
@@ -1033,7 +1044,7 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsForSnapshot(ctx context.Cont
 			return pods, nil
 		}
 	}
-	return cluster.readEdgeDaemonSetPods(ctx, release, name, container, expectedNodes, groupID, true)
+	return cluster.readEdgeDaemonSetPods(ctx, release, name, container, expectedNodes, groupID, includeWorkerHealth)
 }
 
 func (cluster *kubectlCluster) readEdgeDaemonSetPods(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string, includeWorkerHealth bool) (map[string]edgeGroupPod, error) {
@@ -1058,9 +1069,6 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	if err != nil {
 		return nil, fmt.Errorf("parse DaemonSet/%s pods: %w", name, err)
 	}
-	if !requireReady {
-		return pods, nil
-	}
 	// Both the front and worker edge containers expose their readiness endpoint
 	// on the canonical named port "health".  The worker resources have always
 	// declared that name; using "http" here made prewrite adoption reject the
@@ -1068,10 +1076,16 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	var endpoints []podHTTPEndpoint
 	var endpointErr error
 	for _, portName := range edgeHealthPortNames() {
-		endpoints, endpointErr = podHTTPEndpointsFromJSON(podsRaw, container, portName)
+		endpoints, endpointErr = podHTTPEndpointsFromJSONWithReadiness(podsRaw, container, portName, requireReady)
 		if endpointErr == nil {
 			break
 		}
+	}
+	if !requireReady && endpointErr != nil {
+		// Snapshot mode only needs immutable pod identity. An unready pod may
+		// not have a routable PodIP yet; activation CAS evidence is used by the
+		// recovery planner instead of probing this endpoint.
+		return pods, nil
 	}
 	if endpointErr != nil {
 		err = endpointErr
@@ -1090,6 +1104,9 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 		}
 		pod.PodIP, pod.HealthPort = endpoint.IP, endpoint.Port
 		pods[node] = pod
+	}
+	if !requireReady {
+		return pods, nil
 	}
 	if includeWorkerHealth {
 		for node, pod := range pods {
@@ -1339,7 +1356,7 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 	var current map[string]edgeGroupPod
 	var err error
 	if replaceUnready && name != transition.FrontName {
-		current, err = cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID)
+		current, err = cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
 	} else {
 		current, err = cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
 	}
@@ -1483,7 +1500,10 @@ func (cluster *kubectlCluster) readEdgeActivationStateFromPod(ctx context.Contex
 func (cluster *kubectlCluster) waitFrontActivation(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, slot, source, digest string) (map[string]edgeFrontHealth, error) {
 	deadline := time.Now().Add(cluster.timeout)
 	for {
-		front, err := cluster.readEdgeDaemonSetPods(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, false)
+		// The old active slot may keep the Front Pod unready until the Worker
+		// activation CAS moves traffic to the healthy candidate. Snapshot mode
+		// retains its Pod endpoint so this wait can observe that CAS boundary.
+		front, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, false)
 		if err == nil {
 			health := make(map[string]edgeFrontHealth, len(front))
 			matched := true
