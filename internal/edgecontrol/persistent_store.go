@@ -112,6 +112,24 @@ func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o007 != 0 {
 		return nil, errors.New("edge-control persistent state directory must be a non-world-accessible real directory")
 	}
+	// A process killed while atomically replacing a state file can leave its
+	// private temporary JSON behind. These files are never a recovery source:
+	// the durable group file remains the only checksummed state. Remove only
+	// our exact temporary-file shape so repeated OOM/restart cycles cannot turn
+	// the PVC into an unbounded source of disk and inode pressure.
+	if entries, readErr := os.ReadDir(root); readErr == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if !strings.HasPrefix(name, ".group-state-") || !strings.HasSuffix(name, ".tmp") {
+				continue
+			}
+			path := filepath.Join(root, name)
+			st, statErr := os.Lstat(path)
+			if statErr == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o007 == 0 {
+				_ = os.Remove(path)
+			}
+		}
+	}
 	return &PersistentGroupStore{root: root, summaries: make(map[string]persistentGroupSummary)}, nil
 }
 

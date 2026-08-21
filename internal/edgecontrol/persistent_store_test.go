@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +146,20 @@ func TestPersistentGroupStoreCompactsCandidateBundlesWithoutLosingSequence(t *te
 	history, err := store.History(context.Background(), groupID)
 	if err != nil || len(history) != len(state.Ledger) || !history[0].BundleArchived || history[0].Bundle != nil {
 		t.Fatalf("compacted history did not preserve archived identity: len=%d err=%v first=%+v", len(history), err, history[0])
+	}
+}
+
+func TestOpenPersistentGroupStoreRemovesStaleStateTemporaries(t *testing.T) {
+	root := privateStateDir(t)
+	stale := filepath.Join(root, ".group-state-crash.tmp")
+	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenPersistentGroupStore(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale state temporary still exists: %v", err)
 	}
 }
 
