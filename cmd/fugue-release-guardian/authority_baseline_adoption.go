@@ -15,6 +15,7 @@ import (
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -257,24 +258,60 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 // probe before the group can settle.
 func repairOrphanedAuthority(ctx context.Context, store authorityBaselineStore, client kubernetes.Interface, namespace string, config authorityBaselineConfig, before releaseguardian.CurrentAuthority, uid types.UID, rv string, fronts map[string]observedBaselineFront) (bool, error) {
 	candidate, _, _, err := store.LoadCandidate(ctx, config.GroupID)
-	if err != nil || candidate.Validate() != nil || candidate.State != releaseguardian.CandidateAuthorityVerified || !candidate.HasPromotionWitness() || !candidate.HasWorkerReleaseIdentity() {
-		return false, nil
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("orphaned authority candidate is unavailable: %w", err)
 	}
-	if record, recordErr := store.LoadRouteBundleRecord(ctx, config.GroupID, candidate.RecordDigest); recordErr != nil || record.Epoch != int64(candidate.CandidateEpoch) {
-		return false, nil
+	if err := candidate.Validate(); err != nil {
+		return false, fmt.Errorf("orphaned authority candidate is invalid: %w", err)
+	}
+	if candidate.State != releaseguardian.CandidateAuthorityVerified {
+		return false, fmt.Errorf("orphaned authority candidate is not verified: state=%s", candidate.State)
+	}
+	if !candidate.HasPromotionWitness() {
+		return false, errors.New("orphaned authority candidate promotion witness is incomplete")
+	}
+	if !candidate.HasWorkerReleaseIdentity() {
+		return false, errors.New("orphaned authority candidate Worker identity is incomplete")
+	}
+	if record, recordErr := store.LoadRouteBundleRecord(ctx, config.GroupID, candidate.RecordDigest); recordErr != nil {
+		return false, fmt.Errorf("orphaned authority candidate route record is unavailable: %w", recordErr)
+	} else if record.Epoch != int64(candidate.CandidateEpoch) {
+		return false, fmt.Errorf("orphaned authority candidate route epoch mismatch: record=%d candidate=%d", record.Epoch, candidate.CandidateEpoch)
 	}
 	normalization, exists, err := store.LoadNormalizationReceipt(ctx, config.GroupID)
-	if err != nil || !exists || normalization.Validate() != nil {
-		return false, nil
+	if err != nil {
+		return false, fmt.Errorf("orphaned authority normalization receipt is unavailable: %w", err)
+	}
+	if !exists {
+		return false, errors.New("orphaned authority normalization receipt is absent")
+	}
+	if err := normalization.Validate(); err != nil {
+		return false, fmt.Errorf("orphaned authority normalization receipt is invalid: %w", err)
 	}
 	front, ok := firstBaselineFront(fronts)
-	if !ok || releaseguardian.AuthoritySlot(front.health.ActiveSlot) != candidate.WorkerSlot ||
-		front.health.WorkerSourceCommit != candidate.WorkerSourceSHA || front.health.WorkerImageDigest != candidate.WorkerImageDigest ||
-		authorityGenerationBase(front.health.BundleGeneration) != authorityGenerationBase(candidate.CurrentServingGeneration) ||
-		before.CurrentWorkerSlot == candidate.WorkerSlot || before.CurrentRecordDigest == candidate.RecordDigest ||
-		before.CurrentWorkerSourceSHA != candidate.WorkerSourceSHA || before.CurrentWorkerImageDigest != candidate.WorkerImageDigest ||
-		authorityGenerationBase(before.CurrentBundleGeneration) != authorityGenerationBase(candidate.CurrentServingGeneration) {
-		return false, nil
+	if !ok {
+		return false, errors.New("orphaned authority Front witness is absent")
+	}
+	if releaseguardian.AuthoritySlot(front.health.ActiveSlot) != candidate.WorkerSlot {
+		return false, fmt.Errorf("orphaned authority slot mismatch: front=%s candidate=%s", front.health.ActiveSlot, candidate.WorkerSlot)
+	}
+	if front.health.WorkerSourceCommit != candidate.WorkerSourceSHA || front.health.WorkerImageDigest != candidate.WorkerImageDigest {
+		return false, fmt.Errorf("orphaned authority Front identity mismatch: front=%s/%s candidate=%s/%s", front.health.WorkerSourceCommit, front.health.WorkerImageDigest, candidate.WorkerSourceSHA, candidate.WorkerImageDigest)
+	}
+	if authorityGenerationBase(front.health.BundleGeneration) != authorityGenerationBase(candidate.CurrentServingGeneration) {
+		return false, fmt.Errorf("orphaned authority Front bundle mismatch: front=%s candidate-serving=%s", front.health.BundleGeneration, candidate.CurrentServingGeneration)
+	}
+	if before.CurrentWorkerSlot == candidate.WorkerSlot || before.CurrentRecordDigest == candidate.RecordDigest {
+		return false, fmt.Errorf("orphaned authority current pointer already targets candidate: slot=%s record=%s", before.CurrentWorkerSlot, before.CurrentRecordDigest)
+	}
+	if before.CurrentWorkerSourceSHA != candidate.WorkerSourceSHA || before.CurrentWorkerImageDigest != candidate.WorkerImageDigest {
+		return false, fmt.Errorf("orphaned authority current identity mismatch: current=%s/%s candidate=%s/%s", before.CurrentWorkerSourceSHA, before.CurrentWorkerImageDigest, candidate.WorkerSourceSHA, candidate.WorkerImageDigest)
+	}
+	if authorityGenerationBase(before.CurrentBundleGeneration) != authorityGenerationBase(candidate.CurrentServingGeneration) {
+		return false, fmt.Errorf("orphaned authority current bundle mismatch: current=%s candidate-serving=%s", before.CurrentBundleGeneration, candidate.CurrentServingGeneration)
 	}
 	if normalization.After.CurrentWorkerSourceSHA == "" || normalization.After.CurrentWorkerImageDigest == "" {
 		return false, errors.New("orphaned authority normalization identity is invalid")
