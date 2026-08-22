@@ -45,6 +45,7 @@ type authorityBaselineStore interface {
 	LoadCurrent(context.Context, string) (releaseguardian.CurrentAuthority, types.UID, string, error)
 	LoadBaselineReceipt(context.Context, string) (releaseguardian.AuthorityBaselineReceipt, error)
 	LoadNormalizationReceipt(context.Context, string) (releaseguardian.AuthorityNormalizationReceipt, bool, error)
+	LoadNormalizationReceiptForRecovery(context.Context, string) (releaseguardian.AuthorityNormalizationReceipt, bool, error)
 	LoadRouteBundleRecord(context.Context, string, string) (releaseguardian.RouteBundleRecord, error)
 	AdoptCurrentBaseline(context.Context, releaseguardian.CurrentAuthority, releaseguardian.AuthorityBaselineReceipt, types.UID, string) (types.UID, string, error)
 	NormalizeCurrentBaseline(context.Context, releaseguardian.CurrentAuthority, releaseguardian.AuthorityNormalizationReceipt, types.UID, string) (types.UID, string, error)
@@ -281,7 +282,7 @@ func repairOrphanedAuthority(ctx context.Context, store authorityBaselineStore, 
 	} else if record.Epoch != int64(candidate.CandidateEpoch) {
 		return false, fmt.Errorf("orphaned authority candidate route epoch mismatch: record=%d candidate=%d", record.Epoch, candidate.CandidateEpoch)
 	}
-	normalization, exists, err := store.LoadNormalizationReceipt(ctx, config.GroupID)
+	normalization, exists, err := store.LoadNormalizationReceiptForRecovery(ctx, config.GroupID)
 	if err != nil {
 		return false, fmt.Errorf("orphaned authority normalization receipt is unavailable: %w", err)
 	}
