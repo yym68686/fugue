@@ -322,6 +322,31 @@ func ResourceDesiredSubset(desired, live map[string]any) bool {
 	return desiredSubset(desired, live, "")
 }
 
+// RuntimeResourcesRollbackWitness removes only explicitly reviewed container
+// resources from a predecessor convergence witness. This allows a recovery
+// atom to repair a resource limit on an unhealthy old LKG before the first
+// forward write; all code, image, identity and other workload fields remain
+// part of the witness.
+func RuntimeResourcesRollbackWitness(manifest []byte, targets []RuntimeResourceTarget) ([]byte, error) {
+	set, err := DecodeResourceSet(bytes.NewReader(manifest))
+	if err != nil {
+		return nil, err
+	}
+	for _, target := range targets {
+		artifactTarget := ArtifactTarget{APIVersion: target.APIVersion, Kind: target.Kind, Namespace: target.Namespace, Name: target.Name, Container: target.Container, ContainerType: target.ContainerType}
+		workload, err := resourceSetTarget(&set, artifactTarget)
+		if err != nil {
+			return nil, err
+		}
+		container, err := workloadContainerObject(workload, target.Container, target.ContainerType)
+		if err != nil {
+			return nil, err
+		}
+		delete(container, "resources")
+	}
+	return CanonicalJSON(set)
+}
+
 // PredecessorConvergenceManifest removes only the ownership/receipt metadata
 // introduced by this release entrypoint. Every operational field remains in
 // the witness and must already match the live LKG before a first handoff.

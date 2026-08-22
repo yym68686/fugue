@@ -493,7 +493,7 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	if verifyErr := cluster.VerifyTarget(ctx, lkg); verifyErr != nil {
 		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", verifyErr)
 	}
-	witness, err := PredecessorConvergenceManifest(lkgManifest)
+	witness, err := rollbackConvergenceWitness(lkgManifest, release)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -577,7 +577,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		if err == nil {
 			var witness []byte
 			if prepared.Prewrite.ImageRef == "" {
-				witness, err = PredecessorConvergenceManifest(lkgManifest)
+				witness, err = rollbackConvergenceWitness(lkgManifest, release)
 			} else {
 				witness, err = RetryPredecessorConvergenceManifest(forwardManifest, release)
 			}
@@ -716,6 +716,18 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	)
 	result.Final = lkgObservation
 	return sealResult(result)
+}
+
+func rollbackConvergenceWitness(lkgManifest []byte, release PlanRelease) ([]byte, error) {
+	witnessManifest := lkgManifest
+	if len(release.RuntimeResourcesFromForward) > 0 {
+		var err error
+		witnessManifest, err = RuntimeResourcesRollbackWitness(lkgManifest, release.RuntimeResourcesFromForward)
+		if err != nil {
+			return nil, fmt.Errorf("prepare runtime resource rollback witness: %w", err)
+		}
+	}
+	return PredecessorConvergenceManifest(witnessManifest)
 }
 
 func observeForwardResult(ctx context.Context, cluster Cluster, release PlanRelease, target TargetIdentity, manifest []byte, applyErr error) (Observation, error, error) {

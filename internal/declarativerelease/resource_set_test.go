@@ -138,6 +138,21 @@ func TestPredecessorConvergenceManifestOnlyDropsReleaseOwnershipMetadata(t *test
 	}
 }
 
+func TestRuntimeResourcesRollbackWitnessDropsOnlyBoundContainerResources(t *testing.T) {
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"edge-control-de","namespace":"fugue-system"},"spec":{"template":{"metadata":{"annotations":{"stable":"keep"}},"spec":{"containers":[{"command":["keep"],"image":"ghcr.io/example/edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"edge-control","resources":{"limits":{"memory":"1Gi"}}},{"image":"ghcr.io/example/sidecar@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"sidecar","resources":{"limits":{"memory":"64Mi"}}}]}}}}],"kind":"ComponentResourceSet"}`)
+	target := RuntimeResourceTarget{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de", Container: "edge-control", ContainerType: "container"}
+	witness, err := RuntimeResourcesRollbackWitness(manifest, []RuntimeResourceTarget{target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(witness, []byte(`"memory":"1Gi"`)) || !bytes.Contains(witness, []byte(`"memory":"64Mi"`)) || !bytes.Contains(witness, []byte(`"command":["keep"]`)) {
+		t.Fatalf("runtime rollback witness changed more than the bound resources object: %s", witness)
+	}
+	if _, err := RuntimeResourcesRollbackWitness(manifest, []RuntimeResourceTarget{{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de", Container: "missing", ContainerType: "container"}}); err == nil {
+		t.Fatal("missing runtime resource container was accepted")
+	}
+}
+
 func TestBootstrapPredecessorAllowsOnlyAbsentForwardInitContainer(t *testing.T) {
 	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"edge-worker-a","namespace":"fugue-system"},"spec":{"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"1111111111111111111111111111111111111111","stable.example/key":"keep"}},"spec":{"containers":[{"image":"ghcr.io/example/fugue-edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"edge"},{"image":"docker.io/library/caddy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"caddy"}]}}}}],"kind":"ComponentResourceSet"}`)
 	release := PlanRelease{ArtifactTargets: []ArtifactTarget{
