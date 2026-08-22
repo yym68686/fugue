@@ -347,6 +347,22 @@ func RuntimeResourcesRollbackWitness(manifest []byte, targets []RuntimeResourceT
 	return CanonicalJSON(set)
 }
 
+// ResourceSetsEquivalentExceptRuntimeResources proves that two resource sets
+// are byte-equivalent after removing only the explicitly reviewed container
+// resources objects. It is used at Guardian admission to distinguish a
+// deliberate runtime-capacity recovery from an unreviewed LKG drift.
+func ResourceSetsEquivalentExceptRuntimeResources(left, right []byte, targets []RuntimeResourceTarget) (bool, error) {
+	leftWitness, err := RuntimeResourcesRollbackWitness(left, targets)
+	if err != nil {
+		return false, err
+	}
+	rightWitness, err := RuntimeResourcesRollbackWitness(right, targets)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(leftWitness, rightWitness), nil
+}
+
 // PredecessorConvergenceManifest removes only the ownership/receipt metadata
 // introduced by this release entrypoint. Every operational field remains in
 // the witness and must already match the live LKG before a first handoff.

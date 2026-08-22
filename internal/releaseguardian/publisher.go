@@ -42,11 +42,21 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	if !publishDesiredEligible(snapshot, bundle, stableRecord) {
 		return ReleaseRecord{}, DesiredRelease{}, errors.New("current component is not a healthy settled release")
 	}
+	lkgMatchesStable := digest(bundle.LKG) == stableMonitor.ForwardManifestDigest
+	if len(bundle.Release.RuntimeResourcesFromForward) > 0 && strings.TrimSpace(snapshot.CurrentMonitorData["forward.json"]) != "" {
+		var compareErr error
+		lkgMatchesStable, compareErr = declarativerelease.ResourceSetsEquivalentExceptRuntimeResources(
+			bundle.LKG, []byte(snapshot.CurrentMonitorData["forward.json"]), bundle.Release.RuntimeResourcesFromForward,
+		)
+		if compareErr != nil {
+			return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("compare Guardian LKG runtime resource recovery: %w", compareErr)
+		}
+	}
 	if !bundle.Prepared.LKG.Present || bundle.Release.ExpectedPreviousConfigSHA != stableMonitor.ConfigSHA ||
 		bundle.Release.ExpectedPreviousManifestSHA != stableMonitor.ConfigSHA ||
 		bundle.Release.ExpectedPreviousOCIRevision != stableMonitor.ConfigSHA ||
 		bundle.Release.ExpectedPreviousImageDigest != stableRecord.ImageDigest ||
-		digest(bundle.LKG) != stableMonitor.ForwardManifestDigest {
+		!lkgMatchesStable {
 		return ReleaseRecord{}, DesiredRelease{}, errors.New("Guardian candidate LKG is not the exact current stable release")
 	}
 	record, err := bundle.ReleaseRecord(key, stableRecord.RecordDigest)
