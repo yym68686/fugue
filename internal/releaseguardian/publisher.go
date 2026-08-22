@@ -261,7 +261,8 @@ func failedDesiredReplacementEligible(snapshot Snapshot, bundle ExecutionBundle,
 
 func unprovenLKGReason(reason string) bool {
 	return reason == "lkg-unproven" || strings.HasPrefix(reason, "lkg-unproven: ") ||
-		strings.HasPrefix(reason, "failed candidate is fenced while LKG health awaits complete evidence")
+		strings.HasPrefix(reason, "failed candidate is fenced while LKG health awaits complete evidence") ||
+		strings.HasPrefix(reason, "rollout result is unknown:")
 }
 
 func knownDegradedHealth(health HealthSnapshot) bool {

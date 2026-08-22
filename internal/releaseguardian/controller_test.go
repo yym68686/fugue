@@ -330,7 +330,7 @@ func TestWriteModeRestoresFencedLKGWhenCandidateRolloutIsIncomplete(t *testing.T
 	previous, err := (ReleaseStatus{
 		Component: snapshot.Key.Component, Group: snapshot.Key.Group, State: StateRecoveryRequired,
 		CurrentRecordDigest: otherDigest, TargetRecordDigest: snapshot.Record.RecordDigest,
-		LastSuccessfulLKG: otherDigest, Health: snapshot.Health, Reason: "lkg-unproven",
+		LastSuccessfulLKG: otherDigest, Health: snapshot.Health, Reason: "rollout result is unknown: stale execution plan",
 		RolloutReceiptDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano),
 	}).Seal()
 	if err != nil {
