@@ -289,8 +289,9 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	if err != nil {
 		return err
 	}
+	var compensationCandidates []edgeGroupPod
 	compensate := func(cause error) error {
-		if compensationErr := compensateEdgeActivation(ctx, runtime, before, transition); compensationErr != nil {
+		if compensationErr := compensateEdgeActivation(ctx, runtime, before, transition, compensationCandidates...); compensationErr != nil {
 			return errors.Join(cause, fmt.Errorf("edge activation compensation is unknown: %w", compensationErr))
 		}
 		return errors.Join(cause, errors.New("edge activation compensated"))
@@ -325,6 +326,9 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	candidatePods, err := runtime.Roll(ctx, inactiveName, target, true, release.SupersedesFailedConfigSHA != "")
 	if err != nil {
 		return compensate(fmt.Errorf("roll inactive edge slot %s: %w", inactiveSlot, err))
+	}
+	for _, pod := range candidatePods {
+		compensationCandidates = append(compensationCandidates, pod)
 	}
 	frontHealth, err := runtime.WaitFront(ctx, inactiveSlot, target.ConfigSHA, desiredDigest)
 	if err != nil {
@@ -396,7 +400,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 // that boundary is crossed, rolling the pointer back here would split serving
 // authority from the already-promoted Worker and the Guardian transaction
 // owns compensation instead.
-func compensateEdgeActivation(ctx context.Context, runtime edgeGroupTransitionRuntime, before edgeGroupState, transition declarativerelease.EdgeGroupABTransition) error {
+func compensateEdgeActivation(ctx context.Context, runtime edgeGroupTransitionRuntime, before edgeGroupState, transition declarativerelease.EdgeGroupABTransition, extraCandidates ...edgeGroupPod) error {
 	if runtime == nil || (before.ActiveSlot != "a" && before.ActiveSlot != "b") || len(before.FrontHealth) == 0 {
 		return errors.New("pre-transition activation evidence is unavailable")
 	}
@@ -415,6 +419,7 @@ func compensateEdgeActivation(ctx context.Context, runtime edgeGroupTransitionRu
 			selectorCandidates = append(selectorCandidates, pod)
 		}
 	}
+	selectorCandidates = append(selectorCandidates, extraCandidates...)
 	executor, err := runtime.SelectCASExecutor(ctx, selectorCandidates...)
 	if err != nil {
 		return err

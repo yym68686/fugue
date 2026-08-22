@@ -556,6 +556,26 @@ func TestExecuteEdgeGroupABCompensatesActivationBeforeAuthorityCommit(t *testing
 	}
 }
 
+func TestCompensateEdgeActivationUsesPromotedCandidateCASExecutor(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	beforeHealth := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 4,
+		BundleGeneration: "old-bundle", WorkerSourceCommit: old.ConfigSHA, WorkerImageDigest: digestFromTarget(t, old), RouteAuthority: edgeActivationAuthority}
+	before := edgeStateFixture("a", old, beforeHealth)
+	before.WorkerA = map[string]edgeGroupPod{"node-1": {NodeName: "node-1"}}
+	before.WorkerB = map[string]edgeGroupPod{"node-1": {NodeName: "node-1"}}
+	runtime := &fakeEdgeGroupRuntime{activationState: &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID,
+		Generation: 5, ActiveSlot: "b", BundleGeneration: "new-bundle", WorkerSourceCommit: strings.Repeat("2", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), Authority: edgeActivationAuthority, Operation: edgeActivationPromote}}
+	candidate := edgeGroupPod{Name: "candidate-worker", NodeName: "node-1"}
+	if err := compensateEdgeActivation(context.Background(), runtime, before, transition, candidate); err != nil {
+		t.Fatalf("candidate CAS executor was not used for compensation: %v", err)
+	}
+	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationRollback || runtime.requests[0].TargetSlot != "a" {
+		t.Fatalf("unexpected compensation request: %+v", runtime.requests)
+	}
+}
+
 func TestExecuteEdgeGroupABCompensationSwitchesBeforeRestoringFront(t *testing.T) {
 	transition := edgeTransitionFixture()
 	lkg := edgeTargetFixture("1", "a")
