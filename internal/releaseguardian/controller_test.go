@@ -70,6 +70,13 @@ func TestClassifySeparatesLocalDependencyAndRouteFailures(t *testing.T) {
 			}
 		})
 	}
+	settledInactive := Classify(testDigest, testDigest, HealthSnapshot{
+		Local:      testLayer(HealthDegraded, "health daemonset/edge-worker-a rollout is incomplete desired=1 updated=1 ready=0 available=0", now),
+		Dependency: testLayer(HealthHealthy, "", now), Route: testLayer(HealthHealthy, "", now),
+	})
+	if settledInactive.State != StateStable {
+		t.Fatalf("healthy serving LKG with inactive candidate was not settled: %+v", settledInactive)
+	}
 }
 
 type fakeStore struct {

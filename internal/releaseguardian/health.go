@@ -29,6 +29,10 @@ func Classify(currentRecordDigest, targetRecordDigest string, health HealthSnaps
 	if health.Local.State == HealthUnknown || health.Dependency.State == HealthUnknown || health.Route.State == HealthUnknown {
 		return Decision{State: StateRecoveryRequired, Reason: joinedReason("health evidence is incomplete", health)}
 	}
+	if currentRecordDigest == targetRecordDigest && health.Dependency.State == HealthHealthy && health.Route.State == HealthHealthy &&
+		inactiveDaemonSetRollout(health.Local.Reason) {
+		return Decision{State: StateStable, Reason: "serving LKG authority is healthy; inactive candidate rollout remains fenced"}
+	}
 	if health.Local.State == HealthDegraded {
 		return Decision{
 			State: StateRollbackPending, Reason: joinedReason("component-local health is degraded", health),
@@ -42,6 +46,11 @@ func Classify(currentRecordDigest, targetRecordDigest string, health HealthSnaps
 		return Decision{State: StateDegraded, Reason: joinedReason("independent route canary is degraded", health)}
 	}
 	return Decision{State: StateStable, Reason: "local, dependency, and route health are verified"}
+}
+
+func inactiveDaemonSetRollout(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	return strings.HasPrefix(reason, "health daemonset/") && strings.Contains(reason, " rollout is incomplete ")
 }
 
 func stableIdentityDrift(reason string) bool {
