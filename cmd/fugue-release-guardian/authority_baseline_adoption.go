@@ -68,6 +68,16 @@ type baselineWorkerHealth struct {
 	CandidateWorkerSlot   string `json:"candidate_worker_slot"`
 }
 
+func authorityRecoveryCohortLimit(expectedNodes int) int64 {
+	// One control-plane Pod, one Front, and two slot Workers may exist per
+	// node. Spare capacity covers a terminating predecessor without allowing
+	// an unbounded recovery list.
+	if expectedNodes < 1 {
+		return 8
+	}
+	return int64(4*expectedNodes + 4)
+}
+
 func parseAuthorityBaselines(value string) ([]authorityBaselineConfig, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -277,7 +287,7 @@ func observeBaselineFronts(ctx context.Context, client kubernetes.Interface, nam
 // attestation below still have to prove the exact record and runtime identity.
 func observeBaselineFrontsFromActivation(ctx context.Context, client kubernetes.Interface, namespace string, config authorityBaselineConfig, executor podCommandExecutor) (map[string]observedBaselineFront, error) {
 	selector := labels.Set{"fugue.io/edge-group-id": config.GroupID}.AsSelector().String()
-	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(3*config.ExpectedNodes + 1)})
+	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: authorityRecoveryCohortLimit(config.ExpectedNodes)})
 	if err != nil || list.Continue != "" {
 		return nil, errors.New("Front activation recovery cohort is unavailable")
 	}

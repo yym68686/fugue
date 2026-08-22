@@ -262,10 +262,7 @@ func (activator *frontAuthorityActivator) observeFrontsForPreflight(ctx context.
 		return fronts, nil
 	}
 	selector := labels.Set{"fugue.io/edge-group-id": target.GroupID}.AsSelector().String()
-	// One node has one Front plus two A/B Workers. The preflight cohort must
-	// see all three objects or Kubernetes pagination can hide the Front and
-	// make a valid recovery witness look incomplete.
-	list, listErr := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(3*activator.config.ExpectedNodes + 1)})
+	list, listErr := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: authorityRecoveryCohortLimit(activator.config.ExpectedNodes)})
 	if listErr != nil || list.Continue != "" {
 		return nil, fmt.Errorf("Front readiness failed and recovery cohort is unavailable: %w", err)
 	}

@@ -21,6 +21,22 @@ type baselineActivationExecutor struct {
 	raw []byte
 }
 
+func TestAuthorityRecoveryCohortLimitLeavesPaginationHeadroom(t *testing.T) {
+	for _, test := range []struct {
+		nodes int
+		want  int64
+	}{
+		{nodes: 1, want: 8},
+		{nodes: 3, want: 16},
+		{nodes: 100, want: 404},
+		{nodes: 0, want: 8},
+	} {
+		if got := authorityRecoveryCohortLimit(test.nodes); got != test.want {
+			t.Fatalf("authorityRecoveryCohortLimit(%d)=%d, want %d", test.nodes, got, test.want)
+		}
+	}
+}
+
 func (executor baselineActivationExecutor) Exec(context.Context, string, string, string, ...string) ([]byte, error) {
 	return append([]byte(nil), executor.raw...), nil
 }
