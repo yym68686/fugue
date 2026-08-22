@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/util/workqueue"
@@ -153,7 +154,26 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		status.State = StateRecoveryRequired
 		status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
 		status.Reason = joinedReason("lkg-unproven: failed candidate is fenced while LKG health awaits complete evidence", snapshot.Health)
-		if allLayersHealthy(snapshot.Health) {
+		if lkgRecoveryExecutionEligible(snapshot) {
+			receipt, executeErr := controller.executor.Rollback(ctx, snapshot)
+			if executeErr != nil {
+				status.Reason = "LKG restore result is unknown: " + executeErr.Error()
+			} else {
+				status.RollbackReceiptDigest = receipt.ReceiptDigest
+				if receipt.Status == "compensated" && receipt.RecordDigest == snapshot.Record.LKGRecordDigest {
+					if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
+						status.Reason = "LKG is restored but failed-candidate DesiredRelease rollback CAS failed: " + err.Error()
+					} else {
+						status.State = StateLKGStable
+						status.CurrentRecordDigest = snapshot.CurrentRecordDigest
+						status.TargetRecordDigest = snapshot.CurrentRecordDigest
+						status.Reason = receipt.Reason
+					}
+				} else {
+					status.Reason = receipt.Reason
+				}
+			}
+		} else if allLayersHealthy(snapshot.Health) {
 			if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
 				status.Reason = "LKG is healthy but failed-candidate DesiredRelease rollback CAS failed: " + err.Error()
 			} else {
@@ -293,4 +313,17 @@ func pendingTargetCanaryVerification(snapshot Snapshot) bool {
 
 func allLayersHealthy(health HealthSnapshot) bool {
 	return health.Local.State == HealthHealthy && health.Dependency.State == HealthHealthy && health.Route.State == HealthHealthy
+}
+
+// A failed candidate can leave its replacement DaemonSet unavailable while
+// the independent LKG route is already healthy. In that narrow state, the
+// ordinary restore-monitor transaction is the authority for bringing the
+// workload back to the signed LKG; arbitrary local degradation remains
+// fenced and cannot trigger a rollback from this recovery path.
+func lkgRecoveryExecutionEligible(snapshot Snapshot) bool {
+	if snapshot.Health.Local.State != HealthDegraded || snapshot.Health.Dependency.State != HealthHealthy || snapshot.Health.Route.State != HealthHealthy {
+		return false
+	}
+	reason := strings.TrimSpace(snapshot.Health.Local.Reason)
+	return strings.HasPrefix(reason, "health daemonset/") && strings.Contains(reason, " rollout is incomplete ")
 }

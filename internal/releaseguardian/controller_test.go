@@ -323,6 +323,36 @@ func TestWriteModeFencesUnprovenLKGUntilFreshHealth(t *testing.T) {
 	}
 }
 
+func TestWriteModeRestoresFencedLKGWhenCandidateRolloutIsIncomplete(t *testing.T) {
+	now := time.Unix(28, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), otherDigest)
+	snapshot.Health.Local.Reason = "health daemonset/edge-worker-a rollout is incomplete desired=1 updated=1 ready=0 available=0 generation=7 observed=7"
+	previous, err := (ReleaseStatus{
+		Component: snapshot.Key.Component, Group: snapshot.Key.Group, State: StateRecoveryRequired,
+		CurrentRecordDigest: otherDigest, TargetRecordDigest: snapshot.Record.RecordDigest,
+		LastSuccessfulLKG: otherDigest, Health: snapshot.Health, Reason: "lkg-unproven",
+		RolloutReceiptDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.PreviousStatus = &previous
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollbacks != 1 || store.lkgCAS != 1 || store.status.State != StateLKGStable ||
+		store.status.TargetRecordDigest != snapshot.CurrentRecordDigest {
+		t.Fatalf("executor=%+v store=%+v status=%+v", executor, store, store.status)
+	}
+}
+
 func TestWriteModeRollsBackOnlyLocalFailure(t *testing.T) {
 	now := time.Unix(30, 0).UTC()
 	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), "")
