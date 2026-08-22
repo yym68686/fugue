@@ -290,7 +290,8 @@ func degradedPredecessorRolloutEligible(snapshot Snapshot) bool {
 func pendingUnprovenLKGRecovery(snapshot Snapshot) bool {
 	previous := snapshot.PreviousStatus
 	if previous == nil || previous.State != StateRecoveryRequired || previous.Key() != snapshot.Key ||
-		previous.RolloutReceiptDigest == "" || snapshot.CurrentRecordDigest == snapshot.Desired.RecordDigest ||
+		(previous.RolloutReceiptDigest == "" && !strings.HasPrefix(previous.Reason, "rollout result is unknown:")) ||
+		snapshot.CurrentRecordDigest == snapshot.Desired.RecordDigest ||
 		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || snapshot.CurrentRecordDigest != snapshot.Record.LKGRecordDigest ||
 		previous.CurrentRecordDigest != snapshot.CurrentRecordDigest || previous.TargetRecordDigest != snapshot.Desired.RecordDigest ||
 		previous.LastSuccessfulLKG != snapshot.CurrentRecordDigest {
