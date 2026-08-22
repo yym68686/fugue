@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -101,12 +102,16 @@ func parseAuthorityBaselines(value string) ([]authorityBaselineConfig, error) {
 	return configs, nil
 }
 
-func startAuthorityBaselineAdopters(ctx context.Context, store *releaseguardian.AuthorityStore, client kubernetes.Interface, namespace string, configs []authorityBaselineConfig) {
+func startAuthorityBaselineAdopters(ctx context.Context, store *releaseguardian.AuthorityStore, client kubernetes.Interface, namespace string, configs []authorityBaselineConfig, executors ...podCommandExecutor) {
+	var executor podCommandExecutor
+	if len(executors) > 0 {
+		executor = executors[0]
+	}
 	for _, config := range configs {
 		config := config
 		go func() {
 			for {
-				done, err := adoptAuthorityBaselineOnce(ctx, store, client, namespace, config, time.Now().UTC())
+				done, err := adoptAuthorityBaselineOnce(ctx, store, client, namespace, config, time.Now().UTC(), executor)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "authority baseline %s: %v\n", config.GroupID, err)
 				}
@@ -123,7 +128,7 @@ func startAuthorityBaselineAdopters(ctx context.Context, store *releaseguardian.
 	}
 }
 
-func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStore, client kubernetes.Interface, namespace string, config authorityBaselineConfig, now time.Time) (bool, error) {
+func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStore, client kubernetes.Interface, namespace string, config authorityBaselineConfig, now time.Time, executors ...podCommandExecutor) (bool, error) {
 	if store == nil || client == nil || strings.TrimSpace(namespace) == "" {
 		return false, errors.New("authority baseline dependency is unavailable")
 	}
@@ -144,7 +149,11 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 			return false, errors.New("authority normalization is not bound to the original one-time authorization")
 		}
 	}
-	fronts, err := observeBaselineFronts(ctx, client, namespace, config)
+	var executor podCommandExecutor
+	if len(executors) > 0 {
+		executor = executors[0]
+	}
+	fronts, err := observeBaselineFronts(ctx, client, namespace, config, before, executor)
 	if err != nil {
 		return false, err
 	}
@@ -222,31 +231,127 @@ type observedBaselineFront struct {
 	health baselineFrontHealth
 }
 
-func observeBaselineFronts(ctx context.Context, client kubernetes.Interface, namespace string, config authorityBaselineConfig) (map[string]observedBaselineFront, error) {
+func observeBaselineFronts(ctx context.Context, client kubernetes.Interface, namespace string, config authorityBaselineConfig, before releaseguardian.CurrentAuthority, executor podCommandExecutor) (map[string]observedBaselineFront, error) {
 	selector := labels.Set{"fugue.io/edge-group-id": config.GroupID, "app.kubernetes.io/component": config.FrontComponent}.AsSelector().String()
 	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(config.ExpectedNodes + 1)})
 	if err != nil || list.Continue != "" || len(list.Items) != config.ExpectedNodes {
+		if before.BaselineReceiptDigest != "" && executor != nil {
+			return observeBaselineFrontsFromActivation(ctx, client, namespace, config, executor)
+		}
 		return nil, errors.New("Front baseline cohort is unavailable")
 	}
 	result := make(map[string]observedBaselineFront, len(list.Items))
 	for index := range list.Items {
 		pod := list.Items[index]
 		if pod.DeletionTimestamp != nil || pod.UID == "" || pod.ResourceVersion == "" || pod.Spec.NodeName == "" || pod.Status.PodIP == "" || !podReady(pod.Status.Conditions) {
+			if before.BaselineReceiptDigest != "" && executor != nil {
+				return observeBaselineFrontsFromActivation(ctx, client, namespace, config, executor)
+			}
 			return nil, errors.New("Front baseline Pod is invalid")
 		}
 		var health baselineFrontHealth
 		if err := readAuthorityBaselineJSON(ctx, "http://"+pod.Status.PodIP+":"+strconv.Itoa(frontReadyPort)+"/readyz", &health); err != nil || health.Status != "ok" ||
 			health.Generation < 1 || releaseguardian.AuthoritySlot(health.ActiveSlot).Validate() != nil || health.RouteAuthority != "edge-control" ||
 			!exactSourceSHA(health.WorkerSourceCommit) || !exactSHA256Digest(health.WorkerImageDigest) {
+			if before.BaselineReceiptDigest != "" && executor != nil {
+				return observeBaselineFrontsFromActivation(ctx, client, namespace, config, executor)
+			}
 			return nil, errors.New("Front baseline readiness is invalid")
 		}
 		if strings.TrimSpace(pod.Annotations["fugue.pro/source-commit"]) != health.WorkerSourceCommit ||
 			containerRuntimeImageDigest(pod, "edge-front") != health.WorkerImageDigest {
+			if before.BaselineReceiptDigest != "" && executor != nil {
+				return observeBaselineFrontsFromActivation(ctx, client, namespace, config, executor)
+			}
 			return nil, errors.New("Front runtime does not match its activation")
 		}
 		result[pod.Spec.NodeName] = observedBaselineFront{pod: pod, health: health}
 	}
 	return result, nil
+}
+
+// observeBaselineFrontsFromActivation is only used while normalizing an
+// existing baseline after a historical Front outage. The Front process may be
+// unready, but its node-local activation CAS remains readable from a Worker.
+// This produces planning evidence only; worker health and public-route
+// attestation below still have to prove the exact record and runtime identity.
+func observeBaselineFrontsFromActivation(ctx context.Context, client kubernetes.Interface, namespace string, config authorityBaselineConfig, executor podCommandExecutor) (map[string]observedBaselineFront, error) {
+	selector := labels.Set{"fugue.io/edge-group-id": config.GroupID}.AsSelector().String()
+	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(3*config.ExpectedNodes + 1)})
+	if err != nil || list.Continue != "" {
+		return nil, errors.New("Front activation recovery cohort is unavailable")
+	}
+	fronts := make(map[string]corev1.Pod, config.ExpectedNodes)
+	workers := make(map[string][]corev1.Pod, config.ExpectedNodes)
+	for index := range list.Items {
+		pod := list.Items[index]
+		if pod.DeletionTimestamp != nil || pod.UID == "" || pod.ResourceVersion == "" || strings.TrimSpace(pod.Spec.NodeName) == "" {
+			return nil, errors.New("Front activation recovery Pod identity is incomplete")
+		}
+		isFront, isWorker := false, false
+		for _, container := range pod.Spec.Containers {
+			isFront = isFront || container.Name == "edge-front"
+			isWorker = isWorker || container.Name == "edge"
+		}
+		if isFront && pod.Labels["app.kubernetes.io/component"] == config.FrontComponent {
+			if _, exists := fronts[pod.Spec.NodeName]; exists {
+				return nil, errors.New("Front activation recovery cohort has duplicate Front nodes")
+			}
+			fronts[pod.Spec.NodeName] = pod
+		}
+		if isWorker {
+			workers[pod.Spec.NodeName] = append(workers[pod.Spec.NodeName], pod)
+		}
+	}
+	if len(fronts) != config.ExpectedNodes || len(workers) != config.ExpectedNodes {
+		return nil, errors.New("Front activation recovery cohort is incomplete")
+	}
+	result := make(map[string]observedBaselineFront, config.ExpectedNodes)
+	activeSlot := ""
+	for node, candidates := range workers {
+		var state edgegroupfront.ActivationState
+		var readErr error
+		for _, worker := range candidates {
+			state, readErr = readBaselineActivation(ctx, executor, namespace, worker.Name, config.GroupID)
+			if readErr == nil {
+				break
+			}
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read Front activation recovery witness on node %s: %w", node, readErr)
+		}
+		if activeSlot == "" {
+			activeSlot = state.ActiveSlot
+		} else if activeSlot != state.ActiveSlot {
+			return nil, errors.New("Front activation recovery cohort has mixed active slots")
+		}
+		front := fronts[node]
+		result[node] = observedBaselineFront{pod: front, health: baselineFrontHealth{Status: "recovery-witness",
+			ActiveSlot: state.ActiveSlot, Generation: state.Generation, BundleGeneration: state.BundleGeneration,
+			WorkerSourceCommit: state.WorkerSourceCommit, WorkerImageDigest: state.WorkerImageDigest,
+			RouteAuthority: state.Authority}}
+	}
+	return result, nil
+}
+
+func readBaselineActivation(ctx context.Context, executor podCommandExecutor, namespace, pod, groupID string) (edgegroupfront.ActivationState, error) {
+	raw, err := executor.Exec(ctx, namespace, pod, "edge", "cat", frontActivationStatePath)
+	if err != nil {
+		return edgegroupfront.ActivationState{}, err
+	}
+	var state edgegroupfront.ActivationState
+	if decodeStrictJSON(raw, &state) != nil {
+		return edgegroupfront.ActivationState{}, errors.New("Front activation recovery witness is invalid")
+	}
+	validOperation := state.Operation == edgegroupfront.ActivationOperationInit || state.Operation == edgegroupfront.ActivationOperationPromote || state.Operation == edgegroupfront.ActivationOperationRollback
+	validPreviousSlot := state.PreviousSlot == "" || state.PreviousSlot == "a" || state.PreviousSlot == "b"
+	validRollback := state.Operation != edgegroupfront.ActivationOperationRollback || state.RollbackOfGeneration > 0
+	if state.Schema != edgegroupfront.ActivationStateSchemaV1 || state.GroupID != groupID || state.Generation == 0 ||
+		(state.ActiveSlot != "a" && state.ActiveSlot != "b") || !validPreviousSlot || state.Authority != edgegroupfront.ActivationAuthority || !validOperation || !validRollback ||
+		strings.TrimSpace(state.BundleGeneration) == "" || !exactSourceSHA(state.WorkerSourceCommit) || !exactSHA256Digest(state.WorkerImageDigest) || state.UpdatedAt.IsZero() {
+		return edgegroupfront.ActivationState{}, errors.New("Front activation recovery witness is invalid")
+	}
+	return state, nil
 }
 
 func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, namespace string, config authorityBaselineConfig, slot releaseguardian.AuthoritySlot, fronts map[string]observedBaselineFront, current releaseguardian.CurrentAuthority) (map[string]corev1.Pod, string, int64, []releaseguardian.AuthorityBaselineNodeWitness, error) {

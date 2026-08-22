@@ -2,18 +2,62 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+type baselineActivationExecutor struct {
+	raw []byte
+}
+
+func (executor baselineActivationExecutor) Exec(context.Context, string, string, string, ...string) ([]byte, error) {
+	return append([]byte(nil), executor.raw...), nil
+}
+
+func TestAuthorityBaselineReadsActivationFromWorkerWhenFrontIsUnready(t *testing.T) {
+	group := "edge-pool-a"
+	source := strings.Repeat("a", 40)
+	image := "sha256:" + strings.Repeat("b", 64)
+	front := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "front-a", Namespace: "fugue-system", UID: types.UID("front-uid"), ResourceVersion: "11",
+		Labels: map[string]string{"fugue.io/edge-group-id": group, "app.kubernetes.io/component": "edge-front-a"}},
+		Spec:   corev1.PodSpec{NodeName: "edge-node-a", Containers: []corev1.Container{{Name: "edge-front"}}},
+		Status: corev1.PodStatus{PodIP: "10.0.0.1", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}}}
+	workerA := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Namespace: "fugue-system", UID: types.UID("worker-a-uid"), ResourceVersion: "12",
+		Labels: map[string]string{"fugue.io/edge-group-id": group, "fugue.io/edge-slot": "a"}},
+		Spec: corev1.PodSpec{NodeName: "edge-node-a", Containers: []corev1.Container{{Name: "edge"}}}}
+	workerB := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-b", Namespace: "fugue-system", UID: types.UID("worker-b-uid"), ResourceVersion: "13",
+		Labels: map[string]string{"fugue.io/edge-group-id": group, "fugue.io/edge-slot": "b"}},
+		Spec: corev1.PodSpec{NodeName: "edge-node-a", Containers: []corev1.Container{{Name: "edge"}}}}
+	raw, err := json.Marshal(edgegroupfront.ActivationState{Schema: edgegroupfront.ActivationStateSchemaV1, GroupID: group, Generation: 135,
+		ActiveSlot: "a", BundleGeneration: "routes-serving.p15778.r151", WorkerSourceCommit: source, WorkerImageDigest: image,
+		Authority: edgegroupfront.ActivationAuthority, Operation: edgegroupfront.ActivationOperationPromote,
+		Reason: "recover activation witness", UpdatedAt: time.Unix(1, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewSimpleClientset(front, workerA, workerB)
+	before := releaseguardian.CurrentAuthority{BaselineReceiptDigest: "sha256:" + strings.Repeat("c", 64)}
+	fronts, err := observeBaselineFronts(context.Background(), client, "fugue-system", authorityBaselineConfig{GroupID: group, FrontComponent: "edge-front-a", ExpectedNodes: 1}, before, baselineActivationExecutor{raw: raw})
+	if err != nil {
+		t.Fatalf("activation fallback failed: %v", err)
+	}
+	health, ok := fronts["edge-node-a"]
+	if !ok || health.pod.Name != front.Name || health.health.Status != "recovery-witness" || health.health.ActiveSlot != "a" ||
+		health.health.Generation != 135 || health.health.BundleGeneration != "routes-serving.p15778.r151" || health.health.WorkerSourceCommit != source || health.health.WorkerImageDigest != image {
+		t.Fatalf("unexpected activation fallback witness: %+v", fronts)
+	}
+}
 
 func TestAuthorityBaselineAdoptsExactServingFrontWithoutChangingWorkloads(t *testing.T) {
 	now := time.Date(2026, 8, 13, 2, 0, 0, 0, time.UTC)
