@@ -80,6 +80,12 @@ func (plan Plan) ValidateBound() error {
 		if err := validateArtifactTargets(Component{ID: release.ComponentID, Workload: release.Workload, ArtifactTargets: release.ArtifactTargets}); err != nil {
 			return fmt.Errorf("bound release %d artifact targets: %w", index, err)
 		}
+		if err := validateRuntimeResourceTargets(release.ComponentID, release.RuntimeResourcesFromForward); err != nil {
+			return fmt.Errorf("bound release %d runtime resources: %w", index, err)
+		}
+		if len(release.RuntimeResourcesFromForward) > 0 && !release.ExpectedPreviousPresent {
+			return fmt.Errorf("bound release %d runtime resources require an explicit predecessor", index)
+		}
 		if err := release.Transition.validate(Component{ID: release.ComponentID, Workload: release.Workload, ArtifactTargets: release.ArtifactTargets}); err != nil {
 			return fmt.Errorf("bound release %d transition: %w", index, err)
 		}

@@ -60,6 +60,30 @@ func TestRegistryAndIntentAreStrict(t *testing.T) {
 	}
 }
 
+func TestIntentRuntimeResourceRollbackBindingsAreStrict(t *testing.T) {
+	target := RuntimeResourceTarget{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api", ContainerType: "container"}
+	intent := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 2,
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1,
+		ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest,
+		RuntimeResourcesFromForward: []RuntimeResourceTarget{target}, Rollback: "previous-git-lkg"}
+	if err := intent.Validate(); err != nil {
+		t.Fatalf("valid runtime resource binding: %v", err)
+	}
+	intent.RuntimeResourcesFromForward = []RuntimeResourceTarget{target, target}
+	if err := intent.Validate(); err == nil || !strings.Contains(err.Error(), "strictly identity ordered") {
+		t.Fatalf("duplicate runtime resource binding was accepted: %v", err)
+	}
+	intent.RuntimeResourcesFromForward = []RuntimeResourceTarget{target}
+	intent.ExpectedPreviousPresent = false
+	intent.ExpectedPreviousConfigSHA = ""
+	intent.ExpectedPreviousManifestSHA = ""
+	intent.ExpectedPreviousOCIRevision = ""
+	intent.ExpectedPreviousImageDigest = ""
+	if err := intent.Validate(); err == nil || !strings.Contains(err.Error(), "explicit predecessor") {
+		t.Fatalf("runtime resource binding without predecessor was accepted: %v", err)
+	}
+}
+
 func TestRegistryArtifactTargetsAreStrictAndContainPrimary(t *testing.T) {
 	registry := testRegistry()
 	registry.Components[0].ArtifactTargets = []ArtifactTarget{

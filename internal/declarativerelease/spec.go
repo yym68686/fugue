@@ -93,6 +93,20 @@ type ArtifactTarget struct {
 	ContainerType string `json:"containerType"`
 }
 
+// RuntimeResourceTarget identifies the one reviewed, non-code portion of a
+// workload that must survive a code rollback. Only the Kubernetes container
+// resources object is copied from the forward manifest; image, provenance,
+// command, environment, selectors and all other fields remain the immutable
+// predecessor values.
+type RuntimeResourceTarget struct {
+	APIVersion    string `json:"apiVersion"`
+	Kind          string `json:"kind"`
+	Namespace     string `json:"namespace"`
+	Name          string `json:"name"`
+	Container     string `json:"container"`
+	ContainerType string `json:"containerType"`
+}
+
 type Artifact struct {
 	Repository   string `json:"repository"`
 	Dockerfile   string `json:"dockerfile"`
@@ -156,17 +170,18 @@ type HealthProbe struct {
 // identity is therefore the immutable push SHA and is deliberately absent
 // from this document; self-referential Git commits are forbidden.
 type Intent struct {
-	APIVersion                  string `json:"apiVersion"`
-	Kind                        string `json:"kind"`
-	Component                   string `json:"component"`
-	Generation                  int    `json:"generation"`
-	ExpectedPreviousPresent     bool   `json:"expectedPreviousPresent"`
-	ExpectedPreviousConfigSHA   string `json:"expectedPreviousConfigSha"`
-	ExpectedPreviousManifestSHA string `json:"expectedPreviousManifestSha"`
-	ExpectedPreviousOCIRevision string `json:"expectedPreviousOciRevision"`
-	ExpectedPreviousImageDigest string `json:"expectedPreviousImageDigest"`
-	SupersedesFailedConfigSHA   string `json:"supersedesFailedConfigSha,omitempty"`
-	Rollback                    string `json:"rollback"`
+	APIVersion                  string                  `json:"apiVersion"`
+	Kind                        string                  `json:"kind"`
+	Component                   string                  `json:"component"`
+	Generation                  int                     `json:"generation"`
+	ExpectedPreviousPresent     bool                    `json:"expectedPreviousPresent"`
+	ExpectedPreviousConfigSHA   string                  `json:"expectedPreviousConfigSha"`
+	ExpectedPreviousManifestSHA string                  `json:"expectedPreviousManifestSha"`
+	ExpectedPreviousOCIRevision string                  `json:"expectedPreviousOciRevision"`
+	ExpectedPreviousImageDigest string                  `json:"expectedPreviousImageDigest"`
+	SupersedesFailedConfigSHA   string                  `json:"supersedesFailedConfigSha,omitempty"`
+	RuntimeResourcesFromForward []RuntimeResourceTarget `json:"runtimeResourcesFromForward,omitempty"`
+	Rollback                    string                  `json:"rollback"`
 }
 
 type Plan struct {
@@ -179,27 +194,28 @@ type Plan struct {
 }
 
 type PlanRelease struct {
-	ComponentID                 string            `json:"component"`
-	ChangedPaths                []string          `json:"changedPaths"`
-	IntentPath                  string            `json:"intentPath"`
-	IntentDigest                string            `json:"intentDigest"`
-	IntentGeneration            int               `json:"intentGeneration"`
-	ExpectedPreviousPresent     bool              `json:"expectedPreviousPresent"`
-	ExpectedPreviousConfigSHA   string            `json:"expectedPreviousConfigSha"`
-	ExpectedPreviousManifestSHA string            `json:"expectedPreviousManifestSha"`
-	ExpectedPreviousOCIRevision string            `json:"expectedPreviousOciRevision"`
-	ExpectedPreviousImageDigest string            `json:"expectedPreviousImageDigest"`
-	SupersedesFailedConfigSHA   string            `json:"supersedesFailedConfigSha,omitempty"`
-	ManifestPath                string            `json:"manifestPath"`
-	ManifestVariables           map[string]string `json:"manifestVariables,omitempty"`
-	RetrySameLKG                bool              `json:"retrySameLkg,omitempty"`
-	Artifact                    Artifact          `json:"artifact"`
-	ArtifactTargets             []ArtifactTarget  `json:"artifactTargets,omitempty"`
-	Workload                    Workload          `json:"workload"`
-	Transition                  *Transition       `json:"transition,omitempty"`
-	Health                      []HealthProbe     `json:"health"`
-	Concurrency                 string            `json:"concurrency"`
-	Delivery                    *Delivery         `json:"delivery,omitempty"`
+	ComponentID                 string                  `json:"component"`
+	ChangedPaths                []string                `json:"changedPaths"`
+	IntentPath                  string                  `json:"intentPath"`
+	IntentDigest                string                  `json:"intentDigest"`
+	IntentGeneration            int                     `json:"intentGeneration"`
+	ExpectedPreviousPresent     bool                    `json:"expectedPreviousPresent"`
+	ExpectedPreviousConfigSHA   string                  `json:"expectedPreviousConfigSha"`
+	ExpectedPreviousManifestSHA string                  `json:"expectedPreviousManifestSha"`
+	ExpectedPreviousOCIRevision string                  `json:"expectedPreviousOciRevision"`
+	ExpectedPreviousImageDigest string                  `json:"expectedPreviousImageDigest"`
+	SupersedesFailedConfigSHA   string                  `json:"supersedesFailedConfigSha,omitempty"`
+	RuntimeResourcesFromForward []RuntimeResourceTarget `json:"runtimeResourcesFromForward,omitempty"`
+	ManifestPath                string                  `json:"manifestPath"`
+	ManifestVariables           map[string]string       `json:"manifestVariables,omitempty"`
+	RetrySameLKG                bool                    `json:"retrySameLkg,omitempty"`
+	Artifact                    Artifact                `json:"artifact"`
+	ArtifactTargets             []ArtifactTarget        `json:"artifactTargets,omitempty"`
+	Workload                    Workload                `json:"workload"`
+	Transition                  *Transition             `json:"transition,omitempty"`
+	Health                      []HealthProbe           `json:"health"`
+	Concurrency                 string                  `json:"concurrency"`
+	Delivery                    *Delivery               `json:"delivery,omitempty"`
 }
 
 // DecodeRegistry accepts exactly one strict JSON document.
@@ -468,6 +484,35 @@ func (target ArtifactTarget) key() string {
 	return target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name + "\x00" + target.ContainerType + "\x00" + target.Container
 }
 
+func (target RuntimeResourceTarget) validate() error {
+	return (ArtifactTarget{
+		APIVersion: target.APIVersion, Kind: target.Kind, Namespace: target.Namespace,
+		Name: target.Name, Container: target.Container, ContainerType: target.ContainerType,
+	}).validate()
+}
+
+func (target RuntimeResourceTarget) key() string {
+	return target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name + "\x00" + target.ContainerType + "\x00" + target.Container
+}
+
+func validateRuntimeResourceTargets(componentID string, targets []RuntimeResourceTarget) error {
+	if len(targets) > 16 {
+		return fmt.Errorf("component %q runtime resource target count is invalid", componentID)
+	}
+	previous := ""
+	for index, target := range targets {
+		if err := target.validate(); err != nil {
+			return fmt.Errorf("component %q runtime resource target %d: %w", componentID, index, err)
+		}
+		key := target.key()
+		if previous != "" && previous >= key {
+			return fmt.Errorf("component %q runtime resource targets must be strictly identity ordered", componentID)
+		}
+		previous = key
+	}
+	return nil
+}
+
 func (workload Workload) validate(componentID string) error {
 	if workload.Kind != "Deployment" && workload.Kind != "DaemonSet" && workload.Kind != "Job" {
 		return fmt.Errorf("component %q workload kind is unsupported", componentID)
@@ -581,6 +626,12 @@ func (intent Intent) Validate() error {
 			intent.SupersedesFailedConfigSHA == intent.ExpectedPreviousConfigSHA {
 			return errors.New("superseded failed production atom identity is invalid")
 		}
+	}
+	if err := validateRuntimeResourceTargets(intent.Component, intent.RuntimeResourcesFromForward); err != nil {
+		return err
+	}
+	if len(intent.RuntimeResourcesFromForward) > 0 && !intent.ExpectedPreviousPresent {
+		return errors.New("runtime resource rollback bindings require an explicit predecessor")
 	}
 	if intent.Rollback != "previous-git-lkg" {
 		return errors.New("production intent rollback must be previous-git-lkg")
@@ -739,7 +790,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 				failedIntent.Validate() == nil && failedIntent.Component == component.ID && failedIntent.Generation <= prior.Generation &&
 				intent.ExpectedPreviousPresent && sameIntentPredecessor(intent, prior) && sameIntentPredecessor(intent, failedIntent)
 			correctedFailedPreflightAtom := failedIntentFound && intent.SupersedesFailedConfigSHA == priorConfigSHA &&
-				failedIntent == prior && intent.ExpectedPreviousPresent &&
+				intentsEqual(failedIntent, prior) && intent.ExpectedPreviousPresent &&
 				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousManifestSHA &&
 				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousOCIRevision
 			// A failed preflight can leave Guardian serving a newer forward
@@ -747,7 +798,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			// explicit supersede may repair that metadata by naming the live
 			// Guardian LKG; execution still verifies those exact bytes through
 			// LoadStableLKG before any mutation.
-			liveLKGRepairAtom := failedIntentFound && failedIntent == prior &&
+			liveLKGRepairAtom := failedIntentFound && intentsEqual(failedIntent, prior) &&
 				intent.SupersedesFailedConfigSHA != "" && intent.ExpectedPreviousPresent &&
 				shaPattern.MatchString(intent.ExpectedPreviousConfigSHA) &&
 				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousManifestSHA &&
@@ -758,6 +809,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 				intent.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
 				intent.ExpectedPreviousOCIRevision == prior.ExpectedPreviousOCIRevision &&
 				intent.ExpectedPreviousImageDigest == prior.ExpectedPreviousImageDigest && intent.Rollback == prior.Rollback &&
+				runtimeResourceTargetsEqual(intent.RuntimeResourcesFromForward, prior.RuntimeResourcesFromForward) &&
 				intent.SupersedesFailedConfigSHA == ""
 			if !normalSuccessor && !failedAtomSuccessor && !retrySameLKG {
 				return Plan{}, fmt.Errorf("component %q predecessor is not the prior production atom", component.ID)
@@ -778,6 +830,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.ExpectedPreviousOCIRevision = intent.ExpectedPreviousOCIRevision
 		release.ExpectedPreviousImageDigest = intent.ExpectedPreviousImageDigest
 		release.SupersedesFailedConfigSHA = intent.SupersedesFailedConfigSHA
+		release.RuntimeResourcesFromForward = append([]RuntimeResourceTarget(nil), intent.RuntimeResourcesFromForward...)
 		release.ManifestPath = component.ManifestPath
 		release.ManifestVariables = make(map[string]string, len(component.ManifestVariables))
 		for key, value := range component.ManifestVariables {
@@ -809,6 +862,18 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 	digest := sha256.Sum256(unsigned)
 	plan.PlanDigest = fmt.Sprintf("sha256:%x", digest)
 	return plan, nil
+}
+
+func runtimeResourceTargetsEqual(left, right []RuntimeResourceTarget) bool {
+	leftBytes, leftErr := CanonicalJSON(left)
+	rightBytes, rightErr := CanonicalJSON(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftBytes, rightBytes)
+}
+
+func intentsEqual(left, right Intent) bool {
+	leftBytes, leftErr := CanonicalJSON(left)
+	rightBytes, rightErr := CanonicalJSON(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftBytes, rightBytes)
 }
 
 func sameIntentPredecessor(left, right Intent) bool {

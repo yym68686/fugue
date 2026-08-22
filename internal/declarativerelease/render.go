@@ -19,11 +19,10 @@ type RenderedManifests struct {
 	LKGDigest     string
 }
 
-// BindGuardianLKG replaces the renderer-produced predecessor with the exact
-// immutable manifest recorded for the currently stable release. The normal
-// renderer still validates the predecessor schema and selected image, but a
-// Guardian rollback must preserve the stable release's original provenance
-// bytes rather than restamp them with the candidate plan and receipt.
+// BindGuardianLKG replaces the renderer-produced predecessor with the
+// immutable manifest recorded for the currently stable release. Its code and
+// provenance remain exact; an explicitly reviewed runtime resources binding
+// may carry only container requests/limits from the forward configuration.
 func BindGuardianLKG(plan Plan, componentID string, rendered RenderedManifests, exact []byte) (RenderedManifests, error) {
 	if err := plan.ValidateBound(); err != nil {
 		return RenderedManifests{}, err
@@ -54,14 +53,21 @@ func BindGuardianLKG(plan Plan, componentID string, rendered RenderedManifests, 
 	if !lkgResourceIdentitiesSubset(forward, lkg) {
 		return RenderedManifests{}, errors.New("exact Guardian LKG resource identities are not a subset of forward")
 	}
+	if err := applyRuntimeResourcesFromForward(&forward, &lkg, release.RuntimeResourcesFromForward); err != nil {
+		return RenderedManifests{}, fmt.Errorf("apply Guardian rollback runtime resources: %w", err)
+	}
 	if err := validateImmutableResourceSetImages(lkg); err != nil {
 		return RenderedManifests{}, fmt.Errorf("validate exact Guardian LKG images: %w", err)
 	}
 	if err := validateGuardianLKGIdentity(lkg, release); err != nil {
 		return RenderedManifests{}, err
 	}
-	rendered.LKG = append([]byte(nil), exact...)
-	sum := sha256.Sum256(exact)
+	bound, err := CanonicalJSON(lkg)
+	if err != nil {
+		return RenderedManifests{}, err
+	}
+	rendered.LKG = bound
+	sum := sha256.Sum256(bound)
 	rendered.LKGDigest = fmt.Sprintf("sha256:%x", sum)
 	return rendered, nil
 }
@@ -256,6 +262,9 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		if err := patchResourceSet(&lkg, *release, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest, false); err != nil {
 			return RenderedManifests{}, err
 		}
+		if err := applyRuntimeResourcesFromForward(&forward, &lkg, release.RuntimeResourcesFromForward); err != nil {
+			return RenderedManifests{}, fmt.Errorf("apply rollback runtime resources: %w", err)
+		}
 		if err := validateImmutableResourceSetImages(lkg); err != nil {
 			return RenderedManifests{}, fmt.Errorf("validate LKG images: %w", err)
 		}
@@ -277,18 +286,18 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 	}, nil
 }
 
-func workloadContainerImage(workload map[string]any, name, containerType string) (string, error) {
+func workloadContainerObject(workload map[string]any, name, containerType string) (map[string]any, error) {
 	spec, err := objectField(workload, "spec")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	template, err := objectField(spec, "template")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	templateSpec, err := objectField(template, "spec")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	field := "containers"
 	if containerType == "init-container" {
@@ -296,25 +305,68 @@ func workloadContainerImage(workload map[string]any, name, containerType string)
 	}
 	containers, ok := templateSpec[field].([]any)
 	if !ok {
-		return "", fmt.Errorf("bootstrap LKG %s are invalid", field)
+		return nil, fmt.Errorf("bootstrap LKG %s are invalid", field)
 	}
-	image := ""
+	var selected map[string]any
 	for _, raw := range containers {
 		container, ok := raw.(map[string]any)
 		if !ok {
-			return "", errors.New("bootstrap LKG container is invalid")
+			return nil, errors.New("bootstrap LKG container is invalid")
 		}
 		if stringField(container, "name") == name {
-			if image != "" {
-				return "", errors.New("bootstrap LKG container is ambiguous")
+			if selected != nil {
+				return nil, errors.New("bootstrap LKG container is ambiguous")
 			}
-			image = stringField(container, "image")
+			selected = container
 		}
 	}
+	if selected == nil {
+		return nil, errors.New("bootstrap LKG container is absent")
+	}
+	return selected, nil
+}
+
+func workloadContainerImage(workload map[string]any, name, containerType string) (string, error) {
+	container, err := workloadContainerObject(workload, name, containerType)
+	if err != nil {
+		return "", err
+	}
+	image := stringField(container, "image")
 	if image == "" {
-		return "", errors.New("bootstrap LKG container is absent")
+		return "", errors.New("bootstrap LKG container image is absent")
 	}
 	return image, nil
+}
+
+func applyRuntimeResourcesFromForward(forward, lkg *ResourceSet, targets []RuntimeResourceTarget) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	for _, target := range targets {
+		artifactTarget := ArtifactTarget{APIVersion: target.APIVersion, Kind: target.Kind, Namespace: target.Namespace, Name: target.Name, Container: target.Container, ContainerType: target.ContainerType}
+		forwardWorkload, err := resourceSetTarget(forward, artifactTarget)
+		if err != nil {
+			return fmt.Errorf("forward %s/%s: %w", target.Kind, target.Name, err)
+		}
+		lkgWorkload, err := resourceSetTarget(lkg, artifactTarget)
+		if err != nil {
+			return fmt.Errorf("LKG %s/%s: %w", target.Kind, target.Name, err)
+		}
+		forwardContainer, err := workloadContainerObject(forwardWorkload, target.Container, target.ContainerType)
+		if err != nil {
+			return fmt.Errorf("forward container %s: %w", target.Container, err)
+		}
+		resources, ok := forwardContainer["resources"].(map[string]any)
+		if !ok || resources == nil {
+			return fmt.Errorf("forward container %s has no resources object", target.Container)
+		}
+		lkgContainer, err := workloadContainerObject(lkgWorkload, target.Container, target.ContainerType)
+		if err != nil {
+			return fmt.Errorf("LKG container %s: %w", target.Container, err)
+		}
+		lkgContainer["resources"] = deepCopyMap(resources)
+	}
+	return nil
 }
 
 func validateImmutableResourceSetImages(set ResourceSet) error {

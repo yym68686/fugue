@@ -128,6 +128,67 @@ func TestBindGuardianLKGPreservesStableProvenanceAndRejectsRuntimeDrift(t *testi
 	}
 }
 
+func TestBindGuardianLKGCarriesOnlyReviewedRuntimeResources(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.Releases[0].Delivery = &Delivery{Writer: "guardian", Group: "de", DependencyService: "fugue-fugue"}
+	plan.Releases[0].RuntimeResourcesFromForward = []RuntimeResourceTarget{{
+		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system",
+		Name: "fugue-fugue-api", Container: "api", ContainerType: "container",
+	}}
+	plan.PlanDigest = ""
+	planRaw, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(planRaw)
+	receipt, err := MaterializeArtifactReceipt(plan, "api", RegistryVerification{
+		Image: "ghcr.io/example/fugue-api@sha256:" + strings.Repeat("b", 64), IndexDigest: "sha256:" + strings.Repeat("b", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("c", 64), ConfigDigest: "sha256:" + strings.Repeat("d", 64),
+		OCIRevision: testSHA2, Platform: "linux/amd64", Verification: "registry_manifest_config_and_layer_get",
+		BlobCount: 2, LayerProbeCount: 1, RequestCount: 5, TotalLayerBytes: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"strategy":{"type":"RollingUpdate"},"template":{"metadata":{},"spec":{"containers":[{"command":["forward-command"],"env":[{"name":"MODE","value":"forward"}],"image":"placeholder","name":"api","resources":{"limits":{"memory":"1Gi"},"requests":{"memory":"256Mi"}}}]}}}}],"kind":"ComponentResourceSet"}`)
+	rendered, err := RenderManifests(plan, "api", receipt, bytes.NewReader(manifest), bytes.NewReader(manifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stable ResourceSet
+	if err := json.Unmarshal(rendered.LKG, &stable); err != nil {
+		t.Fatal(err)
+	}
+	container := stable.Items[0]["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	container["command"] = []any{"lkg-command"}
+	container["env"] = []any{map[string]any{"name": "MODE", "value": "lkg"}}
+	container["resources"] = map[string]any{"limits": map[string]any{"memory": "512Mi"}, "requests": map[string]any{"memory": "128Mi"}}
+	exact, err := CanonicalJSON(stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := BindGuardianLKG(plan, "api", rendered, exact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rollback ResourceSet
+	if err := json.Unmarshal(bound.LKG, &rollback); err != nil {
+		t.Fatal(err)
+	}
+	rollbackContainer := rollback.Items[0]["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	resources := rollbackContainer["resources"].(map[string]any)
+	if resources["limits"].(map[string]any)["memory"] != "1Gi" || resources["requests"].(map[string]any)["memory"] != "256Mi" {
+		t.Fatalf("reviewed runtime resources were not carried into rollback: %#v", resources)
+	}
+	if rollbackContainer["command"].([]any)[0] != "lkg-command" || rollbackContainer["env"].([]any)[0].(map[string]any)["value"] != "lkg" ||
+		rollbackContainer["image"] != "ghcr.io/example/fugue-api@"+testDigest {
+		t.Fatalf("rollback code configuration or image changed: %#v", rollbackContainer)
+	}
+	if bound.LKGDigest != digestOf(bound.LKG) || bytes.Equal(bound.LKG, exact) {
+		t.Fatalf("bound rollback digest was not recomputed: %s", bound.LKGDigest)
+	}
+}
+
 func TestEdgeGuardianLKGAllowsBootstrapTwinSlotsThenRequiresMixedCurrent(t *testing.T) {
 	release := PlanRelease{ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1,
 		ExpectedPreviousImageDigest: testDigest, Artifact: Artifact{Repository: "ghcr.io/example/fugue-edge"},

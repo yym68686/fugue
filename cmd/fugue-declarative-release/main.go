@@ -265,7 +265,9 @@ func resolvePreviousConfigSHA(baseSHA, intentPath string, current, previous decl
 		return previousIntentSHA
 	}
 	declaredIntent, err := loadGitIntentAt(declared, intentPath)
-	if err != nil || declaredIntent != previous {
+	declaredBytes, declaredErr := declarativerelease.CanonicalJSON(declaredIntent)
+	previousBytes, previousErr := declarativerelease.CanonicalJSON(previous)
+	if err != nil || declaredErr != nil || previousErr != nil || !bytes.Equal(declaredBytes, previousBytes) {
 		return previousIntentSHA
 	}
 	return declared
