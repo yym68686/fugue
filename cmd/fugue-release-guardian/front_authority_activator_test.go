@@ -127,6 +127,18 @@ func TestFrontRestoreGenerationAcceptsOnlyExactRetryChain(t *testing.T) {
 	}
 }
 
+func TestObservedFrontFromActivationPreservesRecoveryWitness(t *testing.T) {
+	state := edgegroupfront.ActivationState{GroupID: "edge-group-country-de", Generation: 136, ActiveSlot: "b",
+		BundleGeneration: "bundle.p42.r7", WorkerSourceCommit: strings.Repeat("1", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("2", 64), Authority: edgegroupfront.ActivationAuthority}
+	observed := observedFrontFromActivation(state)
+	if observed.Status != "recovery-witness" || observed.Generation != state.Generation || observed.ActiveSlot != state.ActiveSlot ||
+		observed.BundleGeneration != state.BundleGeneration || observed.WorkerSourceCommit != state.WorkerSourceCommit ||
+		observed.WorkerImageDigest != state.WorkerImageDigest || observed.RouteAuthority != state.Authority {
+		t.Fatalf("activation witness was not preserved: observed=%+v state=%+v", observed, state)
+	}
+}
+
 func TestAuthorityRuntimeRequiresExactWorkerAndFrontIdentity(t *testing.T) {
 	source := strings.Repeat("1", 40)
 	digest := "sha256:" + strings.Repeat("2", 64)

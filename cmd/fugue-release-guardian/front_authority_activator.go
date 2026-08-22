@@ -201,7 +201,7 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 	if target.WorkerCohortDigest != "" && cohort.CohortDigest != target.WorkerCohortDigest {
 		return frontAuthorityPreflight{}, errors.New("candidate worker cohort changed before Front CAS")
 	}
-	fronts, err := activator.observeFronts(ctx)
+	fronts, err := activator.observeFrontsForPreflight(ctx, target, workers)
 	if err != nil {
 		return frontAuthorityPreflight{}, err
 	}
@@ -246,6 +246,59 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 		states[node] = state
 	}
 	return frontAuthorityPreflight{workers: workers, states: states, previousGeneration: previousGeneration, alreadyAtNew: alreadyAtNew}, nil
+}
+
+// observeFrontsForPreflight admits only a bounded recovery witness when the
+// Front process is currently unready. A broken active slot can keep Front's
+// /readyz endpoint at 503 until the activation CAS moves traffic to the
+// healthy candidate, so requiring Front readiness before that CAS deadlocks
+// recovery. The fallback never claims serving health: it binds every Front
+// pod to its node-local Worker and uses the shared activation CAS record; the
+// normal post-CAS readiness, Worker health, and public-route checks remain
+// mandatory.
+func (activator *frontAuthorityActivator) observeFrontsForPreflight(ctx context.Context, target releaseguardian.FrontAuthorityTarget, workers map[string]corev1.Pod) (map[string]observedFront, error) {
+	fronts, err := activator.observeFronts(ctx)
+	if err == nil {
+		return fronts, nil
+	}
+	selector := labels.Set{"fugue.io/edge-group-id": target.GroupID}.AsSelector().String()
+	list, listErr := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(activator.config.ExpectedNodes + 1)})
+	if listErr != nil || list.Continue != "" {
+		return nil, fmt.Errorf("Front readiness failed and recovery cohort is unavailable: %w", err)
+	}
+	degraded := make(map[string]observedFront, activator.config.ExpectedNodes)
+	for index := range list.Items {
+		pod := &list.Items[index]
+		isFront := false
+		for _, container := range pod.Spec.Containers {
+			isFront = isFront || container.Name == "edge-front"
+		}
+		if !isFront {
+			continue
+		}
+		if pod.DeletionTimestamp != nil || pod.UID == "" || strings.TrimSpace(pod.Spec.NodeName) == "" {
+			return nil, errors.New("Front recovery cohort identity is incomplete")
+		}
+		worker, exists := workers[pod.Spec.NodeName]
+		if !exists {
+			return nil, errors.New("Front recovery cohort does not match Worker nodes")
+		}
+		state, readErr := activator.readActivation(ctx, worker.Name)
+		if readErr != nil || (state.ActiveSlot != string(target.PreviousSlot) && state.ActiveSlot != string(target.TargetSlot)) {
+			return nil, errors.New("Front recovery activation witness is not target-bound")
+		}
+		degraded[pod.Spec.NodeName] = observedFrontFromActivation(state)
+	}
+	if len(degraded) != activator.config.ExpectedNodes {
+		return nil, errors.New("Front recovery cohort size is invalid")
+	}
+	return degraded, nil
+}
+
+func observedFrontFromActivation(state edgegroupfront.ActivationState) observedFront {
+	return observedFront{Generation: state.Generation, ActiveSlot: state.ActiveSlot,
+		BundleGeneration: state.BundleGeneration, WorkerSourceCommit: state.WorkerSourceCommit,
+		WorkerImageDigest: state.WorkerImageDigest, RouteAuthority: state.Authority, Status: "recovery-witness"}
 }
 
 func frontLKGGenerationMatches(state edgegroupfront.ActivationState, expected uint64, operation string) bool {
