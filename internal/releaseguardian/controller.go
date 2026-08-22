@@ -158,6 +158,14 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 			receipt, executeErr := controller.executor.Rollback(ctx, snapshot)
 			if executeErr != nil {
 				status.Reason = "LKG restore result is unknown: " + executeErr.Error()
+				if strings.Contains(executeErr.Error(), "LKG monitor record is not the exact predecessor") {
+					if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
+						status.Reason = "LKG monitor ledger is inconsistent and DesiredRelease rollback CAS failed: " + err.Error()
+					} else {
+						status.TargetRecordDigest = snapshot.CurrentRecordDigest
+						status.Reason = "LKG monitor ledger is inconsistent; failed-candidate DesiredRelease was fenced back to the recorded LKG"
+					}
+				}
 			} else {
 				status.RollbackReceiptDigest = receipt.ReceiptDigest
 				if receipt.Status == "compensated" && receipt.RecordDigest == snapshot.Record.LKGRecordDigest {
