@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/edgecontrol"
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
@@ -72,6 +74,32 @@ func TestAuthorityBaselineReadsActivationFromWorkerWhenFrontIsUnready(t *testing
 	if !ok || health.pod.Name != front.Name || health.health.Status != "recovery-witness" || health.health.ActiveSlot != "a" ||
 		health.health.Generation != 135 || health.health.BundleGeneration != "routes-serving.p15778.r151" || health.health.WorkerSourceCommit != source || health.health.WorkerImageDigest != image {
 		t.Fatalf("unexpected activation fallback witness: %+v", fronts)
+	}
+}
+
+func TestRecoverableLKGWitnessRequiresLiveExactGeneration(t *testing.T) {
+	now := time.Date(2026, 8, 22, 8, 0, 0, 0, time.UTC)
+	status := edgecontrol.AuthorityGroupStatus{GroupID: "edge-group-country-de", Ready: true, ServingHealthy: true,
+		CurrentPublicationSequence: 19673, BundleGeneration: "routes.p15765.r151", PublishedBundleDigest: "sha256:" + strings.Repeat("a", 64),
+		LKGState: edgecontrol.GroupAuthorityLKGPreserved, BundleValidUntil: func() *time.Time { value := now.Add(time.Minute); return &value }()}
+	if !recoverableLKGWitness(status, "routes.p15765.r151", nil, releaseguardian.AuthoritySlotB, now) {
+		t.Fatal("live LKG publication was rejected")
+	}
+	for name, mutate := range []func(*edgecontrol.AuthorityGroupStatus){
+		func(value *edgecontrol.AuthorityGroupStatus) { value.ServingHealthy = false },
+		func(value *edgecontrol.AuthorityGroupStatus) { value.BundleGeneration = "other.p1.r1" },
+		func(value *edgecontrol.AuthorityGroupStatus) {
+			expired := now.Add(-time.Minute)
+			value.BundleValidUntil = &expired
+		},
+	} {
+		t.Run(fmt.Sprintf("invalid-%d", name), func(t *testing.T) {
+			changed := status
+			mutate(&changed)
+			if recoverableLKGWitness(changed, "routes.p15765.r151", nil, releaseguardian.AuthoritySlotB, now) {
+				t.Fatal("invalid LKG publication was accepted")
+			}
+		})
 	}
 }
 

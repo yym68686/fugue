@@ -107,6 +107,11 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 		current.PreviousWorkerSourceSHA, current.PreviousWorkerImageDigest, 0, current.PreviousBundleGeneration, false)
 	lkgHealthy := lkgRuntimeHealthy && authorityRouteMatches(status, body, headers, lkgErr, activator.front.config.RouteBodyDigest,
 		current.PreviousRecordDigest, current.PreviousWorkerSlot, true)
+	if !lkgHealthy && lkgRuntimeHealthy && lkgErr == nil && status == http.StatusOK && shaDigest(body) == activator.front.config.RouteBodyDigest {
+		if groupStatus, statusErr := activator.groupStatus(ctx, current.GroupID); statusErr == nil {
+			lkgHealthy = recoverableLKGWitness(groupStatus, current.PreviousBundleGeneration, headers, current.PreviousWorkerSlot, activator.now().UTC())
+		}
+	}
 	evidence, err := declarativerelease.CanonicalJSON(map[string]any{
 		"groupId": current.GroupID, "currentRecordDigest": current.CurrentRecordDigest, "currentSlot": current.CurrentWorkerSlot,
 		"currentHealthy": currentHealthy, "currentError": errorClass(currentErr), "currentRuntimeError": errorClass(currentRuntimeErr),
@@ -117,6 +122,26 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 		return false, false, "", err
 	}
 	return currentHealthy, lkgHealthy, shaDigest(evidence), nil
+}
+
+// recoverableLKGWitness authorizes the existing restore transaction when an
+// inactive Worker is healthy but still serves a stale candidate envelope. The
+// witness is deliberately weaker than settled LKG health: it requires a
+// live, valid Edge Control publication for the same immutable generation and
+// leaves the final activation and public-route checks mandatory.
+func recoverableLKGWitness(status edgecontrol.AuthorityGroupStatus, expectedBundle string, headers http.Header, slot releaseguardian.AuthoritySlot, now time.Time) bool {
+	if status.GroupID == "" || !status.Ready || !status.ServingHealthy ||
+		(status.LKGState != edgecontrol.GroupAuthorityLKGCurrent && status.LKGState != edgecontrol.GroupAuthorityLKGPreserved) ||
+		status.CurrentPublicationSequence == 0 || !exactSHA256Digest(status.PublishedBundleDigest) || status.BundleValidUntil == nil || !status.BundleValidUntil.After(now) ||
+		authorityGenerationBase(status.BundleGeneration) != authorityGenerationBase(expectedBundle) {
+		return false
+	}
+	observedSlot := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))
+	observedRecord := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest"))
+	if observedSlot == "" && observedRecord == "" {
+		return true
+	}
+	return observedSlot == string(slot) && exactSHA256Digest(observedRecord)
 }
 
 // authorityRouteMatches permits an unattested route only for a previous LKG.

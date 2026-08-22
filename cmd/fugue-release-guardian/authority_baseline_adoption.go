@@ -40,11 +40,14 @@ type authorityBaselineConfig struct {
 }
 
 type authorityBaselineStore interface {
+	LoadCandidate(context.Context, string) (releaseguardian.CandidateAuthority, types.UID, string, error)
 	LoadCurrent(context.Context, string) (releaseguardian.CurrentAuthority, types.UID, string, error)
 	LoadBaselineReceipt(context.Context, string) (releaseguardian.AuthorityBaselineReceipt, error)
+	LoadNormalizationReceipt(context.Context, string) (releaseguardian.AuthorityNormalizationReceipt, bool, error)
 	LoadRouteBundleRecord(context.Context, string, string) (releaseguardian.RouteBundleRecord, error)
 	AdoptCurrentBaseline(context.Context, releaseguardian.CurrentAuthority, releaseguardian.AuthorityBaselineReceipt, types.UID, string) (types.UID, string, error)
 	NormalizeCurrentBaseline(context.Context, releaseguardian.CurrentAuthority, releaseguardian.AuthorityNormalizationReceipt, types.UID, string) (types.UID, string, error)
+	SwitchCurrent(context.Context, releaseguardian.CurrentAuthority, types.UID, string) (types.UID, string, error)
 }
 
 type baselineFrontHealth struct {
@@ -178,6 +181,15 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 	if activeSlot.Validate() != nil {
 		return false, errors.New("Front baseline has an invalid active authority")
 	}
+	if before.BaselineReceiptDigest != "" {
+		repaired, repairErr := repairOrphanedAuthority(ctx, store, client, namespace, config, before, uid, rv, fronts)
+		if repairErr != nil {
+			return false, repairErr
+		}
+		if repaired {
+			return true, nil
+		}
+	}
 	workers, recordDigest, epoch, witnesses, err := observeBaselineWorkers(ctx, client, namespace, config, activeSlot, fronts, before)
 	if err != nil {
 		return false, err
@@ -234,6 +246,114 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 		return false, err
 	}
 	return true, nil
+}
+
+// repairOrphanedAuthority handles the narrow historical failure where Front
+// already committed a verified candidate activation but CurrentAuthority was
+// left pointing at the opposite slot. It only performs the metadata CAS when
+// the activation, verified candidate, normalization receipt, and the live
+// inactive Worker identities all agree. The subsequent authority runtime loop
+// still has to execute the ordinary LKG restore transaction and public-route
+// probe before the group can settle.
+func repairOrphanedAuthority(ctx context.Context, store authorityBaselineStore, client kubernetes.Interface, namespace string, config authorityBaselineConfig, before releaseguardian.CurrentAuthority, uid types.UID, rv string, fronts map[string]observedBaselineFront) (bool, error) {
+	candidate, _, _, err := store.LoadCandidate(ctx, config.GroupID)
+	if err != nil || candidate.Validate() != nil || candidate.State != releaseguardian.CandidateAuthorityVerified || !candidate.HasPromotionWitness() || !candidate.HasWorkerReleaseIdentity() {
+		return false, nil
+	}
+	if record, recordErr := store.LoadRouteBundleRecord(ctx, config.GroupID, candidate.RecordDigest); recordErr != nil || record.Epoch != int64(candidate.CandidateEpoch) {
+		return false, nil
+	}
+	normalization, exists, err := store.LoadNormalizationReceipt(ctx, config.GroupID)
+	if err != nil || !exists || normalization.Validate() != nil {
+		return false, nil
+	}
+	front, ok := firstBaselineFront(fronts)
+	if !ok || releaseguardian.AuthoritySlot(front.health.ActiveSlot) != candidate.WorkerSlot ||
+		front.health.WorkerSourceCommit != candidate.WorkerSourceSHA || front.health.WorkerImageDigest != candidate.WorkerImageDigest ||
+		authorityGenerationBase(front.health.BundleGeneration) != authorityGenerationBase(candidate.CurrentServingGeneration) ||
+		before.CurrentWorkerSlot == candidate.WorkerSlot || before.CurrentRecordDigest == candidate.RecordDigest ||
+		before.CurrentWorkerSourceSHA != candidate.WorkerSourceSHA || before.CurrentWorkerImageDigest != candidate.WorkerImageDigest ||
+		authorityGenerationBase(before.CurrentBundleGeneration) != authorityGenerationBase(candidate.CurrentServingGeneration) {
+		return false, nil
+	}
+	if normalization.After.CurrentWorkerSourceSHA == "" || normalization.After.CurrentWorkerImageDigest == "" {
+		return false, errors.New("orphaned authority normalization identity is invalid")
+	}
+	workers, err := observeStableAuthorityWorkers(ctx, client, namespace, config, candidate.WorkerSlot, normalization.After.CurrentWorkerSourceSHA, normalization.After.CurrentWorkerImageDigest)
+	if err != nil {
+		return false, err
+	}
+	for node := range fronts {
+		if _, ok := workers[node]; !ok {
+			return false, errors.New("orphaned authority LKG Worker node set is incomplete")
+		}
+	}
+	previousSource, previousImage := normalization.After.CurrentWorkerSourceSHA, normalization.After.CurrentWorkerImageDigest
+	next := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: config.GroupID, CurrentRecordDigest: candidate.RecordDigest, CurrentWorkerSlot: candidate.WorkerSlot,
+		CurrentFrontGeneration: front.health.Generation, CurrentBundleGeneration: front.health.BundleGeneration,
+		CurrentWorkerSourceSHA: candidate.WorkerSourceSHA, CurrentWorkerImageDigest: candidate.WorkerImageDigest,
+		PreviousRecordDigest: before.CurrentRecordDigest, PreviousWorkerSlot: func() releaseguardian.AuthoritySlot {
+			if candidate.WorkerSlot == releaseguardian.AuthoritySlotA {
+				return releaseguardian.AuthoritySlotB
+			}
+			return releaseguardian.AuthoritySlotA
+		}(),
+		PreviousFrontGeneration: before.CurrentFrontGeneration, PreviousBundleGeneration: before.CurrentBundleGeneration,
+		PreviousWorkerSourceSHA: previousSource, PreviousWorkerImageDigest: previousImage,
+		AuthorityEpoch: before.AuthorityEpoch + 1, BaselineReceiptDigest: before.BaselineReceiptDigest}
+	if next.Validate() != nil {
+		return false, errors.New("orphaned authority repair pointer is invalid")
+	}
+	if _, _, err := store.SwitchCurrent(ctx, next, uid, rv); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func firstBaselineFront(fronts map[string]observedBaselineFront) (observedBaselineFront, bool) {
+	for _, front := range fronts {
+		return front, true
+	}
+	return observedBaselineFront{}, false
+}
+
+func authorityGenerationBase(value string) string {
+	value = strings.TrimSpace(value)
+	if pivot := strings.LastIndex(value, ".p"); pivot > 0 {
+		return value[:pivot]
+	}
+	return value
+}
+
+func observeStableAuthorityWorkers(ctx context.Context, client kubernetes.Interface, namespace string, config authorityBaselineConfig, activeSlot releaseguardian.AuthoritySlot, source, image string) (map[string]corev1.Pod, error) {
+	otherSlot := releaseguardian.AuthoritySlotA
+	if activeSlot == releaseguardian.AuthoritySlotA {
+		otherSlot = releaseguardian.AuthoritySlotB
+	}
+	selector := labels.Set{"fugue.io/edge-group-id": config.GroupID, "fugue.io/edge-slot": string(otherSlot)}.AsSelector().String()
+	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: int64(config.ExpectedNodes + 1)})
+	if err != nil || list.Continue != "" || len(list.Items) != config.ExpectedNodes {
+		return nil, errors.New("orphaned authority LKG Worker cohort is unavailable")
+	}
+	workers := make(map[string]corev1.Pod, len(list.Items))
+	for index := range list.Items {
+		pod := list.Items[index]
+		if pod.DeletionTimestamp != nil || pod.UID == "" || pod.ResourceVersion == "" || pod.Spec.NodeName == "" || !podReady(pod.Status.Conditions) ||
+			strings.TrimSpace(pod.Annotations["fugue.pro/source-commit"]) != source || containerRuntimeImageDigest(pod, "edge") != image {
+			return nil, errors.New("orphaned authority LKG Worker identity is invalid")
+		}
+		var health baselineWorkerHealth
+		if pod.Status.PodIP == "" || readAuthorityBaselineJSON(ctx, "http://"+pod.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health) != nil ||
+			!health.Healthy || health.EdgeGroupID != config.GroupID {
+			return nil, errors.New("orphaned authority LKG Worker health is invalid")
+		}
+		if _, exists := workers[pod.Spec.NodeName]; exists {
+			return nil, errors.New("orphaned authority LKG Worker cohort has duplicate nodes")
+		}
+		workers[pod.Spec.NodeName] = pod
+	}
+	return workers, nil
 }
 
 type observedBaselineFront struct {

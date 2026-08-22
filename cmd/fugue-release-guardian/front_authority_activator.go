@@ -420,9 +420,30 @@ func (activator *frontAuthorityActivator) verifyPublicRoute(ctx context.Context,
 	probe := canaryProbe{Address: activator.config.RouteAddress, Host: activator.config.RouteHost, Path: activator.config.RoutePath}
 	verifyCtx, cancel := context.WithTimeout(ctx, postActivationRouteTimeout)
 	defer cancel()
+	request := requestPublicRouteWithHeaders
+	if allowUnattestedLKG {
+		// A restored Worker may retain candidate attestation headers from the
+		// failed activation while it converges to the refreshed current LKG
+		// publication. Runtime identity and Edge Control publication are already
+		// checked before this probe; accept only a complete, well-formed stale
+		// attestation and remove it so the LKG route matcher treats it as legacy.
+		request = func(ctx context.Context, probe canaryProbe) (int, []byte, http.Header, error) {
+			status, body, headers, err := requestPublicRouteWithHeaders(ctx, probe)
+			if err == nil && status == http.StatusOK && shaDigest(body) == activator.config.RouteBodyDigest {
+				record := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest"))
+				slot := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))
+				if exactSHA256Digest(record) && slot == string(target.TargetSlot) {
+					headers = headers.Clone()
+					headers.Del("X-Fugue-Candidate-Record-Digest")
+					headers.Del("X-Fugue-Candidate-Worker-Slot")
+				}
+			}
+			return status, body, headers, err
+		}
+	}
 	return waitForAuthorityRoute(verifyCtx, probe, activator.config.RouteBodyDigest, target.CandidateRecordDigest,
 		target.TargetSlot, allowUnattestedLKG, postActivationRouteAttempts, postActivationRouteSuccesses,
-		postActivationRouteInterval, requestPublicRouteWithHeaders)
+		postActivationRouteInterval, request)
 }
 
 type authorityRouteRequest func(context.Context, canaryProbe) (int, []byte, http.Header, error)
@@ -584,7 +605,7 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 		}
 		var health baselineWorkerHealth
 		if err := readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil ||
-			!authorityWorkerHealthMatches(health, activator.config.GroupID, bundleGeneration) {
+			!health.Healthy || health.EdgeGroupID != activator.config.GroupID || (requireFront && !authorityWorkerHealthMatches(health, activator.config.GroupID, bundleGeneration)) {
 			return false, errors.New("authority Worker route generation does not match its pointer")
 		}
 	}
