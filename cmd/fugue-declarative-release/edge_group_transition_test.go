@@ -187,6 +187,49 @@ func TestStageCandidateRecoversPublishedLKGAfterSequenceConflict(t *testing.T) {
 	}
 }
 
+func TestStageCandidateFailsClosedWhenPublishedLKGRecoveryFails(t *testing.T) {
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("7", 64))
+	now := time.Now().UTC()
+	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
+	keyring := edgeCandidateKeyring{Schema: "edge-control-group-recovery-keyring/v1", Generation: 1,
+		GroupID: "edge-group-country-de", Keys: []edgeCandidateKey{{KeyID: "key-1",
+			Secret:        base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("s", 32))),
+			NotBeforeUnix: now.Add(-time.Hour).Unix(), NotAfterUnix: now.Add(time.Hour).Unix()}}}
+	rawKeyring, _ := json.Marshal(keyring)
+	if err := os.WriteFile(keyringPath, rawKeyring, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statusReads, recoveryPosts, stagePosts := 0, 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet:
+			statusReads++
+			_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":10,"candidate_epoch":7,"bundle_generation":"routes.p160.r1","published_bundle_digest":"sha256:%s","recovery_epoch":2}`, strings.Repeat("4", 64))
+		case request.URL.Path == edgeGroupRecoveryPath:
+			recoveryPosts++
+			writer.WriteHeader(http.StatusNotFound)
+		default:
+			stagePosts++
+			writer.WriteHeader(http.StatusConflict)
+			_, _ = writer.Write([]byte(`{"schema":"edge-control-error/v1","error":"sequence_conflict"}`))
+		}
+	}))
+	defer server.Close()
+
+	runtime := kubectlEdgeGroupRuntime{client: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		release: declarativerelease.PlanRelease{SupersedesFailedConfigSHA: strings.Repeat("f", 40), Workload: declarativerelease.Workload{Namespace: "fugue-system"}},
+		transition: declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-de",
+			CandidateStageURL: server.URL + edgeCandidateStagePath, CandidateKeyring: keyringPath}}
+	target := declarativerelease.TargetIdentity{ConfigSHA: strings.Repeat("5", 40),
+		ImageRef: "ghcr.io/yym68686/fugue-edge@sha256:" + strings.Repeat("6", 64)}
+	_, err := runtime.StageCandidate(context.Background(), edgeGroupState{ActiveSlot: "a"}, "b", target)
+	if err == nil || !strings.Contains(err.Error(), "refresh published Edge Control LKG after candidate sequence conflict: Edge Control recovery HTTP 404") ||
+		statusReads != 2 || recoveryPosts != 1 || stagePosts != 1 {
+		t.Fatalf("recovery failure was not fail-closed: reads=%d recoveries=%d stages=%d err=%v", statusReads, recoveryPosts, stagePosts, err)
+	}
+}
+
 func TestPostEdgeCandidateStageDoesNotReflectUntrustedErrorBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
