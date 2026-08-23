@@ -829,8 +829,8 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 			}
 			if !allowDegradedRecovery || !edgeFrontHealthMatchesDegradedServingAuthority(health, current) {
-				return nil, fmt.Errorf("Guardian current authority does not match the serving Front slot: %s",
-					edgeDegradedServingAuthorityMismatch(health, current, allowDegradedRecovery))
+				return nil, fmt.Errorf("Guardian current authority does not match the serving Front slot: %s expected_lkg=%s",
+					edgeDegradedServingAuthorityMismatch(health, current, allowDegradedRecovery), edgeExpectedLKGMismatch(health, current, expectedLKGSourceSHA, expectedLKGImageDigest))
 			}
 			return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 		}
@@ -909,6 +909,16 @@ func edgeFrontHealthMatchesExpectedLKG(health edgeFrontHealth, current releasegu
 	currentGeneration, _, _, currentOK := parseEdgePublicationVersion(current.CurrentBundleGeneration)
 	frontGeneration, _, _, frontOK := parseEdgePublicationVersion(health.BundleGeneration)
 	return currentOK && frontOK && currentGeneration == frontGeneration
+}
+
+func edgeExpectedLKGMismatch(health edgeFrontHealth, current releaseguardian.CurrentAuthority, expectedSourceSHA, expectedImageDigest string) string {
+	currentGeneration, _, _, currentOK := parseEdgePublicationVersion(current.CurrentBundleGeneration)
+	frontGeneration, _, _, frontOK := parseEdgePublicationVersion(health.BundleGeneration)
+	return fmt.Sprintf("slot_ok=%t source_ok=%t image_ok=%t activation_ok=%t route_ok=%t generation_ok=%t bundle_family_ok=%t expected_source=%s actual_source=%s expected_image=%s actual_image=%s",
+		health.ActiveSlot == string(current.CurrentWorkerSlot) || health.ActiveSlot == string(current.PreviousWorkerSlot),
+		health.WorkerSourceCommit == expectedSourceSHA, health.WorkerImageDigest == expectedImageDigest,
+		health.ActivationPresent, health.RouteAuthority == edgeActivationAuthority, health.Generation >= current.CurrentFrontGeneration,
+		currentOK && frontOK && currentGeneration == frontGeneration, expectedSourceSHA, health.WorkerSourceCommit, expectedImageDigest, health.WorkerImageDigest)
 }
 
 func edgeDegradedServingAuthorityMismatch(health edgeFrontHealth, current releaseguardian.CurrentAuthority, allowed bool) string {
