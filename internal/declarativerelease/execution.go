@@ -618,7 +618,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 			current, err = cluster.ObserveDegraded(ctx, release, observationManifest)
 		}
 		if err == nil && !current.SameSpecIdentity(prepared.Prewrite) {
-			err = errors.New("degraded predecessor identity changed")
+			err = fmt.Errorf("degraded predecessor identity changed: %s", specIdentityMismatch(prepared.Prewrite, current))
 		}
 		if err == nil && !controlledEdgeRecovery {
 			var witness []byte
@@ -762,6 +762,24 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	)
 	result.Final = lkgObservation
 	return sealResult(result)
+}
+
+func specIdentityMismatch(expected, actual Observation) string {
+	if expected.Present != actual.Present || expected.Primary != actual.Primary || expected.UID != actual.UID || expected.Generation != actual.Generation ||
+		expected.ImageRef != actual.ImageRef || expected.ConfigSHA != actual.ConfigSHA || expected.ManifestSHA != actual.ManifestSHA || expected.OCIRevision != actual.OCIRevision ||
+		expected.TemplateDigest != actual.TemplateDigest || !equalStrings(expected.FieldManagers, actual.FieldManagers) {
+		return fmt.Sprintf("workload expected=%+v actual=%+v", expected, actual)
+	}
+	if len(expected.Resources) != len(actual.Resources) {
+		return fmt.Sprintf("resource count expected=%d actual=%d", len(expected.Resources), len(actual.Resources))
+	}
+	for index := range expected.Resources {
+		left, right := expected.Resources[index], actual.Resources[index]
+		if !sameResourceSpecIdentity(left, right) {
+			return fmt.Sprintf("resource %s expected=%+v actual=%+v", left.Identity.key(), left, right)
+		}
+	}
+	return "resource identity differs"
 }
 
 func rollbackConvergenceWitness(lkgManifest []byte, release PlanRelease) ([]byte, error) {
