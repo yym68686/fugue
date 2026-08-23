@@ -51,9 +51,11 @@ func (executor *ProcessExecutor) Repair(ctx context.Context, snapshot Snapshot) 
 }
 
 func (executor *ProcessExecutor) Rollback(ctx context.Context, snapshot Snapshot) (ExecutionReceipt, error) {
-	files := make(map[string][]byte, len(snapshot.CurrentMonitorData))
-	for name, value := range snapshot.CurrentMonitorData {
-		files[name] = []byte(value)
+	// The Desired candidate bundle carries the exact predecessor LKG. The
+	// monitor record is retained separately as the trusted current artifact.
+	files := make(map[string][]byte, len(snapshot.Bundle.Files))
+	for name, value := range snapshot.Bundle.Files {
+		files[name] = append([]byte(nil), value...)
 	}
 	return executor.execute(ctx, snapshot, "restore-monitor", files)
 }

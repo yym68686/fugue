@@ -263,7 +263,7 @@ func writeExecutorFixture(t *testing.T, operation, recordDigest string, result d
 	}
 	path := filepath.Join(t.TempDir(), "executor")
 	expectedFiles := len(executionFileNames)
-	if operation == "restore-monitor" || operation == "repair-monitor" {
+	if operation == "repair-monitor" {
 		expectedFiles = 7
 	}
 	extraArgument := "test $# = 2"

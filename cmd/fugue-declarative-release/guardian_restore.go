@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/releaseguardian"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -106,11 +107,28 @@ func runRestoreMonitorContext(parent context.Context, args []string, output io.W
 	if len(args) != 3 {
 		return errors.New("usage: fugue-declarative-release restore-monitor MONITOR_DIR LKG_RECORD_DIGEST")
 	}
-	currentBundle, err := readMonitorDirectory(args[1])
-	if err != nil {
-		return err
+	currentBundle, monitorErr := readMonitorDirectory(args[1])
+	monitorRestore := monitorErr == nil
+	var candidateBundle releaseguardian.ExecutionBundle
+	var release declarativerelease.PlanRelease
+	var err error
+	if monitorRestore {
+		release, err = selectedRelease(currentBundle.Plan, currentBundle.Record.Component)
+	} else {
+		files, readErr := readPlanDirectory(args[1])
+		if readErr != nil {
+			return monitorErr
+		}
+		plan, planErr := declarativerelease.DecodePlan(bytes.NewReader(files["release-plan.json"]))
+		if planErr != nil || len(plan.Releases) != 1 {
+			return monitorErr
+		}
+		release = plan.Releases[0]
+		if release.Delivery == nil {
+			return monitorErr
+		}
+		candidateBundle, err = releaseguardian.DecodeExecutionBundle(files, releaseguardian.Key{Component: release.ComponentID, Group: release.Delivery.Group})
 	}
-	release, err := selectedRelease(currentBundle.Plan, currentBundle.Record.Component)
 	if err != nil {
 		return err
 	}
@@ -121,10 +139,19 @@ func runRestoreMonitorContext(parent context.Context, args []string, output io.W
 	ctx, cancel := context.WithTimeout(parent, 8*time.Minute)
 	defer cancel()
 	current, err := store.load(ctx, release.Workload.Namespace, release.ComponentID)
-	if err != nil || current.Bundle.Record != currentBundle.Record {
-		return errors.New("live monitor pointer is not bound to the requested rollback record")
+	if err != nil {
+		return err
 	}
-	lkgName, lkgBundle, err := loadBoundMonitorLKG(ctx, store, currentBundle, release, args[2])
+	var lkgName string
+	var lkgBundle monitorBundle
+	if monitorRestore {
+		if current.Bundle.Record != currentBundle.Record {
+			return errors.New("live monitor pointer is not bound to the requested rollback record")
+		}
+		lkgName, lkgBundle, err = loadBoundMonitorLKG(ctx, store, currentBundle, release, args[2])
+	} else {
+		lkgName, lkgBundle, err = loadBoundExecutionLKG(ctx, store, candidateBundle, release, args[2])
+	}
 	if err != nil {
 		return err
 	}
@@ -136,22 +163,27 @@ func runRestoreMonitorContext(parent context.Context, args []string, output io.W
 	if err != nil {
 		return err
 	}
-	held, err := lease.acquire(ctx, release, currentBundle.Record.ConfigSHA)
+	held, err := lease.acquire(ctx, release, current.Bundle.Record.ConfigSHA)
 	if err != nil {
 		return fmt.Errorf("acquire component mutation lease: %w", err)
 	}
 	fresh, freshErr := store.load(ctx, release.Workload.Namespace, release.ComponentID)
-	if freshErr != nil || fresh.Bundle.Record != currentBundle.Record {
+	if freshErr != nil || fresh.Bundle.Record != lkgBundle.Record {
 		releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
 		_ = lease.release(releaseCtx, held)
 		releaseCancel()
 		return errors.New("monitor pointer changed after component Lease acquisition")
 	}
-	result := declarativerelease.RestoreMonitoredLKG(ctx, cluster, currentBundle.Plan, currentBundle.Prepared, currentBundle.Forward, currentBundle.LKG, release)
+	plan := currentBundle.Plan
+	prepared, forward, lkg := currentBundle.Prepared, currentBundle.Forward, currentBundle.LKG
+	if !monitorRestore {
+		plan, prepared, forward, lkg = candidateBundle.Plan, candidateBundle.Prepared, candidateBundle.Forward, candidateBundle.LKG
+	}
+	result := declarativerelease.RestoreMonitoredLKG(ctx, cluster, plan, prepared, forward, lkg, release)
 	finalizeCtx, finalizeCancel := componentLeaseFinalizationContext(ctx)
 	defer finalizeCancel()
 	var activateErr error
-	if result.Status == "compensated" {
+	if monitorRestore && result.Status == "compensated" {
 		_, activateErr = store.activateExistingRecord(finalizeCtx, fresh, lkgName, lkgBundle)
 	}
 	releaseErr := lease.release(finalizeCtx, held)
@@ -172,6 +204,26 @@ func runRestoreMonitorContext(parent context.Context, args []string, output io.W
 		return fmt.Errorf("Guardian LKG rollback ended with status=%s reason=%s", result.Status, result.Reason)
 	}
 	return nil
+}
+
+func loadBoundExecutionLKG(ctx context.Context, store *monitorStore, candidate releaseguardian.ExecutionBundle, release declarativerelease.PlanRelease, recordDigest string) (string, monitorBundle, error) {
+	if !strings.HasPrefix(recordDigest, "sha256:") || len(recordDigest) != 71 || strings.Trim(recordDigest[7:], "0123456789abcdef") != "" {
+		return "", monitorBundle{}, errors.New("LKG monitor record digest is invalid")
+	}
+	lkgName := monitorRecordNameFromIdentity(release.ComponentID, recordDigest)
+	lkgMap, err := store.client.ConfigMaps(release.Workload.Namespace).Get(ctx, lkgName, metav1.GetOptions{})
+	if err != nil || lkgMap.Immutable == nil || !*lkgMap.Immutable {
+		return "", monitorBundle{}, errors.New("immutable LKG monitor record is unavailable")
+	}
+	lkgBundle, err := decodeStoredMonitorBundle(lkgMap.Data)
+	if err != nil || lkgBundle.Record.RecordDigest != recordDigest || !candidate.Prepared.LKG.Present ||
+		candidate.Prepared.LKG.ManifestDigest != lkgBundle.Record.ForwardManifestDigest ||
+		candidate.Prepared.LKG.ConfigSHA != lkgBundle.Prepared.Forward.ConfigSHA ||
+		candidate.Prepared.LKG.OCIRevision != lkgBundle.Prepared.Forward.OCIRevision ||
+		candidate.Prepared.LKG.ImageRef != lkgBundle.Prepared.Forward.ImageRef {
+		return "", monitorBundle{}, errors.New("LKG monitor record is not the exact predecessor of the candidate release")
+	}
+	return lkgName, lkgBundle, nil
 }
 
 func loadBoundMonitorLKG(ctx context.Context, store *monitorStore, currentBundle monitorBundle, release declarativerelease.PlanRelease, recordDigest string) (string, monitorBundle, error) {
