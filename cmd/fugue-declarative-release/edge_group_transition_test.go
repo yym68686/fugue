@@ -24,12 +24,13 @@ import (
 func TestReadEdgeCandidateStageStatusAcceptsFullAuthorityResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"edge_group_id":"edge-group-country-us","status":"serving_lkg","ready":true,"authority_sequence":12,"publication_sequence":12,"current_publication_sequence":10,"candidate_epoch":13,"published_bundle_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recovery_epoch":2,"lkg_state":"preserved"}`))
+		_, _ = writer.Write([]byte(`{"edge_group_id":"edge-group-country-us","status":"serving_lkg","ready":true,"authority_sequence":12,"publication_sequence":12,"current_publication_sequence":10,"candidate_epoch":13,"candidate_worker_source_sha":"9999999999999999999999999999999999999999","published_bundle_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recovery_epoch":2,"lkg_state":"preserved"}`))
 	}))
 	defer server.Close()
 	endpoint := server.URL + edgeCandidateStagePath
 	status, err := readEdgeCandidateStageStatus(context.Background(), endpoint, "edge-group-country-us")
-	if err != nil || status.AuthoritySequence != 12 || status.CurrentPublicationSequence != 10 || status.CandidateEpoch != 13 {
+	if err != nil || status.AuthoritySequence != 12 || status.CurrentPublicationSequence != 10 || status.CandidateEpoch != 13 ||
+		status.CandidateWorkerSourceSHA != strings.Repeat("9", 40) {
 		t.Fatalf("full status response: status=%+v err=%v", status, err)
 	}
 }
@@ -121,19 +122,43 @@ func TestStageCandidateRecoversPublishedLKGAfterSequenceConflict(t *testing.T) {
 	statusReads := 0
 	stagePosts := 0
 	recoveryPosts := 0
+	candidateRecoveryPosts := 0
+	operations := make([]string, 0, 4)
+	failedSourceSHA := strings.Repeat("9", 40)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch {
 		case request.Method == http.MethodGet:
 			statusReads++
-			publicationSequence, recoveryEpoch := uint64(10), uint64(2)
+			publicationSequence, recoveryEpoch, candidateEpoch := uint64(10), uint64(2), uint64(7)
+			candidateSource := failedSourceSHA
 			if statusReads >= 3 {
-				publicationSequence, recoveryEpoch = 11, 3
+				publicationSequence, recoveryEpoch, candidateEpoch, candidateSource = 11, 3, 0, ""
 			}
-			_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":%d,"candidate_epoch":7,"bundle_generation":"routes.p160.r1","published_bundle_digest":"sha256:%s","recovery_epoch":%d}`,
-				publicationSequence, strings.Repeat("4", 64), recoveryEpoch)
+			_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":%d,"candidate_epoch":%d,"candidate_worker_source_sha":%q,"bundle_generation":"routes.p160.r1","published_bundle_digest":"sha256:%s","recovery_epoch":%d}`,
+				publicationSequence, candidateEpoch, candidateSource, strings.Repeat("4", 64), recoveryEpoch)
+		case request.URL.Path == edgeCandidateRecoveryPath:
+			candidateRecoveryPosts++
+			operations = append(operations, "fence")
+			var recovery edgeCandidateRecoveryRequest
+			if err := json.NewDecoder(request.Body).Decode(&recovery); err != nil {
+				t.Errorf("decode candidate recovery request: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if recovery.Schema != edgeCandidateRecoverySchema || recovery.GroupID != "edge-group-country-de" ||
+				recovery.ExpectedAuthoritySequence != 12 || recovery.ExpectedPublicationSequence != 10 ||
+				recovery.ExpectedRecoveryEpoch != 2 || recovery.ExpectedCandidateEpoch != 7 ||
+				recovery.ExpectedWorkerSourceSHA != failedSourceSHA || recovery.Signature == "" {
+				t.Errorf("candidate recovery request is not bound to failed candidate: %+v", recovery)
+			}
+			_ = json.NewEncoder(writer).Encode(edgeCandidateRecoveryReceipt{Schema: edgeCandidateRecoveryReceiptSchema,
+				GroupID: "edge-group-country-de", FencedCandidateEpoch: 7, FencedWorkerSourceSHA: failedSourceSHA,
+				CurrentPublicationSequence: 10, CurrentRecoveryEpoch: 2,
+				PublishedBundleDigest: "sha256:" + strings.Repeat("4", 64), CandidateCleared: true})
 		case request.URL.Path == edgeGroupRecoveryPath:
 			recoveryPosts++
+			operations = append(operations, "recover")
 			var recovery edgeGroupRecoveryRequest
 			if err := json.NewDecoder(request.Body).Decode(&recovery); err != nil {
 				t.Errorf("decode recovery request: %v", err)
@@ -151,6 +176,7 @@ func TestStageCandidateRecoversPublishedLKGAfterSequenceConflict(t *testing.T) {
 				Authority: edgeActivationAuthority, PublicationEnabled: true})
 		default:
 			stagePosts++
+			operations = append(operations, "stage")
 			var staged edgeCandidateStageRequest
 			if err := json.NewDecoder(request.Body).Decode(&staged); err != nil {
 				t.Errorf("decode staged request: %v", err)
@@ -181,9 +207,11 @@ func TestStageCandidateRecoversPublishedLKGAfterSequenceConflict(t *testing.T) {
 	target := declarativerelease.TargetIdentity{ConfigSHA: strings.Repeat("5", 40),
 		ImageRef: "ghcr.io/yym68686/fugue-edge@sha256:" + strings.Repeat("6", 64)}
 	receipt, err := runtime.StageCandidate(context.Background(), edgeGroupState{ActiveSlot: "a"}, "b", target)
-	if err != nil || receipt.WorkerSlot != "b" || statusReads != 3 || stagePosts != 2 || recoveryPosts != 1 ||
+	if err != nil || receipt.WorkerSlot != "b" || statusReads != 3 || stagePosts != 2 || recoveryPosts != 1 || candidateRecoveryPosts != 1 ||
+		strings.Join(operations, ",") != "stage,fence,recover,stage" ||
 		receipt.CurrentPublicationSequence != 11 || receipt.CurrentRecoveryEpoch != 3 {
-		t.Fatalf("candidate recovery flow did not settle: receipt=%+v reads=%d stages=%d recoveries=%d err=%v", receipt, statusReads, stagePosts, recoveryPosts, err)
+		t.Fatalf("candidate recovery flow did not settle: receipt=%+v reads=%d stages=%d fences=%d recoveries=%d operations=%v err=%v",
+			receipt, statusReads, stagePosts, candidateRecoveryPosts, recoveryPosts, operations, err)
 	}
 }
 
