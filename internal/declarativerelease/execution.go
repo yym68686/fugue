@@ -618,7 +618,24 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 			current, err = cluster.ObserveDegraded(ctx, release, observationManifest)
 		}
 		if err == nil && !current.SameSpecIdentity(prepared.Prewrite) {
-			err = fmt.Errorf("degraded predecessor identity changed: %s", specIdentityMismatch(prepared.Prewrite, current))
+			if controlledEdgeRecovery {
+				// Edge inventory/controller updates can briefly expose a different
+				// read-only snapshot while the failed candidate remains fenced. A
+				// second immediate CAS read may proceed only if it returns to the
+				// exact prepared identity; no changed snapshot is ever applied.
+				retry, retryErr := cluster.ObserveCAS(ctx, release, observationManifest)
+				if retryErr == nil && retry.SameSpecIdentity(prepared.Prewrite) {
+					current = retry
+				} else {
+					if retryErr != nil {
+						err = fmt.Errorf("degraded predecessor identity changed: %s; retry observe: %w", specIdentityMismatch(prepared.Prewrite, current), retryErr)
+					} else {
+						err = fmt.Errorf("degraded predecessor identity changed: %s; retry: %s", specIdentityMismatch(prepared.Prewrite, current), specIdentityMismatch(prepared.Prewrite, retry))
+					}
+				}
+			} else {
+				err = fmt.Errorf("degraded predecessor identity changed: %s", specIdentityMismatch(prepared.Prewrite, current))
+			}
 		}
 		if err == nil && !controlledEdgeRecovery {
 			var witness []byte
@@ -640,6 +657,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	if err != nil {
 		result.Status = "failed-no-write"
 		result.Reason = "prewrite-cas-drift"
+		result.FailureDetail = boundedFailureDetail(err.Error())
 		return sealResult(result)
 	}
 	if prepared.AlreadyConverged {
