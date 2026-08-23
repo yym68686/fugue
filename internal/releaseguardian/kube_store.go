@@ -74,18 +74,19 @@ func (store *KubeStore) Keys() []Key {
 }
 
 type storedRelease struct {
-	record              ReleaseRecord
-	currentRecord       ReleaseRecord
-	desired             DesiredRelease
-	currentRecordDigest string
-	bundle              ExecutionBundle
-	currentBundle       ExecutionBundle
-	currentMonitorData  map[string]string
-	desiredRV           string
-	statusRV            string
-	previousStatus      *ReleaseStatus
-	managed             bool
-	lkgMonitorDigest    string
+	record               ReleaseRecord
+	currentRecord        ReleaseRecord
+	desired              DesiredRelease
+	currentRecordDigest  string
+	bundle               ExecutionBundle
+	currentBundle        ExecutionBundle
+	currentMonitorData   map[string]string
+	desiredRV            string
+	statusRV             string
+	previousStatus       *ReleaseStatus
+	managed              bool
+	lkgMonitorDigest     string
+	desiredRecordMissing bool
 }
 
 func (store *KubeStore) Load(ctx context.Context, key Key) (Snapshot, error) {
@@ -108,7 +109,7 @@ func (store *KubeStore) Load(ctx context.Context, key Key) (Snapshot, error) {
 		StatusResourceVersion: stored.statusRV, DesiredResourceVersion: stored.desiredRV,
 		PreviousStatus: stored.previousStatus,
 		Bundle:         stored.bundle, CurrentMonitorData: stored.currentMonitorData,
-		LKGMonitorRecordDigest: stored.lkgMonitorDigest, Managed: stored.managed,
+		LKGMonitorRecordDigest: stored.lkgMonitorDigest, DesiredRecordMissing: stored.desiredRecordMissing, Managed: stored.managed,
 	}, nil
 }
 
@@ -200,6 +201,7 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 	// prober and the next publisher must remain bound to the current production
 	// monitor record.
 	lkgMonitorDigest := monitor.RecordDigest
+	desiredRecordMissing := false
 	desiredRV := ""
 	managed := false
 	desiredMap, desiredErr := configMaps.Get(ctx, desiredName(target.Key), metav1.GetOptions{})
@@ -211,46 +213,51 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 		}
 		if desired.RecordDigest != stableRecord.RecordDigest {
 			candidateMap, err := configMaps.Get(ctx, releaseRecordName(target.Key, desired.RecordDigest), metav1.GetOptions{})
-			if err != nil {
+			if apierrors.IsNotFound(err) {
+				desiredRecordMissing = true
+			} else if err != nil {
 				return storedRelease{}, fmt.Errorf("read immutable Guardian release record: %w", err)
 			}
-			if candidateMap.Immutable == nil || !*candidateMap.Immutable || totalConfigMapBytes(candidateMap.Data) > maxRecordBytes {
+			if desiredRecordMissing {
+				// Keep selectedRecord/selectedBundle bound to the stable monitor.
+			} else if candidateMap.Immutable == nil || !*candidateMap.Immutable || totalConfigMapBytes(candidateMap.Data) > maxRecordBytes {
 				return storedRelease{}, errors.New("Guardian release record metadata is invalid")
-			}
-			if err := decodeStrict([]byte(candidateMap.Data["guardian-record.json"]), &selectedRecord); err != nil || selectedRecord.Validate() != nil || selectedRecord.Key() != target.Key || selectedRecord.RecordDigest != desired.RecordDigest {
+			} else if err := decodeStrict([]byte(candidateMap.Data["guardian-record.json"]), &selectedRecord); err != nil || selectedRecord.Validate() != nil || selectedRecord.Key() != target.Key || selectedRecord.RecordDigest != desired.RecordDigest {
 				return storedRelease{}, errors.New("Guardian release record envelope is invalid")
 			}
-			lkgMonitorDigest = strings.TrimSpace(candidateMap.Data["lkg-monitor-record-digest"])
-			if !digestPattern.MatchString(lkgMonitorDigest) {
-				return storedRelease{}, errors.New("Guardian release record LKG monitor binding is invalid")
-			}
-			candidateData := make(map[string]string, len(candidateMap.Data))
-			for name, value := range candidateMap.Data {
-				candidateData[name] = value
-			}
-			executionMap, executionErr := configMaps.Get(ctx, executionSnapshotName(target.Key, desired.Generation), metav1.GetOptions{})
-			if executionErr == nil {
-				if executionMap.Immutable == nil || !*executionMap.Immutable || totalConfigMapBytes(executionMap.Data) > maxRecordBytes ||
-					!stringMapEqual(executionMap.Labels, guardianLabels(target.Key)) ||
-					strings.TrimSpace(executionMap.Data["record-digest"]) != desired.RecordDigest ||
-					strings.TrimSpace(executionMap.Data["execution-plan.json"]) == "" || len(executionMap.Data) != 2 {
-					return storedRelease{}, errors.New("Guardian execution snapshot metadata is invalid")
+			if !desiredRecordMissing {
+				lkgMonitorDigest = strings.TrimSpace(candidateMap.Data["lkg-monitor-record-digest"])
+				if !digestPattern.MatchString(lkgMonitorDigest) {
+					return storedRelease{}, errors.New("Guardian release record LKG monitor binding is invalid")
 				}
-				candidateData["execution-plan.json"] = executionMap.Data["execution-plan.json"]
-			} else if !apierrors.IsNotFound(executionErr) {
-				return storedRelease{}, fmt.Errorf("read immutable Guardian execution snapshot: %w", executionErr)
-			}
-			candidateFiles, err := executionFilesFromStrings(candidateData)
-			if err != nil {
-				return storedRelease{}, err
-			}
-			selectedBundle, err = DecodeExecutionBundle(candidateFiles, target.Key)
-			if err != nil {
-				return storedRelease{}, err
-			}
-			want, err := selectedBundle.ReleaseRecord(target.Key, selectedRecord.LKGRecordDigest)
-			if err != nil || want != selectedRecord {
-				return storedRelease{}, errors.New("Guardian release record does not match its canonical execution bundle")
+				candidateData := make(map[string]string, len(candidateMap.Data))
+				for name, value := range candidateMap.Data {
+					candidateData[name] = value
+				}
+				executionMap, executionErr := configMaps.Get(ctx, executionSnapshotName(target.Key, desired.Generation), metav1.GetOptions{})
+				if executionErr == nil {
+					if executionMap.Immutable == nil || !*executionMap.Immutable || totalConfigMapBytes(executionMap.Data) > maxRecordBytes ||
+						!stringMapEqual(executionMap.Labels, guardianLabels(target.Key)) ||
+						strings.TrimSpace(executionMap.Data["record-digest"]) != desired.RecordDigest ||
+						strings.TrimSpace(executionMap.Data["execution-plan.json"]) == "" || len(executionMap.Data) != 2 {
+						return storedRelease{}, errors.New("Guardian execution snapshot metadata is invalid")
+					}
+					candidateData["execution-plan.json"] = executionMap.Data["execution-plan.json"]
+				} else if !apierrors.IsNotFound(executionErr) {
+					return storedRelease{}, fmt.Errorf("read immutable Guardian execution snapshot: %w", executionErr)
+				}
+				candidateFiles, err := executionFilesFromStrings(candidateData)
+				if err != nil {
+					return storedRelease{}, err
+				}
+				selectedBundle, err = DecodeExecutionBundle(candidateFiles, target.Key)
+				if err != nil {
+					return storedRelease{}, err
+				}
+				want, err := selectedBundle.ReleaseRecord(target.Key, selectedRecord.LKGRecordDigest)
+				if err != nil || want != selectedRecord {
+					return storedRelease{}, errors.New("Guardian release record does not match its canonical execution bundle")
+				}
 			}
 		}
 	} else if !apierrors.IsNotFound(desiredErr) {
@@ -285,6 +292,7 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 		record: selectedRecord, currentRecord: currentRecord, desired: desired, currentRecordDigest: currentRecordDigest,
 		bundle: selectedBundle, currentBundle: currentBundle, currentMonitorData: monitorData,
 		desiredRV: desiredRV, statusRV: statusRV, previousStatus: previousStatus, managed: managed, lkgMonitorDigest: lkgMonitorDigest,
+		desiredRecordMissing: desiredRecordMissing,
 	}, nil
 }
 

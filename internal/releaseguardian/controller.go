@@ -30,13 +30,18 @@ type Snapshot struct {
 	Bundle                 ExecutionBundle
 	CurrentMonitorData     map[string]string
 	LKGMonitorRecordDigest string
-	Managed                bool
+	// DesiredRecordMissing means the mutable DesiredRelease points at an
+	// immutable candidate that was pruned. The stable monitor remains the
+	// runtime authority until an explicit predecessor-bound successor replaces
+	// that orphan pointer.
+	DesiredRecordMissing bool
+	Managed              bool
 }
 
 func (snapshot Snapshot) Validate(now time.Time) error {
 	if snapshot.Key.Validate() != nil || snapshot.Record.Validate() != nil || snapshot.Desired.Validate() != nil ||
 		snapshot.Record.Key() != snapshot.Key || snapshot.Desired.Key() != snapshot.Key ||
-		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || snapshot.Health.Validate(now) != nil ||
+		(snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest && !snapshot.DesiredRecordMissing) || snapshot.Health.Validate(now) != nil ||
 		(snapshot.CurrentRecordDigest != "" && !digestPattern.MatchString(snapshot.CurrentRecordDigest)) ||
 		!digestPattern.MatchString(snapshot.LastSuccessfulLKG) || snapshot.Bundle.Prepared.Component != snapshot.Key.Component ||
 		(snapshot.Managed && !digestPattern.MatchString(snapshot.LKGMonitorRecordDigest)) {

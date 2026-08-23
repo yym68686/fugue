@@ -176,8 +176,32 @@ func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle, stableRec
 	}
 	return degradedPredecessorPublishEligible(snapshot, bundle) ||
 		degradedEdgeRouteRecoveryEligible(snapshot, bundle) ||
+		orphanedDesiredEdgeRecoveryEligible(snapshot, bundle, stableRecord) ||
 		fencedDesiredReplacementEligible(snapshot, bundle, stableRecord) ||
 		failedDesiredReplacementEligible(snapshot, bundle, stableRecord)
+}
+
+// orphanedDesiredEdgeRecoveryEligible admits only a signed Edge A/B successor
+// when DesiredRelease points at a pruned/missing candidate. The stable monitor
+// remains the exact LKG anchor; the successor must carry an explicit failed
+// config supersession and a degraded-predecessor execution plan before
+// Guardian advances the pointer again.
+func orphanedDesiredEdgeRecoveryEligible(snapshot Snapshot, bundle ExecutionBundle, stableRecord ReleaseRecord) bool {
+	prepared, release := bundle.Prepared, bundle.Release
+	return snapshot.Managed && snapshot.DesiredRecordMissing && knownDegradedHealth(snapshot.Health) &&
+		stableRecord.Key() == snapshot.Key && snapshot.Record.Key() == snapshot.Key &&
+		snapshot.CurrentRecordDigest == stableRecord.RecordDigest &&
+		snapshot.LastSuccessfulLKG == stableRecord.RecordDigest &&
+		prepared.DegradedPredecessor && prepared.DegradedRoute && prepared.Component == snapshot.Key.Component &&
+		release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil &&
+		release.SupersedesFailedConfigSHA != "" && release.ExpectedPreviousPresent &&
+		release.ExpectedPreviousConfigSHA == stableRecord.ConfigSHA &&
+		release.ExpectedPreviousManifestSHA == stableRecord.ConfigSHA &&
+		release.ExpectedPreviousOCIRevision == stableRecord.ConfigSHA &&
+		release.ExpectedPreviousImageDigest == stableRecord.ImageDigest && prepared.LKG.Present &&
+		prepared.LKG.ConfigSHA == stableRecord.ConfigSHA && prepared.LKG.ManifestSHA == stableRecord.ConfigSHA &&
+		prepared.LKG.OCIRevision == stableRecord.ConfigSHA &&
+		prepared.LKG.ImageRef == release.Artifact.Repository+"@"+stableRecord.ImageDigest
 }
 
 // A degraded predecessor retry is admitted only when the immutable candidate
