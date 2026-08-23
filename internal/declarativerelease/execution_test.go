@@ -301,6 +301,25 @@ func TestFailedEdgeGroupTransitionSkipsMixedIdentityHealthCheck(t *testing.T) {
 	}
 }
 
+func TestControlledEdgeRecoveryBindsCASWithoutGenericManifestConvergence(t *testing.T) {
+	lkg := stableObservation("1", "10", "ghcr.io/example/fugue-api@"+testDigest, testSHA1)
+	degraded := casOnlyObservation(lkg)
+	release := PlanRelease{
+		ExpectedPreviousPresent:   true,
+		ExpectedPreviousConfigSHA: testSHA1,
+		SupersedesFailedConfigSHA: strings.Repeat("f", 40),
+		Artifact:                  Artifact{Repository: "ghcr.io/example/fugue-api"},
+		Transition:                &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{}},
+	}
+	fake := &fakeCluster{cas: []Observation{degraded, degraded}}
+	prepared, err := prepareControlledEdgeRecoveryPredecessor(context.Background(), fake, release, TargetIdentity{
+		Present: true, ImageRef: lkg.ImageRef, ConfigSHA: testSHA1, ManifestSHA: testSHA1, OCIRevision: testSHA1,
+	}, []byte(`{"kind":"ComponentResourceSet"}`))
+	if err != nil || !prepared.SameSpecIdentity(degraded) || len(fake.verifiedTargets) != 1 || len(fake.casManifests) != 2 || len(fake.converged) != 0 {
+		t.Fatalf("controlled edge recovery used invalid predecessor evidence: prepared=%+v verified=%d cas=%d converged=%d err=%v", prepared, len(fake.verifiedTargets), len(fake.casManifests), len(fake.converged), err)
+	}
+}
+
 func TestPrepareObservesTheLivePredecessorAgainstTheLKGManifest(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}

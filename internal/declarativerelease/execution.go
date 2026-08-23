@@ -260,7 +260,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		// authority/candidate ledger. Bind only the immutable workload CAS here;
 		// the edge transition performs the readiness and activation checks before
 		// committing traffic.
-		prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+		prewrite, err = prepareControlledEdgeRecoveryPredecessor(ctx, cluster, release, lkg, rendered.Forward)
 		degradedPredecessor = err == nil
 		degradedRoute = true
 	} else if release.RetrySameLKG && release.ExpectedPreviousPresent {
@@ -531,6 +531,39 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	return second, nil
 }
 
+// prepareControlledEdgeRecoveryPredecessor binds only the immutable workload
+// CAS for an edge-group recovery. Edge transitions have a separate serving
+// authority contract, so generic manifest convergence can reject a valid
+// recovery while the old Front or standby slot is intentionally unready.
+// The transition still receives two stable CAS observations and verifies the
+// exact declared LKG artifact before it can mutate anything.
+func prepareControlledEdgeRecoveryPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest []byte) (Observation, error) {
+	if !release.ExpectedPreviousPresent || !lkg.Present {
+		return Observation{}, errors.New("controlled edge recovery is not authorized")
+	}
+	if verifyErr := cluster.VerifyTarget(ctx, lkg); verifyErr != nil {
+		return Observation{}, fmt.Errorf("verify controlled edge LKG artifact: %w", verifyErr)
+	}
+	first, err := cluster.ObserveCAS(ctx, release, forwardManifest)
+	if err != nil {
+		return Observation{}, err
+	}
+	if err := first.ValidateDegradedPredecessor(release); err != nil {
+		return Observation{}, err
+	}
+	second, err := cluster.ObserveCAS(ctx, release, forwardManifest)
+	if err != nil {
+		return Observation{}, err
+	}
+	if err := second.ValidateDegradedPredecessor(release); err != nil {
+		return Observation{}, err
+	}
+	if !second.SameSpecIdentity(first) {
+		return Observation{}, errors.New("controlled edge recovery predecessor identity changed during validation")
+	}
+	return second, nil
+}
+
 func prepareOwnedDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, forwardManifest []byte, lkgDrift error) (Observation, error) {
 	witness, err := RetryPredecessorConvergenceManifest(forwardManifest, release)
 	if err != nil {
@@ -577,6 +610,8 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	observationManifest := forwardManifest
 	var current Observation
 	if prepared.DegradedPredecessor {
+		controlledEdgeRecovery := release.ExpectedPreviousPresent && release.SupersedesFailedConfigSHA != "" &&
+			release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil
 		if prepared.Prewrite.ImageRef == "" {
 			current, err = cluster.ObserveCAS(ctx, release, observationManifest)
 		} else {
@@ -585,7 +620,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		if err == nil && !current.SameSpecIdentity(prepared.Prewrite) {
 			err = errors.New("degraded predecessor identity changed")
 		}
-		if err == nil {
+		if err == nil && !controlledEdgeRecovery {
 			var witness []byte
 			if prepared.Prewrite.ImageRef == "" {
 				witness, err = rollbackConvergenceWitness(lkgManifest, release)
