@@ -2856,11 +2856,6 @@ func (s *Service) startProxyServer() (func(context.Context) error, error) {
 	return server.Shutdown, nil
 }
 
-func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
-	request, _, err := s.newRoutesRequestWithSelection(ctx)
-	return request, err
-}
-
 func (s *Service) newRoutesRequestWithSelection(ctx context.Context) (*http.Request, routeSourceSelection, error) {
 	selection, err := s.selectRouteBundleSource()
 	if err != nil {

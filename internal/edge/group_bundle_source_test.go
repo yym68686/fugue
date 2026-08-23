@@ -162,7 +162,7 @@ func TestEdgeControlReaderCredentialNeverEntersRequestURLOrURLError(t *testing.T
 		URL: "http://edge-control-us.fugue-system.svc:8092/v1/edge/routes", TokenFile: tokenFile,
 		VerifierKeyringFile: filepath.Join(root, "verifier.json"),
 	}, log.New(io.Discard, "", 0))
-	request, err := service.newRoutesRequest(context.Background())
+	request, _, err := service.newRoutesRequestWithSelection(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
