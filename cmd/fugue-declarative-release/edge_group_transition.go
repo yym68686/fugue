@@ -399,7 +399,11 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	if err := runtime.ApplyCandidateResources(ctx, transition.FrontName); err != nil {
 		return compensate(fmt.Errorf("apply Front candidate after Guardian authority switch: %w", err))
 	}
-	frontPods, err := runtime.Roll(ctx, transition.FrontName, target, true, false)
+	// A failed successor may leave the old Front process running but unready
+	// after compensation.  In that explicitly superseding flow, allow the
+	// rollout helper to use immutable snapshot identity and replace that pod;
+	// ordinary promotions retain the strict ready-only read.
+	frontPods, err := runtime.Roll(ctx, transition.FrontName, target, true, release.SupersedesFailedConfigSHA != "")
 	if err != nil {
 		return compensate(fmt.Errorf("roll edge front after Guardian authority switch: %w", err))
 	}
@@ -1673,7 +1677,7 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 	}
 	var current map[string]edgeGroupPod
 	var err error
-	if replaceUnready && name != transition.FrontName {
+	if replaceUnready {
 		current, err = cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
 	} else {
 		current, err = cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
