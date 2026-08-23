@@ -570,12 +570,28 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 			if statusErr != nil {
 				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("read Edge Control status before published LKG recovery: %w", statusErr))
 			}
-			if status.CandidateEpoch != 0 && status.CandidateWorkerSourceSHA != "" && status.CandidateWorkerSourceSHA != target.ConfigSHA {
+			servingLKGBundle, servingLKG, servingErr := runtime.servingLKGRecoveryTarget(ctx, before, status)
+			if servingErr != nil {
+				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("read exact Front LKG recovery witness after candidate sequence conflict: %w", servingErr))
+			}
+			if servingLKG {
+				// The durable candidate is fenced before the exact publication
+				// named by Front activation is restored. Both writes remain
+				// signed and CAS-bound to the same Edge Control status snapshot.
+				if fenceErr := runtime.fenceFailedCandidate(ctx, status); fenceErr != nil {
+					return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("fence failed Edge Control candidate before Front LKG recovery: %w", fenceErr))
+				}
+				if recoveryErr := runtime.recoverPublishedLKG(ctx, status, servingLKGBundle, "restore exact Front activation LKG before candidate retry"); recoveryErr != nil {
+					return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("restore exact Front activation LKG after candidate sequence conflict: %w", recoveryErr))
+				}
+			} else if status.CandidateEpoch != 0 && status.CandidateWorkerSourceSHA != "" && status.CandidateWorkerSourceSHA != target.ConfigSHA {
 				if fenceErr := runtime.fenceFailedCandidate(ctx, status); fenceErr != nil {
 					return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("fence failed Edge Control candidate after sequence conflict: %w", fenceErr))
 				}
-			}
-			if recoveryErr := runtime.refreshPublishedLKG(ctx, status); recoveryErr != nil {
+				if recoveryErr := runtime.refreshPublishedLKG(ctx, status); recoveryErr != nil {
+					return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("refresh published Edge Control LKG after candidate sequence conflict: %w", recoveryErr))
+				}
+			} else if recoveryErr := runtime.refreshPublishedLKG(ctx, status); recoveryErr != nil {
 				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("refresh published Edge Control LKG after candidate sequence conflict: %w", recoveryErr))
 			}
 			recoveryAttempts++
@@ -662,7 +678,11 @@ func (runtime *kubectlEdgeGroupRuntime) fenceFailedCandidate(ctx context.Context
 }
 
 func (runtime *kubectlEdgeGroupRuntime) refreshPublishedLKG(ctx context.Context, status edgeCandidateStageStatus) error {
-	if status.GroupID != runtime.transition.GroupID || status.CurrentPublicationSequence == 0 || status.BundleGeneration == "" || status.PublishedBundleDigest == "" {
+	return runtime.recoverPublishedLKG(ctx, status, status.BundleGeneration, "refresh exact published LKG before degraded Worker candidate staging")
+}
+
+func (runtime *kubectlEdgeGroupRuntime) recoverPublishedLKG(ctx context.Context, status edgeCandidateStageStatus, targetGeneration, reason string) error {
+	if status.GroupID != runtime.transition.GroupID || status.CurrentPublicationSequence == 0 || strings.TrimSpace(targetGeneration) == "" || status.PublishedBundleDigest == "" || strings.TrimSpace(reason) == "" {
 		return errors.New("Edge Control published LKG status is incomplete")
 	}
 	endpoint, err := edgeGroupRecoveryURL(runtime.transition.CandidateStageURL)
@@ -677,8 +697,8 @@ func (runtime *kubectlEdgeGroupRuntime) refreshPublishedLKG(ctx context.Context,
 	request := edgeGroupRecoveryRequest{
 		Schema: edgeGroupRecoverySchema, GroupID: runtime.transition.GroupID,
 		ExpectedPublicationSequence: status.CurrentPublicationSequence, ExpectedRecoveryEpoch: status.RecoveryEpoch,
-		TargetBundleGeneration: status.BundleGeneration, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(2 * time.Minute).Unix(),
-		Nonce: base64.RawURLEncoding.EncodeToString(nonceRaw), Reason: "refresh exact published LKG before degraded Worker candidate staging",
+		TargetBundleGeneration: targetGeneration, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(2 * time.Minute).Unix(),
+		Nonce: base64.RawURLEncoding.EncodeToString(nonceRaw), Reason: reason,
 	}
 	if err := signEdgeGroupRecoveryRequest(runtime.transition.CandidateKeyring, &request, now); err != nil {
 		return err
@@ -720,12 +740,54 @@ func (runtime *kubectlEdgeGroupRuntime) refreshPublishedLKG(ctx context.Context,
 	if err := decodeEdgeCandidateStageResponse(body, &receipt); err != nil {
 		return fmt.Errorf("decode Edge Control recovery receipt: %w", err)
 	}
-	if receipt.Schema != edgeGroupRecoveryReceiptSchema || receipt.GroupID != status.GroupID || receipt.BundleGeneration != status.BundleGeneration ||
+	targetBase, _, _, targetVersionOK := parseEdgePublicationVersion(targetGeneration)
+	receiptGeneration := targetGeneration
+	if targetVersionOK && targetBase == status.BundleGeneration {
+		receiptGeneration = targetBase
+	}
+	if receipt.Schema != edgeGroupRecoveryReceiptSchema || receipt.GroupID != status.GroupID || receipt.BundleGeneration != receiptGeneration ||
 		receipt.PublicationSequence <= status.CurrentPublicationSequence || receipt.RecoveryEpoch != status.RecoveryEpoch+1 ||
 		receipt.PublishedBundleDigest == "" || receipt.Authority != edgeActivationAuthority || !receipt.PublicationEnabled {
 		return errors.New("Edge Control recovery receipt is not bound to the published LKG")
 	}
 	return nil
+}
+
+// servingLKGRecoveryTarget returns the exact publication version named by the
+// immutable Front activation when CurrentAuthority has advanced to a failed
+// candidate. A base bundle generation is insufficient here because multiple
+// authority publications intentionally share it.
+func (runtime *kubectlEdgeGroupRuntime) servingLKGRecoveryTarget(ctx context.Context, before edgeGroupState, status edgeCandidateStageStatus) (string, bool, error) {
+	if runtime == nil || runtime.client == nil || before.FrontActivation == nil ||
+		before.ActiveSlot != "a" && before.ActiveSlot != "b" ||
+		runtime.release.ExpectedPreviousConfigSHA == "" || runtime.release.ExpectedPreviousImageDigest == "" ||
+		status.CandidateEpoch == 0 || status.CandidateWorkerSourceSHA == "" {
+		return "", false, nil
+	}
+	current, object, err := runtime.readCurrentAuthority(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if object == nil {
+		return "", false, nil
+	}
+	if current.Validate() != nil || current.GroupID != runtime.transition.GroupID {
+		return "", false, errors.New("Guardian current authority recovery witness is invalid")
+	}
+	if current.CurrentWorkerSlot == current.PreviousWorkerSlot || current.PreviousWorkerSlot.Validate() != nil ||
+		string(current.PreviousWorkerSlot) != before.ActiveSlot || current.PreviousBundleGeneration != before.FrontActivation.BundleGeneration ||
+		current.PreviousWorkerSourceSHA != runtime.release.ExpectedPreviousConfigSHA || current.PreviousWorkerImageDigest != runtime.release.ExpectedPreviousImageDigest {
+		return "", false, nil
+	}
+	_, targetSequence, targetRecovery, targetVersionOK := parseEdgePublicationVersion(before.FrontActivation.BundleGeneration)
+	if !targetVersionOK {
+		return "", false, errors.New("Front activation LKG publication version is invalid")
+	}
+	if status.CurrentPublicationSequence < targetSequence ||
+		(status.CurrentPublicationSequence == targetSequence && status.RecoveryEpoch <= targetRecovery) {
+		return "", false, nil
+	}
+	return before.FrontActivation.BundleGeneration, true, nil
 }
 
 func (runtime *kubectlEdgeGroupRuntime) publishedLKGRefreshCommitted(ctx context.Context, previous edgeCandidateStageStatus) bool {
@@ -777,23 +839,34 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidateOnce(ctx context.Context, 
 }
 
 func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.Context, before edgeGroupState) (*edgeServingAuthorityWitness, error) {
+	current, object, err := runtime.readCurrentAuthority(ctx)
+	if err != nil || object == nil {
+		return nil, err
+	}
+	return edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "", runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) readCurrentAuthority(ctx context.Context) (releaseguardian.CurrentAuthority, *unstructured.Unstructured, error) {
+	if runtime == nil || runtime.client == nil {
+		return releaseguardian.CurrentAuthority{}, nil, nil
+	}
 	resource := runtime.client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace(runtime.release.Workload.Namespace)
 	object, err := resource.Get(ctx, "fugue-current-authority-"+runtime.transition.GroupID, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, nil
+		return releaseguardian.CurrentAuthority{}, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read Guardian current authority: %w", err)
+		return releaseguardian.CurrentAuthority{}, nil, fmt.Errorf("read Guardian current authority: %w", err)
 	}
 	data, found, err := unstructured.NestedStringMap(object.Object, "data")
 	if err != nil || !found || strings.TrimSpace(data["authority.json"]) == "" {
-		return nil, errors.New("Guardian current authority payload is unavailable")
+		return releaseguardian.CurrentAuthority{}, nil, errors.New("Guardian current authority payload is unavailable")
 	}
 	var current releaseguardian.CurrentAuthority
 	if err := decodeStrictJSON([]byte(data["authority.json"]), &current); err != nil {
-		return nil, errors.New("Guardian current authority payload is invalid")
+		return releaseguardian.CurrentAuthority{}, nil, errors.New("Guardian current authority payload is invalid")
 	}
-	return edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "", runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest)
+	return current, object, nil
 }
 
 func edgeServingAuthorityWitnessFromCurrent(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string) (*edgeServingAuthorityWitness, error) {
