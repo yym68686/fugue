@@ -32,24 +32,21 @@ import (
 )
 
 const (
-	edgeActivationStateSchema          = "edge-front-group-activation/v1"
-	edgeActivationReceiptSchema        = "edge-front-group-activation-receipt/v1"
-	edgeActivationAuthority            = "edge-control"
-	edgeActivationInitialize           = "initialize"
-	edgeActivationPromote              = "promote"
-	edgeActivationRollback             = "rollback"
-	edgeGroupAuthoritySource           = "edge-control-group-authority/v1"
-	edgeCandidateStagePath             = "/v1/authority/group-worker-candidates"
-	edgeGroupRecoveryPath              = "/v1/recovery/group-publications"
-	edgeCandidateRecoveryPath          = "/v1/recovery/group-worker-candidates"
-	edgeCandidateStageSchema           = "edge-control-group-worker-candidate-request/v1"
-	edgeCandidateReceiptSchema         = "edge-control-group-worker-candidate-receipt/v1"
-	edgeGroupRecoverySchema            = "edge-control-group-recovery-request/v1"
-	edgeGroupRecoveryReceiptSchema     = "edge-control-group-recovery-receipt/v1"
-	edgeCandidateRecoverySchema        = "edge-control-group-candidate-recovery-request/v1"
-	edgeCandidateRecoveryReceiptSchema = "edge-control-group-candidate-recovery-receipt/v1"
-	edgeCandidateStageAttempts         = 4
-	edgeCandidateStageRetryBase        = 200 * time.Millisecond
+	edgeActivationStateSchema      = "edge-front-group-activation/v1"
+	edgeActivationReceiptSchema    = "edge-front-group-activation-receipt/v1"
+	edgeActivationAuthority        = "edge-control"
+	edgeActivationInitialize       = "initialize"
+	edgeActivationPromote          = "promote"
+	edgeActivationRollback         = "rollback"
+	edgeGroupAuthoritySource       = "edge-control-group-authority/v1"
+	edgeCandidateStagePath         = "/v1/authority/group-worker-candidates"
+	edgeGroupRecoveryPath          = "/v1/recovery/group-publications"
+	edgeCandidateStageSchema       = "edge-control-group-worker-candidate-request/v1"
+	edgeCandidateReceiptSchema     = "edge-control-group-worker-candidate-receipt/v1"
+	edgeGroupRecoverySchema        = "edge-control-group-recovery-request/v1"
+	edgeGroupRecoveryReceiptSchema = "edge-control-group-recovery-receipt/v1"
+	edgeCandidateStageAttempts     = 4
+	edgeCandidateStageRetryBase    = 200 * time.Millisecond
 )
 
 var (
@@ -122,7 +119,6 @@ type edgeCandidateStageStatus struct {
 	AuthoritySequence          uint64 `json:"authority_sequence"`
 	CurrentPublicationSequence uint64 `json:"current_publication_sequence"`
 	CandidateEpoch             uint64 `json:"candidate_epoch"`
-	CandidateWorkerSourceSHA   string `json:"candidate_worker_source_sha"`
 	PublishedBundleDigest      string `json:"published_bundle_digest"`
 	BundleGeneration           string `json:"bundle_generation"`
 	RecoveryEpoch              uint64 `json:"recovery_epoch"`
@@ -151,34 +147,6 @@ type edgeGroupRecoveryReceipt struct {
 	PublishedBundleDigest string `json:"published_bundle_digest"`
 	Authority             string `json:"authority"`
 	PublicationEnabled    bool   `json:"publication_enabled"`
-}
-
-type edgeCandidateRecoveryRequest struct {
-	Schema                        string `json:"schema"`
-	KeyID                         string `json:"key_id"`
-	GroupID                       string `json:"edge_group_id"`
-	ExpectedAuthoritySequence     uint64 `json:"expected_authority_sequence"`
-	ExpectedPublicationSequence   uint64 `json:"expected_publication_sequence"`
-	ExpectedRecoveryEpoch         uint64 `json:"expected_recovery_epoch"`
-	ExpectedPublishedBundleDigest string `json:"expected_published_bundle_digest"`
-	ExpectedCandidateEpoch        uint64 `json:"expected_candidate_epoch"`
-	ExpectedWorkerSourceSHA       string `json:"expected_worker_source_sha"`
-	IssuedAtUnix                  int64  `json:"issued_at_unix"`
-	ExpiresAtUnix                 int64  `json:"expires_at_unix"`
-	Nonce                         string `json:"nonce"`
-	Reason                        string `json:"reason"`
-	Signature                     string `json:"signature"`
-}
-
-type edgeCandidateRecoveryReceipt struct {
-	Schema                     string `json:"schema"`
-	GroupID                    string `json:"edge_group_id"`
-	FencedCandidateEpoch       uint64 `json:"fenced_candidate_epoch"`
-	FencedWorkerSourceSHA      string `json:"fenced_worker_source_sha"`
-	CurrentPublicationSequence uint64 `json:"current_publication_sequence"`
-	CurrentRecoveryEpoch       uint64 `json:"current_recovery_epoch"`
-	PublishedBundleDigest      string `json:"published_bundle_digest"`
-	CandidateCleared           bool   `json:"candidate_cleared"`
 }
 
 type edgeCandidateKeyring struct {
@@ -566,11 +534,6 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 			if statusErr != nil {
 				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("read Edge Control status before published LKG recovery: %w", statusErr))
 			}
-			if status.CandidateEpoch != 0 && status.CandidateWorkerSourceSHA != "" && status.CandidateWorkerSourceSHA != target.ConfigSHA {
-				if fenceErr := runtime.fenceFailedCandidate(ctx, status); fenceErr != nil {
-					return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("fence failed Edge Control candidate after sequence conflict: %w", fenceErr))
-				}
-			}
 			if recoveryErr := runtime.refreshPublishedLKG(ctx, status); recoveryErr != nil {
 				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("refresh published Edge Control LKG after candidate sequence conflict: %w", recoveryErr))
 			}
@@ -593,68 +556,6 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 		}
 	}
 	return edgeCandidateStageReceipt{}, lastErr
-}
-
-func (runtime *kubectlEdgeGroupRuntime) fenceFailedCandidate(ctx context.Context, status edgeCandidateStageStatus) error {
-	endpoint, err := edgeCandidateRecoveryURL(runtime.transition.CandidateStageURL)
-	if err != nil {
-		return err
-	}
-	nonceRaw := make([]byte, 24)
-	if _, err := rand.Read(nonceRaw); err != nil {
-		return errors.New("generate Edge Control candidate recovery nonce")
-	}
-	now := time.Now().UTC().Truncate(time.Second)
-	request := edgeCandidateRecoveryRequest{
-		Schema: edgeCandidateRecoverySchema, GroupID: runtime.transition.GroupID,
-		ExpectedAuthoritySequence: status.AuthoritySequence, ExpectedPublicationSequence: status.CurrentPublicationSequence,
-		ExpectedRecoveryEpoch: status.RecoveryEpoch, ExpectedPublishedBundleDigest: status.PublishedBundleDigest,
-		ExpectedCandidateEpoch: status.CandidateEpoch, ExpectedWorkerSourceSHA: status.CandidateWorkerSourceSHA,
-		IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(2 * time.Minute).Unix(),
-		Nonce: base64.RawURLEncoding.EncodeToString(nonceRaw), Reason: "fence failed Worker candidate before controlled LKG recovery",
-	}
-	if err := signEdgeCandidateRecoveryRequest(runtime.transition.CandidateKeyring, &request, now); err != nil {
-		return err
-	}
-	raw, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	httpRequest.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(httpRequest)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-	if err != nil {
-		return err
-	}
-	if response.StatusCode == http.StatusConflict {
-		latest, latestErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
-		if latestErr == nil && latest.CandidateEpoch == 0 {
-			return nil
-		}
-		return errors.New("Edge Control candidate recovery CAS conflict")
-	}
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("Edge Control candidate recovery HTTP %d", response.StatusCode)
-	}
-	var receipt edgeCandidateRecoveryReceipt
-	if err := decodeEdgeCandidateStageResponse(body, &receipt); err != nil {
-		return fmt.Errorf("decode Edge Control candidate recovery receipt: %w", err)
-	}
-	if receipt.Schema != edgeCandidateRecoveryReceiptSchema || receipt.GroupID != status.GroupID ||
-		receipt.FencedCandidateEpoch != status.CandidateEpoch || receipt.FencedWorkerSourceSHA != status.CandidateWorkerSourceSHA ||
-		receipt.CurrentPublicationSequence != status.CurrentPublicationSequence || receipt.CurrentRecoveryEpoch != status.RecoveryEpoch ||
-		receipt.PublishedBundleDigest != status.PublishedBundleDigest || !receipt.CandidateCleared {
-		return errors.New("Edge Control candidate recovery receipt is not bound to the failed candidate")
-	}
-	return nil
 }
 
 func (runtime *kubectlEdgeGroupRuntime) refreshPublishedLKG(ctx context.Context, status edgeCandidateStageStatus) error {
@@ -1041,17 +942,6 @@ func edgeGroupRecoveryURL(stageURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func edgeCandidateRecoveryURL(stageURL string) (string, error) {
-	parsed, err := url.Parse(stageURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", errors.New("edge-control candidate stage URL is invalid")
-	}
-	parsed.Path = edgeCandidateRecoveryPath
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
-}
-
 func validEdgeControlErrorCode(value string) bool {
 	if value == "" || len(value) > 64 {
 		return false
@@ -1140,45 +1030,6 @@ func signEdgeGroupRecoveryRequest(filename string, request *edgeGroupRecoveryReq
 		return nil
 	}
 	return errors.New("edge-control recovery key is inactive")
-}
-
-func signEdgeCandidateRecoveryRequest(filename string, request *edgeCandidateRecoveryRequest, now time.Time) error {
-	if request == nil {
-		return errors.New("edge-control candidate recovery request is nil")
-	}
-	raw, err := os.ReadFile(filename)
-	if err != nil || len(raw) == 0 || len(raw) > 64<<10 {
-		return errors.New("read edge-control candidate recovery keyring")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var keyring edgeCandidateKeyring
-	if decoder.Decode(&keyring) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
-		keyring.Schema != "edge-control-group-recovery-keyring/v1" || keyring.Generation == 0 || keyring.GroupID != request.GroupID {
-		return errors.New("edge-control candidate recovery keyring is invalid")
-	}
-	for _, key := range keyring.Keys {
-		if key.Revoked || now.Before(time.Unix(key.NotBeforeUnix, 0)) || !now.Before(time.Unix(key.NotAfterUnix, 0)) {
-			continue
-		}
-		secret, decodeErr := base64.RawURLEncoding.DecodeString(key.Secret)
-		if decodeErr != nil || len(secret) < 32 || len(secret) > 64 {
-			zeroEdgeCandidateSecret(secret)
-			return errors.New("edge-control candidate recovery key is invalid")
-		}
-		request.KeyID, request.Signature = key.KeyID, ""
-		signingRaw, encodeErr := json.Marshal(request)
-		if encodeErr != nil {
-			zeroEdgeCandidateSecret(secret)
-			return encodeErr
-		}
-		mac := hmac.New(sha256.New, secret)
-		_, _ = mac.Write(signingRaw)
-		request.Signature = base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-		zeroEdgeCandidateSecret(secret)
-		return nil
-	}
-	return errors.New("edge-control candidate recovery key is inactive")
 }
 
 func zeroEdgeCandidateSecret(value []byte) {
