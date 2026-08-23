@@ -302,7 +302,7 @@ func degradedEdgeRouteRecoveryEligible(snapshot Snapshot, bundle ExecutionBundle
 		release.SupersedesFailedConfigSHA == "" || snapshot.CurrentRecordDigest != snapshot.Record.LKGRecordDigest ||
 		snapshot.LastSuccessfulLKG != snapshot.CurrentRecordDigest || snapshot.CurrentRecordDigest == snapshot.Record.RecordDigest ||
 		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || snapshot.Health.Dependency.State != HealthHealthy ||
-		snapshot.Health.Route.State != HealthDegraded {
+		snapshot.Health.Route.State == HealthHealthy {
 		return false
 	}
 	edgeWorkerRecovery := snapshot.Health.Local.State == HealthDegraded && release.Transition != nil &&

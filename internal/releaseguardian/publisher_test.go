@@ -386,10 +386,13 @@ func TestEdgeRouteRecoveryPublishAllowsExactDegradedPredecessor(t *testing.T) {
 	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
 		"unknown local health":      func(value *Snapshot, _ *ExecutionBundle) { value.Health.Local.State = HealthUnknown },
 		"unknown dependency health": func(value *Snapshot, _ *ExecutionBundle) { value.Health.Dependency.State = HealthUnknown },
-		"unknown route health":      func(value *Snapshot, _ *ExecutionBundle) { value.Health.Route.State = HealthUnknown },
-		"missing transition":        func(_ *Snapshot, value *ExecutionBundle) { value.Release.Transition = nil },
-		"ordinary candidate":        func(_ *Snapshot, value *ExecutionBundle) { value.Release.SupersedesFailedConfigSHA = "" },
-		"current drift":             func(value *Snapshot, _ *ExecutionBundle) { value.CurrentRecordDigest = otherDigest },
+		"unknown route health": func(value *Snapshot, candidate *ExecutionBundle) {
+			value.Health.Route.State = HealthUnknown
+			candidate.Prepared.DegradedRoute = false
+		},
+		"missing transition": func(_ *Snapshot, value *ExecutionBundle) { value.Release.Transition = nil },
+		"ordinary candidate": func(_ *Snapshot, value *ExecutionBundle) { value.Release.SupersedesFailedConfigSHA = "" },
+		"current drift":      func(value *Snapshot, _ *ExecutionBundle) { value.CurrentRecordDigest = otherDigest },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidateSnapshot, candidateBundle := snapshot, bundle
