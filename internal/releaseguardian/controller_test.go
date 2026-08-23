@@ -99,11 +99,15 @@ type fakeExecutor struct {
 	rollouts  int
 	repairs   int
 	rollbacks int
+	rollout   *ExecutionReceipt
 	repair    *ExecutionReceipt
 }
 
 func (executor *fakeExecutor) Rollout(context.Context, Snapshot) (ExecutionReceipt, error) {
 	executor.rollouts++
+	if executor.rollout != nil {
+		return *executor.rollout, nil
+	}
 	return ExecutionReceipt{Status: "verified", Reason: "rollout verified", RecordDigest: otherDigest, ReceiptDigest: testDigest}, nil
 }
 
@@ -233,6 +237,27 @@ func TestWriteModeAllowsControlledDegradedEdgeRouteRecovery(t *testing.T) {
 	}
 	if executor.rollouts != 1 || executor.rollbacks != 0 || store.status.State != StateVerifying {
 		t.Fatalf("controlled route recovery was not admitted: executor=%+v status=%+v", executor, store.status)
+	}
+}
+
+func TestWriteModeStopsAfterKnownRolloutTerminalBeforeRollbackDecision(t *testing.T) {
+	now := time.Unix(23, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now), otherDigest)
+	executor := &fakeExecutor{rollout: &ExecutionReceipt{
+		Status: "failed-no-write", Reason: "forward-apply-rejected-before-commit", RecordDigest: otherDigest, ReceiptDigest: testDigest,
+	}}
+	store := &fakeStore{snapshot: snapshot}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 1 || executor.rollbacks != 0 || store.lkgCAS != 1 || store.status.State != StateLKGStable ||
+		store.status.TargetRecordDigest != snapshot.Record.LKGRecordDigest {
+		t.Fatalf("known rollout terminal was followed by an invalid rollback: executor=%+v store=%+v status=%+v", executor, store, store.status)
 	}
 }
 

@@ -243,6 +243,15 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 				status.Reason = "rollout returned an invalid terminal status"
 			}
 		}
+		// Re-evaluate health and DesiredRelease after every rollout terminal
+		// result. Continuing with the pre-rollout RollbackEligible decision can
+		// incorrectly walk the stable monitor record's older LKG after a known
+		// failed-no-write/compensated candidate has already been fenced back.
+		sealed, err := status.Seal()
+		if err != nil {
+			return err
+		}
+		return controller.store.UpdateStatus(ctx, snapshot, sealed)
 	}
 	if decision.RollbackEligible {
 		status.State = StateRollingBack
