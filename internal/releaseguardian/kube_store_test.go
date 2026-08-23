@@ -66,7 +66,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"name":"fugue-release-guardian"`, `"name":"fugue-release-canary-prober"`,
 		`"value":"write"`, `"value":"guardian"`, `"value":"canary-prober"`,
 		`"value":"edge-control-de,de,fugue-system,edge-control-de,fugue-fugue;edge-worker-de,de,fugue-system,edge-worker-de,edge-control-de;edge-control-us,us,fugue-system,edge-control-us,fugue-fugue;edge-worker-us,us,fugue-system,edge-worker-us,edge-control-us;api,global,fugue-system,api,fugue-fugue"`,
-		`"value":"edge-worker-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10;edge-control-us,us,15.204.94.71:443,fugue.pro,/healthz,ok,10;edge-worker-us,us,15.204.94.71:443,fugue.pro,/healthz,ok,10;api,global,15.204.94.71:443,api.fugue.pro,/healthz,ok,10"`,
+		`"value":"edge-control-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10;edge-worker-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10;edge-control-us,us,15.204.94.71:443,fugue.pro,/healthz,ok,10;edge-worker-us,us,15.204.94.71:443,fugue.pro,/healthz,ok,10;api,global,15.204.94.71:443,api.fugue.pro,/healthz,ok,10"`,
 		`"name":"FUGUE_RELEASE_GUARDIAN_CANDIDATE_CANARY"`,
 		`"value":"edge-group-country-de,51.38.126.103:18443,51.38.126.103:28443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,10,candidate-canary-de-v1,/var/run/secrets/fugue-candidate-canary-de/token"`,
 		`"mountPath":"/var/run/secrets/fugue-candidate-canary-de"`,
