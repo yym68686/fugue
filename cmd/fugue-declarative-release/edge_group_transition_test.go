@@ -215,6 +215,56 @@ func TestStageCandidateRecoversPublishedLKGAfterSequenceConflict(t *testing.T) {
 	}
 }
 
+func TestRefreshPublishedLKGReconcilesTransportFailure(t *testing.T) {
+	now := time.Now().UTC()
+	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
+	keyring := edgeCandidateKeyring{Schema: "edge-control-group-recovery-keyring/v1", Generation: 1,
+		GroupID: "edge-group-country-de", Keys: []edgeCandidateKey{{KeyID: "key-1",
+			Secret:        base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("s", 32))),
+			NotBeforeUnix: now.Add(-time.Hour).Unix(), NotAfterUnix: now.Add(time.Hour).Unix()}}}
+	rawKeyring, _ := json.Marshal(keyring)
+	if err := os.WriteFile(keyringPath, rawKeyring, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name      string
+		committed bool
+	}{
+		{name: "committed response lost", committed: true},
+		{name: "request lost", committed: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			publicationSequence, recoveryEpoch := uint64(10), uint64(2)
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				if request.Method == http.MethodGet {
+					_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":%d,"bundle_generation":"routes.p160.r1","published_bundle_digest":"sha256:%s","recovery_epoch":%d}`,
+						publicationSequence, strings.Repeat("4", 64), recoveryEpoch)
+					return
+				}
+				if test.committed {
+					publicationSequence, recoveryEpoch = 11, 3
+				}
+				panic(http.ErrAbortHandler)
+			}))
+			defer server.Close()
+
+			runtime := kubectlEdgeGroupRuntime{transition: declarativerelease.EdgeGroupABTransition{
+				GroupID: "edge-group-country-de", CandidateStageURL: server.URL + edgeCandidateStagePath, CandidateKeyring: keyringPath}}
+			status := edgeCandidateStageStatus{GroupID: "edge-group-country-de", CurrentPublicationSequence: 10,
+				BundleGeneration: "routes.p160.r1", PublishedBundleDigest: "sha256:" + strings.Repeat("4", 64), RecoveryEpoch: 2}
+			err := runtime.refreshPublishedLKG(context.Background(), status)
+			if test.committed && err != nil {
+				t.Fatalf("committed recovery was not reconciled: %v", err)
+			}
+			if !test.committed && err == nil {
+				t.Fatal("uncommitted transport failure was accepted")
+			}
+		})
+	}
+}
+
 func TestStageCandidateFailsClosedWhenPublishedLKGRecoveryFails(t *testing.T) {
 	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("7", 64))
 	now := time.Now().UTC()

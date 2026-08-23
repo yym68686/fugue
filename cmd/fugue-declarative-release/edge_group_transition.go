@@ -690,16 +690,21 @@ func (runtime *kubectlEdgeGroupRuntime) refreshPublishedLKG(ctx context.Context,
 	httpRequest.Header.Set("Content-Type", "application/json")
 	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(httpRequest)
 	if err != nil {
+		if runtime.publishedLKGRefreshCommitted(ctx, status) {
+			return nil
+		}
 		return err
 	}
-	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	response.Body.Close()
 	if err != nil {
+		if runtime.publishedLKGRefreshCommitted(ctx, status) {
+			return nil
+		}
 		return err
 	}
 	if response.StatusCode == http.StatusConflict {
-		latest, latestErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
-		if latestErr == nil && latest.BundleGeneration == status.BundleGeneration && latest.CurrentPublicationSequence > status.CurrentPublicationSequence && latest.RecoveryEpoch > status.RecoveryEpoch {
+		if runtime.publishedLKGRefreshCommitted(ctx, status) {
 			return nil
 		}
 		return errors.New("Edge Control recovery CAS conflict")
@@ -717,6 +722,12 @@ func (runtime *kubectlEdgeGroupRuntime) refreshPublishedLKG(ctx context.Context,
 		return errors.New("Edge Control recovery receipt is not bound to the published LKG")
 	}
 	return nil
+}
+
+func (runtime *kubectlEdgeGroupRuntime) publishedLKGRefreshCommitted(ctx context.Context, previous edgeCandidateStageStatus) bool {
+	latest, err := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
+	return err == nil && latest.BundleGeneration == previous.BundleGeneration &&
+		latest.CurrentPublicationSequence > previous.CurrentPublicationSequence && latest.RecoveryEpoch > previous.RecoveryEpoch
 }
 
 func (runtime *kubectlEdgeGroupRuntime) stageCandidateOnce(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool) (edgeCandidateStageReceipt, error) {
