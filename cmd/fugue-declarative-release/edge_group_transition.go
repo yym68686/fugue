@@ -859,8 +859,8 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 				health = observed
 				break
 			}
-			return nil, fmt.Errorf("Guardian current authority does not match the serving Front slot: %s",
-				edgeDegradedServingAuthorityMismatch(health, current, allowDegradedRecovery))
+			return nil, fmt.Errorf("Guardian current authority does not match the serving Front slot: %s expected_lkg=%s",
+				edgeDegradedServingAuthorityMismatch(health, current, allowDegradedRecovery), edgeExpectedLKGMismatch(health, current, expectedLKGSourceSHA, expectedLKGImageDigest))
 		}
 		for _, health := range before.FrontHealth {
 			if !edgeFrontHealthMatchesDegradedServingAuthority(health, current) {
