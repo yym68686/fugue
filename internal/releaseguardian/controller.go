@@ -298,12 +298,20 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 // path that lets the worker transition repair its own route authority.
 func degradedEdgeRouteRecoveryEligible(snapshot Snapshot, bundle ExecutionBundle) bool {
 	prepared, release := bundle.Prepared, bundle.Release
-	return snapshot.Managed && prepared.DegradedPredecessor && prepared.DegradedRoute &&
-		release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil &&
+	if !snapshot.Managed || !prepared.DegradedPredecessor || !prepared.DegradedRoute ||
+		release.SupersedesFailedConfigSHA == "" || snapshot.CurrentRecordDigest != snapshot.Record.LKGRecordDigest ||
+		snapshot.LastSuccessfulLKG != snapshot.CurrentRecordDigest || snapshot.CurrentRecordDigest == snapshot.Record.RecordDigest ||
+		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || snapshot.Health.Dependency.State != HealthHealthy ||
+		snapshot.Health.Route.State != HealthDegraded {
+		return false
+	}
+	edgeWorkerRecovery := snapshot.Health.Local.State == HealthDegraded && release.Transition != nil &&
+		release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil
+	edgeControlRecovery := snapshot.Health.Local.State == HealthHealthy && release.Transition == nil &&
+		strings.HasPrefix(snapshot.Key.Component, "edge-control-")
+	return (edgeWorkerRecovery || edgeControlRecovery) &&
 		release.SupersedesFailedConfigSHA != "" && snapshot.CurrentRecordDigest == snapshot.Record.LKGRecordDigest &&
-		snapshot.LastSuccessfulLKG == snapshot.CurrentRecordDigest && snapshot.CurrentRecordDigest != snapshot.Record.RecordDigest &&
-		snapshot.Desired.RecordDigest == snapshot.Record.RecordDigest && snapshot.Health.Local.State == HealthDegraded &&
-		snapshot.Health.Dependency.State == HealthHealthy && snapshot.Health.Route.State == HealthDegraded
+		snapshot.LastSuccessfulLKG == snapshot.CurrentRecordDigest
 }
 
 func degradedPredecessorRolloutEligible(snapshot Snapshot) bool {
