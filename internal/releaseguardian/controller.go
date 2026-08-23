@@ -135,6 +135,7 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 	}
 	decision := Classify(snapshot.CurrentRecordDigest, snapshot.Desired.RecordDigest, snapshot.Health)
 	degradedPredecessorRollout := degradedPredecessorRolloutEligible(snapshot)
+	degradedEdgeRouteRecovery := degradedEdgeRouteRecoveryEligible(snapshot)
 	status := ReleaseStatus{
 		Component: key.Component, Group: key.Group, State: decision.State,
 		CurrentRecordDigest: snapshot.CurrentRecordDigest, TargetRecordDigest: snapshot.Desired.RecordDigest,
@@ -146,9 +147,13 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
 		status.Reason = joinedReason("rollout is verified locally and is waiting for target-bound route evidence", snapshot.Health)
 	}
-	if degradedPredecessorRollout {
+	if degradedPredecessorRollout || degradedEdgeRouteRecovery {
 		status.State = StateRolloutPending
-		status.Reason = joinedReason("exact degraded predecessor repair is authorized by immutable prewrite evidence", snapshot.Health)
+		if degradedEdgeRouteRecovery {
+			status.Reason = joinedReason("controlled edge route recovery is authorized by immutable predecessor and degraded-route evidence", snapshot.Health)
+		} else {
+			status.Reason = joinedReason("exact degraded predecessor repair is authorized by immutable prewrite evidence", snapshot.Health)
+		}
 	}
 	if controller.mode == ModeWrite && snapshot.Managed && pendingUnprovenLKGRecovery(snapshot) {
 		status.State = StateRecoveryRequired
@@ -209,7 +214,7 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		}
 		return controller.store.UpdateStatus(ctx, snapshot, sealed)
 	}
-	if decision.RolloutEligible || degradedPredecessorRollout {
+	if decision.RolloutEligible || degradedPredecessorRollout || degradedEdgeRouteRecovery {
 		status.State = StateRolling
 		receipt, executeErr := controller.executor.Rollout(ctx, snapshot)
 		if executeErr != nil {
@@ -284,6 +289,21 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		return err
 	}
 	return controller.store.UpdateStatus(ctx, snapshot, sealed)
+}
+
+// degradedEdgeRouteRecovery admits only the edge-group transition's explicit
+// successor when the exact LKG resource identity is still present but its
+// public route is degraded. The regular rollout gate remains closed for every
+// other component and for unknown/dependency health; this is the controlled
+// path that lets the worker transition repair its own route authority.
+func degradedEdgeRouteRecoveryEligible(snapshot Snapshot) bool {
+	prepared, release := snapshot.Bundle.Prepared, snapshot.Bundle.Release
+	return snapshot.Managed && prepared.DegradedPredecessor && prepared.DegradedRoute &&
+		release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil &&
+		release.SupersedesFailedConfigSHA != "" && snapshot.CurrentRecordDigest == snapshot.Record.LKGRecordDigest &&
+		snapshot.LastSuccessfulLKG == snapshot.CurrentRecordDigest && snapshot.CurrentRecordDigest != snapshot.Record.RecordDigest &&
+		snapshot.Desired.RecordDigest == snapshot.Record.RecordDigest && snapshot.Health.Local.State == HealthDegraded &&
+		snapshot.Health.Dependency.State == HealthHealthy && snapshot.Health.Route.State == HealthDegraded
 }
 
 func degradedPredecessorRolloutEligible(snapshot Snapshot) bool {

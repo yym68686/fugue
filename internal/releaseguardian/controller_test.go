@@ -209,6 +209,33 @@ func TestWriteModeRollsOutExactDegradedPredecessorRepair(t *testing.T) {
 	}
 }
 
+func TestWriteModeAllowsControlledDegradedEdgeRouteRecovery(t *testing.T) {
+	now := time.Unix(23, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthDegraded, now), otherDigest)
+	snapshot.Desired.RecordDigest = snapshot.Record.RecordDigest
+	snapshot.Bundle.Prepared = declarativerelease.ExecutionPlan{
+		Component: snapshot.Key.Component, ConfigSHA: snapshot.Record.ConfigSHA, DegradedPredecessor: true, DegradedRoute: true,
+		Forward: declarativerelease.TargetIdentity{ConfigSHA: snapshot.Record.ConfigSHA},
+	}
+	snapshot.Bundle.Release = declarativerelease.PlanRelease{
+		SupersedesFailedConfigSHA: strings.Repeat("f", 40),
+		Transition:                &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-de"}},
+	}
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 1 || executor.rollbacks != 0 || store.status.State != StateVerifying {
+		t.Fatalf("controlled route recovery was not admitted: executor=%+v status=%+v", executor, store.status)
+	}
+}
+
 func TestDegradedPredecessorRolloutRequiresExactRecordBindings(t *testing.T) {
 	now := time.Unix(23, 0).UTC()
 	exact := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthDegraded, now), otherDigest)
