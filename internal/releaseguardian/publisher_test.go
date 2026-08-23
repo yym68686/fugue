@@ -363,7 +363,7 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 
 func TestEdgeRouteRecoveryPublishAllowsExactDegradedPredecessor(t *testing.T) {
 	now := time.Date(2026, 8, 15, 2, 0, 0, 0, time.UTC)
-	key := Key{Component: "edge-control-de", Group: "de"}
+	key := Key{Component: "edge-worker-de", Group: "de"}
 	stableSHA, targetSHA := strings.Repeat("1", 40), strings.Repeat("2", 40)
 	record := ReleaseRecord{Component: key.Component, Group: key.Group, ConfigSHA: targetSHA,
 		ImageDigest: "sha256:" + strings.Repeat("d", 64), LKGRecordDigest: testDigest, RecordDigest: otherDigest}
@@ -424,7 +424,7 @@ func TestEdgeControlRouteRecoveryPublishAllowsHealthyLocalDegradedRoute(t *testi
 		"worker transition": func(_ *Snapshot, value *ExecutionBundle) {
 			value.Release.Transition = &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-de"}}
 		},
-		"degraded local":     func(value *Snapshot, _ *ExecutionBundle) { value.Health.Local.State = HealthDegraded },
+		"unknown local":      func(value *Snapshot, _ *ExecutionBundle) { value.Health.Local.State = HealthUnknown },
 		"unknown dependency": func(value *Snapshot, _ *ExecutionBundle) { value.Health.Dependency.State = HealthUnknown },
 	} {
 		t.Run(name, func(t *testing.T) {

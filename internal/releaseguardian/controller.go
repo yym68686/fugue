@@ -307,7 +307,7 @@ func degradedEdgeRouteRecoveryEligible(snapshot Snapshot, bundle ExecutionBundle
 	}
 	edgeWorkerRecovery := snapshot.Health.Local.State == HealthDegraded && release.Transition != nil &&
 		release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil
-	edgeControlRecovery := snapshot.Health.Local.State == HealthHealthy && release.Transition == nil &&
+	edgeControlRecovery := snapshot.Health.Local.State != HealthUnknown && release.Transition == nil &&
 		strings.HasPrefix(snapshot.Key.Component, "edge-control-")
 	return (edgeWorkerRecovery || edgeControlRecovery) &&
 		release.SupersedesFailedConfigSHA != "" && snapshot.CurrentRecordDigest == snapshot.Record.LKGRecordDigest &&
