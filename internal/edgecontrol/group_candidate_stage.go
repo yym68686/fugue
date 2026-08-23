@@ -217,7 +217,11 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	currentEpoch := uint64(0)
 	if exists {
 		currentEpoch = currentCandidate.Epoch
-		if currentCandidate.Epoch == request.ExpectedCandidateEpoch && stagedCandidateMatchesRequest(currentCandidate, request, authority) {
+		// A prior candidate write may have committed before its HTTP receipt was
+		// observed. Reconcile that exact request by identity even when the
+		// caller's candidate epoch witness is stale; the current authority and
+		// immutable release fields still provide the CAS boundary.
+		if stagedCandidateMatchesRequest(currentCandidate, request, authority) {
 			return currentCandidate, nil
 		}
 	}

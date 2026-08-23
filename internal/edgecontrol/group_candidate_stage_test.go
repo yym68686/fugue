@@ -136,6 +136,23 @@ func TestWorkerCandidateStageBindsExactReleaseAndPreservesCurrentAuthority(t *te
 	if !reflect.DeepEqual(afterReplay, staged) {
 		t.Fatalf("exact replay changed candidate: before=%+v after=%+v", staged, afterReplay)
 	}
+	// A transport timeout can leave the candidate committed while the caller
+	// retries with the pre-write epoch. Matching the immutable request identity
+	// must still reconcile the already committed candidate.
+	request.ExpectedCandidateEpoch = existing.Epoch
+	request.Nonce = strings.Repeat("s", 24)
+	request.Signature = ""
+	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	staleReplay := postGroupCandidateStage(t, handler, request)
+	if staleReplay.Code != http.StatusOK {
+		t.Fatalf("stale replay status=%d body=%s", staleReplay.Code, staleReplay.Body.String())
+	}
+	afterStaleReplay, _, _ := store.ReadGroupCandidate(ctx, groupID)
+	if !reflect.DeepEqual(afterStaleReplay, staged) {
+		t.Fatalf("stale replay changed candidate: before=%+v after=%+v", staged, afterStaleReplay)
+	}
 }
 
 func TestWorkerCandidateStageAcceptsMonotonicLKGRefreshForSameGeneration(t *testing.T) {
