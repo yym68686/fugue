@@ -641,6 +641,25 @@ func TestServingAuthorityCanUseCurrentPublishedFallback(t *testing.T) {
 	}
 }
 
+func TestServingAuthorityCandidateFallbackRequiresDegradedAuthorizationForRetainedHistory(t *testing.T) {
+	currentGeneration := "edgegroupbundle_" + strings.Repeat("a", 64)
+	currentPublicationSequence, currentRecoveryEpoch := uint64(22855), uint64(388)
+	servingVersion := groupPublicationVersion(currentGeneration, 19710, 328)
+	if !servingAuthorityCanUseCandidateFallback(servingVersion, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, true, true) {
+		t.Fatal("authorized same-generation fallback was rejected when retained slot history existed")
+	}
+	if servingAuthorityCanUseCandidateFallback(servingVersion, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, true, false) {
+		t.Fatal("ordinary transition ignored retained serving history")
+	}
+	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("changed-generation", 19710, 328), currentGeneration,
+		currentPublicationSequence, currentRecoveryEpoch, true, true) {
+		t.Fatal("degraded fallback accepted a different immutable route generation")
+	}
+	if !servingAuthorityCanUseCandidateFallback(servingVersion, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, false, false) {
+		t.Fatal("pruned same-generation history fallback was rejected")
+	}
+}
+
 func postGroupCandidateStage(t *testing.T, handler http.Handler, value GroupCandidateStageRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	raw, err := json.Marshal(value)
