@@ -76,6 +76,10 @@ func TestGroupAuthorityPromotionReplaysOnlyUnknownExactRequest(t *testing.T) {
 	requests := 0
 	var firstRaw []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		requests++
 		raw := make([]byte, request.ContentLength)
 		_, _ = request.Body.Read(raw)
@@ -99,6 +103,33 @@ func TestGroupAuthorityPromotionReplaysOnlyUnknownExactRequest(t *testing.T) {
 	receipt, err := activator.promoteControl(context.Background(), target)
 	if err != nil || requests != 2 || receipt.PublicationSequence != target.AuthoritySequence+1 {
 		t.Fatalf("promotion replay requests=%d receipt=%+v err=%v", requests, receipt, err)
+	}
+}
+
+func TestGroupAuthorityPromotionReconcilesCommittedResponseLoss(t *testing.T) {
+	now := time.Date(2026, 8, 13, 5, 5, 0, 0, time.UTC)
+	target := groupAuthorityTargetFixture()
+	requests, gets := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			gets++
+			validUntil := now.Add(time.Minute)
+			_ = json.NewEncoder(w).Encode(edgecontrol.AuthorityGroupStatus{GroupID: target.GroupID,
+				AuthoritySequence: target.AuthoritySequence + 1, CurrentPublicationSequence: target.AuthoritySequence + 1, RecoveryEpoch: target.RecoveryEpoch,
+				CandidateEpoch: target.CandidateEpoch, CandidateWorkerSourceSHA: target.WorkerSourceSHA,
+				BundleGeneration: target.ServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("9", 64),
+				BundleValidUntil: &validUntil})
+			return
+		}
+		requests++
+		panic(http.ErrAbortHandler)
+	}))
+	defer server.Close()
+	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
+	receipt, err := activator.promoteControl(context.Background(), target)
+	if err != nil || requests != 1 || gets != 1 || receipt.PublicationSequence != target.AuthoritySequence+1 ||
+		receipt.BundleGeneration != target.ServingGeneration {
+		t.Fatalf("promotion response-loss reconciliation requests=%d gets=%d receipt=%+v err=%v", requests, gets, receipt, err)
 	}
 }
 

@@ -456,10 +456,14 @@ func (activator *groupAuthorityActivator) promoteControl(ctx context.Context, ta
 		if !errors.Is(err, errAuthorityMutationUnknown) {
 			return receipt, err
 		}
-		// Promotion is request-idempotent in Edge Control. Replaying these exact
-		// signed bytes can only return the prior receipt or fail closed.
-		if replayErr := activator.post(ctx, edgecontrol.GroupPromotionPathV1, request, &receipt); replayErr != nil {
-			return receipt, errors.Join(err, replayErr)
+		// A committed promotion can lose its response while Edge Control is
+		// serializing the large signed bundle. Reconcile the compact authority
+		// status first; only an explicit non-commit falls back to replaying the
+		// exact signed request.
+		if reconciled, reconcileErr := activator.reconcilePromotionReceipt(ctx, target); reconcileErr == nil {
+			receipt = reconciled
+		} else if replayErr := activator.post(ctx, edgecontrol.GroupPromotionPathV1, request, &receipt); replayErr != nil {
+			return receipt, errors.Join(err, reconcileErr, replayErr)
 		}
 	}
 	if receipt.Schema != edgecontrol.GroupPromotionReceiptSchemaV1 || receipt.GroupID != target.GroupID ||
@@ -472,6 +476,26 @@ func (activator *groupAuthorityActivator) promoteControl(ctx context.Context, ta
 		return receipt, errors.New("Edge Control promotion receipt is invalid")
 	}
 	return receipt, nil
+}
+
+func (activator *groupAuthorityActivator) reconcilePromotionReceipt(ctx context.Context, target releaseguardian.FrontAuthorityTarget) (edgecontrol.GroupPromotionReceipt, error) {
+	status, err := activator.groupStatus(ctx, target.GroupID)
+	if err != nil {
+		return edgecontrol.GroupPromotionReceipt{}, errAuthorityMutationUnknown
+	}
+	if status.GroupID != target.GroupID || status.AuthoritySequence <= target.AuthoritySequence ||
+		status.CurrentPublicationSequence <= target.PublicationSequence ||
+		status.RecoveryEpoch != target.RecoveryEpoch || status.BundleGeneration != target.ServingGeneration ||
+		status.CandidateEpoch < target.CandidateEpoch || status.CandidateWorkerSourceSHA != target.WorkerSourceSHA ||
+		!exactSHA256Digest(status.PublishedBundleDigest) {
+		return edgecontrol.GroupPromotionReceipt{}, errAuthorityMutationUnknown
+	}
+	return edgecontrol.GroupPromotionReceipt{Schema: edgecontrol.GroupPromotionReceiptSchemaV1, GroupID: target.GroupID,
+		PreviousAuthoritySequence: status.AuthoritySequence - 1, PreviousPublicationSequence: target.PublicationSequence,
+		PreviousRecoveryEpoch: target.RecoveryEpoch, PreviousBundleGeneration: target.PreviousServingGeneration,
+		PreviousPublishedBundleDigest: target.PublishedBundleDigest, PublicationSequence: status.CurrentPublicationSequence,
+		RecoveryEpoch: status.RecoveryEpoch, BundleGeneration: target.ServingGeneration, PublishedBundleDigest: status.PublishedBundleDigest,
+		CandidateRecordDigest: target.CandidateRecordDigest, WorkerSlot: string(target.TargetSlot), Authority: "edge-control"}, nil
 }
 
 func (activator *groupAuthorityActivator) recoverControl(ctx context.Context, promotion edgecontrol.GroupPromotionReceipt, targetGeneration string) error {
