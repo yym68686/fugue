@@ -519,7 +519,7 @@ func (runtime *kubectlEdgeGroupRuntime) StageStandby(ctx context.Context, before
 
 func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool) (edgeCandidateStageReceipt, error) {
 	var lastErr error
-	recoveredLKG := false
+	recoveryAttempts := 0
 	for attempt := 0; attempt < edgeCandidateStageAttempts; attempt++ {
 		receipt, err := runtime.stageCandidateOnce(ctx, before, inactiveSlot, target, standbyOnly)
 		if err == nil {
@@ -529,7 +529,7 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 			return edgeCandidateStageReceipt{}, err
 		}
 		lastErr = err
-		if errors.Is(err, errEdgeCandidateStageSequenceConflict) && !recoveredLKG && !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "" {
+		if errors.Is(err, errEdgeCandidateStageSequenceConflict) && recoveryAttempts < 2 && !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "" {
 			status, statusErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
 			if statusErr != nil {
 				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("read Edge Control status before published LKG recovery: %w", statusErr))
@@ -537,7 +537,7 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 			if recoveryErr := runtime.refreshPublishedLKG(ctx, status); recoveryErr != nil {
 				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("refresh published Edge Control LKG after candidate sequence conflict: %w", recoveryErr))
 			}
-			recoveredLKG = true
+			recoveryAttempts++
 		}
 		if attempt+1 == edgeCandidateStageAttempts {
 			break
