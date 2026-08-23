@@ -338,7 +338,13 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	if err != nil {
 		return nil, nil, err
 	}
-	handler, err := edgecontrol.NewAuthorityControlHandler(edgecontrol.NewAuthorityBoundary(cfg.Enabled).Handler(), heartbeat, status, bundles, recovery, promotion, staging)
+	candidateRecovery, err := edgecontrol.NewGroupCandidateRecoveryHandler(edgecontrol.GroupCandidateRecoveryHandlerConfig{
+		Store: store, GroupIDs: cfg.AuthorityGroupIDs, KeyringDir: cfg.GroupRecoveryKeyringDir,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	handler, err := edgecontrol.NewAuthorityControlHandler(edgecontrol.NewAuthorityBoundary(cfg.Enabled).Handler(), heartbeat, status, bundles, recovery, promotion, staging, candidateRecovery)
 	if err != nil {
 		return nil, nil, err
 	}

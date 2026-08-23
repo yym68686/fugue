@@ -59,6 +59,7 @@ type AuthorityGroupStatus struct {
 	PublicationSequence         uint64     `json:"publication_sequence,omitempty"`
 	CurrentPublicationSequence  uint64     `json:"current_publication_sequence,omitempty"`
 	CandidateEpoch              uint64     `json:"candidate_epoch,omitempty"`
+	CandidateWorkerSourceSHA    string     `json:"candidate_worker_source_sha,omitempty"`
 	PublicationDecision         string     `json:"publication_decision,omitempty"`
 	BundleGeneration            string     `json:"bundle_generation,omitempty"`
 	PublishedBundleDigest       string     `json:"published_bundle_digest,omitempty"`
@@ -352,6 +353,7 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 	}
 	if stored.CandidateExists {
 		group.CandidateEpoch = stored.Candidate.Epoch
+		group.CandidateWorkerSourceSHA = stored.Candidate.WorkerSourceSHA
 	}
 	if inventoryErr != nil && !errors.Is(inventoryErr, ErrGroupInventoryNotFound) && group.FailureCode == "" {
 		group.FailureCode = GroupShadowFailureInventoryRead
@@ -405,7 +407,7 @@ func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery h
 	if boundary == nil || heartbeat == nil || status == nil || bundles == nil || recovery == nil {
 		return nil, errors.New("edge-control authority HTTP handler dependency is nil")
 	}
-	if len(mutations) > 2 {
+	if len(mutations) > 3 {
 		return nil, errors.New("edge-control authority mutation HTTP handlers are invalid")
 	}
 	for _, handler := range mutations {
@@ -425,8 +427,11 @@ func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery h
 	if len(mutations) >= 1 {
 		mux.Handle("POST "+GroupPromotionPathV1, mutations[0])
 	}
-	if len(mutations) == 2 {
+	if len(mutations) >= 2 {
 		mux.Handle("POST "+GroupCandidateStagePathV1, mutations[1])
+	}
+	if len(mutations) == 3 {
+		mux.Handle("POST "+GroupCandidateRecoveryPathV1, mutations[2])
 	}
 	mux.Handle("/", boundary)
 	return mux, nil

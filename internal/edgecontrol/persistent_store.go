@@ -457,6 +457,63 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 	return cloneGroupCandidateBundle(stored), err
 }
 
+// FenceGroupCandidateCAS retires only an inactive candidate that is explicitly
+// identified by its epoch and failed worker source. The bundle remains in the
+// bounded candidate history for audit and recovery, while the current pointer
+// is cleared so a subsequent worker atom can stage from the exact published
+// authority without inheriting a stale candidate epoch.
+func (store *PersistentGroupStore) FenceGroupCandidateCAS(ctx context.Context, groupID string, expectedAuthoritySequence, expectedPublicationSequence, expectedRecoveryEpoch uint64, expectedPublishedDigest string, expectedCandidateEpoch uint64, expectedWorkerSourceSHA string) (GroupCandidateRecoveryReceipt, error) {
+	var receipt GroupCandidateRecoveryReceipt
+	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
+		if state.Published == nil || len(state.AuthorityLedger) == 0 {
+			return groupCandidateCASConflict("store_candidate_recovery_target_unavailable")
+		}
+		actualAuthoritySequence := uint64(len(state.AuthorityLedger))
+		if actualAuthoritySequence != expectedAuthoritySequence || state.Published.PublicationSequence != expectedPublicationSequence ||
+			state.Published.RecoveryEpoch != expectedRecoveryEpoch || state.Published.Digest != expectedPublishedDigest {
+			return groupCandidateCASConflict(fmt.Sprintf("store_candidate_recovery_authority_mismatch expected_ledger=%d actual_ledger=%d expected_publication=%d actual_publication=%d expected_recovery=%d actual_recovery=%d",
+				expectedAuthoritySequence, actualAuthoritySequence, expectedPublicationSequence, state.Published.PublicationSequence,
+				expectedRecoveryEpoch, state.Published.RecoveryEpoch))
+		}
+		for _, audit := range state.AuthorityLedger[expectedAuthoritySequence:] {
+			if !authorityAuditTailPreservesPublishedAuthority(audit, state.Published.Bundle.Generation) {
+				return groupCandidateCASConflict("store_candidate_recovery_authority_tail_changed")
+			}
+		}
+		if state.Candidate == nil {
+			for index := len(state.CandidateHistory) - 1; index >= 0; index-- {
+				candidate := state.CandidateHistory[index]
+				if candidate.Epoch == expectedCandidateEpoch && candidate.WorkerSourceSHA == expectedWorkerSourceSHA &&
+					candidate.Epoch > state.Published.PublicationSequence && validatePersistentCandidateBinding(*state, state.GroupID, candidate) == nil {
+					receipt = GroupCandidateRecoveryReceipt{
+						Schema: GroupCandidateRecoveryReceiptSchemaV1, GroupID: state.GroupID,
+						FencedCandidateEpoch: candidate.Epoch, FencedWorkerSourceSHA: candidate.WorkerSourceSHA,
+						CurrentPublicationSequence: state.Published.PublicationSequence, CurrentRecoveryEpoch: state.Published.RecoveryEpoch,
+						PublishedBundleDigest: state.Published.Digest, CandidateCleared: true,
+					}
+					return nil
+				}
+			}
+			return groupCandidateCASConflict("store_candidate_recovery_candidate_missing")
+		}
+		candidate := *state.Candidate
+		if candidate.Epoch != expectedCandidateEpoch || candidate.WorkerSourceSHA != expectedWorkerSourceSHA ||
+			candidate.Epoch <= state.Published.PublicationSequence || validatePersistentCandidateBinding(*state, state.GroupID, candidate) != nil {
+			return groupCandidateCASConflict("store_candidate_recovery_candidate_identity_mismatch")
+		}
+		retainReplacedCandidate(state, candidate.Epoch+1)
+		state.Candidate = nil
+		receipt = GroupCandidateRecoveryReceipt{
+			Schema: GroupCandidateRecoveryReceiptSchemaV1, GroupID: state.GroupID,
+			FencedCandidateEpoch: candidate.Epoch, FencedWorkerSourceSHA: candidate.WorkerSourceSHA,
+			CurrentPublicationSequence: state.Published.PublicationSequence, CurrentRecoveryEpoch: state.Published.RecoveryEpoch,
+			PublishedBundleDigest: state.Published.Digest, CandidateCleared: true,
+		}
+		return nil
+	})
+	return receipt, err
+}
+
 func candidateCurrentRecordDigest(candidate GroupCandidateBundle) string {
 	if candidate.CurrentRecord == nil {
 		return ""
