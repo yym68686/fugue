@@ -52,6 +52,7 @@ const (
 var (
 	edgeServingAuthorityTokenPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,255}$`)
 	errEdgeCandidateStageSequenceConflict = errors.New("stage edge Worker candidate: HTTP 409 (sequence_conflict)")
+	errEdgeCandidateStageTransient        = errors.New("stage edge Worker candidate: transient transport failure")
 )
 
 type edgeServingAuthorityWitness struct {
@@ -524,11 +525,11 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 		if err == nil {
 			return receipt, nil
 		}
-		if !errors.Is(err, errEdgeCandidateStageSequenceConflict) {
+		if !errors.Is(err, errEdgeCandidateStageSequenceConflict) && !errors.Is(err, errEdgeCandidateStageTransient) {
 			return edgeCandidateStageReceipt{}, err
 		}
 		lastErr = err
-		if !recoveredLKG && !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "" {
+		if errors.Is(err, errEdgeCandidateStageSequenceConflict) && !recoveredLKG && !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "" {
 			status, statusErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
 			if statusErr != nil {
 				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("read Edge Control status before published LKG recovery: %w", statusErr))
@@ -889,7 +890,7 @@ func postEdgeCandidateStage(ctx context.Context, endpoint string, value edgeCand
 		request.Header.Set("Content-Type", "application/json")
 		response, requestErr := (&http.Client{Timeout: 15 * time.Second}).Do(request)
 		if requestErr != nil {
-			lastErr = requestErr
+			lastErr = fmt.Errorf("%w: %v", errEdgeCandidateStageTransient, requestErr)
 			continue
 		}
 		rawResponse, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
