@@ -793,7 +793,7 @@ func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.
 	if err := decodeStrictJSON([]byte(data["authority.json"]), &current); err != nil {
 		return nil, errors.New("Guardian current authority payload is invalid")
 	}
-	return edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "")
+	return edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "", runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest)
 }
 
 func edgeServingAuthorityWitnessFromCurrent(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string) (*edgeServingAuthorityWitness, error) {
@@ -801,6 +801,15 @@ func edgeServingAuthorityWitnessFromCurrent(before edgeGroupState, current relea
 }
 
 func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string, allowDegradedRecovery bool) (*edgeServingAuthorityWitness, error) {
+	return edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, groupID, uid, resourceVersion, allowDegradedRecovery, "", "")
+}
+
+// edgeServingAuthorityWitnessFromCurrentWithExpectedLKG admits the narrow
+// recovery state left by a committed-but-unserved authority promotion: the
+// Front still serves the exact declared LKG while CurrentAuthority points at
+// the failed candidate. The LKG source/image and bundle family are explicit
+// inputs, so this cannot turn arbitrary Front drift into a serving witness.
+func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string, allowDegradedRecovery bool, expectedLKGSourceSHA, expectedLKGImageDigest string) (*edgeServingAuthorityWitness, error) {
 	if current.Validate() != nil || current.GroupID != groupID {
 		return nil, errors.New("Guardian current authority payload is invalid")
 	}
@@ -823,6 +832,9 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 			return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 		}
 		if !edgeFrontHealthMatchesServingAuthority(health, current) {
+			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			return nil, errors.New("Guardian current authority does not match serving Front activation evidence")
 		}
 		return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
@@ -862,6 +874,9 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 	}
 	for _, health := range before.FrontHealth {
 		if !edgeFrontHealthMatchesServingAuthority(health, current) {
+			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			return nil, errors.New("Guardian current authority does not match serving Front evidence")
 		}
 	}
@@ -871,6 +886,21 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: string(current.CurrentWorkerSlot),
 		WorkerSourceSHA: current.CurrentWorkerSourceSHA, WorkerImageDigest: current.CurrentWorkerImageDigest,
 	}, nil
+}
+
+func edgeFrontHealthMatchesExpectedLKG(health edgeFrontHealth, current releaseguardian.CurrentAuthority, expectedSourceSHA, expectedImageDigest string) bool {
+	if strings.TrimSpace(expectedSourceSHA) == "" || strings.TrimSpace(expectedImageDigest) == "" ||
+		current.CurrentWorkerSourceSHA == expectedSourceSHA && current.CurrentWorkerImageDigest == expectedImageDigest {
+		return false
+	}
+	if !health.ActivationPresent || health.ActiveSlot != string(current.CurrentWorkerSlot) ||
+		health.RouteAuthority != edgeActivationAuthority || health.Generation < current.CurrentFrontGeneration ||
+		health.WorkerSourceCommit != expectedSourceSHA || health.WorkerImageDigest != expectedImageDigest {
+		return false
+	}
+	currentGeneration, _, _, currentOK := parseEdgePublicationVersion(current.CurrentBundleGeneration)
+	frontGeneration, _, _, frontOK := parseEdgePublicationVersion(health.BundleGeneration)
+	return currentOK && frontOK && currentGeneration == frontGeneration
 }
 
 func edgeDegradedServingAuthorityMismatch(health edgeFrontHealth, current releaseguardian.CurrentAuthority, allowed bool) string {

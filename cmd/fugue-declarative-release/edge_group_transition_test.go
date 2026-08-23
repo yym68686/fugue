@@ -391,6 +391,25 @@ func TestServingAuthorityWitnessAllowsExplicitDegradedPublicationRefresh(t *test
 	}
 }
 
+func TestServingAuthorityWitnessAllowsCommittedFailedAuthorityWithExactLKGFront(t *testing.T) {
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
+		CurrentWorkerSlot: releaseguardian.AuthoritySlotA, CurrentFrontGeneration: 134,
+		CurrentBundleGeneration: "routes.p15765.r151", CurrentWorkerSourceSHA: strings.Repeat("2", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("3", 64), AuthorityEpoch: 12635}
+	health := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 135,
+		BundleGeneration: "routes.p15778.r151", WorkerSourceCommit: strings.Repeat("4", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("5", 64), RouteAuthority: edgeActivationAuthority}
+	before := edgeGroupState{ActiveSlot: "a", FrontHealth: map[string]edgeFrontHealth{"node-1": health}}
+	witness, err := edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, current.GroupID, "current-uid", "123", true, strings.Repeat("4", 40), "sha256:"+strings.Repeat("5", 64))
+	if err != nil || witness == nil || witness.WorkerSlot != "a" || witness.WorkerSourceSHA != health.WorkerSourceCommit || witness.WorkerImageDigest != health.WorkerImageDigest {
+		t.Fatalf("exact LKG Front witness was rejected: witness=%+v err=%v", witness, err)
+	}
+	if _, err := edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, current.GroupID, "current-uid", "123", true, strings.Repeat("6", 40), "sha256:"+strings.Repeat("6", 64)); err == nil {
+		t.Fatal("Front identity outside the declared LKG was accepted")
+	}
+}
+
 func TestServingAuthorityWitnessUsesWorkerActivationEvidenceWhenFrontMetadataLags(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
