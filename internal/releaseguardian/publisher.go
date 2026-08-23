@@ -175,6 +175,7 @@ func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle, stableRec
 		return true
 	}
 	return degradedPredecessorPublishEligible(snapshot, bundle) ||
+		degradedEdgeRouteRecoveryEligible(snapshot, bundle) ||
 		fencedDesiredReplacementEligible(snapshot, bundle, stableRecord) ||
 		failedDesiredReplacementEligible(snapshot, bundle, stableRecord)
 }

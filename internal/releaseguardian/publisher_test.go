@@ -361,6 +361,46 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 	}
 }
 
+func TestEdgeRouteRecoveryPublishAllowsExactDegradedPredecessor(t *testing.T) {
+	now := time.Date(2026, 8, 15, 2, 0, 0, 0, time.UTC)
+	key := Key{Component: "edge-control-de", Group: "de"}
+	stableSHA, targetSHA := strings.Repeat("1", 40), strings.Repeat("2", 40)
+	record := ReleaseRecord{Component: key.Component, Group: key.Group, ConfigSHA: targetSHA,
+		ImageDigest: "sha256:" + strings.Repeat("d", 64), LKGRecordDigest: testDigest, RecordDigest: otherDigest}
+	snapshot := Snapshot{
+		Key: key, Record: record,
+		Desired:             DesiredRelease{Component: key.Component, Group: key.Group, RecordDigest: otherDigest},
+		CurrentRecordDigest: testDigest, LastSuccessfulLKG: testDigest, Managed: true,
+		Health: testHealth(HealthDegraded, HealthHealthy, HealthDegraded, now),
+	}
+	snapshot.Record.ConfigSHA = stableSHA
+	bundle := ExecutionBundle{
+		Prepared: declarativerelease.ExecutionPlan{Component: key.Component, ConfigSHA: targetSHA,
+			DegradedPredecessor: true, DegradedRoute: true},
+		Release: declarativerelease.PlanRelease{ComponentID: key.Component, SupersedesFailedConfigSHA: stableSHA,
+			Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-de"}}},
+	}
+	if !degradedEdgeRouteRecoveryEligible(snapshot, bundle) || !publishDesiredEligible(snapshot, bundle, record) {
+		t.Fatal("exact degraded edge route recovery candidate was rejected")
+	}
+	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
+		"unknown local health":      func(value *Snapshot, _ *ExecutionBundle) { value.Health.Local.State = HealthUnknown },
+		"unknown dependency health": func(value *Snapshot, _ *ExecutionBundle) { value.Health.Dependency.State = HealthUnknown },
+		"unknown route health":      func(value *Snapshot, _ *ExecutionBundle) { value.Health.Route.State = HealthUnknown },
+		"missing transition":        func(_ *Snapshot, value *ExecutionBundle) { value.Release.Transition = nil },
+		"ordinary candidate":        func(_ *Snapshot, value *ExecutionBundle) { value.Release.SupersedesFailedConfigSHA = "" },
+		"current drift":             func(value *Snapshot, _ *ExecutionBundle) { value.CurrentRecordDigest = otherDigest },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidateSnapshot, candidateBundle := snapshot, bundle
+			mutate(&candidateSnapshot, &candidateBundle)
+			if degradedEdgeRouteRecoveryEligible(candidateSnapshot, candidateBundle) || publishDesiredEligible(candidateSnapshot, candidateBundle, record) {
+				t.Fatal("unsafe degraded edge route recovery candidate was accepted")
+			}
+		})
+	}
+}
+
 func guardianCandidateWithResourceVersion(t *testing.T, candidate map[string][]byte, resourceVersion string) map[string][]byte {
 	t.Helper()
 	result := make(map[string][]byte, len(candidate))

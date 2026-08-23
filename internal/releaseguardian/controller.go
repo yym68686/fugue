@@ -135,7 +135,7 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 	}
 	decision := Classify(snapshot.CurrentRecordDigest, snapshot.Desired.RecordDigest, snapshot.Health)
 	degradedPredecessorRollout := degradedPredecessorRolloutEligible(snapshot)
-	degradedEdgeRouteRecovery := degradedEdgeRouteRecoveryEligible(snapshot)
+	degradedEdgeRouteRecovery := degradedEdgeRouteRecoveryEligible(snapshot, snapshot.Bundle)
 	status := ReleaseStatus{
 		Component: key.Component, Group: key.Group, State: decision.State,
 		CurrentRecordDigest: snapshot.CurrentRecordDigest, TargetRecordDigest: snapshot.Desired.RecordDigest,
@@ -296,8 +296,8 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 // public route is degraded. The regular rollout gate remains closed for every
 // other component and for unknown/dependency health; this is the controlled
 // path that lets the worker transition repair its own route authority.
-func degradedEdgeRouteRecoveryEligible(snapshot Snapshot) bool {
-	prepared, release := snapshot.Bundle.Prepared, snapshot.Bundle.Release
+func degradedEdgeRouteRecoveryEligible(snapshot Snapshot, bundle ExecutionBundle) bool {
+	prepared, release := bundle.Prepared, bundle.Release
 	return snapshot.Managed && prepared.DegradedPredecessor && prepared.DegradedRoute &&
 		release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil &&
 		release.SupersedesFailedConfigSHA != "" && snapshot.CurrentRecordDigest == snapshot.Record.LKGRecordDigest &&
