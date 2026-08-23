@@ -252,7 +252,18 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	alreadyConverged := false
 	degradedPredecessor := false
 	degradedRoute := false
-	if release.RetrySameLKG && release.ExpectedPreviousPresent {
+	controlledEdgeRecovery := release.ExpectedPreviousPresent && release.SupersedesFailedConfigSHA != "" &&
+		release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil
+	if controlledEdgeRecovery {
+		// Edge group recovery owns its serving-health contract: the Front and
+		// inactive slot may be intentionally unready while Guardian restores the
+		// authority/candidate ledger. Bind only the immutable workload CAS here;
+		// the edge transition performs the readiness and activation checks before
+		// committing traffic.
+		prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+		degradedPredecessor = err == nil
+		degradedRoute = true
+	} else if release.RetrySameLKG && release.ExpectedPreviousPresent {
 		prewrite, err = cluster.Observe(ctx, release, forward, rendered.Forward)
 		if err == nil && prewrite.Matches(forward, release, false) {
 			prewrite, err = cluster.WaitHealthy(ctx, release, forward, rendered.Forward)
