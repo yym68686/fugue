@@ -673,20 +673,28 @@ func (store *PersistentGroupStore) ReadGroupRecoveryTarget(ctx context.Context, 
 		authority.Published = cloneGroupPublishedBundle(*state.Published)
 		authority.PublishedExists = true
 		targetCandidateSequence := uint64(0)
+		targetBundleGeneration := ""
 		for index := len(state.AuthorityLedger) - 1; index >= 0; index-- {
 			entry := state.AuthorityLedger[index]
 			if entry.RecoveryEpoch > recoveryEpoch {
 				recoveryEpoch = entry.RecoveryEpoch
 			}
-			if targetCandidateSequence == 0 && entry.Status == GroupAuthorityStatusPublished && entry.BundleGeneration == generation {
+			// A base generation can be shared by many publications. Recovery
+			// callers that have a Front activation witness must be able to name
+			// the exact immutable publication (generation.pN.rM), otherwise a
+			// retry can silently select the failed candidate again.
+			entryVersion := groupPublicationVersion(entry.BundleGeneration, entry.Sequence, entry.RecoveryEpoch)
+			if targetCandidateSequence == 0 && entry.Status == GroupAuthorityStatusPublished &&
+				(entry.BundleGeneration == generation || entryVersion == generation) {
 				targetCandidateSequence = entry.CandidateLedgerSequence
+				targetBundleGeneration = entry.BundleGeneration
 			}
 		}
 		if targetCandidateSequence == 0 || targetCandidateSequence > uint64(len(state.Ledger)) {
 			return errors.New("edge-control recovery target was never published")
 		}
 		candidate = cloneGroupShadowLedgerEntry(state.Ledger[targetCandidateSequence-1])
-		if candidate.Status != GroupShadowStatusCompiled || candidate.BundleGeneration != generation {
+		if candidate.Status != GroupShadowStatusCompiled || candidate.BundleGeneration != targetBundleGeneration {
 			return errors.New("edge-control recovery target candidate is invalid")
 		}
 		// Candidate bundles are compacted independently of the authority ledger.
@@ -694,7 +702,7 @@ func (store *PersistentGroupStore) ReadGroupRecoveryTarget(ctx context.Context, 
 		// its shadow candidate payload has been archived. Rehydrate only the exact
 		// published generation; never use a different candidate or current intent.
 		if candidate.Bundle == nil {
-			if !candidate.BundleArchived || state.Published.Bundle.Generation != generation {
+			if !candidate.BundleArchived || state.Published.Bundle.Generation != targetBundleGeneration {
 				return errors.New("edge-control recovery target candidate is unavailable")
 			}
 			bundle := cloneEdgeRouteBundle(state.Published.Bundle)

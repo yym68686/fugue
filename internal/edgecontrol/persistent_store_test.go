@@ -201,6 +201,11 @@ func TestPersistentGroupStoreRehydratesArchivedPublishedRecoveryTarget(t *testin
 	if err != nil {
 		t.Fatalf("archived published recovery target rejected: %v", err)
 	}
+	exactVersion := groupPublicationVersion(published.Published.Bundle.Generation, published.Published.PublicationSequence, published.Published.RecoveryEpoch)
+	_, exactRecovered, _, err := restarted.ReadGroupRecoveryTarget(ctx, groupID, exactVersion)
+	if err != nil || exactRecovered.Sequence != recovered.Sequence {
+		t.Fatalf("exact archived publication recovery target rejected: candidate=%+v err=%v", exactRecovered, err)
+	}
 	if recovered.Bundle == nil || recovered.Bundle.Generation != published.Published.Bundle.Generation ||
 		!recovered.BundleArchived || authority.Published.Bundle.Generation != recovered.Bundle.Generation {
 		t.Fatalf("archived published recovery target was not rehydrated exactly: authority=%+v candidate=%+v", authority, recovered)
