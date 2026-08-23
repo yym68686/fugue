@@ -557,6 +557,32 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 	var lastErr error
 	recoveryAttempts := 0
 	for attempt := 0; attempt < edgeCandidateStageAttempts; attempt++ {
+		// A failed Guardian atom can leave the exact target candidate durable
+		// even though Front still serves the previous activation. Reusing that
+		// candidate makes the next import carry an expired/stale current bundle
+		// and prevents the sequence-conflict recovery branch from running. Clear
+		// the candidate and renew the exact Front publication before the first
+		// retry, using the same signed CAS pair as the conflict path below.
+		if !standbyOnly && before.FrontActivation != nil && recoveryAttempts < 2 && runtime.release.SupersedesFailedConfigSHA != "" {
+			status, statusErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
+			if statusErr != nil {
+				return edgeCandidateStageReceipt{}, fmt.Errorf("read Edge Control status before failed candidate recovery: %w", statusErr)
+			}
+			servingLKGBundle, servingLKG, servingErr := runtime.servingLKGRecoveryTarget(ctx, before, status)
+			if servingErr != nil {
+				return edgeCandidateStageReceipt{}, fmt.Errorf("read exact Front LKG recovery witness before candidate staging: %w", servingErr)
+			}
+			if servingLKG && status.CandidateEpoch != 0 && status.CandidateWorkerSourceSHA != "" {
+				if fenceErr := runtime.fenceFailedCandidate(ctx, status); fenceErr != nil {
+					return edgeCandidateStageReceipt{}, fmt.Errorf("fence failed Edge Control candidate before candidate staging: %w", fenceErr)
+				}
+				if recoveryErr := runtime.recoverPublishedLKG(ctx, status, servingLKGBundle, "restore exact Front activation LKG before failed candidate retry"); recoveryErr != nil {
+					return edgeCandidateStageReceipt{}, fmt.Errorf("restore exact Front activation LKG before candidate staging: %w", recoveryErr)
+				}
+				recoveryAttempts++
+				continue
+			}
+		}
 		receipt, err := runtime.stageCandidateOnce(ctx, before, inactiveSlot, target, standbyOnly)
 		if err == nil {
 			return receipt, nil

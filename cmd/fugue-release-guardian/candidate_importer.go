@@ -409,10 +409,27 @@ func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, curren
 		return nil
 	}
 	if current.Validate() != nil || current.GroupID != envelope.GroupID || current.CurrentRecordDigest != witness.CurrentRecordDigest ||
-		current.AuthorityEpoch != witness.AuthorityEpoch || string(uid) != witness.CurrentAuthorityUID || resourceVersion != witness.CurrentAuthorityRV ||
-		current.CurrentFrontGeneration != witness.FrontGeneration || current.CurrentBundleGeneration != witness.BundleVersion ||
-		current.CurrentWorkerSlot != witness.WorkerSlot || current.CurrentWorkerSourceSHA != witness.WorkerSourceSHA ||
-		current.CurrentWorkerImageDigest != witness.WorkerImageDigest {
+		current.AuthorityEpoch != witness.AuthorityEpoch || string(uid) != witness.CurrentAuthorityUID || resourceVersion != witness.CurrentAuthorityRV {
+		return errors.New("candidate serving authority binding is invalid")
+	}
+	if current.CurrentFrontGeneration == witness.FrontGeneration && current.CurrentBundleGeneration == witness.BundleVersion &&
+		current.CurrentWorkerSlot == witness.WorkerSlot && current.CurrentWorkerSourceSHA == witness.WorkerSourceSHA &&
+		current.CurrentWorkerImageDigest == witness.WorkerImageDigest {
+		return nil
+	}
+	// During controlled recovery Front may already have committed the exact
+	// previous-slot activation while Guardian CurrentAuthority still points at
+	// the failed candidate. Accept only that one-step, previous-LKG witness;
+	// arbitrary slot or generation drift must remain fenced.
+	if current.CurrentWorkerSlot == witness.WorkerSlot || current.PreviousWorkerSlot != witness.WorkerSlot ||
+		current.PreviousBundleGeneration != witness.BundleVersion || current.PreviousWorkerSourceSHA != witness.WorkerSourceSHA ||
+		current.PreviousWorkerImageDigest != witness.WorkerImageDigest || current.CurrentFrontGeneration == 0 ||
+		witness.FrontGeneration != current.CurrentFrontGeneration+1 || current.PreviousFrontGeneration >= current.CurrentFrontGeneration {
+		return errors.New("candidate serving authority binding is invalid")
+	}
+	currentGeneration, _, _, currentErr := parseUnboundAuthorityBundleVersion(current.CurrentBundleGeneration)
+	witnessGeneration, _, _, witnessErr := parseUnboundAuthorityBundleVersion(witness.BundleVersion)
+	if currentErr != nil || witnessErr != nil || currentGeneration != witnessGeneration {
 		return errors.New("candidate serving authority binding is invalid")
 	}
 	return nil

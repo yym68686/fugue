@@ -17,6 +17,7 @@ import (
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgecontrol"
 	"fugue/internal/releaseguardian"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
@@ -212,6 +213,94 @@ func TestStageCandidateRecoversPublishedLKGAfterSequenceConflict(t *testing.T) {
 		receipt.CurrentPublicationSequence != 11 || receipt.CurrentRecoveryEpoch != 3 {
 		t.Fatalf("candidate recovery flow did not settle: receipt=%+v reads=%d stages=%d fences=%d recoveries=%d operations=%v err=%v",
 			receipt, statusReads, stagePosts, candidateRecoveryPosts, recoveryPosts, operations, err)
+	}
+}
+
+func TestStageCandidateRecoversExistingFailedCandidateBeforeFirstStage(t *testing.T) {
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("7", 64))
+	now := time.Now().UTC()
+	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
+	keyring := edgeCandidateKeyring{Schema: "edge-control-group-recovery-keyring/v1", Generation: 1,
+		GroupID: "edge-group-country-de", Keys: []edgeCandidateKey{{KeyID: "key-1",
+			Secret:        base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("s", 32))),
+			NotBeforeUnix: now.Add(-time.Hour).Unix(), NotAfterUnix: now.Add(time.Hour).Unix()}}}
+	rawKeyring, _ := json.Marshal(keyring)
+	if err := os.WriteFile(keyringPath, rawKeyring, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lkgSource, lkgImage := strings.Repeat("1", 40), "sha256:"+strings.Repeat("2", 64)
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 137, CurrentBundleGeneration: "routes.p10.r2", CurrentWorkerSourceSHA: strings.Repeat("c", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("d", 64), PreviousRecordDigest: "sha256:" + strings.Repeat("e", 64),
+		PreviousWorkerSlot: releaseguardian.AuthoritySlotB, PreviousFrontGeneration: 136, PreviousBundleGeneration: "routes.p5.r1",
+		PreviousWorkerSourceSHA: lkgSource, PreviousWorkerImageDigest: lkgImage, AuthorityEpoch: 23}
+	currentRaw, _ := json.Marshal(current)
+	if err := current.Validate(); err != nil {
+		t.Fatalf("authority fixture invalid: %v", err)
+	}
+	authorityObject := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]interface{}{"name": "fugue-current-authority-edge-group-country-de", "namespace": "fugue-system", "uid": "authority-uid", "resourceVersion": "41"},
+		"data":     map[string]interface{}{"authority.json": string(currentRaw)},
+	}}
+	statusReads, stagePosts, fencePosts, recoveryPosts := 0, 0, 0, 0
+	operations := make([]string, 0, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet:
+			statusReads++
+			candidateEpoch, publicationSequence, recoveryEpoch := uint64(7), uint64(10), uint64(2)
+			if statusReads > 1 {
+				candidateEpoch, publicationSequence, recoveryEpoch = 0, 11, 3
+			}
+			_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":%d,"candidate_epoch":%d,"candidate_worker_source_sha":%q,"bundle_generation":"routes","published_bundle_digest":"sha256:%s","recovery_epoch":%d}`,
+				publicationSequence, candidateEpoch, strings.Repeat("9", 40), strings.Repeat("4", 64), recoveryEpoch)
+		case request.URL.Path == edgeCandidateRecoveryPath:
+			fencePosts++
+			operations = append(operations, "fence")
+			_ = json.NewEncoder(writer).Encode(edgeCandidateRecoveryReceipt{Schema: edgeCandidateRecoveryReceiptSchema,
+				GroupID: "edge-group-country-de", FencedCandidateEpoch: 7, FencedWorkerSourceSHA: strings.Repeat("9", 40),
+				CurrentPublicationSequence: 10, CurrentRecoveryEpoch: 2, PublishedBundleDigest: "sha256:" + strings.Repeat("4", 64), CandidateCleared: true})
+		case request.URL.Path == edgeGroupRecoveryPath:
+			recoveryPosts++
+			operations = append(operations, "recover")
+			var recovery edgeGroupRecoveryRequest
+			if err := json.NewDecoder(request.Body).Decode(&recovery); err != nil || recovery.TargetBundleGeneration != "routes.p5.r1" {
+				t.Fatalf("recovery request target=%+v err=%v", recovery, err)
+			}
+			_ = json.NewEncoder(writer).Encode(edgeGroupRecoveryReceipt{Schema: edgeGroupRecoveryReceiptSchema,
+				GroupID: "edge-group-country-de", PublicationSequence: 11, RecoveryEpoch: 3, BundleGeneration: "routes",
+				PublishedBundleDigest: "sha256:" + strings.Repeat("4", 64), Authority: edgeActivationAuthority, PublicationEnabled: true})
+		default:
+			stagePosts++
+			operations = append(operations, "stage")
+			var staged edgeCandidateStageRequest
+			if err := json.NewDecoder(request.Body).Decode(&staged); err != nil {
+				t.Fatalf("decode staged request: %v", err)
+			}
+			_ = json.NewEncoder(writer).Encode(edgeCandidateStageReceipt{Schema: edgeCandidateReceiptSchema, GroupID: staged.GroupID,
+				CandidateEpoch: staged.ExpectedCandidateEpoch + 1, CandidateRecordDigest: "sha256:" + strings.Repeat("8", 64),
+				ReleaseRecordDigest: staged.ReleaseRecordDigest, WorkerSourceSHA: staged.WorkerSourceSHA, WorkerImageDigest: staged.WorkerImageDigest,
+				WorkerSlot: staged.TargetWorkerSlot, CurrentWorkerSlot: staged.ExpectedCurrentWorkerSlot,
+				CurrentPublishedBundleDigest: staged.ExpectedPublishedBundleDigest, CurrentPublicationSequence: staged.ExpectedPublicationSequence,
+				CurrentRecoveryEpoch: staged.ExpectedRecoveryEpoch, AllowDegradedPrevious: staged.AllowDegradedPrevious})
+		}
+	}))
+	defer server.Close()
+
+	runtime := kubectlEdgeGroupRuntime{client: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), authorityObject),
+		release: declarativerelease.PlanRelease{SupersedesFailedConfigSHA: strings.Repeat("f", 40), ExpectedPreviousConfigSHA: lkgSource,
+			ExpectedPreviousImageDigest: lkgImage, Workload: declarativerelease.Workload{Namespace: "fugue-system"}},
+		transition: declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-de", CandidateStageURL: server.URL + edgeCandidateStagePath, CandidateKeyring: keyringPath}}
+	target := declarativerelease.TargetIdentity{ConfigSHA: strings.Repeat("5", 40), ImageRef: "ghcr.io/yym68686/fugue-edge@sha256:" + strings.Repeat("6", 64)}
+	receipt, err := runtime.StageCandidate(context.Background(), edgeGroupState{ActiveSlot: "b", FrontActivation: &edgeActivationState{
+		Schema: edgeActivationStateSchema, GroupID: "edge-group-country-de", Generation: 138, ActiveSlot: "b", PreviousSlot: "a",
+		BundleGeneration: "routes.p5.r1", WorkerSourceCommit: lkgSource, WorkerImageDigest: lkgImage, Authority: edgeActivationAuthority}}, "a", target)
+	if err != nil || receipt.WorkerSlot != "a" || statusReads != 3 || stagePosts != 1 || fencePosts != 1 || recoveryPosts != 1 || strings.Join(operations, ",") != "fence,recover,stage" {
+		t.Fatalf("existing failed candidate recovery did not run before staging: receipt=%+v reads=%d stages=%d fences=%d recoveries=%d operations=%v err=%v",
+			receipt, statusReads, stagePosts, fencePosts, recoveryPosts, operations, err)
 	}
 }
 
