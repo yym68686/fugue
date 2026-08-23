@@ -458,10 +458,12 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 }
 
 // FenceGroupCandidateCAS retires only an inactive candidate that is explicitly
-// identified by its epoch and failed worker source. The bundle remains in the
-// bounded candidate history for audit and recovery, while the current pointer
-// is cleared so a subsequent worker atom can stage from the exact published
-// authority without inheriting a stale candidate epoch.
+// identified by its epoch and failed worker source. This also covers a stale
+// candidate pointer superseded by a later publication or LKG refresh. The
+// bundle remains in the bounded candidate history for audit and recovery,
+// while the current pointer is cleared so a subsequent worker atom can stage
+// from the exact published authority without inheriting a stale candidate
+// epoch.
 func (store *PersistentGroupStore) FenceGroupCandidateCAS(ctx context.Context, groupID string, expectedAuthoritySequence, expectedPublicationSequence, expectedRecoveryEpoch uint64, expectedPublishedDigest string, expectedCandidateEpoch uint64, expectedWorkerSourceSHA string) (GroupCandidateRecoveryReceipt, error) {
 	var receipt GroupCandidateRecoveryReceipt
 	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
@@ -469,7 +471,7 @@ func (store *PersistentGroupStore) FenceGroupCandidateCAS(ctx context.Context, g
 			return groupCandidateCASConflict("store_candidate_recovery_target_unavailable")
 		}
 		actualAuthoritySequence := uint64(len(state.AuthorityLedger))
-		if actualAuthoritySequence != expectedAuthoritySequence || state.Published.PublicationSequence != expectedPublicationSequence ||
+		if actualAuthoritySequence < expectedAuthoritySequence || state.Published.PublicationSequence != expectedPublicationSequence ||
 			state.Published.RecoveryEpoch != expectedRecoveryEpoch || state.Published.Digest != expectedPublishedDigest {
 			return groupCandidateCASConflict(fmt.Sprintf("store_candidate_recovery_authority_mismatch expected_ledger=%d actual_ledger=%d expected_publication=%d actual_publication=%d expected_recovery=%d actual_recovery=%d",
 				expectedAuthoritySequence, actualAuthoritySequence, expectedPublicationSequence, state.Published.PublicationSequence,
@@ -484,7 +486,7 @@ func (store *PersistentGroupStore) FenceGroupCandidateCAS(ctx context.Context, g
 			for index := len(state.CandidateHistory) - 1; index >= 0; index-- {
 				candidate := state.CandidateHistory[index]
 				if candidate.Epoch == expectedCandidateEpoch && candidate.WorkerSourceSHA == expectedWorkerSourceSHA &&
-					candidate.Epoch > state.Published.PublicationSequence && validatePersistentCandidateBinding(*state, state.GroupID, candidate) == nil {
+					validatePersistentCandidateBinding(*state, state.GroupID, candidate) == nil {
 					receipt = GroupCandidateRecoveryReceipt{
 						Schema: GroupCandidateRecoveryReceiptSchemaV1, GroupID: state.GroupID,
 						FencedCandidateEpoch: candidate.Epoch, FencedWorkerSourceSHA: candidate.WorkerSourceSHA,
@@ -498,7 +500,7 @@ func (store *PersistentGroupStore) FenceGroupCandidateCAS(ctx context.Context, g
 		}
 		candidate := *state.Candidate
 		if candidate.Epoch != expectedCandidateEpoch || candidate.WorkerSourceSHA != expectedWorkerSourceSHA ||
-			candidate.Epoch <= state.Published.PublicationSequence || validatePersistentCandidateBinding(*state, state.GroupID, candidate) != nil {
+			validatePersistentCandidateBinding(*state, state.GroupID, candidate) != nil {
 			return groupCandidateCASConflict("store_candidate_recovery_candidate_identity_mismatch")
 		}
 		retainReplacedCandidate(state, candidate.Epoch+1)

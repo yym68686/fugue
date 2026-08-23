@@ -14,7 +14,7 @@ import (
 func TestGroupCandidateRecoveryFencesOnlyExplicitFailedCandidate(t *testing.T) {
 	now := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
 	groupID := "edge-group-country-de"
-	store, _, candidate, authority := groupPromotionFixture(t, groupID, now)
+	store, signer, candidate, authority := groupPromotionFixture(t, groupID, now)
 	keyringDir := privateFixtureDir(t)
 	secret := bytes.Repeat([]byte{0x62}, 32)
 	writeGroupRecoveryFixture(t, keyringDir, groupID, secret, now.Add(time.Minute))
@@ -51,6 +51,23 @@ func TestGroupCandidateRecoveryFencesOnlyExplicitFailedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	refreshedAt := now.Add(16 * time.Minute)
+	if result, err := (GroupAuthorityPublisher{Store: store, Signer: signer}).RefreshPublishedLKG(context.Background(), groupID, refreshedAt); err != nil || result.Status != GroupAuthorityStatusPublished {
+		t.Fatalf("refresh published LKG: result=%+v err=%v", result, err)
+	}
+	authority, err = store.ReadGroupAuthority(context.Background(), groupID)
+	if err != nil || candidate.Epoch > authority.Published.PublicationSequence {
+		t.Fatalf("fixture candidate was not superseded by the refreshed publication: candidate=%+v authority=%+v err=%v", candidate, authority, err)
+	}
+	requestAuthoritySequence := authority.LedgerHead.Sequence
+	failed := GroupAuthorityLedgerEntry{Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Status: GroupAuthorityStatusFailed,
+		CandidateLedgerSequence: authority.Published.CandidateLedgerSequence, RouteIntentGeneration: "candidate-recovery-audit-tail",
+		LastPublishedBundleGeneration: authority.Published.Bundle.Generation, FailureCode: GroupAuthorityFailureSigning,
+		Authority: "edge-control", PublicationEnabled: true, RecordedAt: refreshedAt.Add(time.Minute)}
+	if _, err := store.AppendGroupAuthorityCAS(context.Background(), groupID, requestAuthoritySequence,
+		authority.Published.CandidateLedgerSequence, failed, nil); err != nil {
+		t.Fatalf("append publication-preserving audit tail: %v", err)
+	}
 	handler, err := NewGroupCandidateRecoveryHandler(GroupCandidateRecoveryHandlerConfig{
 		Store: store, GroupIDs: []string{groupID}, KeyringDir: keyringDir, Now: func() time.Time { return now.Add(time.Minute) },
 	})
@@ -59,7 +76,7 @@ func TestGroupCandidateRecoveryFencesOnlyExplicitFailedCandidate(t *testing.T) {
 	}
 	request := GroupCandidateRecoveryRequest{
 		Schema: GroupCandidateRecoveryRequestSchemaV1, KeyID: "recovery-de-1", GroupID: groupID,
-		ExpectedAuthoritySequence: authority.LedgerHead.Sequence, ExpectedPublicationSequence: authority.Published.PublicationSequence,
+		ExpectedAuthoritySequence: requestAuthoritySequence, ExpectedPublicationSequence: authority.Published.PublicationSequence,
 		ExpectedRecoveryEpoch: authority.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: authority.Published.Digest,
 		ExpectedCandidateEpoch: candidate.Epoch, ExpectedWorkerSourceSHA: candidate.WorkerSourceSHA,
 		IssuedAtUnix: now.Add(time.Minute).Unix(), ExpiresAtUnix: now.Add(2 * time.Minute).Unix(), Nonce: strings.Repeat("n", 24), Reason: "fence failed candidate before retry",
