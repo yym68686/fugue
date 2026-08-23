@@ -105,6 +105,88 @@ func TestStageCandidateRefreshesCASStateAfterSequenceConflict(t *testing.T) {
 	}
 }
 
+func TestStageCandidateRecoversPublishedLKGAfterSequenceConflict(t *testing.T) {
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("7", 64))
+	now := time.Now().UTC()
+	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
+	keyring := edgeCandidateKeyring{Schema: "edge-control-group-recovery-keyring/v1", Generation: 1,
+		GroupID: "edge-group-country-de", Keys: []edgeCandidateKey{{KeyID: "key-1",
+			Secret:        base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("s", 32))),
+			NotBeforeUnix: now.Add(-time.Hour).Unix(), NotAfterUnix: now.Add(time.Hour).Unix()}}}
+	rawKeyring, _ := json.Marshal(keyring)
+	if err := os.WriteFile(keyringPath, rawKeyring, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	statusReads := 0
+	stagePosts := 0
+	recoveryPosts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet:
+			statusReads++
+			publicationSequence, recoveryEpoch := uint64(10), uint64(2)
+			if statusReads >= 3 {
+				publicationSequence, recoveryEpoch = 11, 3
+			}
+			_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":%d,"candidate_epoch":7,"bundle_generation":"routes.p160.r1","published_bundle_digest":"sha256:%s","recovery_epoch":%d}`,
+				publicationSequence, strings.Repeat("4", 64), recoveryEpoch)
+		case request.URL.Path == edgeGroupRecoveryPath:
+			recoveryPosts++
+			var recovery edgeGroupRecoveryRequest
+			if err := json.NewDecoder(request.Body).Decode(&recovery); err != nil {
+				t.Errorf("decode recovery request: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if recovery.Schema != edgeGroupRecoverySchema || recovery.GroupID != "edge-group-country-de" ||
+				recovery.ExpectedPublicationSequence != 10 || recovery.ExpectedRecoveryEpoch != 2 ||
+				recovery.TargetBundleGeneration != "routes.p160.r1" || recovery.Signature == "" {
+				t.Errorf("recovery request is not bound to published LKG: %+v", recovery)
+			}
+			_ = json.NewEncoder(writer).Encode(edgeGroupRecoveryReceipt{Schema: edgeGroupRecoveryReceiptSchema,
+				GroupID: "edge-group-country-de", PublicationSequence: 11, RecoveryEpoch: 3,
+				BundleGeneration: "routes.p160.r1", PublishedBundleDigest: "sha256:" + strings.Repeat("4", 64),
+				Authority: edgeActivationAuthority, PublicationEnabled: true})
+		default:
+			stagePosts++
+			var staged edgeCandidateStageRequest
+			if err := json.NewDecoder(request.Body).Decode(&staged); err != nil {
+				t.Errorf("decode staged request: %v", err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if stagePosts == 1 {
+				writer.WriteHeader(http.StatusConflict)
+				_, _ = writer.Write([]byte(`{"schema":"edge-control-error/v1","error":"sequence_conflict"}`))
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(edgeCandidateStageReceipt{Schema: edgeCandidateReceiptSchema,
+				GroupID: staged.GroupID, CandidateEpoch: staged.ExpectedCandidateEpoch + 1,
+				CandidateRecordDigest: "sha256:" + strings.Repeat("8", 64), ReleaseRecordDigest: staged.ReleaseRecordDigest,
+				WorkerSourceSHA: staged.WorkerSourceSHA, WorkerImageDigest: staged.WorkerImageDigest,
+				WorkerSlot: staged.TargetWorkerSlot, CurrentWorkerSlot: staged.ExpectedCurrentWorkerSlot,
+				CurrentPublishedBundleDigest: staged.ExpectedPublishedBundleDigest,
+				CurrentPublicationSequence:   staged.ExpectedPublicationSequence, CurrentRecoveryEpoch: staged.ExpectedRecoveryEpoch,
+				AllowDegradedPrevious: staged.AllowDegradedPrevious})
+		}
+	}))
+	defer server.Close()
+
+	runtime := kubectlEdgeGroupRuntime{client: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		release: declarativerelease.PlanRelease{SupersedesFailedConfigSHA: strings.Repeat("f", 40), Workload: declarativerelease.Workload{Namespace: "fugue-system"}},
+		transition: declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-de",
+			CandidateStageURL: server.URL + edgeCandidateStagePath, CandidateKeyring: keyringPath}}
+	target := declarativerelease.TargetIdentity{ConfigSHA: strings.Repeat("5", 40),
+		ImageRef: "ghcr.io/yym68686/fugue-edge@sha256:" + strings.Repeat("6", 64)}
+	receipt, err := runtime.StageCandidate(context.Background(), edgeGroupState{ActiveSlot: "a"}, "b", target)
+	if err != nil || receipt.WorkerSlot != "b" || statusReads != 3 || stagePosts != 2 || recoveryPosts != 1 ||
+		receipt.CurrentPublicationSequence != 11 || receipt.CurrentRecoveryEpoch != 3 {
+		t.Fatalf("candidate recovery flow did not settle: receipt=%+v reads=%d stages=%d recoveries=%d err=%v", receipt, statusReads, stagePosts, recoveryPosts, err)
+	}
+}
+
 func TestPostEdgeCandidateStageDoesNotReflectUntrustedErrorBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")

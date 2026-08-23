@@ -32,18 +32,21 @@ import (
 )
 
 const (
-	edgeActivationStateSchema   = "edge-front-group-activation/v1"
-	edgeActivationReceiptSchema = "edge-front-group-activation-receipt/v1"
-	edgeActivationAuthority     = "edge-control"
-	edgeActivationInitialize    = "initialize"
-	edgeActivationPromote       = "promote"
-	edgeActivationRollback      = "rollback"
-	edgeGroupAuthoritySource    = "edge-control-group-authority/v1"
-	edgeCandidateStagePath      = "/v1/authority/group-worker-candidates"
-	edgeCandidateStageSchema    = "edge-control-group-worker-candidate-request/v1"
-	edgeCandidateReceiptSchema  = "edge-control-group-worker-candidate-receipt/v1"
-	edgeCandidateStageAttempts  = 4
-	edgeCandidateStageRetryBase = 200 * time.Millisecond
+	edgeActivationStateSchema      = "edge-front-group-activation/v1"
+	edgeActivationReceiptSchema    = "edge-front-group-activation-receipt/v1"
+	edgeActivationAuthority        = "edge-control"
+	edgeActivationInitialize       = "initialize"
+	edgeActivationPromote          = "promote"
+	edgeActivationRollback         = "rollback"
+	edgeGroupAuthoritySource       = "edge-control-group-authority/v1"
+	edgeCandidateStagePath         = "/v1/authority/group-worker-candidates"
+	edgeGroupRecoveryPath          = "/v1/recovery/group-publications"
+	edgeCandidateStageSchema       = "edge-control-group-worker-candidate-request/v1"
+	edgeCandidateReceiptSchema     = "edge-control-group-worker-candidate-receipt/v1"
+	edgeGroupRecoverySchema        = "edge-control-group-recovery-request/v1"
+	edgeGroupRecoveryReceiptSchema = "edge-control-group-recovery-receipt/v1"
+	edgeCandidateStageAttempts     = 4
+	edgeCandidateStageRetryBase    = 200 * time.Millisecond
 )
 
 var (
@@ -116,7 +119,33 @@ type edgeCandidateStageStatus struct {
 	CurrentPublicationSequence uint64 `json:"current_publication_sequence"`
 	CandidateEpoch             uint64 `json:"candidate_epoch"`
 	PublishedBundleDigest      string `json:"published_bundle_digest"`
+	BundleGeneration           string `json:"bundle_generation"`
 	RecoveryEpoch              uint64 `json:"recovery_epoch"`
+}
+
+type edgeGroupRecoveryRequest struct {
+	Schema                      string `json:"schema"`
+	KeyID                       string `json:"key_id"`
+	GroupID                     string `json:"edge_group_id"`
+	ExpectedPublicationSequence uint64 `json:"expected_publication_sequence"`
+	ExpectedRecoveryEpoch       uint64 `json:"expected_recovery_epoch"`
+	TargetBundleGeneration      string `json:"target_bundle_generation"`
+	IssuedAtUnix                int64  `json:"issued_at_unix"`
+	ExpiresAtUnix               int64  `json:"expires_at_unix"`
+	Nonce                       string `json:"nonce"`
+	Reason                      string `json:"reason"`
+	Signature                   string `json:"signature"`
+}
+
+type edgeGroupRecoveryReceipt struct {
+	Schema                string `json:"schema"`
+	GroupID               string `json:"edge_group_id"`
+	PublicationSequence   uint64 `json:"publication_sequence"`
+	RecoveryEpoch         uint64 `json:"recovery_epoch"`
+	BundleGeneration      string `json:"bundle_generation"`
+	PublishedBundleDigest string `json:"published_bundle_digest"`
+	Authority             string `json:"authority"`
+	PublicationEnabled    bool   `json:"publication_enabled"`
 }
 
 type edgeCandidateKeyring struct {
@@ -489,6 +518,7 @@ func (runtime *kubectlEdgeGroupRuntime) StageStandby(ctx context.Context, before
 
 func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool) (edgeCandidateStageReceipt, error) {
 	var lastErr error
+	recoveredLKG := false
 	for attempt := 0; attempt < edgeCandidateStageAttempts; attempt++ {
 		receipt, err := runtime.stageCandidateOnce(ctx, before, inactiveSlot, target, standbyOnly)
 		if err == nil {
@@ -498,6 +528,16 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 			return edgeCandidateStageReceipt{}, err
 		}
 		lastErr = err
+		if !recoveredLKG && !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "" {
+			status, statusErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
+			if statusErr == nil {
+				if recoveryErr := runtime.refreshPublishedLKG(ctx, status); recoveryErr != nil {
+					lastErr = errors.Join(lastErr, fmt.Errorf("refresh published Edge Control LKG after candidate sequence conflict: %w", recoveryErr))
+				} else {
+					recoveredLKG = true
+				}
+			}
+		}
 		if attempt+1 == edgeCandidateStageAttempts {
 			break
 		}
@@ -515,6 +555,68 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 		}
 	}
 	return edgeCandidateStageReceipt{}, lastErr
+}
+
+func (runtime *kubectlEdgeGroupRuntime) refreshPublishedLKG(ctx context.Context, status edgeCandidateStageStatus) error {
+	if status.GroupID != runtime.transition.GroupID || status.CurrentPublicationSequence == 0 || status.BundleGeneration == "" || status.PublishedBundleDigest == "" {
+		return errors.New("Edge Control published LKG status is incomplete")
+	}
+	endpoint, err := edgeGroupRecoveryURL(runtime.transition.CandidateStageURL)
+	if err != nil {
+		return err
+	}
+	nonceRaw := make([]byte, 24)
+	if _, err := rand.Read(nonceRaw); err != nil {
+		return errors.New("generate Edge Control recovery nonce")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	request := edgeGroupRecoveryRequest{
+		Schema: edgeGroupRecoverySchema, GroupID: runtime.transition.GroupID,
+		ExpectedPublicationSequence: status.CurrentPublicationSequence, ExpectedRecoveryEpoch: status.RecoveryEpoch,
+		TargetBundleGeneration: status.BundleGeneration, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(2 * time.Minute).Unix(),
+		Nonce: base64.RawURLEncoding.EncodeToString(nonceRaw), Reason: "refresh exact published LKG before degraded Worker candidate staging",
+	}
+	if err := signEdgeGroupRecoveryRequest(runtime.transition.CandidateKeyring, &request, now); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(httpRequest)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	if err != nil {
+		return err
+	}
+	if response.StatusCode == http.StatusConflict {
+		latest, latestErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
+		if latestErr == nil && latest.BundleGeneration == status.BundleGeneration && latest.CurrentPublicationSequence > status.CurrentPublicationSequence && latest.RecoveryEpoch > status.RecoveryEpoch {
+			return nil
+		}
+		return errors.New("Edge Control recovery CAS conflict")
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("Edge Control recovery HTTP %d", response.StatusCode)
+	}
+	var receipt edgeGroupRecoveryReceipt
+	if err := decodeEdgeCandidateStageResponse(body, &receipt); err != nil {
+		return fmt.Errorf("decode Edge Control recovery receipt: %w", err)
+	}
+	if receipt.Schema != edgeGroupRecoveryReceiptSchema || receipt.GroupID != status.GroupID || receipt.BundleGeneration != status.BundleGeneration ||
+		receipt.PublicationSequence <= status.CurrentPublicationSequence || receipt.RecoveryEpoch != status.RecoveryEpoch+1 ||
+		receipt.PublishedBundleDigest == "" || receipt.Authority != edgeActivationAuthority || !receipt.PublicationEnabled {
+		return errors.New("Edge Control recovery receipt is not bound to the published LKG")
+	}
+	return nil
 }
 
 func (runtime *kubectlEdgeGroupRuntime) stageCandidateOnce(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool) (edgeCandidateStageReceipt, error) {
@@ -828,6 +930,17 @@ func decodeEdgeCandidateStageResponse(raw []byte, value any) error {
 	return nil
 }
 
+func edgeGroupRecoveryURL(stageURL string) (string, error) {
+	parsed, err := url.Parse(stageURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", errors.New("edge-control candidate stage URL is invalid")
+	}
+	parsed.Path = edgeGroupRecoveryPath
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
 func validEdgeControlErrorCode(value string) bool {
 	if value == "" || len(value) > 64 {
 		return false
@@ -877,6 +990,45 @@ func signEdgeCandidateStageRequest(filename string, request *edgeCandidateStageR
 		return nil
 	}
 	return errors.New("edge candidate staging key is inactive")
+}
+
+func signEdgeGroupRecoveryRequest(filename string, request *edgeGroupRecoveryRequest, now time.Time) error {
+	if request == nil {
+		return errors.New("edge-control recovery request is nil")
+	}
+	raw, err := os.ReadFile(filename)
+	if err != nil || len(raw) == 0 || len(raw) > 64<<10 {
+		return errors.New("read edge-control recovery keyring")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var keyring edgeCandidateKeyring
+	if decoder.Decode(&keyring) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+		keyring.Schema != "edge-control-group-recovery-keyring/v1" || keyring.Generation == 0 || keyring.GroupID != request.GroupID {
+		return errors.New("edge-control recovery keyring is invalid")
+	}
+	for _, key := range keyring.Keys {
+		if key.Revoked || now.Before(time.Unix(key.NotBeforeUnix, 0)) || !now.Before(time.Unix(key.NotAfterUnix, 0)) {
+			continue
+		}
+		secret, decodeErr := base64.RawURLEncoding.DecodeString(key.Secret)
+		if decodeErr != nil || len(secret) < 32 || len(secret) > 64 {
+			zeroEdgeCandidateSecret(secret)
+			return errors.New("edge-control recovery key is invalid")
+		}
+		request.KeyID, request.Signature = key.KeyID, ""
+		signingRaw, encodeErr := json.Marshal(request)
+		if encodeErr != nil {
+			zeroEdgeCandidateSecret(secret)
+			return encodeErr
+		}
+		mac := hmac.New(sha256.New, secret)
+		_, _ = mac.Write(signingRaw)
+		request.Signature = base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		zeroEdgeCandidateSecret(secret)
+		return nil
+	}
+	return errors.New("edge-control recovery key is inactive")
 }
 
 func zeroEdgeCandidateSecret(value []byte) {
