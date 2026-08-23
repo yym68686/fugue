@@ -410,6 +410,34 @@ func TestServingAuthorityWitnessAllowsCommittedFailedAuthorityWithExactLKGFront(
 	}
 }
 
+func TestServingAuthorityWitnessAllowsCommittedFailedAuthorityOnPreviousLKGSlot(t *testing.T) {
+	current := releaseguardian.CurrentAuthority{
+		APIVersion:                releaseguardian.APIVersion,
+		Kind:                      releaseguardian.CurrentAuthorityKind,
+		GroupID:                   "edge-group-country-de",
+		CurrentRecordDigest:       "sha256:" + strings.Repeat("1", 64),
+		AuthorityEpoch:            137,
+		CurrentFrontGeneration:    137,
+		CurrentBundleGeneration:   "routes.p15765.r151",
+		CurrentWorkerSlot:         "a",
+		CurrentWorkerSourceSHA:    strings.Repeat("2", 40),
+		CurrentWorkerImageDigest:  "sha256:" + strings.Repeat("3", 64),
+		PreviousRecordDigest:      "sha256:" + strings.Repeat("6", 64),
+		PreviousWorkerSlot:        "b",
+		PreviousFrontGeneration:   136,
+		PreviousBundleGeneration:  "routes.p15710.r150",
+		PreviousWorkerSourceSHA:   strings.Repeat("4", 40),
+		PreviousWorkerImageDigest: "sha256:" + strings.Repeat("5", 64),
+	}
+	health := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 138,
+		BundleGeneration: "routes.p15778.r151", WorkerSourceCommit: strings.Repeat("4", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("5", 64), RouteAuthority: edgeActivationAuthority}
+	witness, err := edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(edgeGroupState{ActiveSlot: "b", FrontHealth: map[string]edgeFrontHealth{"node": health}}, current, "edge-group-country-de", strings.Repeat("a", 20), strings.Repeat("b", 20), true, strings.Repeat("4", 40), "sha256:"+strings.Repeat("5", 64))
+	if err != nil || witness == nil || witness.WorkerSlot != "b" {
+		t.Fatalf("previous-slot LKG recovery was rejected: witness=%+v err=%v", witness, err)
+	}
+}
+
 func TestServingAuthorityWitnessUsesWorkerActivationEvidenceWhenFrontMetadataLags(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),

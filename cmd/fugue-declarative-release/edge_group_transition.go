@@ -825,6 +825,9 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 			return nil, errors.New("edge activation evidence disagrees with serving slot")
 		}
 		if before.ActiveSlot != string(current.CurrentWorkerSlot) {
+			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			if !allowDegradedRecovery || !edgeFrontHealthMatchesDegradedServingAuthority(health, current) {
 				return nil, fmt.Errorf("Guardian current authority does not match the serving Front slot: %s",
 					edgeDegradedServingAuthorityMismatch(health, current, allowDegradedRecovery))
@@ -844,6 +847,11 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 			before.FrontActivation != nil, before.ActiveSlot, current.CurrentWorkerSlot)
 	}
 	if before.ActiveSlot != string(current.CurrentWorkerSlot) {
+		for _, health := range before.FrontHealth {
+			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
+		}
 		if !allowDegradedRecovery || current.CurrentWorkerSourceSHA == "" || current.CurrentWorkerImageDigest == "" ||
 			current.CurrentBundleGeneration == "" {
 			var health edgeFrontHealth
@@ -893,7 +901,7 @@ func edgeFrontHealthMatchesExpectedLKG(health edgeFrontHealth, current releasegu
 		current.CurrentWorkerSourceSHA == expectedSourceSHA && current.CurrentWorkerImageDigest == expectedImageDigest {
 		return false
 	}
-	if !health.ActivationPresent || health.ActiveSlot != string(current.CurrentWorkerSlot) ||
+	if !health.ActivationPresent || (health.ActiveSlot != string(current.CurrentWorkerSlot) && health.ActiveSlot != string(current.PreviousWorkerSlot)) ||
 		health.RouteAuthority != edgeActivationAuthority || health.Generation < current.CurrentFrontGeneration ||
 		health.WorkerSourceCommit != expectedSourceSHA || health.WorkerImageDigest != expectedImageDigest {
 		return false
