@@ -70,7 +70,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"needs: [prepush, component-build, deploy_schema]",
 		"needs: [prepush, component-build, deploy_schema, deploy_release_guardian]",
 		"needs: [prepush, component-build, deploy_api]",
-		"needs: [prepush, component-build, deploy_api, deploy_edge_control]",
+		"needs: [prepush, component-build, deploy_api, deploy_edge_control, deploy_release_guardian]",
 		"edge_control_matrix",
 		"edge_client_matrix",
 		"edge_worker_matrix",

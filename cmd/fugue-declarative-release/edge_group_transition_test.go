@@ -438,6 +438,22 @@ func TestServingAuthorityWitnessAllowsCommittedFailedAuthorityOnPreviousLKGSlot(
 	}
 }
 
+func TestServingAuthorityWitnessAllowsProductionCommittedAuthorityRollback(t *testing.T) {
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:2d1944caf69c601c014df2daf6bae7193aebd7297f827294162971ebace28074",
+		CurrentWorkerSlot: releaseguardian.AuthoritySlotA, CurrentFrontGeneration: 137,
+		CurrentBundleGeneration: "edgegroupbundle_80ecacaded8a8a2f0442ac723b4aeef5743bde9d9fead155142d84a41392aa36.p22941.r390",
+		CurrentWorkerSourceSHA:  "11990495e58630ae634405da4d48dbf6a52687cd", CurrentWorkerImageDigest: "sha256:e0dd98a24e5160e61abb0d6f5faa13c910628c7a4946953636f36af65cd8c6ee",
+		PreviousRecordDigest: "sha256:fe4cf177860b6de7203de55f7100776b08b42007496c04c37e39f05fb48acdde", PreviousWorkerSlot: releaseguardian.AuthoritySlotB,
+		PreviousFrontGeneration: 136, PreviousBundleGeneration: "edgegroupbundle_80ecacaded8a8a2f0442ac723b4aeef5743bde9d9fead155142d84a41392aa36.p19710.r328",
+		PreviousWorkerSourceSHA: "791c67f0824831364c29797425dc7652622672d7", PreviousWorkerImageDigest: "sha256:1a1b1abbf00be60001f59ae99e33e542dfc9ef1064b59d5dd688e361e9f1bfd6", AuthorityEpoch: 12638}
+	health := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 138, BundleGeneration: current.PreviousBundleGeneration,
+		WorkerSourceCommit: current.PreviousWorkerSourceSHA, WorkerImageDigest: current.PreviousWorkerImageDigest, RouteAuthority: edgeActivationAuthority}
+	if witness, err := edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(edgeGroupState{ActiveSlot: "b", FrontHealth: map[string]edgeFrontHealth{"node": health}}, current, current.GroupID, "authority-uid", "77188752", true, current.PreviousWorkerSourceSHA, current.PreviousWorkerImageDigest); err != nil || witness == nil {
+		t.Fatalf("production rollback authority witness was rejected: witness=%+v err=%v", witness, err)
+	}
+}
+
 func TestServingAuthorityWitnessUsesWorkerActivationEvidenceWhenFrontMetadataLags(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),

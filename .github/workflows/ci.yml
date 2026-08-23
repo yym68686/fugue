@@ -277,8 +277,8 @@ jobs:
         with: {component: '${{ matrix.component }}', registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_edge_worker:
-    needs: [prepush, component-build, deploy_api, deploy_edge_control]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control.result == 'success' || needs.deploy_edge_control.result == 'skipped') && needs.prepush.outputs.edge_worker_count != '0' }}
+    needs: [prepush, component-build, deploy_api, deploy_edge_control, deploy_release_guardian]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control.result == 'success' || needs.deploy_edge_control.result == 'skipped') && (needs.deploy_release_guardian.result == 'success' || needs.deploy_release_guardian.result == 'skipped') && needs.prepush.outputs.edge_worker_count != '0' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
