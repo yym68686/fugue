@@ -29,9 +29,15 @@ func Classify(currentRecordDigest, targetRecordDigest string, health HealthSnaps
 	if health.Local.State == HealthUnknown || health.Dependency.State == HealthUnknown || health.Route.State == HealthUnknown {
 		return Decision{State: StateRecoveryRequired, Reason: joinedReason("health evidence is incomplete", health)}
 	}
-	if currentRecordDigest == targetRecordDigest && health.Dependency.State == HealthHealthy && health.Route.State == HealthHealthy &&
-		inactiveDaemonSetRollout(health.Local.Reason) {
-		return Decision{State: StateStable, Reason: "serving LKG authority is healthy; inactive candidate rollout remains fenced"}
+	if currentRecordDigest == targetRecordDigest && inactiveDaemonSetRollout(health.Local.Reason) {
+		if health.Dependency.State == HealthHealthy && health.Route.State == HealthHealthy {
+			return Decision{State: StateStable, Reason: "serving LKG authority is healthy; inactive candidate rollout remains fenced"}
+		}
+		// The inactive candidate is not the serving workload. Keep the stable
+		// LKG selected while exposing an independent dependency/route failure;
+		// rolling back the stable monitor here would incorrectly walk its older
+		// LKG and create a false predecessor mismatch.
+		return Decision{State: StateDegraded, Reason: joinedReason("serving LKG authority is degraded; inactive candidate rollout remains fenced", health)}
 	}
 	if health.Local.State == HealthDegraded {
 		return Decision{
