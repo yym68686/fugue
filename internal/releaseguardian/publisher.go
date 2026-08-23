@@ -326,6 +326,10 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 						if status.TargetRecordDigest == expected.RecordDigest && status.CurrentRecordDigest == expected.RecordDigest {
 							return status, nil
 						}
+					case StateDegraded:
+						if degradedRouteTargetTerminal(status, expected) {
+							return status, nil
+						}
 					case StateRecoveryRequired:
 						if status.TargetRecordDigest == expected.RecordDigest {
 							return status, fmt.Errorf("Guardian release ended in %s: %s", status.State, status.Reason)
@@ -351,6 +355,13 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 		case <-ticker.C:
 		}
 	}
+}
+
+func degradedRouteTargetTerminal(status ReleaseStatus, expected DesiredRelease) bool {
+	return status.State == StateDegraded && status.TargetRecordDigest == expected.RecordDigest &&
+		status.CurrentRecordDigest == expected.RecordDigest && status.LastSuccessfulLKG == expected.RecordDigest &&
+		status.Health.Local.State == HealthHealthy && status.Health.Dependency.State == HealthHealthy &&
+		status.Health.Route.State == HealthDegraded
 }
 
 func (store *KubeStore) SetDesiredToLKG(ctx context.Context, snapshot Snapshot) error {

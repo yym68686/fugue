@@ -476,6 +476,8 @@ func TestWaitForTerminalRecognizesSuccessAndExactLKGCompensation(t *testing.T) {
 		Dependency: LayerHealth{State: HealthHealthy, EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano)},
 		Route:      LayerHealth{State: HealthHealthy, EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano)},
 	}
+	degradedRouteHealth := health
+	degradedRouteHealth.Route.State = HealthDegraded
 	for _, test := range []struct {
 		name       string
 		status     ReleaseStatus
@@ -487,6 +489,13 @@ func TestWaitForTerminalRecognizesSuccessAndExactLKGCompensation(t *testing.T) {
 			name: "stable target",
 			status: ReleaseStatus{Component: key.Component, Group: key.Group, State: StateStable, CurrentRecordDigest: testDigest,
 				TargetRecordDigest: testDigest, LastSuccessfulLKG: otherDigest, Health: health, Reason: "forward verified", ObservedAt: now.Format(time.RFC3339Nano)},
+			desired: candidate,
+		},
+		{
+			name: "accepted target with preserved route degradation",
+			status: ReleaseStatus{Component: key.Component, Group: key.Group, State: StateDegraded, CurrentRecordDigest: testDigest,
+				TargetRecordDigest: testDigest, LastSuccessfulLKG: testDigest, Health: degradedRouteHealth,
+				Reason: "independent route canary is degraded", ObservedAt: now.Format(time.RFC3339Nano)},
 			desired: candidate,
 		},
 		{
@@ -521,6 +530,33 @@ func TestWaitForTerminalRecognizesSuccessAndExactLKGCompensation(t *testing.T) {
 				}
 			} else if waitErr != nil || got.StatusDigest != sealed.StatusDigest {
 				t.Fatalf("status=%+v err=%v", got, waitErr)
+			}
+		})
+	}
+}
+
+func TestDegradedRouteTargetTerminalRequiresExactAcceptedTarget(t *testing.T) {
+	key := Key{Component: "edge-control-de", Group: "de"}
+	expected := DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group, RecordDigest: testDigest, Generation: 2}
+	status := ReleaseStatus{Component: key.Component, Group: key.Group, State: StateDegraded,
+		CurrentRecordDigest: testDigest, TargetRecordDigest: testDigest, LastSuccessfulLKG: testDigest,
+		Health: HealthSnapshot{Local: LayerHealth{State: HealthHealthy}, Dependency: LayerHealth{State: HealthHealthy}, Route: LayerHealth{State: HealthDegraded}}}
+	if !degradedRouteTargetTerminal(status, expected) {
+		t.Fatal("exact accepted target with preserved route degradation was not terminal")
+	}
+	for name, mutate := range map[string]func(*ReleaseStatus){
+		"current":    func(value *ReleaseStatus) { value.CurrentRecordDigest = otherDigest },
+		"target":     func(value *ReleaseStatus) { value.TargetRecordDigest = otherDigest },
+		"lkg":        func(value *ReleaseStatus) { value.LastSuccessfulLKG = otherDigest },
+		"local":      func(value *ReleaseStatus) { value.Health.Local.State = HealthDegraded },
+		"dependency": func(value *ReleaseStatus) { value.Health.Dependency.State = HealthDegraded },
+		"route":      func(value *ReleaseStatus) { value.Health.Route.State = HealthHealthy },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := status
+			mutate(&candidate)
+			if degradedRouteTargetTerminal(candidate, expected) {
+				t.Fatalf("non-exact degraded target was accepted: %+v", candidate)
 			}
 		})
 	}
