@@ -22,7 +22,12 @@ import (
 
 const (
 	persistentGroupStateSchemaV1          = "edge-control-persistent-group-state/v1"
-	maxPersistentGroupStateBytes          = 64 << 20
+	// Group authority keeps append-only shadow and publication evidence. A
+	// busy group can reach the old 64 MiB ceiling before an LKG recovery gets
+	// a chance to append its bounded audit record, stranding serving traffic.
+	// Keep enough headroom for recovery while retaining the existing bounded
+	// compaction behavior.
+	maxPersistentGroupStateBytes          = 96 << 20
 	targetPersistentGroupStateBytes       = 48 << 20
 	retainedGroupCandidateBundles         = 8
 	persistentGroupStateDigestPlaceholder = "sha256:" + "0000000000000000000000000000000000000000000000000000000000000000"
