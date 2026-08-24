@@ -19,7 +19,10 @@ jobs:
       - name: Checkout requested commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.expected_sha }}
+          ref: ${{ github.ref }}
+
+      - name: Verify exact source commit
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
