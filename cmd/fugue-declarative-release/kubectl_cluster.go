@@ -58,8 +58,12 @@ var emergencyOwnershipManagers = map[string]bool{
 	"kubectl-set":   true,
 }
 
+// before-first-apply is Kubernetes' synthetic owner for fields that predate
+// managedFields. It receives the same scalar-only CAS transfer as Helm; it is
+// never authorized to expand the reviewed emergency ownership allowlist.
 var legacyOwnershipManagers = map[string]bool{
-	"helm": true,
+	"helm":               true,
+	"before-first-apply": true,
 }
 
 func emergencyOwnershipManager(manager string) bool {

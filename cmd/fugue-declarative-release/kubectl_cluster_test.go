@@ -1811,6 +1811,33 @@ func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 	}
 }
 
+func TestBeforeFirstApplyOwnershipTransfersOnlyAllowlistedScalars(t *testing.T) {
+	pointer := "/metadata/annotations/fugue.pro~1artifact-receipt-digest"
+	desired := map[string]any{"metadata": map[string]any{
+		"uid": "control-uid", "resourceVersion": "42",
+		"annotations": map[string]any{"fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("a", 64)},
+	}}
+	live := deepCopyJSONMap(t, desired)
+	metadata := mapField(live, "metadata")
+	metadata["managedFields"] = []any{map[string]any{
+		"manager": "before-first-apply", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
+	}}
+	mapField(metadata, "annotations")["fugue.pro/artifact-receipt-digest"] = "sha256:" + strings.Repeat("b", 64)
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: ` + ssaFieldForPointer(pointer))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "", applyErr); err != nil {
+		t.Fatalf("synthetic pre-SSA ownership blocked an exact release scalar: %v", err)
+	}
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{pointer}, "", applyErr)
+	if err != nil || !found || len(patch) != 4 || patch[3]["path"] != pointer {
+		t.Fatalf("synthetic pre-SSA scalar transfer is invalid: patch=%v found=%v err=%v", patch, found, err)
+	}
+	outside := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: .spec.replicas`)
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "", outside); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
+		t.Fatalf("synthetic pre-SSA ownership expanded beyond the allowlist: %v", err)
+	}
+}
+
 func TestEmergencyOwnershipVerificationAcceptsOpaqueKubernetesListSelectors(t *testing.T) {
 	allowed := []string{"/spec/template/spec/containers[name=edge]/image"}
 	metadata := map[string]any{"managedFields": []any{
