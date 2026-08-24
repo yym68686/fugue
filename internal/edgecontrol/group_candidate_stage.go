@@ -91,8 +91,10 @@ type GroupCandidateStageRequest struct {
 type GroupCandidateStageReceipt struct {
 	Schema                       string `json:"schema"`
 	GroupID                      string `json:"edge_group_id"`
+	AuthoritySequence            uint64 `json:"authority_sequence"`
 	CandidateEpoch               uint64 `json:"candidate_epoch"`
 	CandidateRecordDigest        string `json:"candidate_record_digest"`
+	CandidateBundleGeneration    string `json:"candidate_bundle_generation"`
 	ReleaseRecordDigest          string `json:"release_record_digest"`
 	WorkerSourceSHA              string `json:"worker_source_sha"`
 	WorkerImageDigest            string `json:"worker_image_digest"`
@@ -388,8 +390,10 @@ func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request Group
 
 func groupCandidateStageReceipt(candidate GroupCandidateBundle, request GroupCandidateStageRequest) GroupCandidateStageReceipt {
 	return GroupCandidateStageReceipt{Schema: GroupCandidateStageReceiptSchemaV1, GroupID: candidate.GroupID,
-		CandidateEpoch: candidate.Epoch, CandidateRecordDigest: candidate.Record.RecordDigest, ReleaseRecordDigest: candidate.ReleaseRecordDigest,
-		WorkerSourceSHA: candidate.WorkerSourceSHA, WorkerImageDigest: candidate.WorkerImageDigest, WorkerSlot: candidate.WorkerSlot,
+		AuthoritySequence: candidate.AuthorityLedgerSequence, CandidateEpoch: candidate.Epoch,
+		CandidateRecordDigest: candidate.Record.RecordDigest, CandidateBundleGeneration: candidate.Bundle.Generation,
+		ReleaseRecordDigest: candidate.ReleaseRecordDigest,
+		WorkerSourceSHA:     candidate.WorkerSourceSHA, WorkerImageDigest: candidate.WorkerImageDigest, WorkerSlot: candidate.WorkerSlot,
 		CurrentWorkerSlot: candidate.CurrentWorkerSlot, CurrentPublishedBundleDigest: candidate.CurrentRecord.BundleDigest,
 		CurrentPublicationSequence: uint64(candidate.CurrentRecord.Epoch), CurrentRecoveryEpoch: request.ExpectedRecoveryEpoch,
 		AllowDegradedPrevious: candidate.AllowDegradedPrevious, StandbyOnly: candidate.StandbyOnly, OrdinaryTrafficMutation: false}

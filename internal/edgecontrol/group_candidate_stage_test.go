@@ -90,6 +90,7 @@ func TestWorkerCandidateStageBindsExactReleaseAndPreservesCurrentAuthority(t *te
 	var receipt GroupCandidateStageReceipt
 	if json.Unmarshal(recorder.Body.Bytes(), &receipt) != nil || receipt.Schema != GroupCandidateStageReceiptSchemaV1 ||
 		receipt.GroupID != groupID || receipt.WorkerSlot != "b" || receipt.CurrentWorkerSlot != "a" ||
+		receipt.AuthoritySequence != authority.LedgerHead.Sequence || receipt.CandidateBundleGeneration != authority.Published.Bundle.Generation ||
 		receipt.WorkerSourceSHA != request.WorkerSourceSHA || receipt.WorkerImageDigest != request.WorkerImageDigest ||
 		receipt.ReleaseRecordDigest != request.ReleaseRecordDigest || receipt.OrdinaryTrafficMutation ||
 		receipt.CurrentPublishedBundleDigest != authority.Published.Digest {
