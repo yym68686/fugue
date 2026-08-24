@@ -392,6 +392,9 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	for _, pod := range candidatePods {
 		compensationCandidates = append(compensationCandidates, pod)
 	}
+	if err := promoteEdgeActivation(ctx, runtime, before, transition, inactiveSlot, candidatePods, target, desiredDigest); err != nil {
+		return compensate(fmt.Errorf("promote edge activation after candidate health: %w", err))
+	}
 	frontHealth, err := runtime.WaitFront(ctx, inactiveSlot, target.ConfigSHA, desiredDigest)
 	if err != nil {
 		return compensate(fmt.Errorf("wait Guardian authority switch: %w", err))
@@ -458,6 +461,62 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return errors.New("edge group activation did not converge to the promoted slot")
 	}
 	return nil
+}
+
+// promoteEdgeActivation is the only forward traffic-authority mutation in the
+// Edge group transition. The candidate Worker has already loaded and exposed
+// its signed bundle before this CAS, so the activation record can name the
+// exact immutable generation that Front must serve. Groups without an
+// activation witness are legacy/bootstrap layouts; they retain their prior
+// externally managed handoff until initialized by the control plane.
+func promoteEdgeActivation(ctx context.Context, runtime edgeGroupTransitionRuntime, before edgeGroupState, transition declarativerelease.EdgeGroupABTransition, targetSlot string, candidates map[string]edgeGroupPod, target declarativerelease.TargetIdentity, imageDigest string) error {
+	if before.FrontActivation == nil {
+		return nil
+	}
+	if before.FrontActivation.GroupID != transition.GroupID || before.FrontActivation.Generation == 0 ||
+		before.FrontActivation.ActiveSlot != before.ActiveSlot || before.FrontActivation.BundleGeneration == "" {
+		return errors.New("pre-transition activation witness is invalid")
+	}
+	if targetSlot != "a" && targetSlot != "b" {
+		return errors.New("candidate activation target slot is invalid")
+	}
+	var bundleGeneration string
+	for _, node := range sortedEdgeNodes(candidates) {
+		pod := candidates[node]
+		if !pod.Ready || pod.BundleGeneration == "" || pod.SourceCommit != target.ConfigSHA || pod.ImageRef == "" {
+			return errors.New("candidate Worker activation evidence is incomplete")
+		}
+		if bundleGeneration == "" {
+			bundleGeneration = pod.BundleGeneration
+		} else if bundleGeneration != pod.BundleGeneration {
+			return errors.New("candidate Worker bundle generations disagree")
+		}
+	}
+	if bundleGeneration == "" {
+		return errors.New("candidate Worker activation bundle generation is missing")
+	}
+	executor, err := runtime.SelectCASExecutor(ctx, candidatesInNodeOrder(candidates)...)
+	if err != nil {
+		return fmt.Errorf("select candidate activation CAS executor: %w", err)
+	}
+	request := edgeActivationRequest{
+		GroupID: transition.GroupID, ExpectedGeneration: before.FrontActivation.Generation,
+		ExpectedSlot: before.ActiveSlot, TargetSlot: targetSlot, BundleGeneration: bundleGeneration,
+		WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: imageDigest,
+		Operation: edgeActivationPromote, Reason: "promote verified edge group candidate",
+	}
+	if _, err := runtime.ActivationCAS(ctx, executor, request); err != nil {
+		return fmt.Errorf("candidate activation CAS: %w", err)
+	}
+	return nil
+}
+
+func candidatesInNodeOrder(candidates map[string]edgeGroupPod) []edgeGroupPod {
+	ordered := make([]edgeGroupPod, 0, len(candidates))
+	for _, node := range sortedEdgeNodes(candidates) {
+		ordered = append(ordered, candidates[node])
+	}
+	return ordered
 }
 
 // compensateEdgeActivation restores the activation pointer to the exact

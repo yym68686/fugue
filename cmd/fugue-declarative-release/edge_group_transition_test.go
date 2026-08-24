@@ -849,6 +849,32 @@ func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 	}
 }
 
+func TestPromoteEdgeActivationUsesCandidateBundleEvidence(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	target := edgeTargetFixture("2", "b")
+	imageDigest := digestFromTarget(t, target)
+	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
+	before.FrontActivation = &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID,
+		Generation: 7, ActiveSlot: "a", BundleGeneration: "bundle-a", WorkerSourceCommit: old.ConfigSHA,
+		WorkerImageDigest: digestFromTarget(t, old), Authority: edgeActivationAuthority}
+	runtime := &fakeEdgeGroupRuntime{}
+	candidates := map[string]edgeGroupPod{"node-1": {Name: "candidate", NodeName: "node-1", SourceCommit: target.ConfigSHA,
+		ImageRef: target.ImageRef, BundleGeneration: "bundle-b", Ready: true}}
+	if err := promoteEdgeActivation(context.Background(), runtime, before, transition, "b", candidates, target, imageDigest); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.requests) != 1 {
+		t.Fatalf("activation requests=%+v, want one request", runtime.requests)
+	}
+	request := runtime.requests[0]
+	if request.ExpectedGeneration != 7 || request.ExpectedSlot != "a" || request.TargetSlot != "b" ||
+		request.BundleGeneration != "bundle-b" || request.WorkerSourceCommit != target.ConfigSHA || request.WorkerImageDigest != imageDigest ||
+		request.Operation != edgeActivationPromote {
+		t.Fatalf("activation request is not candidate-bound: %+v", request)
+	}
+}
+
 func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFails(t *testing.T) {
 	transition := edgeTransitionFixture()
 	old := edgeTargetFixture("1", "a")
