@@ -393,6 +393,18 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	for _, pod := range candidatePods {
 		compensationCandidates = append(compensationCandidates, pod)
 	}
+	// A failed successor can leave the serving slot on an older worker binary
+	// that rejects the renewed publication version for its exact LKG bundle.
+	// Restore code execution on that slot before changing traffic authority;
+	// the activation pointer and route artifact remain the existing LKG.
+	if release.SupersedesFailedConfigSHA != "" && edgeActiveWorkerNeedsCodeRecovery(before) {
+		if err := runtime.ApplyCandidateResources(ctx, activeSlot); err != nil {
+			return compensate(fmt.Errorf("apply active Worker recovery code: %w", err))
+		}
+		if _, err := runtime.Roll(ctx, edgeWorkerName(transition, activeSlot), target, true, true); err != nil {
+			return compensate(fmt.Errorf("roll active Worker recovery code: %w", err))
+		}
+	}
 	if err := promoteEdgeActivation(ctx, runtime, before, transition, inactiveSlot, candidatePods, target, desiredDigest); err != nil {
 		return compensate(fmt.Errorf("promote edge activation after candidate health: %w", err))
 	}
@@ -462,6 +474,15 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return errors.New("edge group activation did not converge to the promoted slot")
 	}
 	return nil
+}
+
+func edgeActiveWorkerNeedsCodeRecovery(state edgeGroupState) bool {
+	for _, pod := range edgeWorkerPods(state, state.ActiveSlot) {
+		if !pod.Ready || !edgePodHasGroupAuthority(pod) {
+			return true
+		}
+	}
+	return false
 }
 
 // promoteEdgeActivation is the only forward traffic-authority mutation in the

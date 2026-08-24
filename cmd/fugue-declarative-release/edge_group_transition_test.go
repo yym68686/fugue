@@ -875,6 +875,54 @@ func TestPromoteEdgeActivationUsesCandidateBundleEvidence(t *testing.T) {
 	}
 }
 
+func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	failed := edgeTargetFixture("2", "b")
+	target := edgeTargetFixture("3", "c")
+	beforeHealth := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 4,
+		BundleGeneration: "bundle-a", WorkerSourceCommit: failed.ConfigSHA, WorkerImageDigest: digestFromTarget(t, failed), RouteAuthority: edgeActivationAuthority}
+	before := edgeStateFixture("a", failed, beforeHealth)
+	active := before.WorkerA["node-1"]
+	active.Ready = false
+	active.RouteBundleSource = ""
+	before.WorkerA["node-1"] = active
+	before.FrontActivation = &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID,
+		Generation: 4, ActiveSlot: "a", BundleGeneration: "bundle-a", WorkerSourceCommit: failed.ConfigSHA,
+		WorkerImageDigest: digestFromTarget(t, failed), Authority: edgeActivationAuthority, Operation: edgeActivationPromote}
+	finalHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 5,
+		BundleGeneration: "bundle-b", WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target), RouteAuthority: edgeActivationAuthority}
+	final := edgeStateFixture("b", target, finalHealth)
+	final.WorkerA = edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"}).WorkerA
+	runtime := &fakeEdgeGroupRuntime{
+		snapshots: []edgeGroupState{before, final},
+		rolls: map[string]map[string]edgeGroupPod{
+			transition.WorkerBName: final.WorkerB,
+			transition.WorkerAName: final.WorkerA,
+			transition.FrontName:   final.Front,
+		},
+		waits:           []map[string]edgeFrontHealth{{"node-1": finalHealth}},
+		declared:        map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
+		activationState: before.FrontActivation,
+		stageDegraded:   true,
+	}
+	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, SupersedesFailedConfigSHA: failed.ConfigSHA,
+		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
+	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
+		t.Fatal(err)
+	}
+	activeRecovery := []string{"apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName}
+	joined := strings.Join(runtime.calls, "\n")
+	for _, call := range activeRecovery {
+		if !strings.Contains(joined, call) {
+			t.Fatalf("active worker recovery call %q missing: %v", call, runtime.calls)
+		}
+	}
+	if activeIndex, promoteIndex := strings.Index(joined, "roll:"+transition.WorkerAName), strings.Index(joined, "cas:promote:b"); activeIndex < 0 || promoteIndex < 0 || activeIndex > promoteIndex {
+		t.Fatalf("active worker recovery did not precede promotion: %v", runtime.calls)
+	}
+}
+
 func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFails(t *testing.T) {
 	transition := edgeTransitionFixture()
 	old := edgeTargetFixture("1", "a")
