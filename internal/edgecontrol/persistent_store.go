@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	persistentGroupStateSchemaV1          = "edge-control-persistent-group-state/v1"
+	persistentGroupStateSchemaV1 = "edge-control-persistent-group-state/v1"
 	// Group authority keeps append-only shadow and publication evidence. A
 	// busy group can reach the old 64 MiB ceiling before an LKG recovery gets
 	// a chance to append its bounded audit record, stranding serving traffic.
