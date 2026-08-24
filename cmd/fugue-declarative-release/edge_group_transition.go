@@ -120,13 +120,17 @@ type edgeControlError struct {
 
 type edgeCandidateStageStatus struct {
 	GroupID                    string `json:"edge_group_id"`
+	Ready                      bool   `json:"ready"`
+	ServingHealthy             bool   `json:"serving_healthy"`
 	AuthoritySequence          uint64 `json:"authority_sequence"`
 	CurrentPublicationSequence uint64 `json:"current_publication_sequence"`
 	CandidateEpoch             uint64 `json:"candidate_epoch"`
 	CandidateWorkerSourceSHA   string `json:"candidate_worker_source_sha"`
+	PublicationDecision        string `json:"publication_decision"`
 	PublishedBundleDigest      string `json:"published_bundle_digest"`
 	BundleGeneration           string `json:"bundle_generation"`
 	RecoveryEpoch              uint64 `json:"recovery_epoch"`
+	LKGState                   string `json:"lkg_state"`
 }
 
 type edgeGroupRecoveryRequest struct {
@@ -393,6 +397,8 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	for _, pod := range candidatePods {
 		compensationCandidates = append(compensationCandidates, pod)
 	}
+	var frontPods map[string]edgeGroupPod
+	frontRecovered := false
 	// A failed successor can leave the serving slot on an older worker binary
 	// that rejects the renewed publication version for its exact LKG bundle.
 	// Restore code execution on that slot before changing traffic authority;
@@ -404,6 +410,19 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		if _, err := runtime.Roll(ctx, edgeWorkerName(transition, activeSlot), target, true, true); err != nil {
 			return compensate(fmt.Errorf("roll active Worker recovery code: %w", err))
 		}
+	}
+	// The Front process is part of the serving code path. Recover it before
+	// the activation CAS so an old binary cannot reject the new activation
+	// witness while WaitFront is proving the committed slot.
+	if release.SupersedesFailedConfigSHA != "" && edgeFrontNeedsCodeRecovery(before, target) {
+		if err := runtime.ApplyCandidateResources(ctx, transition.FrontName); err != nil {
+			return compensate(fmt.Errorf("apply Front recovery code: %w", err))
+		}
+		frontPods, err = runtime.Roll(ctx, transition.FrontName, target, false, true)
+		if err != nil {
+			return compensate(fmt.Errorf("roll Front recovery code: %w", err))
+		}
+		frontRecovered = true
 	}
 	if err := promoteEdgeActivation(ctx, runtime, before, transition, inactiveSlot, candidatePods, target, desiredDigest); err != nil {
 		return compensate(fmt.Errorf("promote edge activation after candidate health: %w", err))
@@ -419,9 +438,11 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	// after compensation.  In that explicitly superseding flow, allow the
 	// rollout helper to use immutable snapshot identity and replace that pod;
 	// ordinary promotions retain the strict ready-only read.
-	frontPods, err := runtime.Roll(ctx, transition.FrontName, target, true, release.SupersedesFailedConfigSHA != "")
-	if err != nil {
-		return compensate(fmt.Errorf("roll edge front after Guardian authority switch: %w", err))
+	if !frontRecovered {
+		frontPods, err = runtime.Roll(ctx, transition.FrontName, target, true, release.SupersedesFailedConfigSHA != "")
+		if err != nil {
+			return compensate(fmt.Errorf("roll edge front after Guardian authority switch: %w", err))
+		}
 	}
 	if err := runtime.WaitActiveWorkerAuthority(ctx, inactiveName, target); err != nil {
 		return compensate(fmt.Errorf("verify active edge worker authority: %w", err))
@@ -479,6 +500,15 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 func edgeActiveWorkerNeedsCodeRecovery(state edgeGroupState, target declarativerelease.TargetIdentity) bool {
 	for _, pod := range edgeWorkerPods(state, state.ActiveSlot) {
 		if !pod.Ready || !edgePodHasGroupAuthority(pod) || pod.SourceCommit != target.ConfigSHA || pod.ImageRef != target.ImageRef {
+			return true
+		}
+	}
+	return false
+}
+
+func edgeFrontNeedsCodeRecovery(state edgeGroupState, target declarativerelease.TargetIdentity) bool {
+	for _, pod := range state.Front {
+		if !edgePodMatchesTarget(pod, target) {
 			return true
 		}
 	}
@@ -890,10 +920,13 @@ func (runtime *kubectlEdgeGroupRuntime) servingLKGRecoveryTarget(ctx context.Con
 	if !targetVersionOK {
 		return "", false, errors.New("Front activation LKG publication version is invalid")
 	}
-	if status.BundleGeneration == targetBase {
+	if status.BundleGeneration == targetBase && status.PublicationDecision == "published" &&
+		status.LKGState == "current" && status.Ready && status.ServingHealthy {
 		// Edge Control already points at a newer publication of the exact
-		// immutable LKG family. Re-signing it again only extends the durable
-		// ledger write and can exhaust the Guardian recovery deadline.
+		// immutable LKG family and has proved it healthy. Re-signing it again
+		// only extends the durable ledger write and can exhaust the Guardian
+		// recovery deadline. A failed/unhealthy publication with the same base
+		// bundle must still take the controlled recovery path.
 		return "", false, nil
 	}
 	if status.CurrentPublicationSequence < targetSequence ||
