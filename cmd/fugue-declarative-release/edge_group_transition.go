@@ -50,6 +50,7 @@ const (
 	edgeCandidateRecoveryReceiptSchema = "edge-control-group-candidate-recovery-receipt/v1"
 	edgeCandidateStageAttempts         = 4
 	edgeCandidateStageRetryBase        = 200 * time.Millisecond
+	edgeGroupRecoveryHTTPTimeout       = 60 * time.Second
 )
 
 var (
@@ -797,7 +798,7 @@ func (runtime *kubectlEdgeGroupRuntime) recoverPublishedLKG(ctx context.Context,
 		return err
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(httpRequest)
+	response, err := (&http.Client{Timeout: edgeGroupRecoveryHTTPTimeout}).Do(httpRequest)
 	if err != nil {
 		if runtime.publishedLKGRefreshCommitted(ctx, status) {
 			return nil
