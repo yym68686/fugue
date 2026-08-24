@@ -258,7 +258,7 @@
         "template": {
           "metadata": {
             "annotations": {
-              "fugue.io/edge-heartbeat-fenced": "true",
+              "fugue.io/edge-heartbeat-fenced": "false",
               "fugue.pro/edge-worker-manifest-state": "materialization-ready",
               "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
             },
@@ -773,7 +773,7 @@
         "template": {
           "metadata": {
             "annotations": {
-              "fugue.io/edge-heartbeat-fenced": "true",
+              "fugue.io/edge-heartbeat-fenced": "false",
               "fugue.pro/edge-worker-manifest-state": "materialization-ready",
               "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
             },

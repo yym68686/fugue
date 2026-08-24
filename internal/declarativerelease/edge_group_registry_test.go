@@ -484,6 +484,44 @@ func TestEdgeWorkerTemplateSeparatesProcessLivenessFromServingReadiness(t *testi
 	}
 }
 
+func TestEdgeWorkerTemplateAllowsActiveSlotHeartbeats(t *testing.T) {
+	raw, err := os.ReadFile("../../internal/edge/component/resources.inventory-producer.group.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := edgeGroupFixture("gamma", "edge-group-metro-gamma")
+	materialized, err := MaterializeManifestTemplate(raw, group.Worker.ManifestVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := DecodeResourceSet(strings.NewReader(string(materialized)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, item := range set.Items {
+		if item["kind"] != "DaemonSet" {
+			continue
+		}
+		metadata, _ := item["metadata"].(map[string]any)
+		name := stringField(metadata, "name")
+		if name != group.Worker.Transition.EdgeGroupAB.WorkerAName && name != group.Worker.Transition.EdgeGroupAB.WorkerBName {
+			continue
+		}
+		spec, _ := item["spec"].(map[string]any)
+		template, _ := spec["template"].(map[string]any)
+		templateMetadata, _ := template["metadata"].(map[string]any)
+		annotations, _ := templateMetadata["annotations"].(map[string]any)
+		if stringField(annotations, "fugue.io/edge-heartbeat-fenced") == "true" {
+			t.Fatalf("worker %s permanently fences its active-slot heartbeat", name)
+		}
+		checked++
+	}
+	if checked != 2 {
+		t.Fatalf("checked %d edge worker templates, want 2", checked)
+	}
+}
+
 func TestEdgeWorkerTemplateBindsCurrentAndInactiveCandidateBundleSources(t *testing.T) {
 	raw, err := os.ReadFile("../../internal/edge/component/resources.inventory-producer.group.json")
 	if err != nil {
