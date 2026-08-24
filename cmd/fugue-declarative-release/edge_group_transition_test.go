@@ -173,7 +173,7 @@ func TestStageCandidateRecoversPublishedLKGAfterSequenceConflict(t *testing.T) {
 			}
 			_ = json.NewEncoder(writer).Encode(edgeGroupRecoveryReceipt{Schema: edgeGroupRecoveryReceiptSchema,
 				GroupID: "edge-group-country-de", PublicationSequence: 11, RecoveryEpoch: 3,
-				BundleGeneration: "routes.p160.r1", PublishedBundleDigest: "sha256:" + strings.Repeat("4", 64),
+				BundleGeneration: "routes", PublishedBundleDigest: "sha256:" + strings.Repeat("4", 64),
 				Authority: edgeActivationAuthority, PublicationEnabled: true})
 		default:
 			stagePosts++
@@ -252,11 +252,13 @@ func TestStageCandidateRecoversExistingFailedCandidateBeforeFirstStage(t *testin
 		case request.Method == http.MethodGet:
 			statusReads++
 			candidateEpoch, publicationSequence, recoveryEpoch := uint64(7), uint64(10), uint64(2)
+			bundleGeneration := "failed-routes"
 			if statusReads > 1 {
 				candidateEpoch, publicationSequence, recoveryEpoch = 0, 11, 3
+				bundleGeneration = "routes"
 			}
-			_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":%d,"candidate_epoch":%d,"candidate_worker_source_sha":%q,"bundle_generation":"routes","published_bundle_digest":"sha256:%s","recovery_epoch":%d}`,
-				publicationSequence, candidateEpoch, strings.Repeat("9", 40), strings.Repeat("4", 64), recoveryEpoch)
+			_, _ = fmt.Fprintf(writer, `{"edge_group_id":"edge-group-country-de","authority_sequence":12,"current_publication_sequence":%d,"candidate_epoch":%d,"candidate_worker_source_sha":%q,"bundle_generation":%q,"published_bundle_digest":"sha256:%s","recovery_epoch":%d}`,
+				publicationSequence, candidateEpoch, strings.Repeat("9", 40), bundleGeneration, strings.Repeat("4", 64), recoveryEpoch)
 		case request.URL.Path == edgeCandidateRecoveryPath:
 			fencePosts++
 			operations = append(operations, "fence")
@@ -301,6 +303,37 @@ func TestStageCandidateRecoversExistingFailedCandidateBeforeFirstStage(t *testin
 	if err != nil || receipt.WorkerSlot != "a" || statusReads != 3 || stagePosts != 1 || fencePosts != 1 || recoveryPosts != 1 || strings.Join(operations, ",") != "fence,recover,stage" {
 		t.Fatalf("existing failed candidate recovery did not run before staging: receipt=%+v reads=%d stages=%d fences=%d recoveries=%d operations=%v err=%v",
 			receipt, statusReads, stagePosts, fencePosts, recoveryPosts, operations, err)
+	}
+}
+
+func TestServingLKGRecoverySkipsAlreadyRenewedBundleFamily(t *testing.T) {
+	lkgSource, lkgImage := strings.Repeat("1", 40), "sha256:"+strings.Repeat("2", 64)
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 137, CurrentBundleGeneration: "routes.p10.r2", CurrentWorkerSourceSHA: strings.Repeat("c", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("d", 64), PreviousRecordDigest: "sha256:" + strings.Repeat("e", 64),
+		PreviousWorkerSlot: releaseguardian.AuthoritySlotB, PreviousFrontGeneration: 136,
+		PreviousBundleGeneration: "routes.p5.r1", PreviousWorkerSourceSHA: lkgSource, PreviousWorkerImageDigest: lkgImage, AuthorityEpoch: 23}
+	raw, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityObject := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]interface{}{"name": "fugue-current-authority-edge-group-country-de", "namespace": "fugue-system", "uid": "authority-uid", "resourceVersion": "41"},
+		"data":     map[string]interface{}{"authority.json": string(raw)},
+	}}
+	runtime := kubectlEdgeGroupRuntime{client: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), authorityObject),
+		release:    declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: lkgSource, ExpectedPreviousImageDigest: lkgImage, Workload: declarativerelease.Workload{Namespace: "fugue-system"}},
+		transition: declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-de"}}
+	before := edgeGroupState{ActiveSlot: "b", FrontActivation: &edgeActivationState{Schema: edgeActivationStateSchema,
+		GroupID: "edge-group-country-de", Generation: 138, ActiveSlot: "b", PreviousSlot: "a", BundleGeneration: "routes.p5.r1",
+		WorkerSourceCommit: lkgSource, WorkerImageDigest: lkgImage, Authority: edgeActivationAuthority}}
+	status := edgeCandidateStageStatus{GroupID: "edge-group-country-de", CurrentPublicationSequence: 11, CandidateEpoch: 7,
+		CandidateWorkerSourceSHA: strings.Repeat("9", 40), BundleGeneration: "routes", RecoveryEpoch: 3,
+		PublishedBundleDigest: "sha256:" + strings.Repeat("4", 64)}
+	if target, needed, err := runtime.servingLKGRecoveryTarget(context.Background(), before, status); err != nil || needed || target != "" {
+		t.Fatalf("already renewed LKG family requested another recovery: target=%q needed=%t err=%v", target, needed, err)
 	}
 }
 

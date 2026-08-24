@@ -849,7 +849,7 @@ func (runtime *kubectlEdgeGroupRuntime) recoverPublishedLKG(ctx context.Context,
 	}
 	targetBase, _, _, targetVersionOK := parseEdgePublicationVersion(targetGeneration)
 	receiptGeneration := targetGeneration
-	if targetVersionOK && targetBase == status.BundleGeneration {
+	if targetVersionOK {
 		receiptGeneration = targetBase
 	}
 	if receipt.Schema != edgeGroupRecoveryReceiptSchema || receipt.GroupID != status.GroupID || receipt.BundleGeneration != receiptGeneration ||
@@ -886,9 +886,15 @@ func (runtime *kubectlEdgeGroupRuntime) servingLKGRecoveryTarget(ctx context.Con
 		current.PreviousWorkerSourceSHA != runtime.release.ExpectedPreviousConfigSHA || current.PreviousWorkerImageDigest != runtime.release.ExpectedPreviousImageDigest {
 		return "", false, nil
 	}
-	_, targetSequence, targetRecovery, targetVersionOK := parseEdgePublicationVersion(before.FrontActivation.BundleGeneration)
+	targetBase, targetSequence, targetRecovery, targetVersionOK := parseEdgePublicationVersion(before.FrontActivation.BundleGeneration)
 	if !targetVersionOK {
 		return "", false, errors.New("Front activation LKG publication version is invalid")
+	}
+	if status.BundleGeneration == targetBase {
+		// Edge Control already points at a newer publication of the exact
+		// immutable LKG family. Re-signing it again only extends the durable
+		// ledger write and can exhaust the Guardian recovery deadline.
+		return "", false, nil
 	}
 	if status.CurrentPublicationSequence < targetSequence ||
 		(status.CurrentPublicationSequence == targetSequence && status.RecoveryEpoch <= targetRecovery) {
