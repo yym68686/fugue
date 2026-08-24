@@ -56,7 +56,8 @@ func Classify(currentRecordDigest, targetRecordDigest string, health HealthSnaps
 
 func inactiveDaemonSetRollout(reason string) bool {
 	reason = strings.TrimSpace(reason)
-	return strings.HasPrefix(reason, "health daemonset/") && strings.Contains(reason, " rollout is incomplete ")
+	return (strings.HasPrefix(reason, "health daemonset/") && strings.Contains(reason, " rollout is incomplete ")) ||
+		strings.HasPrefix(reason, "rollout is incomplete ")
 }
 
 func stableIdentityDrift(reason string) bool {
