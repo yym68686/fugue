@@ -629,6 +629,7 @@ func TestServingAuthorityWitnessOmitsLegacyUnboundFront(t *testing.T) {
 type fakeEdgeGroupRuntime struct {
 	snapshots       []edgeGroupState
 	rolls           map[string]map[string]edgeGroupPod
+	rollTargets     map[string]declarativerelease.TargetIdentity
 	waits           []map[string]edgeFrontHealth
 	calls           []string
 	requests        []edgeActivationRequest
@@ -681,10 +682,13 @@ func (fake *fakeEdgeGroupRuntime) DeclaredTarget(name string) (declarativereleas
 	return target, nil
 }
 
-func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, _ declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool) (map[string]edgeGroupPod, error) {
+func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool) (map[string]edgeGroupPod, error) {
 	fake.calls = append(fake.calls, "roll:"+name)
 	fake.rollAuthority = append(fake.rollAuthority, requireGroupAuthority)
 	fake.rollUnready = append(fake.rollUnready, replaceUnready)
+	if fake.rollTargets != nil {
+		fake.rollTargets[name] = target
+	}
 	value, exists := fake.rolls[name]
 	if !exists {
 		return nil, fmt.Errorf("unexpected roll %s", name)
@@ -940,6 +944,7 @@ func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *tes
 	old := edgeTargetFixture("1", "a")
 	failed := edgeTargetFixture("2", "b")
 	target := edgeTargetFixture("3", "c")
+	frontTarget := edgeTargetFixture("4", "front")
 	beforeHealth := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 4,
 		BundleGeneration: "bundle-a", WorkerSourceCommit: failed.ConfigSHA, WorkerImageDigest: digestFromTarget(t, failed), RouteAuthority: edgeActivationAuthority}
 	before := edgeStateFixture("a", failed, beforeHealth)
@@ -953,6 +958,11 @@ func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *tes
 	finalHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 5,
 		BundleGeneration: "bundle-b", WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target), RouteAuthority: edgeActivationAuthority}
 	final := edgeStateFixture("b", target, finalHealth)
+	for node, pod := range final.Front {
+		pod.SourceCommit = frontTarget.ConfigSHA
+		pod.ImageRef = frontTarget.ImageRef
+		final.Front[node] = pod
+	}
 	final.WorkerA = edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"}).WorkerA
 	runtime := &fakeEdgeGroupRuntime{
 		snapshots: []edgeGroupState{before, final},
@@ -962,7 +972,8 @@ func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *tes
 			transition.FrontName:   final.Front,
 		},
 		waits:           []map[string]edgeFrontHealth{{"node-1": finalHealth}},
-		declared:        map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
+		declared:        map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: frontTarget},
+		rollTargets:     make(map[string]declarativerelease.TargetIdentity),
 		activationState: before.FrontActivation,
 		stageDegraded:   true,
 	}
@@ -980,6 +991,9 @@ func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *tes
 	}
 	if activeIndex, promoteIndex := strings.Index(joined, "roll:"+transition.WorkerAName), strings.Index(joined, "cas:promote:b"); activeIndex < 0 || promoteIndex < 0 || activeIndex > promoteIndex {
 		t.Fatalf("active worker recovery did not precede promotion: %v", runtime.calls)
+	}
+	if got := runtime.rollTargets[transition.FrontName]; got != frontTarget {
+		t.Fatalf("Front recovery used Worker target: got=%+v want=%+v", got, frontTarget)
 	}
 }
 

@@ -349,6 +349,10 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	if err != nil {
 		return fmt.Errorf("capture edge group prewrite state: %w", err)
 	}
+	frontTarget, err := runtime.DeclaredTarget(transition.FrontName)
+	if err != nil {
+		return fmt.Errorf("read declared edge Front target: %w", err)
+	}
 	activeSlot := before.ActiveSlot
 	inactiveSlot := otherEdgeSlot(activeSlot)
 	inactiveName := edgeWorkerName(transition, inactiveSlot)
@@ -418,11 +422,11 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	// The Front process is part of the serving code path. Recover it before
 	// the activation CAS so an old binary cannot reject the new activation
 	// witness while WaitFront is proving the committed slot.
-	if release.SupersedesFailedConfigSHA != "" && edgeFrontNeedsCodeRecovery(before, target) {
+	if release.SupersedesFailedConfigSHA != "" && edgeFrontNeedsCodeRecovery(before, frontTarget) {
 		if err := runtime.ApplyCandidateResources(ctx, transition.FrontName); err != nil {
 			return compensate(fmt.Errorf("apply Front recovery code: %w", err))
 		}
-		frontPods, err = runtime.Roll(ctx, transition.FrontName, target, false, true)
+		frontPods, err = runtime.Roll(ctx, transition.FrontName, frontTarget, false, true)
 		if err != nil {
 			return compensate(fmt.Errorf("roll Front recovery code: %w", err))
 		}
@@ -443,7 +447,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	// rollout helper to use immutable snapshot identity and replace that pod;
 	// ordinary promotions retain the strict ready-only read.
 	if !frontRecovered {
-		frontPods, err = runtime.Roll(ctx, transition.FrontName, target, true, release.SupersedesFailedConfigSHA != "")
+		frontPods, err = runtime.Roll(ctx, transition.FrontName, frontTarget, true, release.SupersedesFailedConfigSHA != "")
 		if err != nil {
 			return compensate(fmt.Errorf("roll edge front after Guardian authority switch: %w", err))
 		}
@@ -482,7 +486,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	if err != nil {
 		return fmt.Errorf("capture final edge group state: %w", err)
 	}
-	if !edgePodsMatchTarget(final.Front, target) || !edgePodsMatchTarget(edgeWorkerPods(final, inactiveSlot), target) {
+	if !edgePodsMatchTarget(final.Front, frontTarget) || !edgePodsMatchTarget(edgeWorkerPods(final, inactiveSlot), target) {
 		return errors.New("edge group did not converge candidate current authority")
 	}
 	if standbyConverged && !edgePodsMatchTarget(edgeWorkerPods(final, activeSlot), previousTarget) {
