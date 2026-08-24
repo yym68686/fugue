@@ -695,6 +695,7 @@ func (s *Service) LoadCache() error {
 
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /livez", s.handleLivez)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /edge/bundle", s.handleBundle)
 	mux.HandleFunc("GET /edge/tls/ask", s.handleTLSAsk)
@@ -919,6 +920,13 @@ func (s *Service) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		code = http.StatusServiceUnavailable
 	}
 	httpx.WriteJSON(w, code, status)
+}
+
+// handleLivez reports process liveness independently of route readiness. A
+// stale or temporarily unavailable route bundle must not cause Kubernetes to
+// restart a worker that can still serve its signed local LKG.
+func (s *Service) handleLivez(w http.ResponseWriter, _ *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "live"})
 }
 
 func (s *Service) handleBundle(w http.ResponseWriter, r *http.Request) {

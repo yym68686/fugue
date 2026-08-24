@@ -374,7 +374,7 @@ spec:
             timeoutSeconds: 3
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: health
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -607,7 +607,7 @@ spec:
             timeoutSeconds: 3
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: http
             initialDelaySeconds: 30
             periodSeconds: 10

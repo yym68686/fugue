@@ -1586,6 +1586,26 @@ func TestSyncOnceWithoutCacheIsUnhealthyWhenAPIUnavailable(t *testing.T) {
 	}
 }
 
+func TestLivezRemainsHealthyWhenRouteReadinessFails(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{
+		CachePath: filepath.Join(t.TempDir(), "routes-cache.json"),
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncError(errors.New("route bundle unavailable"))
+
+	recorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected livez status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	ready := httptest.NewRecorder()
+	service.Handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if ready.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected healthz to remain not ready, got %d body=%s", ready.Code, ready.Body.String())
+	}
+}
+
 func TestSyncErrorsAndLogsRedactEdgeToken(t *testing.T) {
 	t.Parallel()
 

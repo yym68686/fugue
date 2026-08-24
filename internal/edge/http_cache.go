@@ -399,7 +399,7 @@ func edgeCachePathLooksLikeHTMLDocument(path string) bool {
 		return false
 	case lower == "/graphql" || strings.HasPrefix(lower, "/graphql/"):
 		return false
-	case lower == "/healthz" || lower == "/readyz" || lower == "/metrics":
+	case lower == "/healthz" || lower == "/livez" || lower == "/readyz" || lower == "/metrics":
 		return false
 	case strings.HasPrefix(lower, "/_next/"):
 		return false
