@@ -354,6 +354,11 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return fmt.Errorf("read declared edge Front target: %w", err)
 	}
 	activeSlot := before.ActiveSlot
+	activeName := edgeWorkerName(transition, activeSlot)
+	activeTarget, err := runtime.DeclaredTarget(activeName)
+	if err != nil {
+		return fmt.Errorf("read declared active edge Worker target: %w", err)
+	}
 	inactiveSlot := otherEdgeSlot(activeSlot)
 	inactiveName := edgeWorkerName(transition, inactiveSlot)
 	desiredDigest, err := immutableDigestFromRef(target.ImageRef)
@@ -411,11 +416,11 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	// that rejects the renewed publication version for its exact LKG bundle.
 	// Restore code execution on that slot before changing traffic authority;
 	// the activation pointer and route artifact remain the existing LKG.
-	if release.SupersedesFailedConfigSHA != "" && edgeActiveWorkerNeedsCodeRecovery(before, target) {
+	if release.SupersedesFailedConfigSHA != "" && edgeActiveWorkerNeedsCodeRecovery(before, activeTarget) {
 		if err := runtime.ApplyCandidateResources(ctx, activeSlot); err != nil {
 			return compensate(fmt.Errorf("apply active Worker recovery code: %w", err))
 		}
-		if _, err := runtime.Roll(ctx, edgeWorkerName(transition, activeSlot), target, true, true); err != nil {
+		if _, err := runtime.Roll(ctx, activeName, activeTarget, true, true); err != nil {
 			return compensate(fmt.Errorf("roll active Worker recovery code: %w", err))
 		}
 	}

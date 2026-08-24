@@ -992,6 +992,9 @@ func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *tes
 	if activeIndex, promoteIndex := strings.Index(joined, "roll:"+transition.WorkerAName), strings.Index(joined, "cas:promote:b"); activeIndex < 0 || promoteIndex < 0 || activeIndex > promoteIndex {
 		t.Fatalf("active worker recovery did not precede promotion: %v", runtime.calls)
 	}
+	if got := runtime.rollTargets[transition.WorkerAName]; got != old {
+		t.Fatalf("active Worker recovery ignored declared LKG target: got=%+v want=%+v", got, old)
+	}
 	if got := runtime.rollTargets[transition.FrontName]; got != frontTarget {
 		t.Fatalf("Front recovery used Worker target: got=%+v want=%+v", got, frontTarget)
 	}
