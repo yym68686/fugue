@@ -62,11 +62,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 			if got := usResources["requests"].(map[string]any)["cpu"]; got != "100m" {
 				t.Fatalf("US Control CPU request=%v, want 100m", got)
 			}
-			if got := usResources["limits"].(map[string]any)["memory"]; got != "1Gi" {
-				t.Fatalf("US Control memory limit=%v, want 1Gi", got)
+			if got := usResources["limits"].(map[string]any)["memory"]; got != "2Gi" {
+				t.Fatalf("US Control memory limit=%v, want 2Gi", got)
 			}
-			if got := usResources["requests"].(map[string]any)["memory"]; got != "256Mi" {
-				t.Fatalf("US Control memory request=%v, want 256Mi", got)
+			if got := usResources["requests"].(map[string]any)["memory"]; got != "512Mi" {
+				t.Fatalf("US Control memory request=%v, want 512Mi", got)
 			}
 			copyUS := cloneJSONMap(t, usItems[index])
 			copyContainer := copyUS["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
@@ -117,11 +117,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	const lkgSHA = "63eed68216095bea6aa780299a227fd0c60f9281"
-	if intent.Generation != 27 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
+	const lkgSHA = "9253d52ead439783432bec879ef2f987910af5fe"
+	if intent.Generation != 30 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:0e867ba02ddc556bf87d6fefd610b02081370377e4c2b12b2592c24178773fca" ||
-		intent.SupersedesFailedConfigSHA != "" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
+		intent.ExpectedPreviousImageDigest != "sha256:b45f31923fab7bff378a519a73789e34f8997a0f51b4ab7468d46c1981e694b0" ||
+		intent.SupersedesFailedConfigSHA != "066c52d07f93462fd6859ff14d19b9544df1f595" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
 	registry, err := MergeEdgeGroupRegistry(base, edge)
@@ -133,9 +133,10 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 26
-	prior.SupersedesFailedConfigSHA = ""
-	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior}, nil)
+	prior.Generation = 29
+	failed := prior
+	failed.SupersedesFailedConfigSHA = "08da56200afa1ef18705855b9d59ac90e84187fc"
+	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior}, nil, map[string]Intent{intent.SupersedesFailedConfigSHA: failed})
 	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" {
 		t.Fatalf("US Edge Control prerequisite planner expanded: releases=%+v err=%v", bound.Releases, err)
 	}
