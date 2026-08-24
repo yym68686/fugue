@@ -25,6 +25,8 @@ import (
 const (
 	maxInventoryProducerResponseBytes = 64 << 10
 	maxInventoryProducerTokenBytes    = 64 << 10
+	inventoryProducerRequestAttempts  = 3
+	inventoryProducerRetryDelay       = 500 * time.Millisecond
 )
 
 type InventoryProducerConfig struct {
@@ -140,6 +142,17 @@ func newInventoryProducerHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+type inventoryProducerTransportError struct {
+	operation string
+	cause     error
+}
+
+func (err *inventoryProducerTransportError) Error() string {
+	return fmt.Sprintf("Edge inventory producer %s transport failed: %v", err.operation, err.cause)
+}
+
+func (err *inventoryProducerTransportError) Unwrap() error { return err.cause }
+
 func (s *Service) startInventoryProducerLoop(ctx context.Context) {
 	if s == nil || !s.InventoryProducer.enabled() {
 		return
@@ -178,6 +191,29 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 	if err := validateInventoryProducerConfig(s.InventoryProducer, edgeConfig); err != nil {
 		return err
 	}
+	// A heartbeat write may queue behind edge-control's durable authority CAS.
+	// Retry the complete transaction so an ambiguous POST timeout first reads a
+	// fresh cursor instead of replaying a sequence that may already be stored.
+	for attempt := 0; attempt < inventoryProducerRequestAttempts; attempt++ {
+		err = s.inventoryHeartbeatAttempt(ctx, edgeConfig, status)
+		var transportErr *inventoryProducerTransportError
+		if err == nil || !errors.As(err, &transportErr) || attempt+1 == inventoryProducerRequestAttempts {
+			return err
+		}
+		timer := time.NewTimer(inventoryProducerRetryDelay * time.Duration(attempt+1))
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return err
+}
+
+func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig config.EdgeConfig, status Status) error {
 	activation, exists, err := edgegroupfront.ReadActivationState(s.InventoryProducer.ActivationStateFile)
 	if err != nil || !exists {
 		return errors.New("Edge inventory producer activation state is unavailable")
@@ -249,7 +285,7 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 	request.Header.Set("Accept", "application/json")
 	response, err := s.InventoryProducerHTTPClient.Do(request)
 	if err != nil {
-		return errors.New("Edge inventory producer heartbeat transport failed")
+		return &inventoryProducerTransportError{operation: "heartbeat", cause: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
@@ -316,7 +352,7 @@ func (s *Service) readInventoryProducerCursor(ctx context.Context, groupID strin
 	request.Header.Set("Accept", "application/json")
 	response, err := s.InventoryProducerHTTPClient.Do(request)
 	if err != nil {
-		return 0, 0, errors.New("Edge inventory producer cursor transport failed")
+		return 0, 0, &inventoryProducerTransportError{operation: "cursor", cause: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {

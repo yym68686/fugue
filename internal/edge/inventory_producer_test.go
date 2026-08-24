@@ -360,6 +360,93 @@ func TestInventoryProducerTransportFailureDoesNotExposeProjectedIdentity(t *test
 	}
 }
 
+func TestInventoryProducerRetriesTransportFailureWithFreshCursor(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := "edge-group-country-de"
+	nodeID := "edge-node-de-1"
+	sourceCommit := strings.Repeat("f", 40)
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotB, sourceCommit)
+	keyringFile, _ := writeInventoryProducerKeyringFixture(t, groupID)
+	producer := InventoryProducerConfig{
+		URL:                 "http://edge-control-de.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		AuthorityService:    "edge-control-de",
+		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
+	}
+	service := NewServiceWithEdgeSources(config.EdgeConfig{
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-de-b", EdgeReleaseEpoch: sourceCommit,
+		HTTPTimeout: time.Second,
+	}, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
+	var postAttempts atomic.Int32
+	var getAttempts atomic.Int32
+	var firstHeartbeat edgecontrol.GroupInventoryHeartbeat
+	service.InventoryProducerHTTPClient = &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			attempt := getAttempts.Add(1)
+			return inventoryJSONResponse(http.StatusServiceUnavailable, edgecontrol.AuthorityGroupStatus{
+				GroupID: groupID, InventorySequence: 10 + uint64(attempt), InventoryProducerGeneration: 8 + uint64(attempt),
+			}), nil
+		}
+		var heartbeat edgecontrol.GroupInventoryHeartbeat
+		if err := json.NewDecoder(request.Body).Decode(&heartbeat); err != nil {
+			t.Fatal(err)
+		}
+		attempt := postAttempts.Add(1)
+		if attempt == 1 {
+			firstHeartbeat = heartbeat
+			return nil, &url.Error{Op: "Post", URL: request.URL.String(), Err: errors.New("timeout")}
+		}
+		if request.Header.Get("Authorization") == "" || heartbeat.ExpectedSequence != firstHeartbeat.ExpectedSequence+1 ||
+			heartbeat.ProducerGeneration != firstHeartbeat.ProducerGeneration+1 || heartbeat.Nonce == firstHeartbeat.Nonce {
+			t.Fatalf("retried heartbeat did not use a fresh authority cursor: first=%+v retry=%+v", firstHeartbeat, heartbeat)
+		}
+		return inventoryJSONResponse(http.StatusCreated, edgecontrol.GroupInventoryHeartbeatReceipt{
+			Schema: edgecontrol.GroupInventoryHeartbeatReceiptSchemaV1, GroupID: groupID, Sequence: 13,
+			Generation: "inventory-server-generation", InventoryDigest: "sha256:" + strings.Repeat("a", 64),
+			Authority: "edge-control", Publication: true, ProducerNodeID: nodeID, ProducerGeneration: 11,
+		}), nil
+	})}
+	service.mu.Lock()
+	service.snapshot.Healthy = true
+	service.snapshot.Status = "healthy"
+	service.mu.Unlock()
+
+	if err := service.InventoryHeartbeatOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if getAttempts.Load() != 2 || postAttempts.Load() != 2 || service.Status().InventoryHeartbeatGeneration != 11 {
+		t.Fatalf("heartbeat retry did not converge: gets=%d posts=%d status=%+v", getAttempts.Load(), postAttempts.Load(), service.Status())
+	}
+}
+
+func TestInventoryProducerDoesNotRetryHTTPFailure(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := "edge-group-country-de"
+	nodeID := "edge-node-de-1"
+	sourceCommit := strings.Repeat("1", 40)
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, sourceCommit)
+	keyringFile, _ := writeInventoryProducerKeyringFixture(t, groupID)
+	service := NewServiceWithEdgeSources(config.EdgeConfig{
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-de-a", EdgeReleaseEpoch: sourceCommit,
+		HTTPTimeout: time.Second,
+	}, RouteBundleSourceConfig{}, InventoryProducerConfig{
+		URL:              "http://edge-control-de.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		AuthorityService: "edge-control-de", IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
+	}, log.New(io.Discard, "", 0))
+	var attempts atomic.Int32
+	service.InventoryProducerHTTPClient = &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			return inventoryJSONResponse(http.StatusServiceUnavailable, edgecontrol.AuthorityGroupStatus{GroupID: groupID}), nil
+		}
+		attempts.Add(1)
+		return inventoryJSONResponse(http.StatusServiceUnavailable, map[string]string{"error": "store_unavailable"}), nil
+	})}
+
+	err := service.InventoryHeartbeatOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "returned status 503") || attempts.Load() != 1 {
+		t.Fatalf("HTTP failure retry behavior is invalid: err=%v attempts=%d", err, attempts.Load())
+	}
+}
+
 func TestInventoryProducerUsesExplicitAuthorityServiceNotCountryDerivedName(t *testing.T) {
 	groupID := "edge-group-country-de"
 	producer := InventoryProducerConfig{
