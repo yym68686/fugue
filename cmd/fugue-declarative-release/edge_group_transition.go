@@ -390,7 +390,11 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	if err := runtime.ApplyCandidateResources(ctx, inactiveSlot); err != nil {
 		return compensate(err)
 	}
-	candidatePods, err := runtime.Roll(ctx, inactiveName, target, true, release.SupersedesFailedConfigSHA != "")
+	// A superseding recovery candidate is intentionally allowed to prove its
+	// immutable bundle before it owns group authority. The current publication
+	// may still be degraded until the old active Worker is recovered below.
+	candidateRequireAuthority := release.SupersedesFailedConfigSHA == ""
+	candidatePods, err := runtime.Roll(ctx, inactiveName, target, candidateRequireAuthority, release.SupersedesFailedConfigSHA != "")
 	if err != nil {
 		return compensate(fmt.Errorf("roll inactive edge slot %s: %w", inactiveSlot, err))
 	}

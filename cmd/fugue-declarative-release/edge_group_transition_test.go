@@ -904,6 +904,9 @@ func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 	if got, want := fmt.Sprint(runtime.rollUnready), "[true true true true]"; got != want {
 		t.Fatalf("failed successor replace-unready gates=%s want=%s", got, want)
 	}
+	if got, want := fmt.Sprint(runtime.rollAuthority), "[false true false true]"; got != want {
+		t.Fatalf("failed successor authority gates=%s want=%s", got, want)
+	}
 }
 
 func TestPromoteEdgeActivationUsesCandidateBundleEvidence(t *testing.T) {
