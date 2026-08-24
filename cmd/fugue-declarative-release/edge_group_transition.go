@@ -397,7 +397,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	// that rejects the renewed publication version for its exact LKG bundle.
 	// Restore code execution on that slot before changing traffic authority;
 	// the activation pointer and route artifact remain the existing LKG.
-	if release.SupersedesFailedConfigSHA != "" && edgeActiveWorkerNeedsCodeRecovery(before) {
+	if release.SupersedesFailedConfigSHA != "" && edgeActiveWorkerNeedsCodeRecovery(before, target) {
 		if err := runtime.ApplyCandidateResources(ctx, activeSlot); err != nil {
 			return compensate(fmt.Errorf("apply active Worker recovery code: %w", err))
 		}
@@ -476,9 +476,9 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	return nil
 }
 
-func edgeActiveWorkerNeedsCodeRecovery(state edgeGroupState) bool {
+func edgeActiveWorkerNeedsCodeRecovery(state edgeGroupState, target declarativerelease.TargetIdentity) bool {
 	for _, pod := range edgeWorkerPods(state, state.ActiveSlot) {
-		if !pod.Ready || !edgePodHasGroupAuthority(pod) {
+		if !pod.Ready || !edgePodHasGroupAuthority(pod) || pod.SourceCommit != target.ConfigSHA || pod.ImageRef != target.ImageRef {
 			return true
 		}
 	}

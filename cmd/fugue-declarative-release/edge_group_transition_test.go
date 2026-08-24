@@ -844,7 +844,7 @@ func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 	if got := final.WorkerA["node-1"].SourceCommit; got != old.ConfigSHA {
 		t.Fatalf("previous authority slot changed from LKG: %s", got)
 	}
-	if got, want := fmt.Sprint(runtime.rollUnready), "[true true true]"; got != want {
+	if got, want := fmt.Sprint(runtime.rollUnready), "[true true true true]"; got != want {
 		t.Fatalf("failed successor replace-unready gates=%s want=%s", got, want)
 	}
 }
