@@ -39,7 +39,7 @@ func run(args []string, output io.Writer) error {
 
 func runContext(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|repair-monitor|restore-monitor|reconcile|install-monitor-record> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ...")
 	}
 	switch args[0] {
 	case "plan":
@@ -66,8 +66,10 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		return runReconcile(args, output)
 	case "install-monitor-record":
 		return runInstallMonitorRecord(args, output)
+	case "adopt-committed-monitor":
+		return runAdoptCommittedMonitorContext(ctx, args, output)
 	default:
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|repair-monitor|restore-monitor|reconcile|install-monitor-record> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ...")
 	}
 }
 

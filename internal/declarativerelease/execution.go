@@ -115,6 +115,14 @@ type Cluster interface {
 	VerifyOwnershipConverged(context.Context, PlanRelease, []byte) error
 }
 
+// CommittedForwardReconciler verifies a transition whose authority transaction
+// committed even though the original executor did not produce a verified
+// terminal receipt. Implementations must be read-only and bind all runtime
+// facts owned outside the static resource manifest before returning success.
+type CommittedForwardReconciler interface {
+	ReconcileCommittedForward(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error)
+}
+
 var ErrDegradedPredecessorHealth = errors.New("declarative predecessor health is degraded")
 
 // ErrPublicRouteHealth identifies only an independent public route probe
@@ -958,7 +966,7 @@ func forwardFailureClass(applyErr, healthErr, convergedErr error, observed Obser
 	}
 }
 
-// ReconcileExecution// ReconcileExecution is the read-only terminal path used when the executor
+// ReconcileExecution is the read-only terminal path used when the executor
 // process itself fails. It never invokes Apply/Delete and can only verify the
 // immutable forward target or report that LKG/partial state still requires a
 // failed terminal result.
@@ -968,6 +976,25 @@ func ReconcileExecution(ctx context.Context, cluster Cluster, releasePlan Plan, 
 	release, err := releaseByID(releasePlan, prepared.Component)
 	if err != nil || prepared.Validate(releasePlan, forwardManifest, lkgManifest) != nil {
 		result.Reason = "execution-plan-invalid"
+		return sealResult(result)
+	}
+	if release.Transition != nil && release.Transition.Type == "edge-group-ab" {
+		reconciler, ok := cluster.(CommittedForwardReconciler)
+		if !ok {
+			result.Reason = "committed-forward-reconciler-unavailable"
+			return sealResult(result)
+		}
+		forward, reconcileErr := reconciler.ReconcileCommittedForward(ctx, release, prepared.Forward, forwardManifest)
+		result.Final = forward
+		if reconcileErr != nil || !forward.Matches(prepared.Forward, release, false) {
+			result.Reason = "committed-forward-reconcile-unproven"
+			if reconcileErr != nil {
+				result.FailureDetail = boundedFailureDetail(reconcileErr.Error())
+			}
+			return sealResult(result)
+		}
+		result.Status = "verified"
+		result.Reason = "committed-authority-reconciled-after-executor-failure"
 		return sealResult(result)
 	}
 	forwardObserved, forwardObserveErr := cluster.Observe(ctx, release, prepared.Forward, forwardManifest)

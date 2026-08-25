@@ -335,7 +335,7 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 			if err != nil {
 				return err
 			}
-			if string(priorJSON) != string(nextJSON) && selected != pair.id {
+			if string(priorJSON) != string(nextJSON) && selected != pair.id && !componentSourceRootsStrictlyNarrowed(pair.previous, pair.next) {
 				return fmt.Errorf("edge group registry changed unselected component %q", pair.id)
 			}
 		}
@@ -344,6 +344,30 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 		return errors.New("edge group registry cannot remove an existing group")
 	}
 	return nil
+}
+
+// componentSourceRootsStrictlyNarrowed permits correcting an over-broad
+// release dependency without manufacturing a release for the affected data
+// plane. Every runtime field must remain byte-identical and new dependency
+// roots remain fail-closed.
+func componentSourceRootsStrictlyNarrowed(previous, next Component) bool {
+	if len(next.SourceRoots) >= len(previous.SourceRoots) {
+		return false
+	}
+	previousRoots := make(map[string]struct{}, len(previous.SourceRoots))
+	for _, root := range previous.SourceRoots {
+		previousRoots[root] = struct{}{}
+	}
+	for _, root := range next.SourceRoots {
+		if _, exists := previousRoots[root]; !exists {
+			return false
+		}
+	}
+	previous.SourceRoots = nil
+	next.SourceRoots = nil
+	previousJSON, previousErr := CanonicalJSON(previous)
+	nextJSON, nextErr := CanonicalJSON(next)
+	return previousErr == nil && nextErr == nil && string(previousJSON) == string(nextJSON)
 }
 
 func edgeGroupUsesStagedHealth(group EdgeGroup) bool {

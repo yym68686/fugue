@@ -519,6 +519,57 @@ func (store *KubeStore) SetDesiredToLKG(ctx context.Context, snapshot Snapshot) 
 	return err
 }
 
+// AdoptCurrentStable advances DesiredRelease to the canonical record derived
+// from a newly verified monitor pointer. It is used only after a committed
+// transition has been reconciled read-only under the component mutation Lease.
+func (store *KubeStore) AdoptCurrentStable(ctx context.Context, key Key, expected DesiredRelease, expectedResourceVersion string, stable ReleaseRecord, monitorRecordDigest string) (DesiredRelease, error) {
+	if store == nil || expected.Validate() != nil || expected.Key() != key || expectedResourceVersion == "" ||
+		stable.Validate() != nil || stable.Key() != key || stable.LKGRecordDigest != monitorRecordDigest ||
+		!digestPattern.MatchString(monitorRecordDigest) {
+		return DesiredRelease{}, errors.New("current stable adoption request is invalid")
+	}
+	target, exists := store.targets[key]
+	if !exists {
+		return DesiredRelease{}, errors.New("release Guardian target is not configured")
+	}
+	stored, err := store.loadRelease(ctx, target)
+	if err != nil {
+		return DesiredRelease{}, err
+	}
+	canonical, monitor, err := canonicalStableReleaseRecord(key, stored.currentMonitorData)
+	if err != nil || canonical != stable || monitor.RecordDigest != monitorRecordDigest || stored.currentRecord != stable {
+		return DesiredRelease{}, errors.New("verified monitor does not derive the requested current stable record")
+	}
+	if stored.desired != expected || stored.desiredRV != expectedResourceVersion {
+		return DesiredRelease{}, errors.New("DesiredRelease changed before current stable adoption CAS")
+	}
+	if expected.RecordDigest == stable.RecordDigest {
+		return expected, nil
+	}
+	next := DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group,
+		RecordDigest: stable.RecordDigest, Generation: expected.Generation + 1}
+	raw, err := declarativerelease.CanonicalJSON(next)
+	if err != nil {
+		return DesiredRelease{}, err
+	}
+	configMaps := store.client.CoreV1().ConfigMaps(target.Namespace)
+	current, err := configMaps.Get(ctx, desiredName(key), metav1.GetOptions{})
+	if err != nil || current.ResourceVersion != expectedResourceVersion {
+		return DesiredRelease{}, errors.New("DesiredRelease changed before current stable resourceVersion CAS")
+	}
+	var observed DesiredRelease
+	if decodeStrict([]byte(current.Data["desired.json"]), &observed) != nil || observed != expected {
+		return DesiredRelease{}, errors.New("DesiredRelease payload changed before current stable CAS")
+	}
+	updated := current.DeepCopy()
+	updated.Data = map[string]string{"desired.json": string(raw)}
+	updated.Labels = guardianLabels(key)
+	if _, err := configMaps.Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		return DesiredRelease{}, err
+	}
+	return next, nil
+}
+
 func monitorRecordNameFromDigest(component, recordDigest string) string {
 	suffix := strings.TrimPrefix(recordDigest, "sha256:")
 	if len(suffix) > 16 {

@@ -471,6 +471,52 @@ func TestHistoricalLKGRecordAliasRequiresImmutableCanonicalTarget(t *testing.T) 
 	}
 }
 
+func TestAdoptCurrentStableUsesMonitorAndDesiredResourceVersionCAS(t *testing.T) {
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	key := Key{Component: "edge-control-de", Group: "de"}
+	stableData, _, _, _ := guardianStableFixture(t, key, now)
+	stable, monitor, err := canonicalStableReleaseRecord(key, stableData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	immutable := true
+	state := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "fugue-release-monitor-edge-control-de", Namespace: "fugue-system", UID: types.UID("state-uid"), ResourceVersion: "10"},
+		Data:       map[string]string{"recordName": monitorRecordNameFromDigest(key.Component, monitor.RecordDigest), "state.json": `{}`},
+	}
+	recordMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: monitorRecordNameFromDigest(key.Component, monitor.RecordDigest), Namespace: "fugue-system"},
+		Immutable:  &immutable, Data: stableData,
+	}
+	expected := DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group, RecordDigest: otherDigest, Generation: 7}
+	expectedRaw, _ := declarativerelease.CanonicalJSON(expected)
+	desiredMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: desiredName(key), Namespace: "fugue-system", ResourceVersion: "20"},
+		Data:       map[string]string{"desired.json": string(expectedRaw)},
+	}
+	client := kubernetesfake.NewSimpleClientset(state, recordMap, desiredMap)
+	store, err := NewKubeStore(client, []TargetConfig{{Key: key, Namespace: "fugue-system", MonitorComponent: key.Component, DependencyService: "fugue-fugue"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := store.AdoptCurrentStable(context.Background(), key, expected, "20", stable, monitor.RecordDigest)
+	if err != nil || next.RecordDigest != stable.RecordDigest || next.Generation != 8 {
+		t.Fatalf("adopted=%+v err=%v", next, err)
+	}
+	stored, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), desiredName(key), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed DesiredRelease
+	if err := decodeStrict([]byte(stored.Data["desired.json"]), &observed); err != nil || observed != next {
+		t.Fatalf("stored desired=%+v err=%v", observed, err)
+	}
+	if _, err := store.AdoptCurrentStable(context.Background(), key, expected, "20", stable, monitor.RecordDigest); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("stale adoption CAS was accepted: %v", err)
+	}
+}
+
 func TestEdgeRouteRecoveryPublishAllowsExactDegradedPredecessor(t *testing.T) {
 	now := time.Date(2026, 8, 15, 2, 0, 0, 0, time.UTC)
 	key := Key{Component: "edge-worker-de", Group: "de"}

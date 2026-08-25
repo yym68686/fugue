@@ -37,6 +37,18 @@ type fakeCluster struct {
 	rollbackDriftErrors  []error
 }
 
+type committedFakeCluster struct {
+	*fakeCluster
+	committed      Observation
+	committedError error
+	committedCalls int
+}
+
+func (fake *committedFakeCluster) ReconcileCommittedForward(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error) {
+	fake.committedCalls++
+	return fake.committed, fake.committedError
+}
+
 func (fake *fakeCluster) Observe(_ context.Context, _ PlanRelease, _ TargetIdentity, manifest []byte) (Observation, error) {
 	fake.observedManifests = append(fake.observedManifests, append([]byte(nil), manifest...))
 	if len(fake.observationErrors) > 0 {
@@ -298,6 +310,58 @@ func TestFailedEdgeGroupTransitionSkipsMixedIdentityHealthCheck(t *testing.T) {
 	}
 	if class := forwardFailureClass(applyErr, healthErr, convergedErr, observed, TargetIdentity{}, release); class != "forward_apply" {
 		t.Fatalf("transition apply failure was misclassified: %q", class)
+	}
+}
+
+func TestReconcileExecutionUsesCommittedAuthorityForEdgeGroup(t *testing.T) {
+	forwardManifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[],"kind":"ComponentResourceSet"}`)
+	lkgManifest := append([]byte(nil), forwardManifest...)
+	release := PlanRelease{
+		ComponentID: "edge-worker-us", IntentDigest: "sha256:" + strings.Repeat("3", 64), IntentGeneration: 2,
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1,
+		ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest,
+		SupersedesFailedConfigSHA: strings.Repeat("f", 40), Artifact: Artifact{Repository: "ghcr.io/example/fugue-edge"},
+		Workload: Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front", Container: "edge-front", FieldManager: "fugue-api-declarative", RolloutMode: "on-delete"},
+		ArtifactTargets: []ArtifactTarget{
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front", Container: "edge-front", ContainerType: "container"},
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker-a", Container: "edge", ContainerType: "container"},
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker-b", Container: "edge", ContainerType: "container"},
+		},
+		Transition: &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{GroupID: "edge-group-country-us", FrontName: "edge-front", WorkerAName: "edge-worker-a", WorkerBName: "edge-worker-b", WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}},
+		Health:     []HealthProbe{{Type: "daemonset", Name: "edge-front"}}, Concurrency: "fugue-production-edge-worker-us",
+	}
+	plan := Plan{APIVersion: IntentAPIVersion, Kind: "ProductionReleasePlan", BaseSHA: testSHA1, HeadSHA: testSHA2, Releases: []PlanRelease{release}}
+	planRaw, _ := CanonicalJSON(plan)
+	plan.PlanDigest = digestOf(planRaw)
+	forwardTarget := TargetIdentity{Present: true, ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("b", 64), ConfigSHA: testSHA2, ManifestSHA: testSHA2, OCIRevision: testSHA2, ManifestDigest: digestOf(forwardManifest)}
+	lkgTarget := TargetIdentity{Present: true, ImageRef: "ghcr.io/example/fugue-edge@" + testDigest, ConfigSHA: testSHA1, ManifestSHA: testSHA1, OCIRevision: testSHA1, ManifestDigest: digestOf(lkgManifest)}
+	final := stableObservation("front-uid", "42", forwardTarget.ImageRef, testSHA2)
+	final.Primary = ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front"}
+	final.Resources[0].Identity = final.Primary
+	final.Desired, final.Updated, final.Ready, final.Available = 1, 1, 1, 1
+	prewrite := stableObservation("front-uid", "41", lkgTarget.ImageRef, testSHA1)
+	prewrite.Primary = final.Primary
+	prewrite.Resources[0].Identity = final.Primary
+	prewrite.Desired, prewrite.Updated, prewrite.Ready, prewrite.Available = 1, 1, 1, 1
+	prepared := ExecutionPlan{APIVersion: ExecutionPlanAPIVersion, Kind: ExecutionPlanKind, Component: release.ComponentID,
+		ConfigSHA: testSHA2, ReleasePlanDigest: plan.PlanDigest, IntentDigest: release.IntentDigest,
+		ArtifactDigest: "sha256:" + strings.Repeat("4", 64), Forward: forwardTarget, LKG: lkgTarget,
+		Prewrite: prewrite, PreparedAt: time.Unix(1, 0).UTC().Format(time.RFC3339Nano)}
+	preparedRaw, _ := CanonicalJSON(prepared)
+	prepared.PlanDigest = digestOf(preparedRaw)
+	if err := prepared.Validate(plan, forwardManifest, lkgManifest); err != nil {
+		t.Fatalf("prepared edge reconciliation fixture: %v", err)
+	}
+	fake := &committedFakeCluster{fakeCluster: &fakeCluster{}, committed: final}
+
+	result := ReconcileExecution(context.Background(), fake, plan, prepared, forwardManifest, lkgManifest)
+	if result.Status != "verified" || result.Reason != "committed-authority-reconciled-after-executor-failure" || fake.committedCalls != 1 || fake.applies != 0 {
+		t.Fatalf("result=%+v committedCalls=%d applies=%d", result, fake.committedCalls, fake.applies)
+	}
+	fake.committedError = errors.New("authority drift")
+	result = ReconcileExecution(context.Background(), fake, plan, prepared, forwardManifest, lkgManifest)
+	if result.Status != "recovery-required" || result.Reason != "committed-forward-reconcile-unproven" || result.FailureDetail != "authority drift" {
+		t.Fatalf("unproven authority was accepted: %+v", result)
 	}
 }
 

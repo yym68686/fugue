@@ -349,6 +349,141 @@ func (cluster *kubectlCluster) applyEdgeGroupAB(ctx context.Context, release dec
 	return executeEdgeGroupAB(ctx, runtime, release, transition, target)
 }
 
+// ReconcileCommittedForward is the read-only recovery path for an Edge A/B
+// transaction whose Guardian authority CAS committed before the executor lost
+// its terminal receipt. Static manifests describe candidate intent, while
+// CurrentAuthority owns the current and immediately reversible slot identities;
+// both sources must agree with the live group for the full soak window.
+func (cluster *kubectlCluster) ReconcileCommittedForward(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
+	if release.Transition == nil || release.Transition.Type != "edge-group-ab" || release.Transition.EdgeGroupAB == nil || !target.Present {
+		return declarativerelease.Observation{}, errors.New("committed edge reconciliation is not transition-bound")
+	}
+	transition := *release.Transition.EdgeGroupAB
+	config, err := loadComponentLeaseClientConfig()
+	if err != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("load Kubernetes client config: %w", err)
+	}
+	client, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("create Kubernetes dynamic client: %w", err)
+	}
+	runtime := &kubectlEdgeGroupRuntime{cluster: cluster, client: client, release: release, transition: transition, manifest: manifest}
+	probeRelease := release
+	probeRelease.Health = make([]declarativerelease.HealthProbe, 0, len(release.Health))
+	for _, probe := range release.Health {
+		if probe.Type == "daemonset" && (probe.Name == transition.WorkerAName || probe.Name == transition.WorkerBName) {
+			continue
+		}
+		probeRelease.Health = append(probeRelease.Health, probe)
+	}
+	deadline := time.Now().Add(cluster.timeout + healthSoakDuration(release))
+	tracker := healthSoakTracker{required: healthSoakDuration(release)}
+	var observation declarativerelease.Observation
+	var lastErr error
+	for {
+		observation, err = cluster.observeExpected(ctx, release, target.OCIRevision, manifest)
+		if err == nil && observation.Matches(target, release, false) {
+			current, _, currentErr := runtime.readCurrentAuthority(ctx)
+			state, stateErr := runtime.Snapshot(ctx)
+			if currentErr != nil {
+				err = currentErr
+			} else if stateErr != nil {
+				err = stateErr
+			} else if err = validateCommittedEdgeGroupState(state, current, transition, target); err == nil {
+				err = cluster.committedEdgeNonWorkerResourcesConverged(ctx, release, transition, manifest)
+			}
+			if err == nil {
+				var probeDigest string
+				probeDigest, err = cluster.verifyProbes(ctx, probeRelease, target, manifest, observation)
+				if err == nil {
+					observation.HealthDigest = digestJoin(observation.HealthDigest, probeDigest)
+				}
+			}
+			if err == nil {
+				err = cluster.VerifyOwnershipConverged(ctx, release, manifest)
+			}
+		}
+		if err == nil && observation.Matches(target, release, false) {
+			if tracker.observe(time.Now(), true) {
+				return observation, nil
+			}
+		} else {
+			tracker.observe(time.Now(), false)
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			if lastErr == nil {
+				lastErr = errors.New("committed edge authority did not remain converged")
+			}
+			return observation, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return observation, waitHealthyTerminalError(ctx.Err(), lastErr)
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func validateCommittedEdgeGroupState(state edgeGroupState, current releaseguardian.CurrentAuthority, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity) error {
+	digest, err := immutableDigestFromRef(target.ImageRef)
+	if err != nil {
+		return err
+	}
+	if current.Validate() != nil || current.GroupID != transition.GroupID || current.CurrentWorkerSourceSHA != target.ConfigSHA ||
+		current.CurrentWorkerImageDigest != digest || current.CurrentWorkerSlot != releaseguardian.AuthoritySlot(state.ActiveSlot) ||
+		current.PreviousRecordDigest == "" || current.PreviousWorkerSlot != releaseguardian.AuthoritySlot(otherEdgeSlot(state.ActiveSlot)) ||
+		current.PreviousWorkerSourceSHA == "" || current.PreviousWorkerImageDigest == "" {
+		return errors.New("CurrentAuthority does not bind the committed current/previous Edge slots")
+	}
+	if !edgePodsMatchTarget(state.Front, target) || !edgePodsMatchTarget(edgeWorkerPods(state, state.ActiveSlot), target) {
+		return errors.New("committed Edge Front or active Worker differs from CurrentAuthority")
+	}
+	previousTarget := declarativerelease.TargetIdentity{Present: true, ConfigSHA: current.PreviousWorkerSourceSHA,
+		ManifestSHA: current.PreviousWorkerSourceSHA, OCIRevision: current.PreviousWorkerSourceSHA,
+		ImageRef: strings.Split(target.ImageRef, "@")[0] + "@" + current.PreviousWorkerImageDigest}
+	if !edgePodsMatchTarget(edgeWorkerPods(state, string(current.PreviousWorkerSlot)), previousTarget) {
+		return errors.New("previous Edge Worker differs from CurrentAuthority")
+	}
+	if err := validateEdgeGroupAuthority(state, transition); err != nil {
+		return err
+	}
+	for _, health := range state.FrontHealth {
+		if !edgeFrontHealthMatchesServingAuthority(health, current) {
+			return errors.New("Edge Front does not serve the exact committed CurrentAuthority")
+		}
+	}
+	return nil
+}
+
+func (cluster *kubectlCluster) committedEdgeNonWorkerResourcesConverged(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, manifest []byte) error {
+	identities, err := declarativerelease.ResourceSetIdentities(manifest)
+	if err != nil {
+		return err
+	}
+	for _, identity := range identities {
+		if identity.Kind == "DaemonSet" && (identity.Name == transition.WorkerAName || identity.Name == transition.WorkerBName) {
+			continue
+		}
+		desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
+		if desiredErr != nil {
+			return desiredErr
+		}
+		liveRaw, getErr := cluster.getResource(ctx, identity)
+		if getErr != nil || resourceAbsent(liveRaw) {
+			return fmt.Errorf("read committed resource %s/%s: %w", identity.Kind, identity.Name, getErr)
+		}
+		live, decodeErr := decodeJSONObject(liveRaw)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if !declarativerelease.ResourceDesiredSubset(desired, live) {
+			return fmt.Errorf("committed resource %s/%s has not converged", identity.Kind, identity.Name)
+		}
+	}
+	return nil
+}
+
 func declaredEdgeDaemonSetTarget(manifest []byte, release declarativerelease.PlanRelease, name, container string) (declarativerelease.TargetIdentity, error) {
 	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: release.Workload.Namespace, Name: name}
 	desired, err := declarativerelease.ResourceSetItem(manifest, identity)

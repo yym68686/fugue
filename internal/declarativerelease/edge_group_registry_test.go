@@ -94,6 +94,36 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 	}
 }
 
+func TestEdgeGroupRegistryAllowsOnlyUnselectedSourceRootNarrowing(t *testing.T) {
+	previous := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind,
+		Groups: []EdgeGroup{edgeGroupFixture("gamma", "edge-group-metro-gamma")}}
+	current := previous
+	current.Groups = append([]EdgeGroup(nil), previous.Groups...)
+	current.Groups[0].Worker.SourceRoots = append([]string(nil), previous.Groups[0].Worker.SourceRoots[1:]...)
+	guardianPlan := Plan{Releases: []PlanRelease{{ComponentID: "release-guardian"}}}
+
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, guardianPlan, []string{"deploy/releases/edge-groups.json", "deploy/releases/guardian/intent.json"}); err != nil {
+		t.Fatalf("strict source-root narrowing was rejected: %v", err)
+	}
+	added := current
+	added.Groups = append([]EdgeGroup(nil), current.Groups...)
+	added.Groups[0].Worker.SourceRoots = append(append([]string(nil), current.Groups[0].Worker.SourceRoots...), "internal/new-runtime")
+	sort.Strings(added.Groups[0].Worker.SourceRoots)
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, added, guardianPlan, []string{"deploy/releases/edge-groups.json"}); err == nil || !strings.Contains(err.Error(), "unselected component") {
+		t.Fatalf("unselected source-root expansion was accepted: %v", err)
+	}
+	drifted := current
+	drifted.Groups = append([]EdgeGroup(nil), current.Groups...)
+	drifted.Groups[0].Worker.ManifestVariables = make(map[string]string, len(current.Groups[0].Worker.ManifestVariables))
+	for key, value := range current.Groups[0].Worker.ManifestVariables {
+		drifted.Groups[0].Worker.ManifestVariables[key] = value
+	}
+	drifted.Groups[0].Worker.ManifestVariables["API_SECRET"] = "changed-secret"
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, drifted, guardianPlan, []string{"deploy/releases/edge-groups.json"}); err == nil || !strings.Contains(err.Error(), "unselected component") {
+		t.Fatalf("unselected runtime drift was accepted: %v", err)
+	}
+}
+
 func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
 	baseFile, err := os.Open("../../deploy/releases/components.json")
 	if err != nil {

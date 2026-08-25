@@ -421,6 +421,9 @@ type workloadHealthEvidence struct {
 // multi-workload components such as an Edge worker group, where the primary
 // front can remain Ready while one inactive worker slot has crashed or drifted.
 func (store *KubeStore) componentWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) ([]workloadHealthEvidence, error) {
+	if release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil {
+		return store.edgeGroupComponentWorkloadHealth(ctx, release, target)
+	}
 	seen := map[string]bool{}
 	result := make([]workloadHealthEvidence, 0, len(release.Health))
 	for _, probe := range release.Health {
@@ -444,6 +447,62 @@ func (store *KubeStore) componentWorkloadHealth(ctx context.Context, release dec
 	}
 	if len(result) == 0 {
 		return nil, errors.New("component health contract has no workload probe")
+	}
+	return result, nil
+}
+
+func (store *KubeStore) edgeGroupComponentWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) ([]workloadHealthEvidence, error) {
+	transition := release.Transition.EdgeGroupAB
+	authorities, err := NewAuthorityStore(store.client, release.Workload.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	current, _, _, err := authorities.LoadCurrent(ctx, transition.GroupID)
+	if err != nil {
+		return nil, fmt.Errorf("read Edge CurrentAuthority: %w", err)
+	}
+	separator := strings.LastIndex(target.ImageRef, "@")
+	if current.CurrentWorkerSourceSHA != target.ConfigSHA || separator < 1 ||
+		current.CurrentWorkerImageDigest != target.ImageRef[separator+1:] ||
+		current.PreviousRecordDigest == "" || current.PreviousWorkerSlot == current.CurrentWorkerSlot ||
+		current.PreviousWorkerSourceSHA == "" || current.PreviousWorkerImageDigest == "" {
+		return nil, errors.New("Edge CurrentAuthority does not bind the stable current/previous workloads")
+	}
+	previous := declarativerelease.TargetIdentity{Present: true, ConfigSHA: current.PreviousWorkerSourceSHA,
+		ManifestSHA: current.PreviousWorkerSourceSHA, OCIRevision: current.PreviousWorkerSourceSHA,
+		ImageRef: target.ImageRef[:separator+1] + current.PreviousWorkerImageDigest}
+	seen := map[string]bool{}
+	result := make([]workloadHealthEvidence, 0, len(release.Health))
+	for _, probe := range release.Health {
+		if probe.Type != "daemonset" {
+			continue
+		}
+		if seen[probe.Name] {
+			continue
+		}
+		seen[probe.Name] = true
+		desiredTarget := target
+		switch probe.Name {
+		case transition.FrontName:
+		case transition.WorkerAName:
+			if current.CurrentWorkerSlot != AuthoritySlotA {
+				desiredTarget = previous
+			}
+		case transition.WorkerBName:
+			if current.CurrentWorkerSlot != AuthoritySlotB {
+				desiredTarget = previous
+			}
+		default:
+			return nil, fmt.Errorf("Edge health DaemonSet/%s is not authority-bound", probe.Name)
+		}
+		evidence, err := store.oneWorkloadHealth(ctx, release, desiredTarget, probe.Type, probe.Name)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, evidence)
+	}
+	if len(result) != 3 {
+		return nil, errors.New("Edge health contract does not cover Front and both Worker slots")
 	}
 	return result, nil
 }

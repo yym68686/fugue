@@ -1307,6 +1307,41 @@ func TestEdgeActivationCommitUnknownRequiresExactStateOrPrecondition(t *testing.
 	}
 }
 
+func TestValidateCommittedEdgeGroupStateUsesCurrentAuthorityForPreviousSlot(t *testing.T) {
+	transition := edgeTransitionFixture()
+	currentTarget := edgeTargetFixture("9", "b")
+	previousTarget := edgeTargetFixture("4", "a")
+	currentDigest := digestFromTarget(t, currentTarget)
+	previousDigest := digestFromTarget(t, previousTarget)
+	state := edgeStateFixture("a", currentTarget, edgeFrontHealth{
+		ActiveSlot: "a", ActivationPresent: true, Generation: 12,
+		BundleGeneration: "bundle.p39769.r150", WorkerSourceCommit: currentTarget.ConfigSHA,
+		WorkerImageDigest: currentDigest, RouteAuthority: edgeActivationAuthority,
+	})
+	state.WorkerB = map[string]edgeGroupPod{"node-1": {
+		Name: "worker-b-pod", UID: "worker-b-uid", ResourceVersion: "43", NodeName: "node-1",
+		SourceCommit: previousTarget.ConfigSHA, ImageRef: previousTarget.ImageRef, ImageID: previousTarget.ImageRef,
+		RouteBundleSource: edgeGroupAuthoritySource, PublicationSequence: 39768, ServingGeneration: "generation-previous", Ready: true,
+	}}
+	current := releaseguardian.CurrentAuthority{
+		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind, GroupID: transition.GroupID,
+		CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 12, CurrentBundleGeneration: "bundle.p39769.r150", CurrentWorkerSourceSHA: currentTarget.ConfigSHA,
+		CurrentWorkerImageDigest: currentDigest, PreviousRecordDigest: "sha256:" + strings.Repeat("2", 64),
+		PreviousWorkerSlot: releaseguardian.AuthoritySlotB, PreviousFrontGeneration: 10,
+		PreviousBundleGeneration: "bundle.p39768.r150", PreviousWorkerSourceSHA: previousTarget.ConfigSHA,
+		PreviousWorkerImageDigest: previousDigest, AuthorityEpoch: 39559,
+	}
+
+	if err := validateCommittedEdgeGroupState(state, current, transition, currentTarget); err != nil {
+		t.Fatalf("authority-bound previous slot was rejected: %v", err)
+	}
+	state.WorkerB["node-1"] = state.WorkerA["node-1"]
+	if err := validateCommittedEdgeGroupState(state, current, transition, currentTarget); err == nil || !strings.Contains(err.Error(), "previous Edge Worker") {
+		t.Fatalf("static-forward previous slot was accepted: %v", err)
+	}
+}
+
 func edgeGroupPodFixture(name, uid, node, group, source, digest string) map[string]any {
 	return map[string]any{
 		"metadata": map[string]any{
