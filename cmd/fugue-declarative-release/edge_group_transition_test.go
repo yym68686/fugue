@@ -49,6 +49,78 @@ func TestPostEdgeCandidateStageReportsTrustedControlErrorCode(t *testing.T) {
 	}
 }
 
+func TestPromoteCandidateUsesExactStagingWitness(t *testing.T) {
+	now := time.Now().UTC()
+	groupID := "edge-group-country-de"
+	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
+	keyring := edgeCandidateKeyring{Schema: "edge-control-group-recovery-keyring/v1", Generation: 1, GroupID: groupID,
+		Keys: []edgeCandidateKey{{KeyID: "promotion-key-1", Secret: base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("s", 32))),
+			NotBeforeUnix: now.Add(-time.Hour).Unix(), NotAfterUnix: now.Add(time.Hour).Unix()}}}
+	rawKeyring, _ := json.Marshal(keyring)
+	if err := os.WriteFile(keyringPath, rawKeyring, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged := edgeCandidateStageReceipt{GroupID: groupID, AuthoritySequence: 12, CurrentPublicationSequence: 10,
+		CurrentRecoveryEpoch: 3, CurrentPublishedBundleDigest: "sha256:" + strings.Repeat("a", 64),
+		CandidateEpoch: 13, CandidateRecordDigest: "sha256:" + strings.Repeat("b", 64), CandidateBundleGeneration: "routes-new",
+		WorkerSlot: "b", WorkerSourceSHA: strings.Repeat("1", 40)}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != edgeCandidatePromotionPath {
+			t.Errorf("promotion endpoint=%s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var promotion edgeCandidatePromotionRequest
+		if err := json.NewDecoder(request.Body).Decode(&promotion); err != nil {
+			t.Errorf("decode promotion: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if promotion.GroupID != staged.GroupID || promotion.ExpectedAuthoritySequence != staged.AuthoritySequence ||
+			promotion.ExpectedPublicationSequence != staged.CurrentPublicationSequence || promotion.ExpectedRecoveryEpoch != staged.CurrentRecoveryEpoch ||
+			promotion.ExpectedPublishedBundleDigest != staged.CurrentPublishedBundleDigest || promotion.ExpectedCandidateEpoch != staged.CandidateEpoch ||
+			promotion.CandidateRecordDigest != staged.CandidateRecordDigest || promotion.CandidateWorkerSlot != staged.WorkerSlot ||
+			promotion.CandidateBundleGeneration != staged.CandidateBundleGeneration || promotion.KeyID != "promotion-key-1" || promotion.Signature == "" {
+			t.Errorf("promotion is not receipt-bound: %+v", promotion)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(edgeCandidatePromotionReceipt{Schema: edgeCandidatePromotionReceiptSchema, GroupID: groupID,
+			PreviousAuthoritySequence: 12, PreviousPublicationSequence: 10, PreviousRecoveryEpoch: 3,
+			PreviousBundleGeneration: "routes-old", PreviousPublishedBundleDigest: staged.CurrentPublishedBundleDigest,
+			PublicationSequence: 13, RecoveryEpoch: 3, BundleGeneration: staged.CandidateBundleGeneration,
+			PublishedBundleDigest: "sha256:" + strings.Repeat("c", 64), CandidateRecordDigest: staged.CandidateRecordDigest,
+			WorkerSlot: staged.WorkerSlot, Authority: edgeActivationAuthority})
+	}))
+	defer server.Close()
+	runtime := kubectlEdgeGroupRuntime{transition: declarativerelease.EdgeGroupABTransition{GroupID: groupID,
+		CandidateStageURL: server.URL + edgeCandidateStagePath, CandidateKeyring: keyringPath}}
+	if err := runtime.PromoteCandidate(context.Background(), staged); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEdgeSharedResourcesExcludeOnlyDeclaredABWorkloads(t *testing.T) {
+	transition := edgeTransitionFixture()
+	item := func(apiVersion, kind, name string) map[string]any {
+		return map[string]any{"apiVersion": apiVersion, "kind": kind,
+			"metadata": map[string]any{"name": name, "namespace": "fugue-system"}}
+	}
+	manifest, _ := json.Marshal(map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{
+		item("apps/v1", "DaemonSet", transition.FrontName), item("apps/v1", "DaemonSet", transition.WorkerAName),
+		item("apps/v1", "DaemonSet", transition.WorkerBName), item("v1", "ServiceAccount", "edge-worker-us"),
+	}})
+	shared, err := edgeSharedResourceIdentities(manifest, transition)
+	if err != nil || len(shared) != 1 || shared[0].Kind != "ServiceAccount" || shared[0].Name != "edge-worker-us" {
+		t.Fatalf("shared identities=%+v err=%v", shared, err)
+	}
+	manifest, _ = json.Marshal(map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{
+		item("apps/v1", "DaemonSet", "undeclared-worker"),
+	}})
+	if _, err := edgeSharedResourceIdentities(manifest, transition); err == nil || !strings.Contains(err.Error(), "undeclared DaemonSet") {
+		t.Fatalf("undeclared workload was accepted: %v", err)
+	}
+}
+
 func TestStageCandidateRefreshesCASStateAfterSequenceConflict(t *testing.T) {
 	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("7", 64))
 	now := time.Now().UTC()
@@ -651,6 +723,11 @@ func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, err
 	return value, nil
 }
 
+func (fake *fakeEdgeGroupRuntime) ApplySharedResources(context.Context) error {
+	fake.calls = append(fake.calls, "apply-shared")
+	return nil
+}
+
 func (fake *fakeEdgeGroupRuntime) ApplyCandidateResources(_ context.Context, selector string) error {
 	fake.calls = append(fake.calls, "apply:"+selector)
 	return nil
@@ -672,6 +749,11 @@ func (fake *fakeEdgeGroupRuntime) StageStandby(_ context.Context, before edgeGro
 	digest, _ := immutableDigestFromRef(target.ImageRef)
 	return edgeCandidateStageReceipt{Schema: edgeCandidateReceiptSchema,
 		WorkerSlot: inactive, CurrentWorkerSlot: before.ActiveSlot, WorkerSourceSHA: target.ConfigSHA, WorkerImageDigest: digest, StandbyOnly: true}, nil
+}
+
+func (fake *fakeEdgeGroupRuntime) PromoteCandidate(_ context.Context, staged edgeCandidateStageReceipt) error {
+	fake.calls = append(fake.calls, "promote-candidate")
+	return nil
 }
 
 func (fake *fakeEdgeGroupRuntime) DeclaredTarget(name string) (declarativerelease.TargetIdentity, error) {
@@ -861,7 +943,7 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "promote-candidate", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
@@ -1024,7 +1106,7 @@ func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFa
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "apply:" + transition.FrontName,
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "promote-candidate", "apply:" + transition.FrontName,
 		"roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("post-commit standby failure changed serving workloads: calls=%v want=%v", runtime.calls, want)
