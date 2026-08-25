@@ -59,6 +59,11 @@ type GroupRecoveryStore interface {
 	RecoverGroupAuthorityCAS(context.Context, string, uint64, uint64, GroupAuthorityLedgerEntry, model.EdgeRouteBundle) (GroupAuthorityLedgerEntry, error)
 }
 
+type currentPublishedLKGRecoveryStore interface {
+	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
+	PublishedLKGRecoveryStore
+}
+
 type GroupRecoveryHandlerConfig struct {
 	Store      GroupRecoveryStore
 	Signer     GroupBundleSigner
@@ -155,6 +160,17 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 		writeGroupBundleError(w, http.StatusUnauthorized, "credential_rejected")
 		return
 	}
+	if store, ok := handler.store.(currentPublishedLKGRecoveryStore); ok {
+		authority, readErr := store.ReadGroupAuthority(request.Context(), groupID)
+		targetGeneration := recovery.TargetBundleGeneration
+		if generation, _, _, parsed := parseGroupPublicationVersion(targetGeneration); parsed {
+			targetGeneration = generation
+		}
+		if readErr == nil && authority.LedgerExists && authority.PublishedExists && authority.Published.Bundle.Generation == targetGeneration {
+			handler.recoverCurrentPublishedLKG(w, request, store, authority, recovery, now)
+			return
+		}
+	}
 	authority, candidate, recoveryEpoch, err := handler.store.ReadGroupRecoveryTarget(request.Context(), groupID, recovery.TargetBundleGeneration)
 	if err != nil {
 		writeGroupBundleError(w, http.StatusBadRequest, "target_rejected")
@@ -201,6 +217,50 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 	}
 	writeJSON(w, http.StatusOK, GroupRecoveryReceipt{
 		Schema: GroupRecoveryReceiptSchemaV1, GroupID: groupID, PublicationSequence: appended.Sequence,
+		RecoveryEpoch: appended.RecoveryEpoch, BundleGeneration: appended.BundleGeneration,
+		PublishedBundleDigest: appended.PublishedBundleDigest, Authority: "edge-control", PublicationEnabled: true,
+	})
+}
+
+func (handler *groupRecoveryHandler) recoverCurrentPublishedLKG(w http.ResponseWriter, request *http.Request, store currentPublishedLKGRecoveryStore,
+	authority GroupAuthorityState, recovery GroupRecoveryRequest, now time.Time) {
+	if validateGroupPublishedBundle(recovery.GroupID, authority.Published) != nil {
+		writeGroupBundleError(w, http.StatusBadRequest, "target_rejected")
+		return
+	}
+	if authority.Published.PublicationSequence != recovery.ExpectedPublicationSequence ||
+		authority.Published.RecoveryEpoch != recovery.ExpectedRecoveryEpoch {
+		writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
+		return
+	}
+	bundle := cloneEdgeRouteBundle(authority.Published.Bundle)
+	bundle.Issuer = groupAuthorityIssuer
+	bundle.GeneratedAt = now
+	bundle.ValidUntil = time.Time{}
+	bundle.KeyID = ""
+	bundle.Signature = ""
+	bundle.Signatures = nil
+	bundle.PreviousGeneration = ""
+	bundle.Version = groupPublicationVersion(bundle.Generation, authority.LedgerHead.Sequence+1, recovery.ExpectedRecoveryEpoch+1)
+	signed, err := handler.signer.SignGroupBundle(request.Context(), recovery.GroupID, bundle)
+	if err != nil {
+		writeGroupBundleError(w, http.StatusServiceUnavailable, "signing_unavailable")
+		return
+	}
+	appended, err := store.RecoverPublishedLKG(request.Context(), recovery.GroupID, recovery.ExpectedPublicationSequence,
+		recovery.ExpectedRecoveryEpoch, bundle.Generation, signed, recovery.Reason, now)
+	if err != nil {
+		if errors.Is(err, ErrGroupAuthorityCandidateCAS) || errors.Is(err, ErrGroupAuthorityPublishedPointerCAS) ||
+			errors.Is(err, ErrGroupAuthorityRecoveryEpochCAS) || errors.Is(err, ErrGroupAuthorityAuditTailCAS) ||
+			errors.Is(err, ErrGroupAuthorityCASConflict) {
+			writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
+			return
+		}
+		writeGroupBundleError(w, http.StatusServiceUnavailable, "recovery_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, GroupRecoveryReceipt{
+		Schema: GroupRecoveryReceiptSchemaV1, GroupID: recovery.GroupID, PublicationSequence: appended.Sequence,
 		RecoveryEpoch: appended.RecoveryEpoch, BundleGeneration: appended.BundleGeneration,
 		PublishedBundleDigest: appended.PublishedBundleDigest, Authority: "edge-control", PublicationEnabled: true,
 	})

@@ -451,8 +451,9 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 			currentPublication := uint64(candidate.CurrentRecord.Epoch)
 			_, _, currentRecovery, currentOK := parseGroupPublicationVersion(candidate.CurrentBundle.Version)
 			degradedRecoveryPublication = currentOK &&
-				servingAuthorityCanUseCurrentPublishedFallback(candidate.ServingAuthority.BundleVersion, candidate.CurrentBundle.Generation,
-					currentPublication, currentRecovery, true)
+				(servingAuthorityCanUseCurrentPublishedFallback(candidate.ServingAuthority.BundleVersion, candidate.CurrentBundle.Generation,
+					currentPublication, currentRecovery, true) ||
+					servingAuthorityCanUsePrunedDegradedHistory(candidate.ServingAuthority.BundleVersion, currentPublication, currentRecovery))
 		}
 		if !exactHistoricalPublication && !degradedRecoveryPublication {
 			return errors.New("edge-control group candidate serving publication is invalid")

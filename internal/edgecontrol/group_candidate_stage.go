@@ -367,10 +367,20 @@ func servingAuthorityCanUseCurrentPublishedFallback(version, currentGeneration s
 }
 
 func servingAuthorityCanUseCandidateFallback(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64, historyExists, allowDegraded bool) bool {
-	if !historyExists && servingAuthorityCanUsePrunedCurrentGeneration(version, currentGeneration, currentPublicationSequence, currentRecoveryEpoch) {
-		return true
+	if !historyExists {
+		if servingAuthorityCanUsePrunedCurrentGeneration(version, currentGeneration, currentPublicationSequence, currentRecoveryEpoch) {
+			return true
+		}
+		if allowDegraded && servingAuthorityCanUsePrunedDegradedHistory(version, currentPublicationSequence, currentRecoveryEpoch) {
+			return true
+		}
 	}
 	return allowDegraded && servingAuthorityCanUseCurrentPublishedFallback(version, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, true)
+}
+
+func servingAuthorityCanUsePrunedDegradedHistory(version string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {
+	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
+	return ok && generation != "" && publicationSequence < currentPublicationSequence && recoveryEpoch <= currentRecoveryEpoch
 }
 
 func servingAuthorityCanUsePrunedCurrentGeneration(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {

@@ -599,9 +599,15 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
 		t.Fatal(err)
 	}
-	crossRecoveryRejected := postGroupCandidateStage(t, handler, request)
-	if crossRecoveryRejected.Code != http.StatusConflict {
-		t.Fatalf("cross-recovery serving publication status=%d body=%s", crossRecoveryRejected.Code, crossRecoveryRejected.Body.String())
+	crossRecoveryFallback := postGroupCandidateStage(t, handler, request)
+	if crossRecoveryFallback.Code != http.StatusOK {
+		t.Fatalf("pruned cross-recovery serving publication status=%d body=%s", crossRecoveryFallback.Code, crossRecoveryFallback.Body.String())
+	}
+	crossRecoveryCandidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
+	if err != nil || !exists || crossRecoveryCandidate.Bundle.Generation != current.Published.Bundle.Generation ||
+		crossRecoveryCandidate.CandidateLedgerSequence != current.Published.CandidateLedgerSequence ||
+		!crossRecoveryCandidate.AllowDegradedPrevious || crossRecoveryCandidate.StandbyOnly {
+		t.Fatalf("pruned cross-recovery fallback candidate=%+v exists=%v err=%v", crossRecoveryCandidate, exists, err)
 	}
 }
 
@@ -655,6 +661,22 @@ func TestServingAuthorityCandidateFallbackRequiresDegradedAuthorizationForRetain
 	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("changed-generation", 19710, 328), currentGeneration,
 		currentPublicationSequence, currentRecoveryEpoch, true, true) {
 		t.Fatal("degraded fallback accepted a different immutable route generation")
+	}
+	if !servingAuthorityCanUseCandidateFallback(groupPublicationVersion("pruned-generation", 19710, 328), currentGeneration,
+		currentPublicationSequence, currentRecoveryEpoch, false, true) {
+		t.Fatal("authorized degraded fallback rejected a monotonic pruned publication")
+	}
+	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("pruned-generation", 19710, 328), currentGeneration,
+		currentPublicationSequence, currentRecoveryEpoch, false, false) {
+		t.Fatal("ordinary transition accepted a pruned cross-generation publication")
+	}
+	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("pruned-generation", currentPublicationSequence, 328), currentGeneration,
+		currentPublicationSequence, currentRecoveryEpoch, false, true) {
+		t.Fatal("degraded fallback accepted a same-sequence cross-generation publication")
+	}
+	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("pruned-generation", 19710, currentRecoveryEpoch+1), currentGeneration,
+		currentPublicationSequence, currentRecoveryEpoch, false, true) {
+		t.Fatal("degraded fallback accepted a future recovery epoch")
 	}
 	if !servingAuthorityCanUseCandidateFallback(servingVersion, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, false, false) {
 		t.Fatal("pruned same-generation history fallback was rejected")

@@ -722,6 +722,59 @@ func TestGroupBundleReaderAndRecoveryAreAuthenticatedGroupScopedCAS(t *testing.T
 	}
 }
 
+type prunedCurrentRecoveryStore struct {
+	*PersistentGroupStore
+}
+
+func (store *prunedCurrentRecoveryStore) ReadGroupRecoveryTarget(context.Context, string, string) (GroupAuthorityState, GroupShadowLedgerEntry, uint64, error) {
+	return GroupAuthorityState{}, GroupShadowLedgerEntry{}, 0, errors.New("fixture candidate history was pruned")
+}
+
+func TestGroupRecoveryRenewsCurrentPublishedBundleWithoutCandidateHistory(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 25, 13, 45, 0, 0, time.UTC)
+	groupID := "edge-group-country-us"
+	persistent, signer, _, _ := groupPromotionFixture(t, groupID, now.Add(-time.Minute))
+	before, err := persistent.ReadGroupAuthority(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyringDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x61}, 32)
+	writeGroupRecoveryFixture(t, keyringDir, groupID, secret, now)
+	handler, err := NewGroupRecoveryHandler(GroupRecoveryHandlerConfig{
+		Store: &prunedCurrentRecoveryStore{PersistentGroupStore: persistent}, Signer: signer,
+		GroupIDs: []string{groupID}, KeyringDir: keyringDir, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := GroupRecoveryRequest{
+		Schema: GroupRecoveryRequestSchemaV1, KeyID: "recovery-us-1", GroupID: groupID,
+		ExpectedPublicationSequence: before.Published.PublicationSequence, ExpectedRecoveryEpoch: before.Published.RecoveryEpoch,
+		TargetBundleGeneration: before.Published.Bundle.Generation, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(),
+		Nonce: "current-recovery-nonce-01", Reason: "refresh current published LKG after pruned candidate history",
+	}
+	if err := SignGroupRecoveryRequest(&value, secret); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(value)
+	request := httptest.NewRequest(http.MethodPost, GroupRecoveryPathV1, bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("current published recovery status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	after, err := persistent.ReadGroupAuthority(ctx, groupID)
+	if err != nil || after.Published.Bundle.Generation != before.Published.Bundle.Generation ||
+		after.Published.PublicationSequence != before.LedgerHead.Sequence+1 ||
+		after.Published.RecoveryEpoch != before.Published.RecoveryEpoch+1 ||
+		after.LedgerHead.Sequence != before.LedgerHead.Sequence+1 {
+		t.Fatalf("current published recovery did not advance exact bundle: before=%+v after=%+v err=%v", before, after, err)
+	}
+}
+
 type fixtureGroupSigner struct {
 	keys     map[string][]byte
 	validFor time.Duration
