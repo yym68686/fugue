@@ -70,6 +70,78 @@ func TestGroupPromotionAtomicallyReissuesExactCandidateAsCurrent(t *testing.T) {
 	}
 }
 
+func TestGroupPromotionDoesNotBlockFollowingRouteIntentPublication(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 26, 2, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-us"
+	store, signer, candidate, current := groupPromotionFixture(t, groupID, now)
+	keyDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x76}, 32)
+	writeGroupRecoveryFixture(t, keyDir, groupID, secret, now)
+	handler, err := NewGroupPromotionHandler(GroupPromotionHandlerConfig{Store: store, Signer: signer,
+		GroupIDs: []string{groupID}, KeyringDir: keyDir, Now: func() time.Time { return now.Add(2 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotion := GroupPromotionRequest{Schema: GroupPromotionRequestSchemaV1, KeyID: "recovery-us-1", GroupID: groupID,
+		ExpectedAuthoritySequence: current.LedgerHead.Sequence, ExpectedPublicationSequence: current.Published.PublicationSequence,
+		ExpectedRecoveryEpoch: current.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: current.Published.Digest,
+		ExpectedCandidateEpoch: candidate.Epoch, CandidateRecordDigest: candidate.Record.RecordDigest,
+		CandidateWorkerSlot: candidate.WorkerSlot, CandidateBundleGeneration: candidate.Bundle.Generation,
+		IssuedAtUnix: now.Add(2 * time.Minute).Unix(), ExpiresAtUnix: now.Add(3 * time.Minute).Unix(),
+		Nonce: "promotion-followed-by-config-0001", Reason: "promote before independent config recovery"}
+	if err := SignGroupPromotionRequest(&promotion, secret); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(promotion)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("promotion status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	inventory, err := store.ReadGroupInventory(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory.Sequence++
+	inventory.Generation = "inventory-after-promotion"
+	inventory.ObservedAt = now.Add(3 * time.Minute)
+	inventory.ActiveEpoch.Slot = candidate.WorkerSlot
+	inventory.ActiveEpoch.ReleaseEpoch = "epoch-after-promotion"
+	inventory.ActiveEpoch.FenceSequence++
+	for index := range inventory.Instances {
+		inventory.Instances[index].Slot = candidate.WorkerSlot
+		inventory.Instances[index].ReleaseEpoch = inventory.ActiveEpoch.ReleaseEpoch
+		inventory.Instances[index].EffectiveHealthy = true
+		serving := true
+		inventory.Instances[index].ServingHealthy = &serving
+	}
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, inventory.Sequence-1, inventory); err != nil {
+		t.Fatal(err)
+	}
+	nextIntent := routeIntentFixture()
+	nextIntent.Generation = "route-intents-after-promotion"
+	nextIntent.Routes[0].Generation = "route-after-promotion"
+	compiled, err := (GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now.Add(3 * time.Minute) }}).
+		Reconcile(ctx, nextIntent, []string{groupID})
+	if err != nil || compiled.Succeeded != 1 {
+		t.Fatalf("compile next config: batch=%+v err=%v", compiled, err)
+	}
+	published, err := (GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now.Add(3 * time.Minute) }}).
+		Publish(ctx, compiled)
+	if err != nil || published.Published != 1 || published.Failed != 0 {
+		t.Fatalf("publish next config after promotion: batch=%+v err=%v", published, err)
+	}
+	after, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || after.Published.Bundle.Generation != compiled.Results[0].BundleGeneration ||
+		after.Published.PublicationSequence <= current.Published.PublicationSequence {
+		t.Fatalf("next config did not become current: authority=%+v err=%v", after, err)
+	}
+}
+
 func TestGroupPromotionAllowsOnlyFailedAuditTailAfterCandidateCanary(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 13, 8, 30, 0, 0, time.UTC)

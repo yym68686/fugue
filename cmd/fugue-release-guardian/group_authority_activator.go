@@ -96,9 +96,7 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 	}
 	probe := canaryProbe{Address: activator.front.config.RouteAddress, Host: activator.front.config.RouteHost, Path: activator.front.config.RoutePath}
 	status, body, headers, currentErr := requestPublicRouteWithHeaders(ctx, probe)
-	currentHealthy := currentErr == nil && status == http.StatusOK && shaDigest(body) == activator.front.config.RouteBodyDigest &&
-		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) == current.CurrentRecordDigest &&
-		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) == current.CurrentWorkerSlot
+	currentHealthy := authorityCurrentRouteMatches(status, body, headers, currentErr, activator.front.config.RouteBodyDigest, current.CurrentWorkerSlot)
 	currentRuntimeHealthy, currentRuntimeErr := activator.front.observeAuthorityRuntime(ctx, current.CurrentWorkerSlot,
 		current.CurrentWorkerSourceSHA, current.CurrentWorkerImageDigest, current.CurrentFrontGeneration, current.CurrentBundleGeneration, true)
 	currentHealthy = currentHealthy && currentRuntimeHealthy
@@ -126,6 +124,15 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 		return false, false, "", err
 	}
 	return currentHealthy, lkgHealthy, shaDigest(evidence), nil
+}
+
+// authorityCurrentRouteMatches checks code routing identity only. The record
+// digest names configuration and may advance independently after code commit.
+func authorityCurrentRouteMatches(status int, body []byte, headers http.Header, requestErr error, expectedBodyDigest string,
+	slot releaseguardian.AuthoritySlot) bool {
+	return requestErr == nil && status == http.StatusOK && shaDigest(body) == expectedBodyDigest &&
+		exactSHA256Digest(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest"))) &&
+		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) == slot
 }
 
 // recoverableLKGWitness authorizes the existing restore transaction when an
@@ -220,63 +227,14 @@ func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, targ
 }
 
 func (activator *groupAuthorityActivator) BeginRestore(ctx context.Context, current releaseguardian.CurrentAuthority) (releaseguardian.FrontAuthorityTransaction, error) {
-	if current.Validate() != nil || current.GroupID != activator.config.GroupID || current.PreviousRecordDigest == "" ||
+	if activator == nil || activator.front == nil || current.Validate() != nil || current.GroupID != activator.config.GroupID || current.PreviousRecordDigest == "" ||
 		current.PreviousWorkerSlot.Validate() != nil || current.CurrentWorkerSlot == current.PreviousWorkerSlot {
 		return nil, errors.New("group authority restore target is invalid")
 	}
-	currentGeneration, currentSequence, currentRecovery, err := splitPromotedBundleVersion(current.CurrentBundleGeneration)
-	if err != nil {
-		return nil, errors.New("current group authority generation is invalid")
-	}
-	previousGeneration, _, _, err := splitPromotedBundleVersion(current.PreviousBundleGeneration)
-	if err != nil {
-		return nil, errors.New("previous group authority generation is invalid")
-	}
-	target := releaseguardian.FrontAuthorityTarget{GroupID: current.GroupID, TargetSlot: current.PreviousWorkerSlot,
-		CandidateBundleGeneration: current.PreviousBundleGeneration, ServingGeneration: previousGeneration,
-		FrontBundleGeneration: current.PreviousBundleGeneration, WorkerSourceSHA: current.PreviousWorkerSourceSHA,
-		WorkerImageDigest: current.PreviousWorkerImageDigest, CandidateRecordDigest: current.PreviousRecordDigest,
-		CanaryResultDigest: current.CurrentRecordDigest, PreviousSlot: current.CurrentWorkerSlot,
-		PreviousFrontGeneration: current.CurrentFrontGeneration, PreviousBundleGeneration: current.CurrentBundleGeneration,
-		PreviousWorkerSourceSHA: current.CurrentWorkerSourceSHA, PreviousWorkerImageDigest: current.CurrentWorkerImageDigest}
-	lease, err := activator.front.acquireLease(ctx)
-	if err != nil {
-		return nil, err
-	}
-	releaseOnError := true
-	defer func() {
-		if releaseOnError {
-			_ = lease.release(context.WithoutCancel(ctx))
-		}
-	}()
-	recovered, err := activator.recoverControlReceipt(ctx, edgecontrol.GroupPromotionReceipt{
-		GroupID: current.GroupID, PublicationSequence: currentSequence, RecoveryEpoch: currentRecovery,
-	}, previousGeneration)
-	if err != nil {
-		return nil, err
-	}
-	recoveredVersion := promotedBundleVersion(previousGeneration, recovered.PublicationSequence, recovered.RecoveryEpoch)
-	target.CandidateBundleGeneration, target.FrontBundleGeneration = recoveredVersion, recoveredVersion
-	preflight, err := activator.front.preflightForOperation(ctx, target, edgegroupfront.ActivationOperationRollback)
-	if err != nil {
-		return nil, err
-	}
-	frontTx, err := activator.front.applyWithLease(ctx, target, lease, preflight, edgegroupfront.ActivationOperationRollback,
-		preflight.previousGeneration, "restore Guardian group authority LKG")
-	if err != nil {
-		compensation := edgecontrol.GroupPromotionReceipt{GroupID: current.GroupID, PublicationSequence: recovered.PublicationSequence,
-			RecoveryEpoch: recovered.RecoveryEpoch}
-		if recoveryErr := activator.recoverControl(context.WithoutCancel(ctx), compensation, currentGeneration); recoveryErr != nil {
-			releaseOnError = false
-			return nil, errors.Join(err, fmt.Errorf("Edge Control restore compensation is unknown: %w", recoveryErr))
-		}
-		return nil, err
-	}
-	releaseOnError = false
-	return &groupAuthorityTransaction{activator: activator, front: frontTx.(*frontAuthorityTransaction), promotion: edgecontrol.GroupPromotionReceipt{
-		GroupID: current.GroupID, PublicationSequence: recovered.PublicationSequence, RecoveryEpoch: recovered.RecoveryEpoch,
-		PreviousBundleGeneration: currentGeneration,
-	}}, nil
+	// CurrentAuthority owns code and Front activation identity, not the mutable
+	// Edge Control publication pointer. The previous Worker was already proven
+	// healthy by ObserveCurrentAndLKG, so a code rollback only changes Front.
+	return activator.front.BeginRestore(ctx, current)
 }
 
 func (activator *groupAuthorityActivator) Finalize(ctx context.Context) error {

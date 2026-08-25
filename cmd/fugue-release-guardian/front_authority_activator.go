@@ -378,7 +378,7 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 		}
 		changed[node] = receipt
 	}
-	if err := activator.waitFront(ctx, target); err != nil {
+	if err := activator.waitFront(ctx, target, operation == edgegroupfront.ActivationOperationRollback); err != nil {
 		if rollbackErr := activator.rollbackReceipts(context.WithoutCancel(ctx), workers, changed); rollbackErr != nil {
 			return nil, errors.Join(err, fmt.Errorf("%w: %v", errFrontCompensationUnknown, rollbackErr))
 		}
@@ -587,7 +587,8 @@ func (activator *frontAuthorityActivator) observeWorkers(ctx context.Context, ta
 // Worker cohort. Current authority additionally binds every Front process to
 // the committed activation state; LKG health deliberately does not, because a
 // failed activation may leave Front on the candidate while the inactive LKG
-// Worker remains the only safe rollback target.
+// Worker remains the only safe rollback target. Edge Control may independently
+// advance to a newer signed configuration after code activation commits.
 func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Context, slot releaseguardian.AuthoritySlot,
 	sourceSHA, imageDigest string, frontGeneration uint64, bundleGeneration string, requireFront bool) (bool, error) {
 	if activator == nil || slot.Validate() != nil || !exactSourceSHA(sourceSHA) || !exactSHA256Digest(imageDigest) ||
@@ -605,7 +606,7 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 		}
 		var health baselineWorkerHealth
 		if err := readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil ||
-			!health.Healthy || health.EdgeGroupID != activator.config.GroupID || (requireFront && !authorityWorkerHealthMatches(health, activator.config.GroupID, bundleGeneration)) {
+			!health.Healthy || health.EdgeGroupID != activator.config.GroupID || (requireFront && !authorityWorkerHealthAtOrAfter(health, activator.config.GroupID, bundleGeneration)) {
 			return false, errors.New("authority Worker route generation does not match its pointer")
 		}
 	}
@@ -626,6 +627,19 @@ func authorityWorkerHealthMatches(health baselineWorkerHealth, groupID, bundleGe
 	serving, publication, _, err := splitPromotedBundleVersion(bundleGeneration)
 	return err == nil && health.Healthy && health.EdgeGroupID == groupID && health.BundleVersion == bundleGeneration &&
 		health.ServingGeneration == serving && health.PublicationSequence == publication
+}
+
+func authorityWorkerHealthAtOrAfter(health baselineWorkerHealth, groupID, committedBundle string) bool {
+	committedServing, committedPublication, committedRecovery, committedErr := splitPromotedBundleVersion(committedBundle)
+	observedServing, observedPublication, observedRecovery, observedErr := splitPromotedBundleVersion(health.BundleVersion)
+	if committedErr != nil || observedErr != nil || !health.Healthy || health.EdgeGroupID != groupID ||
+		health.ServingGeneration != observedServing || health.PublicationSequence != observedPublication || observedPublication < committedPublication {
+		return false
+	}
+	if observedPublication == committedPublication {
+		return observedServing == committedServing && observedRecovery >= committedRecovery
+	}
+	return true
 }
 
 func authorityRuntimeMatches(workers map[string]corev1.Pod, cohort releaseguardian.CandidateWorkerCohort, fronts map[string]observedFront,
@@ -778,7 +792,7 @@ func (activator *frontAuthorityActivator) activationCAS(ctx context.Context, pod
 	return receipt, nil
 }
 
-func (activator *frontAuthorityActivator) waitFront(ctx context.Context, target releaseguardian.FrontAuthorityTarget) error {
+func (activator *frontAuthorityActivator) waitFront(ctx context.Context, target releaseguardian.FrontAuthorityTarget, allowConfigAdvance bool) error {
 	deadline := activator.now().Add(30 * time.Second)
 	for {
 		fronts, err := activator.observeFronts(ctx)
@@ -788,7 +802,7 @@ func (activator *frontAuthorityActivator) waitFront(ctx context.Context, target 
 				matched = matched && front.ActiveSlot == string(target.TargetSlot) && front.BundleGeneration == target.FrontBundleGeneration &&
 					front.WorkerSourceCommit == target.WorkerSourceSHA && front.WorkerImageDigest == target.WorkerImageDigest
 			}
-			if matched && activator.targetWorkersLoaded(ctx, target) {
+			if matched && activator.targetWorkersLoaded(ctx, target, allowConfigAdvance) {
 				return nil
 			}
 		}
@@ -803,7 +817,7 @@ func (activator *frontAuthorityActivator) waitFront(ctx context.Context, target 
 	}
 }
 
-func (activator *frontAuthorityActivator) targetWorkersLoaded(ctx context.Context, target releaseguardian.FrontAuthorityTarget) bool {
+func (activator *frontAuthorityActivator) targetWorkersLoaded(ctx context.Context, target releaseguardian.FrontAuthorityTarget, allowConfigAdvance bool) bool {
 	workers, _, err := activator.observeWorkers(ctx, target)
 	if err != nil {
 		return false
@@ -813,8 +827,14 @@ func (activator *frontAuthorityActivator) targetWorkersLoaded(ctx context.Contex
 			return false
 		}
 		var health baselineWorkerHealth
-		if readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health) != nil ||
-			!authorityWorkerHealthMatches(health, target.GroupID, target.FrontBundleGeneration) {
+		if readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health) != nil {
+			return false
+		}
+		matches := authorityWorkerHealthMatches(health, target.GroupID, target.FrontBundleGeneration)
+		if allowConfigAdvance {
+			matches = authorityWorkerHealthAtOrAfter(health, target.GroupID, target.FrontBundleGeneration)
+		}
+		if !matches {
 			return false
 		}
 	}

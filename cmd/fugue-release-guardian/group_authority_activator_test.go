@@ -16,6 +16,7 @@ import (
 
 	"fugue/internal/edgecontrol"
 	"fugue/internal/releaseguardian"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestAuthorityRouteMatchesAttestedCurrentOrExactLegacyLKG(t *testing.T) {
@@ -46,27 +47,98 @@ func TestAuthorityRouteMatchesAttestedCurrentOrExactLegacyLKG(t *testing.T) {
 	}
 }
 
-func TestAuthorityWorkerHealthMatchesExactPromotedGeneration(t *testing.T) {
+func TestCurrentCodeRouteAcceptsIndependentConfigurationRecord(t *testing.T) {
+	body := []byte("route-ok")
+	bodyDigest := shaDigest(body)
+	headers := http.Header{"X-Fugue-Candidate-Record-Digest": []string{"sha256:" + strings.Repeat("c", 64)},
+		"X-Fugue-Candidate-Worker-Slot": []string{"a"}}
+	if !authorityCurrentRouteMatches(http.StatusOK, body, headers, nil, bodyDigest, releaseguardian.AuthoritySlotA) {
+		t.Fatal("independent signed configuration record was treated as code drift")
+	}
+	for name, mutate := range map[string]func(http.Header){
+		"missing record": func(value http.Header) { value.Del("X-Fugue-Candidate-Record-Digest") },
+		"wrong slot":     func(value http.Header) { value.Set("X-Fugue-Candidate-Worker-Slot", "b") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := headers.Clone()
+			mutate(changed)
+			if authorityCurrentRouteMatches(http.StatusOK, body, changed, nil, bodyDigest, releaseguardian.AuthoritySlotA) {
+				t.Fatal("invalid code route identity was accepted")
+			}
+		})
+	}
+}
+
+func TestAuthorityWorkerHealthAcceptsMonotonicControlPublication(t *testing.T) {
 	group := "edge-group-country-de"
 	bundle := "serving-generation.p11481.r129"
 	health := baselineWorkerHealth{Healthy: true, EdgeGroupID: group, BundleVersion: bundle, PublicationSequence: 11481, ServingGeneration: "serving-generation"}
-	if !authorityWorkerHealthMatches(health, group, bundle) {
+	if !authorityWorkerHealthAtOrAfter(health, group, bundle) {
 		t.Fatal("exact Worker route generation was rejected")
 	}
+	advanced := health
+	advanced.BundleVersion = "serving-generation.p11486.r131"
+	advanced.PublicationSequence = 11486
+	if !authorityWorkerHealthAtOrAfter(advanced, group, bundle) {
+		t.Fatal("monotonic Edge Control publication was rejected")
+	}
+	if authorityWorkerHealthMatches(advanced, group, bundle) {
+		t.Fatal("candidate activation accepted a non-exact configuration publication")
+	}
+	advanced.BundleVersion = "new-route-intent.p11487.r0"
+	advanced.PublicationSequence = 11487
+	advanced.ServingGeneration = "new-route-intent"
+	if !authorityWorkerHealthAtOrAfter(advanced, group, bundle) {
+		t.Fatal("newer independent configuration generation was rejected")
+	}
 	for name, mutate := range map[string]func(*baselineWorkerHealth){
-		"unhealthy":     func(value *baselineWorkerHealth) { value.Healthy = false },
-		"wrong group":   func(value *baselineWorkerHealth) { value.EdgeGroupID = "edge-group-other" },
-		"wrong bundle":  func(value *baselineWorkerHealth) { value.BundleVersion += "-other" },
-		"wrong epoch":   func(value *baselineWorkerHealth) { value.PublicationSequence++ },
-		"wrong serving": func(value *baselineWorkerHealth) { value.ServingGeneration += "-other" },
+		"unhealthy":    func(value *baselineWorkerHealth) { value.Healthy = false },
+		"wrong group":  func(value *baselineWorkerHealth) { value.EdgeGroupID = "edge-group-other" },
+		"wrong bundle": func(value *baselineWorkerHealth) { value.BundleVersion = "other-generation.p11481.r129" },
+		"stale publication": func(value *baselineWorkerHealth) {
+			value.BundleVersion = "serving-generation.p11480.r129"
+			value.PublicationSequence = 11480
+		},
+		"stale recovery": func(value *baselineWorkerHealth) { value.BundleVersion = "serving-generation.p11481.r128" },
+		"wrong epoch":    func(value *baselineWorkerHealth) { value.PublicationSequence++ },
+		"wrong serving":  func(value *baselineWorkerHealth) { value.ServingGeneration += "-other" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := health
 			mutate(&changed)
-			if authorityWorkerHealthMatches(changed, group, bundle) {
+			if authorityWorkerHealthAtOrAfter(changed, group, bundle) {
 				t.Fatal("invalid Worker route generation was accepted")
 			}
 		})
+	}
+}
+
+func TestGroupAuthorityRestoreNeverMutatesControlPublication(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	group := "edge-group-country-us"
+	front, err := newFrontAuthorityActivator(fake.NewSimpleClientset(), baselineActivationExecutor{}, frontAuthorityConfig{
+		GroupID: group, Namespace: "fugue-system", ExpectedNodes: 1,
+	}, "guardian-pod:edge-group-country-us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	activator := &groupAuthorityActivator{front: front, config: groupAuthorityConfig{GroupID: group, Endpoint: server.URL}}
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: group, CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 29, CurrentBundleGeneration: "routes.p39713.r124", CurrentWorkerSourceSHA: strings.Repeat("2", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("3", 64), PreviousRecordDigest: "sha256:" + strings.Repeat("4", 64),
+		PreviousWorkerSlot: releaseguardian.AuthoritySlotB, PreviousFrontGeneration: 28, PreviousBundleGeneration: "routes.p39680.r120",
+		PreviousWorkerSourceSHA: strings.Repeat("5", 40), PreviousWorkerImageDigest: "sha256:" + strings.Repeat("6", 64), AuthorityEpoch: 8}
+	if _, err := activator.BeginRestore(context.Background(), current); err == nil {
+		t.Fatal("restore unexpectedly found a Front cohort")
+	}
+	if requests != 0 {
+		t.Fatalf("code rollback mutated Edge Control publication: requests=%d", requests)
 	}
 }
 
