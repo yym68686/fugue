@@ -44,15 +44,16 @@ var (
 )
 
 type routePublicationMetadata struct {
-	Source              string
-	GroupID             string
-	Generation          string
-	PublicationSequence uint64
-	RecoveryEpoch       uint64
-	Candidate           bool
-	CandidateRecord     string
-	ReleaseRecord       string
-	WorkerSlot          string
+	Source                       string
+	GroupID                      string
+	Generation                   string
+	PublicationSequence          uint64
+	RecoveryEpoch                uint64
+	Candidate                    bool
+	CandidatePublicationSequence uint64
+	CandidateRecord              string
+	ReleaseRecord                string
+	WorkerSlot                   string
 }
 
 type edgeRouteVerifierKeyringFile struct {
@@ -234,12 +235,15 @@ func retainActivatedCandidateAttestation(selection routeSourceSelection, workerS
 	workerSlot = strings.TrimSpace(workerSlot)
 	if selection.candidate || next.Candidate || selection.activeSlot != workerSlot || current.WorkerSlot != workerSlot ||
 		current.Source != next.Source || current.GroupID != next.GroupID ||
-		!edgeRouteDigestPattern.MatchString(current.CandidateRecord) || !edgeRouteDigestPattern.MatchString(current.ReleaseRecord) {
+		!edgeRouteDigestPattern.MatchString(current.CandidateRecord) || !edgeRouteDigestPattern.MatchString(current.ReleaseRecord) ||
+		(current.Candidate && current.CandidatePublicationSequence != current.PublicationSequence) ||
+		(!current.Candidate && (current.CandidatePublicationSequence == 0 || next.PublicationSequence != current.PublicationSequence)) {
 		return next
 	}
 	next.CandidateRecord = current.CandidateRecord
 	next.ReleaseRecord = current.ReleaseRecord
 	next.WorkerSlot = current.WorkerSlot
+	next.CandidatePublicationSequence = current.CandidatePublicationSequence
 	return next
 }
 
@@ -437,6 +441,7 @@ func bindCandidatePublication(headers map[string][]string, publication routePubl
 		return routePublicationMetadata{}, errors.New("edge-control candidate publication identity is invalid or unbound")
 	}
 	publication.Candidate = true
+	publication.CandidatePublicationSequence = publication.PublicationSequence
 	publication.CandidateRecord = candidateRecord
 	publication.ReleaseRecord = releaseRecord
 	publication.WorkerSlot = workerSlot
@@ -479,17 +484,26 @@ func routePublicationFromCache(cached cacheFile) routePublicationMetadata {
 	if strings.TrimSpace(cached.RouteBundleSource) == "" {
 		return routePublicationMetadata{}
 	}
-	return routePublicationMetadata{
-		Source:              strings.TrimSpace(cached.RouteBundleSource),
-		GroupID:             strings.TrimSpace(cached.Bundle.EdgeGroupID),
-		Generation:          strings.TrimSpace(cached.Bundle.Generation),
-		PublicationSequence: cached.PublicationSequence,
-		RecoveryEpoch:       cached.RecoveryEpoch,
-		Candidate:           cached.Candidate,
-		CandidateRecord:     strings.TrimSpace(cached.CandidateRecordDigest),
-		ReleaseRecord:       strings.TrimSpace(cached.ReleaseRecordDigest),
-		WorkerSlot:          strings.TrimSpace(cached.CandidateWorkerSlot),
+	metadata := routePublicationMetadata{
+		Source:                       strings.TrimSpace(cached.RouteBundleSource),
+		GroupID:                      strings.TrimSpace(cached.Bundle.EdgeGroupID),
+		Generation:                   strings.TrimSpace(cached.Bundle.Generation),
+		PublicationSequence:          cached.PublicationSequence,
+		RecoveryEpoch:                cached.RecoveryEpoch,
+		Candidate:                    cached.Candidate,
+		CandidatePublicationSequence: cached.CandidatePublicationSequence,
+		CandidateRecord:              strings.TrimSpace(cached.CandidateRecordDigest),
+		ReleaseRecord:                strings.TrimSpace(cached.ReleaseRecordDigest),
+		WorkerSlot:                   strings.TrimSpace(cached.CandidateWorkerSlot),
 	}
+	if metadata.CandidatePublicationSequence == 0 {
+		if metadata.Candidate {
+			metadata.CandidatePublicationSequence = metadata.PublicationSequence
+		} else {
+			metadata.CandidateRecord, metadata.ReleaseRecord, metadata.WorkerSlot = "", "", ""
+		}
+	}
+	return metadata
 }
 
 func (s *Service) currentRoutePublicationAndBundle() (routePublicationMetadata, *model.EdgeRouteBundle) {
@@ -517,7 +531,8 @@ func (s *Service) validateCachedRouteSource(cached cacheFile) error {
 	}
 	hasCandidateAttestation := metadata.CandidateRecord != "" || metadata.ReleaseRecord != "" || metadata.WorkerSlot != ""
 	if (metadata.Candidate || hasCandidateAttestation) && (!edgeRouteDigestPattern.MatchString(metadata.CandidateRecord) ||
-		!edgeRouteDigestPattern.MatchString(metadata.ReleaseRecord) || metadata.WorkerSlot != strings.TrimSpace(s.Config.EdgeSlot)) {
+		!edgeRouteDigestPattern.MatchString(metadata.ReleaseRecord) || metadata.WorkerSlot != strings.TrimSpace(s.Config.EdgeSlot) ||
+		metadata.CandidatePublicationSequence == 0 || metadata.CandidatePublicationSequence != metadata.PublicationSequence) {
 		return errors.New("edge-control candidate publication cache is invalid")
 	}
 	return validateNonCatastrophicGroupBundle(nil, cached.Bundle, false)

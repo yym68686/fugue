@@ -386,7 +386,7 @@ func TestActivatedCandidateAttestationFollowsPromotedCurrentPublications(t *test
 	selection := routeSourceSelection{activeSlot: model.EdgeSlotB, expectedGeneration: "candidate-generation", expectedPublicationSequence: 11502}
 	loadedCandidate := routePublicationMetadata{
 		Source: edgeControlRouteSourceV1, GroupID: "edge-group-country-us", Generation: "candidate-generation",
-		PublicationSequence: 11502, Candidate: true, CandidateRecord: "sha256:" + strings.Repeat("a", 64),
+		PublicationSequence: 11502, Candidate: true, CandidatePublicationSequence: 11502, CandidateRecord: "sha256:" + strings.Repeat("a", 64),
 		ReleaseRecord: "sha256:" + strings.Repeat("b", 64), WorkerSlot: model.EdgeSlotB,
 	}
 	promoted := routePublicationMetadata{
@@ -395,16 +395,24 @@ func TestActivatedCandidateAttestationFollowsPromotedCurrentPublications(t *test
 	}
 	promoted = retainActivatedCandidateAttestation(selection, model.EdgeSlotB, loadedCandidate, promoted)
 	if promoted.Candidate || promoted.CandidateRecord != loadedCandidate.CandidateRecord ||
-		promoted.ReleaseRecord != loadedCandidate.ReleaseRecord || promoted.WorkerSlot != loadedCandidate.WorkerSlot {
+		promoted.ReleaseRecord != loadedCandidate.ReleaseRecord || promoted.WorkerSlot != loadedCandidate.WorkerSlot || promoted.CandidatePublicationSequence != loadedCandidate.PublicationSequence {
 		t.Fatalf("promoted current lost candidate attestation: %+v", promoted)
 	}
 	refreshed := promoted
 	refreshed.Generation = "current-refresh"
 	refreshed.PublicationSequence++
+	refreshed.CandidatePublicationSequence = 0
 	refreshed.CandidateRecord, refreshed.ReleaseRecord, refreshed.WorkerSlot = "", "", ""
 	refreshed = retainActivatedCandidateAttestation(selection, model.EdgeSlotB, promoted, refreshed)
-	if refreshed.CandidateRecord != loadedCandidate.CandidateRecord || refreshed.ReleaseRecord != loadedCandidate.ReleaseRecord || refreshed.WorkerSlot != model.EdgeSlotB {
-		t.Fatalf("current refresh lost release attestation: %+v", refreshed)
+	if refreshed.CandidateRecord != "" || refreshed.ReleaseRecord != "" || refreshed.WorkerSlot != "" || refreshed.CandidatePublicationSequence != 0 {
+		t.Fatalf("new current publication retained stale release attestation: %+v", refreshed)
+	}
+	samePublication := promoted
+	samePublication.CandidateRecord, samePublication.ReleaseRecord, samePublication.WorkerSlot = "", "", ""
+	samePublication.Candidate = false
+	samePublication = retainActivatedCandidateAttestation(selection, model.EdgeSlotB, promoted, samePublication)
+	if samePublication.CandidateRecord != loadedCandidate.CandidateRecord || samePublication.CandidatePublicationSequence != loadedCandidate.PublicationSequence {
+		t.Fatalf("same current publication lost release attestation: %+v", samePublication)
 	}
 	otherSlotCurrent := promoted
 	otherSlotCurrent.CandidateRecord, otherSlotCurrent.ReleaseRecord, otherSlotCurrent.WorkerSlot = "", "", ""
@@ -435,6 +443,23 @@ func TestCandidatePublicationMayStartAtIndependentRecoveryEpoch(t *testing.T) {
 	candidate.Candidate = false
 	if err := validateRoutePublicationAdvance(current, candidate); err == nil {
 		t.Fatal("ordinary publication regressed recovery epoch was accepted")
+	}
+}
+
+func TestLegacyCacheDropsUnboundPromotedAttestation(t *testing.T) {
+	cached := cacheFile{
+		RouteBundleSource: edgeControlRouteSourceV1, PublicationSequence: 11503, RecoveryEpoch: 41,
+		CandidateRecordDigest: "sha256:" + strings.Repeat("a", 64), ReleaseRecordDigest: "sha256:" + strings.Repeat("b", 64),
+		CandidateWorkerSlot: model.EdgeSlotB, Bundle: model.EdgeRouteBundle{EdgeGroupID: "edge-group-country-us", Generation: "routes"},
+	}
+	metadata := routePublicationFromCache(cached)
+	if metadata.CandidateRecord != "" || metadata.ReleaseRecord != "" || metadata.WorkerSlot != "" || metadata.CandidatePublicationSequence != 0 {
+		t.Fatalf("legacy promoted cache retained unbound attestation: %+v", metadata)
+	}
+	cached.Candidate = true
+	metadata = routePublicationFromCache(cached)
+	if metadata.CandidatePublicationSequence != cached.PublicationSequence || metadata.CandidateRecord != cached.CandidateRecordDigest {
+		t.Fatalf("legacy candidate cache lost its publication binding: %+v", metadata)
 	}
 }
 

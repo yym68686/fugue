@@ -161,17 +161,18 @@ type edgeDesiredState struct {
 }
 
 type cacheFile struct {
-	Version               int                   `json:"version"`
-	ETag                  string                `json:"etag,omitempty"`
-	CachedAt              time.Time             `json:"cached_at"`
-	RouteBundleSource     string                `json:"route_bundle_source,omitempty"`
-	PublicationSequence   uint64                `json:"publication_sequence,omitempty"`
-	RecoveryEpoch         uint64                `json:"recovery_epoch,omitempty"`
-	Candidate             bool                  `json:"candidate,omitempty"`
-	CandidateRecordDigest string                `json:"candidate_record_digest,omitempty"`
-	ReleaseRecordDigest   string                `json:"release_record_digest,omitempty"`
-	CandidateWorkerSlot   string                `json:"candidate_worker_slot,omitempty"`
-	Bundle                model.EdgeRouteBundle `json:"bundle"`
+	Version                      int                   `json:"version"`
+	ETag                         string                `json:"etag,omitempty"`
+	CachedAt                     time.Time             `json:"cached_at"`
+	RouteBundleSource            string                `json:"route_bundle_source,omitempty"`
+	PublicationSequence          uint64                `json:"publication_sequence,omitempty"`
+	RecoveryEpoch                uint64                `json:"recovery_epoch,omitempty"`
+	Candidate                    bool                  `json:"candidate,omitempty"`
+	CandidatePublicationSequence uint64                `json:"candidate_publication_sequence,omitempty"`
+	CandidateRecordDigest        string                `json:"candidate_record_digest,omitempty"`
+	ReleaseRecordDigest          string                `json:"release_record_digest,omitempty"`
+	CandidateWorkerSlot          string                `json:"candidate_worker_slot,omitempty"`
+	Bundle                       model.EdgeRouteBundle `json:"bundle"`
 }
 
 type telemetry struct {
@@ -681,17 +682,18 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		if err := s.writeCache(cacheFile{
-			Version:               cacheFileVersion,
-			ETag:                  etag,
-			CachedAt:              now,
-			RouteBundleSource:     publication.Source,
-			PublicationSequence:   publication.PublicationSequence,
-			RecoveryEpoch:         publication.RecoveryEpoch,
-			Candidate:             publication.Candidate,
-			CandidateRecordDigest: publication.CandidateRecord,
-			ReleaseRecordDigest:   publication.ReleaseRecord,
-			CandidateWorkerSlot:   publication.WorkerSlot,
-			Bundle:                bundle,
+			Version:                      cacheFileVersion,
+			ETag:                         etag,
+			CachedAt:                     now,
+			RouteBundleSource:            publication.Source,
+			PublicationSequence:          publication.PublicationSequence,
+			RecoveryEpoch:                publication.RecoveryEpoch,
+			Candidate:                    publication.Candidate,
+			CandidatePublicationSequence: publication.CandidatePublicationSequence,
+			CandidateRecordDigest:        publication.CandidateRecord,
+			ReleaseRecordDigest:          publication.ReleaseRecord,
+			CandidateWorkerSlot:          publication.WorkerSlot,
+			Bundle:                       bundle,
 		}); err != nil {
 			if previousBundle != nil && s.Config.CaddyEnabled {
 				if _, restoreErr := s.applyCaddyConfigOnly(ctx, *previousBundle); restoreErr != nil {
