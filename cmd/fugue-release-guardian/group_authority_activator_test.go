@@ -70,6 +70,21 @@ func TestAuthorityWorkerHealthMatchesExactPromotedGeneration(t *testing.T) {
 	}
 }
 
+func TestNewGroupAuthorityActivatorBudgetsPersistentMutationAndReplay(t *testing.T) {
+	group := "edge-group-country-de"
+	front := &frontAuthorityActivator{config: frontAuthorityConfig{GroupID: group}}
+	activator, err := newGroupAuthorityActivator(front, groupAuthorityConfig{GroupID: group,
+		Endpoint: "http://127.0.0.1:8080", KeyringFile: filepath.Join(t.TempDir(), "keyring.json"),
+		SlotA: "192.0.2.10:18443", SlotB: "192.0.2.10:28443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activator.client.Timeout != authorityMutationTimeout || authorityMutationTimeout+authorityReconcileTimeout >= authorityRequestTTL {
+		t.Fatalf("authority mutation budget cannot complete an exact signed replay: timeout=%s reconcile=%s ttl=%s",
+			activator.client.Timeout, authorityReconcileTimeout, authorityRequestTTL)
+	}
+}
+
 func TestGroupAuthorityPromotionReplaysOnlyUnknownExactRequest(t *testing.T) {
 	now := time.Date(2026, 8, 13, 5, 0, 0, 0, time.UTC)
 	target := groupAuthorityTargetFixture()

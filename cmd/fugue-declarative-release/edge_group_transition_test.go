@@ -49,56 +49,6 @@ func TestPostEdgeCandidateStageReportsTrustedControlErrorCode(t *testing.T) {
 	}
 }
 
-func TestPromoteCandidateUsesExactStagingWitness(t *testing.T) {
-	now := time.Now().UTC()
-	groupID := "edge-group-country-de"
-	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
-	keyring := edgeCandidateKeyring{Schema: "edge-control-group-recovery-keyring/v1", Generation: 1, GroupID: groupID,
-		Keys: []edgeCandidateKey{{KeyID: "promotion-key-1", Secret: base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("s", 32))),
-			NotBeforeUnix: now.Add(-time.Hour).Unix(), NotAfterUnix: now.Add(time.Hour).Unix()}}}
-	rawKeyring, _ := json.Marshal(keyring)
-	if err := os.WriteFile(keyringPath, rawKeyring, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	staged := edgeCandidateStageReceipt{GroupID: groupID, AuthoritySequence: 12, CurrentPublicationSequence: 10,
-		CurrentRecoveryEpoch: 3, CurrentPublishedBundleDigest: "sha256:" + strings.Repeat("a", 64),
-		CandidateEpoch: 13, CandidateRecordDigest: "sha256:" + strings.Repeat("b", 64), CandidateBundleGeneration: "routes-new",
-		WorkerSlot: "b", WorkerSourceSHA: strings.Repeat("1", 40)}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPost || request.URL.Path != edgeCandidatePromotionPath {
-			t.Errorf("promotion endpoint=%s %s", request.Method, request.URL.Path)
-			writer.WriteHeader(http.StatusNotFound)
-			return
-		}
-		var promotion edgeCandidatePromotionRequest
-		if err := json.NewDecoder(request.Body).Decode(&promotion); err != nil {
-			t.Errorf("decode promotion: %v", err)
-			writer.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		if promotion.GroupID != staged.GroupID || promotion.ExpectedAuthoritySequence != staged.AuthoritySequence ||
-			promotion.ExpectedPublicationSequence != staged.CurrentPublicationSequence || promotion.ExpectedRecoveryEpoch != staged.CurrentRecoveryEpoch ||
-			promotion.ExpectedPublishedBundleDigest != staged.CurrentPublishedBundleDigest || promotion.ExpectedCandidateEpoch != staged.CandidateEpoch ||
-			promotion.CandidateRecordDigest != staged.CandidateRecordDigest || promotion.CandidateWorkerSlot != staged.WorkerSlot ||
-			promotion.CandidateBundleGeneration != staged.CandidateBundleGeneration || promotion.KeyID != "promotion-key-1" || promotion.Signature == "" {
-			t.Errorf("promotion is not receipt-bound: %+v", promotion)
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(edgeCandidatePromotionReceipt{Schema: edgeCandidatePromotionReceiptSchema, GroupID: groupID,
-			PreviousAuthoritySequence: 12, PreviousPublicationSequence: 10, PreviousRecoveryEpoch: 3,
-			PreviousBundleGeneration: "routes-old", PreviousPublishedBundleDigest: staged.CurrentPublishedBundleDigest,
-			PublicationSequence: 13, RecoveryEpoch: 3, BundleGeneration: staged.CandidateBundleGeneration,
-			PublishedBundleDigest: "sha256:" + strings.Repeat("c", 64), CandidateRecordDigest: staged.CandidateRecordDigest,
-			WorkerSlot: staged.WorkerSlot, Authority: edgeActivationAuthority})
-	}))
-	defer server.Close()
-	runtime := kubectlEdgeGroupRuntime{transition: declarativerelease.EdgeGroupABTransition{GroupID: groupID,
-		CandidateStageURL: server.URL + edgeCandidateStagePath, CandidateKeyring: keyringPath}}
-	if err := runtime.PromoteCandidate(context.Background(), staged); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestCurrentAuthorityMustConvergeToExactStagedCandidate(t *testing.T) {
 	groupID := "edge-group-country-de"
 	staged := edgeCandidateStageReceipt{
@@ -814,11 +764,6 @@ func (fake *fakeEdgeGroupRuntime) StageStandby(_ context.Context, before edgeGro
 		WorkerSlot: inactive, CurrentWorkerSlot: before.ActiveSlot, WorkerSourceSHA: target.ConfigSHA, WorkerImageDigest: digest, StandbyOnly: true}, nil
 }
 
-func (fake *fakeEdgeGroupRuntime) PromoteCandidate(_ context.Context, staged edgeCandidateStageReceipt) error {
-	fake.calls = append(fake.calls, "promote-candidate")
-	return nil
-}
-
 func (fake *fakeEdgeGroupRuntime) DeclaredTarget(name string) (declarativerelease.TargetIdentity, error) {
 	target, exists := fake.declared[name]
 	if !exists {
@@ -1020,7 +965,7 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-front:b", "wait-current-authority", "promote-candidate", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-current-authority", "wait-front:b", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
@@ -1069,32 +1014,6 @@ func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 	}
 	if got, want := fmt.Sprint(runtime.rollAuthority), "[false true false true]"; got != want {
 		t.Fatalf("failed successor authority gates=%s want=%s", got, want)
-	}
-}
-
-func TestPromoteEdgeActivationUsesCandidateBundleEvidence(t *testing.T) {
-	transition := edgeTransitionFixture()
-	old := edgeTargetFixture("1", "a")
-	target := edgeTargetFixture("2", "b")
-	imageDigest := digestFromTarget(t, target)
-	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
-	before.FrontActivation = &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID,
-		Generation: 7, ActiveSlot: "a", BundleGeneration: "bundle-a", WorkerSourceCommit: old.ConfigSHA,
-		WorkerImageDigest: digestFromTarget(t, old), Authority: edgeActivationAuthority}
-	runtime := &fakeEdgeGroupRuntime{}
-	candidates := map[string]edgeGroupPod{"node-1": {Name: "candidate", NodeName: "node-1", SourceCommit: target.ConfigSHA,
-		ImageRef: target.ImageRef, BundleGeneration: "bundle-b", Ready: true}}
-	if err := promoteEdgeActivation(context.Background(), runtime, before, transition, "b", candidates, target, imageDigest); err != nil {
-		t.Fatal(err)
-	}
-	if len(runtime.requests) != 1 {
-		t.Fatalf("activation requests=%+v, want one request", runtime.requests)
-	}
-	request := runtime.requests[0]
-	if request.ExpectedGeneration != 7 || request.ExpectedSlot != "a" || request.TargetSlot != "b" ||
-		request.BundleGeneration != "bundle-b" || request.WorkerSourceCommit != target.ConfigSHA || request.WorkerImageDigest != imageDigest ||
-		request.Operation != edgeActivationPromote {
-		t.Fatalf("activation request is not candidate-bound: %+v", request)
 	}
 }
 
@@ -1148,8 +1067,11 @@ func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *tes
 			t.Fatalf("active worker recovery call %q missing: %v", call, runtime.calls)
 		}
 	}
-	if activeIndex, promoteIndex := strings.Index(joined, "roll:"+transition.WorkerAName), strings.Index(joined, "cas:promote:b"); activeIndex < 0 || promoteIndex < 0 || activeIndex > promoteIndex {
-		t.Fatalf("active worker recovery did not precede promotion: %v", runtime.calls)
+	if activeIndex, guardianIndex := strings.Index(joined, "roll:"+transition.WorkerAName), strings.Index(joined, "wait-current-authority"); activeIndex < 0 || guardianIndex < 0 || activeIndex > guardianIndex {
+		t.Fatalf("active worker recovery did not precede Guardian authority: %v", runtime.calls)
+	}
+	if len(runtime.requests) != 0 {
+		t.Fatalf("executor wrote traffic activation during promotion: %+v", runtime.requests)
 	}
 	if got := runtime.rollTargets[transition.WorkerAName]; got != old {
 		t.Fatalf("active Worker recovery ignored declared LKG target: got=%+v want=%+v", got, old)
@@ -1183,7 +1105,7 @@ func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFa
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-front:b", "wait-current-authority", "promote-candidate", "apply:" + transition.FrontName,
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-current-authority", "wait-front:b", "apply:" + transition.FrontName,
 		"roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("post-commit standby failure changed serving workloads: calls=%v want=%v", runtime.calls, want)
@@ -1193,7 +1115,7 @@ func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFa
 	}
 }
 
-func TestExecuteEdgeGroupABCompensatesActivationBeforeAuthorityCommit(t *testing.T) {
+func TestExecuteEdgeGroupABDoesNotCompensateGuardianActivationOnObservationFailure(t *testing.T) {
 	transition := edgeTransitionFixture()
 	old := edgeTargetFixture("1", "a")
 	target := edgeTargetFixture("2", "b")
@@ -1210,34 +1132,14 @@ func TestExecuteEdgeGroupABCompensatesActivationBeforeAuthorityCommit(t *testing
 	}
 	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA,
 		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
-	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err == nil || !strings.Contains(err.Error(), "edge activation compensated") {
-		t.Fatalf("pre-commit failure did not report compensated activation: %v", err)
+	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err == nil || !strings.Contains(err.Error(), "observe Guardian authority switch") {
+		t.Fatalf("Guardian observation failure was not reported: %v", err)
 	}
-	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationRollback || runtime.requests[0].TargetSlot != "a" || runtime.requests[0].RollbackOfGeneration != 5 {
-		t.Fatalf("compensation request=%+v", runtime.requests)
+	if len(runtime.requests) != 0 {
+		t.Fatalf("executor raced Guardian compensation: %+v", runtime.requests)
 	}
-	if runtime.activationState == nil || runtime.activationState.ActiveSlot != "a" || runtime.activationState.Generation != 6 || runtime.activationState.RollbackOfGeneration != 5 {
-		t.Fatalf("activation did not settle at exact pre-transition witness: %+v", runtime.activationState)
-	}
-}
-
-func TestCompensateEdgeActivationUsesPromotedCandidateCASExecutor(t *testing.T) {
-	transition := edgeTransitionFixture()
-	old := edgeTargetFixture("1", "a")
-	beforeHealth := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 4,
-		BundleGeneration: "old-bundle", WorkerSourceCommit: old.ConfigSHA, WorkerImageDigest: digestFromTarget(t, old), RouteAuthority: edgeActivationAuthority}
-	before := edgeStateFixture("a", old, beforeHealth)
-	before.WorkerA = map[string]edgeGroupPod{"node-1": {NodeName: "node-1"}}
-	before.WorkerB = map[string]edgeGroupPod{"node-1": {NodeName: "node-1"}}
-	runtime := &fakeEdgeGroupRuntime{activationState: &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID,
-		Generation: 5, ActiveSlot: "b", BundleGeneration: "new-bundle", WorkerSourceCommit: strings.Repeat("2", 40),
-		WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), Authority: edgeActivationAuthority, Operation: edgeActivationPromote}}
-	candidate := edgeGroupPod{Name: "candidate-worker", NodeName: "node-1"}
-	if err := compensateEdgeActivation(context.Background(), runtime, before, transition, candidate); err != nil {
-		t.Fatalf("candidate CAS executor was not used for compensation: %v", err)
-	}
-	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationRollback || runtime.requests[0].TargetSlot != "a" {
-		t.Fatalf("unexpected compensation request: %+v", runtime.requests)
+	if runtime.activationState == nil || runtime.activationState.ActiveSlot != "b" || runtime.activationState.Generation != 5 {
+		t.Fatalf("executor mutated Guardian-owned activation: %+v", runtime.activationState)
 	}
 }
 

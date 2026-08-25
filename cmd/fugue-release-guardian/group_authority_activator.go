@@ -27,7 +27,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const authorityRequestTTL = 45 * time.Second
+const (
+	authorityRequestTTL       = 2 * time.Minute
+	authorityMutationTimeout  = 60 * time.Second
+	authorityReconcileTimeout = 10 * time.Second
+)
 
 var errAuthorityMutationUnknown = errors.New("Edge Control mutation result is unknown")
 var errAuthorityPrewriteCASChanged = errors.New("Edge Control prewrite CAS changed")
@@ -76,7 +80,7 @@ func newGroupAuthorityActivator(front *frontAuthorityActivator, config groupAuth
 		!validAuthoritySlotAddress(config.SlotA) || !validAuthoritySlotAddress(config.SlotB) || config.SlotA == config.SlotB {
 		return nil, errors.New("group authority activator configuration is invalid")
 	}
-	return &groupAuthorityActivator{front: front, config: config, client: &http.Client{Timeout: 8 * time.Second}, now: time.Now}, nil
+	return &groupAuthorityActivator{front: front, config: config, client: &http.Client{Timeout: authorityMutationTimeout}, now: time.Now}, nil
 }
 
 func validAuthoritySlotAddress(value string) bool {
@@ -460,7 +464,10 @@ func (activator *groupAuthorityActivator) promoteControl(ctx context.Context, ta
 		// serializing the large signed bundle. Reconcile the compact authority
 		// status first; only an explicit non-commit falls back to replaying the
 		// exact signed request.
-		if reconciled, reconcileErr := activator.reconcilePromotionReceipt(ctx, target); reconcileErr == nil {
+		reconcileCtx, cancel := context.WithTimeout(ctx, authorityReconcileTimeout)
+		reconciled, reconcileErr := activator.reconcilePromotionReceipt(reconcileCtx, target)
+		cancel()
+		if reconcileErr == nil {
 			receipt = reconciled
 		} else if replayErr := activator.post(ctx, edgecontrol.GroupPromotionPathV1, request, &receipt); replayErr != nil {
 			return receipt, errors.Join(err, reconcileErr, replayErr)
