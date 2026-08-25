@@ -54,6 +54,8 @@ const (
 	edgeCandidateStageAttempts          = 4
 	edgeCandidateStageRetryBase         = 200 * time.Millisecond
 	edgeGroupRecoveryHTTPTimeout        = 60 * time.Second
+	edgeInventoryHeartbeatMaxAge        = 2 * time.Minute
+	edgeInventoryHeartbeatClockSkew     = 30 * time.Second
 )
 
 var (
@@ -418,6 +420,9 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	}
 
 	if target.ConfigSHA == release.ExpectedPreviousConfigSHA {
+		if err := restoreEdgeLKGActivation(ctx, runtime, before, transition, target); err != nil {
+			return fmt.Errorf("restore exact edge LKG activation before workloads: %w", err)
+		}
 		if err := runtime.ApplyCandidateResources(ctx, ""); err != nil {
 			return err
 		}
@@ -558,6 +563,93 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return errors.New("edge group activation did not converge to the promoted slot")
 	}
 	return nil
+}
+
+// restoreEdgeLKGActivation switches traffic to the exact predecessor Worker
+// while that immutable standby is still present. The generic LKG apply rolls
+// code after this boundary, so it must not be allowed to leave a newer durable
+// activation pointer selecting code that rollback has already replaced.
+func restoreEdgeLKGActivation(ctx context.Context, runtime edgeGroupTransitionRuntime, before edgeGroupState, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity) error {
+	if runtime == nil || (before.ActiveSlot != "a" && before.ActiveSlot != "b") {
+		return errors.New("rollback activation state is unavailable")
+	}
+	desiredDigest, err := immutableDigestFromRef(target.ImageRef)
+	if err != nil {
+		return err
+	}
+	allPods := make([]edgeGroupPod, 0, len(before.WorkerA)+len(before.WorkerB))
+	for _, pods := range []map[string]edgeGroupPod{before.WorkerA, before.WorkerB} {
+		for _, pod := range pods {
+			allPods = append(allPods, pod)
+		}
+	}
+	executor, err := runtime.SelectCASExecutor(ctx, allPods...)
+	if err != nil {
+		return err
+	}
+	current, exists, err := runtime.ReadActivation(ctx, executor)
+	if err != nil {
+		return err
+	}
+	if !exists || current.GroupID != transition.GroupID || current.Authority != edgeActivationAuthority ||
+		(current.ActiveSlot != "a" && current.ActiveSlot != "b") || current.Generation == 0 {
+		return errors.New("current rollback activation identity is invalid")
+	}
+	currentPods := edgeWorkerPods(before, current.ActiveSlot)
+	if current.WorkerSourceCommit == target.ConfigSHA && current.WorkerImageDigest == desiredDigest {
+		bundle, bundleErr := exactEdgeWorkerBundle(currentPods, target)
+		if bundleErr != nil || bundle != current.BundleGeneration {
+			return errors.New("current activation claims the LKG without exact Worker evidence")
+		}
+		return nil
+	}
+
+	targetSlot := ""
+	targetBundle := ""
+	for _, slot := range []string{"a", "b"} {
+		bundle, bundleErr := exactEdgeWorkerBundle(edgeWorkerPods(before, slot), target)
+		if bundleErr != nil {
+			continue
+		}
+		if targetSlot != "" {
+			return errors.New("rollback LKG Worker slot is ambiguous")
+		}
+		targetSlot, targetBundle = slot, bundle
+	}
+	if targetSlot == "" {
+		return errors.New("rollback LKG Worker standby is unavailable")
+	}
+	request := edgeActivationRequest{
+		GroupID: transition.GroupID, ExpectedGeneration: current.Generation, ExpectedSlot: current.ActiveSlot,
+		TargetSlot: targetSlot, BundleGeneration: targetBundle, WorkerSourceCommit: target.ConfigSHA,
+		WorkerImageDigest: desiredDigest, Operation: edgeActivationRollback, RollbackOfGeneration: current.Generation,
+		Reason: "restore exact edge LKG before workload rollback",
+	}
+	if _, err := runtime.ActivationCAS(ctx, executor, request); err != nil {
+		return err
+	}
+	if _, err := runtime.WaitFront(ctx, targetSlot, target.ConfigSHA, desiredDigest); err != nil {
+		return fmt.Errorf("wait Front on restored LKG slot: %w", err)
+	}
+	return nil
+}
+
+func exactEdgeWorkerBundle(pods map[string]edgeGroupPod, target declarativerelease.TargetIdentity) (string, error) {
+	if len(pods) == 0 {
+		return "", errors.New("edge Worker evidence is absent")
+	}
+	bundle := ""
+	for _, pod := range pods {
+		if !edgePodMatchesTarget(pod, target) || !edgePodHasGroupAuthority(pod) || strings.TrimSpace(pod.BundleGeneration) == "" {
+			return "", errors.New("edge Worker does not prove the exact LKG bundle")
+		}
+		if bundle == "" {
+			bundle = pod.BundleGeneration
+		} else if bundle != pod.BundleGeneration {
+			return "", errors.New("edge Worker LKG bundle evidence diverged")
+		}
+	}
+	return bundle, nil
 }
 
 func edgeActiveWorkerNeedsCodeRecovery(state edgeGroupState, target declarativerelease.TargetIdentity) bool {
@@ -2074,8 +2166,16 @@ func edgePodHasGroupAuthority(pod edgeGroupPod) bool {
 }
 
 func edgePodHasActiveInventory(pod edgeGroupPod) bool {
-	return edgePodHasGroupAuthority(pod) && pod.InventoryProducerActive && pod.InventoryHeartbeatGeneration > 0 &&
-		!pod.InventoryHeartbeatAt.IsZero() && pod.InventoryHeartbeatError == ""
+	return edgePodHasActiveInventoryAt(pod, time.Now().UTC())
+}
+
+func edgePodHasActiveInventoryAt(pod edgeGroupPod, now time.Time) bool {
+	if !edgePodHasGroupAuthority(pod) || !pod.InventoryProducerActive || pod.InventoryHeartbeatGeneration == 0 || pod.InventoryHeartbeatAt.IsZero() {
+		return false
+	}
+	heartbeatAt := pod.InventoryHeartbeatAt.UTC()
+	now = now.UTC()
+	return !heartbeatAt.After(now.Add(edgeInventoryHeartbeatClockSkew)) && now.Sub(heartbeatAt) <= edgeInventoryHeartbeatMaxAge
 }
 
 func validateEdgeGroupAuthority(state edgeGroupState, transition declarativerelease.EdgeGroupABTransition) error {

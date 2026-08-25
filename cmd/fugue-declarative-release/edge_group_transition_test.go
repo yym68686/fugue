@@ -1170,6 +1170,10 @@ func TestExecuteEdgeGroupABCompensationSwitchesBeforeRestoringFront(t *testing.T
 	current := edgeTargetFixture("2", "b")
 	currentHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 4, WorkerSourceCommit: current.ConfigSHA, WorkerImageDigest: digestFromTarget(t, current), RouteAuthority: edgeActivationAuthority}
 	before := edgeStateFixture("b", current, currentHealth)
+	before.FrontActivation = &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID, Generation: 4,
+		ActiveSlot: "b", BundleGeneration: "bundle-b", WorkerSourceCommit: current.ConfigSHA,
+		WorkerImageDigest: digestFromTarget(t, current), Authority: edgeActivationAuthority, Operation: edgeActivationPromote}
+	before.WorkerA = edgeStateFixture("a", lkg, edgeFrontHealth{ActiveSlot: "a"}).WorkerA
 	finalHealth := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 5, WorkerSourceCommit: lkg.ConfigSHA, WorkerImageDigest: digestFromTarget(t, lkg), RouteAuthority: edgeActivationAuthority}
 	runtime := &fakeEdgeGroupRuntime{
 		snapshots: []edgeGroupState{before},
@@ -1178,18 +1182,20 @@ func TestExecuteEdgeGroupABCompensationSwitchesBeforeRestoringFront(t *testing.T
 			transition.WorkerBName: edgeStateFixture("a", lkg, finalHealth).WorkerB,
 			transition.FrontName:   edgeStateFixture("a", lkg, finalHealth).Front,
 		},
-		declared: map[string]declarativerelease.TargetIdentity{transition.WorkerAName: lkg, transition.WorkerBName: lkg, transition.FrontName: lkg},
+		waits:           []map[string]edgeFrontHealth{{"node-1": finalHealth}},
+		activationState: before.FrontActivation,
+		declared:        map[string]declarativerelease.TargetIdentity{transition.WorkerAName: lkg, transition.WorkerBName: lkg, transition.FrontName: lkg},
 	}
 	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: lkg.ConfigSHA}
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, lkg); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply:", "roll:" + transition.WorkerAName, "roll:" + transition.WorkerBName, "roll:" + transition.FrontName}
+	want := []string{"snapshot", "select-cas", "read-activation", "cas:rollback:a", "wait-front:a", "apply:", "roll:" + transition.WorkerAName, "roll:" + transition.WorkerBName, "roll:" + transition.FrontName}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge compensation order=%v want=%v", runtime.calls, want)
 	}
-	if len(runtime.requests) != 0 {
-		t.Fatalf("exact LKG compensation performed direct authority CAS: %+v", runtime.requests)
+	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationRollback || runtime.requests[0].TargetSlot != "a" || runtime.requests[0].RollbackOfGeneration != 4 {
+		t.Fatalf("exact LKG compensation did not restore authority first: %+v", runtime.requests)
 	}
 }
 
@@ -1212,6 +1218,20 @@ func TestEdgeGroupAuthorityRequiresPublicationOnBothSlotsAndInventoryOnActive(t 
 	state.WorkerA["node-1"] = pod
 	if err := validateEdgeGroupAuthority(state, transition); err == nil || !strings.Contains(err.Error(), "inventory") {
 		t.Fatalf("missing active inventory was accepted: %v", err)
+	}
+}
+
+func TestActiveInventoryUsesFreshVerifiedSuccessAcrossTransientFailure(t *testing.T) {
+	now := time.Date(2026, 8, 25, 1, 0, 0, 0, time.UTC)
+	pod := edgeGroupPod{RouteBundleSource: edgeGroupAuthoritySource, PublicationSequence: 4, ServingGeneration: "routes",
+		InventoryProducerActive: true, InventoryHeartbeatGeneration: 9, InventoryHeartbeatAt: now.Add(-time.Minute),
+		InventoryHeartbeatError: "Edge inventory producer heartbeat returned status 409"}
+	if !edgePodHasActiveInventoryAt(pod, now) {
+		t.Fatal("transient failure erased a still-fresh verified inventory receipt")
+	}
+	pod.InventoryHeartbeatAt = now.Add(-edgeInventoryHeartbeatMaxAge - time.Nanosecond)
+	if edgePodHasActiveInventoryAt(pod, now) {
+		t.Fatal("stale inventory receipt remained authoritative")
 	}
 }
 
@@ -1280,7 +1300,7 @@ func edgeStateFixture(active string, target declarativerelease.TargetIdentity, h
 	pod := func(name string) map[string]edgeGroupPod {
 		return map[string]edgeGroupPod{"node-1": {Name: name + "-pod", UID: name + "-uid", ResourceVersion: "42", NodeName: "node-1", SourceCommit: target.ConfigSHA, ImageRef: target.ImageRef, ImageID: target.ImageRef, BundleGeneration: "bundle-" + active,
 			RouteBundleSource: edgeGroupAuthoritySource, PublicationSequence: 1, ServingGeneration: "generation-one",
-			InventoryProducerActive: true, InventoryHeartbeatGeneration: 1, InventoryHeartbeatAt: time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC), Ready: true}}
+			InventoryProducerActive: true, InventoryHeartbeatGeneration: 1, InventoryHeartbeatAt: time.Now().UTC(), Ready: true}}
 	}
 	return edgeGroupState{Front: pod("front"), FrontHealth: map[string]edgeFrontHealth{"node-1": health}, WorkerA: pod("worker-a"), WorkerB: pod("worker-b"), ActiveSlot: active}
 }
