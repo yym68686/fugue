@@ -302,6 +302,10 @@ type edgeGroupPod struct {
 	InventoryHeartbeatGeneration uint64
 	InventoryHeartbeatAt         time.Time
 	InventoryHeartbeatError      string
+	CandidateBundleLoaded        bool
+	CandidateRecordDigest        string
+	CandidateReleaseRecordDigest string
+	CandidateWorkerSlot          string
 	LegacyIdentity               bool
 	Ready                        bool
 }
@@ -315,6 +319,10 @@ type edgeWorkerHealth struct {
 	InventoryHeartbeatGeneration uint64
 	InventoryHeartbeatAt         time.Time
 	InventoryHeartbeatError      string
+	CandidateBundleLoaded        bool
+	CandidateRecordDigest        string
+	CandidateReleaseRecordDigest string
+	CandidateWorkerSlot          string
 }
 
 type edgeFrontHealth struct {
@@ -345,6 +353,7 @@ type edgeGroupTransitionRuntime interface {
 	PromoteCandidate(context.Context, edgeCandidateStageReceipt) error
 	DeclaredTarget(string) (declarativerelease.TargetIdentity, error)
 	Roll(context.Context, string, declarativerelease.TargetIdentity, bool, bool) (map[string]edgeGroupPod, error)
+	WaitCandidateWorkerAuthority(context.Context, string, declarativerelease.TargetIdentity, edgeCandidateStageReceipt) (map[string]edgeGroupPod, error)
 	SelectCASExecutor(context.Context, ...edgeGroupPod) (edgeGroupPod, error)
 	ReadActivation(context.Context, edgeGroupPod) (edgeActivationState, bool, error)
 	WaitFront(context.Context, string, string, string) (map[string]edgeFrontHealth, error)
@@ -461,6 +470,10 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	}
 	for _, pod := range candidatePods {
 		compensationCandidates = append(compensationCandidates, pod)
+	}
+	candidatePods, err = runtime.WaitCandidateWorkerAuthority(ctx, inactiveName, target, stage)
+	if err != nil {
+		return compensate(fmt.Errorf("verify inactive edge Worker candidate authority: %w", err))
 	}
 	var frontPods map[string]edgeGroupPod
 	frontRecovered := false
@@ -1846,6 +1859,10 @@ func (runtime *kubectlEdgeGroupRuntime) WaitFront(ctx context.Context, slot, sou
 	return runtime.cluster.waitFrontActivation(ctx, runtime.release, runtime.transition, slot, source, digest)
 }
 
+func (runtime *kubectlEdgeGroupRuntime) WaitCandidateWorkerAuthority(ctx context.Context, name string, target declarativerelease.TargetIdentity, stage edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
+	return runtime.cluster.waitEdgeCandidateWorkerAuthority(ctx, runtime.release, runtime.transition, name, target, stage)
+}
+
 func (runtime *kubectlEdgeGroupRuntime) WaitActiveWorkerAuthority(ctx context.Context, name string, target declarativerelease.TargetIdentity) error {
 	return runtime.cluster.waitActiveEdgeWorkerAuthority(ctx, runtime.release, runtime.transition, name, target)
 }
@@ -2035,6 +2052,10 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 			pod.InventoryHeartbeatGeneration = health.InventoryHeartbeatGeneration
 			pod.InventoryHeartbeatAt = health.InventoryHeartbeatAt
 			pod.InventoryHeartbeatError = health.InventoryHeartbeatError
+			pod.CandidateBundleLoaded = health.CandidateBundleLoaded
+			pod.CandidateRecordDigest = health.CandidateRecordDigest
+			pod.CandidateReleaseRecordDigest = health.CandidateReleaseRecordDigest
+			pod.CandidateWorkerSlot = health.CandidateWorkerSlot
 			pods[node] = pod
 		}
 	}
@@ -2134,11 +2155,15 @@ func (cluster *kubectlCluster) readEdgeWorkerHealth(ctx context.Context, pod edg
 		return edgeWorkerHealth{}, errors.New("edge worker health is not group-bound and healthy")
 	}
 	health := edgeWorkerHealth{
-		BundleGeneration:        strings.TrimSpace(stringValue(value["bundle_version"])),
-		RouteBundleSource:       strings.TrimSpace(stringValue(value["route_bundle_source"])),
-		ServingGeneration:       strings.TrimSpace(stringValue(value["serving_generation"])),
-		InventoryProducerActive: value["inventory_producer_active"] == true,
-		InventoryHeartbeatError: strings.TrimSpace(stringValue(value["inventory_heartbeat_error"])),
+		BundleGeneration:             strings.TrimSpace(stringValue(value["bundle_version"])),
+		RouteBundleSource:            strings.TrimSpace(stringValue(value["route_bundle_source"])),
+		ServingGeneration:            strings.TrimSpace(stringValue(value["serving_generation"])),
+		InventoryProducerActive:      value["inventory_producer_active"] == true,
+		InventoryHeartbeatError:      strings.TrimSpace(stringValue(value["inventory_heartbeat_error"])),
+		CandidateBundleLoaded:        value["candidate_bundle_loaded"] == true,
+		CandidateRecordDigest:        strings.TrimSpace(stringValue(value["candidate_record_digest"])),
+		CandidateReleaseRecordDigest: strings.TrimSpace(stringValue(value["candidate_release_record_digest"])),
+		CandidateWorkerSlot:          strings.TrimSpace(stringValue(value["candidate_worker_slot"])),
 	}
 	if raw, exists := value["publication_sequence"]; exists {
 		health.PublicationSequence, err = uint64Value(raw)
@@ -2163,6 +2188,12 @@ func (cluster *kubectlCluster) readEdgeWorkerHealth(ctx context.Context, pod edg
 
 func edgePodHasGroupAuthority(pod edgeGroupPod) bool {
 	return pod.RouteBundleSource == edgeGroupAuthoritySource && pod.PublicationSequence > 0 && pod.ServingGeneration != ""
+}
+
+func edgePodHasCandidateAuthority(pod edgeGroupPod, stage edgeCandidateStageReceipt) bool {
+	return edgePodHasGroupAuthority(pod) && pod.CandidateBundleLoaded && pod.BundleGeneration == stage.CandidateBundleGeneration &&
+		pod.CandidateRecordDigest == stage.CandidateRecordDigest && pod.CandidateReleaseRecordDigest == stage.ReleaseRecordDigest &&
+		pod.CandidateWorkerSlot == stage.WorkerSlot
 }
 
 func edgePodHasActiveInventory(pod edgeGroupPod) bool {
@@ -2229,6 +2260,34 @@ func (cluster *kubectlCluster) waitActiveEdgeWorkerAuthority(ctx context.Context
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func (cluster *kubectlCluster) waitEdgeCandidateWorkerAuthority(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity, stage edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
+	if stage.WorkerSlot != "a" && stage.WorkerSlot != "b" || !edgePromotionDigestPattern.MatchString(stage.CandidateRecordDigest) ||
+		!edgePromotionDigestPattern.MatchString(stage.ReleaseRecordDigest) || strings.TrimSpace(stage.CandidateBundleGeneration) == "" {
+		return nil, errors.New("staged candidate authority witness is incomplete")
+	}
+	deadline := time.Now().Add(cluster.timeout)
+	for {
+		pods, err := cluster.readEdgeDaemonSetPods(ctx, release, name, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
+		if err == nil {
+			converged := len(pods) == transition.ExpectedNodes
+			for _, pod := range pods {
+				converged = converged && edgePodMatchesTarget(pod, target) && edgePodHasCandidateAuthority(pod, stage)
+			}
+			if converged {
+				return pods, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("DaemonSet/%s did not load the exact staged candidate authority", name)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}

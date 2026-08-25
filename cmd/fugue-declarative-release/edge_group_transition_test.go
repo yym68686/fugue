@@ -778,6 +778,15 @@ func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, target de
 	return value, nil
 }
 
+func (fake *fakeEdgeGroupRuntime) WaitCandidateWorkerAuthority(_ context.Context, name string, _ declarativerelease.TargetIdentity, _ edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
+	fake.calls = append(fake.calls, "wait-candidate-authority:"+name)
+	value, exists := fake.rolls[name]
+	if !exists {
+		return nil, fmt.Errorf("unexpected candidate authority wait %s", name)
+	}
+	return value, nil
+}
+
 func (fake *fakeEdgeGroupRuntime) SelectCASExecutor(_ context.Context, candidates ...edgeGroupPod) (edgeGroupPod, error) {
 	fake.calls = append(fake.calls, "select-cas")
 	for _, candidate := range candidates {
@@ -943,7 +952,7 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "promote-candidate", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-front:b", "promote-candidate", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
@@ -1106,7 +1115,7 @@ func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFa
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "promote-candidate", "apply:" + transition.FrontName,
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-front:b", "promote-candidate", "apply:" + transition.FrontName,
 		"roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("post-commit standby failure changed serving workloads: calls=%v want=%v", runtime.calls, want)
@@ -1232,6 +1241,31 @@ func TestActiveInventoryUsesFreshVerifiedSuccessAcrossTransientFailure(t *testin
 	pod.InventoryHeartbeatAt = now.Add(-edgeInventoryHeartbeatMaxAge - time.Nanosecond)
 	if edgePodHasActiveInventoryAt(pod, now) {
 		t.Fatal("stale inventory receipt remained authoritative")
+	}
+}
+
+func TestCandidateAuthorityRequiresExactStagedReleaseWitness(t *testing.T) {
+	stage := edgeCandidateStageReceipt{WorkerSlot: "a", CandidateBundleGeneration: "routes.p12.r0",
+		CandidateRecordDigest: "sha256:" + strings.Repeat("a", 64), ReleaseRecordDigest: "sha256:" + strings.Repeat("b", 64)}
+	pod := edgeGroupPod{RouteBundleSource: edgeGroupAuthoritySource, PublicationSequence: 12, ServingGeneration: "routes",
+		BundleGeneration: stage.CandidateBundleGeneration, CandidateBundleLoaded: true, CandidateRecordDigest: stage.CandidateRecordDigest,
+		CandidateReleaseRecordDigest: stage.ReleaseRecordDigest, CandidateWorkerSlot: stage.WorkerSlot}
+	if !edgePodHasCandidateAuthority(pod, stage) {
+		t.Fatal("exact staged candidate authority was rejected")
+	}
+	for name, mutate := range map[string]func(*edgeGroupPod){
+		"bundle":  func(value *edgeGroupPod) { value.BundleGeneration = "routes.p13.r0" },
+		"record":  func(value *edgeGroupPod) { value.CandidateRecordDigest = "sha256:" + strings.Repeat("c", 64) },
+		"release": func(value *edgeGroupPod) { value.CandidateReleaseRecordDigest = "sha256:" + strings.Repeat("d", 64) },
+		"slot":    func(value *edgeGroupPod) { value.CandidateWorkerSlot = "b" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := pod
+			mutate(&changed)
+			if edgePodHasCandidateAuthority(changed, stage) {
+				t.Fatal("candidate authority drift was accepted")
+			}
+		})
 	}
 }
 
