@@ -311,6 +311,46 @@ func TestCandidateImporterAcceptsSameSlotAfterRepeatedFrontRecovery(t *testing.T
 	}
 }
 
+func TestCandidateImporterAcceptsExplicitCrossFamilyRuntimeRecovery(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-group-country-us", now)
+	envelope.AllowDegradedPrevious = true
+	envelope.CurrentWorkerSlot = releaseguardian.AuthoritySlotB
+	envelope.WorkerSlot = releaseguardian.AuthoritySlotA
+	envelope.Bundle.Generation = "edgegroupbundle_front"
+	envelope.Bundle.Version = envelope.Bundle.Generation + ".p5.r0"
+	envelope.Bundle.PreviousGeneration = envelope.CurrentBundle.Generation
+	envelope.Record.BundleDigest = candidateBundleDigest(envelope.Bundle)
+	record, err := envelope.Record.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Record = record
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: envelope.GroupID, CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 23, CurrentBundleGeneration: "edgegroupbundle_old.p14252.r103", CurrentWorkerSourceSHA: strings.Repeat("b", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("c", 64), AuthorityEpoch: 14221}
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "41", FrontGeneration: 24,
+		BundleVersion: "edgegroupbundle_front.p16641.r104", WorkerSlot: releaseguardian.AuthoritySlotB,
+		WorkerSourceSHA: strings.Repeat("5", 40), WorkerImageDigest: "sha256:" + strings.Repeat("6", 64)}
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("cross-family recovery envelope was rejected: %v", err)
+	}
+	if err := validateCandidateServingAuthorityBinding(envelope, current, "current-authority", "41"); err != nil {
+		t.Fatalf("cross-family runtime recovery witness was rejected: %v", err)
+	}
+	envelope.AllowDegradedPrevious = false
+	if err := validateCandidateServingAuthorityBinding(envelope, current, "current-authority", "41"); err == nil {
+		t.Fatal("cross-family runtime recovery without explicit authorization was accepted")
+	}
+	envelope.AllowDegradedPrevious = true
+	envelope.Bundle.Generation = "edgegroupbundle_other"
+	if err := validateCandidateServingAuthorityBinding(envelope, current, "current-authority", "41"); err == nil {
+		t.Fatal("cross-family runtime recovery not cloned from Front generation was accepted")
+	}
+}
+
 func TestCandidateImporterPersistsRecordsBeforeRejectingServingAuthorityCASDrift(t *testing.T) {
 	now := time.Date(2026, 8, 14, 20, 15, 0, 0, time.UTC)
 	groupID := "edge-pool-a"

@@ -717,6 +717,40 @@ func TestServingAuthorityWitnessUsesWorkerActivationEvidenceWhenFrontMetadataLag
 	}
 }
 
+func TestServingAuthorityWitnessAllowsExplicitRuntimeDriftWithActiveWorkerProof(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-us", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
+		CurrentWorkerSlot: releaseguardian.AuthoritySlotA, CurrentFrontGeneration: 23,
+		CurrentBundleGeneration: "edgegroupbundle_old.p14252.r103", CurrentWorkerSourceSHA: strings.Repeat("2", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("3", 64), AuthorityEpoch: 14221}
+	source, image := strings.Repeat("5", 40), "sha256:"+strings.Repeat("6", 64)
+	health := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 24,
+		BundleGeneration: "edgegroupbundle_front.p16641.r104", WorkerSourceCommit: source,
+		WorkerImageDigest: image, RouteAuthority: edgeActivationAuthority}
+	worker := edgeGroupPod{Name: "worker-b", NodeName: "edge-node-us", Ready: true, SourceCommit: source,
+		ImageRef: "ghcr.io/example/fugue-edge@" + image, RouteBundleSource: edgeGroupAuthoritySource,
+		BundleGeneration: "edgegroupbundle_current.p39215.r120", ServingGeneration: "edgegroupbundle_current",
+		PublicationSequence: 39215, InventoryProducerActive: true, InventoryHeartbeatGeneration: 49241,
+		InventoryHeartbeatAt: now.Add(-time.Second)}
+	state := edgeGroupState{ActiveSlot: "b", Front: map[string]edgeGroupPod{"edge-node-us": {Name: "front", NodeName: "edge-node-us"}},
+		WorkerB: map[string]edgeGroupPod{"edge-node-us": worker}}
+	if !edgeGroupStateMatchesExplicitServingDrift(state, current, health, now) {
+		t.Fatal("exact runtime-drift serving witness was rejected")
+	}
+	worker.InventoryHeartbeatAt = now.Add(-3 * time.Minute)
+	state.WorkerB["edge-node-us"] = worker
+	if edgeGroupStateMatchesExplicitServingDrift(state, current, health, now) {
+		t.Fatal("stale active Worker inventory witness was accepted")
+	}
+	worker.InventoryHeartbeatAt = now
+	state.WorkerB["edge-node-us"] = worker
+	health.Generation = 25
+	if edgeGroupStateMatchesExplicitServingDrift(state, current, health, now) {
+		t.Fatal("runtime-drift witness with invalid slot parity was accepted")
+	}
+}
+
 func TestServingAuthorityWitnessOmitsLegacyUnboundFront(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),

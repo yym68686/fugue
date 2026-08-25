@@ -434,7 +434,18 @@ func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, curren
 	}
 	currentGeneration, _, _, currentErr := parseUnboundAuthorityBundleVersion(current.CurrentBundleGeneration)
 	witnessGeneration, _, _, witnessErr := parseUnboundAuthorityBundleVersion(witness.BundleVersion)
-	if currentErr != nil || witnessErr != nil || currentGeneration != witnessGeneration {
+	if currentErr != nil || witnessErr != nil {
+		return errors.New("candidate serving authority binding is invalid")
+	}
+	// An emergency runtime repair may leave Guardian on an older bundle family.
+	// Edge Control proves the replacement candidate was cloned from the exact
+	// historical generation named by Front; retain every UID/RV, generation,
+	// slot-parity, and explicit degraded-recovery check above while allowing the
+	// stale CurrentAuthority family to be normalized by the ordinary switch.
+	if currentGeneration != witnessGeneration {
+		if envelope.AllowDegradedPrevious && !envelope.StandbyOnly && witnessGeneration == envelope.Bundle.Generation {
+			return nil
+		}
 		return errors.New("candidate serving authority binding is invalid")
 	}
 	previousMatches := current.PreviousWorkerSlot == witness.WorkerSlot && current.PreviousBundleGeneration == witness.BundleVersion &&

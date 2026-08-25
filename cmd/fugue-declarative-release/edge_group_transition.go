@@ -60,6 +60,7 @@ const (
 
 var (
 	edgeServingAuthorityTokenPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,255}$`)
+	edgeSourceSHAPattern                  = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	edgePromotionDigestPattern            = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	errEdgeCandidateStageSequenceConflict = errors.New("stage edge Worker candidate: HTTP 409 (sequence_conflict)")
 	errEdgeCandidateStageTransient        = errors.New("stage edge Worker candidate: transient transport failure")
@@ -1295,6 +1296,9 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
 				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 			}
+			if allowDegradedRecovery && edgeGroupStateMatchesExplicitServingDrift(before, current, health, time.Now().UTC()) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			if !allowDegradedRecovery || !edgeFrontHealthMatchesDegradedServingAuthority(health, current) {
 				return nil, fmt.Errorf("Guardian current authority does not match the serving Front slot: %s expected_lkg=%s",
 					edgeDegradedServingAuthorityMismatch(health, current, allowDegradedRecovery), edgeExpectedLKGMismatch(health, current, expectedLKGSourceSHA, expectedLKGImageDigest))
@@ -1303,6 +1307,9 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 		}
 		if !edgeFrontHealthMatchesServingAuthority(health, current) {
 			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
+			if allowDegradedRecovery && edgeGroupStateMatchesExplicitServingDrift(before, current, health, time.Now().UTC()) {
 				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 			}
 			return nil, errors.New("Guardian current authority does not match serving Front activation evidence")
@@ -1352,6 +1359,9 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
 				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 			}
+			if allowDegradedRecovery && edgeGroupStateMatchesExplicitServingDrift(before, current, health, time.Now().UTC()) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			return nil, errors.New("Guardian current authority does not match serving Front evidence")
 		}
 	}
@@ -1361,6 +1371,42 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: string(current.CurrentWorkerSlot),
 		WorkerSourceSHA: current.CurrentWorkerSourceSHA, WorkerImageDigest: current.CurrentWorkerImageDigest,
 	}, nil
+}
+
+// edgeGroupStateMatchesExplicitServingDrift admits a reviewed superseding
+// recovery after an emergency Edge A/B repair advanced Front beyond Guardian.
+// The activation file alone is insufficient: the exact active Worker cohort
+// must be healthy, serve signed Edge Control authority, and own a fresh
+// inventory heartbeat on the same node set.
+func edgeGroupStateMatchesExplicitServingDrift(before edgeGroupState, current releaseguardian.CurrentAuthority, health edgeFrontHealth, now time.Time) bool {
+	if !health.ActivationPresent || health.RouteAuthority != edgeActivationAuthority || before.ActiveSlot != health.ActiveSlot ||
+		(health.ActiveSlot != "a" && health.ActiveSlot != "b") || health.Generation <= current.CurrentFrontGeneration ||
+		!edgeSourceSHAPattern.MatchString(health.WorkerSourceCommit) || !edgePromotionDigestPattern.MatchString(health.WorkerImageDigest) {
+		return false
+	}
+	delta := health.Generation - current.CurrentFrontGeneration
+	if (health.ActiveSlot != string(current.CurrentWorkerSlot)) != (delta%2 == 1) {
+		return false
+	}
+	_, activationPublication, activationRecovery, activationOK := parseEdgePublicationVersion(health.BundleGeneration)
+	if !activationOK {
+		return false
+	}
+	workers := edgeWorkerPods(before, health.ActiveSlot)
+	if len(workers) == 0 || len(workers) != len(before.Front) || !sameEdgeNodes(workers, before.Front) {
+		return false
+	}
+	for _, worker := range workers {
+		digest, err := immutableDigestFromRef(worker.ImageRef)
+		generation, publication, recovery, versionOK := parseEdgePublicationVersion(worker.BundleGeneration)
+		if err != nil || !worker.Ready || worker.RestartCount != 0 || worker.SourceCommit != health.WorkerSourceCommit ||
+			digest != health.WorkerImageDigest || !edgePodHasGroupAuthority(worker) || !edgePodHasActiveInventoryAt(worker, now) ||
+			!versionOK || worker.ServingGeneration != generation || worker.PublicationSequence != publication ||
+			publication < activationPublication || recovery < activationRecovery {
+			return false
+		}
+	}
+	return true
 }
 
 func edgeFrontHealthMatchesExpectedLKG(health edgeFrontHealth, current releaseguardian.CurrentAuthority, expectedSourceSHA, expectedImageDigest string) bool {

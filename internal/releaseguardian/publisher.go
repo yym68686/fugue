@@ -178,8 +178,39 @@ func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle, stableRec
 	return degradedPredecessorPublishEligible(snapshot, bundle) ||
 		degradedEdgeRouteRecoveryEligible(snapshot, bundle) ||
 		orphanedDesiredEdgeRecoveryEligible(snapshot, bundle, stableRecord) ||
+		runtimeDriftedDesiredEdgeRecoveryEligible(snapshot, bundle, stableRecord) ||
 		fencedDesiredReplacementEligible(snapshot, bundle, stableRecord) ||
 		failedDesiredReplacementEligible(snapshot, bundle, stableRecord)
+}
+
+// runtimeDriftedDesiredEdgeRecoveryEligible handles an Edge A/B group whose
+// serving runtime was repaired outside Guardian after a failed DesiredRelease.
+// The successor remains anchored to the immutable stable LKG, while its exact
+// prewrite CAS and the edge transition's Front/Worker authority witness prove
+// the live runtime before any workload or traffic mutation.
+func runtimeDriftedDesiredEdgeRecoveryEligible(snapshot Snapshot, bundle ExecutionBundle, stableRecord ReleaseRecord) bool {
+	previous := snapshot.PreviousStatus
+	prepared, release := bundle.Prepared, bundle.Release
+	if !snapshot.Managed || previous == nil || previous.Key() != snapshot.Key ||
+		previous.State != StateRecoveryRequired || previous.RolloutReceiptDigest != "" || previous.RollbackReceiptDigest != "" ||
+		!strings.HasPrefix(previous.Reason, "desired rollout is fenced because the current component is degraded") ||
+		snapshot.Health.Local.State != HealthDegraded || snapshot.Health.Dependency.State != HealthHealthy || snapshot.Health.Route.State != HealthHealthy ||
+		stableRecord.Key() != snapshot.Key || snapshot.Record.Key() != snapshot.Key || snapshot.Record.LKGRecordDigest != stableRecord.RecordDigest ||
+		snapshot.CurrentRecordDigest != stableRecord.RecordDigest || snapshot.LastSuccessfulLKG != stableRecord.RecordDigest ||
+		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || previous.CurrentRecordDigest != snapshot.CurrentRecordDigest ||
+		previous.TargetRecordDigest != snapshot.Desired.RecordDigest || previous.LastSuccessfulLKG != snapshot.CurrentRecordDigest ||
+		!prepared.DegradedPredecessor || !prepared.DegradedRoute || prepared.Component != snapshot.Key.Component ||
+		release.Transition == nil || release.Transition.Type != "edge-group-ab" || release.Transition.EdgeGroupAB == nil ||
+		release.SupersedesFailedConfigSHA == "" || release.SupersedesFailedConfigSHA != snapshot.Record.ConfigSHA ||
+		!release.ExpectedPreviousPresent || release.ExpectedPreviousConfigSHA != stableRecord.ConfigSHA ||
+		release.ExpectedPreviousManifestSHA != stableRecord.ConfigSHA || release.ExpectedPreviousOCIRevision != stableRecord.ConfigSHA ||
+		release.ExpectedPreviousImageDigest != stableRecord.ImageDigest {
+		return false
+	}
+	return prepared.Prewrite.ValidateDegradedPredecessor(release) == nil && prepared.LKG.Present &&
+		prepared.LKG.ConfigSHA == stableRecord.ConfigSHA && prepared.LKG.ManifestSHA == stableRecord.ConfigSHA &&
+		prepared.LKG.OCIRevision == stableRecord.ConfigSHA &&
+		prepared.LKG.ImageRef == release.Artifact.Repository+"@"+stableRecord.ImageDigest
 }
 
 // orphanedDesiredEdgeRecoveryEligible admits only a signed Edge A/B successor

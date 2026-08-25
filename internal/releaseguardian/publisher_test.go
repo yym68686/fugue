@@ -304,6 +304,45 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 			}
 		})
 	}
+	runtimeDrifted := localFenced
+	runtimeDrifted.Record.LKGRecordDigest = record.RecordDigest
+	runtimeDrifted.Health = testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now)
+	runtimeBundle := bundle
+	runtimeBundle.Prepared.DegradedRoute = true
+	runtimeBundle.Release.Transition = &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-us"}}
+	runtimeBundle.Release.Workload = declarativerelease.Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front", FieldManager: "edge-worker-us-declarative"}
+	runtimeBundle.Prepared.Prewrite = declarativerelease.Observation{
+		Present: true, Primary: declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front"},
+		UID: "edge-front-uid", ResourceVersion: "91", Generation: 24,
+		ImageRef: repository + "@sha256:" + strings.Repeat("6", 64), ConfigSHA: strings.Repeat("5", 40),
+		ManifestSHA: strings.Repeat("5", 40), OCIRevision: strings.Repeat("5", 40), TemplateDigest: testDigest,
+		FieldManagers: []string{"edge-worker-us-declarative"}, Resources: []declarativerelease.ResourceObservation{{
+			Identity: declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front"},
+			Present:  true, UID: "edge-front-uid", ResourceVersion: "91", Generation: 24, ObjectDigest: testDigest,
+			FieldManagers: []string{"edge-worker-us-declarative"},
+		}},
+	}
+	if !runtimeDriftedDesiredEdgeRecoveryEligible(runtimeDrifted, runtimeBundle, record) || !publishDesiredEligible(runtimeDrifted, runtimeBundle, record) {
+		t.Fatal("exact edge runtime-drift recovery was rejected")
+	}
+	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
+		"not edge A/B":   func(_ *Snapshot, value *ExecutionBundle) { value.Release.Transition = nil },
+		"route degraded": func(value *Snapshot, _ *ExecutionBundle) { value.Health.Route.State = HealthDegraded },
+		"supersede drift": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Release.SupersedesFailedConfigSHA = strings.Repeat("6", 40)
+		},
+		"prewrite CAS invalid": func(_ *Snapshot, value *ExecutionBundle) { value.Prepared.Prewrite.ResourceVersion = "" },
+	} {
+		t.Run("runtime drift "+name, func(t *testing.T) {
+			candidateSnapshot, candidateBundle := runtimeDrifted, runtimeBundle
+			previous := *runtimeDrifted.PreviousStatus
+			candidateSnapshot.PreviousStatus = &previous
+			mutate(&candidateSnapshot, &candidateBundle)
+			if runtimeDriftedDesiredEdgeRecoveryEligible(candidateSnapshot, candidateBundle, record) {
+				t.Fatal("unsafe edge runtime-drift recovery was accepted")
+			}
+		})
+	}
 	failedDesired := snapshot
 	failedDesired.Record = ReleaseRecord{
 		Component: key.Component, Group: key.Group, ConfigSHA: targetSHA, ImageDigest: failedImageDigest,
