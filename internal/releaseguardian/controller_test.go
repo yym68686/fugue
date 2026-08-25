@@ -389,6 +389,51 @@ func TestWriteModeFencesUnprovenLKGUntilFreshHealth(t *testing.T) {
 	}
 }
 
+func TestWriteModeRetriesRecoveredImmutablePredecessorOnce(t *testing.T) {
+	now := time.Unix(27, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), otherDigest)
+	snapshot.Health.Local.Reason = "health DaemonSet/edge-worker-a release identity differs from the stable record"
+	snapshot.Bundle.Prepared.DegradedPredecessor = true
+	snapshot.Bundle.Prepared.Component = snapshot.Key.Component
+	snapshot.Bundle.Prepared.ConfigSHA = snapshot.Record.ConfigSHA
+	snapshot.Bundle.Prepared.Forward.ConfigSHA = snapshot.Record.ConfigSHA
+	previous, err := (ReleaseStatus{
+		Component: snapshot.Key.Component, Group: snapshot.Key.Group, State: StateRecoveryRequired,
+		CurrentRecordDigest: otherDigest, TargetRecordDigest: snapshot.Record.RecordDigest,
+		LastSuccessfulLKG: otherDigest, Health: snapshot.Health, Reason: "lkg-unproven: failed candidate is fenced",
+		RolloutReceiptDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.PreviousStatus = &previous
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{rollout: &ExecutionReceipt{
+		Status: "recovery-required", Reason: "retry still blocked", RecordDigest: otherDigest, ReceiptDigest: testDigest,
+	}}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 1 || store.status.State != StateRecoveryRequired || store.status.RecoveryRetryCount != 1 {
+		t.Fatalf("recovered predecessor retry was not bounded: executor=%+v status=%+v", executor, store.status)
+	}
+
+	snapshot.PreviousStatus = &store.status
+	store.snapshot = snapshot
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 1 || store.status.State != StateRecoveryRequired || store.status.RecoveryRetryCount != 1 ||
+		!strings.Contains(store.status.Reason, "fenced") {
+		t.Fatalf("second recovered predecessor retry was not fenced: executor=%+v status=%+v", executor, store.status)
+	}
+}
+
 func TestWriteModeRestoresFencedLKGWhenCandidateRolloutIsIncomplete(t *testing.T) {
 	now := time.Unix(28, 0).UTC()
 	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), otherDigest)

@@ -141,11 +141,19 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 	decision := Classify(snapshot.CurrentRecordDigest, snapshot.Desired.RecordDigest, snapshot.Health)
 	degradedPredecessorRollout := degradedPredecessorRolloutEligible(snapshot)
 	degradedEdgeRouteRecovery := degradedEdgeRouteRecoveryEligible(snapshot, snapshot.Bundle)
+	pendingUnprovenLKG := pendingUnprovenLKGRecovery(snapshot)
+	recoveredPredecessorRetry := pendingUnprovenLKG && recoveredPredecessorRetryEligible(snapshot)
 	status := ReleaseStatus{
 		Component: key.Component, Group: key.Group, State: decision.State,
 		CurrentRecordDigest: snapshot.CurrentRecordDigest, TargetRecordDigest: snapshot.Desired.RecordDigest,
 		LastSuccessfulLKG: snapshot.LastSuccessfulLKG, Health: snapshot.Health,
 		Reason: decision.Reason, ObservedAt: now.Format(time.RFC3339Nano),
+	}
+	if pendingUnprovenLKG {
+		status.RecoveryRetryCount = snapshot.PreviousStatus.RecoveryRetryCount
+	}
+	if recoveredPredecessorRetry {
+		status.RecoveryRetryCount++
 	}
 	if pendingTargetCanaryVerification(snapshot) {
 		status.State = StateVerifying
@@ -160,7 +168,7 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 			status.Reason = joinedReason("exact degraded predecessor repair is authorized by immutable prewrite evidence", snapshot.Health)
 		}
 	}
-	if controller.mode == ModeWrite && snapshot.Managed && pendingUnprovenLKGRecovery(snapshot) {
+	if controller.mode == ModeWrite && snapshot.Managed && pendingUnprovenLKG && !recoveredPredecessorRetry {
 		status.State = StateRecoveryRequired
 		status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
 		status.Reason = joinedReason("lkg-unproven: failed candidate is fenced while LKG health awaits complete evidence", snapshot.Health)
@@ -243,6 +251,9 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 				}
 			case "recovery-required":
 				status.State = StateRecoveryRequired
+				if recoveredPredecessorRetry {
+					status.Reason = "lkg-unproven: bounded predecessor retry: " + receipt.Reason
+				}
 			default:
 				status.State = StateRecoveryRequired
 				status.Reason = "rollout returned an invalid terminal status"
@@ -348,6 +359,23 @@ func pendingUnprovenLKGRecovery(snapshot Snapshot) bool {
 		return false
 	}
 	return unprovenLKGReason(previous.Reason)
+}
+
+// recoveredPredecessorRetryEligible permits one retry of the exact immutable
+// superseder after its independent serving LKG has recovered. The retry is
+// deliberately limited to inactive-worker identity drift: arbitrary local
+// degradation, unhealthy dependencies, and degraded public routes remain
+// fenced. Persisting the retry count prevents a failed retry from becoming a
+// reconcile loop while a new desired record receives an independent budget.
+func recoveredPredecessorRetryEligible(snapshot Snapshot) bool {
+	previous := snapshot.PreviousStatus
+	if previous == nil || previous.RecoveryRetryCount != 0 || !degradedPredecessorRolloutEligible(snapshot) ||
+		snapshot.Health.Dependency.State != HealthHealthy || snapshot.Health.Route.State != HealthHealthy ||
+		snapshot.Health.Local.State != HealthDegraded {
+		return false
+	}
+	reason := strings.ToLower(strings.TrimSpace(snapshot.Health.Local.Reason))
+	return strings.HasPrefix(reason, "health daemonset/") && strings.Contains(reason, " release identity differs from the stable record")
 }
 
 func pendingTargetCanaryVerification(snapshot Snapshot) bool {

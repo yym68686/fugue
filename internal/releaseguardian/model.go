@@ -246,6 +246,7 @@ type ReleaseStatus struct {
 	Reason                string         `json:"reason,omitempty"`
 	RolloutReceiptDigest  string         `json:"rolloutReceiptDigest,omitempty"`
 	RollbackReceiptDigest string         `json:"rollbackReceiptDigest,omitempty"`
+	RecoveryRetryCount    uint8          `json:"recoveryRetryCount,omitempty"`
 	ObservedAt            string         `json:"observedAt"`
 	StatusDigest          string         `json:"statusDigest"`
 }
@@ -288,7 +289,7 @@ func (status ReleaseStatus) validateUnsigned() error {
 		!digestPattern.MatchString(status.TargetRecordDigest) || !digestPattern.MatchString(status.LastSuccessfulLKG) ||
 		(status.CurrentRecordDigest != "" && !digestPattern.MatchString(status.CurrentRecordDigest)) ||
 		(status.RolloutReceiptDigest != "" && !digestPattern.MatchString(status.RolloutReceiptDigest)) ||
-		(status.RollbackReceiptDigest != "" && !digestPattern.MatchString(status.RollbackReceiptDigest)) || status.ObservedAt == "" ||
+		(status.RollbackReceiptDigest != "" && !digestPattern.MatchString(status.RollbackReceiptDigest)) || status.RecoveryRetryCount > 1 || status.ObservedAt == "" ||
 		len(status.Reason) > 512 || strings.ContainsAny(status.Reason, "\r\n\x00") {
 		return errors.New("release status is invalid")
 	}
