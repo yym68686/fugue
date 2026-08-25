@@ -169,6 +169,22 @@ func TestProductionRuntimeDiffDoesNotImportAnotherComponentIntent(t *testing.T) 
 	if containsPath(paths, "deploy/b/intent.json") || containsPath(paths, "deploy/b/resources.json") {
 		t.Fatalf("selected component runtime diff imported another lane: %v", paths)
 	}
+	if _, err := addProductionRuntimeChanges(expanded, head, []string{"deploy/a/intent.json", "deploy/b/intent.json"}); err == nil ||
+		!strings.Contains(err.Error(), "different artifacts") {
+		t.Fatalf("different artifact intents were accepted: %v", err)
+	}
+
+	expanded.Components[1].Artifact = expanded.Components[0].Artifact
+	writeJSON(t, "deploy/b/intent.json", declarativerelease.Intent{APIVersion: declarativerelease.IntentAPIVersion, Kind: declarativerelease.IntentKind, Component: "b", Generation: 1,
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: base, ExpectedPreviousManifestSHA: base, ExpectedPreviousOCIRevision: base,
+		ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64), Rollback: "previous-git-lkg"})
+	paths, err = addProductionRuntimeChanges(expanded, head, []string{"shared/value.go", "deploy/a/intent.json", "deploy/b/intent.json"})
+	if err != nil {
+		t.Fatalf("shared artifact intents were rejected: %v", err)
+	}
+	if !containsPath(paths, "deploy/a/intent.json") || !containsPath(paths, "deploy/b/intent.json") || !containsPath(paths, "shared/value.go") {
+		t.Fatalf("shared artifact runtime diff lost a selected lane: %v", paths)
+	}
 }
 
 func TestReconcileRefusesToReplaceAnExistingCanonicalTerminalReceipt(t *testing.T) {

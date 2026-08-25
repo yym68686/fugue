@@ -279,7 +279,7 @@ func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA s
 		componentsByIntent[component.IntentPath] = component
 	}
 	seenChanged := make(map[string]struct{}, len(changed))
-	var selected *declarativerelease.Component
+	selected := make([]declarativerelease.Component, 0, 1)
 	for _, changedPath := range changed {
 		if _, exists := seenChanged[changedPath]; exists {
 			return nil, fmt.Errorf("duplicate changed path %q", changedPath)
@@ -289,63 +289,65 @@ func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA s
 		if !exists {
 			continue
 		}
-		if selected != nil {
-			return nil, errors.New("runtime commit contains multiple production intents; split it into independent production atoms")
+		if len(selected) > 0 && !sameProductionArtifact(selected[0].Artifact, component.Artifact) {
+			return nil, errors.New("runtime commit contains multiple production intents for different artifacts")
 		}
-		copy := component
-		selected = &copy
+		selected = append(selected, component)
 	}
-	if selected == nil {
+	if len(selected) == 0 {
 		return changed, nil
-	}
-	intent, err := loadIntent(selected.IntentPath)
-	if err != nil {
-		return nil, fmt.Errorf("load component %q intent for production runtime diff: %w", selected.ID, err)
-	}
-	if err := intent.Validate(); err != nil {
-		return nil, fmt.Errorf("component %q intent for production runtime diff: %w", selected.ID, err)
-	}
-	if intent.Component != selected.ID {
-		return nil, fmt.Errorf("component %q production runtime intent identity mismatch", selected.ID)
-	}
-	if !intent.ExpectedPreviousPresent {
-		return changed, nil
-	}
-	baseline := intent.ExpectedPreviousOCIRevision
-	if err := exec.Command("git", "merge-base", "--is-ancestor", baseline, headSHA).Run(); err != nil {
-		return nil, fmt.Errorf("component %q production OCI revision is not in target ancestry", selected.ID)
-	}
-	raw, err := exec.Command("git", "diff", "--no-renames", "--name-only", baseline, headSHA, "--").Output()
-	if err != nil {
-		return nil, fmt.Errorf("compute component %q production runtime diff: %w", selected.ID, err)
 	}
 	merged := make(map[string]struct{}, len(changed)+32)
 	for _, path := range changed {
 		merged[path] = struct{}{}
 	}
-	for _, path := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		if path == "" || strings.HasSuffix(path, "_test.go") {
+	selectedIDs := make(map[string]struct{}, len(selected))
+	for _, component := range selected {
+		selectedIDs[component.ID] = struct{}{}
+		intent, err := loadIntent(component.IntentPath)
+		if err != nil {
+			return nil, fmt.Errorf("load component %q intent for production runtime diff: %w", component.ID, err)
+		}
+		if err := intent.Validate(); err != nil {
+			return nil, fmt.Errorf("component %q intent for production runtime diff: %w", component.ID, err)
+		}
+		if intent.Component != component.ID {
+			return nil, fmt.Errorf("component %q production runtime intent identity mismatch", component.ID)
+		}
+		if !intent.ExpectedPreviousPresent {
 			continue
 		}
-		if path == selected.ManifestPath {
-			merged[path] = struct{}{}
-			continue
+		baseline := intent.ExpectedPreviousOCIRevision
+		if err := exec.Command("git", "merge-base", "--is-ancestor", baseline, headSHA).Run(); err != nil {
+			return nil, fmt.Errorf("component %q production OCI revision is not in target ancestry", component.ID)
 		}
-		for _, root := range selected.SourceRoots {
-			if pathMatchesComponentRoot(path, root) {
+		raw, err := exec.Command("git", "diff", "--no-renames", "--name-only", baseline, headSHA, "--").Output()
+		if err != nil {
+			return nil, fmt.Errorf("compute component %q production runtime diff: %w", component.ID, err)
+		}
+		for _, path := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			if path == "" || strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			if path == component.ManifestPath {
 				merged[path] = struct{}{}
-				break
+				continue
+			}
+			for _, root := range component.SourceRoots {
+				if pathMatchesComponentRoot(path, root) {
+					merged[path] = struct{}{}
+					break
+				}
 			}
 		}
 	}
-	// Runtime-diff expansion is intentionally scoped to the selected component.
+	// Runtime-diff expansion is intentionally scoped to the selected artifact lanes.
 	// A shared Go package can be linked into several independently deployed
 	// binaries; adding its historical diff as another component's manifest
-	// change would either co-deploy that component or make a safe single-lane
-	// atom impossible. BuildPlan still classifies the actual commit paths
-	// against every expanded dependency graph and rejects any non-shared path.
+	// change would either co-deploy that component or make a safe artifact atom
+	// impossible. BuildPlan still rejects selected lanes whose paths differ.
 	for _, component := range registry.Components {
-		if component.ID == selected.ID {
+		if _, ok := selectedIDs[component.ID]; ok {
 			continue
 		}
 		delete(merged, component.ManifestPath)
@@ -357,6 +359,11 @@ func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA s
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+func sameProductionArtifact(left, right declarativerelease.Artifact) bool {
+	return left.Repository == right.Repository && left.BuildPackage == right.BuildPackage &&
+		left.Dockerfile == right.Dockerfile && left.Context == right.Context
 }
 
 func pathMatchesComponentRoot(filename, root string) bool {

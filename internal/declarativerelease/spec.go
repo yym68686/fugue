@@ -722,6 +722,7 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 				if item.component.Artifact.Repository != first.component.Artifact.Repository ||
 					item.component.Artifact.BuildPackage != first.component.Artifact.BuildPackage ||
 					item.component.Artifact.Dockerfile != first.component.Artifact.Dockerfile ||
+					item.component.Artifact.Context != first.component.Artifact.Context ||
 					!sameStringSlice(item.selectedPaths, first.selectedPaths) {
 					return Plan{}, errors.New("runtime commit contains multiple production intents for different artifacts or paths")
 				}
