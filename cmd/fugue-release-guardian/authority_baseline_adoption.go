@@ -63,6 +63,7 @@ type baselineFrontHealth struct {
 }
 
 type baselineWorkerHealth struct {
+	Status                string `json:"status"`
 	Healthy               bool   `json:"healthy"`
 	EdgeGroupID           string `json:"edge_group_id"`
 	BundleVersion         string `json:"bundle_version"`
@@ -386,7 +387,7 @@ func observeStableAuthorityWorkers(ctx context.Context, client kubernetes.Interf
 		}
 		var health baselineWorkerHealth
 		if pod.Status.PodIP == "" || readAuthorityBaselineJSON(ctx, "http://"+pod.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health) != nil ||
-			!health.Healthy || health.EdgeGroupID != config.GroupID {
+			!authorityWorkerHealthUsable(health, config.GroupID) {
 			return nil, errors.New("orphaned authority LKG Worker health is invalid")
 		}
 		if _, exists := workers[pod.Spec.NodeName]; exists {
@@ -542,8 +543,8 @@ func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, na
 			return nil, "", 0, nil, errors.New("active worker baseline Pod is invalid")
 		}
 		var health baselineWorkerHealth
-		if err := readAuthorityBaselineJSON(ctx, "http://"+pod.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil || !health.Healthy ||
-			health.EdgeGroupID != config.GroupID || health.CandidateWorkerSlot != string(slot) ||
+		if err := readAuthorityBaselineJSON(ctx, "http://"+pod.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil ||
+			!authorityWorkerHealthUsable(health, config.GroupID) || health.CandidateWorkerSlot != string(slot) ||
 			!exactSHA256Digest(health.CandidateRecordDigest) || health.PublicationSequence == 0 ||
 			!strings.HasPrefix(health.BundleVersion, health.ServingGeneration+".p") || !strings.Contains(health.BundleVersion, ".p"+strconv.FormatUint(health.PublicationSequence, 10)+".") {
 			return nil, "", 0, nil, errors.New("active worker baseline health is invalid")

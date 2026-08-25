@@ -168,6 +168,9 @@ func (activator *frontAuthorityActivator) beginWithOperation(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
+	if operation == edgegroupfront.ActivationOperationRollback {
+		rollbackOf = preflight.previousGeneration
+	}
 	transaction, err := activator.applyWithLease(ctx, target, lease, preflight, operation, rollbackOf, reason)
 	if err != nil {
 		if errors.Is(err, errFrontCompensationUnknown) {
@@ -606,7 +609,7 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 		}
 		var health baselineWorkerHealth
 		if err := readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil ||
-			!health.Healthy || health.EdgeGroupID != activator.config.GroupID || (requireFront && !authorityWorkerHealthAtOrAfter(health, activator.config.GroupID, bundleGeneration)) {
+			!authorityWorkerHealthUsable(health, activator.config.GroupID) || (requireFront && !authorityWorkerHealthAtOrAfter(health, activator.config.GroupID, bundleGeneration)) {
 			return false, errors.New("authority Worker route generation does not match its pointer")
 		}
 	}
@@ -617,7 +620,8 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 	if err != nil || len(fronts) != activator.config.ExpectedNodes {
 		return false, errors.New("authority Front runtime is unavailable")
 	}
-	if !authorityRuntimeMatches(workers, cohort, fronts, slot, sourceSHA, imageDigest, frontGeneration, bundleGeneration, true) {
+	if !authorityRuntimeMatches(workers, cohort, fronts, slot, sourceSHA, imageDigest, frontGeneration, bundleGeneration, true) &&
+		!activator.compensatedCurrentRuntimeMatches(ctx, workers, cohort, fronts, slot, sourceSHA, imageDigest, frontGeneration, bundleGeneration) {
 		return false, errors.New("authority Front runtime does not match its pointer")
 	}
 	return true, nil
@@ -625,19 +629,46 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 
 func authorityWorkerHealthMatches(health baselineWorkerHealth, groupID, bundleGeneration string) bool {
 	serving, publication, _, err := splitPromotedBundleVersion(bundleGeneration)
-	return err == nil && health.Healthy && health.EdgeGroupID == groupID && health.BundleVersion == bundleGeneration &&
+	return err == nil && authorityWorkerHealthUsable(health, groupID) && health.BundleVersion == bundleGeneration &&
 		health.ServingGeneration == serving && health.PublicationSequence == publication
+}
+
+func authorityWorkerHealthUsable(health baselineWorkerHealth, groupID string) bool {
+	return health.Status == "ok" && health.Healthy && health.EdgeGroupID == groupID
 }
 
 func authorityWorkerHealthAtOrAfter(health baselineWorkerHealth, groupID, committedBundle string) bool {
 	committedServing, committedPublication, committedRecovery, committedErr := splitPromotedBundleVersion(committedBundle)
 	observedServing, observedPublication, observedRecovery, observedErr := splitPromotedBundleVersion(health.BundleVersion)
-	if committedErr != nil || observedErr != nil || !health.Healthy || health.EdgeGroupID != groupID ||
+	if committedErr != nil || observedErr != nil || !authorityWorkerHealthUsable(health, groupID) ||
 		health.ServingGeneration != observedServing || health.PublicationSequence != observedPublication || observedPublication < committedPublication {
 		return false
 	}
 	if observedPublication == committedPublication {
 		return observedServing == committedServing && observedRecovery >= committedRecovery
+	}
+	return true
+}
+
+func (activator *frontAuthorityActivator) compensatedCurrentRuntimeMatches(ctx context.Context, workers map[string]corev1.Pod,
+	cohort releaseguardian.CandidateWorkerCohort, fronts map[string]observedFront, slot releaseguardian.AuthoritySlot,
+	sourceSHA, imageDigest string, frontGeneration uint64, bundleGeneration string) bool {
+	if len(workers) == 0 || len(fronts) != len(workers) || cohort.WorkerSourceSHA != sourceSHA || cohort.WorkerImageDigest != imageDigest {
+		return false
+	}
+	for node, worker := range workers {
+		front, exists := fronts[node]
+		if !exists || front.ActiveSlot != string(slot) || front.BundleGeneration != bundleGeneration ||
+			front.WorkerSourceCommit != sourceSHA || front.WorkerImageDigest != imageDigest {
+			return false
+		}
+		state, err := activator.readActivation(ctx, worker.Name)
+		if err != nil || state.GroupID != activator.config.GroupID || state.ActiveSlot != front.ActiveSlot ||
+			state.Generation != front.Generation || state.BundleGeneration != front.BundleGeneration ||
+			state.WorkerSourceCommit != front.WorkerSourceCommit || state.WorkerImageDigest != front.WorkerImageDigest ||
+			!frontLKGGenerationMatches(state, frontGeneration, edgegroupfront.ActivationOperationRollback) {
+			return false
+		}
 	}
 	return true
 }

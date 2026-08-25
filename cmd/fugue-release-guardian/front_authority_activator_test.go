@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -167,5 +168,55 @@ func TestAuthorityRuntimeRequiresExactWorkerAndFrontIdentity(t *testing.T) {
 		Generation: 12, ActiveSlot: "a", BundleGeneration: "bundle-a.p8.r1", WorkerSourceCommit: oldSource, WorkerImageDigest: oldDigest,
 	}}, releaseguardian.AuthoritySlotA, source, digest, 12, "bundle-a.p8.r1", true) {
 		t.Fatal("candidate pointer accepted a compensated LKG Front runtime")
+	}
+}
+
+func TestCompensatedCurrentRuntimeAcceptsOnlyExactRollbackChain(t *testing.T) {
+	group := "edge-group-country-us"
+	source := strings.Repeat("1", 40)
+	digest := "sha256:" + strings.Repeat("2", 64)
+	bundle := "routes.p39713.r124"
+	worker := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Annotations: map[string]string{"fugue.pro/source-commit": source}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "edge", Ready: true,
+			ImageID: "ghcr.io/example/edge@" + digest}}}}
+	workers := map[string]corev1.Pod{"node-a": worker}
+	cohort := releaseguardian.CandidateWorkerCohort{WorkerSourceSHA: source, WorkerImageDigest: digest}
+	fronts := map[string]observedFront{"node-a": {Generation: 79, ActiveSlot: "a", BundleGeneration: bundle,
+		WorkerSourceCommit: source, WorkerImageDigest: digest}}
+	state := edgegroupfront.ActivationState{Schema: edgegroupfront.ActivationStateSchemaV1, GroupID: group, Generation: 79,
+		ActiveSlot: "a", BundleGeneration: bundle, WorkerSourceCommit: source, WorkerImageDigest: digest,
+		Authority: edgegroupfront.ActivationAuthority, Operation: edgegroupfront.ActivationOperationRollback, RollbackOfGeneration: 78}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activator := &frontAuthorityActivator{executor: baselineActivationExecutor{raw: raw}, config: frontAuthorityConfig{GroupID: group, Namespace: "fugue-system"}}
+	if !activator.compensatedCurrentRuntimeMatches(context.Background(), workers, cohort, fronts, releaseguardian.AuthoritySlotA,
+		source, digest, 29, bundle) {
+		t.Fatal("production compensation chain 29 -> 79 was rejected")
+	}
+
+	for name, mutate := range map[string]func(*edgegroupfront.ActivationState){
+		"odd generation": func(value *edgegroupfront.ActivationState) { value.Generation = 78; value.RollbackOfGeneration = 77 },
+		"broken link":    func(value *edgegroupfront.ActivationState) { value.RollbackOfGeneration = 77 },
+		"wrong operation": func(value *edgegroupfront.ActivationState) {
+			value.Operation = edgegroupfront.ActivationOperationPromote
+		},
+		"wrong bundle": func(value *edgegroupfront.ActivationState) { value.BundleGeneration = "routes.p39714.r0" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := state
+			mutate(&changed)
+			changedRaw, marshalErr := json.Marshal(changed)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			candidate := *activator
+			candidate.executor = baselineActivationExecutor{raw: changedRaw}
+			if candidate.compensatedCurrentRuntimeMatches(context.Background(), workers, cohort, fronts, releaseguardian.AuthoritySlotA,
+				source, digest, 29, bundle) {
+				t.Fatal("invalid compensation chain was accepted")
+			}
+		})
 	}
 }

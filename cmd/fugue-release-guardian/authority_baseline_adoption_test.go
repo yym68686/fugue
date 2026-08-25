@@ -142,7 +142,7 @@ func TestAuthorityBaselineAdoptsExactServingFrontWithoutChangingWorkloads(t *tes
 			*value = baselineFrontHealth{Status: "ok", ActiveSlot: "b", Generation: 34,
 				BundleGeneration: "routes-serving.p41.r0", WorkerSourceCommit: source, WorkerImageDigest: image, RouteAuthority: "edge-control"}
 		case *baselineWorkerHealth:
-			*value = baselineWorkerHealth{Healthy: true, EdgeGroupID: group, BundleVersion: "routes-serving.p41.r0", PublicationSequence: 41,
+			*value = baselineWorkerHealth{Status: "ok", Healthy: true, EdgeGroupID: group, BundleVersion: "routes-serving.p41.r0", PublicationSequence: 41,
 				ServingGeneration: "routes-serving", CandidateBundleLoaded: true, CandidateRecordDigest: record.RecordDigest, CandidateWorkerSlot: "b"}
 		default:
 			t.Fatalf("unexpected baseline endpoint %s", endpoint)
@@ -240,7 +240,7 @@ func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *t
 			*value = baselineFrontHealth{Status: "ok", ActiveSlot: "b", Generation: 9, BundleGeneration: "new.p10.r0",
 				WorkerSourceCommit: newSource, WorkerImageDigest: newImage, RouteAuthority: "edge-control"}
 		case *baselineWorkerHealth:
-			*value = baselineWorkerHealth{Healthy: true, EdgeGroupID: group, BundleVersion: "new.p11.r0", PublicationSequence: 11,
+			*value = baselineWorkerHealth{Status: "ok", Healthy: true, EdgeGroupID: group, BundleVersion: "new.p11.r0", PublicationSequence: 11,
 				ServingGeneration: "new", CandidateBundleLoaded: candidateBundleLoaded, CandidateRecordDigest: newRecord.RecordDigest, CandidateWorkerSlot: "b"}
 		}
 		return nil

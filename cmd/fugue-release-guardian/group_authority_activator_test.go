@@ -72,7 +72,7 @@ func TestCurrentCodeRouteAcceptsIndependentConfigurationRecord(t *testing.T) {
 func TestAuthorityWorkerHealthAcceptsMonotonicControlPublication(t *testing.T) {
 	group := "edge-group-country-de"
 	bundle := "serving-generation.p11481.r129"
-	health := baselineWorkerHealth{Healthy: true, EdgeGroupID: group, BundleVersion: bundle, PublicationSequence: 11481, ServingGeneration: "serving-generation"}
+	health := baselineWorkerHealth{Status: "ok", Healthy: true, EdgeGroupID: group, BundleVersion: bundle, PublicationSequence: 11481, ServingGeneration: "serving-generation"}
 	if !authorityWorkerHealthAtOrAfter(health, group, bundle) {
 		t.Fatal("exact Worker route generation was rejected")
 	}
@@ -92,7 +92,11 @@ func TestAuthorityWorkerHealthAcceptsMonotonicControlPublication(t *testing.T) {
 		t.Fatal("newer independent configuration generation was rejected")
 	}
 	for name, mutate := range map[string]func(*baselineWorkerHealth){
-		"unhealthy":    func(value *baselineWorkerHealth) { value.Healthy = false },
+		"unhealthy": func(value *baselineWorkerHealth) { value.Healthy = false },
+		"missing status": func(value *baselineWorkerHealth) {
+			value.Status = ""
+		},
+		"degraded":     func(value *baselineWorkerHealth) { value.Status = "degraded" },
 		"wrong group":  func(value *baselineWorkerHealth) { value.EdgeGroupID = "edge-group-other" },
 		"wrong bundle": func(value *baselineWorkerHealth) { value.BundleVersion = "other-generation.p11481.r129" },
 		"stale publication": func(value *baselineWorkerHealth) {
