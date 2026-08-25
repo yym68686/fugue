@@ -260,7 +260,7 @@ func TestCandidateImporterAcceptsCommittedFrontDeclaredLKGRecoveryWitness(t *tes
 	}
 }
 
-func TestCandidateImporterRejectsServingAuthorityCASDriftBeforeWritingRecords(t *testing.T) {
+func TestCandidateImporterPersistsRecordsBeforeRejectingServingAuthorityCASDrift(t *testing.T) {
 	now := time.Date(2026, 8, 14, 20, 15, 0, 0, time.UTC)
 	groupID := "edge-pool-a"
 	token := strings.Repeat("t", 48)
@@ -296,8 +296,11 @@ func TestCandidateImporterRejectsServingAuthorityCASDriftBeforeWritingRecords(t 
 	if _, _, _, err := store.LoadCandidate(context.Background(), groupID); !apierrors.IsNotFound(err) {
 		t.Fatalf("stale serving witness wrote candidate authority: %v", err)
 	}
-	if _, err := store.LoadRouteBundleRecord(context.Background(), groupID, envelope.Record.RecordDigest); !apierrors.IsNotFound(err) {
-		t.Fatalf("stale serving witness wrote immutable candidate record: %v", err)
+	if record, err := store.LoadRouteBundleRecord(context.Background(), groupID, envelope.CurrentRecord.RecordDigest); err != nil || record != *envelope.CurrentRecord {
+		t.Fatalf("stale serving witness did not preserve immutable current record: record=%+v err=%v", record, err)
+	}
+	if record, err := store.LoadRouteBundleRecord(context.Background(), groupID, envelope.Record.RecordDigest); err != nil || record != envelope.Record {
+		t.Fatalf("stale serving witness did not preserve immutable candidate record: record=%+v err=%v", record, err)
 	}
 }
 
@@ -345,8 +348,11 @@ func TestCandidateImporterTreatsPromotedServingWitnessAsSettled(t *testing.T) {
 	if _, _, _, err := store.LoadCandidate(context.Background(), groupID); !apierrors.IsNotFound(err) {
 		t.Fatalf("settled candidate recreated promotable state: %v", err)
 	}
-	if _, err := store.LoadRouteBundleRecord(context.Background(), groupID, envelope.Record.RecordDigest); !apierrors.IsNotFound(err) {
-		t.Fatalf("settled candidate rewrote immutable records: %v", err)
+	if record, err := store.LoadRouteBundleRecord(context.Background(), groupID, envelope.CurrentRecord.RecordDigest); err != nil || record != *envelope.CurrentRecord {
+		t.Fatalf("settled candidate did not preserve immutable current record: record=%+v err=%v", record, err)
+	}
+	if record, err := store.LoadRouteBundleRecord(context.Background(), groupID, envelope.Record.RecordDigest); err != nil || record != envelope.Record {
+		t.Fatalf("settled candidate did not preserve immutable candidate record: record=%+v err=%v", record, err)
 	}
 }
 

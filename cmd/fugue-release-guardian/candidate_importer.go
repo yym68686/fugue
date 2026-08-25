@@ -163,6 +163,17 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	if err := validateCandidateEnvelope(config.GroupID, envelope, now.UTC()); err != nil {
 		return false, err
 	}
+	// Route records are immutable artifacts, not mutable serving authority.
+	// Persist a fully validated envelope's records before checking the current
+	// authority CAS so metadata drift cannot make the recovery evidence needed
+	// to repair that drift permanently unavailable. Pointer updates below remain
+	// bound to the exact CurrentAuthority witness.
+	if err := store.CreateRouteBundleRecord(ctx, *envelope.CurrentRecord); err != nil {
+		return false, fmt.Errorf("persist current route record: %w", err)
+	}
+	if err := store.CreateRouteBundleRecord(ctx, envelope.Record); err != nil {
+		return false, fmt.Errorf("persist candidate route record: %w", err)
+	}
 	current, currentUID, currentRV, err := store.LoadCurrent(ctx, config.GroupID)
 	currentMissing := apierrors.IsNotFound(err)
 	if err != nil && !currentMissing {
@@ -182,15 +193,6 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		return false, nil
 	}
 	currentPublicationSequence, currentRecoveryEpoch, _ := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
-	// Immutable records are idempotent. Persist both sides before creating the
-	// mutable pointers, so an invalid envelope can never create a partial
-	// authority state.
-	if err := store.CreateRouteBundleRecord(ctx, *envelope.CurrentRecord); err != nil {
-		return false, fmt.Errorf("persist current route record: %w", err)
-	}
-	if err := store.CreateRouteBundleRecord(ctx, envelope.Record); err != nil {
-		return false, fmt.Errorf("persist candidate route record: %w", err)
-	}
 	changed := false
 	bootstrapCurrent := releaseguardian.CurrentAuthority{
 		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind, GroupID: config.GroupID,
