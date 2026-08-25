@@ -722,9 +722,8 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 				if item.component.Artifact.Repository != first.component.Artifact.Repository ||
 					item.component.Artifact.BuildPackage != first.component.Artifact.BuildPackage ||
 					item.component.Artifact.Dockerfile != first.component.Artifact.Dockerfile ||
-					item.component.Artifact.Context != first.component.Artifact.Context ||
-					!sameStringSlice(item.selectedPaths, first.selectedPaths) {
-					return Plan{}, errors.New("runtime commit contains multiple production intents for different artifacts or paths")
+					item.component.Artifact.Context != first.component.Artifact.Context {
+					return Plan{}, errors.New("runtime commit contains multiple production intents for different artifacts")
 				}
 			}
 			selectedCandidates = append(selectedCandidates, item)
@@ -758,18 +757,6 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 		})
 	}
 	return plan, nil
-}
-
-func sameStringSlice(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 // BindIntents turns a path-only plan into the immutable server-side plan used

@@ -212,9 +212,13 @@ func TestBuildPlanAllowsSharedArtifactIntentAtom(t *testing.T) {
 	registry := testRegistry()
 	registry.Components[0].SourceRoots = append(registry.Components[0].SourceRoots, "internal/shared-runtime")
 	registry.Components[1].SourceRoots = append(registry.Components[1].SourceRoots, "internal/shared-runtime")
+	registry.Components[0].SourceRoots = append(registry.Components[0].SourceRoots, "internal/zz-api-only")
+	registry.Components[1].SourceRoots = append(registry.Components[1].SourceRoots, "internal/zz-telemetry-only")
 	registry.Components[1].Artifact = registry.Components[0].Artifact
 	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{
 		"internal/shared-runtime/runtime.go",
+		"internal/zz-api-only/runtime.go",
+		"internal/zz-telemetry-only/runtime.go",
 		"deploy/releases/api/intent.json",
 		"deploy/releases/telemetry/intent.json",
 	})
