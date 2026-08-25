@@ -103,7 +103,7 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 		return err
 	}
 	if value := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE")); value != "" {
-		if err := materializeAuthorityPublicKey(value); err != nil {
+		if err := materializeAuthorityPublicKeys(value); err != nil {
 			return err
 		}
 	}

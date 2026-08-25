@@ -57,7 +57,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(set.Items) != 9 {
+	if len(set.Items) != 10 {
 		t.Fatalf("resource count=%d", len(set.Items))
 	}
 	encoded, _ := json.Marshal(set)
@@ -68,22 +68,31 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"value":"edge-control-de,de,fugue-system,edge-control-de,fugue-fugue;edge-worker-de,de,fugue-system,edge-worker-de,edge-control-de;edge-control-us,us,fugue-system,edge-control-us,fugue-fugue;edge-worker-us,us,fugue-system,edge-worker-us,edge-control-us;api,global,fugue-system,api,fugue-fugue"`,
 		`"value":"edge-control-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10;edge-worker-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10;edge-control-us,us,15.204.94.71:443,fugue.pro,/healthz,ok,10;edge-worker-us,us,15.204.94.71:443,fugue.pro,/healthz,ok,10;api,global,15.204.94.71:443,api.fugue.pro,/healthz,ok,10"`,
 		`"name":"FUGUE_RELEASE_GUARDIAN_CANDIDATE_CANARY"`,
-		`"value":"edge-group-country-de,51.38.126.103:18443,51.38.126.103:28443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,10,candidate-canary-de-v1,/var/run/secrets/fugue-candidate-canary-de/token"`,
+		`"value":"edge-group-country-de,51.38.126.103:18443,51.38.126.103:28443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,10,candidate-canary-de-v1,/var/run/secrets/fugue-candidate-canary-de/token;edge-group-country-us,15.204.94.71:18443,15.204.94.71:28443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,10,candidate-canary-us-v1,/var/run/secrets/fugue-candidate-canary-us/token"`,
 		`"mountPath":"/var/run/secrets/fugue-candidate-canary-de"`,
+		`"mountPath":"/var/run/secrets/fugue-candidate-canary-us"`,
 		`"secretName":"fugue-edge-worker-reader-de"`,
+		`"secretName":"fugue-edge-worker-reader-us"`,
 		`"fieldPath":"metadata.uid"`, `"mountPath":"/tmp"`,
 		`"fugue.io/edge-authority-importer":"true"`,
-		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE","value":"/var/run/secrets/fugue-candidate-import-de/token,/tmp/candidate-canary-de.pub"`,
-		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS","value":"edge-group-country-de,candidate-canary-de-v1,/tmp/candidate-canary-de.pub"`,
-		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS","value":"edge-group-country-de,http://edge-control-de.fugue-system.svc:8092,/var/run/secrets/fugue-authority-recovery-de/keyring.json,1,51.38.126.103:443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,51.38.126.103:18443,51.38.126.103:28443"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS","value":"edge-group-country-de,http://edge-control-de.fugue-system.svc:8092/v1/edge/candidate-envelope,/var/run/secrets/fugue-candidate-import-de/token;edge-group-country-us,http://edge-control-us.fugue-system.svc:8092/v1/edge/candidate-envelope,/var/run/secrets/fugue-candidate-import-us/token"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE","value":"/var/run/secrets/fugue-candidate-import-de/token,/tmp/candidate-canary-de.pub;/var/run/secrets/fugue-candidate-import-us/token,/tmp/candidate-canary-us.pub"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS","value":"edge-group-country-de,candidate-canary-de-v1,/tmp/candidate-canary-de.pub;edge-group-country-us,candidate-canary-us-v1,/tmp/candidate-canary-us.pub"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS","value":"edge-group-country-de,http://edge-control-de.fugue-system.svc:8092,/var/run/secrets/fugue-authority-recovery-de/keyring.json,1,51.38.126.103:443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,51.38.126.103:18443,51.38.126.103:28443;edge-group-country-us,http://edge-control-us.fugue-system.svc:8092,/var/run/secrets/fugue-authority-recovery-us/keyring.json,1,15.204.94.71:443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,15.204.94.71:18443,15.204.94.71:28443"`,
 		`"mountPath":"/var/run/secrets/fugue-authority-recovery-de"`,
+		`"mountPath":"/var/run/secrets/fugue-authority-recovery-us"`,
+		`"mountPath":"/var/run/secrets/fugue-candidate-import-us"`,
 		`"secretName":"fugue-edge-control-recovery-de"`,
+		`"secretName":"fugue-edge-control-recovery-us"`,
 		`"name":"fugue-release-guardian-edge-control-de-import"`,
+		`"name":"fugue-release-guardian-edge-control-us-import"`,
 		`"app.kubernetes.io/instance":"edge-control-de"`,
+		`"app.kubernetes.io/instance":"edge-control-us"`,
 		`"fugue.io/edge-group-id":"edge-group-country-de"`,
+		`"fugue.io/edge-group-id":"edge-group-country-us"`,
 		`"port":8092,"protocol":"TCP"`,
 		`"resources":["configmaps"],"verbs":["create","delete","get","list","update"]`,
-		`"resourceNames":["fugue-authority-transition-activated-edge-group-country-de","fugue-authority-transition-prepared-edge-group-country-de"],"resources":["configmaps"],"verbs":["delete"]`,
+		`"resourceNames":["fugue-authority-transition-activated-edge-group-country-de","fugue-authority-transition-prepared-edge-group-country-de","fugue-authority-transition-activated-edge-group-country-us","fugue-authority-transition-prepared-edge-group-country-us"],"resources":["configmaps"],"verbs":["delete"]`,
 		`"resources":["pods"],"verbs":["get","list"]`,
 		`"resourceNames":["fugue-api-route-intent-ca-de","fugue-api-route-intent-ca-us","fugue-api-tls","fugue-edge-control-inventory-writer-de","fugue-edge-control-inventory-writer-us","fugue-edge-control-reader-de","fugue-edge-control-reader-us","fugue-edge-control-recovery-de","fugue-edge-control-recovery-us","fugue-edge-control-route-intent-identity-de","fugue-edge-control-route-intent-identity-us","fugue-edge-control-signing-de","fugue-edge-control-signing-us","fugue-edge-route-intent-identity","fugue-edge-token-vps-591f4447","fugue-edge-token-vps-84c8f0a9","fugue-edge-worker-reader-de","fugue-edge-worker-reader-us","fugue-fugue-config","fugue-fugue-edge-activation-signing-v1","fugue-fugue-platform-component-identity"],"resources":["secrets"],"verbs":["get"]`,
 		`"resources":["events"],"verbs":["get","list","watch"]`,
@@ -118,7 +127,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		for _, rule := range role.Rules {
 			if len(rule.Resources) == 1 && rule.Resources[0] == "configmaps" && len(rule.Verbs) == 1 && rule.Verbs[0] == "delete" {
 				guardianDeleteRules++
-				if strings.Join(rule.ResourceNames, ",") != "fugue-authority-transition-activated-edge-group-country-de,fugue-authority-transition-prepared-edge-group-country-de" {
+				if strings.Join(rule.ResourceNames, ",") != "fugue-authority-transition-activated-edge-group-country-de,fugue-authority-transition-prepared-edge-group-country-de,fugue-authority-transition-activated-edge-group-country-us,fugue-authority-transition-prepared-edge-group-country-us" {
 					t.Fatal("Guardian ConfigMap delete resourceNames changed")
 				}
 			}
@@ -127,7 +136,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 	if guardianDeleteRules != 1 {
 		t.Fatal("Guardian ConfigMap delete is not one exact transition-journal resourceNames rule")
 	}
-	for _, forbidden := range []string{`edge-group-country-us,candidate-canary`, `FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS","value":"edge-group-country-de;`, `"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
+	for _, forbidden := range []string{`"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("shadow Guardian resources grant forbidden capability %s", forbidden)
 		}
