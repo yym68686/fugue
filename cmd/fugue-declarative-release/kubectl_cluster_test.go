@@ -784,6 +784,45 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 	}
 }
 
+func TestEmergencyOwnershipWitnessAcceptsStatusOnlyResourceVersionAdvance(t *testing.T) {
+	pointer := "/spec/template/spec/containers[name=edge]/image"
+	desired := map[string]any{
+		"metadata": map[string]any{"uid": "worker-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "edge", "image": "target",
+		}}}}},
+	}
+	live := deepCopyJSONMap(t, desired)
+	liveMetadata := mapField(live, "metadata")
+	liveMetadata["resourceVersion"] = "57"
+	liveMetadata["managedFields"] = []any{map[string]any{
+		"manager": "kubectl-set", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{pointer}),
+	}}
+	container := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	container["image"] = "old"
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "kubectl-set" using apps/v1: ` + ssaFieldForPointer(pointer))
+
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "declarative", applyErr); err != nil {
+		t.Fatalf("status-only resourceVersion advance was rejected: %v", err)
+	}
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{pointer}, "declarative", applyErr)
+	if err != nil || !found || len(patch) < 2 || patch[1]["path"] != "/metadata/resourceVersion" || patch[1]["value"] != "57" {
+		t.Fatalf("ownership transfer was not bound to the latest live RV: patch=%v found=%v err=%v", patch, found, err)
+	}
+
+	wrongUID := deepCopyJSONMap(t, live)
+	mapField(wrongUID, "metadata")["uid"] = "replacement-uid"
+	if err := validateEmergencyOwnershipConflictEvidence(desired, wrongUID, []string{pointer}, "declarative", applyErr); err == nil || !strings.Contains(err.Error(), "UID changed") {
+		t.Fatalf("replacement UID was accepted: %v", err)
+	}
+	invalidRV := deepCopyJSONMap(t, live)
+	mapField(invalidRV, "metadata")["resourceVersion"] = "057"
+	if err := validateEmergencyOwnershipConflictEvidence(desired, invalidRV, []string{pointer}, "declarative", applyErr); err == nil || !strings.Contains(err.Error(), "valid resourceVersion") {
+		t.Fatalf("non-canonical live RV was accepted: %v", err)
+	}
+}
+
 func TestLegacyOwnershipTransferPatchMovesOnlyExactEnvironmentValues(t *testing.T) {
 	enabled := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value"
 	timeout := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT]/value"

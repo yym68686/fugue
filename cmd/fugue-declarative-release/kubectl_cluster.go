@@ -1384,9 +1384,17 @@ func addDeclaredContainerEnvValuePointers(desired map[string]any, containerType,
 
 func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, allowed []string, declarativeManager string, applyErr error) error {
 	desiredMetadata, liveMetadata := mapField(desired, "metadata"), mapField(live, "metadata")
-	if stringValue(desiredMetadata["uid"]) == "" || stringValue(desiredMetadata["uid"]) != stringValue(liveMetadata["uid"]) ||
-		stringValue(desiredMetadata["resourceVersion"]) == "" || stringValue(desiredMetadata["resourceVersion"]) != stringValue(liveMetadata["resourceVersion"]) {
-		return errors.New("emergency ownership witness is not UID/RV bound")
+	desiredUID, liveUID := stringValue(desiredMetadata["uid"]), stringValue(liveMetadata["uid"])
+	if desiredUID == "" || desiredUID != liveUID {
+		return errors.New("emergency ownership witness UID changed")
+	}
+	// A controller may update the workload status resourceVersion during an
+	// edge canary soak. The subsequent scalar transfer is bound to the latest
+	// live UID/RV with JSON Patch tests, so equality with the older reviewed RV
+	// would add no concurrency protection and would deadlock every long soak.
+	if !validKubernetesResourceVersion(stringValue(desiredMetadata["resourceVersion"])) ||
+		!validKubernetesResourceVersion(stringValue(liveMetadata["resourceVersion"])) {
+		return errors.New("emergency ownership witness lacks a valid resourceVersion")
 	}
 	conflicts, err := parseEmergencySSAConflicts(applyErr)
 	if err != nil {
@@ -1428,6 +1436,18 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 		}
 	}
 	return nil
+}
+
+func validKubernetesResourceVersion(value string) bool {
+	if value == "" || value[0] == '0' {
+		return false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []string, declarativeManager string, applyErr error) ([]map[string]any, bool, error) {
