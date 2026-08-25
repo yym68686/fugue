@@ -211,9 +211,13 @@ func TestCandidateImporterAcceptsCommittedFrontPreviousLKGRecoveryWitness(t *tes
 		t.Fatalf("committed Front previous-LKG witness was rejected: %v", err)
 	}
 
+	envelope.ServingAuthority.FrontGeneration = 140
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err != nil {
+		t.Fatalf("repeated compensated Front recovery generation was rejected: %v", err)
+	}
 	envelope.ServingAuthority.FrontGeneration = 139
 	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err == nil {
-		t.Fatal("non-consecutive Front recovery generation was accepted")
+		t.Fatal("same-slot parity Front recovery generation was accepted")
 	}
 }
 
@@ -254,9 +258,13 @@ func TestCandidateImporterAcceptsCommittedFrontDeclaredLKGRecoveryWitness(t *tes
 		t.Fatal("declared LKG recovery witness without authorization was accepted")
 	}
 	envelope.AllowDegradedPrevious = true
-	envelope.ServingAuthority.FrontGeneration++
+	envelope.ServingAuthority.FrontGeneration += 2
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err != nil {
+		t.Fatalf("repeated declared-LKG recovery generation was rejected: %v", err)
+	}
+	envelope.ServingAuthority.FrontGeneration--
 	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err == nil {
-		t.Fatal("non-consecutive declared LKG recovery generation was accepted")
+		t.Fatal("same-slot parity declared LKG recovery generation was accepted")
 	}
 }
 

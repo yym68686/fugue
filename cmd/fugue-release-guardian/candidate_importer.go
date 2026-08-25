@@ -419,14 +419,16 @@ func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, curren
 		current.CurrentWorkerImageDigest == witness.WorkerImageDigest {
 		return nil
 	}
-	// During controlled recovery Front may already have committed one signed
-	// activation beyond Guardian CurrentAuthority. The activation can be the
-	// declared release LKG even when Guardian's previous metadata predates it,
-	// so bind recovery to the signed envelope, exact CurrentAuthority CAS,
-	// consecutive Front generation, slot switch, and immutable bundle family.
+	// During controlled recovery Front may already have committed an odd number
+	// of signed slot switches beyond Guardian CurrentAuthority. Compensation and
+	// a later retry each advance the activation generation, so requiring exactly
+	// one generation permanently rejects the same valid LKG after the first
+	// recovered retry. Bind recovery to the signed envelope, exact
+	// CurrentAuthority CAS, slot parity, and immutable bundle family instead.
 	// Ordinary candidates must still match current or previous metadata exactly.
 	if current.CurrentWorkerSlot == witness.WorkerSlot || current.CurrentFrontGeneration == 0 ||
-		witness.FrontGeneration != current.CurrentFrontGeneration+1 {
+		witness.FrontGeneration <= current.CurrentFrontGeneration ||
+		(witness.FrontGeneration-current.CurrentFrontGeneration)%2 != 1 {
 		return errors.New("candidate serving authority binding is invalid")
 	}
 	currentGeneration, _, _, currentErr := parseUnboundAuthorityBundleVersion(current.CurrentBundleGeneration)
