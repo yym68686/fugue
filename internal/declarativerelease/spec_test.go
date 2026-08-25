@@ -208,6 +208,24 @@ func TestBuildPlanRejectsMultiComponentProductionAtom(t *testing.T) {
 	}
 }
 
+func TestBuildPlanAllowsSharedArtifactIntentAtom(t *testing.T) {
+	registry := testRegistry()
+	registry.Components[0].SourceRoots = append(registry.Components[0].SourceRoots, "internal/shared-runtime")
+	registry.Components[1].SourceRoots = append(registry.Components[1].SourceRoots, "internal/shared-runtime")
+	registry.Components[1].Artifact = registry.Components[0].Artifact
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{
+		"internal/shared-runtime/runtime.go",
+		"deploy/releases/api/intent.json",
+		"deploy/releases/telemetry/intent.json",
+	})
+	if err != nil {
+		t.Fatalf("shared artifact intents were rejected: %v", err)
+	}
+	if len(plan.Releases) != 2 || plan.Releases[0].ComponentID != "api" || plan.Releases[1].ComponentID != "telemetry" {
+		t.Fatalf("unexpected shared artifact release plan: %+v", plan.Releases)
+	}
+}
+
 func TestBuildPlanSerializesGroupsThatShareOneArtifact(t *testing.T) {
 	registry := testRegistry()
 	registry.Components[0].SourceRoots = append(registry.Components[0].SourceRoots, "internal/shared-runtime")

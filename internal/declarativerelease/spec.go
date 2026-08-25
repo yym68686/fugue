@@ -711,16 +711,33 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 	if intentCount == 0 {
 		return Plan{}, fmt.Errorf("component %q runtime change is missing same-commit production intent", candidates[0].component.ID)
 	}
+	selectedCandidates := make([]candidate, 0, intentCount)
 	if intentCount > 1 {
-		return Plan{}, errors.New("runtime commit contains multiple production intents; split it into independent production atoms")
+		for _, item := range candidates {
+			if !item.intentChanged {
+				continue
+			}
+			if len(selectedCandidates) > 0 {
+				first := selectedCandidates[0]
+				if item.component.Artifact.Repository != first.component.Artifact.Repository ||
+					item.component.Artifact.BuildPackage != first.component.Artifact.BuildPackage ||
+					item.component.Artifact.Dockerfile != first.component.Artifact.Dockerfile ||
+					!sameStringSlice(item.selectedPaths, first.selectedPaths) {
+					return Plan{}, errors.New("runtime commit contains multiple production intents for different artifacts or paths")
+				}
+			}
+			selectedCandidates = append(selectedCandidates, item)
+		}
+	} else {
+		selectedCandidates = append(selectedCandidates, candidates[selectedIndex])
 	}
-	selected := candidates[selectedIndex]
+	selected := selectedCandidates[0]
 	selectedPathSet := make(map[string]struct{}, len(selected.selectedPaths))
 	for _, changedPath := range selected.selectedPaths {
 		selectedPathSet[changedPath] = struct{}{}
 	}
-	for index, item := range candidates {
-		if index == selectedIndex || len(item.selectedPaths) == 0 {
+	for _, item := range candidates {
+		if item.intentChanged || len(item.selectedPaths) == 0 {
 			continue
 		}
 		for _, changedPath := range item.selectedPaths {
@@ -732,12 +749,26 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 			}
 		}
 	}
-	plan.Releases = append(plan.Releases, PlanRelease{
-		ComponentID:  selected.component.ID,
-		ChangedPaths: selected.selectedPaths,
-		IntentPath:   selected.component.IntentPath,
-	})
+	for _, item := range selectedCandidates {
+		plan.Releases = append(plan.Releases, PlanRelease{
+			ComponentID:  item.component.ID,
+			ChangedPaths: item.selectedPaths,
+			IntentPath:   item.component.IntentPath,
+		})
+	}
 	return plan, nil
+}
+
+func sameStringSlice(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // BindIntents turns a path-only plan into the immutable server-side plan used
