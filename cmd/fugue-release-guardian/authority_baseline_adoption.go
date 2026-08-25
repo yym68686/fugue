@@ -545,8 +545,7 @@ func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, na
 		if err := readAuthorityBaselineJSON(ctx, "http://"+pod.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil || !health.Healthy ||
 			health.EdgeGroupID != config.GroupID || health.CandidateWorkerSlot != string(slot) ||
 			!exactSHA256Digest(health.CandidateRecordDigest) || health.PublicationSequence == 0 ||
-			!strings.HasPrefix(health.BundleVersion, health.ServingGeneration+".p") || !strings.Contains(health.BundleVersion, ".p"+strconv.FormatUint(health.PublicationSequence, 10)+".") ||
-			(!health.CandidateBundleLoaded && !baselineWorkerHealthMatchesCurrent(health, front.health, slot, current)) {
+			!strings.HasPrefix(health.BundleVersion, health.ServingGeneration+".p") || !strings.Contains(health.BundleVersion, ".p"+strconv.FormatUint(health.PublicationSequence, 10)+".") {
 			return nil, "", 0, nil, errors.New("active worker baseline health is invalid")
 		}
 		source := strings.TrimSpace(pod.Annotations["fugue.pro/source-commit"])

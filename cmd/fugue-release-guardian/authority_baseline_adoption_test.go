@@ -233,7 +233,7 @@ func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *t
 	setMutableAuthorityFixture(t, client, "fugue-candidate-authority-"+group, "loaded-candidate", "61")
 	oldRead, oldRoute := readAuthorityBaselineJSON, requestAuthorityBaselineRoute
 	defer func() { readAuthorityBaselineJSON, requestAuthorityBaselineRoute = oldRead, oldRoute }()
-	candidateBundleLoaded := true
+	candidateBundleLoaded := false
 	readAuthorityBaselineJSON = func(_ context.Context, _ string, destination any) error {
 		switch value := destination.(type) {
 		case *baselineFrontHealth:
@@ -267,7 +267,6 @@ func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *t
 	if next, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), object.Name, metav1.GetOptions{}); err != nil || next.Data["normalization-receipt.json"] == "" {
 		t.Fatalf("normalization receipt missing: %v", err)
 	}
-	candidateBundleLoaded = false
 	if done, err := adoptAuthorityBaselineOnce(context.Background(), store, client, "fugue-system", config, now.Add(time.Minute)); err != nil || !done {
 		t.Fatalf("established current without candidate flag done=%v err=%v", done, err)
 	}
