@@ -128,7 +128,16 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 			writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_bundle_unavailable")
 			return
 		}
-		candidate, exists, err := reader.ReadGroupCandidate(request.Context(), groupID)
+		var candidate GroupCandidateBundle
+		var exists bool
+		var err error
+		if serving, optimized := handler.store.(interface {
+			ReadGroupServingCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
+		}); optimized {
+			candidate, exists, err = serving.ReadGroupServingCandidate(request.Context(), groupID)
+		} else {
+			candidate, exists, err = reader.ReadGroupCandidate(request.Context(), groupID)
+		}
 		if err != nil || !exists || !candidateHasStagedWorkerIdentity(candidate) || validateGroupCandidateBundle(groupID, candidate) != nil || !candidate.Bundle.ValidUntil.After(handler.now()) {
 			writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_bundle_unavailable")
 			return
@@ -154,7 +163,15 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 		}
 		return
 	}
-	state, err := handler.store.ReadGroupAuthority(request.Context(), groupID)
+	var state GroupAuthorityState
+	var err error
+	if serving, optimized := handler.store.(interface {
+		ReadGroupServingAuthority(context.Context, string) (GroupAuthorityState, error)
+	}); optimized {
+		state, err = serving.ReadGroupServingAuthority(request.Context(), groupID)
+	} else {
+		state, err = handler.store.ReadGroupAuthority(request.Context(), groupID)
+	}
 	if err != nil || !state.PublishedExists {
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "group_bundle_unavailable")
 		return

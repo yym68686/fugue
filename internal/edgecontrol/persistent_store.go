@@ -238,6 +238,21 @@ func (store *PersistentGroupStore) ReadGroupAuthority(ctx context.Context, group
 	return snapshot, err
 }
 
+// ReadGroupServingAuthority returns the last fully validated in-process
+// projection. HTTP serving must not parse the full append-only audit history
+// under the writer lock for every bundle request.
+func (store *PersistentGroupStore) ReadGroupServingAuthority(ctx context.Context, groupID string) (GroupAuthorityState, error) {
+	summary, err := store.readGroupSummary(ctx, groupID)
+	if err != nil {
+		return GroupAuthorityState{}, err
+	}
+	authority := summary.status.Authority
+	if authority.PublishedExists {
+		authority.Published = cloneGroupPublishedBundle(authority.Published)
+	}
+	return authority, nil
+}
+
 func (store *PersistentGroupStore) ReadGroupCandidate(ctx context.Context, groupID string) (GroupCandidateBundle, bool, error) {
 	var candidate GroupCandidateBundle
 	exists := false
@@ -249,6 +264,20 @@ func (store *PersistentGroupStore) ReadGroupCandidate(ctx context.Context, group
 		return nil
 	})
 	return candidate, exists, err
+}
+
+// ReadGroupServingCandidate is the candidate equivalent of
+// ReadGroupServingAuthority. Mutations still validate the durable state before
+// refreshing this projection.
+func (store *PersistentGroupStore) ReadGroupServingCandidate(ctx context.Context, groupID string) (GroupCandidateBundle, bool, error) {
+	summary, err := store.readGroupSummary(ctx, groupID)
+	if err != nil {
+		return GroupCandidateBundle{}, false, err
+	}
+	if !summary.status.CandidateExists {
+		return GroupCandidateBundle{}, false, nil
+	}
+	return cloneGroupCandidateBundle(summary.status.Candidate), true, nil
 }
 
 func (store *PersistentGroupStore) ReadGroupCandidateStage(ctx context.Context, groupID, servingBundleVersion string) (GroupCandidateStageSnapshot, error) {

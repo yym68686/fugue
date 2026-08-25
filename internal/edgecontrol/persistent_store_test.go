@@ -336,6 +336,22 @@ func TestPersistentGroupStoreCachesOnlyValidatedCurrentSummary(t *testing.T) {
 	if err != nil || status.Inventory.Sequence != 2 || status.Inventory.Generation != second.Generation {
 		t.Fatalf("write-refreshed summary=%+v err=%v", status, err)
 	}
+
+	// Serving reads must use the validated projection. Re-reading and
+	// re-validating a large append-only ledger under the file lock makes the
+	// candidate importer time out while inventory writes are active.
+	statePath := store.groupStatePath(groupID)
+	if err := os.Rename(statePath, statePath+".offline"); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := store.ReadGroupServingAuthority(ctx, groupID)
+	if err != nil || authority.LedgerExists || authority.PublishedExists {
+		t.Fatalf("cached authority=%+v err=%v", authority, err)
+	}
+	candidate, exists, err := store.ReadGroupServingCandidate(ctx, groupID)
+	if err != nil || exists || candidate.GroupID != "" {
+		t.Fatalf("cached candidate=%+v exists=%v err=%v", candidate, exists, err)
+	}
 }
 
 func TestPersistentGroupStoreAcceptsFirstProducerInventoryAfterMissingInventoryLedger(t *testing.T) {
