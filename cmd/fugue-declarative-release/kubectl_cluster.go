@@ -58,6 +58,15 @@ var emergencyOwnershipManagers = map[string]bool{
 	"kubectl-set":   true,
 }
 
+var releaseArtifactAnnotationKeys = map[string]bool{
+	"fugue.pro/artifact-image":          true,
+	"fugue.pro/artifact-receipt-digest": true,
+	"fugue.pro/oci-revision":            true,
+	"fugue.pro/production-config-sha":   true,
+	"fugue.pro/release-plan-digest":     true,
+	"fugue.pro/source-commit":           true,
+}
+
 // before-first-apply is Kubernetes' synthetic owner for fields that predate
 // managedFields. It receives the same scalar-only CAS transfer as Helm; it is
 // never authorized to expand the reviewed emergency ownership allowlist.
@@ -1175,7 +1184,10 @@ func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity
 	}
 	templateAnnotations := mapField(mapField(mapField(desired, "spec"), "template"), "metadata")
 	templateAnnotations = mapField(templateAnnotations, "annotations")
-	for _, key := range []string{"fugue.pro/oci-revision", "fugue.pro/production-config-sha", "fugue.pro/source-commit"} {
+	for _, key := range []string{
+		"fugue.pro/artifact-image", "fugue.pro/artifact-receipt-digest", "fugue.pro/oci-revision",
+		"fugue.pro/production-config-sha", "fugue.pro/release-plan-digest", "fugue.pro/source-commit",
+	} {
 		if _, ok := templateAnnotations[key]; ok {
 			add("/spec/template/metadata/annotations/" + escapeJSONPointerToken(key))
 		}
@@ -1405,7 +1417,7 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 			pointers, flattenErr := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
 			if flattenErr != nil || len(pointers) == 0 ||
 				(ownDeclarativeUpdate && !stringSubset(pointers, ownershipCleanupPointers(allowed))) ||
-				(emergencyOwnershipManager(conflict.manager) && !emergencyProbePathPointer(pointer) &&
+				(emergencyOwnershipManager(conflict.manager) && !broadEmergencyOwnershipTransferPointer(pointer) &&
 					!stringSubset(pointers, ownershipCleanupPointers(allowed))) {
 				return errors.New("emergency managedFields entry expands beyond the exact allowlist")
 			}
@@ -1610,6 +1622,23 @@ func emergencyProbePathPointer(pointer string) bool {
 	}
 	_, ok = probePathTail(tail)
 	return ok
+}
+
+// Historical hotfixes can leave one kubectl-patch Update entry owning both
+// release identity annotations and unrelated fields. The transfer patch still
+// tests UID/RV and replaces only the exact SSA-conflicting scalar. Permit that
+// broad witness for immutable artifact identity annotations, as already done
+// for probe paths, without extending the set of fields that may conflict.
+func broadEmergencyOwnershipTransferPointer(pointer string) bool {
+	if emergencyProbePathPointer(pointer) {
+		return true
+	}
+	for _, prefix := range []string{"/metadata/annotations/", "/spec/template/metadata/annotations/"} {
+		if strings.HasPrefix(pointer, prefix) {
+			return releaseArtifactAnnotationKeys[unescapeJSONPointerToken(strings.TrimPrefix(pointer, prefix))]
+		}
+	}
+	return false
 }
 
 func emergencyEnvValuePointer(pointer string) bool {

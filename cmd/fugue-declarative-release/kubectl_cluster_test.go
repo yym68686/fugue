@@ -1811,6 +1811,61 @@ func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 	}
 }
 
+func TestArtifactIdentityOwnershipTransfersFromBroadKubectlPatch(t *testing.T) {
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": "worker-a", "namespace": "fugue-system", "uid": "worker-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"template": map[string]any{
+			"metadata": map[string]any{"annotations": map[string]any{
+				"fugue.pro/artifact-image":          "ghcr.io/example/edge@sha256:" + strings.Repeat("a", 64),
+				"fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("b", 64),
+				"fugue.pro/oci-revision":            strings.Repeat("c", 40),
+				"fugue.pro/production-config-sha":   strings.Repeat("c", 40),
+				"fugue.pro/release-plan-digest":     "sha256:" + strings.Repeat("d", 64),
+				"fugue.pro/source-commit":           strings.Repeat("c", 40),
+			}},
+			"spec": map[string]any{"containers": []any{map[string]any{
+				"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("a", 64),
+			}}},
+		}},
+	}
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a",
+		Container: "edge", FieldManager: "fugue-edge-worker-us-declarative",
+	}}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a"}
+	allowed := ownershipConvergencePointers(release, identity, desired)
+	pointer := "/spec/template/metadata/annotations/fugue.pro~1artifact-image"
+	if !stringSubset([]string{pointer}, allowed) {
+		t.Fatalf("artifact image annotation missing from ownership allowlist: %v", allowed)
+	}
+	live := deepCopyJSONMap(t, desired)
+	liveAnnotations := mapField(mapField(mapField(live, "spec"), "template"), "metadata")
+	liveAnnotations = mapField(liveAnnotations, "annotations")
+	liveAnnotations["fugue.pro/artifact-image"] = "ghcr.io/example/edge@sha256:" + strings.Repeat("e", 64)
+	mapField(live, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/template/spec/nodeSelector"}),
+	}}
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: ` + ssaFieldForPointer(pointer))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, applyErr); err != nil {
+		t.Fatalf("exact artifact identity transfer was blocked by unrelated kubectl-patch ownership: %v", err)
+	}
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
+	if err != nil || !found || len(patch) != 4 || patch[3]["path"] != pointer {
+		t.Fatalf("artifact identity transfer patch=%v found=%v err=%v", patch, found, err)
+	}
+	imagePointer := "/spec/template/spec/containers[name=edge]/image"
+	mapField(live, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{imagePointer, "/spec/template/spec/nodeSelector"}),
+	}}
+	imageConflict := errors.New(`Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: ` + ssaFieldForPointer(imagePointer))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, imageConflict); err == nil || !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("broad kubectl-patch ownership escaped the artifact annotation boundary: %v", err)
+	}
+}
+
 func TestBeforeFirstApplyOwnershipTransfersOnlyAllowlistedScalars(t *testing.T) {
 	pointer := "/metadata/annotations/fugue.pro~1artifact-receipt-digest"
 	desired := map[string]any{"metadata": map[string]any{
