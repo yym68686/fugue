@@ -354,6 +354,12 @@ func TestCandidateImporterTreatsPromotedServingWitnessAsSettled(t *testing.T) {
 	if record, err := store.LoadRouteBundleRecord(context.Background(), groupID, envelope.Record.RecordDigest); err != nil || record != envelope.Record {
 		t.Fatalf("settled candidate did not preserve immutable candidate record: record=%+v err=%v", record, err)
 	}
+	changed, err = importCandidateOnce(context.Background(), store, client, candidateImportConfig{
+		GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile,
+	}, now.Add(time.Second))
+	if err != nil || changed {
+		t.Fatalf("settled candidate record repair was not idempotent: changed=%v err=%v", changed, err)
+	}
 }
 
 func TestCandidateEnvelopeSettledCurrentRequiresExactTransitionIdentity(t *testing.T) {
