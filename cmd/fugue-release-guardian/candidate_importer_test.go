@@ -217,6 +217,49 @@ func TestCandidateImporterAcceptsCommittedFrontPreviousLKGRecoveryWitness(t *tes
 	}
 }
 
+func TestCandidateImporterAcceptsCommittedFrontDeclaredLKGRecoveryWitness(t *testing.T) {
+	now := time.Date(2026, 8, 25, 2, 0, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
+	envelope.AllowDegradedPrevious = true
+	envelope.CurrentWorkerSlot = releaseguardian.AuthoritySlotA
+	envelope.WorkerSlot = releaseguardian.AuthoritySlotB
+	envelope.Bundle.Generation = envelope.CurrentBundle.Generation
+	envelope.Bundle.Version = envelope.Bundle.Generation + ".p5.r0"
+	envelope.Bundle.PreviousGeneration = envelope.CurrentBundle.Generation
+	envelope.Record.BundleDigest = candidateBundleDigest(envelope.Bundle)
+	record, err := envelope.Record.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Record = record
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: envelope.GroupID, CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotB,
+		CurrentFrontGeneration: 150, CurrentBundleGeneration: envelope.CurrentBundle.Generation + ".p5.r1", CurrentWorkerSourceSHA: strings.Repeat("b", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("c", 64), PreviousRecordDigest: "sha256:" + strings.Repeat("d", 64),
+		PreviousWorkerSlot: releaseguardian.AuthoritySlotA, PreviousFrontGeneration: 149, PreviousBundleGeneration: envelope.CurrentBundle.Generation + ".p4.r1",
+		PreviousWorkerSourceSHA: strings.Repeat("e", 40), PreviousWorkerImageDigest: "sha256:" + strings.Repeat("f", 64), AuthorityEpoch: 23}
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "41", FrontGeneration: 151,
+		BundleVersion: envelope.CurrentBundle.Generation + ".p6.r1", WorkerSlot: envelope.CurrentWorkerSlot, WorkerSourceSHA: strings.Repeat("1", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("2", 64)}
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("declared LKG recovery envelope was rejected: %v", err)
+	}
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err != nil {
+		t.Fatalf("committed Front declared-LKG witness was rejected: %v", err)
+	}
+
+	envelope.AllowDegradedPrevious = false
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err == nil {
+		t.Fatal("declared LKG recovery witness without authorization was accepted")
+	}
+	envelope.AllowDegradedPrevious = true
+	envelope.ServingAuthority.FrontGeneration++
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err == nil {
+		t.Fatal("non-consecutive declared LKG recovery generation was accepted")
+	}
+}
+
 func TestCandidateImporterRejectsServingAuthorityCASDriftBeforeWritingRecords(t *testing.T) {
 	now := time.Date(2026, 8, 14, 20, 15, 0, 0, time.UTC)
 	groupID := "edge-pool-a"

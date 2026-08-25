@@ -417,14 +417,14 @@ func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, curren
 		current.CurrentWorkerImageDigest == witness.WorkerImageDigest {
 		return nil
 	}
-	// During controlled recovery Front may already have committed the exact
-	// previous-slot activation while Guardian CurrentAuthority still points at
-	// the failed candidate. Accept only that one-step, previous-LKG witness;
-	// arbitrary slot or generation drift must remain fenced.
-	if current.CurrentWorkerSlot == witness.WorkerSlot || current.PreviousWorkerSlot != witness.WorkerSlot ||
-		current.PreviousBundleGeneration != witness.BundleVersion || current.PreviousWorkerSourceSHA != witness.WorkerSourceSHA ||
-		current.PreviousWorkerImageDigest != witness.WorkerImageDigest || current.CurrentFrontGeneration == 0 ||
-		witness.FrontGeneration != current.CurrentFrontGeneration+1 || current.PreviousFrontGeneration >= current.CurrentFrontGeneration {
+	// During controlled recovery Front may already have committed one signed
+	// activation beyond Guardian CurrentAuthority. The activation can be the
+	// declared release LKG even when Guardian's previous metadata predates it,
+	// so bind recovery to the signed envelope, exact CurrentAuthority CAS,
+	// consecutive Front generation, slot switch, and immutable bundle family.
+	// Ordinary candidates must still match current or previous metadata exactly.
+	if current.CurrentWorkerSlot == witness.WorkerSlot || current.CurrentFrontGeneration == 0 ||
+		witness.FrontGeneration != current.CurrentFrontGeneration+1 {
 		return errors.New("candidate serving authority binding is invalid")
 	}
 	currentGeneration, _, _, currentErr := parseUnboundAuthorityBundleVersion(current.CurrentBundleGeneration)
@@ -432,7 +432,13 @@ func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, curren
 	if currentErr != nil || witnessErr != nil || currentGeneration != witnessGeneration {
 		return errors.New("candidate serving authority binding is invalid")
 	}
-	return nil
+	previousMatches := current.PreviousWorkerSlot == witness.WorkerSlot && current.PreviousBundleGeneration == witness.BundleVersion &&
+		current.PreviousWorkerSourceSHA == witness.WorkerSourceSHA && current.PreviousWorkerImageDigest == witness.WorkerImageDigest &&
+		current.PreviousFrontGeneration < current.CurrentFrontGeneration
+	if previousMatches || envelope.AllowDegradedPrevious && !envelope.StandbyOnly {
+		return nil
+	}
+	return errors.New("candidate serving authority binding is invalid")
 }
 
 func parseAuthorityBundleVersion(generation, version string) (uint64, uint64, error) {
