@@ -155,10 +155,11 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 
 func canonicalStableReleaseRecord(key Key, data map[string]string) (ReleaseRecord, declarativerelease.MonitorRecord, error) {
 	plan, artifact, prepared, monitor, _, _, err := decodeStableRecord(data)
-	if err != nil || len(plan.Releases) != 1 || prepared.Component != key.Component || monitor.Component != key.Component {
+	release, found := releaseForComponent(plan, key.Component)
+	if err != nil || !found || prepared.Component != key.Component || monitor.Component != key.Component {
 		return ReleaseRecord{}, declarativerelease.MonitorRecord{}, errors.New("current stable monitor record is invalid")
 	}
-	healthRaw, err := declarativerelease.CanonicalJSON(plan.Releases[0].Health)
+	healthRaw, err := declarativerelease.CanonicalJSON(release.Health)
 	if err != nil {
 		return ReleaseRecord{}, declarativerelease.MonitorRecord{}, err
 	}

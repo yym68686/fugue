@@ -120,10 +120,14 @@ func runRestoreMonitorContext(parent context.Context, args []string, output io.W
 			return monitorErr
 		}
 		plan, planErr := declarativerelease.DecodePlan(bytes.NewReader(files["release-plan.json"]))
-		if planErr != nil || len(plan.Releases) != 1 {
+		artifact, artifactErr := declarativerelease.DecodeArtifactReceipt(bytes.NewReader(files["artifact-receipt.json"]))
+		if planErr != nil || artifactErr != nil {
 			return monitorErr
 		}
-		release = plan.Releases[0]
+		release, err = selectedRelease(plan, artifact.Component)
+		if err != nil {
+			return monitorErr
+		}
 		if release.Delivery == nil {
 			return monitorErr
 		}

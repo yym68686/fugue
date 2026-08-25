@@ -176,10 +176,10 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 	if err != nil {
 		return storedRelease{}, err
 	}
-	if monitor.Component != target.MonitorComponent || prepared.Component != target.MonitorComponent || len(plan.Releases) != 1 {
+	release, found := releaseForComponent(plan, target.MonitorComponent)
+	if monitor.Component != target.MonitorComponent || prepared.Component != target.MonitorComponent || !found {
 		return storedRelease{}, errors.New("stable release record component binding is invalid")
 	}
-	release := plan.Releases[0]
 	healthRaw, err := declarativerelease.CanonicalJSON(release.Health)
 	if err != nil {
 		return storedRelease{}, err

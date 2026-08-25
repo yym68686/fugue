@@ -72,10 +72,41 @@ func TestArtifactReceiptRejectsWrongRevisionAndRepository(t *testing.T) {
 	}
 }
 
-func TestBoundPlanRejectsMoreThanOneProductionAtom(t *testing.T) {
+func TestBoundPlanRejectsRepeatedComponent(t *testing.T) {
 	plan := boundAPIPlan(t)
 	plan.Releases = append(plan.Releases, plan.Releases[0])
-	if err := plan.ValidateBound(); err == nil || !strings.Contains(err.Error(), "more than one component atom") {
-		t.Fatalf("multi-component bound plan was accepted: %v", err)
+	if err := plan.ValidateBound(); err == nil || !strings.Contains(err.Error(), "repeats component") {
+		t.Fatalf("repeated component was accepted: %v", err)
+	}
+}
+
+func TestBoundPlanAllowsComponentsSharingOneArtifact(t *testing.T) {
+	plan := boundAPIPlan(t)
+	second := plan.Releases[0]
+	second.ComponentID = "api-secondary"
+	second.IntentDigest = "sha256:" + strings.Repeat("e", 64)
+	second.Concurrency = "fugue-production-api-secondary"
+	second.Workload.Name = "fugue-fugue-api-secondary"
+	second.Workload.Container = "api-secondary"
+	second.Workload.FieldManager = "fugue-api-secondary-declarative"
+	plan.Releases = append(plan.Releases, second)
+	plan.PlanDigest = ""
+	raw, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(raw)
+	if err := plan.ValidateBound(); err != nil {
+		t.Fatalf("shared artifact bound plan was rejected: %v", err)
+	}
+	plan.Releases[1].Artifact.Repository = "ghcr.io/example/other"
+	plan.PlanDigest = ""
+	raw, err = CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(raw)
+	if err := plan.ValidateBound(); err == nil || !strings.Contains(err.Error(), "different artifacts") {
+		t.Fatalf("different artifacts were accepted: %v", err)
 	}
 }

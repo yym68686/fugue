@@ -103,10 +103,17 @@ func runGuardianSubmit(args []string, output io.Writer) error {
 		return err
 	}
 	plan, err := declarativerelease.DecodePlan(bytes.NewReader(files["release-plan.json"]))
-	if err != nil || len(plan.Releases) != 1 {
-		return errors.New("Guardian submission requires one exact component plan")
+	if err != nil {
+		return err
 	}
-	release := plan.Releases[0]
+	artifact, err := declarativerelease.DecodeArtifactReceipt(bytes.NewReader(files["artifact-receipt.json"]))
+	if err != nil {
+		return err
+	}
+	release, err := selectedRelease(plan, artifact.Component)
+	if err != nil {
+		return err
+	}
 	if release.Delivery == nil || release.Delivery.Writer != "guardian" {
 		return errors.New("component is not enrolled in Guardian delivery")
 	}

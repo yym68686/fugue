@@ -53,11 +53,8 @@ func DecodeExecutionBundle(files map[string][]byte, key Key) (ExecutionBundle, e
 	if err != nil {
 		return ExecutionBundle{}, err
 	}
-	if len(plan.Releases) != 1 {
-		return ExecutionBundle{}, errors.New("Guardian execution plan must contain exactly one component")
-	}
-	release := plan.Releases[0]
-	if release.ComponentID != key.Component || release.Delivery == nil || release.Delivery.Writer != "guardian" || release.Delivery.Group != key.Group {
+	release, found := releaseForComponent(plan, key.Component)
+	if !found || release.Delivery == nil || release.Delivery.Writer != "guardian" || release.Delivery.Group != key.Group {
 		return ExecutionBundle{}, errors.New("Guardian execution plan delivery binding is invalid")
 	}
 	artifact, err := declarativerelease.DecodeArtifactReceipt(bytes.NewReader(canonical["artifact-receipt.json"]))
@@ -76,6 +73,15 @@ func DecodeExecutionBundle(files map[string][]byte, key Key) (ExecutionBundle, e
 		Plan: plan, Artifact: artifact, Prepared: prepared, Release: release,
 		Forward: canonical["forward.json"], LKG: canonical["lkg.json"], Files: canonical,
 	}, nil
+}
+
+func releaseForComponent(plan declarativerelease.Plan, component string) (declarativerelease.PlanRelease, bool) {
+	for _, release := range plan.Releases {
+		if release.ComponentID == component {
+			return release, true
+		}
+	}
+	return declarativerelease.PlanRelease{}, false
 }
 
 func (bundle ExecutionBundle) ReleaseRecord(key Key, lkgRecordDigest string) (ReleaseRecord, error) {
