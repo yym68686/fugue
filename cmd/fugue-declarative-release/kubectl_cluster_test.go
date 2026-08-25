@@ -1838,6 +1838,68 @@ func TestBeforeFirstApplyOwnershipTransfersOnlyAllowlistedScalars(t *testing.T) 
 	}
 }
 
+func TestGuardianRoleRulesOwnershipTransfersByExactCAS(t *testing.T) {
+	desired := map[string]any{
+		"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+		"metadata": map[string]any{"name": "fugue-release-guardian", "namespace": "fugue-system", "uid": "role-uid", "resourceVersion": "42"},
+		"rules": []any{
+			map[string]any{"apiGroups": []any{""}, "resources": []any{"configmaps"}, "verbs": []any{"get", "update"}},
+			map[string]any{"apiGroups": []any{""}, "resourceNames": []any{"transition-us"}, "resources": []any{"configmaps"}, "verbs": []any{"delete"}},
+		},
+	}
+	live := deepCopyJSONMap(t, desired)
+	live["rules"] = []any{map[string]any{"apiGroups": []any{""}, "resources": []any{"configmaps"}, "verbs": []any{"get", "update"}}}
+	mapField(live, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{"/rules"}),
+	}}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role", Namespace: "fugue-system", Name: "fugue-release-guardian"}
+	allowed := ownershipConvergencePointers(declarativerelease.PlanRelease{}, identity, desired)
+	if len(allowed) != 1 || allowed[0] != "/rules" {
+		t.Fatalf("Role rules ownership allowlist=%v", allowed)
+	}
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "kubectl-patch" using rbac.authorization.k8s.io/v1: .rules`)
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "fugue-release-guardian-declarative", applyErr); err != nil {
+		t.Fatalf("exact Role rules conflict rejected: %v", err)
+	}
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "fugue-release-guardian-declarative", applyErr)
+	if err != nil || !found || len(patch) != 4 || patch[2]["path"] != "/rules" || patch[3]["path"] != "/rules" {
+		t.Fatalf("Role rules transfer patch=%v found=%v err=%v", patch, found, err)
+	}
+
+	fresh := deepCopyJSONMap(t, desired)
+	mapField(fresh, "metadata")["resourceVersion"] = "43"
+	mapField(fresh, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": "fugue-release-guardian-declarative", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{"/rules"}),
+	}}
+	expected, err := expectedStateAfterLegacyOwnershipTransfer(desired, live, fresh, allowed, applyErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebound, err := rebindDesiredResourceVersionAfterScalarTransfer(desired, expected, fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reboundObject, err := decodeJSONObject(rebound)
+	if err != nil || stringValue(mapField(reboundObject, "metadata")["resourceVersion"]) != "43" {
+		t.Fatalf("Role rules transfer did not bind fresh RV: object=%v err=%v", reboundObject, err)
+	}
+
+	expanded := deepCopyJSONMap(t, live)
+	mapField(expanded, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{"/rules", "/metadata/labels/emergency"}),
+	}}
+	if err := validateEmergencyOwnershipConflictEvidence(desired, expanded, allowed, "fugue-release-guardian-declarative", applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("expanded Role ownership was accepted: %v", err)
+	}
+	helmErr := errors.New(`Apply failed with 1 conflict: conflict with "helm" using rbac.authorization.k8s.io/v1: .rules`)
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "fugue-release-guardian-declarative", helmErr); err == nil || !strings.Contains(err.Error(), "scalar transfer") {
+		t.Fatalf("legacy manager received structural Role takeover: %v", err)
+	}
+}
+
 func TestEmergencyOwnershipVerificationAcceptsOpaqueKubernetesListSelectors(t *testing.T) {
 	allowed := []string{"/spec/template/spec/containers[name=edge]/image"}
 	metadata := map[string]any{"managedFields": []any{

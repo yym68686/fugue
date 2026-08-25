@@ -961,13 +961,13 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 
 // applyResourceWithOwnershipConvergence is the one bounded recovery path for
 // emergency kubectl writes. A typed SSA conflict must exactly match the
-// release-owned annotation, image, HTTP probe path, or declared environment
-// value allowlist and an Update managedFields entry. Execute moves only exact
-// string-valued runtime fields through a UID/RV-bound JSON Patch using the
-// declarative field manager, then retries ordinary SSA with the fresh RV. This
-// transfers ownership without editing API server-owned managedFields or using
-// unconditional conflict takeover. Prepare remains read-only and accepts only
-// the same typed proof.
+// release-owned annotation, image, HTTP probe path, declared environment value,
+// or a complete declared Role rules list and an Update managedFields entry.
+// Execute moves only the exact reviewed value through a UID/RV-bound JSON Patch
+// using the declarative field manager, then retries ordinary SSA with the fresh
+// RV. This transfers ownership without editing API server-owned managedFields
+// or using unconditional conflict takeover. Prepare remains read-only and
+// accepts only the same typed proof.
 func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
 	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
 	if applyErr != nil {
@@ -1122,9 +1122,10 @@ func (cluster *kubectlCluster) reconcileApplyCommitUnknown(ctx context.Context, 
 }
 
 // rebindDesiredResourceVersionAfterScalarTransfer permits exactly the RV
-// change caused by a reviewed scalar transfer. The live object must otherwise
-// be byte-equivalent after removing Kubernetes observation metadata, and
-// UID/generation remain explicit CAS witnesses.
+// change caused by a reviewed ownership transfer. The live object must
+// otherwise be byte-equivalent after removing Kubernetes observation metadata,
+// and UID/generation remain explicit CAS witnesses. RBAC Roles do not expose a
+// generation, so an exact zero-to-zero generation witness is accepted for them.
 func rebindDesiredResourceVersionAfterScalarTransfer(desired, before, fresh map[string]any) ([]byte, error) {
 	desiredMetadata := mapField(desired, "metadata")
 	beforeMetadata := mapField(before, "metadata")
@@ -1139,7 +1140,8 @@ func rebindDesiredResourceVersionAfterScalarTransfer(desired, before, fresh map[
 	if freshUID == "" || freshRV == "" || freshUID != beforeUID || freshRV == beforeRV {
 		return nil, errors.New("scalar transfer did not produce the expected fresh UID/RV")
 	}
-	if beforeGeneration <= 0 || freshGeneration != beforeGeneration {
+	roleRulesTransfer := declaredRoleRulesResource(before) && beforeGeneration == 0 && freshGeneration == 0
+	if !roleRulesTransfer && (beforeGeneration <= 0 || freshGeneration != beforeGeneration) {
 		return nil, errors.New("scalar transfer changed the workload generation")
 	}
 	if digestJSON(sanitizeObservedResource(before)) != digestJSON(sanitizeObservedResource(fresh)) {
@@ -1238,6 +1240,9 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 			continue
 		}
 		addDeclaredContainerEnvValuePointers(desired, target.ContainerType, target.Container, add)
+	}
+	if declaredRoleRulesResource(desired) {
+		add("/rules")
 	}
 	allowed := make([]string, 0, len(allowedSet))
 	for pointer := range allowedSet {
@@ -1423,6 +1428,9 @@ func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []st
 	if uid == "" || rv == "" {
 		return nil, false, errors.New("legacy ownership transfer lacks UID/RV")
 	}
+	if patch, found, err := nextRoleRulesOwnershipTransferPatch(desired, live, allowed, declarativeManager, conflicts, uid, rv); found || err != nil {
+		return patch, found, err
+	}
 	hasTransfer, hasOther := false, false
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
@@ -1548,7 +1556,7 @@ func expectedStateAfterLegacyOwnershipTransfer(desired, before, fresh map[string
 	beforeMetadata, freshMetadata := mapField(before, "metadata"), mapField(fresh, "metadata")
 	beforeUID, freshUID := stringValue(beforeMetadata["uid"]), stringValue(freshMetadata["uid"])
 	beforeGeneration, freshGeneration := int64Value(beforeMetadata["generation"]), int64Value(freshMetadata["generation"])
-	if beforeUID == "" || beforeUID != freshUID || beforeGeneration < 1 {
+	if beforeUID == "" || beforeUID != freshUID || (!declaredRoleRulesResource(desired) && beforeGeneration < 1) {
 		return nil, errors.New("legacy ownership transfer changed resource identity unexpectedly")
 	}
 	raw, err := declarativerelease.CanonicalJSON(before)
@@ -1562,6 +1570,17 @@ func expectedStateAfterLegacyOwnershipTransfer(desired, before, fresh map[string
 	conflicts, err := parseEmergencySSAConflicts(applyErr)
 	if err != nil {
 		return nil, err
+	}
+	if roleRulesOwnershipTransferConflicts(desired, conflicts, "") {
+		desiredRules, _ := desired["rules"].([]any)
+		expected["rules"] = desiredRules
+		if freshGeneration != beforeGeneration {
+			return nil, errors.New("Role rules ownership transfer changed generation unexpectedly")
+		}
+		if _, present := freshMetadata["generation"]; present {
+			mapField(expected, "metadata")["generation"] = freshMetadata["generation"]
+		}
+		return expected, nil
 	}
 	changed := false
 	for _, conflict := range conflicts {
@@ -1608,6 +1627,46 @@ func legacyOwnershipTransferPointer(pointer string) bool {
 	}
 	_, _, _, ok := emergencyContainerPointerParts(pointer)
 	return ok
+}
+
+// A Role's rules are one atomic SSA list. A historical kubectl patch can own
+// that whole list and permanently block later declarative additions. Permit a
+// transfer only for the complete reviewed list on an exact rbac/v1 Role; the
+// caller has already verified UID/RV and the exact Update managedFields owner.
+func declaredRoleRulesResource(resource map[string]any) bool {
+	if stringValue(resource["apiVersion"]) != "rbac.authorization.k8s.io/v1" || stringValue(resource["kind"]) != "Role" {
+		return false
+	}
+	rules, ok := resource["rules"].([]any)
+	return ok && len(rules) > 0
+}
+
+func roleRulesOwnershipTransferConflicts(desired map[string]any, conflicts []emergencySSAConflict, declarativeManager string) bool {
+	if !declaredRoleRulesResource(desired) || len(conflicts) != 1 || conflicts[0].field != ".rules" {
+		return false
+	}
+	manager := conflicts[0].manager
+	return emergencyOwnershipManager(manager) || (declarativeManager != "" && manager == declarativeManager)
+}
+
+func nextRoleRulesOwnershipTransferPatch(desired, live map[string]any, allowed []string, declarativeManager string, conflicts []emergencySSAConflict, uid, rv string) ([]map[string]any, bool, error) {
+	if !roleRulesOwnershipTransferConflicts(desired, conflicts, declarativeManager) {
+		return nil, false, nil
+	}
+	if pointerForEmergencySSAField(conflicts[0].field, allowed) != "/rules" || !declaredRoleRulesResource(live) {
+		return nil, false, errors.New("Role rules ownership transfer is outside the exact allowlist")
+	}
+	desiredRules, desiredOK := desired["rules"].([]any)
+	liveRules, liveOK := live["rules"].([]any)
+	if !desiredOK || !liveOK || len(desiredRules) == 0 || len(liveRules) == 0 {
+		return nil, false, errors.New("Role rules ownership transfer lacks a complete rules list")
+	}
+	return []map[string]any{
+		{"op": "test", "path": "/metadata/uid", "value": uid},
+		{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
+		{"op": "test", "path": "/rules", "value": liveRules},
+		{"op": "replace", "path": "/rules", "value": desiredRules},
+	}, true, nil
 }
 
 func parseEmergencySSAConflicts(applyErr error) ([]emergencySSAConflict, error) {
