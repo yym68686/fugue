@@ -268,6 +268,49 @@ func TestCandidateImporterAcceptsCommittedFrontDeclaredLKGRecoveryWitness(t *tes
 	}
 }
 
+func TestCandidateImporterAcceptsSameSlotAfterRepeatedFrontRecovery(t *testing.T) {
+	now := time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-group-country-de", now)
+	envelope.AllowDegradedPrevious = true
+	envelope.CurrentWorkerSlot = releaseguardian.AuthoritySlotB
+	envelope.WorkerSlot = releaseguardian.AuthoritySlotA
+	envelope.Bundle.Generation = envelope.CurrentBundle.Generation
+	envelope.Bundle.Version = envelope.Bundle.Generation + ".p5.r0"
+	envelope.Bundle.PreviousGeneration = envelope.CurrentBundle.Generation
+	envelope.Record.BundleDigest = candidateBundleDigest(envelope.Bundle)
+	record, err := envelope.Record.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Record = record
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: envelope.GroupID, CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotB,
+		CurrentFrontGeneration: 150, CurrentBundleGeneration: envelope.CurrentBundle.Generation + ".p5.r1", CurrentWorkerSourceSHA: strings.Repeat("b", 40),
+		CurrentWorkerImageDigest: "sha256:" + strings.Repeat("c", 64), PreviousRecordDigest: "sha256:" + strings.Repeat("d", 64),
+		PreviousWorkerSlot: releaseguardian.AuthoritySlotA, PreviousFrontGeneration: 149, PreviousBundleGeneration: envelope.CurrentBundle.Generation + ".p4.r1",
+		PreviousWorkerSourceSHA: strings.Repeat("e", 40), PreviousWorkerImageDigest: "sha256:" + strings.Repeat("f", 64), AuthorityEpoch: 23}
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "41", FrontGeneration: 154,
+		BundleVersion: envelope.CurrentBundle.Generation + ".p6.r1", WorkerSlot: releaseguardian.AuthoritySlotB,
+		WorkerSourceSHA: strings.Repeat("1", 40), WorkerImageDigest: "sha256:" + strings.Repeat("2", 64)}
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("same-slot recovery envelope was rejected: %v", err)
+	}
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err != nil {
+		t.Fatalf("same-slot repeated recovery witness was rejected: %v", err)
+	}
+
+	envelope.ServingAuthority.FrontGeneration--
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err == nil {
+		t.Fatal("same-slot recovery with odd generation delta was accepted")
+	}
+	envelope.ServingAuthority.FrontGeneration++
+	envelope.AllowDegradedPrevious = false
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID(envelope.ServingAuthority.CurrentAuthorityUID), envelope.ServingAuthority.CurrentAuthorityRV); err == nil {
+		t.Fatal("same-slot recovery without degraded authorization was accepted")
+	}
+}
+
 func TestCandidateImporterPersistsRecordsBeforeRejectingServingAuthorityCASDrift(t *testing.T) {
 	now := time.Date(2026, 8, 14, 20, 15, 0, 0, time.UTC)
 	groupID := "edge-pool-a"
