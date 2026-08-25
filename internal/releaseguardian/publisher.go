@@ -39,7 +39,15 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	if err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, err
 	}
-	if !publishDesiredEligible(snapshot, bundle, stableRecord) {
+	eligible := publishDesiredEligible(snapshot, bundle, stableRecord)
+	if !eligible && snapshot.Record.LKGRecordDigest != stableRecord.RecordDigest {
+		equivalent, equivalentErr := store.immutableHistoricalLKGRecordAliasesStable(ctx, target, snapshot.Record.LKGRecordDigest, stableRecord)
+		if equivalentErr != nil {
+			return ReleaseRecord{}, DesiredRelease{}, equivalentErr
+		}
+		eligible = equivalent && runtimeDriftedDesiredEdgeRecoveryEligibleWithStableBinding(snapshot, bundle, stableRecord, true)
+	}
+	if !eligible {
 		return ReleaseRecord{}, DesiredRelease{}, errors.New("current component is not a healthy settled release")
 	}
 	lkgMatchesStable := digest(bundle.LKG) == stableMonitor.ForwardManifestDigest
@@ -189,13 +197,19 @@ func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle, stableRec
 // prewrite CAS and the edge transition's Front/Worker authority witness prove
 // the live runtime before any workload or traffic mutation.
 func runtimeDriftedDesiredEdgeRecoveryEligible(snapshot Snapshot, bundle ExecutionBundle, stableRecord ReleaseRecord) bool {
+	return runtimeDriftedDesiredEdgeRecoveryEligibleWithStableBinding(
+		snapshot, bundle, stableRecord, snapshot.Record.LKGRecordDigest == stableRecord.RecordDigest,
+	)
+}
+
+func runtimeDriftedDesiredEdgeRecoveryEligibleWithStableBinding(snapshot Snapshot, bundle ExecutionBundle, stableRecord ReleaseRecord, stableLKGRecordEquivalent bool) bool {
 	previous := snapshot.PreviousStatus
 	prepared, release := bundle.Prepared, bundle.Release
 	if !snapshot.Managed || previous == nil || previous.Key() != snapshot.Key ||
 		previous.State != StateRecoveryRequired || previous.RolloutReceiptDigest != "" || previous.RollbackReceiptDigest != "" ||
 		!strings.HasPrefix(previous.Reason, "desired rollout is fenced because the current component is degraded") ||
 		snapshot.Health.Local.State != HealthDegraded || snapshot.Health.Dependency.State != HealthHealthy || snapshot.Health.Route.State != HealthHealthy ||
-		stableRecord.Key() != snapshot.Key || snapshot.Record.Key() != snapshot.Key || snapshot.Record.LKGRecordDigest != stableRecord.RecordDigest ||
+		stableRecord.Key() != snapshot.Key || snapshot.Record.Key() != snapshot.Key || !stableLKGRecordEquivalent ||
 		snapshot.CurrentRecordDigest != stableRecord.RecordDigest || snapshot.LastSuccessfulLKG != stableRecord.RecordDigest ||
 		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || previous.CurrentRecordDigest != snapshot.CurrentRecordDigest ||
 		previous.TargetRecordDigest != snapshot.Desired.RecordDigest || previous.LastSuccessfulLKG != snapshot.CurrentRecordDigest ||
@@ -211,6 +225,48 @@ func runtimeDriftedDesiredEdgeRecoveryEligible(snapshot Snapshot, bundle Executi
 		prepared.LKG.ConfigSHA == stableRecord.ConfigSHA && prepared.LKG.ManifestSHA == stableRecord.ConfigSHA &&
 		prepared.LKG.OCIRevision == stableRecord.ConfigSHA &&
 		prepared.LKG.ImageRef == release.Artifact.Repository+"@"+stableRecord.ImageDigest
+}
+
+// A stable monitor can re-derive a ReleaseRecord after compensation while an
+// older failed DesiredRelease still names the prior immutable record alias.
+// Accept that lineage only when the historical ConfigMap is immutable, its
+// complete execution bundle re-derives its envelope, and every serving target
+// and health-contract binding equals the current canonical stable record. The
+// new candidate still uses stableRecord.RecordDigest as its direct LKG.
+func (store *KubeStore) immutableHistoricalLKGRecordAliasesStable(ctx context.Context, target TargetConfig, recordDigest string, stableRecord ReleaseRecord) (bool, error) {
+	if !digestPattern.MatchString(recordDigest) || stableRecord.Validate() != nil || stableRecord.Key() != target.Key {
+		return false, nil
+	}
+	value, err := store.client.CoreV1().ConfigMaps(target.Namespace).Get(ctx, releaseRecordName(target.Key, recordDigest), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read historical Guardian LKG record: %w", err)
+	}
+	if value.Immutable == nil || !*value.Immutable || totalConfigMapBytes(value.Data) > maxRecordBytes ||
+		!stringMapEqual(value.Labels, guardianLabels(target.Key)) {
+		return false, nil
+	}
+	var historical ReleaseRecord
+	if decodeStrict([]byte(value.Data["guardian-record.json"]), &historical) != nil || historical.Validate() != nil ||
+		historical.Key() != target.Key || historical.RecordDigest != recordDigest {
+		return false, nil
+	}
+	files, err := executionFilesFromStrings(value.Data)
+	if err != nil {
+		return false, nil
+	}
+	bundle, err := DecodeExecutionBundle(files, target.Key)
+	if err != nil {
+		return false, nil
+	}
+	bound, err := bundle.ReleaseRecord(target.Key, historical.LKGRecordDigest)
+	if err != nil || bound != historical {
+		return false, nil
+	}
+	return historical.ConfigSHA == stableRecord.ConfigSHA && historical.ImageDigest == stableRecord.ImageDigest &&
+		historical.ManifestDigest == stableRecord.ManifestDigest && historical.HealthContractDigest == stableRecord.HealthContractDigest, nil
 }
 
 // orphanedDesiredEdgeRecoveryEligible admits only a signed Edge A/B successor

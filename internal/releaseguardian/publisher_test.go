@@ -325,6 +325,12 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 	if !runtimeDriftedDesiredEdgeRecoveryEligible(runtimeDrifted, runtimeBundle, record) || !publishDesiredEligible(runtimeDrifted, runtimeBundle, record) {
 		t.Fatal("exact edge runtime-drift recovery was rejected")
 	}
+	historicalAlias := runtimeDrifted
+	historicalAlias.Record.LKGRecordDigest = otherDigest
+	if runtimeDriftedDesiredEdgeRecoveryEligible(historicalAlias, runtimeBundle, record) ||
+		!runtimeDriftedDesiredEdgeRecoveryEligibleWithStableBinding(historicalAlias, runtimeBundle, record, true) {
+		t.Fatal("historical LKG alias bypassed or failed its explicit stable binding")
+	}
 	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
 		"not edge A/B":   func(_ *Snapshot, value *ExecutionBundle) { value.Release.Transition = nil },
 		"route degraded": func(value *Snapshot, _ *ExecutionBundle) { value.Health.Route.State = HealthDegraded },
@@ -397,6 +403,71 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 	healthy.Health = testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now)
 	if !publishDesiredEligible(healthy, ExecutionBundle{}, record) {
 		t.Fatal("ordinary healthy settled release was rejected")
+	}
+}
+
+func TestHistoricalLKGRecordAliasRequiresImmutableCanonicalTarget(t *testing.T) {
+	now := time.Date(2026, 8, 25, 13, 30, 0, 0, time.UTC)
+	key := Key{Component: "edge-control-de", Group: "de"}
+	stableData, _, stableArtifact, stableTarget := guardianStableFixture(t, key, now)
+	candidate := guardianCandidateFixture(t, key, stableTarget, stableArtifact.TopDigest, []byte(stableData["forward.json"]), now)
+	bundle, err := DecodeExecutionBundle(candidate, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical, err := bundle.ReleaseRecord(key, testDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableAlias, err := bundle.ReleaseRecord(key, otherDigest)
+	if err != nil || stableAlias.RecordDigest == historical.RecordDigest {
+		t.Fatalf("stable alias=%+v historical=%+v err=%v", stableAlias, historical, err)
+	}
+	data := make(map[string]string, len(candidate)+2)
+	for name, raw := range candidate {
+		data[name] = string(raw)
+	}
+	historicalRaw, _ := declarativerelease.CanonicalJSON(historical)
+	data["guardian-record.json"] = string(historicalRaw)
+	data["lkg-monitor-record-digest"] = testDigest
+	immutable := true
+	value := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: releaseRecordName(key, historical.RecordDigest), Namespace: "fugue-system", Labels: guardianLabels(key)},
+		Immutable:  &immutable, Data: data,
+	}
+	client := kubernetesfake.NewSimpleClientset(value)
+	store, err := NewKubeStore(client, []TargetConfig{{Key: key, Namespace: "fugue-system", MonitorComponent: key.Component, DependencyService: "fugue-fugue"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := store.targets[key]
+	if equivalent, err := store.immutableHistoricalLKGRecordAliasesStable(context.Background(), target, historical.RecordDigest, stableAlias); err != nil || !equivalent {
+		t.Fatalf("canonical immutable historical alias equivalent=%t err=%v", equivalent, err)
+	}
+	drifted := stableAlias
+	drifted.ImageDigest = otherDigest
+	if equivalent, err := store.immutableHistoricalLKGRecordAliasesStable(context.Background(), target, historical.RecordDigest, drifted); err != nil || equivalent {
+		t.Fatalf("target drift equivalent=%t err=%v", equivalent, err)
+	}
+	stored, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), value.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored = stored.DeepCopy()
+	stored.Data["execution-plan.json"] = `{}`
+	if stored, err = client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), stored, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if equivalent, err := store.immutableHistoricalLKGRecordAliasesStable(context.Background(), target, historical.RecordDigest, stableAlias); err != nil || equivalent {
+		t.Fatalf("invalid historical bundle equivalent=%t err=%v", equivalent, err)
+	}
+	stored.Data["execution-plan.json"] = data["execution-plan.json"]
+	stored.Immutable = nil
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), stored, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if equivalent, err := store.immutableHistoricalLKGRecordAliasesStable(context.Background(), target, historical.RecordDigest, stableAlias); err != nil || equivalent {
+		t.Fatalf("mutable historical alias equivalent=%t err=%v", equivalent, err)
 	}
 }
 
