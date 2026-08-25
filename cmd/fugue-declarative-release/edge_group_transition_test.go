@@ -1245,19 +1245,19 @@ func TestActiveInventoryUsesFreshVerifiedSuccessAcrossTransientFailure(t *testin
 }
 
 func TestCandidateAuthorityRequiresExactStagedReleaseWitness(t *testing.T) {
-	stage := edgeCandidateStageReceipt{WorkerSlot: "a", CandidateBundleGeneration: "routes.p12.r0",
+	stage := edgeCandidateStageReceipt{WorkerSlot: "a", CandidateBundleGeneration: "routes",
 		CandidateRecordDigest: "sha256:" + strings.Repeat("a", 64), ReleaseRecordDigest: "sha256:" + strings.Repeat("b", 64)}
 	pod := edgeGroupPod{RouteBundleSource: edgeGroupAuthoritySource, PublicationSequence: 12, ServingGeneration: "routes",
-		BundleGeneration: stage.CandidateBundleGeneration, CandidateBundleLoaded: true, CandidateRecordDigest: stage.CandidateRecordDigest,
+		BundleGeneration: "routes.p12.r0", CandidateBundleLoaded: true, CandidateRecordDigest: stage.CandidateRecordDigest,
 		CandidateReleaseRecordDigest: stage.ReleaseRecordDigest, CandidateWorkerSlot: stage.WorkerSlot}
 	if !edgePodHasCandidateAuthority(pod, stage) {
 		t.Fatal("exact staged candidate authority was rejected")
 	}
 	for name, mutate := range map[string]func(*edgeGroupPod){
-		"bundle":  func(value *edgeGroupPod) { value.BundleGeneration = "routes.p13.r0" },
-		"record":  func(value *edgeGroupPod) { value.CandidateRecordDigest = "sha256:" + strings.Repeat("c", 64) },
-		"release": func(value *edgeGroupPod) { value.CandidateReleaseRecordDigest = "sha256:" + strings.Repeat("d", 64) },
-		"slot":    func(value *edgeGroupPod) { value.CandidateWorkerSlot = "b" },
+		"generation": func(value *edgeGroupPod) { value.ServingGeneration = "other-routes" },
+		"record":     func(value *edgeGroupPod) { value.CandidateRecordDigest = "sha256:" + strings.Repeat("c", 64) },
+		"release":    func(value *edgeGroupPod) { value.CandidateReleaseRecordDigest = "sha256:" + strings.Repeat("d", 64) },
+		"slot":       func(value *edgeGroupPod) { value.CandidateWorkerSlot = "b" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := pod

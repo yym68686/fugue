@@ -2190,8 +2190,10 @@ func edgePodHasGroupAuthority(pod edgeGroupPod) bool {
 	return pod.RouteBundleSource == edgeGroupAuthoritySource && pod.PublicationSequence > 0 && pod.ServingGeneration != ""
 }
 
+// The stage receipt names the base generation; the candidate record digest
+// binds the exact signed .pN.rM publication reported in BundleGeneration.
 func edgePodHasCandidateAuthority(pod edgeGroupPod, stage edgeCandidateStageReceipt) bool {
-	return edgePodHasGroupAuthority(pod) && pod.CandidateBundleLoaded && pod.BundleGeneration == stage.CandidateBundleGeneration &&
+	return edgePodHasGroupAuthority(pod) && pod.CandidateBundleLoaded && pod.ServingGeneration == stage.CandidateBundleGeneration &&
 		pod.CandidateRecordDigest == stage.CandidateRecordDigest && pod.CandidateReleaseRecordDigest == stage.ReleaseRecordDigest &&
 		pod.CandidateWorkerSlot == stage.WorkerSlot
 }
