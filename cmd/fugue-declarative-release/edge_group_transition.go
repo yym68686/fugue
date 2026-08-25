@@ -429,37 +429,39 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	}
 	var frontPods map[string]edgeGroupPod
 	frontRecovered := false
-	// A failed successor can leave the serving slot on an older worker binary
-	// that rejects the renewed publication version for its exact LKG bundle.
-	// Restore code execution on that slot before changing traffic authority;
-	// the activation pointer and route artifact remain the existing LKG.
-	if release.SupersedesFailedConfigSHA != "" && edgeActiveWorkerNeedsCodeRecovery(before, activeTarget) {
-		if err := runtime.ApplyCandidateResources(ctx, activeSlot); err != nil {
-			return fmt.Errorf("apply active Worker recovery code: %w", err)
-		}
-		if _, err := runtime.Roll(ctx, activeName, activeTarget, true, true); err != nil {
-			return fmt.Errorf("roll active Worker recovery code: %w", err)
-		}
-	}
 	// The Front process is part of the serving code path. Recover it before
 	// the activation CAS so an old binary cannot reject the new activation
 	// witness while WaitFront is proving the committed slot.
+	authorityCommitted := false
 	if release.SupersedesFailedConfigSHA != "" && edgeFrontNeedsCodeRecovery(before, frontTarget) {
-		if err := runtime.ApplyCandidateResources(ctx, transition.FrontName); err != nil {
-			return fmt.Errorf("apply Front recovery code: %w", err)
+		frontRecoveryErr := runtime.ApplyCandidateResources(ctx, transition.FrontName)
+		if frontRecoveryErr == nil {
+			frontPods, frontRecoveryErr = runtime.Roll(ctx, transition.FrontName, frontTarget, false, true)
 		}
-		frontPods, err = runtime.Roll(ctx, transition.FrontName, frontTarget, false, true)
-		if err != nil {
-			return fmt.Errorf("roll Front recovery code: %w", err)
+		if frontRecoveryErr != nil {
+			// Guardian may commit the candidate while this independent code
+			// maintenance write races another SSA writer. Once the exact
+			// authority is current, the generic workload rollback must not
+			// compensate that committed transaction. Continue through the
+			// post-commit Front convergence path instead.
+			if authorityErr := runtime.WaitCurrentAuthority(ctx, stage); authorityErr != nil {
+				return fmt.Errorf("recover Front code before Guardian authority: %v; observe exact committed authority: %w", frontRecoveryErr, authorityErr)
+			}
+			authorityCommitted = true
+			frontPods = nil
+		} else {
+			frontRecovered = true
 		}
-		frontRecovered = true
 	}
 	// Guardian owns the group-scoped Control promotion, Front CAS, current
 	// pointer, and compensation as one transaction. The executor must not write
 	// either traffic authority before waiting for that transaction: doing so
 	// gives the same release two competing activation generations and makes a
 	// valid Guardian replay look stale.
-	if err := runtime.WaitCurrentAuthority(ctx, stage); err != nil {
+	if !authorityCommitted {
+		err = runtime.WaitCurrentAuthority(ctx, stage)
+	}
+	if err != nil {
 		// Leave the independently canaried candidate staged. Guardian may still
 		// be durably finishing its transaction, and rolling the candidate here
 		// would race that commit and manufacture a split authority.
@@ -485,11 +487,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	if err := runtime.WaitActiveWorkerAuthority(ctx, inactiveName, target); err != nil {
 		return fmt.Errorf("verify active edge worker authority: %w", err)
 	}
-	previousName := edgeWorkerName(transition, activeSlot)
-	previousTarget, err := runtime.DeclaredTarget(previousName)
-	if err != nil {
-		return err
-	}
+	previousName, previousTarget := activeName, activeTarget
 	serving := edgeGroupState{Front: frontPods, FrontHealth: frontHealth, ActiveSlot: inactiveSlot}
 	if inactiveSlot == "a" {
 		serving.WorkerA, serving.WorkerB = candidatePods, before.WorkerB
@@ -500,9 +498,19 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	// this point.  Standby preparation is maintenance-only: a failed sequence,
 	// receipt, or inactive-slot roll must not send the generic executor down its
 	// workload LKG rollback path and split traffic authority from serving code.
-	standby, standbyErr := runtime.StageStandby(ctx, serving, activeSlot, previousTarget)
+	// Slot templates can lag a Guardian promotion that committed while this
+	// superseding executor was starting. Never rewrite the former active slot
+	// from such a stale declaration; preserve the exact runtime that Guardian
+	// recorded as PreviousAuthority. Standby maintenance is allowed only when
+	// the prewrite active cohort already matched the declared immutable target.
+	standbyEligible := edgePodsMatchTarget(edgeWorkerPods(before, activeSlot), previousTarget)
+	var standby edgeCandidateStageReceipt
+	var standbyErr error
+	if standbyEligible {
+		standby, standbyErr = runtime.StageStandby(ctx, serving, activeSlot, previousTarget)
+	}
 	standbyConverged := false
-	if standbyErr == nil {
+	if standbyEligible && standbyErr == nil {
 		previousDigest, digestErr := immutableDigestFromRef(previousTarget.ImageRef)
 		receiptValid := digestErr == nil && standby.WorkerSlot == activeSlot && standby.CurrentWorkerSlot == inactiveSlot &&
 			standby.WorkerSourceSHA == previousTarget.ConfigSHA && standby.WorkerImageDigest == previousDigest &&
@@ -620,15 +628,6 @@ func exactEdgeWorkerBundle(pods map[string]edgeGroupPod, target declarativerelea
 		}
 	}
 	return bundle, nil
-}
-
-func edgeActiveWorkerNeedsCodeRecovery(state edgeGroupState, target declarativerelease.TargetIdentity) bool {
-	for _, pod := range edgeWorkerPods(state, state.ActiveSlot) {
-		if !pod.Ready || !edgePodHasGroupAuthority(pod) || pod.SourceCommit != target.ConfigSHA || pod.ImageRef != target.ImageRef {
-			return true
-		}
-	}
-	return false
 }
 
 func edgeFrontNeedsCodeRecovery(state edgeGroupState, target declarativerelease.TargetIdentity) bool {

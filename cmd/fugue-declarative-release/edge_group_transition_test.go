@@ -722,6 +722,7 @@ type fakeEdgeGroupRuntime struct {
 	rollUnready     []bool
 	activationState *edgeActivationState
 	standbyErr      error
+	applyFailures   map[string]int
 	declared        map[string]declarativerelease.TargetIdentity
 	stageDegraded   bool
 }
@@ -743,6 +744,10 @@ func (fake *fakeEdgeGroupRuntime) ApplySharedResources(context.Context) error {
 
 func (fake *fakeEdgeGroupRuntime) ApplyCandidateResources(_ context.Context, selector string) error {
 	fake.calls = append(fake.calls, "apply:"+selector)
+	if fake.applyFailures[selector] > 0 {
+		fake.applyFailures[selector]--
+		return errors.New("transient candidate resource apply failure")
+	}
 	return nil
 }
 
@@ -1009,15 +1014,19 @@ func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 	if got := final.WorkerA["node-1"].SourceCommit; got != old.ConfigSHA {
 		t.Fatalf("previous authority slot changed from LKG: %s", got)
 	}
-	if got, want := fmt.Sprint(runtime.rollUnready), "[true true true true]"; got != want {
+	if got, want := fmt.Sprint(runtime.rollUnready), "[true true]"; got != want {
 		t.Fatalf("failed successor replace-unready gates=%s want=%s", got, want)
 	}
-	if got, want := fmt.Sprint(runtime.rollAuthority), "[false true false true]"; got != want {
+	if got, want := fmt.Sprint(runtime.rollAuthority), "[false false]"; got != want {
 		t.Fatalf("failed successor authority gates=%s want=%s", got, want)
+	}
+	if joined := strings.Join(runtime.calls, "\n"); strings.Contains(joined, "apply:"+transition.WorkerAName) ||
+		strings.Contains(joined, "roll:"+transition.WorkerAName) || strings.Contains(joined, "stage-standby:a") {
+		t.Fatalf("stale former-active declaration mutated the previous authority slot: %v", runtime.calls)
 	}
 }
 
-func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *testing.T) {
+func TestExecuteEdgeGroupABDoesNotMutateDriftedActiveWorkerBeforePromotion(t *testing.T) {
 	transition := edgeTransitionFixture()
 	old := edgeTargetFixture("1", "a")
 	failed := edgeTargetFixture("2", "b")
@@ -1060,24 +1069,48 @@ func TestExecuteEdgeGroupABRecoversUnreadyActiveWorkerCodeBeforePromotion(t *tes
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	activeRecovery := []string{"apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName}
 	joined := strings.Join(runtime.calls, "\n")
-	for _, call := range activeRecovery {
-		if !strings.Contains(joined, call) {
-			t.Fatalf("active worker recovery call %q missing: %v", call, runtime.calls)
-		}
-	}
-	if activeIndex, guardianIndex := strings.Index(joined, "roll:"+transition.WorkerAName), strings.Index(joined, "wait-current-authority"); activeIndex < 0 || guardianIndex < 0 || activeIndex > guardianIndex {
-		t.Fatalf("active worker recovery did not precede Guardian authority: %v", runtime.calls)
+	if strings.Contains(joined, "apply:"+transition.WorkerAName) || strings.Contains(joined, "roll:"+transition.WorkerAName) {
+		t.Fatalf("drifted active Worker was rewritten from a stale declaration: %v", runtime.calls)
 	}
 	if len(runtime.requests) != 0 {
 		t.Fatalf("executor wrote traffic activation during promotion: %+v", runtime.requests)
 	}
-	if got := runtime.rollTargets[transition.WorkerAName]; got != old {
-		t.Fatalf("active Worker recovery ignored declared LKG target: got=%+v want=%+v", got, old)
-	}
 	if got := runtime.rollTargets[transition.FrontName]; got != frontTarget {
 		t.Fatalf("Front recovery used Worker target: got=%+v want=%+v", got, frontTarget)
+	}
+}
+
+func TestExecuteEdgeGroupABRetriesFrontAfterExactAuthorityCommits(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	target := edgeTargetFixture("2", "b")
+	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
+	finalHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 2,
+		WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target), RouteAuthority: edgeActivationAuthority}
+	final := edgeStateFixture("b", target, finalHealth)
+	final.WorkerA = before.WorkerA
+	runtime := &fakeEdgeGroupRuntime{
+		snapshots: []edgeGroupState{before, final},
+		rolls: map[string]map[string]edgeGroupPod{
+			transition.WorkerBName: final.WorkerB,
+			transition.FrontName:   final.Front,
+			transition.WorkerAName: final.WorkerA,
+		},
+		waits:         []map[string]edgeFrontHealth{{"node-1": finalHealth}},
+		declared:      map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
+		applyFailures: map[string]int{transition.FrontName: 1},
+		stageDegraded: true,
+	}
+	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, SupersedesFailedConfigSHA: strings.Repeat("f", 40),
+		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
+	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runtime.calls, "\n")
+	if strings.Count(joined, "apply:"+transition.FrontName) != 2 || strings.Count(joined, "wait-current-authority") != 1 ||
+		strings.Index(joined, "wait-current-authority") > strings.LastIndex(joined, "apply:"+transition.FrontName) {
+		t.Fatalf("Front did not retry strictly after the committed authority: %v", runtime.calls)
 	}
 }
 
