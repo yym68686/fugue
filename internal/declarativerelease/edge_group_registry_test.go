@@ -295,11 +295,11 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks := []struct {
-		group, component, dependency, lkgSHA, lkgImage string
-		generation                                     int
+		group, component, dependency, lkgSHA, lkgImage, failedSHA string
+		generation                                                int
 	}{
-		{"us", "edge-worker-us", "edge-control-us", "5fd7c69c351ed5a225a53bf23de5c436d32a3ba5", "sha256:c7a2893151d6bd94ec0631b59acdae8199a2ab3fcb6073c13adb921c143ab2fc", 34},
-		{"de", "edge-worker-de", "edge-control-de", "3ad7f91d033bbb4cb81c8e105cd2ce4a7dec3a0b", "sha256:0f196ab88735b3f828f3ac91ad57bf57d7b32a9adca5d5e1a68baee0e0498965", 221},
+		{"us", "edge-worker-us", "edge-control-us", "5fd7c69c351ed5a225a53bf23de5c436d32a3ba5", "sha256:c7a2893151d6bd94ec0631b59acdae8199a2ab3fcb6073c13adb921c143ab2fc", "46d42454427acac56f1c466276c28abd42968410", 35},
+		{"de", "edge-worker-de", "edge-control-de", "3ad7f91d033bbb4cb81c8e105cd2ce4a7dec3a0b", "sha256:0f196ab88735b3f828f3ac91ad57bf57d7b32a9adca5d5e1a68baee0e0498965", "", 221},
 	}
 	for _, check := range checks {
 		t.Run(check.group, func(t *testing.T) {
@@ -325,7 +325,7 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 			}
 			if intent.Generation != check.generation || intent.ExpectedPreviousConfigSHA != check.lkgSHA ||
 				intent.ExpectedPreviousManifestSHA != check.lkgSHA || intent.ExpectedPreviousOCIRevision != check.lkgSHA ||
-				intent.ExpectedPreviousImageDigest != check.lkgImage || intent.SupersedesFailedConfigSHA != "" {
+				intent.ExpectedPreviousImageDigest != check.lkgImage || intent.SupersedesFailedConfigSHA != check.failedSHA {
 				t.Fatalf("%s Edge Worker intent does not bind the exact live LKG: %+v", check.group, intent)
 			}
 			plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/edge-groups.json", worker.IntentPath})
@@ -334,8 +334,12 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 			}
 			prior := intent
 			prior.Generation--
+			superseded := map[string]Intent{}
+			if check.failedSHA != "" {
+				superseded[check.failedSHA] = prior
+			}
 			bound, err := BindIntents(registry, plan, map[string]Intent{worker.ID: intent}, map[string]Intent{worker.ID: prior},
-				map[string]string{worker.ID: check.lkgSHA})
+				map[string]string{worker.ID: check.lkgSHA}, superseded)
 			if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != worker.ID || bound.Releases[0].Delivery == nil ||
 				bound.Releases[0].Delivery.Writer != "guardian" {
 				t.Fatalf("%s Edge Worker Guardian release expanded the planner: releases=%+v err=%v", check.group, bound.Releases, err)
