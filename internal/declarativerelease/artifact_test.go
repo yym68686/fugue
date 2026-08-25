@@ -80,7 +80,7 @@ func TestBoundPlanRejectsRepeatedComponent(t *testing.T) {
 	}
 }
 
-func TestBoundPlanAllowsComponentsSharingOneArtifact(t *testing.T) {
+func TestBoundPlanAllowsIndependentlyBuiltComponentArtifacts(t *testing.T) {
 	plan := boundAPIPlan(t)
 	second := plan.Releases[0]
 	second.ComponentID = "api-secondary"
@@ -100,13 +100,15 @@ func TestBoundPlanAllowsComponentsSharingOneArtifact(t *testing.T) {
 		t.Fatalf("shared artifact bound plan was rejected: %v", err)
 	}
 	plan.Releases[1].Artifact.Repository = "ghcr.io/example/other"
+	plan.Releases[1].Artifact.BuildPackage = "./cmd/other"
+	plan.Releases[1].Artifact.Dockerfile = "Dockerfile.other"
 	plan.PlanDigest = ""
 	raw, err = CanonicalJSON(plan)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan.PlanDigest = digestOf(raw)
-	if err := plan.ValidateBound(); err == nil || !strings.Contains(err.Error(), "different artifacts") {
-		t.Fatalf("different artifacts were accepted: %v", err)
+	if err := plan.ValidateBound(); err != nil {
+		t.Fatalf("independently built artifacts were rejected: %v", err)
 	}
 }

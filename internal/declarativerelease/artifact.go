@@ -66,7 +66,6 @@ func (plan Plan) ValidateBound() error {
 		return errors.New("bound production release plan identity is invalid")
 	}
 	seen := make(map[string]struct{}, len(plan.Releases))
-	var sharedArtifact *Artifact
 	for index, release := range plan.Releases {
 		if !componentIDPattern.MatchString(release.ComponentID) || !digestPattern.MatchString(release.IntentDigest) ||
 			release.IntentGeneration < 1 || release.Concurrency == "" {
@@ -105,12 +104,6 @@ func (plan Plan) ValidateBound() error {
 		if _, exists := seen[release.ComponentID]; exists {
 			return fmt.Errorf("bound plan repeats component %q", release.ComponentID)
 		}
-		if sharedArtifact == nil {
-			artifact := release.Artifact
-			sharedArtifact = &artifact
-		} else if !sameArtifactIdentity(*sharedArtifact, release.Artifact) {
-			return errors.New("bound production release plan contains different artifacts")
-		}
 		seen[release.ComponentID] = struct{}{}
 	}
 	copy := plan
@@ -124,11 +117,6 @@ func (plan Plan) ValidateBound() error {
 		return errors.New("bound production release plan digest is invalid")
 	}
 	return nil
-}
-
-func sameArtifactIdentity(left, right Artifact) bool {
-	return left.Repository == right.Repository && left.BuildPackage == right.BuildPackage &&
-		left.Dockerfile == right.Dockerfile && left.Context == right.Context
 }
 
 func DecodeRegistryVerification(reader io.Reader) (RegistryVerification, error) {

@@ -717,24 +717,17 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 			if !item.intentChanged {
 				continue
 			}
-			if len(selectedCandidates) > 0 {
-				first := selectedCandidates[0]
-				if item.component.Artifact.Repository != first.component.Artifact.Repository ||
-					item.component.Artifact.BuildPackage != first.component.Artifact.BuildPackage ||
-					item.component.Artifact.Dockerfile != first.component.Artifact.Dockerfile ||
-					item.component.Artifact.Context != first.component.Artifact.Context {
-					return Plan{}, errors.New("runtime commit contains multiple production intents for different artifacts")
-				}
-			}
 			selectedCandidates = append(selectedCandidates, item)
 		}
 	} else {
 		selectedCandidates = append(selectedCandidates, candidates[selectedIndex])
 	}
 	selected := selectedCandidates[0]
-	selectedPathSet := make(map[string]struct{}, len(selected.selectedPaths))
-	for _, changedPath := range selected.selectedPaths {
-		selectedPathSet[changedPath] = struct{}{}
+	selectedPathSet := make(map[string]struct{})
+	for _, selectedCandidate := range selectedCandidates {
+		for _, changedPath := range selectedCandidate.selectedPaths {
+			selectedPathSet[changedPath] = struct{}{}
+		}
 	}
 	for _, item := range candidates {
 		if item.intentChanged || len(item.selectedPaths) == 0 {

@@ -296,9 +296,6 @@ func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA s
 		if !exists {
 			continue
 		}
-		if len(selected) > 0 && !sameProductionArtifact(selected[0].Artifact, component.Artifact) {
-			return nil, errors.New("runtime commit contains multiple production intents for different artifacts")
-		}
 		selected = append(selected, component)
 	}
 	if len(selected) == 0 {
@@ -348,11 +345,10 @@ func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA s
 			}
 		}
 	}
-	// Runtime-diff expansion is intentionally scoped to the selected artifact lanes.
-	// A shared Go package can be linked into several independently deployed
-	// binaries; adding its historical diff as another component's manifest
-	// change would either co-deploy that component or make a safe artifact atom
-	// impossible. BuildPlan still rejects selected lanes whose paths differ.
+	// Runtime-diff expansion is intentionally scoped to the selected component
+	// lanes. Each release is built, receipted, prepared, and deployed by its own
+	// component ID, so a commit may select several independently built artifacts
+	// without importing an unselected component's intent or manifest.
 	for _, component := range registry.Components {
 		if _, ok := selectedIDs[component.ID]; ok {
 			continue
@@ -366,11 +362,6 @@ func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA s
 	}
 	sort.Strings(result)
 	return result, nil
-}
-
-func sameProductionArtifact(left, right declarativerelease.Artifact) bool {
-	return left.Repository == right.Repository && left.BuildPackage == right.BuildPackage &&
-		left.Dockerfile == right.Dockerfile && left.Context == right.Context
 }
 
 func pathMatchesComponentRoot(filename, root string) bool {

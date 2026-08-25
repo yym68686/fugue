@@ -195,16 +195,27 @@ func TestBuildPlanTreatsGoTestsAsNonRuntime(t *testing.T) {
 	}
 }
 
-func TestBuildPlanRejectsMultiComponentProductionAtom(t *testing.T) {
+func TestBuildPlanAllowsMultiArtifactProductionAtom(t *testing.T) {
 	registry := testRegistry()
-	_, err := BuildPlan(registry, testSHA1, testSHA2, []string{
+	observer := registry.Components[1]
+	observer.ID = "telemetry-observer"
+	observer.IntentPath = "deploy/releases/telemetry-observer/intent.json"
+	observer.ManifestPath = "deploy/releases/telemetry-observer/deployment.json"
+	observer.Workload.Name = "fugue-fugue-telemetry-observer"
+	observer.Workload.FieldManager = "fugue-telemetry-observer-declarative"
+	observer.Concurrency = "fugue-production-telemetry-observer"
+	registry.Components = append(registry.Components, observer)
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{
 		"cmd/fugue-api/main.go",
 		"cmd/fugue-telemetry-agent/main.go",
 		"deploy/releases/api/intent.json",
 		"deploy/releases/telemetry/intent.json",
 	})
-	if err == nil || !strings.Contains(err.Error(), "multiple production intents") {
-		t.Fatalf("multi-component runtime atom was accepted: %v", err)
+	if err != nil {
+		t.Fatalf("multi-artifact runtime atom was rejected: %v", err)
+	}
+	if len(plan.Releases) != 2 || plan.Releases[0].ComponentID != "api" || plan.Releases[1].ComponentID != "telemetry" {
+		t.Fatalf("unexpected multi-artifact release plan: %+v", plan.Releases)
 	}
 }
 
