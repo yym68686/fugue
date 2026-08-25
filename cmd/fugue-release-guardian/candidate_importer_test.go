@@ -179,6 +179,32 @@ func TestCandidateImporterAcceptsExactServingAuthorityWitness(t *testing.T) {
 	}
 }
 
+func TestCandidateImporterAcceptsExactCompensatedServingAuthorityWitness(t *testing.T) {
+	now := time.Date(2026, 8, 25, 20, 10, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-group-country-us", now)
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: envelope.GroupID, CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 29, CurrentBundleGeneration: envelope.CurrentBundle.Generation + ".p39713.r124",
+		CurrentWorkerSourceSHA: strings.Repeat("b", 40), CurrentWorkerImageDigest: "sha256:" + strings.Repeat("c", 64), AuthorityEpoch: 39557}
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{CurrentRecordDigest: current.CurrentRecordDigest, AuthorityEpoch: current.AuthorityEpoch,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "78226983", FrontGeneration: 79,
+		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: current.CurrentWorkerSlot, WorkerSourceSHA: current.CurrentWorkerSourceSHA,
+		WorkerImageDigest: current.CurrentWorkerImageDigest}
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID("current-authority"), "78226983"); err != nil {
+		t.Fatalf("exact compensated serving authority was rejected: %v", err)
+	}
+
+	envelope.ServingAuthority.FrontGeneration = 78
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID("current-authority"), "78226983"); err == nil {
+		t.Fatal("odd same-slot compensated serving authority was accepted")
+	}
+	envelope.ServingAuthority.FrontGeneration = 79
+	envelope.ServingAuthority.WorkerImageDigest = "sha256:" + strings.Repeat("d", 64)
+	if err := validateCandidateServingAuthorityBinding(envelope, current, types.UID("current-authority"), "78226983"); err == nil {
+		t.Fatal("compensated serving authority with a different image was accepted")
+	}
+}
+
 func TestCandidateImporterAcceptsCommittedFrontPreviousLKGRecoveryWitness(t *testing.T) {
 	now := time.Date(2026, 8, 14, 20, 7, 0, 0, time.UTC)
 	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)

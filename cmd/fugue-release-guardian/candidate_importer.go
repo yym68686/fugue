@@ -437,6 +437,14 @@ func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, curren
 	if currentErr != nil || witnessErr != nil {
 		return errors.New("candidate serving authority binding is invalid")
 	}
+	// Front may complete an even promote/compensate chain while the immutable
+	// serving identity remains unchanged. The CurrentAuthority UID/RV, record,
+	// epoch, slot parity, source, image, and bundle were all verified above, so
+	// this is not degraded-previous recovery and must not require that flag.
+	if current.CurrentWorkerSlot == witness.WorkerSlot && current.CurrentBundleGeneration == witness.BundleVersion &&
+		current.CurrentWorkerSourceSHA == witness.WorkerSourceSHA && current.CurrentWorkerImageDigest == witness.WorkerImageDigest {
+		return nil
+	}
 	// An emergency runtime repair may leave Guardian on an older bundle family.
 	// Edge Control proves the replacement candidate was cloned from the exact
 	// historical generation named by Front; retain every UID/RV, generation,
