@@ -269,6 +269,9 @@ func repairOrphanedAuthority(ctx context.Context, store authorityBaselineStore, 
 		return false, fmt.Errorf("orphaned authority candidate is invalid: %w", err)
 	}
 	if candidate.State != releaseguardian.CandidateAuthorityVerified {
+		if candidate.State == releaseguardian.CandidateAuthorityLoaded {
+			return false, nil
+		}
 		return false, fmt.Errorf("orphaned authority candidate is not verified: state=%s", candidate.State)
 	}
 	if !candidate.HasPromotionWitness() {

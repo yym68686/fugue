@@ -99,8 +99,9 @@ type kubectlCluster struct {
 }
 
 type healthSoakTracker struct {
-	required time.Duration
-	since    time.Time
+	required       time.Duration
+	since          time.Time
+	transientSince time.Time
 }
 
 type podHTTPEndpoint struct {
@@ -114,13 +115,33 @@ func (tracker *healthSoakTracker) observe(now time.Time, healthy bool) bool {
 		return healthy
 	}
 	if !healthy {
-		tracker.since = time.Time{}
+		tracker.reset()
 		return false
 	}
+	tracker.transientSince = time.Time{}
 	if tracker.since.IsZero() {
 		tracker.since = now
 	}
 	return now.Sub(tracker.since) >= tracker.required
+}
+
+func (tracker *healthSoakTracker) observeTransient(now time.Time, grace time.Duration) bool {
+	if tracker == nil || tracker.required <= 0 || tracker.since.IsZero() || grace <= 0 {
+		return false
+	}
+	if tracker.transientSince.IsZero() {
+		tracker.transientSince = now
+		return false
+	}
+	if now.Sub(tracker.transientSince) > grace {
+		tracker.reset()
+	}
+	return false
+}
+
+func (tracker *healthSoakTracker) reset() {
+	tracker.since = time.Time{}
+	tracker.transientSince = time.Time{}
 }
 
 func newKubectlCluster() (*kubectlCluster, error) {
@@ -1833,6 +1854,8 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 				if tracker.observe(time.Now(), true) {
 					return observation, nil
 				}
+			} else if errors.Is(probeErr, errEdgeInventoryHeartbeatUnavailable) {
+				tracker.observeTransient(time.Now(), edgeInventoryHeartbeatClockSkew)
 			} else {
 				tracker.observe(time.Now(), false)
 			}
@@ -2318,7 +2341,7 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 				return "", fmt.Errorf("%w: %v", errEdgeGroupAuthorityHealth, err)
 			}
 			if err := validateEdgeGroupAuthority(state, transition); err != nil {
-				return "", fmt.Errorf("%w: %v", errEdgeGroupAuthorityHealth, err)
+				return "", fmt.Errorf("%w: %w", errEdgeGroupAuthorityHealth, err)
 			}
 			items := []string{"group=" + transition.GroupID, "active_slot=" + state.ActiveSlot}
 			for _, slot := range []struct {

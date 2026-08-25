@@ -2115,6 +2115,26 @@ func TestHealthSoakTrackerRequiresOneContinuousWindow(t *testing.T) {
 	}
 }
 
+func TestHealthSoakTrackerBoundsInventoryHeartbeatGap(t *testing.T) {
+	start := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
+	tracker := healthSoakTracker{required: 180 * time.Second}
+	if tracker.observe(start, true) {
+		t.Fatal("health soak completed at its first observation")
+	}
+	tracker.observeTransient(start.Add(170*time.Second), 30*time.Second)
+	if !tracker.observe(start.Add(180*time.Second), true) {
+		t.Fatal("bounded inventory heartbeat gap cleared verified soak history")
+	}
+
+	tracker = healthSoakTracker{required: 180 * time.Second}
+	tracker.observe(start, true)
+	tracker.observeTransient(start.Add(100*time.Second), 30*time.Second)
+	tracker.observeTransient(start.Add(131*time.Second), 30*time.Second)
+	if tracker.observe(start.Add(180*time.Second), true) || !tracker.observe(start.Add(360*time.Second), true) {
+		t.Fatal("inventory heartbeat gap beyond the grace budget did not reset the soak")
+	}
+}
+
 func TestWaitHealthyTerminalErrorPreservesLastObservation(t *testing.T) {
 	lastFailure := errors.New("live registry identity mismatch")
 	err := waitHealthyTerminalError(context.DeadlineExceeded, lastFailure)

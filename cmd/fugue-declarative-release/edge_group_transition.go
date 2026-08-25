@@ -63,6 +63,7 @@ var (
 	edgePromotionDigestPattern            = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	errEdgeCandidateStageSequenceConflict = errors.New("stage edge Worker candidate: HTTP 409 (sequence_conflict)")
 	errEdgeCandidateStageTransient        = errors.New("stage edge Worker candidate: transient transport failure")
+	errEdgeInventoryHeartbeatUnavailable  = errors.New("edge inventory heartbeat is temporarily unavailable")
 )
 
 type edgeServingAuthorityWitness struct {
@@ -2237,7 +2238,7 @@ func validateActiveEdgeGroupAuthority(state edgeGroupState, transition declarati
 			return fmt.Errorf("edge group active slot %s node %s has no verified group authority publication", state.ActiveSlot, node)
 		}
 		if !edgePodHasActiveInventory(pod) {
-			return fmt.Errorf("edge group active slot %s node %s has no verified inventory heartbeat", state.ActiveSlot, node)
+			return fmt.Errorf("%w: edge group active slot %s node %s has no verified inventory heartbeat", errEdgeInventoryHeartbeatUnavailable, state.ActiveSlot, node)
 		}
 	}
 	return nil

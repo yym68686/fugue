@@ -223,6 +223,14 @@ func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *t
 	if _, err := client.CoreV1().ConfigMaps("fugue-system").Create(context.Background(), object, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	loadedCandidate := releaseguardian.CandidateAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind,
+		GroupID: group, RecordDigest: "sha256:" + strings.Repeat("8", 64), BundleGeneration: "loaded.p12.r0",
+		WorkerSlot: releaseguardian.AuthoritySlotA, ReleaseRecordDigest: "sha256:" + strings.Repeat("9", 64),
+		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1}
+	if _, _, err := store.PutCandidate(context.Background(), loadedCandidate, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	setMutableAuthorityFixture(t, client, "fugue-candidate-authority-"+group, "loaded-candidate", "61")
 	oldRead, oldRoute := readAuthorityBaselineJSON, requestAuthorityBaselineRoute
 	defer func() { readAuthorityBaselineJSON, requestAuthorityBaselineRoute = oldRead, oldRoute }()
 	candidateBundleLoaded := true
