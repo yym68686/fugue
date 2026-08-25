@@ -99,6 +99,35 @@ func TestPromoteCandidateUsesExactStagingWitness(t *testing.T) {
 	}
 }
 
+func TestCurrentAuthorityMustConvergeToExactStagedCandidate(t *testing.T) {
+	groupID := "edge-group-country-de"
+	staged := edgeCandidateStageReceipt{
+		GroupID: groupID, CandidateRecordDigest: "sha256:" + strings.Repeat("1", 64),
+		CandidateBundleGeneration: "routes", WorkerSlot: "b", WorkerSourceSHA: strings.Repeat("2", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("3", 64),
+	}
+	current := releaseguardian.CurrentAuthority{
+		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind, GroupID: groupID,
+		CurrentRecordDigest: staged.CandidateRecordDigest, CurrentWorkerSlot: releaseguardian.AuthoritySlotB,
+		CurrentFrontGeneration: 12, CurrentBundleGeneration: "routes.p20.r0", CurrentWorkerSourceSHA: staged.WorkerSourceSHA,
+		CurrentWorkerImageDigest: staged.WorkerImageDigest, PreviousRecordDigest: "sha256:" + strings.Repeat("4", 64),
+		PreviousWorkerSlot: releaseguardian.AuthoritySlotA, PreviousFrontGeneration: 11, PreviousBundleGeneration: "routes.p19.r0",
+		PreviousWorkerSourceSHA: strings.Repeat("5", 40), PreviousWorkerImageDigest: "sha256:" + strings.Repeat("6", 64), AuthorityEpoch: 7,
+	}
+	if !edgeCurrentAuthorityMatchesCandidate(current, staged) {
+		t.Fatal("exact staged candidate authority did not converge")
+	}
+	current.CurrentWorkerSourceSHA = strings.Repeat("7", 40)
+	if edgeCurrentAuthorityMatchesCandidate(current, staged) {
+		t.Fatal("stale Guardian source identity was accepted")
+	}
+	current.CurrentWorkerSourceSHA = staged.WorkerSourceSHA
+	current.CurrentBundleGeneration = "other.p20.r0"
+	if edgeCurrentAuthorityMatchesCandidate(current, staged) {
+		t.Fatal("cross-generation Guardian authority was accepted")
+	}
+}
+
 func TestEdgeSharedResourcesExcludeOnlyDeclaredABWorkloads(t *testing.T) {
 	transition := edgeTransitionFixture()
 	item := func(apiVersion, kind, name string) map[string]any {
@@ -828,6 +857,11 @@ func (fake *fakeEdgeGroupRuntime) WaitFront(_ context.Context, slot, source, dig
 	return value, nil
 }
 
+func (fake *fakeEdgeGroupRuntime) WaitCurrentAuthority(_ context.Context, _ edgeCandidateStageReceipt) error {
+	fake.calls = append(fake.calls, "wait-current-authority")
+	return nil
+}
+
 func (fake *fakeEdgeGroupRuntime) WaitActiveWorkerAuthority(_ context.Context, name string, _ declarativerelease.TargetIdentity) error {
 	fake.calls = append(fake.calls, "wait-worker-authority:"+name)
 	return nil
@@ -952,7 +986,7 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-front:b", "promote-candidate", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-front:b", "wait-current-authority", "promote-candidate", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
@@ -1115,7 +1149,7 @@ func TestExecuteEdgeGroupABDoesNotRollbackCommittedAuthorityWhenStandbyStagingFa
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-front:b", "promote-candidate", "apply:" + transition.FrontName,
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-front:b", "wait-current-authority", "promote-candidate", "apply:" + transition.FrontName,
 		"roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("post-commit standby failure changed serving workloads: calls=%v want=%v", runtime.calls, want)

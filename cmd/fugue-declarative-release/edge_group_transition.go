@@ -358,6 +358,7 @@ type edgeGroupTransitionRuntime interface {
 	SelectCASExecutor(context.Context, ...edgeGroupPod) (edgeGroupPod, error)
 	ReadActivation(context.Context, edgeGroupPod) (edgeActivationState, bool, error)
 	WaitFront(context.Context, string, string, string) (map[string]edgeFrontHealth, error)
+	WaitCurrentAuthority(context.Context, edgeCandidateStageReceipt) error
 	WaitActiveWorkerAuthority(context.Context, string, declarativerelease.TargetIdentity) error
 	ActivationCAS(context.Context, edgeGroupPod, edgeActivationRequest) (edgeActivationReceipt, error)
 }
@@ -509,6 +510,9 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	frontHealth, err := runtime.WaitFront(ctx, inactiveSlot, target.ConfigSHA, desiredDigest)
 	if err != nil {
 		return compensate(fmt.Errorf("wait Guardian authority switch: %w", err))
+	}
+	if err := runtime.WaitCurrentAuthority(ctx, stage); err != nil {
+		return compensate(fmt.Errorf("wait Guardian current authority: %w", err))
 	}
 	if err := runtime.PromoteCandidate(ctx, stage); err != nil {
 		return compensate(fmt.Errorf("promote Edge Control candidate after activation: %w", err))
@@ -1858,6 +1862,34 @@ func edgeActivationStateMatchesPrecondition(state edgeActivationState, exists bo
 
 func (runtime *kubectlEdgeGroupRuntime) WaitFront(ctx context.Context, slot, source, digest string) (map[string]edgeFrontHealth, error) {
 	return runtime.cluster.waitFrontActivation(ctx, runtime.release, runtime.transition, slot, source, digest)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) WaitCurrentAuthority(ctx context.Context, staged edgeCandidateStageReceipt) error {
+	deadline := time.Now().Add(runtime.cluster.timeout)
+	for {
+		current, _, err := runtime.readCurrentAuthority(ctx)
+		if err == nil && edgeCurrentAuthorityMatchesCandidate(current, staged) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("Guardian CurrentAuthority did not converge to the staged candidate")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func edgeCurrentAuthorityMatchesCandidate(current releaseguardian.CurrentAuthority, staged edgeCandidateStageReceipt) bool {
+	if current.Validate() != nil || current.GroupID != staged.GroupID || current.CurrentRecordDigest != staged.CandidateRecordDigest ||
+		string(current.CurrentWorkerSlot) != staged.WorkerSlot || current.CurrentWorkerSourceSHA != staged.WorkerSourceSHA ||
+		current.CurrentWorkerImageDigest != staged.WorkerImageDigest || current.PreviousWorkerSlot == current.CurrentWorkerSlot {
+		return false
+	}
+	generation, _, _, ok := parseEdgePublicationVersion(current.CurrentBundleGeneration)
+	return ok && generation == staged.CandidateBundleGeneration
 }
 
 func (runtime *kubectlEdgeGroupRuntime) WaitCandidateWorkerAuthority(ctx context.Context, name string, target declarativerelease.TargetIdentity, stage edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
