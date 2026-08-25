@@ -328,8 +328,8 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 		group, component, dependency, lkgSHA, lkgImage, failedSHA string
 		generation                                                int
 	}{
-		{"us", "edge-worker-us", "edge-control-us", "5fd7c69c351ed5a225a53bf23de5c436d32a3ba5", "sha256:c7a2893151d6bd94ec0631b59acdae8199a2ab3fcb6073c13adb921c143ab2fc", "46d42454427acac56f1c466276c28abd42968410", 35},
-		{"de", "edge-worker-de", "edge-control-de", "3ad7f91d033bbb4cb81c8e105cd2ce4a7dec3a0b", "sha256:0f196ab88735b3f828f3ac91ad57bf57d7b32a9adca5d5e1a68baee0e0498965", "", 221},
+		{"us", "edge-worker-us", "edge-control-us", "5fd7c69c351ed5a225a53bf23de5c436d32a3ba5", "sha256:c7a2893151d6bd94ec0631b59acdae8199a2ab3fcb6073c13adb921c143ab2fc", "", 36},
+		{"de", "edge-worker-de", "edge-control-de", "3ad7f91d033bbb4cb81c8e105cd2ce4a7dec3a0b", "sha256:0f196ab88735b3f828f3ac91ad57bf57d7b32a9adca5d5e1a68baee0e0498965", "", 222},
 	}
 	for _, check := range checks {
 		t.Run(check.group, func(t *testing.T) {
