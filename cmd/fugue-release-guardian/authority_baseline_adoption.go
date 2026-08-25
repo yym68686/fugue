@@ -550,7 +550,8 @@ func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, na
 		}
 		source := strings.TrimSpace(pod.Annotations["fugue.pro/source-commit"])
 		image := edgeRuntimeImageDigest(pod)
-		if source != front.health.WorkerSourceCommit || image != front.health.WorkerImageDigest || front.health.BundleGeneration != health.BundleVersion {
+		if source != front.health.WorkerSourceCommit || image != front.health.WorkerImageDigest ||
+			authorityGenerationBase(front.health.BundleGeneration) != health.ServingGeneration {
 			return nil, "", 0, nil, errors.New("Front and active worker baseline identities differ")
 		}
 		if recordDigest == "" {
@@ -565,14 +566,6 @@ func observeBaselineWorkers(ctx context.Context, client kubernetes.Interface, na
 			WorkerSourceSHA: source, WorkerImageDigest: image})
 	}
 	return workers, recordDigest, int64(epoch), witnesses, nil
-}
-
-func baselineWorkerHealthMatchesCurrent(health baselineWorkerHealth, front baselineFrontHealth, slot releaseguardian.AuthoritySlot, current releaseguardian.CurrentAuthority) bool {
-	return current.BaselineReceiptDigest != "" && current.CurrentWorkerSlot == slot &&
-		current.CurrentRecordDigest == health.CandidateRecordDigest &&
-		current.CurrentFrontGeneration == front.Generation &&
-		current.CurrentBundleGeneration == health.BundleVersion && current.CurrentBundleGeneration == front.BundleGeneration &&
-		current.CurrentWorkerSourceSHA == front.WorkerSourceCommit && current.CurrentWorkerImageDigest == front.WorkerImageDigest
 }
 
 func edgeRuntimeImageDigest(pod corev1.Pod) string {
