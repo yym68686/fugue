@@ -307,10 +307,6 @@
                     "value": "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json"
                   },
                   {
-                    "name": "FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP",
-                    "value": "false"
-                  },
-                  {
                     "name": "FUGUE_BUNDLE_SIGNING_KEY",
                     "valueFrom": {
                       "secretKeyRef": {
@@ -820,10 +816,6 @@
                   {
                     "name": "FUGUE_EDGE_ROUTE_BUNDLE_VERIFIER_KEYRING_FILE",
                     "value": "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json"
-                  },
-                  {
-                    "name": "FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP",
-                    "value": "false"
                   },
                   {
                     "name": "FUGUE_BUNDLE_SIGNING_KEY",
