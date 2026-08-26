@@ -352,6 +352,7 @@ func boundedGatePolicyDuration(raw string) string {
 	if err != nil || duration <= 0 || duration <= maxProductionGateObservation {
 		return raw
 	}
+	// Keep the serialized policy stable so API and artifact responses compare exactly.
 	return maxProductionGateObservationText
 }
 
