@@ -43,12 +43,31 @@ func TestAPIGuardianHandoffBindsProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode API intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "335a34070c9385ecdaa469a52be5310d7dc99d2d"
-	const lkgImage = "sha256:e4e66b50abab9eb93892bf06262029e7b34dd07ed59ba068fbcc5b6e3ecb8430"
-	if intent.Generation != 65 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+	const lkgSHA = "f6d7808f97c36061d12c046e236b7566321729e5"
+	const lkgImage = "sha256:b0f5eb8d5c4e3e2f42fb5e2fdcd0d0aeff09c110860ad667045884a317d78d60"
+	if intent.Generation != 66 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage ||
 		intent.SupersedesFailedConfigSHA != "" {
 		t.Fatalf("API Guardian intent is not bound to the production LKG: %+v", intent)
+	}
+}
+
+func TestControllerIntentBindsCurrentProductionLKG(t *testing.T) {
+	t.Chdir("../..")
+	file, err := os.Open("deploy/releases/controller/intent.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, decodeErr := declarativerelease.DecodeIntent(file)
+	closeErr := file.Close()
+	if decodeErr != nil || closeErr != nil {
+		t.Fatalf("decode controller intent: %v close: %v", decodeErr, closeErr)
+	}
+	const lkgSHA = "52ca342a7a5324ad9eff5ddd3629a2c71d5ebd91"
+	const lkgImage = "sha256:aab3a4498e76706e21da55a1a6bd90584105530e7c004d719f9e2d654283ba24"
+	if intent.Generation != 6 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
+		t.Fatalf("controller intent is not bound to the production LKG: %+v", intent)
 	}
 }
 

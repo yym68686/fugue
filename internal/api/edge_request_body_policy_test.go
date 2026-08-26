@@ -27,7 +27,7 @@ func TestDeriveEdgeRouteBindingCarriesAppScopedRequestBodyPolicies(t *testing.T)
 	app.Status.CurrentReplicas = 1
 	runtimeObj := model.Runtime{ID: app.Spec.RuntimeID, Type: model.RuntimeTypeManagedShared}
 	now := time.Now().UTC()
-	binding := server.deriveEdgeRouteBinding(
+	binding := server.compileTrafficEpochRouteBinding(
 		context.Background(),
 		app,
 		"demo.fugue.pro",
@@ -60,7 +60,7 @@ func TestDeriveEdgeRouteBindingFailsInvalidOptInPolicyClosed(t *testing.T) {
 	app.Status.CurrentReplicas = 1
 	runtimeObj := model.Runtime{ID: app.Spec.RuntimeID, Type: model.RuntimeTypeManagedShared}
 	now := time.Now().UTC()
-	binding := server.deriveEdgeRouteBinding(
+	binding := server.compileTrafficEpochRouteBinding(
 		context.Background(),
 		app,
 		"demo.fugue.pro",

@@ -141,7 +141,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshot(r *http.Request, source edgeRoute
 		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
 			continue
 		}
-		appendBinding(s.deriveEdgeRouteBinding(r.Context(), app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID))
+		appendBinding(s.compileTrafficEpochRouteBinding(r.Context(), app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID))
 	}
 	for _, route := range platformRoutes {
 		intents = append(intents, edgeRouteIntentFromPlatformRoute(route))
@@ -162,7 +162,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshot(r *http.Request, source edgeRoute
 		default:
 			continue
 		}
-		binding := s.deriveEdgeRouteBinding(r.Context(), app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		binding := s.compileTrafficEpochRouteBinding(r.Context(), app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyCustomDomainReadiness(binding, domain)
 		appendBinding(binding)
 		tlsAllowlist = append(tlsAllowlist, model.EdgeTLSAllowlistEntry{Hostname: hostname, AppID: domain.AppID, TenantID: domain.TenantID, Status: domain.Status, TLSStatus: domain.TLSStatus})
@@ -178,7 +178,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshot(r *http.Request, source edgeRoute
 			if !ok {
 				continue
 			}
-			binding := s.deriveEdgeRouteBindingForRoute(r.Context(), app, hostname, routeBinding.PathPrefix, routeBinding.ServicePort, routeKind, tlsPolicy, table.CreatedAt, table.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+			binding := s.compileTrafficEpochRouteBindingForRoute(r.Context(), app, hostname, routeBinding.PathPrefix, routeBinding.ServicePort, routeKind, tlsPolicy, table.CreatedAt, table.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 			if domain != nil {
 				binding = applyCustomDomainReadiness(binding, *domain)
 			}

@@ -347,6 +347,33 @@ func TestProductionAPIHasGenericPublicRouteCanaryForEveryEdgeGroup(t *testing.T)
 	}
 }
 
+func TestProductionTrafficEpochCompilerOwnersAreExplicit(t *testing.T) {
+	file, err := os.Open("../../deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, decodeErr := DecodeRegistry(file)
+	closeErr := file.Close()
+	if decodeErr != nil || closeErr != nil {
+		t.Fatalf("decode production registry: %v close: %v", decodeErr, closeErr)
+	}
+	owners := map[string]Component{}
+	for _, component := range registry.Components {
+		owners[component.ID] = component
+	}
+	for _, componentID := range []string{"api", "controller"} {
+		component, ok := owners[componentID]
+		if !ok {
+			t.Fatalf("production component %s is absent", componentID)
+		}
+		for _, root := range []string{"internal/releaseflow", "internal/trafficepoch"} {
+			if !containsString(component.SourceRoots, root) {
+				t.Fatalf("%s does not own compiled traffic dependency %s: %v", componentID, root, component.SourceRoots)
+			}
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

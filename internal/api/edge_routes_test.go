@@ -116,7 +116,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 		},
 	}
 
-	disabled := server.deriveEdgeRouteBinding(ctx, model.App{
+	disabledApp := model.App{
 		ID:       "app_disabled",
 		TenantID: "tenant_demo",
 		Name:     "disabled",
@@ -125,12 +125,13 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 			Replicas:  0,
 			RuntimeID: model.DefaultManagedRuntimeID,
 		},
-	}, "disabled.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
+	}
+	disabled := server.compileTrafficEpochRouteBinding(ctx, disabledApp, "disabled.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
 	if disabled.Status != model.EdgeRouteStatusDisabled || disabled.UpstreamURL != "" {
 		t.Fatalf("expected disabled route without upstream, got %+v", disabled)
 	}
 
-	missingRuntime := server.deriveEdgeRouteBinding(ctx, model.App{
+	missingRuntimeApp := model.App{
 		ID:       "app_missing_runtime",
 		TenantID: "tenant_demo",
 		Name:     "missing-runtime",
@@ -140,12 +141,13 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 			RuntimeID: "runtime_missing",
 		},
 		Status: model.AppStatus{CurrentReplicas: 1},
-	}, "missing-runtime.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
+	}
+	missingRuntime := server.compileTrafficEpochRouteBinding(ctx, missingRuntimeApp, "missing-runtime.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
 	if missingRuntime.Status != model.EdgeRouteStatusRuntimeMissing || missingRuntime.UpstreamURL != "" {
 		t.Fatalf("expected runtime-missing route without upstream, got %+v", missingRuntime)
 	}
 
-	unavailable := server.deriveEdgeRouteBinding(ctx, model.App{
+	unavailableApp := model.App{
 		ID:       "app_unavailable",
 		TenantID: "tenant_demo",
 		Name:     "unavailable",
@@ -155,12 +157,13 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 			RuntimeID: model.DefaultManagedRuntimeID,
 		},
 		Status: model.AppStatus{CurrentReplicas: 0},
-	}, "unavailable.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
+	}
+	unavailable := server.compileTrafficEpochRouteBinding(ctx, unavailableApp, "unavailable.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
 	if unavailable.Status != model.EdgeRouteStatusUnavailable || unavailable.UpstreamURL != "" {
 		t.Fatalf("expected unavailable route without upstream, got %+v", unavailable)
 	}
 
-	nonHTTP := server.deriveEdgeRouteBinding(ctx, model.App{
+	nonHTTPApp := model.App{
 		ID:       "app_redis",
 		TenantID: "tenant_demo",
 		Name:     "redis",
@@ -171,7 +174,8 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 			RuntimeID: model.DefaultManagedRuntimeID,
 		},
 		Status: model.AppStatus{CurrentReplicas: 1},
-	}, "redis.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
+	}
+	nonHTTP := server.compileTrafficEpochRouteBinding(ctx, nonHTTPApp, "redis.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
 	if nonHTTP.Status != model.EdgeRouteStatusUnavailable || nonHTTP.UpstreamURL != "" || !strings.Contains(nonHTTP.StatusReason, "non-HTTP") {
 		t.Fatalf("expected known non-HTTP app route to be unavailable, got %+v", nonHTTP)
 	}

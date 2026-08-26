@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/trafficepoch"
 )
 
 func TestFinalizeEdgeRouteDecisionIsBehaviorNeutralAndStable(t *testing.T) {
@@ -17,7 +18,7 @@ func TestFinalizeEdgeRouteDecisionIsBehaviorNeutralAndStable(t *testing.T) {
 	app := edgeRouteObservationTestApp("deploying", "op_deploy")
 	route := edgeRouteObservationTestRoute()
 	before := route
-	beforeGeneration := edgeRouteGeneration(route)
+	beforeGeneration := trafficepoch.EdgeRouteGeneration(route)
 	provenance := edgeRouteObservationTestProvenance()
 
 	routes := finalizeEdgeRouteDecisions(
@@ -34,7 +35,7 @@ func TestFinalizeEdgeRouteDecisionIsBehaviorNeutralAndStable(t *testing.T) {
 		t.Fatalf("observability changed route behavior\nbefore=%+v\nafter=%+v", before, routes[0])
 	}
 	routes[0].DecisionID = decisionID
-	if got := edgeRouteGeneration(routes[0]); got != beforeGeneration {
+	if got := trafficepoch.EdgeRouteGeneration(routes[0]); got != beforeGeneration {
 		t.Fatalf("decision metadata changed route generation: before=%s after=%s", beforeGeneration, got)
 	}
 	repeated := finalizeEdgeRouteDecisions(

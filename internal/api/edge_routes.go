@@ -17,9 +17,10 @@ import (
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
+	"fugue/internal/trafficepoch"
 )
 
-const defaultEdgeGroupID = "edge-group-default"
+const defaultEdgeGroupID = trafficepoch.DefaultEdgeGroupID
 
 const (
 	defaultStaticAssetCachePolicyID  = "static-assets-immutable-v1"
@@ -41,77 +42,55 @@ type edgeLiveServingState struct {
 	Reason  string
 }
 
-func (s *Server) deriveEdgeRouteBinding(ctx context.Context, app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
+func edgeRoutePathPrefix(app model.App, routeKind string) string {
 	pathPrefix := "/"
 	if routeKind == model.EdgeRouteKindPlatform && app.Route != nil {
 		pathPrefix = model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix)
 	}
-	return s.deriveEdgeRouteBindingForRoute(ctx, app, hostname, pathPrefix, 0, routeKind, tlsPolicy, createdAt, updatedAt, runtimeByID, runtimeNodeLabelsByID)
+	return pathPrefix
 }
 
-func (s *Server) deriveEdgeRouteBindingForRoute(ctx context.Context, app model.App, hostname, pathPrefix string, servicePort int, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
+func (s *Server) compileTrafficEpochRouteBinding(ctx context.Context, app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
+	return s.compileTrafficEpochRouteBindingForRoute(ctx, app, hostname, edgeRoutePathPrefix(app, routeKind), 0, routeKind, tlsPolicy, createdAt, updatedAt, runtimeByID, runtimeNodeLabelsByID)
+}
+
+func (s *Server) compileTrafficEpochRouteBindingForRoute(ctx context.Context, app model.App, hostname, pathPrefix string, servicePort int, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
+	return trafficepoch.CompileRouteBinding(s.edgeRouteBindingInput(ctx, app, hostname, pathPrefix, servicePort, routeKind, tlsPolicy, createdAt, updatedAt, runtimeByID, runtimeNodeLabelsByID))
+}
+
+func (s *Server) edgeRouteBindingInput(ctx context.Context, app model.App, hostname, pathPrefix string, servicePort int, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) trafficepoch.RouteBindingInput {
 	runtimeID := appProxyRuntimeID(app)
 	runtimeObj, runtimeFound := runtimeByID[runtimeID]
 	edgeGroupID := derivedEdgeGroupIDForRuntime(runtimeObj, runtimeFound, runtimeNodeLabelsByID[runtimeID])
-	fallbackEdgeGroupID := ""
-	if edgeGroupID != defaultEdgeGroupID {
-		fallbackEdgeGroupID = defaultEdgeGroupID
-	}
 	status, reason := edgeRouteStatus(app, runtimeID, runtimeFound)
 	if servicePort <= 0 {
 		servicePort = edgeServicePortForApp(app)
 	}
 	upstream := s.edgeRouteUpstream(ctx, app, runtimeObj, runtimeFound)
-	if status == model.EdgeRouteStatusActive && upstream.Status != model.EdgeRouteStatusActive {
-		status = upstream.Status
-		reason = upstream.StatusReason
-	}
-
-	binding := model.EdgeRouteBinding{
-		Hostname:             normalizeExternalAppDomain(hostname),
-		PathPrefix:           model.NormalizeAppRoutePathPrefix(pathPrefix),
-		RouteKind:            routeKind,
-		AppID:                app.ID,
-		TenantID:             app.TenantID,
-		RuntimeID:            runtimeID,
-		RuntimeEdgeGroupID:   edgeGroupID,
-		RuntimeEdgeGroup:     edgeGroupID,
-		EdgeGroupID:          edgeGroupID,
-		SelectedEdgeGroup:    edgeGroupID,
-		FallbackEdgeGroupID:  fallbackEdgeGroupID,
-		RoutePolicy:          model.EdgeRoutePolicyRouteAOnly,
-		UpstreamKind:         upstream.Kind,
-		UpstreamScope:        upstream.Scope,
-		ServicePort:          servicePort,
-		TLSPolicy:            tlsPolicy,
-		CachePolicyID:        edgeRouteCachePolicyIDForKind(routeKind),
-		DeploymentGeneration: edgeRouteDeploymentGeneration(app),
-		Streaming:            true,
-		Status:               status,
-		StatusReason:         reason,
-		CreatedAt:            createdAt,
-		UpdatedAt:            updatedAt,
-	}
-	requestBodyPolicies, requestBodyPolicyErr := model.ParseEdgeRequestBodyPolicies(app.Spec.Env[model.AppEdgeRequestBodyPoliciesEnv])
-	if requestBodyPolicyErr != nil {
-		binding.Status = model.EdgeRouteStatusUnavailable
-		binding.StatusReason = "invalid app edge request body policy"
-		binding.UpstreamURL = ""
-	} else {
-		binding.RequestBodyPolicies = requestBodyPolicies
-	}
-	if binding.CachePolicyID != "" {
-		binding.CacheNamespace = edgeRouteCacheNamespace(app.ID, binding.DeploymentGeneration)
+	input := trafficepoch.RouteBindingInput{
+		Hostname:                    hostname,
+		PathPrefix:                  pathPrefix,
+		RouteKind:                   routeKind,
+		AppID:                       app.ID,
+		TenantID:                    app.TenantID,
+		RuntimeID:                   runtimeID,
+		RuntimeEdgeGroupID:          edgeGroupID,
+		Status:                      status,
+		StatusReason:                reason,
+		Upstream:                    trafficepoch.RouteUpstreamFact(upstream),
+		ServicePort:                 servicePort,
+		TLSPolicy:                   tlsPolicy,
+		CachePolicyID:               edgeRouteCachePolicyIDForKind(routeKind),
+		DeploymentGeneration:        edgeRouteDeploymentGeneration(app),
+		RequestBodyPoliciesEnvelope: app.Spec.Env[model.AppEdgeRequestBodyPoliciesEnv],
+		CreatedAt:                   createdAt,
+		UpdatedAt:                   updatedAt,
 	}
 	if runtimeFound {
-		binding.RuntimeType = strings.TrimSpace(runtimeObj.Type)
-		binding.RuntimeClusterNode = strings.TrimSpace(runtimeObj.ClusterNodeName)
+		input.RuntimeType = strings.TrimSpace(runtimeObj.Type)
+		input.RuntimeClusterNode = strings.TrimSpace(runtimeObj.ClusterNodeName)
 	}
-	if binding.Status == model.EdgeRouteStatusActive {
-		binding.UpstreamURL = upstream.URL
-	}
-	binding.RouteGeneration = edgeRouteGeneration(binding)
-	return binding
+	return input
 }
 
 func (s *Server) projectRouteEdgePolicy(hostname string, domainByHostname map[string]model.AppDomain) (string, string, *model.AppDomain, bool) {
@@ -406,7 +385,7 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 		} else {
 			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 		}
-		binding.RouteGeneration = edgeRouteGeneration(binding)
+		binding.RouteGeneration = trafficepoch.EdgeRouteGeneration(binding)
 		return binding
 	}
 	binding.PolicyEdgeGroupID = strings.TrimSpace(policy.EdgeGroupID)
@@ -443,7 +422,7 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 	if !exclusions.Empty() {
 		binding.SelectionReason = strings.TrimSpace(binding.SelectionReason + "; exclusions are traffic_drain and do not revoke routes")
 	}
-	binding.RouteGeneration = edgeRouteGeneration(binding)
+	binding.RouteGeneration = trafficepoch.EdgeRouteGeneration(binding)
 	return binding
 }
 
@@ -496,7 +475,7 @@ func expandDefaultPlatformBindingsForGroups(binding model.EdgeRouteBinding, grou
 		candidate := binding
 		candidate.EdgeGroupID = edgeGroupID
 		candidate.FallbackEdgeGroupID = ""
-		candidate.RouteGeneration = edgeRouteGeneration(candidate)
+		candidate.RouteGeneration = trafficepoch.EdgeRouteGeneration(candidate)
 		out = append(out, candidate)
 	}
 	return out
@@ -708,7 +687,7 @@ func applyCustomDomainReadiness(binding model.EdgeRouteBinding, domain model.App
 	binding.Status = model.EdgeRouteStatusUnavailable
 	binding.StatusReason = "custom domain ownership, DNS, or TLS verification is pending"
 	binding.UpstreamURL = ""
-	binding.RouteGeneration = edgeRouteGeneration(binding)
+	binding.RouteGeneration = trafficepoch.EdgeRouteGeneration(binding)
 	return binding
 }
 
@@ -744,7 +723,7 @@ func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, routePublicati
 		} else if !healthyEdgeGroups[base.EdgeGroupID] && base.Status == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(base.RoutePolicy) {
 			retainEdgeRouteWhileDNSWithdrawn(&base, base.EdgeGroupID, "pinned platform route retained while DNS lacks verified edge readiness")
 		}
-		base.RouteGeneration = edgeRouteGeneration(base)
+		base.RouteGeneration = trafficepoch.EdgeRouteGeneration(base)
 		return []model.EdgeRouteBinding{base}
 	default:
 		groups := sortedHealthyEdgeGroups(routePublicationEdgeGroups)
@@ -752,7 +731,7 @@ func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, routePublicati
 			base.Status = model.EdgeRouteStatusUnavailable
 			base.StatusReason = "no healthy edge groups"
 			base.UpstreamURL = ""
-			base.RouteGeneration = edgeRouteGeneration(base)
+			base.RouteGeneration = trafficepoch.EdgeRouteGeneration(base)
 			return []model.EdgeRouteBinding{base}
 		}
 		out := make([]model.EdgeRouteBinding, 0, len(groups))
@@ -760,7 +739,7 @@ func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, routePublicati
 			candidate := base
 			candidate.EdgeGroupID = edgeGroupID
 			candidate = applyEdgeRouteRedundancyStatus(candidate, healthyEdgeNodeCount, minHealthyEdgeNodes)
-			candidate.RouteGeneration = edgeRouteGeneration(candidate)
+			candidate.RouteGeneration = trafficepoch.EdgeRouteGeneration(candidate)
 			out = append(out, candidate)
 		}
 		return out
@@ -1142,10 +1121,6 @@ func firstRuntimeLabelValue(labels map[string]string, keys ...string) string {
 	return ""
 }
 
-func edgeRouteGeneration(binding model.EdgeRouteBinding) string {
-	return releaseflow.EdgeRouteGeneration(binding)
-}
-
 func edgeRouteCachePolicyIDForKind(routeKind string) string {
 	if isDefaultEdgeRouteKind(routeKind) {
 		return defaultStaticAssetCachePolicyID
@@ -1171,19 +1146,6 @@ func edgeRouteDeploymentGeneration(app model.App) string {
 		return "app_" + app.UpdatedAt.UTC().Format("20060102T150405Z")
 	}
 	return "app_" + strings.TrimSpace(app.ID)
-}
-
-func edgeRouteCacheNamespace(appID, deploymentGeneration string) string {
-	appID = strings.TrimSpace(appID)
-	deploymentGeneration = strings.TrimSpace(deploymentGeneration)
-	switch {
-	case appID != "" && deploymentGeneration != "":
-		return appID + "_" + deploymentGeneration
-	case appID != "":
-		return appID
-	default:
-		return deploymentGeneration
-	}
 }
 
 func defaultEdgeCachePolicies() []model.CachePolicy {
