@@ -243,6 +243,10 @@ func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundl
 	if err != nil {
 		return err
 	}
+	generation, err := edgeDNSImmutablePlatformGeneration(content)
+	if err != nil {
+		return err
+	}
 	artifact, _, err := s.store.EnsurePlatformArtifact(model.PlatformArtifact{
 		ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle,
 		Scope: model.PlatformArtifactScope{
@@ -251,7 +255,7 @@ func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundl
 			NodeID:      legacy.DNSNodeID,
 			EdgeGroupID: legacy.EdgeGroupID,
 		},
-		Generation:         legacy.Version,
+		Generation:         generation,
 		Content:            content,
 		CompatibilityFloor: model.PlatformArtifactSchemaVersionV1,
 		CreatedByType:      model.ActorTypeSystem,
@@ -274,7 +278,7 @@ func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundl
 	active, _, _, _, err := s.store.ReleasePlatformArtifact(artifact.ID, model.PlatformArtifactReleaseRequest{
 		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
 		Reason:         "mirror validated DNS bundle into immutable artifact ledger",
-		IdempotencyKey: "edge-dns-shadow:" + legacy.ScopeKey + ":" + legacy.Version,
+		IdempotencyKey: "edge-dns-shadow:" + legacy.ScopeKey + ":" + generation,
 	}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-artifact-controller"})
 	if err != nil {
 		return fmt.Errorf("activate immutable shadow pointer: %w", err)
@@ -287,6 +291,15 @@ func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundl
 		return errors.New("immutable shadow artifact digest differs from source")
 	}
 	return nil
+}
+
+func edgeDNSImmutablePlatformGeneration(content map[string]any) (string, error) {
+	raw, err := json.Marshal(content)
+	if err != nil {
+		return "", fmt.Errorf("marshal immutable edge DNS artifact generation: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return "dns_content_sha256_" + hex.EncodeToString(sum[:]), nil
 }
 
 func edgeDNSImmutableArtifactContentMap(artifact store.EdgeDNSBundleArtifact) (map[string]any, error) {

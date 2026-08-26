@@ -583,6 +583,64 @@ func TestEdgeDNSArtifactPublisherRejectsInvalidBundleBeforeReplacingEitherCurren
 	}
 }
 
+func TestEdgeDNSArtifactPublisherRefreshesImmutableEnvelopeForStableBundleVersion(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	node := model.DNSNode{
+		ID: "dns-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro",
+		PublicIPv4: "203.0.113.10", Status: model.EdgeHealthHealthy, Healthy: true,
+	}
+	if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+		t.Fatalf("record DNS heartbeat: %v", err)
+	}
+	options, ok := server.edgeDNSBundleOptionsForDNSNode(node)
+	if !ok {
+		t.Fatal("expected DNS node publication options")
+	}
+	scopeKey := edgeDNSBundleArtifactScopeKey(options)
+	now := time.Now().UTC()
+	server.runEdgeDNSArtifactController(context.Background(), now)
+	before, beforeRelease, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelShadow,
+	)
+	if err != nil || !found {
+		t.Fatalf("load first immutable envelope: found=%t err=%v", found, err)
+	}
+	beforeContent, err := edgeDNSBundleArtifactFromPlatformArtifact(before)
+	if err != nil {
+		t.Fatalf("decode first immutable envelope: %v", err)
+	}
+
+	server.runEdgeDNSArtifactController(context.Background(), now.Add(time.Minute))
+	server.edgeDNSArtifactMu.Lock()
+	lastError := server.edgeDNSArtifactLastError
+	server.edgeDNSArtifactMu.Unlock()
+	if lastError != "" {
+		t.Fatalf("refresh stable semantic generation: %s", lastError)
+	}
+	after, afterRelease, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelShadow,
+	)
+	if err != nil || !found {
+		t.Fatalf("load refreshed immutable envelope: found=%t err=%v", found, err)
+	}
+	afterContent, err := edgeDNSBundleArtifactFromPlatformArtifact(after)
+	if err != nil {
+		t.Fatalf("decode refreshed immutable envelope: %v", err)
+	}
+	if beforeContent.Version != afterContent.Version {
+		t.Fatalf("expected stable semantic bundle version, before=%s after=%s", beforeContent.Version, afterContent.Version)
+	}
+	if before.Generation == after.Generation || beforeRelease.ID == afterRelease.ID || !afterContent.GeneratedAt.After(beforeContent.GeneratedAt) {
+		t.Fatalf("expected refreshed envelope to get a new content generation and current pointer: before=%s/%s after=%s/%s", before.Generation, beforeRelease.ID, after.Generation, afterRelease.ID)
+	}
+}
+
 func TestEdgeDNSArtifactPublisherSkipsWhenAdvisoryLockIsHeld(t *testing.T) {
 	t.Parallel()
 
