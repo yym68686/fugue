@@ -1089,6 +1089,36 @@ func TestExecuteRetainsRecoveryRequiredWhenLKGUnproven(t *testing.T) {
 	}
 }
 
+func TestExecuteRollbackConvergenceIgnoresRendererEvidence(t *testing.T) {
+	plan, receipt, rendered, lkg, forward := executionFixture(t)
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unhealthy := forward
+	unhealthy.Ready = 0
+	fake.observations = []Observation{lkg}
+	fake.health = []Observation{unhealthy, lkg}
+	fake.healthErrors = []error{errors.New("forward unhealthy"), nil}
+	fake.converged = nil
+
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "compensated" || result.Reason != "forward-unhealthy-lkg-restored" || fake.applies != 2 {
+		t.Fatalf("healthy LKG rollback was not proven: result=%+v applies=%d", result, fake.applies)
+	}
+	if len(fake.converged) != 2 {
+		t.Fatalf("unexpected convergence checks: %d", len(fake.converged))
+	}
+	rollbackWitness := string(fake.converged[1])
+	for _, annotation := range []string{"fugue.pro/production-config-sha", "fugue.pro/release-plan-digest", "fugue.pro/artifact-receipt-digest"} {
+		if strings.Contains(rollbackWitness, annotation) {
+			t.Fatalf("rollback witness retained renderer evidence %q: %s", annotation, rollbackWitness)
+		}
+	}
+}
+
 func TestCombinedFailureDetailRetainsBothBoundedFailures(t *testing.T) {
 	detail := combinedFailureDetail(strings.Repeat("f", 600), strings.Repeat("r", 600))
 	if len(detail) > 512 || !strings.HasPrefix(detail, "forward: ") || !strings.Contains(detail, "; rollback: ") ||

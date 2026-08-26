@@ -767,7 +767,18 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	var lkgHealthErr, lkgConvergedErr error
 	if prepared.LKG.Present {
 		lkgObservation, lkgHealthErr = cluster.WaitHealthy(ctx, release, prepared.LKG, lkgManifest)
-		lkgConvergedErr = errors.Join(cluster.Converged(ctx, release, lkgManifest), cluster.VerifyOwnershipConverged(ctx, release, lkgManifest))
+		// The rollback apply intentionally restores the immutable LKG workload,
+		// while the shared-resource phase may have already written this release's
+		// receipt/config annotations to resources that are unchanged operationally.
+		// Compare convergence against the exact predecessor witness so those
+		// renderer-owned evidence fields cannot turn a no-write/rollback into a
+		// false lkg-unproven terminal state.
+		lkgWitness, witnessErr := rollbackConvergenceWitness(lkgManifest, release)
+		if witnessErr != nil {
+			lkgConvergedErr = witnessErr
+		} else {
+			lkgConvergedErr = errors.Join(cluster.Converged(ctx, release, lkgWitness), cluster.VerifyOwnershipConverged(ctx, release, lkgManifest))
+		}
 	} else {
 		lkgObservation, lkgHealthErr = cluster.Observe(ctx, release, prepared.LKG, forwardManifest)
 	}
