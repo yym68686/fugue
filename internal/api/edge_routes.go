@@ -50,7 +50,6 @@ type edgeRouteBundleOptions struct {
 }
 
 func (s *Server) handleEdgeRoutes(w http.ResponseWriter, r *http.Request) {
-	s.legacyEdgeRouteRequests.Add(1)
 	authContext, ok := s.authorizeEdgeRequest(w, r)
 	if !ok {
 		return

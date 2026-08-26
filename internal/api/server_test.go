@@ -151,7 +151,6 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 	for _, want := range []string{
 		`fugue_component_info{component="api"} 1.000000`,
 		`fugue_api_ready 1.000000`,
-		`fugue_api_legacy_edge_routes_requests_total 0.000000`,
 		`fugue_go_goroutines{component="api"}`,
 		`fugue_hosted_dns_zones{status="active"} 0.000000`,
 		`fugue_hosted_dns_record_publish_lag_seconds 0.000000`,
@@ -170,22 +169,21 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 	}
 }
 
-func TestMetricsHandlerCountsLegacyEdgeRouteRequests(t *testing.T) {
+func TestHandlerDoesNotRegisterLegacyCoreEdgeRoutes(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
-
-	request := httptest.NewRequest(http.MethodGet, "/v1/edge/routes", nil)
-	server.Handler().ServeHTTP(httptest.NewRecorder(), request)
-
+	server := NewServer(s, auth.New(s, "edge-secret"), nil, ServerConfig{})
 	recorder := httptest.NewRecorder()
-	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(recorder.Body.String(), `fugue_api_legacy_edge_routes_requests_total 1.000000`) {
-		t.Fatalf("expected one legacy edge route request, got:\n%s", recorder.Body.String())
+	request := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected removed Core API route to return %d, got %d body=%s", http.StatusNotFound, recorder.Code, recorder.Body.String())
 	}
 }
 

@@ -278,41 +278,6 @@ paths:
                 $ref: "#/components/schemas/EdgeRouteIntentSnapshot"
         default:
           $ref: "#/components/responses/ErrorResponse"
-  /v1/edge/routes:
-    get:
-      operationId: edgeRoutes
-      summary: Edge Routes
-      tags: [Edge]
-      x-fugue-handler: handleEdgeRoutes
-      security:
-        - EdgeToken: []
-      parameters:
-        - in: query
-          name: edge_id
-          required: false
-          schema:
-            type: string
-        - in: query
-          name: edge_group_id
-          required: false
-          schema:
-            type: string
-      responses:
-        '200':
-          description: Successful response
-          headers:
-            ETag:
-              schema:
-                type: string
-            X-Fugue-Route-Bundle-Version:
-              schema:
-                type: string
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EdgeRouteBundle"
-        default:
-          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/ssh/routes:
     get:
       operationId: edgeSSHRoutes

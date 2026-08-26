@@ -330,7 +330,6 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/edge/route-policies/{hostname}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetEdgeRoutePolicy)))
 	mux.Handle("PUT /v1/edge/route-policies/{hostname}", s.auth.RequireAPI(http.HandlerFunc(s.handlePutEdgeRoutePolicy)))
 	mux.Handle("DELETE /v1/edge/route-policies/{hostname}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteEdgeRoutePolicy)))
-	mux.Handle("GET /v1/edge/routes", http.HandlerFunc(s.handleEdgeRoutes))
 	mux.Handle("GET /v1/edge/ssh/routes", http.HandlerFunc(s.handleEdgeSSHRoutes))
 	mux.Handle("GET /v1/edge/tls/ask", http.HandlerFunc(s.handleEdgeTLSAsk))
 	mux.Handle("GET /v1/image-locations", s.auth.RequireAPI(http.HandlerFunc(s.handleListImageLocations)))

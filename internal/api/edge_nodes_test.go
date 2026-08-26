@@ -860,14 +860,14 @@ func TestScopedEdgeTokenRestrictsEdgeGroupAccess(t *testing.T) {
 
 	forbiddenRoutes := httptest.NewRecorder()
 	forbiddenRoutesReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token+"&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(forbiddenRoutes, forbiddenRoutesReq)
+	server.handleEdgeRoutes(forbiddenRoutes, forbiddenRoutesReq)
 	if forbiddenRoutes.Code != http.StatusForbidden {
 		t.Fatalf("expected scoped token group mismatch to be forbidden, got %d body=%s", forbiddenRoutes.Code, forbiddenRoutes.Body.String())
 	}
 
 	allowedRoutes := httptest.NewRecorder()
 	allowedRoutesReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token, nil)
-	server.Handler().ServeHTTP(allowedRoutes, allowedRoutesReq)
+	server.handleEdgeRoutes(allowedRoutes, allowedRoutesReq)
 	if allowedRoutes.Code != http.StatusOK {
 		t.Fatalf("expected scoped token default route request to succeed, got %d body=%s", allowedRoutes.Code, allowedRoutes.Body.String())
 	}
@@ -879,7 +879,7 @@ func TestScopedEdgeTokenRestrictsEdgeGroupAccess(t *testing.T) {
 
 	sameGroupRoutes := httptest.NewRecorder()
 	allowedRoutesReq = httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token+"&edge_id=edge-us-2&edge_group_id=edge-group-country-us", nil)
-	server.Handler().ServeHTTP(sameGroupRoutes, allowedRoutesReq)
+	server.handleEdgeRoutes(sameGroupRoutes, allowedRoutesReq)
 	if sameGroupRoutes.Code != http.StatusOK {
 		t.Fatalf("expected scoped token same-group route request to succeed, got %d body=%s", sameGroupRoutes.Code, sameGroupRoutes.Body.String())
 	}

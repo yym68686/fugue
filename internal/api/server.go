@@ -151,7 +151,6 @@ type Server struct {
 	edgeDNSArtifactSkippedCount            int64
 	edgeDNSArtifactErrorCount              int64
 	edgeDNSArtifactLastError               string
-	legacyEdgeRouteRequests                atomic.Uint64
 	ready                                  atomic.Bool
 	trafficOverrideRouteProbe              trafficOverrideRouteProbeFunc
 }
@@ -365,7 +364,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	status := s.observabilityConfig.Normalize().Status()
 	observability.WriteGaugeMetric(w, "fugue_api_observability_enabled", "Whether Fugue Observability is enabled for the API process.", nil, boolMetric(status.Enabled))
 	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
-	observability.WriteCounterMetric(w, "fugue_api_legacy_edge_routes_requests_total", "Total requests to the legacy Core API edge route bundle endpoint.", nil, float64(s.legacyEdgeRouteRequests.Load()))
 	s.writeBackupMetrics(r.Context(), w)
 	s.writeRobustnessMetrics(w)
 	s.writeAutomationShadowLoopMetrics(w)

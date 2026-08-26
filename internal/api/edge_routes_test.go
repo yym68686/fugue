@@ -134,7 +134,7 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleEdgeRoutes(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -283,7 +283,7 @@ func TestEdgeRoutesBundlePublishesProjectRouteTable(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleEdgeRoutes(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -366,7 +366,7 @@ func TestEdgeRoutesBundlePublishesAppReleaseTrafficUpstreams(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleEdgeRoutes(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected edge routes status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -407,7 +407,7 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 
 	first := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(first, req)
+	server.handleEdgeRoutes(first, req)
 	if first.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, first.Code, first.Body.String())
 	}
@@ -426,7 +426,7 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 
 	repeated := httptest.NewRecorder()
 	repeatedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(repeated, repeatedReq)
+	server.handleEdgeRoutes(repeated, repeatedReq)
 	if repeated.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, repeated.Code, repeated.Body.String())
 	}
@@ -442,7 +442,7 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	second := httptest.NewRecorder()
 	conditional := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
 	conditional.Header.Set("If-None-Match", etag)
-	server.Handler().ServeHTTP(second, conditional)
+	server.handleEdgeRoutes(second, conditional)
 	if second.Code != http.StatusOK {
 		t.Fatalf("expected signed route bundle refresh status %d, got %d body=%s", http.StatusOK, second.Code, second.Body.String())
 	}
@@ -471,7 +471,7 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	changed := httptest.NewRecorder()
 	changedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
 	changedReq.Header.Set("If-None-Match", etag)
-	server.Handler().ServeHTTP(changed, changedReq)
+	server.handleEdgeRoutes(changed, changedReq)
 	if changed.Code != http.StatusOK {
 		t.Fatalf("expected route content change to return status %d, got %d body=%s", http.StatusOK, changed.Code, changed.Body.String())
 	}
@@ -509,7 +509,7 @@ func TestEdgeRoutesScopedSyncRecoversStaleNodeActivity(t *testing.T) {
 	assertRouteStatus := func(path, want string) model.EdgeRouteBundle {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		server.handleEdgeRoutes(recorder, httptest.NewRequest(http.MethodGet, path, nil))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("expected route bundle status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 		}
@@ -569,7 +569,7 @@ func TestEdgeRoutePolicyUnhealthyPolicyGroupRetainsHostRoute(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleEdgeRoutes(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -601,7 +601,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 
 	initial := httptest.NewRecorder()
 	initialReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
-	server.Handler().ServeHTTP(initial, initialReq)
+	server.handleEdgeRoutes(initial, initialReq)
 	if initial.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, initial.Code, initial.Body.String())
 	}
@@ -621,7 +621,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 
 	hkBefore := httptest.NewRecorder()
 	hkReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(hkBefore, hkReq)
+	server.handleEdgeRoutes(hkBefore, hkReq)
 	if hkBefore.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, hkBefore.Code, hkBefore.Body.String())
 	}
@@ -659,7 +659,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 
 	usFallback := httptest.NewRecorder()
 	usFallbackReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
-	server.Handler().ServeHTTP(usFallback, usFallbackReq)
+	server.handleEdgeRoutes(usFallback, usFallbackReq)
 	if usFallback.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, usFallback.Code, usFallback.Body.String())
 	}
@@ -683,7 +683,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 
 	hkAfter := httptest.NewRecorder()
 	hkAfterReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(hkAfter, hkAfterReq)
+	server.handleEdgeRoutes(hkAfter, hkAfterReq)
 	if hkAfter.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, hkAfter.Code, hkAfter.Body.String())
 	}
@@ -700,7 +700,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 
 	usAfter := httptest.NewRecorder()
 	usReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-us", nil)
-	server.Handler().ServeHTTP(usAfter, usReq)
+	server.handleEdgeRoutes(usAfter, usReq)
 	if usAfter.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, usAfter.Code, usAfter.Body.String())
 	}
@@ -727,7 +727,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 	}
 	hkLocal := httptest.NewRecorder()
 	hkLocalReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(hkLocal, hkLocalReq)
+	server.handleEdgeRoutes(hkLocal, hkLocalReq)
 	if hkLocal.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, hkLocal.Code, hkLocal.Body.String())
 	}
@@ -747,7 +747,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 	}
 	reverted := httptest.NewRecorder()
 	revertedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
-	server.Handler().ServeHTTP(reverted, revertedReq)
+	server.handleEdgeRoutes(reverted, revertedReq)
 	if reverted.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, reverted.Code, reverted.Body.String())
 	}
@@ -790,7 +790,7 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-us", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleEdgeRoutes(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -814,7 +814,7 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 
 	hk := httptest.NewRecorder()
 	hkReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(hk, hkReq)
+	server.handleEdgeRoutes(hk, hkReq)
 	if hk.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, hk.Code, hk.Body.String())
 	}
@@ -831,7 +831,7 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 
 	de := httptest.NewRecorder()
 	deReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-de", nil)
-	server.Handler().ServeHTTP(de, deReq)
+	server.handleEdgeRoutes(de, deReq)
 	if de.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, de.Code, de.Body.String())
 	}
@@ -868,7 +868,7 @@ func TestPlatformRoutesRetainPreviouslyServingUnhealthyEdgeGroups(t *testing.T) 
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-us", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleEdgeRoutes(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -932,7 +932,7 @@ func TestEdgeRoutePolicyExclusionDrainsDNSWithoutFilteringRouteBundle(t *testing
 
 	excluded := httptest.NewRecorder()
 	excludedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_id=edge-de-1&edge_group_id=edge-group-country-de", nil)
-	server.Handler().ServeHTTP(excluded, excludedReq)
+	server.handleEdgeRoutes(excluded, excludedReq)
 	if excluded.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, excluded.Code, excluded.Body.String())
 	}
@@ -948,7 +948,7 @@ func TestEdgeRoutePolicyExclusionDrainsDNSWithoutFilteringRouteBundle(t *testing
 
 	allowed := httptest.NewRecorder()
 	allowedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_id=edge-us-1&edge_group_id=edge-group-country-us", nil)
-	server.Handler().ServeHTTP(allowed, allowedReq)
+	server.handleEdgeRoutes(allowed, allowedReq)
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, allowed.Code, allowed.Body.String())
 	}
@@ -1056,7 +1056,7 @@ func TestEdgeRoutePolicyExclusionAppliesToSharedHostnameRoutes(t *testing.T) {
 
 	excluded := httptest.NewRecorder()
 	excludedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_id=edge-de-1&edge_group_id=edge-group-country-de", nil)
-	server.Handler().ServeHTTP(excluded, excludedReq)
+	server.handleEdgeRoutes(excluded, excludedReq)
 	if excluded.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, excluded.Code, excluded.Body.String())
 	}
@@ -1071,7 +1071,7 @@ func TestEdgeRoutePolicyExclusionAppliesToSharedHostnameRoutes(t *testing.T) {
 
 	allowed := httptest.NewRecorder()
 	allowedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_id=edge-us-1&edge_group_id=edge-group-country-us", nil)
-	server.Handler().ServeHTTP(allowed, allowedReq)
+	server.handleEdgeRoutes(allowed, allowedReq)
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, allowed.Code, allowed.Body.String())
 	}
@@ -1118,7 +1118,7 @@ func TestPlatformRoutesBootstrapPendingEdgeGroupReceivesBundle(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleEdgeRoutes(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1169,7 +1169,7 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 	for _, edgeGroupID := range []string{"edge-group-country-us", "edge-group-country-de"} {
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id="+edgeGroupID, nil)
-		server.Handler().ServeHTTP(recorder, req)
+		server.handleEdgeRoutes(recorder, req)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("expected status %d for %s, got %d body=%s", http.StatusOK, edgeGroupID, recorder.Code, recorder.Body.String())
 		}
@@ -1194,7 +1194,7 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 
 	hk := httptest.NewRecorder()
 	hkReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
-	server.Handler().ServeHTTP(hk, hkReq)
+	server.handleEdgeRoutes(hk, hkReq)
 	if hk.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, hk.Code, hk.Body.String())
 	}
