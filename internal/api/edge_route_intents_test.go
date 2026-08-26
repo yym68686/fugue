@@ -285,6 +285,41 @@ func TestEdgeRouteIntentGenerationIgnoresTransportTimestamp(t *testing.T) {
 	}
 }
 
+func TestEdgeRouteIntentProjectionIgnoresSourceTimestamps(t *testing.T) {
+	t.Parallel()
+
+	binding := model.EdgeRouteBinding{
+		Hostname:      "app.example.com",
+		PathPrefix:    "/",
+		RouteKind:     model.EdgeRouteKindCustomDomain,
+		RoutePolicy:   model.EdgeRoutePolicyEnabled,
+		UpstreamKind:  model.EdgeRouteUpstreamKindKubernetesService,
+		UpstreamScope: model.EdgeRouteUpstreamScopeLocalService,
+		UpstreamURL:   "http://app.example.svc.cluster.local:8080",
+		ServicePort:   8080,
+		TLSPolicy:     model.EdgeRouteTLSPolicyCustomDomain,
+		Status:        model.EdgeRouteStatusActive,
+		CreatedAt:     time.Date(2026, 8, 1, 1, 2, 3, 0, time.UTC),
+		UpdatedAt:     time.Date(2026, 8, 2, 1, 2, 3, 0, time.UTC),
+	}
+	first := edgeRouteIntentFromBinding(binding, model.EdgeRoutePolicy{}, time.Time{})
+	binding.CreatedAt = binding.CreatedAt.Add(24 * time.Hour)
+	binding.UpdatedAt = binding.UpdatedAt.Add(time.Minute)
+	second := edgeRouteIntentFromBinding(binding, model.EdgeRoutePolicy{}, time.Time{})
+
+	if !first.CreatedAt.IsZero() || !first.UpdatedAt.IsZero() || !second.CreatedAt.IsZero() || !second.UpdatedAt.IsZero() {
+		t.Fatalf("RouteIntent projected non-serving source timestamps: first=%+v second=%+v", first, second)
+	}
+	if !reflect.DeepEqual(first, second) || first.Generation != second.Generation {
+		t.Fatalf("source timestamp refresh changed RouteIntent: first=%+v second=%+v", first, second)
+	}
+	before := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Routes: []model.EdgeRouteIntent{first}}
+	after := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Routes: []model.EdgeRouteIntent{second}}
+	if edgeRouteIntentSnapshotGeneration(before) != edgeRouteIntentSnapshotGeneration(after) {
+		t.Fatal("source timestamp refresh changed RouteIntent snapshot generation")
+	}
+}
+
 func edgeRouteIntentTestKeyring() platformcontrol.PlatformComponentIdentityKeyring {
 	return platformcontrol.PlatformComponentIdentityKeyring{
 		ActiveKeyID: "edge-route-intent-test-key",

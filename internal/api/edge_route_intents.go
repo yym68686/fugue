@@ -233,7 +233,7 @@ func edgeRouteIntentFromBinding(binding model.EdgeRouteBinding, policy model.Edg
 		Upstreams: append([]model.EdgeRouteUpstream(nil), binding.Upstreams...), ServicePort: binding.ServicePort, TLSPolicy: binding.TLSPolicy,
 		CachePolicyID: binding.CachePolicyID, CacheNamespace: binding.CacheNamespace, DeploymentGeneration: binding.DeploymentGeneration,
 		RequestBodyPolicies: model.CloneEdgeRequestBodyPolicies(binding.RequestBodyPolicies), Streaming: binding.Streaming,
-		OriginStatus: binding.Status, OriginStatusReason: binding.StatusReason, CreatedAt: binding.CreatedAt, UpdatedAt: binding.UpdatedAt,
+		OriginStatus: binding.Status, OriginStatusReason: binding.StatusReason,
 	}
 	if policyMatches {
 		intent.ExcludedEdgeIDs = normalizeEdgeRouteExclusionIDs(policy.ExcludedEdgeIDs)
