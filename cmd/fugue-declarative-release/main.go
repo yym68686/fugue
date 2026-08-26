@@ -205,7 +205,7 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	current := make(map[string]declarativerelease.Intent, len(plan.Releases))
 	previous := make(map[string]declarativerelease.Intent, len(plan.Releases))
-	superseded := make(map[string]declarativerelease.Intent, len(plan.Releases))
+	superseded := make(declarativerelease.SupersededIntents, len(plan.Releases))
 	previousConfigSHA := make(map[string]string, len(plan.Releases))
 	for _, release := range plan.Releases {
 		intent, intentErr := loadIntent(release.IntentPath)
@@ -235,7 +235,10 @@ func runPlan(args []string, output io.Writer) error {
 			if !isExactIntentAtomOrMerge(intent.SupersedesFailedConfigSHA, release.IntentPath) {
 				return fmt.Errorf("component %q superseded failed atom is not an exact production intent atom", release.ComponentID)
 			}
-			superseded[intent.SupersedesFailedConfigSHA] = failedIntent
+			if superseded[release.ComponentID] == nil {
+				superseded[release.ComponentID] = make(map[string]declarativerelease.Intent, 1)
+			}
+			superseded[release.ComponentID][intent.SupersedesFailedConfigSHA] = failedIntent
 			if err := exec.Command("git", "merge-base", "--is-ancestor", intent.ExpectedPreviousConfigSHA, baseSHA).Run(); err != nil {
 				return fmt.Errorf("component %q recovered predecessor is not in the trusted base ancestry", release.ComponentID)
 			}

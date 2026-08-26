@@ -136,7 +136,7 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	prior.Generation = 31
 	failed := prior
 	failed.SupersedesFailedConfigSHA = "08da56200afa1ef18705855b9d59ac90e84187fc"
-	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior}, nil, map[string]Intent{intent.SupersedesFailedConfigSHA: failed})
+	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior}, nil, SupersededIntents{us.Control.ID: {intent.SupersedesFailedConfigSHA: failed}})
 	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" {
 		t.Fatalf("US Edge Control prerequisite planner expanded: releases=%+v err=%v", bound.Releases, err)
 	}

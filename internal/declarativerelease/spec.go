@@ -755,7 +755,10 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 // BindIntents turns a path-only plan into the immutable server-side plan used
 // by build and deploy jobs. current contains intents from HeadSHA. previous
 // contains intents from BaseSHA after the first v2 production atom.
-func BindIntents(registry Registry, plan Plan, current, previous map[string]Intent, previousConfigSHA map[string]string, superseded ...map[string]Intent) (Plan, error) {
+// SupersededIntents keeps failed production intents scoped by component and commit.
+type SupersededIntents map[string]map[string]Intent
+
+func BindIntents(registry Registry, plan Plan, current, previous map[string]Intent, previousConfigSHA map[string]string, superseded ...SupersededIntents) (Plan, error) {
 	if plan.PlanDigest != "" {
 		return Plan{}, errors.New("release plan is already bound")
 	}
@@ -795,7 +798,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			var failedIntent Intent
 			failedIntentFound := false
 			if len(superseded) == 1 {
-				failedIntent, failedIntentFound = superseded[0][intent.SupersedesFailedConfigSHA]
+				failedIntent, failedIntentFound = superseded[0][component.ID][intent.SupersedesFailedConfigSHA]
 			}
 			immediateFailedAtom := intent.SupersedesFailedConfigSHA == priorConfigSHA && sameIntentPredecessor(intent, prior)
 			historicalFailedAtom := failedIntentFound && intent.SupersedesFailedConfigSHA != "" &&

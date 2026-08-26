@@ -370,7 +370,7 @@ func TestBindIntentsAllowsExplicitFailedAtomSupersession(t *testing.T) {
 	failedSHA := "3333333333333333333333333333333333333333"
 	previous := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 2, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest, Rollback: "previous-git-lkg"}
 	current := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 3, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest, SupersedesFailedConfigSHA: failedSHA, Rollback: "previous-git-lkg"}
-	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "4444444444444444444444444444444444444444"}, map[string]Intent{failedSHA: previous})
+	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "4444444444444444444444444444444444444444"}, SupersededIntents{"api": {failedSHA: previous}})
 	if err != nil {
 		t.Fatalf("explicit failed atom supersession was rejected: %v", err)
 	}
@@ -378,8 +378,52 @@ func TestBindIntentsAllowsExplicitFailedAtomSupersession(t *testing.T) {
 		t.Fatalf("failed atom supersession was not bound exactly: %+v", got)
 	}
 	current.SupersedesFailedConfigSHA = testSHA2
-	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "4444444444444444444444444444444444444444"}, map[string]Intent{failedSHA: previous}); err == nil {
+	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "4444444444444444444444444444444444444444"}, SupersededIntents{"api": {failedSHA: previous}}); err == nil {
 		t.Fatal("wrong failed atom identity was accepted")
+	}
+}
+
+func TestBindIntentsKeepsSharedFailedAtomIntentsComponentScoped(t *testing.T) {
+	registry := testRegistry()
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{
+		"deploy/releases/api/intent.json",
+		"deploy/releases/telemetry/intent.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedSHA := "3333333333333333333333333333333333333333"
+	staleSHA := "4444444444444444444444444444444444444444"
+	current := make(map[string]Intent, 2)
+	previous := make(map[string]Intent, 2)
+	previousConfigSHA := make(map[string]string, 2)
+	superseded := make(SupersededIntents, 2)
+	for _, component := range []string{"api", "telemetry"} {
+		prior := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: component, Generation: 2,
+			ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: staleSHA, ExpectedPreviousManifestSHA: staleSHA,
+			ExpectedPreviousOCIRevision: staleSHA, ExpectedPreviousImageDigest: testDigest, Rollback: "previous-git-lkg"}
+		next := prior
+		next.Generation++
+		next.ExpectedPreviousConfigSHA = testSHA1
+		next.ExpectedPreviousManifestSHA = testSHA1
+		next.ExpectedPreviousOCIRevision = testSHA1
+		next.SupersedesFailedConfigSHA = failedSHA
+		current[component] = next
+		previous[component] = prior
+		previousConfigSHA[component] = failedSHA
+		superseded[component] = map[string]Intent{failedSHA: prior}
+	}
+	bound, err := BindIntents(registry, plan, current, previous, previousConfigSHA, superseded)
+	if err != nil {
+		t.Fatalf("shared failed atom intent recovery was rejected: %v", err)
+	}
+	if len(bound.Releases) != 2 {
+		t.Fatalf("shared failed atom lost a component release: %+v", bound.Releases)
+	}
+	for _, release := range bound.Releases {
+		if release.SupersedesFailedConfigSHA != failedSHA || release.ExpectedPreviousConfigSHA != testSHA1 {
+			t.Fatalf("component-scoped failed intent was not bound: %+v", release)
+		}
 	}
 }
 
@@ -399,7 +443,7 @@ func TestBindIntentsAllowsImmediateFailedPreflightPredecessorCorrection(t *testi
 		ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest,
 		SupersedesFailedConfigSHA: failedSHA, Rollback: "previous-git-lkg"}
 	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous},
-		map[string]string{"api": failedSHA}, map[string]Intent{failedSHA: previous})
+		map[string]string{"api": failedSHA}, SupersededIntents{"api": {failedSHA: previous}})
 	if err != nil {
 		t.Fatalf("failed preflight predecessor correction was rejected: %v", err)
 	}
@@ -411,12 +455,12 @@ func TestBindIntentsAllowsImmediateFailedPreflightPredecessorCorrection(t *testi
 	wrongFailed := previous
 	wrongFailed.Generation = 1
 	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous},
-		map[string]string{"api": failedSHA}, map[string]Intent{failedSHA: wrongFailed}); err == nil {
+		map[string]string{"api": failedSHA}, SupersededIntents{"api": {failedSHA: wrongFailed}}); err == nil {
 		t.Fatal("predecessor correction from a different failed intent was accepted")
 	}
 	current.ExpectedPreviousManifestSHA = staleSHA
 	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous},
-		map[string]string{"api": failedSHA}, map[string]Intent{failedSHA: previous}); err == nil {
+		map[string]string{"api": failedSHA}, SupersededIntents{"api": {failedSHA: previous}}); err == nil {
 		t.Fatal("predecessor correction with split source identities was accepted")
 	}
 }
@@ -437,7 +481,7 @@ func TestBindIntentsAllowsFailedPreflightRepairAgainstLiveGuardianLKG(t *testing
 		ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest,
 		SupersedesFailedConfigSHA: failedSHA, Rollback: "previous-git-lkg"}
 	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous},
-		map[string]string{"api": staleSHA}, map[string]Intent{failedSHA: previous})
+		map[string]string{"api": staleSHA}, SupersededIntents{"api": {failedSHA: previous}})
 	if err != nil {
 		t.Fatalf("live Guardian LKG repair was rejected: %v", err)
 	}
@@ -449,7 +493,7 @@ func TestBindIntentsAllowsFailedPreflightRepairAgainstLiveGuardianLKG(t *testing
 	wrongFailed := previous
 	wrongFailed.Generation = 1
 	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous},
-		map[string]string{"api": staleSHA}, map[string]Intent{failedSHA: wrongFailed}); err == nil {
+		map[string]string{"api": staleSHA}, SupersededIntents{"api": {failedSHA: wrongFailed}}); err == nil {
 		t.Fatal("live LKG repair from a different failed intent was accepted")
 	}
 }

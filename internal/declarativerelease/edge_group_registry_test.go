@@ -328,8 +328,8 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 		group, component, dependency, lkgSHA, lkgImage, failedSHA string
 		generation                                                int
 	}{
-		{"us", "edge-worker-us", "edge-control-us", "5fd7c69c351ed5a225a53bf23de5c436d32a3ba5", "sha256:c7a2893151d6bd94ec0631b59acdae8199a2ab3fcb6073c13adb921c143ab2fc", "", 36},
-		{"de", "edge-worker-de", "edge-control-de", "3ad7f91d033bbb4cb81c8e105cd2ce4a7dec3a0b", "sha256:0f196ab88735b3f828f3ac91ad57bf57d7b32a9adca5d5e1a68baee0e0498965", "", 222},
+		{"us", "edge-worker-us", "edge-control-us", "932194a1e3e2f73ebb45394981e6132894b14f5b", "sha256:8b590f8156e37079c71ee0c320ee00ffbbb0b31f026f773a6ccc5894cd676332", "cf3c50ce4a8df97d24df94a0761ef170c84aede5", 37},
+		{"de", "edge-worker-de", "edge-control-de", "46d42454427acac56f1c466276c28abd42968410", "sha256:544d6f7079d8ab43fc74cd08f01d9b17a74ae5b02c593df6c64e2374bfff6184", "cf3c50ce4a8df97d24df94a0761ef170c84aede5", 223},
 	}
 	for _, check := range checks {
 		t.Run(check.group, func(t *testing.T) {
@@ -364,9 +364,9 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 			}
 			prior := intent
 			prior.Generation--
-			superseded := map[string]Intent{}
+			superseded := SupersededIntents{}
 			if check.failedSHA != "" {
-				superseded[check.failedSHA] = prior
+				superseded[worker.ID] = map[string]Intent{check.failedSHA: prior}
 			}
 			bound, err := BindIntents(registry, plan, map[string]Intent{worker.ID: intent}, map[string]Intent{worker.ID: prior},
 				map[string]string{worker.ID: check.lkgSHA}, superseded)
