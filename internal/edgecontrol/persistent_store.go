@@ -640,6 +640,16 @@ func (store *PersistentGroupStore) AppendGroupAuthorityCAS(ctx context.Context, 
 		}
 		state.AuthorityLedger = append(state.AuthorityLedger, appended)
 		if next != nil {
+			// A candidate is compiled and signed against one immutable route
+			// generation. A configuration publication must be able to supersede
+			// that generation independently of an in-flight Worker release; the
+			// Worker can only be promoted after it is staged again against the new
+			// authority. Retire both pointers atomically so stale code state cannot
+			// reject an otherwise valid configuration CAS during state validation.
+			if current != nil && current.Bundle.Generation != next.Bundle.Generation {
+				state.Candidate = nil
+				state.CandidateHistory = nil
+			}
 			state.Published = next
 		}
 		return nil

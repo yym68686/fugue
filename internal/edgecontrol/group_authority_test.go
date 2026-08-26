@@ -274,6 +274,51 @@ func TestGroupAuthorityReconcileIsIdempotentUntilSignatureRefreshWindow(t *testi
 	}
 }
 
+func TestGroupAuthorityConfigurationPublicationRetiresSupersededWorkerCandidate(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 26, 5, 35, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, signer, candidate, before := groupPromotionFixture(t, groupID, now)
+	if candidate.Bundle.Generation != before.Published.Bundle.Generation {
+		t.Fatalf("fixture candidate generation=%s published=%s", candidate.Bundle.Generation, before.Published.Bundle.Generation)
+	}
+
+	inventory, err := store.ReadGroupInventory(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory.Sequence++
+	inventory.Generation = "inventory-configuration-successor"
+	inventory.ObservedAt = now.Add(2 * time.Minute)
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, inventory.Sequence-1, inventory); err != nil {
+		t.Fatal(err)
+	}
+	intent := routeIntentFixture()
+	intent.Generation = "route-intents-configuration-successor"
+	intent.Routes[0].Generation = "route-configuration-successor"
+	compiled, err := (GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now.Add(2 * time.Minute) }}).Reconcile(ctx, intent, []string{groupID})
+	if err != nil || compiled.Succeeded != 1 {
+		t.Fatalf("compile configuration successor: batch=%+v err=%v", compiled, err)
+	}
+	published, err := (GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now.Add(2 * time.Minute) }}).Publish(ctx, compiled)
+	if err != nil || published.Published != 1 || published.Failed != 0 {
+		t.Fatalf("publish configuration successor: batch=%+v err=%v", published, err)
+	}
+
+	after, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || after.Published.Bundle.Generation == before.Published.Bundle.Generation ||
+		after.Published.CandidateLedgerSequence != compiled.Results[0].LedgerSequence {
+		t.Fatalf("configuration authority did not advance: before=%+v after=%+v err=%v", before, after, err)
+	}
+	if _, exists, err := store.ReadGroupCandidate(ctx, groupID); err != nil || exists {
+		t.Fatalf("superseded Worker candidate still blocks configuration authority: exists=%t err=%v", exists, err)
+	}
+	persisted, err := store.readGroupState(store.groupStatePath(groupID), groupID)
+	if err != nil || len(persisted.CandidateHistory) != 0 {
+		t.Fatalf("superseded Worker candidate history was retained: count=%d err=%v", len(persisted.CandidateHistory), err)
+	}
+}
+
 func TestGroupAuthorityClassifiesPublishedLKGRecoveryFailure(t *testing.T) {
 	t.Parallel()
 
