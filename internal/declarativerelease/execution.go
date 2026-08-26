@@ -1135,9 +1135,12 @@ func (observation Observation) ValidateDegradedPredecessor(release PlanRelease) 
 		observation.OCIRevision != "" || observation.TemplateDigest != "" || len(observation.FieldManagers) != 0
 	if owned {
 		separator := strings.LastIndex(observation.ImageRef, "@")
+		coherentIdentity := observation.ManifestSHA == observation.OCIRevision &&
+			(observation.ConfigSHA == observation.ManifestSHA || observation.MatchesSupersededFailedAtom(release))
 		if separator < 1 || !digestPattern.MatchString(observation.ImageRef[separator+1:]) ||
-			!shaPattern.MatchString(observation.ConfigSHA) || observation.ManifestSHA != observation.ConfigSHA ||
-			observation.OCIRevision != observation.ConfigSHA || !digestPattern.MatchString(observation.TemplateDigest) ||
+			!shaPattern.MatchString(observation.ConfigSHA) || !shaPattern.MatchString(observation.ManifestSHA) ||
+			!shaPattern.MatchString(observation.OCIRevision) || !coherentIdentity ||
+			!digestPattern.MatchString(observation.TemplateDigest) ||
 			!sort.StringsAreSorted(observation.FieldManagers) {
 			return errors.New("owned degraded predecessor identity is invalid")
 		}
@@ -1155,15 +1158,18 @@ func (observation Observation) ValidateDegradedPredecessor(release PlanRelease) 
 	return observation.validateResourceCAS()
 }
 
-// MatchesSupersededFailedAtom identifies only the immutable workload produced
-// by the immediately preceding failed production atom. It does not authorize
-// recovery by itself; callers must still use the degraded-predecessor CAS and
-// ownership checks before mutating the workload.
+// MatchesSupersededFailedAtom identifies the executable identity produced by
+// the reviewed failed atom. A failed recovery may update the Pod template while
+// leaving an older valid top-level config annotation behind, so that annotation
+// is CAS evidence rather than executable provenance. Callers still verify the
+// immutable image revision and use degraded-predecessor ownership checks before
+// mutating the workload.
 func (observation Observation) MatchesSupersededFailedAtom(release PlanRelease) bool {
 	failed := release.SupersedesFailedConfigSHA
 	imagePrefix := release.Artifact.Repository + "@"
 	return shaPattern.MatchString(failed) && observation.Present &&
-		observation.ConfigSHA == failed && observation.ManifestSHA == failed && observation.OCIRevision == failed &&
+		shaPattern.MatchString(observation.ConfigSHA) &&
+		observation.ManifestSHA == failed && observation.OCIRevision == failed &&
 		strings.HasPrefix(observation.ImageRef, imagePrefix) &&
 		digestPattern.MatchString(strings.TrimPrefix(observation.ImageRef, imagePrefix))
 }

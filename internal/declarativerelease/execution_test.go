@@ -674,10 +674,11 @@ func TestPrepareFailedAtomSuccessorAdoptsOwnedManifestDriftFromHealthyLKG(t *tes
 	}
 }
 
-func TestPrepareFailedAtomSuccessorRecoversExactFailedWorkloadBeforeLKGObservation(t *testing.T) {
+func TestPrepareFailedAtomSuccessorRecoversMixedLegacyConfigBeforeLKGObservation(t *testing.T) {
 	plan := boundAPIPlan(t)
 	plan.PlanDigest = ""
 	failedSHA := strings.Repeat("f", 40)
+	legacyConfigSHA := strings.Repeat("e", 40)
 	plan.Releases[0].SupersedesFailedConfigSHA = failedSHA
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {
@@ -686,13 +687,13 @@ func TestPrepareFailedAtomSuccessorRecoversExactFailedWorkloadBeforeLKGObservati
 	plan.PlanDigest = digestOf(unsigned)
 	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
 	failed := lkg
-	failed.ConfigSHA = failedSHA
+	failed.ConfigSHA = legacyConfigSHA
 	failed.ManifestSHA = failedSHA
 	failed.OCIRevision = failedSHA
 	failed.ImageRef = plan.Releases[0].Artifact.Repository + "@" + testDigest
 	owned := casOnlyObservation(failed)
 	owned.ImageRef = failed.ImageRef
-	owned.ConfigSHA = failedSHA
+	owned.ConfigSHA = legacyConfigSHA
 	owned.ManifestSHA = failedSHA
 	owned.OCIRevision = failedSHA
 	owned.TemplateDigest = failed.TemplateDigest
@@ -712,7 +713,7 @@ func TestPrepareFailedAtomSuccessorRecoversExactFailedWorkloadBeforeLKGObservati
 	}
 }
 
-func TestMatchesSupersededFailedAtomRejectsPartialIdentity(t *testing.T) {
+func TestMatchesSupersededFailedAtomAcceptsCASBoundLegacyConfigAnnotation(t *testing.T) {
 	failedSHA := strings.Repeat("f", 40)
 	release := PlanRelease{
 		SupersedesFailedConfigSHA: failedSHA,
@@ -725,8 +726,13 @@ func TestMatchesSupersededFailedAtomRejectsPartialIdentity(t *testing.T) {
 	if !exact.MatchesSupersededFailedAtom(release) {
 		t.Fatal("exact superseded failed atom was rejected")
 	}
+	legacyConfig := exact
+	legacyConfig.ConfigSHA = strings.Repeat("e", 40)
+	if !legacyConfig.MatchesSupersededFailedAtom(release) {
+		t.Fatal("superseded failed atom with a legacy top-level config annotation was rejected")
+	}
 	for name, mutate := range map[string]func(*Observation){
-		"config":   func(value *Observation) { value.ConfigSHA = strings.Repeat("e", 40) },
+		"config":   func(value *Observation) { value.ConfigSHA = "invalid" },
 		"manifest": func(value *Observation) { value.ManifestSHA = strings.Repeat("e", 40) },
 		"revision": func(value *Observation) { value.OCIRevision = strings.Repeat("e", 40) },
 		"tag":      func(value *Observation) { value.ImageRef = "ghcr.io/example/fugue-api:latest" },
