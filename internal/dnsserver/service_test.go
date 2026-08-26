@@ -1590,6 +1590,17 @@ func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 	if status := reloaded.Status(); !status.Healthy || !status.StaleCache || status.BundleVersion != "dnsgen_test" {
 		t.Fatalf("unexpected status after cache load: %+v", status)
 	}
+	loadMetrics := reloaded.metricSnapshot().Metrics
+	if loadMetrics.CacheLoadEnvelope != 1 || loadMetrics.CacheLoadRaw != 0 {
+		t.Fatalf("unexpected envelope cache load metrics: %+v", loadMetrics)
+	}
+	recorder := httptest.NewRecorder()
+	reloaded.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metricsBody := recorder.Body.String()
+	if !strings.Contains(metricsBody, `fugue_dns_cache_load_format_total{format="envelope"} 1`) ||
+		!strings.Contains(metricsBody, `fugue_dns_cache_load_format_total{format="raw"} 0`) {
+		t.Fatalf("expected exported envelope cache load metrics, got %s", metricsBody)
+	}
 
 	if err := service.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("second sync failed: %v", err)
@@ -1699,6 +1710,10 @@ func TestLoadCacheReadsLegacyDNSCacheFile(t *testing.T) {
 	status := service.Status()
 	if !status.Healthy || !status.StaleCache || status.ServingGeneration != "dnsgen_legacy" {
 		t.Fatalf("unexpected legacy cache status: %+v", status)
+	}
+	loadMetrics := service.metricSnapshot().Metrics
+	if loadMetrics.CacheLoadEnvelope != 0 || loadMetrics.CacheLoadRaw != 1 {
+		t.Fatalf("unexpected raw cache load metrics: %+v", loadMetrics)
 	}
 }
 

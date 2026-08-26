@@ -125,6 +125,8 @@ type telemetry struct {
 	CacheLoadSuccess      uint64
 	CacheLoadMiss         uint64
 	CacheLoadError        uint64
+	CacheLoadEnvelope     uint64
+	CacheLoadRaw          uint64
 	QueryTotal            map[dnsQueryMetricKey]uint64
 	ScopeResolutionTotal  map[string]uint64
 }
@@ -732,6 +734,10 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "fugue_dns_cache_load_total{result=\"success\"} %d\n", snapshot.Metrics.CacheLoadSuccess)
 	fmt.Fprintf(w, "fugue_dns_cache_load_total{result=\"miss\"} %d\n", snapshot.Metrics.CacheLoadMiss)
 	fmt.Fprintf(w, "fugue_dns_cache_load_total{result=\"error\"} %d\n", snapshot.Metrics.CacheLoadError)
+	fmt.Fprintln(w, "# HELP fugue_dns_cache_load_format_total Successfully loaded DNS bundle caches by on-disk format.")
+	fmt.Fprintln(w, "# TYPE fugue_dns_cache_load_format_total counter")
+	fmt.Fprintf(w, "fugue_dns_cache_load_format_total{format=\"envelope\"} %d\n", snapshot.Metrics.CacheLoadEnvelope)
+	fmt.Fprintf(w, "fugue_dns_cache_load_format_total{format=\"raw\"} %d\n", snapshot.Metrics.CacheLoadRaw)
 	fmt.Fprintln(w, "# HELP fugue_dns_bundle_sync_duration_seconds Duration of the last DNS bundle sync attempt.")
 	fmt.Fprintln(w, "# TYPE fugue_dns_bundle_sync_duration_seconds gauge")
 	fmt.Fprintf(w, "fugue_dns_bundle_sync_duration_seconds %.6f\n", snapshot.Metrics.LastSyncDuration.Seconds())
@@ -930,6 +936,7 @@ func (s *Service) LoadCache() error {
 	}
 	s.setBundle(cached.Bundle, cached.ETag, true, "")
 	s.recordCacheLoad("success")
+	s.recordCacheLoadFormat(decoded.Envelope)
 	s.Logger.Printf("dns bundle cache loaded; version=%s etag=%s cached_at=%s records=%d path=%s", cached.Bundle.Version, cached.ETag, cached.CachedAt.Format(time.RFC3339Nano), len(cached.Bundle.Records), path)
 	return nil
 }
@@ -1141,6 +1148,16 @@ func (s *Service) recordCacheLoad(result string) {
 		s.metrics.CacheLoadMiss++
 	default:
 		s.metrics.CacheLoadError++
+	}
+}
+
+func (s *Service) recordCacheLoadFormat(envelope bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if envelope {
+		s.metrics.CacheLoadEnvelope++
+	} else {
+		s.metrics.CacheLoadRaw++
 	}
 }
 
@@ -1664,6 +1681,7 @@ func (s *Service) LoadPreviousCache() error {
 		}
 		s.setBundle(cached.Bundle, cached.ETag, true, "")
 		s.recordCacheLoad("success")
+		s.recordCacheLoadFormat(decoded.Envelope)
 		if s.Logger != nil {
 			s.Logger.Printf("dns previous cache loaded; version=%s etag=%s path=%s", cached.Bundle.Version, cached.ETag, candidate.Path)
 		}
