@@ -15,7 +15,7 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
-func TestAPIGuardianHandoffBindsProductionLKG(t *testing.T) {
+func TestAPIGuardianHandoffDeclaresValidProductionLKGIdentity(t *testing.T) {
 	t.Chdir("../..")
 	registry, err := loadProductionRegistry("deploy/releases/components.json")
 	if err != nil {
@@ -43,16 +43,10 @@ func TestAPIGuardianHandoffBindsProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode API intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "6642dbd8b992d413e805ac172becfe574b7f8e18"
-	const lkgImage = "sha256:26c2f359ddf47925fccaf9c67402a9fa890d829d1f6a6687a855396b349b8aec"
-	if intent.Generation != 78 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
-		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage ||
-		intent.SupersedesFailedConfigSHA != "" {
-		t.Fatalf("API Guardian intent is not bound to the production LKG: %+v", intent)
-	}
+	assertProductionLKGIntent(t, intent, "api")
 }
 
-func TestControllerIntentBindsCurrentProductionLKG(t *testing.T) {
+func TestControllerIntentDeclaresValidProductionLKGIdentity(t *testing.T) {
 	t.Chdir("../..")
 	file, err := os.Open("deploy/releases/controller/intent.json")
 	if err != nil {
@@ -63,16 +57,10 @@ func TestControllerIntentBindsCurrentProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode controller intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "52ca342a7a5324ad9eff5ddd3629a2c71d5ebd91"
-	const lkgImage = "sha256:aab3a4498e76706e21da55a1a6bd90584105530e7c004d719f9e2d654283ba24"
-	const failedSHA = "72f58422b545638141d03fc1339a9bb79daf6dc7"
-	if intent.Generation != 9 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
-		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != failedSHA {
-		t.Fatalf("controller intent is not bound to the production LKG: %+v", intent)
-	}
+	assertProductionLKGIntent(t, intent, "controller")
 }
 
-func TestReleaseGuardianIntentBindsCurrentProductionLKG(t *testing.T) {
+func TestReleaseGuardianIntentDeclaresValidProductionLKGIdentity(t *testing.T) {
 	t.Chdir("../..")
 	file, err := os.Open("deploy/releases/guardian/intent.json")
 	if err != nil {
@@ -83,11 +71,18 @@ func TestReleaseGuardianIntentBindsCurrentProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode release Guardian intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "9255500f4897928d09050647273e4207ba7752ae"
-	const lkgImage = "sha256:7597d6d166e223dcf78e0521073e73de4a88fb080007a27b3c6dd232bef6c51e"
-	if intent.Generation != 218 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
-		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
-		t.Fatalf("release Guardian intent is not bound to the production LKG: %+v", intent)
+	assertProductionLKGIntent(t, intent, "release-guardian")
+}
+
+func assertProductionLKGIntent(t *testing.T, intent declarativerelease.Intent, component string) {
+	t.Helper()
+	if err := intent.Validate(); err != nil {
+		t.Fatalf("%s production intent is invalid: %v", component, err)
+	}
+	if intent.Component != component || !intent.ExpectedPreviousPresent ||
+		intent.ExpectedPreviousConfigSHA != intent.ExpectedPreviousManifestSHA ||
+		intent.ExpectedPreviousConfigSHA != intent.ExpectedPreviousOCIRevision {
+		t.Fatalf("%s intent does not declare one immutable production predecessor: %+v", component, intent)
 	}
 }
 

@@ -726,7 +726,7 @@
               },
               {
                 "hostPath": {
-                  "path": "/var/lib/fugue/edge-owned/@@GROUP_ID@@/caddy-slot-a",
+                  "path": "/var/lib/fugue/edge-owned/@@GROUP_ID@@/caddy-data",
                   "type": "DirectoryOrCreate"
                 },
                 "name": "caddy-data"
@@ -1237,7 +1237,7 @@
               },
               {
                 "hostPath": {
-                  "path": "/var/lib/fugue/edge-owned/@@GROUP_ID@@/caddy-slot-b",
+                  "path": "/var/lib/fugue/edge-owned/@@GROUP_ID@@/caddy-data",
                   "type": "DirectoryOrCreate"
                 },
                 "name": "caddy-data"

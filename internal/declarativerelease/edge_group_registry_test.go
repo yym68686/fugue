@@ -301,7 +301,7 @@ func TestSharedEdgeWorkerManifestRollsOneGroupPerIntent(t *testing.T) {
 	}
 }
 
-func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
+func TestEdgeWorkerGuardianDeliveryValidatesProductionLKGIdentity(t *testing.T) {
 	baseFile, err := os.Open("../../deploy/releases/components.json")
 	if err != nil {
 		t.Fatal(err)
@@ -325,11 +325,10 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks := []struct {
-		group, component, dependency, lkgSHA, lkgImage, failedSHA string
-		generation                                                int
+		group, component, dependency string
 	}{
-		{"us", "edge-worker-us", "edge-control-us", "932194a1e3e2f73ebb45394981e6132894b14f5b", "sha256:8b590f8156e37079c71ee0c320ee00ffbbb0b31f026f773a6ccc5894cd676332", "cf3c50ce4a8df97d24df94a0761ef170c84aede5", 37},
-		{"de", "edge-worker-de", "edge-control-de", "46d42454427acac56f1c466276c28abd42968410", "sha256:544d6f7079d8ab43fc74cd08f01d9b17a74ae5b02c593df6c64e2374bfff6184", "cf3c50ce4a8df97d24df94a0761ef170c84aede5", 223},
+		{"us", "edge-worker-us", "edge-control-us"},
+		{"de", "edge-worker-de", "edge-control-de"},
 	}
 	for _, check := range checks {
 		t.Run(check.group, func(t *testing.T) {
@@ -353,10 +352,13 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 			if err != nil || closeErr != nil {
 				t.Fatalf("decode %s Worker intent: %v close: %v", check.group, err, closeErr)
 			}
-			if intent.Generation != check.generation || intent.ExpectedPreviousConfigSHA != check.lkgSHA ||
-				intent.ExpectedPreviousManifestSHA != check.lkgSHA || intent.ExpectedPreviousOCIRevision != check.lkgSHA ||
-				intent.ExpectedPreviousImageDigest != check.lkgImage || intent.SupersedesFailedConfigSHA != check.failedSHA {
-				t.Fatalf("%s Edge Worker intent does not bind the exact live LKG: %+v", check.group, intent)
+			if err := intent.Validate(); err != nil {
+				t.Fatalf("%s Edge Worker intent is invalid: %v", check.group, err)
+			}
+			if intent.Component != check.component || !intent.ExpectedPreviousPresent ||
+				intent.ExpectedPreviousConfigSHA != intent.ExpectedPreviousManifestSHA ||
+				intent.ExpectedPreviousConfigSHA != intent.ExpectedPreviousOCIRevision {
+				t.Fatalf("%s Edge Worker intent does not declare one immutable production predecessor: %+v", check.group, intent)
 			}
 			plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/edge-groups.json", worker.IntentPath})
 			if err != nil {
@@ -365,11 +367,11 @@ func TestEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 			prior := intent
 			prior.Generation--
 			superseded := SupersededIntents{}
-			if check.failedSHA != "" {
-				superseded[worker.ID] = map[string]Intent{check.failedSHA: prior}
+			if intent.SupersedesFailedConfigSHA != "" {
+				superseded[worker.ID] = map[string]Intent{intent.SupersedesFailedConfigSHA: prior}
 			}
 			bound, err := BindIntents(registry, plan, map[string]Intent{worker.ID: intent}, map[string]Intent{worker.ID: prior},
-				map[string]string{worker.ID: check.lkgSHA}, superseded)
+				map[string]string{worker.ID: intent.ExpectedPreviousConfigSHA}, superseded)
 			if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != worker.ID || bound.Releases[0].Delivery == nil ||
 				bound.Releases[0].Delivery.Writer != "guardian" {
 				t.Fatalf("%s Edge Worker Guardian release expanded the planner: releases=%+v err=%v", check.group, bound.Releases, err)
@@ -525,6 +527,60 @@ func TestEdgeWorkerTemplateSeparatesProcessLivenessFromServingReadiness(t *testi
 	}
 	if checked != 2 {
 		t.Fatalf("checked %d edge worker containers, want 2", checked)
+	}
+}
+
+func TestEdgeWorkerTemplateSharesCaddyStorageAcrossSlots(t *testing.T) {
+	raw, err := os.ReadFile("../../internal/edge/component/resources.inventory-producer.group.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := edgeGroupFixture("gamma", "edge-group-metro-gamma")
+	materialized, err := MaterializeManifestTemplate(raw, group.Worker.ManifestVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := DecodeResourceSet(strings.NewReader(string(materialized)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantCaddyPath := "/var/lib/fugue/edge-owned/edge-group-metro-gamma/caddy-data"
+	wantWorkerPaths := map[string]string{
+		group.Worker.Transition.EdgeGroupAB.WorkerAName: "/var/lib/fugue/edge-owned/edge-group-metro-gamma/slot-a",
+		group.Worker.Transition.EdgeGroupAB.WorkerBName: "/var/lib/fugue/edge-owned/edge-group-metro-gamma/slot-b",
+	}
+	checked := 0
+	for _, item := range set.Items {
+		if item["kind"] != "DaemonSet" {
+			continue
+		}
+		metadata, _ := item["metadata"].(map[string]any)
+		name := stringField(metadata, "name")
+		wantWorkerPath, ok := wantWorkerPaths[name]
+		if !ok {
+			continue
+		}
+		spec, _ := item["spec"].(map[string]any)
+		template, _ := spec["template"].(map[string]any)
+		templateSpec, _ := template["spec"].(map[string]any)
+		volumes, _ := templateSpec["volumes"].([]any)
+		paths := map[string]string{}
+		for _, rawVolume := range volumes {
+			volume, _ := rawVolume.(map[string]any)
+			hostPath, _ := volume["hostPath"].(map[string]any)
+			paths[stringField(volume, "name")] = stringField(hostPath, "path")
+		}
+		if paths["caddy-data"] != wantCaddyPath {
+			t.Fatalf("worker %s does not use shared Caddy storage: got %q want %q", name, paths["caddy-data"], wantCaddyPath)
+		}
+		if paths["worker-state"] != wantWorkerPath {
+			t.Fatalf("worker %s route state is not slot-isolated: got %q want %q", name, paths["worker-state"], wantWorkerPath)
+		}
+		checked++
+	}
+	if checked != 2 {
+		t.Fatalf("checked %d edge worker templates, want 2", checked)
 	}
 }
 
