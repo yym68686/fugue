@@ -1600,6 +1600,70 @@ func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 	}
 }
 
+func TestServiceSyncUnavailableArtifactRetainsVerifiedLKG(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests > 1 {
+			http.Error(w, "edge DNS artifact is unavailable; retain the current verified LKG", http.StatusServiceUnavailable)
+			return
+		}
+		now := time.Now().UTC()
+		_ = json.NewEncoder(w).Encode(model.EdgeDNSBundle{
+			Version:     "dnsgen_verified_lkg",
+			Generation:  "dnsgen_verified_lkg",
+			GeneratedAt: now,
+			ValidUntil:  now.Add(time.Hour),
+			DNSNodeID:   "dns-node-1",
+			EdgeGroupID: "edge-group-country-us",
+			Zone:        "fugue.pro",
+			Records: []model.EdgeDNSRecord{{
+				Name:       "app.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"203.0.113.10"},
+				TTL:        60,
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				Status:     model.EdgeRouteStatusActive,
+			}},
+		})
+	}))
+	defer server.Close()
+
+	service := NewService(config.DNSConfig{
+		APIURL:      server.URL,
+		EdgeToken:   "edge-secret",
+		DNSNodeID:   "dns-node-1",
+		EdgeGroupID: "edge-group-country-us",
+		Zone:        "fugue.pro",
+		AnswerIPs:   []string{"203.0.113.10"},
+		CachePath:   filepath.Join(t.TempDir(), "dns-cache.json"),
+		MaxStale:    time.Hour,
+		HTTPTimeout: time.Second,
+		TTL:         60,
+		ListenAddr:  "127.0.0.1:0",
+		UDPAddr:     "127.0.0.1:0",
+	}, log.New(ioDiscard{}, "", 0))
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("activate initial DNS artifact: %v", err)
+	}
+	if err := service.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected unavailable artifact sync to fail")
+	}
+	status := service.Status()
+	if !status.Healthy || status.ServingGeneration != "dnsgen_verified_lkg" || status.BundleVersion != "dnsgen_verified_lkg" {
+		t.Fatalf("unavailable artifact replaced the verified LKG: %+v", status)
+	}
+	answer := dnsQuery(t, service, "app.fugue.pro.", miekgdns.TypeA)
+	if len(answer.Answer) != 1 {
+		t.Fatalf("expected verified LKG answer after artifact failure, got %+v", answer.Answer)
+	}
+	if record, ok := answer.Answer[0].(*miekgdns.A); !ok || record.A.String() != "203.0.113.10" {
+		t.Fatalf("unexpected verified LKG answer after artifact failure: %+v", answer.Answer)
+	}
+}
+
 func TestLoadCacheReadsLegacyDNSCacheFile(t *testing.T) {
 	t.Parallel()
 

@@ -63,20 +63,21 @@ func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
 	}
 	bundle, artifactOK, artifactErr := s.edgeDNSBundleArtifactForOptions(options, time.Now().UTC())
 	s.recordEdgeDNSArtifactHandlerLookup(artifactOK, artifactErr)
-	if artifactErr == nil && artifactOK {
+	if artifactErr != nil {
+		if s.log != nil {
+			s.log.Printf("edge dns artifact rejected; retaining DNS node LKG: dns_node_id=%s edge_group_id=%s zone=%s err=%v", options.DNSNodeID, options.EdgeGroupID, options.Zone, artifactErr)
+		}
+		httpx.WriteError(w, http.StatusServiceUnavailable, "edge DNS artifact is unavailable; retain the current verified LKG")
+		return
+	}
+	if artifactOK {
 		writeEdgeDNSBundleResponse(w, bundle)
 		return
-	} else if artifactErr != nil && s.log != nil {
-		s.log.Printf("edge dns artifact lookup failed; falling back to read-only derive: dns_node_id=%s edge_group_id=%s zone=%s err=%v", options.DNSNodeID, options.EdgeGroupID, options.Zone, artifactErr)
 	}
-
-	bundle, err = s.deriveEdgeDNSBundle(r, options)
-	s.recordEdgeDNSArtifactHandlerFallback(err)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
+	if s.log != nil {
+		s.log.Printf("edge dns artifact missing; retaining DNS node LKG: dns_node_id=%s edge_group_id=%s zone=%s", options.DNSNodeID, options.EdgeGroupID, options.Zone)
 	}
-	writeEdgeDNSBundleResponse(w, bundle)
+	httpx.WriteError(w, http.StatusServiceUnavailable, "edge DNS artifact is unavailable; retain the current verified LKG")
 }
 
 func writeEdgeDNSBundleResponse(w http.ResponseWriter, bundle model.EdgeDNSBundle) {

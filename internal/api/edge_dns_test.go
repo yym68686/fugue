@@ -236,7 +236,7 @@ func TestEdgeDNSBundleDerivesCustomDomainTargetsAndProbe(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=203.0.113.10&ttl=120", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -297,21 +297,8 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 			Status:     model.EdgeRouteStatusActive,
 		}},
 	}
-	if err := storeState.UpsertEdgeDNSBundleArtifact(store.EdgeDNSBundleArtifact{
-		ScopeKey:        edgeDNSBundleArtifactScopeKey(options),
-		Zone:            options.Zone,
-		DNSNodeID:       options.DNSNodeID,
-		EdgeGroupID:     options.EdgeGroupID,
-		AnswerIPs:       options.AnswerIPs,
-		RouteAAnswerIPs: options.RouteAAnswerIPs,
-		Version:         bundle.Version,
-		ETag:            edgeRouteBundleETag(bundle.Version),
-		Bundle:          bundle,
-		GeneratedAt:     bundle.GeneratedAt,
-		ValidUntil:      bundle.ValidUntil,
-		ActivatedAt:     now,
-		UpdatedAt:       now,
-	}); err != nil {
+	bundle = signEdgeDNSBundle(bundle, server.bundleKeyring(), 10*time.Minute)
+	if err := storeState.UpsertEdgeDNSBundleArtifact(newEdgeDNSBundleArtifact(options, bundle, now)); err != nil {
 		t.Fatalf("publish artifact: %v", err)
 	}
 
@@ -334,7 +321,7 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 	for _, sample := range []string{
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="hit"} 1.000000`,
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="miss"} 0.000000`,
-		`fugue_edge_dns_artifact_handler_fallbacks_total{outcome="served"} 0.000000`,
+		`fugue_edge_dns_artifact_handler_lookups_total{outcome="error"} 0.000000`,
 	} {
 		if !strings.Contains(metrics.String(), sample) {
 			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
@@ -342,15 +329,18 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 	}
 }
 
-func TestEdgeDNSBundleRecordsArtifactMissFallback(t *testing.T) {
+func TestEdgeDNSBundleRejectsArtifactMissWithoutDerive(t *testing.T) {
 	t.Parallel()
 
 	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
 	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "current verified LKG") {
+		t.Fatalf("expected explicit LKG retention response, got %s", recorder.Body.String())
 	}
 
 	var metrics strings.Builder
@@ -359,12 +349,56 @@ func TestEdgeDNSBundleRecordsArtifactMissFallback(t *testing.T) {
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="hit"} 0.000000`,
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="miss"} 1.000000`,
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="error"} 0.000000`,
-		`fugue_edge_dns_artifact_handler_fallbacks_total{outcome="served"} 1.000000`,
-		`fugue_edge_dns_artifact_handler_fallbacks_total{outcome="error"} 0.000000`,
 	} {
 		if !strings.Contains(metrics.String(), sample) {
 			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
 		}
+	}
+}
+
+func TestEdgeDNSBundleRejectsInvalidSignedArtifact(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	options := edgeDNSBundleOptions{
+		DNSNodeID:   "dns-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		Zone:        "fugue.pro",
+		AnswerIPs:   []string{"203.0.113.10"},
+		TTL:         60,
+	}
+	bundle := signEdgeDNSBundle(model.EdgeDNSBundle{
+		Version:     "dnsgen_invalid_artifact",
+		Generation:  "dnsgen_invalid_artifact",
+		GeneratedAt: now,
+		DNSNodeID:   options.DNSNodeID,
+		EdgeGroupID: options.EdgeGroupID,
+		Zone:        options.Zone,
+		Records: []model.EdgeDNSRecord{{
+			Name:       "artifact.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.10"},
+			TTL:        60,
+			RecordKind: model.EdgeDNSRecordKindProbe,
+			Status:     model.EdgeRouteStatusActive,
+		}},
+	}, server.bundleKeyring(), 10*time.Minute)
+	bundle.Records[0].Values = []string{"198.51.100.99"}
+	if err := storeState.UpsertEdgeDNSBundleArtifact(newEdgeDNSBundleArtifact(options, bundle, now)); err != nil {
+		t.Fatalf("publish invalid artifact fixture: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&dns_node_id=dns-us-1&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=203.0.113.10&ttl=60", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+	}
+	var metrics strings.Builder
+	server.writeEdgeDNSArtifactMetrics(&metrics)
+	if !strings.Contains(metrics.String(), `fugue_edge_dns_artifact_handler_lookups_total{outcome="error"} 1.000000`) {
+		t.Fatalf("expected invalid artifact lookup error metric, got:\n%s", metrics.String())
 	}
 }
 
@@ -405,7 +439,7 @@ func TestEdgeDNSBundlePublishesCustomDomainTargetsBeforeVerification(t *testing.
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=203.0.113.10&ttl=120", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -446,7 +480,7 @@ func TestEdgeDNSBundlePublishesHostedZoneRecords(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=example.net&answer_ip=203.0.113.10&ttl=120", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -494,7 +528,7 @@ func TestEdgeDNSBundlePublishesDynamicHostedZoneInventory(t *testing.T) {
 		t.Helper()
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
-		server.Handler().ServeHTTP(recorder, req)
+		serveEdgeDNSBundleRequest(t, server, recorder, req)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 		}
@@ -554,7 +588,7 @@ func TestEdgeDNSBundlePublishesHostedFlattenedRecords(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=example.net&answer_ip=203.0.113.10&ttl=120", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -598,7 +632,7 @@ func TestEdgeDNSBundleExpandsHostedFugueAppRecord(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=example.net&answer_ip=203.0.113.10&ttl=120", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -631,7 +665,7 @@ func TestEdgeDNSBundleSkipsPreVerificationTargetsForExternalAppRoutes(t *testing
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=203.0.113.10&ttl=120", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -671,7 +705,7 @@ func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 
 	first := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-hk&answer_ip=203.0.113.10", nil)
-	server.Handler().ServeHTTP(first, req)
+	serveEdgeDNSBundleRequest(t, server, first, req)
 	if first.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, first.Code, first.Body.String())
 	}
@@ -687,7 +721,7 @@ func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 
 	repeated := httptest.NewRecorder()
 	repeatedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-hk&answer_ip=203.0.113.10", nil)
-	server.Handler().ServeHTTP(repeated, repeatedReq)
+	serveEdgeDNSBundleRequest(t, server, repeated, repeatedReq)
 	if repeated.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, repeated.Code, repeated.Body.String())
 	}
@@ -700,7 +734,7 @@ func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	conditional := httptest.NewRecorder()
 	conditionalReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-hk&answer_ip=203.0.113.10", nil)
 	conditionalReq.Header.Set("If-None-Match", etag)
-	server.Handler().ServeHTTP(conditional, conditionalReq)
+	serveEdgeDNSBundleRequest(t, server, conditional, conditionalReq)
 	if conditional.Code != http.StatusOK {
 		t.Fatalf("expected signed DNS bundle refresh status %d, got %d body=%s", http.StatusOK, conditional.Code, conditional.Body.String())
 	}
@@ -713,7 +747,7 @@ func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	changed := httptest.NewRecorder()
 	changedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-hk&answer_ip=203.0.113.11", nil)
 	changedReq.Header.Set("If-None-Match", etag)
-	server.Handler().ServeHTTP(changed, changedReq)
+	serveEdgeDNSBundleRequest(t, server, changed, changedReq)
 	if changed.Code != http.StatusOK {
 		t.Fatalf("expected status %d after answer IP change, got %d body=%s", http.StatusOK, changed.Code, changed.Body.String())
 	}
@@ -752,7 +786,7 @@ func TestEdgeDNSBundleUsesDefaultEdgeCustomTargets(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -791,7 +825,7 @@ func TestEdgeDNSBundleKeepsCustomDomainTargetWhileTLSIsPending(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=203.0.113.10&ttl=120", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -850,7 +884,7 @@ func TestEdgeDNSBundleUsesHealthyPolicyEdgeGroupIPsForOptInTargets(t *testing.T)
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-de&answer_ip=198.51.100.10&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -897,7 +931,7 @@ func TestEdgeDNSBundleUsesDNSNodeInventoryAfterEdgeInventoryMovesPerGroup(t *tes
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=192.0.2.10", nil)
-	server.Handler().ServeHTTP(recorder, request)
+	serveEdgeDNSBundleRequest(t, server, recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -943,7 +977,7 @@ func TestEdgeDNSBundleVerifiedCustomDomainOwnsStableTarget(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=15.204.94.71", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -984,7 +1018,7 @@ func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1006,7 +1040,7 @@ func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 
 	otherGroupRecorder := httptest.NewRecorder()
 	otherGroupReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(otherGroupRecorder, otherGroupReq)
+	serveEdgeDNSBundleRequest(t, server, otherGroupRecorder, otherGroupReq)
 	if otherGroupRecorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, otherGroupRecorder.Code, otherGroupRecorder.Body.String())
 	}
@@ -1045,7 +1079,7 @@ func TestEdgeDNSBundleUsesAllRouteReadyEdgesForDefaultPlatformDomain(t *testing.
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1089,7 +1123,7 @@ func TestEdgeDNSBundleExcludesPolicyBlockedEdgeNodeAnswers(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1122,7 +1156,7 @@ func TestEdgeDNSBundleExcludesDrainingEdgeNodeAnswers(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1163,7 +1197,7 @@ func TestEdgeDNSBundleKeepsObserveOnlyDeepHealthFailuresInAnswers(t *testing.T) 
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1210,7 +1244,7 @@ func TestEdgeDNSBundleExcludesInvalidLKGEdgeNodeAnswers(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1281,7 +1315,7 @@ func TestEdgeDNSBundleSharedCustomDomainTargetKeepsStrictestEdgeExclusions(t *te
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1332,7 +1366,7 @@ func TestEdgeDNSBundleUsesDegradedServingLKGEdgeIPsForPlatformAppRecords(t *test
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1362,7 +1396,7 @@ func TestEdgeDNSBundleDoesNotFallbackToRouteAForUnavailableEdgeTraffic(t *testin
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1430,7 +1464,7 @@ func TestEdgeDNSBundlePublishesCustomDomainTargetForDisabledEdgeEnabledApp(t *te
 
 			recorder := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71&route_a_answer_ip=136.112.185.40", nil)
-			server.Handler().ServeHTTP(recorder, req)
+			serveEdgeDNSBundleRequest(t, server, recorder, req)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 			}
@@ -1468,7 +1502,7 @@ func TestEdgeDNSBundleKeepsStaticProtectedZoneRecordsAndWildcardFallback(t *test
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1534,7 +1568,7 @@ func TestEdgeDNSBundleLetsPlatformDomainBindingOverrideStaticAddressRecords(t *t
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1588,7 +1622,7 @@ func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t 
 
 	us := httptest.NewRecorder()
 	usReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(us, usReq)
+	serveEdgeDNSBundleRequest(t, server, us, usReq)
 	if us.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, us.Code, us.Body.String())
 	}
@@ -1608,7 +1642,7 @@ func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t 
 
 	de := httptest.NewRecorder()
 	deReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(de, deReq)
+	serveEdgeDNSBundleRequest(t, server, de, deReq)
 	if de.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, de.Code, de.Body.String())
 	}
@@ -1672,7 +1706,7 @@ func TestEdgeDNSBundleGatesDynamicEdgeUntilCanaryAndProbePass(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1698,7 +1732,7 @@ func TestEdgeDNSBundleGatesDynamicEdgeUntilCanaryAndProbePass(t *testing.T) {
 
 	recorder = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1730,7 +1764,7 @@ func TestEdgeDNSBundleGatesDynamicEdgeUntilCanaryAndProbePass(t *testing.T) {
 	}
 	recorder = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1832,7 +1866,7 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1910,7 +1944,7 @@ func TestEdgeDNSShadowModeDoesNotChangeAnswerButRecordsShadowWinner(t *testing.T
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -1942,7 +1976,7 @@ func TestEdgeDNSLegacyModeDisablesScopedQualityRanking(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -2215,7 +2249,7 @@ func TestEdgeDNSBundleCreatesScopedLatencyProfileFromClientMetadata(t *testing.T
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -2330,7 +2364,7 @@ func TestEdgeDNSBundleHoldsLatencyAwareDecisionDuringCooldown(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -2437,7 +2471,7 @@ func TestDNSACMEChallengeAPIDrivesEdgeDNSBundleTXTRecords(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	serveEdgeDNSBundleRequest(t, server, recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -2458,7 +2492,7 @@ func TestDNSACMEChallengeAPIDrivesEdgeDNSBundleTXTRecords(t *testing.T) {
 
 	afterDelete := httptest.NewRecorder()
 	afterDeleteReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
-	server.Handler().ServeHTTP(afterDelete, afterDeleteReq)
+	serveEdgeDNSBundleRequest(t, server, afterDelete, afterDeleteReq)
 	if afterDelete.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, afterDelete.Code, afterDelete.Body.String())
 	}
@@ -2504,4 +2538,19 @@ func edgeDNSRecordByNameAndType(records []model.EdgeDNSRecord, name, recordType 
 		}
 	}
 	return nil
+}
+
+func serveEdgeDNSBundleRequest(t *testing.T, server *Server, recorder *httptest.ResponseRecorder, req *http.Request) {
+	t.Helper()
+	options, err := server.edgeDNSBundleOptionsFromRequest(req)
+	if err == nil {
+		bundle, deriveErr := server.deriveEdgeDNSBundle(req, options)
+		if deriveErr == nil {
+			now := time.Now().UTC()
+			if publishErr := server.store.UpsertEdgeDNSBundleArtifact(newEdgeDNSBundleArtifact(options, bundle, now)); publishErr != nil {
+				t.Fatalf("publish edge DNS artifact fixture: %v", publishErr)
+			}
+		}
+	}
+	server.Handler().ServeHTTP(recorder, req)
 }

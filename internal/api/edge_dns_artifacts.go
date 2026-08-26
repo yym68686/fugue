@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/observability"
 	"fugue/internal/store"
@@ -147,22 +149,7 @@ func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Tim
 		if err != nil {
 			return count, fmt.Errorf("derive edge dns artifact for node %s: %w", node.ID, err)
 		}
-		artifact := store.EdgeDNSBundleArtifact{
-			ScopeKey:          edgeDNSBundleArtifactScopeKey(options),
-			Zone:              options.Zone,
-			DNSNodeID:         options.DNSNodeID,
-			EdgeGroupID:       options.EdgeGroupID,
-			AnswerIPs:         options.AnswerIPs,
-			RouteAAnswerIPs:   options.RouteAAnswerIPs,
-			Version:           bundle.Version,
-			ETag:              edgeRouteBundleETag(bundle.Version),
-			SourceFingerprint: edgeDNSBundleArtifactSourceFingerprint(options, bundle),
-			Bundle:            bundle,
-			GeneratedAt:       bundle.GeneratedAt,
-			ValidUntil:        bundle.ValidUntil,
-			ActivatedAt:       now,
-			UpdatedAt:         now,
-		}
+		artifact := newEdgeDNSBundleArtifact(options, bundle, now)
 		if err := s.store.UpsertEdgeDNSBundleArtifact(artifact); err != nil {
 			return count, fmt.Errorf("publish edge dns artifact for node %s: %w", node.ID, err)
 		}
@@ -219,10 +206,105 @@ func (s *Server) edgeDNSBundleArtifactForOptions(options edgeDNSBundleOptions, n
 		}
 		return model.EdgeDNSBundle{}, false, err
 	}
-	if !edgeDNSBundleArtifactFresh(artifact, now) {
-		return model.EdgeDNSBundle{}, false, nil
+	if err := s.validateEdgeDNSBundleArtifact(artifact, options, now); err != nil {
+		return model.EdgeDNSBundle{}, false, fmt.Errorf("validate activated edge DNS artifact: %w", err)
 	}
 	return artifact.Bundle, true, nil
+}
+
+func newEdgeDNSBundleArtifact(options edgeDNSBundleOptions, bundle model.EdgeDNSBundle, activatedAt time.Time) store.EdgeDNSBundleArtifact {
+	return store.EdgeDNSBundleArtifact{
+		ScopeKey:          edgeDNSBundleArtifactScopeKey(options),
+		Zone:              options.Zone,
+		DNSNodeID:         options.DNSNodeID,
+		EdgeGroupID:       options.EdgeGroupID,
+		AnswerIPs:         options.AnswerIPs,
+		RouteAAnswerIPs:   options.RouteAAnswerIPs,
+		Version:           bundle.Version,
+		ETag:              edgeRouteBundleETag(bundle.Version),
+		SourceFingerprint: edgeDNSBundleArtifactSourceFingerprint(options, bundle),
+		Bundle:            bundle,
+		GeneratedAt:       bundle.GeneratedAt,
+		ValidUntil:        bundle.ValidUntil,
+		ActivatedAt:       activatedAt,
+		UpdatedAt:         activatedAt,
+	}
+}
+
+func (s *Server) validateEdgeDNSBundleArtifact(artifact store.EdgeDNSBundleArtifact, options edgeDNSBundleOptions, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	expectedScopeKey := edgeDNSBundleArtifactScopeKey(options)
+	if strings.TrimSpace(artifact.ScopeKey) != expectedScopeKey {
+		return errors.New("scope key does not match the request")
+	}
+	if artifact.ActivatedAt.IsZero() {
+		return errors.New("artifact is not activated")
+	}
+	bundle := artifact.Bundle
+	if strings.TrimSpace(artifact.Version) == "" || strings.TrimSpace(artifact.Version) != strings.TrimSpace(bundle.Version) ||
+		strings.TrimSpace(bundle.Generation) != strings.TrimSpace(bundle.Version) {
+		return errors.New("artifact version identity is inconsistent")
+	}
+	if strings.TrimSpace(artifact.ETag) != edgeRouteBundleETag(bundle.Version) {
+		return errors.New("artifact ETag does not match its version")
+	}
+	if strings.TrimSpace(artifact.SourceFingerprint) != edgeDNSBundleArtifactSourceFingerprint(options, bundle) {
+		return errors.New("artifact source fingerprint does not match the request")
+	}
+	if normalizeExternalAppDomain(artifact.Zone) != normalizeExternalAppDomain(options.Zone) ||
+		strings.TrimSpace(artifact.DNSNodeID) != strings.TrimSpace(options.DNSNodeID) ||
+		strings.TrimSpace(artifact.EdgeGroupID) != strings.TrimSpace(options.EdgeGroupID) ||
+		!slices.Equal(uniqueSortedStrings(artifact.AnswerIPs), uniqueSortedStrings(options.AnswerIPs)) ||
+		!slices.Equal(uniqueSortedStrings(artifact.RouteAAnswerIPs), uniqueSortedStrings(options.RouteAAnswerIPs)) {
+		return errors.New("artifact scope material does not match the request")
+	}
+	if normalizeExternalAppDomain(bundle.Zone) != normalizeExternalAppDomain(options.Zone) ||
+		strings.TrimSpace(bundle.DNSNodeID) != strings.TrimSpace(options.DNSNodeID) ||
+		strings.TrimSpace(bundle.EdgeGroupID) != strings.TrimSpace(options.EdgeGroupID) {
+		return errors.New("bundle identity does not match the request")
+	}
+	if !edgeDNSArtifactTimesMatch(artifact.GeneratedAt, bundle.GeneratedAt) ||
+		!edgeDNSArtifactTimesMatch(artifact.ValidUntil, bundle.ValidUntil) {
+		return errors.New("artifact validity metadata does not match the bundle")
+	}
+	if len(bundle.Records) == 0 {
+		return errors.New("artifact contains no DNS records")
+	}
+	if !edgeDNSBundleHasSignature(bundle) {
+		return bundleauth.ErrMissingSignature
+	}
+	if err := bundleauth.VerifyEdgeDNSBundleWithKeyring(bundle, s.bundleKeyring(), now); err != nil {
+		return fmt.Errorf("verify bundle signature: %w", err)
+	}
+	if !edgeDNSBundleArtifactFresh(artifact, now) {
+		return errors.New("artifact is not fresh enough to activate")
+	}
+	return nil
+}
+
+func edgeDNSBundleHasSignature(bundle model.EdgeDNSBundle) bool {
+	if strings.TrimSpace(bundle.KeyID) != "" && strings.TrimSpace(bundle.Signature) != "" {
+		return true
+	}
+	for _, signature := range bundle.Signatures {
+		if strings.TrimSpace(signature.KeyID) != "" && strings.TrimSpace(signature.Signature) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func edgeDNSArtifactTimesMatch(stored, bundled time.Time) bool {
+	if stored.IsZero() || bundled.IsZero() {
+		return false
+	}
+	delta := stored.Sub(bundled)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= time.Microsecond
 }
 
 func edgeDNSBundleArtifactFresh(artifact store.EdgeDNSBundleArtifact, now time.Time) bool {
@@ -253,19 +335,6 @@ func (s *Server) recordEdgeDNSArtifactHandlerLookup(hit bool, err error) {
 	default:
 		s.edgeDNSArtifactHandlerLookupMissCount++
 	}
-}
-
-func (s *Server) recordEdgeDNSArtifactHandlerFallback(err error) {
-	if s == nil {
-		return
-	}
-	s.edgeDNSArtifactMu.Lock()
-	defer s.edgeDNSArtifactMu.Unlock()
-	if err != nil {
-		s.edgeDNSArtifactHandlerFallbackErrCount++
-		return
-	}
-	s.edgeDNSArtifactHandlerFallbackCount++
 }
 
 type edgeDNSBundleArtifactScopeMaterial struct {
@@ -323,8 +392,6 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	handlerLookupHitCount := s.edgeDNSArtifactHandlerLookupHitCount
 	handlerLookupMissCount := s.edgeDNSArtifactHandlerLookupMissCount
 	handlerLookupErrorCount := s.edgeDNSArtifactHandlerLookupErrorCount
-	handlerFallbackCount := s.edgeDNSArtifactHandlerFallbackCount
-	handlerFallbackErrCount := s.edgeDNSArtifactHandlerFallbackErrCount
 	s.edgeDNSArtifactMu.Unlock()
 
 	observability.WriteCounterMetric(w, "fugue_edge_dns_artifact_runs_total", "Total edge DNS artifact controller runs.", nil, float64(runCount))
@@ -344,7 +411,4 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "hit"}, float64(handlerLookupHitCount))
 	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "miss"}, float64(handlerLookupMissCount))
 	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "error"}, float64(handlerLookupErrorCount))
-	observability.WriteMetricHeader(w, "fugue_edge_dns_artifact_handler_fallbacks_total", "Edge DNS handler read-only derive fallbacks by outcome.", "counter")
-	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_fallbacks_total", map[string]string{"outcome": "served"}, float64(handlerFallbackCount))
-	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_fallbacks_total", map[string]string{"outcome": "error"}, float64(handlerFallbackErrCount))
 }
