@@ -155,6 +155,9 @@ type Server struct {
 	edgeDNSArtifactLastLegacyWrites        int
 	edgeDNSArtifactLastParityMismatches    int
 	edgeDNSArtifactLastShadowActive        int
+	edgeDNSArtifactLastVerifiedLKG         int
+	edgeDNSArtifactLastFullActive          int
+	edgeDNSArtifactLastVerifyDeferred      int
 	edgeDNSArtifactRunCount                int64
 	edgeDNSArtifactSkippedCount            int64
 	edgeDNSArtifactErrorCount              int64

@@ -28,15 +28,18 @@ const (
 var errEdgeDNSArtifactParityMismatch = errors.New("immutable and compatibility DNS artifact digests differ")
 
 type edgeDNSArtifactPublicationStats struct {
-	Artifacts         int
-	SourceSnapshots   int
-	NodeProjections   int
-	RouteCompilations int
-	LegacyDerivations int
-	ImmutableWrites   int
-	LegacyWrites      int
-	ParityMismatches  int
-	ShadowActive      int
+	Artifacts            int
+	SourceSnapshots      int
+	NodeProjections      int
+	RouteCompilations    int
+	LegacyDerivations    int
+	ImmutableWrites      int
+	LegacyWrites         int
+	ParityMismatches     int
+	ShadowActive         int
+	VerifiedLKG          int
+	FullActive           int
+	VerificationDeferred int
 }
 
 func (s *Server) StartBackgroundEdgeDNSArtifacts(ctx context.Context) {
@@ -94,6 +97,9 @@ func (s *Server) runEdgeDNSArtifactController(ctx context.Context, now time.Time
 	s.edgeDNSArtifactLastLegacyWrites = publication.LegacyWrites
 	s.edgeDNSArtifactLastParityMismatches = publication.ParityMismatches
 	s.edgeDNSArtifactLastShadowActive = publication.ShadowActive
+	s.edgeDNSArtifactLastVerifiedLKG = publication.VerifiedLKG
+	s.edgeDNSArtifactLastFullActive = publication.FullActive
+	s.edgeDNSArtifactLastVerifyDeferred = publication.VerificationDeferred
 	s.edgeDNSArtifactRunCount++
 	if err != nil {
 		s.edgeDNSArtifactLastError = err.Error()
@@ -106,12 +112,12 @@ func (s *Server) runEdgeDNSArtifactController(ctx context.Context, now time.Time
 
 	if err != nil {
 		if s.log != nil {
-			s.log.Printf("edge dns artifact controller failed: artifacts=%d snapshots=%d projections=%d route_compilations=%d legacy_derivations=%d immutable_writes=%d legacy_writes=%d parity_mismatches=%d shadow_active=%d decisions=%d duration=%s err=%v", publication.Artifacts, publication.SourceSnapshots, publication.NodeProjections, publication.RouteCompilations, publication.LegacyDerivations, publication.ImmutableWrites, publication.LegacyWrites, publication.ParityMismatches, publication.ShadowActive, decisionCount, duration, err)
+			s.log.Printf("edge dns artifact controller failed: artifacts=%d snapshots=%d projections=%d route_compilations=%d legacy_derivations=%d immutable_writes=%d legacy_writes=%d parity_mismatches=%d shadow_active=%d verified_lkg=%d full_active=%d verification_deferred=%d decisions=%d duration=%s err=%v", publication.Artifacts, publication.SourceSnapshots, publication.NodeProjections, publication.RouteCompilations, publication.LegacyDerivations, publication.ImmutableWrites, publication.LegacyWrites, publication.ParityMismatches, publication.ShadowActive, publication.VerifiedLKG, publication.FullActive, publication.VerificationDeferred, decisionCount, duration, err)
 		}
 		return
 	}
 	if s.log != nil {
-		s.log.Printf("edge dns artifact controller complete: artifacts=%d snapshots=%d projections=%d route_compilations=%d legacy_derivations=%d immutable_writes=%d legacy_writes=%d parity_mismatches=%d shadow_active=%d decisions=%d duration=%s", publication.Artifacts, publication.SourceSnapshots, publication.NodeProjections, publication.RouteCompilations, publication.LegacyDerivations, publication.ImmutableWrites, publication.LegacyWrites, publication.ParityMismatches, publication.ShadowActive, decisionCount, duration)
+		s.log.Printf("edge dns artifact controller complete: artifacts=%d snapshots=%d projections=%d route_compilations=%d legacy_derivations=%d immutable_writes=%d legacy_writes=%d parity_mismatches=%d shadow_active=%d verified_lkg=%d full_active=%d verification_deferred=%d decisions=%d duration=%s", publication.Artifacts, publication.SourceSnapshots, publication.NodeProjections, publication.RouteCompilations, publication.LegacyDerivations, publication.ImmutableWrites, publication.LegacyWrites, publication.ParityMismatches, publication.ShadowActive, publication.VerifiedLKG, publication.FullActive, publication.VerificationDeferred, decisionCount, duration)
 	}
 }
 
@@ -155,7 +161,7 @@ func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Tim
 	})
 
 	type publicationTarget struct {
-		nodeID  string
+		node    model.DNSNode
 		options edgeDNSBundleOptions
 	}
 	targets := make([]publicationTarget, 0, len(nodes))
@@ -168,7 +174,7 @@ func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Tim
 		if !ok {
 			continue
 		}
-		targets = append(targets, publicationTarget{nodeID: node.ID, options: options})
+		targets = append(targets, publicationTarget{node: node, options: options})
 		zones = append(zones, options.Zone)
 	}
 	if len(targets) == 0 {
@@ -180,47 +186,66 @@ func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Tim
 	}
 	stats.SourceSnapshots = 1
 	for _, target := range targets {
+		reconciliation, err := s.reconcileEdgeDNSArtifactRelease(target.node, target.options, now)
+		if err != nil {
+			return stats, fmt.Errorf("reconcile immutable edge dns release for node %s: %w", target.node.ID, err)
+		}
+		if reconciliation.VerifiedLKG {
+			stats.VerifiedLKG++
+		}
+		if reconciliation.VerificationDeferred {
+			stats.VerificationDeferred++
+		}
 		bundle, err := s.compileEdgeDNSBundle(ctx, target.options, snapshot)
 		if err != nil {
 			stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
-			return stats, fmt.Errorf("project edge dns artifact for node %s: %w", target.nodeID, err)
+			return stats, fmt.Errorf("project edge dns artifact for node %s: %w", target.node.ID, err)
 		}
 		stats.NodeProjections++
 		artifact := newEdgeDNSBundleArtifact(target.options, bundle, now)
-		if err := s.publishEdgeDNSBundleArtifact(artifact, target.options, now); err != nil {
+		platformArtifact, err := s.publishEdgeDNSBundleArtifact(artifact, target.options, now)
+		if err != nil {
 			if errors.Is(err, errEdgeDNSArtifactParityMismatch) {
 				stats.ParityMismatches++
 			}
 			stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
-			return stats, fmt.Errorf("publish edge dns artifact for node %s: %w", target.nodeID, err)
+			return stats, fmt.Errorf("publish edge dns artifact for node %s: %w", target.node.ID, err)
 		}
 		stats.ImmutableWrites++
 		stats.ShadowActive++
 		stats.LegacyWrites++
+		if reconciliation.ReadyForFull {
+			if err := s.releaseFullEdgeDNSBundleArtifact(platformArtifact); err != nil {
+				stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
+				return stats, fmt.Errorf("activate immutable edge dns full current for node %s: %w", target.node.ID, err)
+			}
+			stats.FullActive++
+		}
 		stats.Artifacts++
 	}
 	stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
 	return stats, nil
 }
 
-func (s *Server) publishEdgeDNSBundleArtifact(artifact store.EdgeDNSBundleArtifact, options edgeDNSBundleOptions, now time.Time) error {
+func (s *Server) publishEdgeDNSBundleArtifact(artifact store.EdgeDNSBundleArtifact, options edgeDNSBundleOptions, now time.Time) (model.PlatformArtifact, error) {
 	if err := s.validateEdgeDNSBundleArtifact(artifact, options, now); err != nil {
-		return fmt.Errorf("validate before publication: %w", err)
+		return model.PlatformArtifact{}, fmt.Errorf("validate before publication: %w", err)
 	}
-	if err := s.publishImmutableEdgeDNSBundleArtifact(artifact); err != nil {
-		return fmt.Errorf("publish immutable generation: %w", err)
+	platformArtifact, err := s.publishImmutableEdgeDNSBundleArtifact(artifact)
+	if err != nil {
+		return model.PlatformArtifact{}, fmt.Errorf("publish immutable generation: %w", err)
 	}
 	if err := s.store.UpsertEdgeDNSBundleArtifact(artifact); err != nil {
-		return fmt.Errorf("publish compatibility row: %w", err)
+		return model.PlatformArtifact{}, fmt.Errorf("publish compatibility row: %w", err)
 	}
 	stored, err := s.store.GetEdgeDNSBundleArtifact(artifact.ScopeKey)
 	if err != nil {
-		return fmt.Errorf("read compatibility row: %w", err)
+		return model.PlatformArtifact{}, fmt.Errorf("read compatibility row: %w", err)
 	}
 	if !edgeDNSBundleArtifactsEquivalent(artifact, stored) {
-		return errEdgeDNSArtifactParityMismatch
+		return model.PlatformArtifact{}, errEdgeDNSArtifactParityMismatch
 	}
-	return nil
+	return platformArtifact, nil
 }
 
 type edgeDNSImmutableArtifactContent struct {
@@ -238,14 +263,14 @@ type edgeDNSImmutableArtifactContent struct {
 	ValidUntil        time.Time           `json:"valid_until,omitempty"`
 }
 
-func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundleArtifact) error {
+func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundleArtifact) (model.PlatformArtifact, error) {
 	content, err := edgeDNSImmutableArtifactContentMap(legacy)
 	if err != nil {
-		return err
+		return model.PlatformArtifact{}, err
 	}
 	generation, err := edgeDNSImmutablePlatformGeneration(content)
 	if err != nil {
-		return err
+		return model.PlatformArtifact{}, err
 	}
 	artifact, _, err := s.store.EnsurePlatformArtifact(model.PlatformArtifact{
 		ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle,
@@ -263,7 +288,7 @@ func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundl
 		CreatedAt:          legacy.GeneratedAt,
 	})
 	if err != nil {
-		return fmt.Errorf("ensure immutable generation: %w", err)
+		return model.PlatformArtifact{}, fmt.Errorf("ensure immutable generation: %w", err)
 	}
 	artifact, err = s.store.ValidatePlatformArtifact(artifact.ID, []model.PlatformArtifactValidationResult{{
 		Name:     "edge_dns_bundle_integrity",
@@ -273,7 +298,7 @@ func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundl
 		Evidence: map[string]string{"source_fingerprint": legacy.SourceFingerprint},
 	}})
 	if err != nil {
-		return fmt.Errorf("validate immutable generation: %w", err)
+		return model.PlatformArtifact{}, fmt.Errorf("validate immutable generation: %w", err)
 	}
 	active, _, _, _, err := s.store.ReleasePlatformArtifact(artifact.ID, model.PlatformArtifactReleaseRequest{
 		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
@@ -281,14 +306,177 @@ func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundl
 		IdempotencyKey: "edge-dns-shadow:" + legacy.ScopeKey + ":" + generation,
 	}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-artifact-controller"})
 	if err != nil {
-		return fmt.Errorf("activate immutable shadow pointer: %w", err)
+		return model.PlatformArtifact{}, fmt.Errorf("activate immutable shadow pointer: %w", err)
 	}
 	projected, err := edgeDNSBundleArtifactFromPlatformArtifact(active)
 	if err != nil {
-		return fmt.Errorf("decode immutable shadow artifact: %w", err)
+		return model.PlatformArtifact{}, fmt.Errorf("decode immutable shadow artifact: %w", err)
 	}
 	if !edgeDNSBundleArtifactsEquivalent(legacy, projected) {
-		return errors.New("immutable shadow artifact digest differs from source")
+		return model.PlatformArtifact{}, errors.New("immutable shadow artifact digest differs from source")
+	}
+	return active, nil
+}
+
+type edgeDNSArtifactReleaseReconciliation struct {
+	VerifiedLKG          bool
+	ReadyForFull         bool
+	VerificationDeferred bool
+}
+
+func (s *Server) reconcileEdgeDNSArtifactRelease(node model.DNSNode, options edgeDNSBundleOptions, now time.Time) (edgeDNSArtifactReleaseReconciliation, error) {
+	result := edgeDNSArtifactReleaseReconciliation{}
+	scopeKey := edgeDNSBundleArtifactScopeKey(options)
+	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey)
+	if err != nil {
+		return result, fmt.Errorf("load verified LKG: %w", err)
+	}
+	if lkg != nil && !lkg.ExpiresAt.IsZero() && !now.UTC().Before(lkg.ExpiresAt.UTC()) {
+		lkg = nil
+	}
+	fullArtifact, fullRelease, fullFound, err := s.store.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelFull,
+	)
+	if err != nil {
+		return result, fmt.Errorf("load full current: %w", err)
+	}
+	if fullFound {
+		if lkg == nil {
+			return s.reconcileInitialEdgeDNSArtifactLKG(node, options, now)
+		}
+		if fullRelease.VerificationState == model.PlatformArtifactVerificationStateVerified {
+			if lkg.ArtifactID != fullArtifact.ID || lkg.Generation != fullArtifact.Generation {
+				return result, errors.New("verified full current does not match the verified LKG")
+			}
+			result.VerifiedLKG = true
+			result.ReadyForFull = true
+			return result, nil
+		}
+		result.VerifiedLKG = lkg != nil
+		verified, err := s.verifyObservedEdgeDNSArtifactRelease(fullArtifact, fullRelease, node, options, lkg, now)
+		if err != nil {
+			return result, err
+		}
+		if verified {
+			result.VerifiedLKG = true
+			result.ReadyForFull = true
+		} else {
+			result.VerificationDeferred = true
+		}
+		return result, nil
+	}
+	if lkg != nil {
+		result.VerifiedLKG = true
+		result.ReadyForFull = true
+		return result, nil
+	}
+	return s.reconcileInitialEdgeDNSArtifactLKG(node, options, now)
+}
+
+func (s *Server) reconcileInitialEdgeDNSArtifactLKG(node model.DNSNode, options edgeDNSBundleOptions, now time.Time) (edgeDNSArtifactReleaseReconciliation, error) {
+	result := edgeDNSArtifactReleaseReconciliation{}
+	shadowArtifact, shadowRelease, shadowFound, err := s.store.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		edgeDNSBundleArtifactScopeKey(options),
+		model.PlatformArtifactReleaseChannelShadow,
+	)
+	if err != nil {
+		return result, fmt.Errorf("load shadow current: %w", err)
+	}
+	if !shadowFound {
+		return result, nil
+	}
+	verified, err := s.verifyObservedEdgeDNSArtifactRelease(shadowArtifact, shadowRelease, node, options, nil, now)
+	if err != nil {
+		return result, err
+	}
+	if verified {
+		result.VerifiedLKG = true
+		result.ReadyForFull = true
+	} else {
+		result.VerificationDeferred = true
+	}
+	return result, nil
+}
+
+func (s *Server) verifyObservedEdgeDNSArtifactRelease(artifact model.PlatformArtifact, release model.PlatformArtifactRelease, node model.DNSNode, options edgeDNSBundleOptions, lkg *model.PlatformLKGSnapshot, now time.Time) (bool, error) {
+	projected, err := edgeDNSBundleArtifactFromPlatformArtifact(artifact)
+	if err != nil {
+		return false, fmt.Errorf("decode release artifact: %w", err)
+	}
+	// Older bundles reused the semantic version as their generation, so a node
+	// heartbeat could not identify the immutable envelope it actually loaded.
+	if !strings.HasPrefix(strings.TrimSpace(projected.Bundle.Generation), "dnsenv_") || projected.Bundle.Generation == projected.Bundle.Version {
+		return false, nil
+	}
+	activated := projected
+	activated.ActivatedAt = release.ReleasedAt
+	activated.UpdatedAt = release.UpdatedAt
+	if err := s.validateEdgeDNSBundleArtifact(activated, options, now); err != nil {
+		return false, nil
+	}
+	compatibility, err := s.store.GetEdgeDNSBundleArtifact(artifact.ScopeKey)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("load compatibility current for verification: %w", err)
+	}
+	databaseRollbackCompatible := edgeDNSBundleArtifactsEquivalent(projected, compatibility)
+	heartbeatAt := node.LastHeartbeatAt
+	watchWindow := heartbeatAt != nil && !heartbeatAt.IsZero() && heartbeatAt.UTC().After(release.ReleasedAt.UTC())
+	consumerConvergence := strings.TrimSpace(node.DNSBundleVersion) == strings.TrimSpace(projected.Bundle.Version) &&
+		strings.TrimSpace(node.ServingGeneration) == strings.TrimSpace(projected.Bundle.Generation) &&
+		strings.TrimSpace(node.LKGGeneration) == strings.TrimSpace(projected.Bundle.Generation) &&
+		node.RecordCount == len(projected.Bundle.Records)
+	localProbe := dnsNodeHeartbeatFresh(node, now) && dnsNodeServingHealthOK(node) &&
+		strings.EqualFold(strings.TrimSpace(node.CacheStatus), "ready") && node.UDPListen && node.TCPListen && strings.TrimSpace(node.LastError) == ""
+	baselineMonotonic := lkg == nil || artifact.GenerationSequence > lkg.GenerationSequence
+	if !consumerConvergence || !localProbe || !watchWindow || !baselineMonotonic || !databaseRollbackCompatible {
+		return false, nil
+	}
+	_, _, _, verifiedLKG, err := s.store.VerifyPlatformArtifactReleaseLKG(release.ID, model.PlatformArtifactVerifyLKGRequest{
+		FencingToken:    release.FencingToken,
+		Reason:          "DNS node served the exact signed immutable envelope after publication",
+		AllowInitialLKG: lkg == nil,
+		Evidence: model.PlatformArtifactVerificationEvidence{
+			ConsumerConvergence:        true,
+			LocalProbe:                 true,
+			PlatformEvidence:           true,
+			WatchWindow:                true,
+			BaselineMonotonic:          true,
+			DatabaseRollbackCompatible: true,
+			ExpectedConsumerSetID:      "dns-node:" + strings.TrimSpace(node.ID),
+			EvidenceRefs: []string{
+				"dns-heartbeat:" + strings.TrimSpace(node.ID) + ":" + heartbeatAt.UTC().Format(time.RFC3339Nano),
+				"dns-envelope:" + strings.TrimSpace(projected.Bundle.Generation),
+				"platform-artifact:" + artifact.ID,
+				"platform-release:" + release.ID,
+			},
+		},
+	}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-artifact-controller"})
+	if err != nil {
+		return false, fmt.Errorf("verify immutable release LKG: %w", err)
+	}
+	if verifiedLKG == nil || verifiedLKG.ArtifactID != artifact.ID || verifiedLKG.Generation != artifact.Generation {
+		return false, errors.New("verified LKG does not match the observed immutable artifact")
+	}
+	return true, nil
+}
+
+func (s *Server) releaseFullEdgeDNSBundleArtifact(artifact model.PlatformArtifact) error {
+	active, release, _, _, err := s.store.ReleasePlatformArtifact(artifact.ID, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		Reason:         "activate DNS answer bundle with a pinned verified per-node rollback generation",
+		IdempotencyKey: "edge-dns-full:" + artifact.ScopeKey + ":" + artifact.Generation,
+	}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-artifact-controller"})
+	if err != nil {
+		return err
+	}
+	if active.ID != artifact.ID || release.Status != model.PlatformArtifactReleaseStatusActive || release.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || release.PinnedRollbackGeneration == "" {
+		return errors.New("full current did not retain the requested artifact and pinned rollback generation")
 	}
 	return nil
 }
@@ -463,7 +651,7 @@ func (s *Server) validateEdgeDNSBundleArtifact(artifact store.EdgeDNSBundleArtif
 	}
 	bundle := artifact.Bundle
 	if strings.TrimSpace(artifact.Version) == "" || strings.TrimSpace(artifact.Version) != strings.TrimSpace(bundle.Version) ||
-		strings.TrimSpace(bundle.Generation) != strings.TrimSpace(bundle.Version) {
+		strings.TrimSpace(bundle.Generation) == "" {
 		return errors.New("artifact version identity is inconsistent")
 	}
 	if strings.TrimSpace(artifact.ETag) != edgeRouteBundleETag(bundle.Version) {
@@ -612,6 +800,9 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	lastLegacyWrites := s.edgeDNSArtifactLastLegacyWrites
 	lastParityMismatches := s.edgeDNSArtifactLastParityMismatches
 	lastShadowActive := s.edgeDNSArtifactLastShadowActive
+	lastVerifiedLKG := s.edgeDNSArtifactLastVerifiedLKG
+	lastFullActive := s.edgeDNSArtifactLastFullActive
+	lastVerificationDeferred := s.edgeDNSArtifactLastVerifyDeferred
 	runCount := s.edgeDNSArtifactRunCount
 	skippedCount := s.edgeDNSArtifactSkippedCount
 	errorCount := s.edgeDNSArtifactErrorCount
@@ -635,6 +826,9 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_legacy_writes", "Number of compatibility DNS bundle rows written by the last controller run.", nil, float64(lastLegacyWrites))
 	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_parity_mismatches", "Number of immutable-to-compatibility DNS artifact digest mismatches in the last controller run.", nil, float64(lastParityMismatches))
 	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_shadow_active", "Number of node-scoped immutable DNS artifacts activated in the shadow lane by the last controller run.", nil, float64(lastShadowActive))
+	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_verified_lkg", "Number of node-scoped DNS artifacts with a verified immutable rollback generation after the last controller run.", nil, float64(lastVerifiedLKG))
+	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_full_active", "Number of node-scoped immutable DNS artifacts activated in the full lane by the last controller run.", nil, float64(lastFullActive))
+	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_verification_deferred", "Number of node-scoped DNS releases left unverified because current consumer evidence was incomplete in the last controller run.", nil, float64(lastVerificationDeferred))
 	if !lastRun.IsZero() {
 		observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_run_timestamp_seconds", "Unix timestamp of the last edge DNS artifact controller run.", nil, float64(lastRun.Unix()))
 	}

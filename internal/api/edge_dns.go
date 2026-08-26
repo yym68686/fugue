@@ -644,7 +644,15 @@ func (s *Server) compileEdgeDNSBundle(ctx context.Context, options edgeDNSBundle
 		return model.EdgeDNSBundle{}, err
 	}
 	bundle = signEdgeDNSBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
+	bundle.Generation = edgeDNSBundleEnvelopeGeneration(bundle)
+	bundle = signEdgeDNSBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
 	return bundle, nil
+}
+
+func edgeDNSBundleEnvelopeGeneration(bundle model.EdgeDNSBundle) string {
+	payload, _ := json.Marshal(bundle)
+	sum := sha256.Sum256(payload)
+	return "dnsenv_" + hex.EncodeToString(sum[:])
 }
 
 func (s *Server) edgeDNSPlatformDomainNames(domains []model.AppDomain, zone string) map[string]bool {

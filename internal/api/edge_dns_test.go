@@ -496,6 +496,9 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 		`fugue_edge_dns_artifact_last_legacy_writes 2.000000`,
 		`fugue_edge_dns_artifact_last_parity_mismatches 0.000000`,
 		`fugue_edge_dns_artifact_last_shadow_active 2.000000`,
+		`fugue_edge_dns_artifact_last_verified_lkg 0.000000`,
+		`fugue_edge_dns_artifact_last_full_active 0.000000`,
+		`fugue_edge_dns_artifact_last_verification_deferred 0.000000`,
 	} {
 		if !strings.Contains(metrics.String(), sample) {
 			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
@@ -533,7 +536,7 @@ func TestEdgeDNSArtifactPublisherRejectsInvalidBundleBeforeReplacingEitherCurren
 	if err != nil || !found {
 		t.Fatalf("load immutable current before invalid publication: found=%t err=%v", found, err)
 	}
-	if err := server.publishEdgeDNSBundleArtifact(before, options, now); err != nil {
+	if _, err := server.publishEdgeDNSBundleArtifact(before, options, now); err != nil {
 		t.Fatalf("retry identical generation: %v", err)
 	}
 	_, retryRelease, found, err := storeState.GetActivePlatformArtifact(
@@ -554,7 +557,7 @@ func TestEdgeDNSArtifactPublisherRejectsInvalidBundleBeforeReplacingEitherCurren
 		t.Fatalf("decode compatibility current clone: %v", err)
 	}
 	invalid.Bundle.Records[0].Values = []string{"198.51.100.99"}
-	if err := server.publishEdgeDNSBundleArtifact(invalid, options, now.Add(time.Second)); err == nil {
+	if _, err := server.publishEdgeDNSBundleArtifact(invalid, options, now.Add(time.Second)); err == nil {
 		t.Fatal("expected tampered signed bundle publication to fail")
 	}
 	after, err := storeState.GetEdgeDNSBundleArtifact(scopeKey)
@@ -636,8 +639,161 @@ func TestEdgeDNSArtifactPublisherRefreshesImmutableEnvelopeForStableBundleVersio
 	if beforeContent.Version != afterContent.Version {
 		t.Fatalf("expected stable semantic bundle version, before=%s after=%s", beforeContent.Version, afterContent.Version)
 	}
+	if beforeContent.Bundle.Generation == afterContent.Bundle.Generation {
+		t.Fatalf("expected refreshed signed envelopes to have distinct exact generations, got %s", beforeContent.Bundle.Generation)
+	}
 	if before.Generation == after.Generation || beforeRelease.ID == afterRelease.ID || !afterContent.GeneratedAt.After(beforeContent.GeneratedAt) {
 		t.Fatalf("expected refreshed envelope to get a new content generation and current pointer: before=%s/%s after=%s/%s", before.Generation, beforeRelease.ID, after.Generation, afterRelease.ID)
+	}
+}
+
+func TestEdgeDNSArtifactPublisherPromotesObservedImmutableEnvelopeToFull(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	node := model.DNSNode{
+		ID: "dns-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro",
+		PublicIPv4: "203.0.113.10", Status: model.EdgeHealthHealthy, Healthy: true,
+		CacheStatus: "ready", UDPListen: true, TCPListen: true,
+	}
+	if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+		t.Fatalf("record initial DNS heartbeat: %v", err)
+	}
+	now := time.Now().UTC()
+	server.runEdgeDNSArtifactController(context.Background(), now)
+	options, ok := server.edgeDNSBundleOptionsForDNSNode(node)
+	if !ok {
+		t.Fatal("expected DNS node publication options")
+	}
+	scopeKey := edgeDNSBundleArtifactScopeKey(options)
+	firstCompatibility, err := storeState.GetEdgeDNSBundleArtifact(scopeKey)
+	if err != nil {
+		t.Fatalf("load first compatibility current: %v", err)
+	}
+	if firstCompatibility.Bundle.Generation == firstCompatibility.Bundle.Version || !strings.HasPrefix(firstCompatibility.Bundle.Generation, "dnsenv_") {
+		t.Fatalf("expected exact envelope generation distinct from semantic version, got version=%s generation=%s", firstCompatibility.Bundle.Version, firstCompatibility.Bundle.Generation)
+	}
+	if _, _, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelFull,
+	); err != nil || found {
+		t.Fatalf("full current must not exist before consumer convergence: found=%t err=%v", found, err)
+	}
+
+	node.DNSBundleVersion = firstCompatibility.Bundle.Version
+	node.ServingGeneration = firstCompatibility.Bundle.Generation
+	node.LKGGeneration = firstCompatibility.Bundle.Generation
+	node.RecordCount = len(firstCompatibility.Bundle.Records)
+	if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+		t.Fatalf("record converged DNS heartbeat: %v", err)
+	}
+	server.runEdgeDNSArtifactController(context.Background(), time.Now().UTC())
+	server.edgeDNSArtifactMu.Lock()
+	verifiedLKGCount := server.edgeDNSArtifactLastVerifiedLKG
+	fullActiveCount := server.edgeDNSArtifactLastFullActive
+	verificationDeferredCount := server.edgeDNSArtifactLastVerifyDeferred
+	lastError := server.edgeDNSArtifactLastError
+	server.edgeDNSArtifactMu.Unlock()
+	if lastError != "" {
+		t.Fatalf("promote observed immutable envelope: %s", lastError)
+	}
+	if verifiedLKGCount != 1 || fullActiveCount != 1 || verificationDeferredCount != 0 {
+		t.Fatalf("expected one verified LKG and full current with no deferred verification; lkg=%d full=%d deferred=%d", verifiedLKGCount, fullActiveCount, verificationDeferredCount)
+	}
+	verifiedLKG, err := storeState.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey)
+	if err != nil || verifiedLKG == nil {
+		t.Fatalf("load verified immutable LKG: lkg=%+v err=%v", verifiedLKG, err)
+	}
+	firstShadow, firstShadowRelease, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelShadow,
+	)
+	if err != nil || !found {
+		t.Fatalf("load refreshed shadow current: found=%t err=%v", found, err)
+	}
+	if verifiedLKG.Generation == firstShadow.Generation || firstShadowRelease.VerificationState != model.PlatformArtifactVerificationStateServingUnverified {
+		t.Fatalf("new shadow must remain unverified while the prior observed envelope is LKG: lkg=%+v shadow=%+v release=%+v", verifiedLKG, firstShadow, firstShadowRelease)
+	}
+	full, fullRelease, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelFull,
+	)
+	if err != nil || !found {
+		t.Fatalf("load immutable full current: found=%t err=%v", found, err)
+	}
+	if full.ID != firstShadow.ID || fullRelease.VerificationState != model.PlatformArtifactVerificationStateServingUnverified || fullRelease.PinnedRollbackGeneration != verifiedLKG.Generation {
+		t.Fatalf("full current did not pin the verified predecessor: full=%+v release=%+v lkg=%+v", full, fullRelease, verifiedLKG)
+	}
+
+	secondCompatibility, err := storeState.GetEdgeDNSBundleArtifact(scopeKey)
+	if err != nil {
+		t.Fatalf("load full compatibility projection: %v", err)
+	}
+	node.DNSBundleVersion = secondCompatibility.Bundle.Version
+	node.ServingGeneration = secondCompatibility.Bundle.Generation
+	node.LKGGeneration = secondCompatibility.Bundle.Generation
+	node.RecordCount = len(secondCompatibility.Bundle.Records)
+	if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+		t.Fatalf("record full-current DNS heartbeat: %v", err)
+	}
+	server.runEdgeDNSArtifactController(context.Background(), time.Now().UTC())
+	advancedLKG, err := storeState.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey)
+	if err != nil || advancedLKG == nil {
+		t.Fatalf("load advanced immutable LKG: lkg=%+v err=%v", advancedLKG, err)
+	}
+	if advancedLKG.ArtifactID != full.ID || advancedLKG.Generation != full.Generation {
+		t.Fatalf("observed full current did not become the next verified LKG: full=%+v lkg=%+v", full, advancedLKG)
+	}
+}
+
+func TestEdgeDNSArtifactPublisherDoesNotSeedLKGFromAmbiguousLegacyGeneration(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	node := model.DNSNode{
+		ID: "dns-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro",
+		PublicIPv4: "203.0.113.10", Status: model.EdgeHealthHealthy, Healthy: true,
+		CacheStatus: "ready", UDPListen: true, TCPListen: true,
+	}
+	if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+		t.Fatalf("record initial DNS heartbeat: %v", err)
+	}
+	now := time.Now().UTC()
+	server.runEdgeDNSArtifactController(context.Background(), now)
+	options, ok := server.edgeDNSBundleOptionsForDNSNode(node)
+	if !ok {
+		t.Fatal("expected DNS node publication options")
+	}
+	scopeKey := edgeDNSBundleArtifactScopeKey(options)
+	legacy, err := storeState.GetEdgeDNSBundleArtifact(scopeKey)
+	if err != nil {
+		t.Fatalf("load exact compatibility current: %v", err)
+	}
+	legacy.Bundle.Generation = legacy.Bundle.Version
+	legacy.Bundle = signEdgeDNSBundle(legacy.Bundle, server.bundleKeyring(), server.discoveryBundleTTL())
+	legacy.ValidUntil = legacy.Bundle.ValidUntil
+	if _, err := server.publishEdgeDNSBundleArtifact(legacy, options, now); err != nil {
+		t.Fatalf("publish legacy-generation migration fixture: %v", err)
+	}
+	node.DNSBundleVersion = legacy.Bundle.Version
+	node.ServingGeneration = legacy.Bundle.Generation
+	node.LKGGeneration = legacy.Bundle.Generation
+	node.RecordCount = len(legacy.Bundle.Records)
+	if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+		t.Fatalf("record ambiguous legacy-generation heartbeat: %v", err)
+	}
+	reconciliation, err := server.reconcileEdgeDNSArtifactRelease(node, options, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("reconcile ambiguous legacy generation: %v", err)
+	}
+	if reconciliation.VerifiedLKG || reconciliation.ReadyForFull || !reconciliation.VerificationDeferred {
+		t.Fatalf("ambiguous legacy generation must remain shadow-only: %+v", reconciliation)
+	}
+	if lkg, err := storeState.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey); err != nil || lkg != nil {
+		t.Fatalf("ambiguous legacy generation seeded an LKG: lkg=%+v err=%v", lkg, err)
 	}
 }
 
