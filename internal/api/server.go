@@ -165,6 +165,8 @@ type Server struct {
 	edgeDNSArtifactHandlerLookupHitCount   int64
 	edgeDNSArtifactHandlerLookupMissCount  int64
 	edgeDNSArtifactHandlerLookupErrorCount int64
+	edgeDNSArtifactHandlerFullCount        int64
+	edgeDNSArtifactHandlerFallbackCount    int64
 	ready                                  atomic.Bool
 	trafficOverrideRouteProbe              trafficOverrideRouteProbeFunc
 }

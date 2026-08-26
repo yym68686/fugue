@@ -609,17 +609,75 @@ func (s *Server) edgeDNSBundleArtifactForOptions(options edgeDNSBundleOptions, n
 	if s == nil || s.store == nil {
 		return model.EdgeDNSBundle{}, false, nil
 	}
-	artifact, err := s.store.GetEdgeDNSBundleArtifact(edgeDNSBundleArtifactScopeKey(options))
+	artifact, release, found, err := s.store.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		edgeDNSBundleArtifactScopeKey(options),
+		model.PlatformArtifactReleaseChannelFull,
+	)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return model.EdgeDNSBundle{}, false, nil
-		}
 		return model.EdgeDNSBundle{}, false, err
 	}
-	if err := s.validateEdgeDNSBundleArtifact(artifact, options, now); err != nil {
-		return model.EdgeDNSBundle{}, false, fmt.Errorf("validate activated edge DNS artifact: %w", err)
+	if !found {
+		return model.EdgeDNSBundle{}, false, nil
 	}
-	return artifact.Bundle, true, nil
+	if err := s.validateEdgeDNSFullRelease(artifact, release); err != nil {
+		return model.EdgeDNSBundle{}, false, fmt.Errorf("validate immutable full release: %w", err)
+	}
+	projected, err := edgeDNSBundleArtifactFromPlatformArtifact(artifact)
+	if err != nil {
+		return model.EdgeDNSBundle{}, false, fmt.Errorf("decode immutable full artifact: %w", err)
+	}
+	projected.ActivatedAt = release.ReleasedAt
+	projected.UpdatedAt = release.UpdatedAt
+	if err := s.validateEdgeDNSBundleArtifact(projected, options, now); err != nil {
+		return model.EdgeDNSBundle{}, false, fmt.Errorf("validate activated immutable edge DNS artifact: %w", err)
+	}
+	return projected.Bundle, true, nil
+}
+
+func (s *Server) validateEdgeDNSFullRelease(artifact model.PlatformArtifact, release model.PlatformArtifactRelease) error {
+	if artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle ||
+		artifact.Status != model.PlatformArtifactStatusValidated ||
+		strings.TrimSpace(artifact.ID) == "" ||
+		strings.TrimSpace(artifact.Generation) == "" ||
+		strings.TrimSpace(artifact.ScopeKey) == "" {
+		return errors.New("platform DNS artifact is not validated")
+	}
+	if release.ArtifactID != artifact.ID ||
+		release.ArtifactKind != artifact.ArtifactKind ||
+		release.ScopeKey != artifact.ScopeKey ||
+		release.Generation != artifact.Generation ||
+		release.ReleaseChannel != model.PlatformArtifactReleaseChannelFull ||
+		release.Status != model.PlatformArtifactReleaseStatusActive ||
+		release.FencingToken <= 0 ||
+		strings.TrimSpace(release.LaneKey) == "" ||
+		strings.TrimSpace(release.PinnedRollbackGeneration) == "" ||
+		strings.TrimSpace(release.RollbackTargetGeneration) != strings.TrimSpace(release.PinnedRollbackGeneration) ||
+		strings.TrimSpace(release.CandidateGeneration) != artifact.Generation ||
+		release.ReleasedAt.IsZero() {
+		return errors.New("platform DNS full release identity is inconsistent")
+	}
+	switch release.VerificationState {
+	case model.PlatformArtifactVerificationStateServingUnverified:
+		if strings.TrimSpace(release.ServingUnverifiedGeneration) != artifact.Generation {
+			return errors.New("unverified full release does not identify its serving generation")
+		}
+	case model.PlatformArtifactVerificationStateVerified:
+		if strings.TrimSpace(release.ServingUnverifiedGeneration) != "" ||
+			strings.TrimSpace(release.VerifiedLKGGeneration) != artifact.Generation ||
+			release.VerifiedAt == nil || release.VerifiedAt.IsZero() {
+			return errors.New("verified full release does not identify its verified generation")
+		}
+	default:
+		return errors.New("platform DNS full release has unsupported verification state")
+	}
+	if strings.TrimSpace(release.OverrideMode) != model.PlatformArtifactOverrideModeNone || len(release.BypassedInvariants) != 0 {
+		return errors.New("platform DNS full release bypassed an invariant")
+	}
+	if err := s.store.VerifyPlatformArtifactIntegrity(artifact); err != nil {
+		return fmt.Errorf("verify platform artifact integrity: %w", err)
+	}
+	return nil
 }
 
 func newEdgeDNSBundleArtifact(options edgeDNSBundleOptions, bundle model.EdgeDNSBundle, activatedAt time.Time) store.EdgeDNSBundleArtifact {
@@ -742,6 +800,7 @@ func (s *Server) recordEdgeDNSArtifactHandlerLookup(hit bool, err error) {
 		s.edgeDNSArtifactHandlerLookupErrorCount++
 	case hit:
 		s.edgeDNSArtifactHandlerLookupHitCount++
+		s.edgeDNSArtifactHandlerFullCount++
 	default:
 		s.edgeDNSArtifactHandlerLookupMissCount++
 	}
@@ -813,6 +872,8 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	handlerLookupHitCount := s.edgeDNSArtifactHandlerLookupHitCount
 	handlerLookupMissCount := s.edgeDNSArtifactHandlerLookupMissCount
 	handlerLookupErrorCount := s.edgeDNSArtifactHandlerLookupErrorCount
+	handlerImmutableFullCount := s.edgeDNSArtifactHandlerFullCount
+	handlerLegacyFallbackCount := s.edgeDNSArtifactHandlerFallbackCount
 	s.edgeDNSArtifactMu.Unlock()
 
 	observability.WriteCounterMetric(w, "fugue_edge_dns_artifact_runs_total", "Total edge DNS artifact controller runs.", nil, float64(runCount))
@@ -843,4 +904,7 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "hit"}, float64(handlerLookupHitCount))
 	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "miss"}, float64(handlerLookupMissCount))
 	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "error"}, float64(handlerLookupErrorCount))
+	observability.WriteMetricHeader(w, "fugue_edge_dns_artifact_handler_source_total", "Successful Edge DNS handler lookups by artifact source.", "counter")
+	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_source_total", map[string]string{"source": "immutable_full"}, float64(handlerImmutableFullCount))
+	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_source_total", map[string]string{"source": "legacy_fallback"}, float64(handlerLegacyFallbackCount))
 }

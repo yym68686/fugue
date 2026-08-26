@@ -299,8 +299,19 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 		}},
 	}
 	bundle = signEdgeDNSBundle(bundle, server.bundleKeyring(), 10*time.Minute)
-	if err := storeState.UpsertEdgeDNSBundleArtifact(newEdgeDNSBundleArtifact(options, bundle, now)); err != nil {
-		t.Fatalf("publish artifact: %v", err)
+	immutable := newEdgeDNSBundleArtifact(options, bundle, now)
+	publishFullEdgeDNSArtifactForTest(t, storeState, server, immutable)
+	legacy := immutable
+	legacy.Bundle.Version = "dnsgen_legacy_row_must_not_serve"
+	legacy.Bundle.Generation = legacy.Bundle.Version
+	legacy.Bundle = signEdgeDNSBundle(legacy.Bundle, server.bundleKeyring(), 10*time.Minute)
+	legacy.Version = legacy.Bundle.Version
+	legacy.ETag = edgeRouteBundleETag(legacy.Bundle.Version)
+	legacy.SourceFingerprint = edgeDNSBundleArtifactSourceFingerprint(options, legacy.Bundle)
+	legacy.GeneratedAt = legacy.Bundle.GeneratedAt
+	legacy.ValidUntil = legacy.Bundle.ValidUntil
+	if err := storeState.UpsertEdgeDNSBundleArtifact(legacy); err != nil {
+		t.Fatalf("publish conflicting legacy compatibility row: %v", err)
 	}
 
 	recorder := httptest.NewRecorder()
@@ -323,6 +334,8 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="hit"} 1.000000`,
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="miss"} 0.000000`,
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="error"} 0.000000`,
+		`fugue_edge_dns_artifact_handler_source_total{source="immutable_full"} 1.000000`,
+		`fugue_edge_dns_artifact_handler_source_total{source="legacy_fallback"} 0.000000`,
 	} {
 		if !strings.Contains(metrics.String(), sample) {
 			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
@@ -333,7 +346,20 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 func TestEdgeDNSBundleRejectsArtifactMissWithoutDerive(t *testing.T) {
 	t.Parallel()
 
-	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	options := edgeDNSBundleOptions{Zone: "fugue.pro", AnswerIPs: []string{"203.0.113.10"}, TTL: 60}
+	legacyBundle := signEdgeDNSBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_legacy_only", Generation: "dnsgen_legacy_only", GeneratedAt: now,
+		Zone: options.Zone,
+		Records: []model.EdgeDNSRecord{{
+			Name: "legacy-only.fugue.pro", Type: model.EdgeDNSRecordTypeA, Values: []string{"203.0.113.10"},
+			TTL: 60, RecordKind: model.EdgeDNSRecordKindProbe, Status: model.EdgeRouteStatusActive,
+		}},
+	}, server.bundleKeyring(), 10*time.Minute)
+	if err := storeState.UpsertEdgeDNSBundleArtifact(newEdgeDNSBundleArtifact(options, legacyBundle, now)); err != nil {
+		t.Fatalf("publish legacy-only compatibility row: %v", err)
+	}
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
 	server.Handler().ServeHTTP(recorder, req)
@@ -386,9 +412,7 @@ func TestEdgeDNSBundleRejectsInvalidSignedArtifact(t *testing.T) {
 		}},
 	}, server.bundleKeyring(), 10*time.Minute)
 	bundle.Records[0].Values = []string{"198.51.100.99"}
-	if err := storeState.UpsertEdgeDNSBundleArtifact(newEdgeDNSBundleArtifact(options, bundle, now)); err != nil {
-		t.Fatalf("publish invalid artifact fixture: %v", err)
-	}
+	publishFullEdgeDNSArtifactForTest(t, storeState, server, newEdgeDNSBundleArtifact(options, bundle, now))
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&dns_node_id=dns-us-1&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=203.0.113.10&ttl=60", nil)
@@ -400,6 +424,122 @@ func TestEdgeDNSBundleRejectsInvalidSignedArtifact(t *testing.T) {
 	server.writeEdgeDNSArtifactMetrics(&metrics)
 	if !strings.Contains(metrics.String(), `fugue_edge_dns_artifact_handler_lookups_total{outcome="error"} 1.000000`) {
 		t.Fatalf("expected invalid artifact lookup error metric, got:\n%s", metrics.String())
+	}
+}
+
+func TestEdgeDNSBundleRejectsInvalidImmutableFullRelease(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	options := edgeDNSBundleOptions{
+		DNSNodeID: "dns-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro",
+		AnswerIPs: []string{"203.0.113.10"}, TTL: 60,
+	}
+	bundle := signEdgeDNSBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_valid_full", Generation: "dnsenv_valid_full", GeneratedAt: now,
+		DNSNodeID: options.DNSNodeID, EdgeGroupID: options.EdgeGroupID, Zone: options.Zone,
+		Records: []model.EdgeDNSRecord{{
+			Name: "artifact.fugue.pro", Type: model.EdgeDNSRecordTypeA, Values: []string{"203.0.113.10"},
+			TTL: 60, RecordKind: model.EdgeDNSRecordKindProbe, Status: model.EdgeRouteStatusActive,
+		}},
+	}, server.bundleKeyring(), 10*time.Minute)
+	publishFullEdgeDNSArtifactForTest(t, storeState, server, newEdgeDNSBundleArtifact(options, bundle, now))
+	artifact, release, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		edgeDNSBundleArtifactScopeKey(options),
+		model.PlatformArtifactReleaseChannelFull,
+	)
+	if err != nil || !found {
+		t.Fatalf("load immutable full fixture: found=%t err=%v", found, err)
+	}
+	if err := server.validateEdgeDNSFullRelease(artifact, release); err != nil {
+		t.Fatalf("expected valid immutable full fixture: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*model.PlatformArtifactRelease)
+	}{
+		{name: "wrong channel", mutate: func(got *model.PlatformArtifactRelease) {
+			got.ReleaseChannel = model.PlatformArtifactReleaseChannelShadow
+		}},
+		{name: "missing pinned rollback", mutate: func(got *model.PlatformArtifactRelease) {
+			got.PinnedRollbackGeneration = ""
+		}},
+		{name: "unsupported verification state", mutate: func(got *model.PlatformArtifactRelease) {
+			got.VerificationState = "unknown"
+		}},
+		{name: "bypassed invariant", mutate: func(got *model.PlatformArtifactRelease) {
+			got.BypassedInvariants = []string{"artifact.signature_valid"}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := release
+			test.mutate(&invalid)
+			if err := server.validateEdgeDNSFullRelease(artifact, invalid); err == nil {
+				t.Fatal("expected invalid immutable full release to be rejected")
+			}
+		})
+	}
+}
+
+func publishFullEdgeDNSArtifactForTest(t *testing.T, storeState *store.Store, server *Server, legacy store.EdgeDNSBundleArtifact) {
+	t.Helper()
+	content, err := edgeDNSImmutableArtifactContentMap(legacy)
+	if err != nil {
+		t.Fatalf("encode immutable DNS fixture: %v", err)
+	}
+	generation, err := edgeDNSImmutablePlatformGeneration(content)
+	if err != nil {
+		t.Fatalf("derive immutable DNS fixture generation: %v", err)
+	}
+	artifact, _, err := storeState.EnsurePlatformArtifact(model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle,
+		Scope: model.PlatformArtifactScope{
+			ScopeType: "dns-node", Key: legacy.ScopeKey, NodeID: legacy.DNSNodeID, EdgeGroupID: legacy.EdgeGroupID,
+		},
+		Generation: generation, Content: content, CompatibilityFloor: model.PlatformArtifactSchemaVersionV1,
+		CreatedByType: model.ActorTypeSystem, CreatedByID: "edge-dns-handler-test", CreatedAt: legacy.GeneratedAt,
+	})
+	if err != nil {
+		t.Fatalf("ensure immutable DNS fixture: %v", err)
+	}
+	artifact, err = storeState.ValidatePlatformArtifact(artifact.ID, []model.PlatformArtifactValidationResult{{
+		Name: "edge_dns_bundle_integrity", Pass: true, Severity: model.RobustnessSeverityInfo,
+	}})
+	if err != nil {
+		t.Fatalf("validate immutable DNS fixture: %v", err)
+	}
+	lkg, err := storeState.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, legacy.ScopeKey)
+	if err != nil {
+		t.Fatalf("load immutable DNS rollback fixture: %v", err)
+	}
+	if lkg == nil {
+		_, shadow, _, _, releaseErr := storeState.ReleasePlatformArtifact(artifact.ID, model.PlatformArtifactReleaseRequest{
+			ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+			Reason:         "seed handler test rollback generation",
+			IdempotencyKey: "edge-dns-handler-test-shadow:" + generation,
+		}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-handler-test"})
+		if releaseErr != nil {
+			t.Fatalf("release immutable DNS shadow fixture: %v", releaseErr)
+		}
+		_, _, _, lkg, err = storeState.VerifyPlatformArtifactReleaseLKG(shadow.ID, model.PlatformArtifactVerifyLKGRequest{
+			FencingToken: shadow.FencingToken, Reason: "handler test observed signed fixture", AllowInitialLKG: true,
+			Evidence: model.PlatformArtifactVerificationEvidence{
+				ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true,
+				BaselineMonotonic: true, DatabaseRollbackCompatible: true,
+				ExpectedConsumerSetID: "dns-node:" + legacy.DNSNodeID,
+				EvidenceRefs:          []string{"handler-test:" + generation},
+			},
+		}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-handler-test"})
+		if err != nil || lkg == nil {
+			t.Fatalf("verify immutable DNS rollback fixture: lkg=%+v err=%v", lkg, err)
+		}
+	}
+	if err := server.releaseFullEdgeDNSBundleArtifact(artifact); err != nil {
+		t.Fatalf("release immutable DNS full fixture: %v", err)
 	}
 }
 
@@ -2982,9 +3122,7 @@ func serveEdgeDNSBundleRequest(t *testing.T, server *Server, recorder *httptest.
 		bundle, deriveErr := server.deriveEdgeDNSBundle(req, options)
 		if deriveErr == nil {
 			now := time.Now().UTC()
-			if publishErr := server.store.UpsertEdgeDNSBundleArtifact(newEdgeDNSBundleArtifact(options, bundle, now)); publishErr != nil {
-				t.Fatalf("publish edge DNS artifact fixture: %v", publishErr)
-			}
+			publishFullEdgeDNSArtifactForTest(t, server.store, server, newEdgeDNSBundleArtifact(options, bundle, now))
 		}
 	}
 	server.Handler().ServeHTTP(recorder, req)

@@ -690,6 +690,16 @@ func (s *Store) GetActivePlatformArtifact(kind, scopeKey, channel string) (model
 	return artifact, release, found, err
 }
 
+func (s *Store) VerifyPlatformArtifactIntegrity(artifact model.PlatformArtifact) error {
+	if s == nil {
+		return ErrInvalidInput
+	}
+	if decision := platformsafety.EvaluateArtifactIntegrity(artifact, s.platformArtifactSigningKeyring()); !decision.Pass {
+		return ErrConflict
+	}
+	return nil
+}
+
 func (s *Store) ListPlatformReleaseMessages(kind, scopeKey string, since time.Time, limit int) ([]model.PlatformReleaseMessage, error) {
 	kind = NormalizePlatformArtifactKind(kind)
 	scopeKey = strings.TrimSpace(strings.ToLower(scopeKey))
