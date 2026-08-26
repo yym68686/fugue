@@ -255,7 +255,9 @@ api:
     limits:
       cpu: "1"
       memory: 1536Mi
-  extraEnv: []
+  extraEnv:
+    - name: GOMEMLIMIT
+      value: 1GiB
 
 controller:
   ownership: helm

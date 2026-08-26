@@ -927,6 +927,8 @@ func TestDefaultControlPlaneResourceEnvelopeKeepsK3SHeadroom(t *testing.T) {
 		"memory: 768Mi",
 		`cpu: "1"`,
 		"memory: 1536Mi",
+		"name: GOMEMLIMIT",
+		"value: 1GiB",
 	} {
 		if !strings.Contains(apiDoc, want) {
 			t.Fatalf("api deployment should keep conservative single-node defaults; missing %q:\n%s", want, apiDoc)
