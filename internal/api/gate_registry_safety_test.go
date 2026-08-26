@@ -46,7 +46,7 @@ func TestGatePolicyOverrideCannotLoosenCompiledSafetyFloor(t *testing.T) {
 	if merged.Scope != base.Scope || merged.KillSwitchEnv != base.KillSwitchEnv || merged.RunbookRef != base.RunbookRef {
 		t.Fatalf("override changed immutable safety binding: %+v", merged)
 	}
-	if merged.SoakMinDuration != "24h" || merged.MinimumSamples != 3 || merged.MinimumFailureDomains != 2 {
+	if merged.SoakMinDuration != "10m" || merged.MinimumSamples != 3 || merged.MinimumFailureDomains != 2 {
 		t.Fatalf("override lowered evidence floor: %+v", merged)
 	}
 	if merged.BlastRadius.MaxNodes != 1 || merged.BlastRadius.PreserveMinHealthyEdgeGroups != 2 {
@@ -76,13 +76,24 @@ func TestGatePolicyOverrideCanTightenCompiledSafetyFloor(t *testing.T) {
 		CanaryFailureDomains:  []string{"node:c", "node:a", "node:b"},
 	})
 	if merged.Mode != model.GatePolicyModeCanary ||
-		merged.SoakMinDuration != "24h" ||
+		merged.SoakMinDuration != "10m" ||
 		merged.MinimumSamples != 10 ||
 		merged.MinimumFailureDomains != 3 {
 		t.Fatalf("expected stricter policy to be retained: %+v", merged)
 	}
 	if len(merged.CanaryFailureDomains) != 1 || merged.CanaryFailureDomains[0] != "node:a" {
 		t.Fatalf("compiled one-node blast cap must bound canary cohort: %+v", merged.CanaryFailureDomains)
+	}
+}
+
+func TestGatePolicyObservationDurationIsBoundedAtTenMinutes(t *testing.T) {
+	merged := mergeGatePolicy(model.GatePolicy{ID: "node.health", SoakMinDuration: "1m"}, model.GatePolicy{SoakMinDuration: "24h"})
+	if merged.SoakMinDuration != "10m" {
+		t.Fatalf("observation duration exceeded ten-minute production cap: %+v", merged)
+	}
+	unknown := mergeGatePolicies(nil, []model.GatePolicy{{ID: "extension.health", Scope: model.GatePolicyScopeNode, SoakMinDuration: "24h"}})
+	if len(unknown) != 1 || unknown[0].SoakMinDuration != "10m" {
+		t.Fatalf("unknown gate observation duration exceeded ten-minute production cap: %+v", unknown)
 	}
 }
 

@@ -71,7 +71,7 @@ mode: shadow | canary | enforced
 introduced_at: "2026-07-09T00:00:00Z"
 introduced_by_release: "<git-sha>"
 soak_started_at: null
-soak_min_duration: 24h
+soak_min_duration: 10m
 minimum_samples: 3
 minimum_failure_domains: 2
 canary_failure_domains:
