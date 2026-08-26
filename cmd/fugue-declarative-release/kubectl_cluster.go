@@ -345,7 +345,7 @@ func emergencyRuntimePointerValue(resource map[string]any, pointer string) (stri
 			value, found := container["image"].(string)
 			return value, found
 		}
-		if scope, resource, resourceOK := resourceCPUTail(tail); resourceOK {
+		if scope, resource, resourceOK := resourceQuantityTail(tail); resourceOK {
 			value, found := mapField(mapField(container, "resources"), scope)[resource].(string)
 			return value, found
 		}
@@ -385,7 +385,7 @@ func setEmergencyRuntimePointerValue(resource map[string]any, pointer, value str
 				container["image"] = value
 				return true
 			}
-			if scope, resource, resourceOK := resourceCPUTail(tail); resourceOK {
+			if scope, resource, resourceOK := resourceQuantityTail(tail); resourceOK {
 				resourceScope := mapField(mapField(container, "resources"), scope)
 				if resourceScope == nil {
 					return false
@@ -428,7 +428,7 @@ func emergencyContainerPointerParts(pointer string) (string, string, string, boo
 		return "", "", "", false
 	}
 	if tail != "image" {
-		if _, _, resourceOK := resourceCPUTail(tail); !resourceOK {
+		if _, _, resourceOK := resourceQuantityTail(tail); !resourceOK {
 			if _, envOK := envValueTail(tail); !envOK {
 				if _, ok := probePathTail(tail); !ok {
 					return "", "", "", false
@@ -439,10 +439,12 @@ func emergencyContainerPointerParts(pointer string) (string, string, string, boo
 	return field, name, tail, true
 }
 
-func resourceCPUTail(tail string) (string, string, bool) {
+func resourceQuantityTail(tail string) (string, string, bool) {
 	for _, scope := range []string{"limits", "requests"} {
-		if tail == "resources/"+scope+"/cpu" {
-			return scope, "cpu", true
+		for _, resource := range []string{"cpu", "memory", "ephemeral-storage"} {
+			if tail == "resources/"+scope+"/"+resource {
+				return scope, resource, true
+			}
 		}
 	}
 	return "", "", false
@@ -971,7 +973,8 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 // applyResourceWithOwnershipConvergence is the one bounded recovery path for
 // emergency kubectl writes. A typed SSA conflict must exactly match the
 // release-owned annotation, image, HTTP probe path, declared environment value,
-// or a complete declared Role rules list and an Update managedFields entry.
+// declared resource quantity, or a complete declared Role rules list and an
+// Update managedFields entry.
 // Execute moves only the exact reviewed value through a UID/RV-bound JSON Patch
 // using the declarative field manager, then retries ordinary SSA with the fresh
 // RV. This transfers ownership without editing API server-owned managedFields
@@ -1197,7 +1200,7 @@ func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity
 		if _, found, err := declaredContainerImageOptional(desired, release.Workload.Container, "container"); err == nil && found {
 			add("/spec/template/spec/containers[name=" + release.Workload.Container + "]/image")
 		}
-		addDeclaredContainerCPUResourcePointers(desired, release.Workload.Container, add)
+		addDeclaredContainerResourceQuantityPointers(desired, release.Workload.Container, []string{"cpu"}, add)
 	}
 	for _, target := range release.ArtifactTargets {
 		if target.APIVersion != identity.APIVersion || target.Kind != identity.Kind || target.Namespace != identity.Namespace || target.Name != identity.Name {
@@ -1230,9 +1233,10 @@ func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity
 }
 
 // ownershipConvergencePointers extends the emergency rollback boundary only
-// for declarative SSA ownership convergence. Literal environment values may
-// transfer from a legacy manager to the reviewed manifest, but they never
-// become authorized emergency rollback fields.
+// for declarative SSA ownership convergence. Literal environment values and
+// declared built-in resource quantity leaves may transfer from a legacy
+// manager to the reviewed manifest, but they never become authorized emergency
+// rollback fields.
 func ownershipConvergencePointers(release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) []string {
 	allowedSet := make(map[string]bool)
 	for _, pointer := range emergencyOwnershipPointers(release, identity, desired) {
@@ -1246,6 +1250,7 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 	if release.Workload.APIVersion == identity.APIVersion && release.Workload.Kind == identity.Kind &&
 		release.Workload.Namespace == identity.Namespace && release.Workload.Name == identity.Name {
 		addDeclaredContainerEnvValuePointers(desired, "container", release.Workload.Container, add)
+		addDeclaredContainerResourceQuantityPointers(desired, release.Workload.Container, []string{"cpu", "memory", "ephemeral-storage"}, add)
 	}
 	for _, target := range release.ArtifactTargets {
 		if target.APIVersion != identity.APIVersion || target.Kind != identity.Kind || target.Namespace != identity.Namespace || target.Name != identity.Name {
@@ -1294,11 +1299,11 @@ func ownershipCleanupPointers(allowed []string) []string {
 	return cleanup
 }
 
-// addDeclaredContainerCPUResourcePointers admits only the two scalar CPU
-// leaves that kubectl set resources can own. Memory, ephemeral storage,
-// resource maps and every other container field remain outside the recovery
-// boundary. A reviewed manifest must declare the exact value before cleanup.
-func addDeclaredContainerCPUResourcePointers(desired map[string]any, containerName string, add func(string)) {
+// addDeclaredContainerResourceQuantityPointers admits only named, built-in
+// resource quantity leaves. Resource maps, extended resources and every other
+// container field remain outside the recovery boundary. A reviewed manifest
+// must declare the exact scalar value before ownership cleanup.
+func addDeclaredContainerResourceQuantityPointers(desired map[string]any, containerName string, resourceNames []string, add func(string)) {
 	templateSpec := mapField(mapField(mapField(desired, "spec"), "template"), "spec")
 	for _, raw := range anySlice(templateSpec["containers"]) {
 		container, _ := raw.(map[string]any)
@@ -1307,8 +1312,13 @@ func addDeclaredContainerCPUResourcePointers(desired map[string]any, containerNa
 		}
 		resources := mapField(container, "resources")
 		for _, scope := range []string{"limits", "requests"} {
-			if _, ok := mapField(resources, scope)["cpu"].(string); ok {
-				add("/spec/template/spec/containers[name=" + containerName + "]/resources/" + scope + "/cpu")
+			for _, resource := range resourceNames {
+				if _, _, ok := resourceQuantityTail("resources/" + scope + "/" + resource); !ok {
+					continue
+				}
+				if _, ok := mapField(resources, scope)[resource].(string); ok {
+					add("/spec/template/spec/containers[name=" + containerName + "]/resources/" + scope + "/" + resource)
+				}
 			}
 		}
 		return
@@ -1548,7 +1558,7 @@ func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []st
 				selectors = append(selectors, selectorTest{path: envBase + "/name", value: envName})
 				valuePath = envBase + "/value"
 			default:
-				scope, resource, resourceOK := resourceCPUTail(tail)
+				scope, resource, resourceOK := resourceQuantityTail(tail)
 				if !resourceOK {
 					return nil, false, errors.New("legacy ownership transfer pointer is not scalar")
 				}

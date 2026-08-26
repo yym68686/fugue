@@ -623,8 +623,8 @@ func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *test
 					map[string]any{"name": "DUPLICATE", "value": "second"},
 				},
 				"resources": map[string]any{
-					"limits":   map[string]any{"cpu": "2", "memory": "512Mi"},
-					"requests": map[string]any{"cpu": "100m", "memory": "128Mi"},
+					"limits":   map[string]any{"cpu": "2", "memory": "512Mi", "ephemeral-storage": "1Gi", "example.com/gpu": "1"},
+					"requests": map[string]any{"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "256Mi"},
 				},
 				"livenessProbe":  map[string]any{"httpGet": map[string]any{"path": "/livez", "port": "health"}, "periodSeconds": json.Number("10")},
 				"readinessProbe": map[string]any{"httpGet": map[string]any{"path": "/readyz", "port": "health"}, "timeoutSeconds": json.Number("3")},
@@ -641,6 +641,10 @@ func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *test
 		"/spec/template/spec/containers[name=edge]/image",
 		"/spec/template/spec/containers[name=edge]/resources/limits/cpu",
 		"/spec/template/spec/containers[name=edge]/resources/requests/cpu",
+		"/spec/template/spec/containers[name=edge]/resources/limits/memory",
+		"/spec/template/spec/containers[name=edge]/resources/requests/memory",
+		"/spec/template/spec/containers[name=edge]/resources/limits/ephemeral-storage",
+		"/spec/template/spec/containers[name=edge]/resources/requests/ephemeral-storage",
 		"/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path",
 		"/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path",
 		"/spec/template/spec/containers[name=edge]/startupProbe/httpGet/path",
@@ -648,6 +652,14 @@ func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *test
 	}
 	if !stringSubset(want, allowed) {
 		t.Fatalf("reviewed runtime scalars missing from ownership convergence allowlist: allowed=%v want=%v", allowed, want)
+	}
+	for _, pointer := range []string{
+		"/spec/template/spec/containers[name=edge]/resources/limits/memory",
+		"/spec/template/spec/containers[name=edge]/resources/limits/ephemeral-storage",
+	} {
+		if stringSubset([]string{pointer}, emergencyOwnershipPointers(release, identity, desired)) {
+			t.Fatalf("ownership-only resource quantity entered the emergency rollback allowlist: %s", pointer)
+		}
 	}
 	cleanupAllowed := ownershipCleanupPointers(allowed)
 	for _, structural := range []string{
@@ -671,8 +683,8 @@ func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *test
 		"/spec/template/spec/containers[name=edge]/livenessProbe/periodSeconds",
 		"/spec/template/spec/containers[name=edge]/readinessProbe/timeoutSeconds",
 		"/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/port",
-		"/spec/template/spec/containers[name=edge]/resources/limits/memory",
-		"/spec/template/spec/containers[name=edge]/resources/requests/memory",
+		"/spec/template/spec/containers[name=edge]/resources/limits/example.com~1gpu",
+		"/spec/template/spec/containers[name=edge]/resources/limits",
 		"/spec/template/spec/containers[name=edge]/env[name=FUGUE_DNS_TOKEN]/value",
 		"/spec/template/spec/containers[name=edge]/env[name=INVALID-NAME]/value",
 		"/spec/template/spec/containers[name=edge]/env[name=DUPLICATE]/value",
@@ -700,6 +712,16 @@ func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *test
 	}
 	if value, ok := emergencyRuntimePointerValue(live, cpuPointer); !ok || value != "1500m" {
 		t.Fatalf("CPU resource pointer write was not observable: value=%q ok=%v", value, ok)
+	}
+	memoryPointer := "/spec/template/spec/containers[name=edge]/resources/limits/memory"
+	if value, ok := emergencyRuntimePointerValue(live, memoryPointer); !ok || value != "512Mi" {
+		t.Fatalf("memory resource pointer read failed: value=%q ok=%v", value, ok)
+	}
+	if !setEmergencyRuntimePointerValue(live, memoryPointer, "768Mi") {
+		t.Fatal("memory resource pointer write failed")
+	}
+	if value, ok := emergencyRuntimePointerValue(live, memoryPointer); !ok || value != "768Mi" {
+		t.Fatalf("memory resource pointer write was not observable: value=%q ok=%v", value, ok)
 	}
 	if value, ok := emergencyRuntimePointerValue(live, envPointer); !ok || value != "true" {
 		t.Fatalf("environment value pointer read failed: value=%q ok=%v", value, ok)
@@ -1929,6 +1951,32 @@ func TestBeforeFirstApplyOwnershipTransfersOnlyAllowlistedScalars(t *testing.T) 
 	outside := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: .spec.replicas`)
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "", outside); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
 		t.Fatalf("synthetic pre-SSA ownership expanded beyond the allowlist: %v", err)
+	}
+}
+
+func TestBeforeFirstApplyOwnershipTransfersDeclaredMemoryQuantity(t *testing.T) {
+	pointer := "/spec/template/spec/containers[name=edge-control]/resources/limits/memory"
+	desired := map[string]any{
+		"metadata": map[string]any{"uid": "control-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "edge-control", "resources": map[string]any{"limits": map[string]any{"memory": "2Gi"}},
+		}}}}},
+	}
+	live := deepCopyJSONMap(t, desired)
+	metadata := mapField(live, "metadata")
+	metadata["managedFields"] = []any{map[string]any{
+		"manager": "before-first-apply", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
+	}}
+	container := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	mapField(mapField(container, "resources"), "limits")["memory"] = "1Gi"
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: ` + ssaFieldForPointer(pointer))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "", applyErr); err != nil {
+		t.Fatalf("synthetic pre-SSA memory ownership blocked an exact scalar: %v", err)
+	}
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{pointer}, "", applyErr)
+	if err != nil || !found || len(patch) != 5 || patch[4]["path"] != "/spec/template/spec/containers/0/resources/limits/memory" || patch[4]["value"] != "2Gi" {
+		t.Fatalf("synthetic pre-SSA memory transfer patch=%v found=%v err=%v", patch, found, err)
 	}
 }
 
