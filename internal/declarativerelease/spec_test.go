@@ -498,6 +498,49 @@ func TestBindIntentsAllowsFailedPreflightRepairAgainstLiveGuardianLKG(t *testing
 	}
 }
 
+func TestBindIntentsAllowsChainedRepairFromLiveWorkloadToGuardianLKG(t *testing.T) {
+	registry := testRegistry()
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/api/intent.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveSHA := "3333333333333333333333333333333333333333"
+	previousRepairSHA := "4444444444444444444444444444444444444444"
+	stable := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 2,
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1,
+		ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest, Rollback: "previous-git-lkg"}
+	previous := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 3,
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: liveSHA, ExpectedPreviousManifestSHA: liveSHA,
+		ExpectedPreviousOCIRevision: liveSHA, ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("c", 64),
+		SupersedesFailedConfigSHA: previousRepairSHA, Rollback: "previous-git-lkg"}
+	current := stable
+	current.Generation = 4
+	current.SupersedesFailedConfigSHA = liveSHA
+	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous},
+		map[string]string{"api": previousRepairSHA}, SupersededIntents{"api": {liveSHA: stable}})
+	if err != nil {
+		t.Fatalf("chained live workload repair was rejected: %v", err)
+	}
+	if got := bound.Releases[0]; got.ExpectedPreviousConfigSHA != testSHA1 || got.SupersedesFailedConfigSHA != liveSHA || got.RetrySameLKG {
+		t.Fatalf("chained live workload repair was not bound exactly: %+v", got)
+	}
+
+	for name, mutate := range map[string]func(*Intent, *Intent){
+		"unreviewed prior repair": func(_ *Intent, prior *Intent) { prior.SupersedesFailedConfigSHA = "" },
+		"different live workload": func(next *Intent, _ *Intent) { next.SupersedesFailedConfigSHA = previousRepairSHA },
+		"different stable LKG":    func(next *Intent, _ *Intent) { next.ExpectedPreviousImageDigest = "sha256:" + strings.Repeat("d", 64) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			next, prior := current, previous
+			mutate(&next, &prior)
+			if _, bindErr := BindIntents(registry, plan, map[string]Intent{"api": next}, map[string]Intent{"api": prior},
+				map[string]string{"api": previousRepairSHA}, SupersededIntents{"api": {liveSHA: stable}}); bindErr == nil {
+				t.Fatal("invalid chained live workload repair was accepted")
+			}
+		})
+	}
+}
+
 func TestBindIntentsAllowsAbsentLKGRetry(t *testing.T) {
 	registry := testRegistry()
 	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/api/intent.json"})

@@ -818,7 +818,22 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 				shaPattern.MatchString(intent.ExpectedPreviousConfigSHA) &&
 				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousManifestSHA &&
 				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousOCIRevision
-			failedAtomSuccessor := immediateFailedAtom || historicalFailedAtom || correctedFailedPreflightAtom || liveLKGRepairAtom
+			// A live-LKG repair attempt can itself fail before mutation because
+			// Guardian's rollback record and the live owned workload are different
+			// immutable facts. Permit the next atom to restore the historical
+			// Guardian LKG only when it explicitly supersedes that exact workload,
+			// the prior attempt named the same workload, and the workload's own
+			// reviewed intent names the same rollback predecessor. Execution still
+			// verifies both immutable images and binds the live workload CAS.
+			chainedLiveWorkloadRepairAtom := failedIntentFound && failedIntent.Validate() == nil &&
+				failedIntent.Component == component.ID && failedIntent.Generation < prior.Generation &&
+				prior.SupersedesFailedConfigSHA != "" && prior.ExpectedPreviousPresent &&
+				intent.SupersedesFailedConfigSHA == prior.ExpectedPreviousConfigSHA &&
+				prior.ExpectedPreviousConfigSHA == prior.ExpectedPreviousManifestSHA &&
+				prior.ExpectedPreviousConfigSHA == prior.ExpectedPreviousOCIRevision &&
+				intent.ExpectedPreviousPresent && sameIntentPredecessor(intent, failedIntent)
+			failedAtomSuccessor := immediateFailedAtom || historicalFailedAtom || correctedFailedPreflightAtom ||
+				liveLKGRepairAtom || chainedLiveWorkloadRepairAtom
 			retrySameLKG = intent.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
 				intent.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
