@@ -858,36 +858,6 @@ func TestScopedEdgeTokenRestrictsEdgeGroupAccess(t *testing.T) {
 		t.Fatalf("create edge node token: %v", err)
 	}
 
-	forbiddenRoutes := httptest.NewRecorder()
-	forbiddenRoutesReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token+"&edge_group_id=edge-group-country-hk", nil)
-	server.handleEdgeRoutes(forbiddenRoutes, forbiddenRoutesReq)
-	if forbiddenRoutes.Code != http.StatusForbidden {
-		t.Fatalf("expected scoped token group mismatch to be forbidden, got %d body=%s", forbiddenRoutes.Code, forbiddenRoutes.Body.String())
-	}
-
-	allowedRoutes := httptest.NewRecorder()
-	allowedRoutesReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token, nil)
-	server.handleEdgeRoutes(allowedRoutes, allowedRoutesReq)
-	if allowedRoutes.Code != http.StatusOK {
-		t.Fatalf("expected scoped token default route request to succeed, got %d body=%s", allowedRoutes.Code, allowedRoutes.Body.String())
-	}
-	var bundle model.EdgeRouteBundle
-	mustDecodeJSON(t, allowedRoutes, &bundle)
-	if bundle.EdgeID != "edge-us-1" || bundle.EdgeGroupID != "edge-group-country-us" {
-		t.Fatalf("expected scoped token to fill edge selector, got %+v", bundle)
-	}
-
-	sameGroupRoutes := httptest.NewRecorder()
-	allowedRoutesReq = httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token+"&edge_id=edge-us-2&edge_group_id=edge-group-country-us", nil)
-	server.handleEdgeRoutes(sameGroupRoutes, allowedRoutesReq)
-	if sameGroupRoutes.Code != http.StatusOK {
-		t.Fatalf("expected scoped token same-group route request to succeed, got %d body=%s", sameGroupRoutes.Code, sameGroupRoutes.Body.String())
-	}
-	mustDecodeJSON(t, sameGroupRoutes, &bundle)
-	if bundle.EdgeID != "edge-us-2" || bundle.EdgeGroupID != "edge-group-country-us" {
-		t.Fatalf("expected scoped token to allow same-group edge selector, got %+v", bundle)
-	}
-
 	allowedHeartbeat := httptest.NewRecorder()
 	sameGroupBody, _ := json.Marshal(map[string]any{
 		"edge_id":       "edge-us-2",

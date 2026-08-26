@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	runtimepkg "fugue/internal/runtime"
@@ -44,48 +43,8 @@ type edgeLiveServingState struct {
 }
 
 type edgeRouteBundleOptions struct {
-	EdgeID              string
-	AuthenticatedEdgeID string
-	EdgeGroupID         string
-}
-
-func (s *Server) handleEdgeRoutes(w http.ResponseWriter, r *http.Request) {
-	authContext, ok := s.authorizeEdgeRequest(w, r)
-	if !ok {
-		return
-	}
-
-	options := edgeRouteBundleOptions{
-		EdgeID:      strings.TrimSpace(r.URL.Query().Get("edge_id")),
-		EdgeGroupID: strings.TrimSpace(r.URL.Query().Get("edge_group_id")),
-	}
-	if err := authContext.constrain(&options.EdgeID, &options.EdgeGroupID); err != nil {
-		httpx.WriteError(w, http.StatusForbidden, err.Error())
-		return
-	}
-	if authContext.Scoped {
-		options.AuthenticatedEdgeID = authContext.EdgeID
-	}
-	bundle, err := s.deriveEdgeRouteBundle(r, options)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if options.AuthenticatedEdgeID != "" {
-		if err := s.store.RecordEdgeRouteSync(options.AuthenticatedEdgeID); err != nil {
-			s.writeStoreError(w, err)
-			return
-		}
-	}
-
-	etag := edgeRouteBundleETag(bundle.Version)
-	w.Header().Set("ETag", etag)
-	w.Header().Set("Cache-Control", "private, no-cache")
-	w.Header().Set("X-Fugue-Route-Bundle-Version", bundle.Version)
-
-	// Route bundles carry signed validity windows. Re-send unchanged content so
-	// edge nodes can refresh valid_until instead of going stale behind a 304.
-	httpx.WriteJSON(w, http.StatusOK, bundle)
+	EdgeID      string
+	EdgeGroupID string
 }
 
 func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleOptions) (model.EdgeRouteBundle, error) {
@@ -124,15 +83,6 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	requestedEdgeGroupID := strings.TrimSpace(options.EdgeGroupID)
 	if requestedEdgeGroupID == "" {
 		requestedEdgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
-	}
-	// A scoped node must be able to fetch the bundle that lets it recover from
-	// stale state. Admit its authenticated identity only within this response;
-	// global route health changes after the successful sync is recorded below.
-	if requestedEdgeGroupID != "" && options.AuthenticatedEdgeID != "" && !healthyEdgeGroups[requestedEdgeGroupID] {
-		healthyEdgeGroups[requestedEdgeGroupID] = true
-		healthyEdgeNodeIDsByGroup[requestedEdgeGroupID] = appendUniqueString(
-			healthyEdgeNodeIDsByGroup[requestedEdgeGroupID], options.AuthenticatedEdgeID,
-		)
 	}
 	if requestedEdgeGroupID != "" && !healthyEdgeGroups[requestedEdgeGroupID] {
 		nodes, _, err := s.listRouteInventoryNodes(requestedEdgeGroupID)
