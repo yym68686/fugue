@@ -2425,6 +2425,28 @@ func podFixture(name, uid, source, imageDigest string) map[string]any {
 	}
 }
 
+func TestParseReadyPodsAcceptsStableHistoricalRestarts(t *testing.T) {
+	const source = "1111111111111111111111111111111111111111"
+	const imageDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{Container: "api"}}
+	first := podFixture("api-1", "uid-1", source, imageDigest)
+	second := podFixture("api-2", "uid-2", source, imageDigest)
+	first["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["restartCount"] = 38
+	second["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["restartCount"] = 41
+	raw := mustJSON(t, map[string]any{"items": []any{first, second}})
+
+	imageID, before, err := parseReadyPods(raw, release, 2, source)
+	if err != nil || imageID != "sha256:"+imageDigest || before == "" {
+		t.Fatalf("stable ready pods with historical restarts were rejected: image=%q health=%q err=%v", imageID, before, err)
+	}
+
+	second["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["restartCount"] = 42
+	_, after, err := parseReadyPods(mustJSON(t, map[string]any{"items": []any{first, second}}), release, 2, source)
+	if err != nil || after == before {
+		t.Fatalf("a new restart did not change the health witness: before=%q after=%q err=%v", before, after, err)
+	}
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	encoded, err := json.Marshal(value)
