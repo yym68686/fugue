@@ -2523,7 +2523,7 @@ func rrForEdgeDNSRecordWithGeoAudit(record model.EdgeDNSRecord, ownerName string
 }
 
 func edgeDNSAnswerCandidateDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]model.EdgeDNSAnswerCandidate, []edgeDNSFilteredCandidate, edgeDNSCandidateOrderDecision) {
-	ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, hint, now)
+	ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, hint, now, liveHealth != nil)
 	filteredCandidates := []edgeDNSFilteredCandidate{}
 	if liveHealth != nil && len(ordered) > 0 {
 		filtered := ordered[:0]
@@ -2625,11 +2625,11 @@ func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.E
 }
 
 func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time) []model.EdgeDNSAnswerCandidate {
-	candidates, _ := edgeDNSOrderedCandidatesWithDecision(record, hint, now)
+	candidates, _ := edgeDNSOrderedCandidatesWithDecision(record, hint, now, false)
 	return candidates
 }
 
-func edgeDNSOrderedCandidatesWithDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time) ([]model.EdgeDNSAnswerCandidate, edgeDNSCandidateOrderDecision) {
+func edgeDNSOrderedCandidatesWithDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time, liveTLSProbeEnabled bool) ([]model.EdgeDNSAnswerCandidate, edgeDNSCandidateOrderDecision) {
 	policy := record.AnswerPolicy
 	sourceCandidates := record.Candidates
 	decision := edgeDNSCandidateOrderDecision{
@@ -2655,7 +2655,7 @@ func edgeDNSOrderedCandidatesWithDecision(record model.EdgeDNSRecord, hint dnsGe
 	decision.Policy = policy
 	candidates := make([]model.EdgeDNSAnswerCandidate, 0, len(sourceCandidates))
 	for _, candidate := range sourceCandidates {
-		if !edgeDNSCandidateEligible(candidate, policy) {
+		if !edgeDNSCandidateEligible(candidate, policy, liveTLSProbeEnabled) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -2759,7 +2759,7 @@ func edgeDNSAnyCandidateScore(candidates []model.EdgeDNSAnswerCandidate) bool {
 	return false
 }
 
-func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy) bool {
+func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy, liveTLSProbeEnabled bool) bool {
 	if edgeDNSCandidateLKGInvalid(candidate) {
 		return false
 	}
@@ -2769,7 +2769,7 @@ func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy mod
 	if policy.RouteReadyRequired && !candidate.RouteReady {
 		return false
 	}
-	if policy.PolicyKind != model.DNSAnswerPolicyKindDisabled {
+	if policy.PolicyKind != model.DNSAnswerPolicyKindDisabled && !liveTLSProbeEnabled {
 		if !candidate.TLSReady {
 			return false
 		}

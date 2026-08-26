@@ -697,7 +697,7 @@ func TestSelectedEdgeGroupOnlyYieldsToExplicitCrossGroupExploration(t *testing.T
 		},
 	}
 	for bucket := int64(0); bucket < 100; bucket++ {
-		ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, time.Unix(bucket*int64((10*time.Minute).Seconds()), 0).UTC())
+		ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, time.Unix(bucket*int64((10*time.Minute).Seconds()), 0).UTC(), false)
 		if len(ordered) == 0 || ordered[0].EdgeGroupID != "edge-group-country-us" || decision.ExplorationKind != "" {
 			t.Fatalf("selection must be stable when exploration is disabled, got decision=%+v candidates=%+v", decision, ordered)
 		}
@@ -706,7 +706,7 @@ func TestSelectedEdgeGroupOnlyYieldsToExplicitCrossGroupExploration(t *testing.T
 	record.AnswerPolicy.ExplorationPercent = 50
 	foundCrossGroupExploration := false
 	for bucket := int64(0); bucket < 100; bucket++ {
-		ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, time.Unix(bucket*int64((10*time.Minute).Seconds()), 0).UTC())
+		ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, time.Unix(bucket*int64((10*time.Minute).Seconds()), 0).UTC(), false)
 		if len(ordered) > 0 && ordered[0].EdgeGroupID == "edge-group-country-de" {
 			if decision.ExplorationKind != "cross_group" {
 				t.Fatalf("selected group may change only through explicit cross-group exploration, got %+v", decision)
@@ -743,7 +743,7 @@ func TestSelectionAuditAttributesOnlyTheExactExplorationCandidate(t *testing.T) 
 	var exploredAt time.Time
 	for bucket := int64(0); bucket < 2000; bucket++ {
 		now := time.Unix(bucket*int64((10*time.Minute).Seconds()), 0).UTC()
-		ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, now)
+		ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, now, false)
 		if decision.ExplorationKind == "cross_group" && len(ordered) > 0 && ordered[0].EdgeID == "edge-de" {
 			exploredAt = now
 			break
@@ -791,7 +791,7 @@ func TestSelectionAuditAttributesExactSameGroupExplorationCandidate(t *testing.T
 	var exploredAt time.Time
 	for bucket := int64(0); bucket < 2000; bucket++ {
 		now := time.Unix(bucket*int64((10*time.Minute).Seconds()), 0).UTC()
-		ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, now)
+		ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, now, false)
 		if decision.ExplorationKind == "same_group" && len(ordered) > 0 && ordered[0].EdgeID == "edge-us-sibling" {
 			exploredAt = now
 			break
@@ -1003,6 +1003,43 @@ func TestEdgeDNSCandidateEligibilityRequiresTLSReadyForWeightedPolicy(t *testing
 	ordered := edgeDNSOrderedCandidates(record, dnsGeoHint{}, time.Date(2026, 6, 17, 0, 0, 0, 0, time.UTC))
 	if len(ordered) != 1 || ordered[0].IP != "51.38.126.103" {
 		t.Fatalf("expected only healthy route-ready TLS-ready candidate, got %+v", ordered)
+	}
+}
+
+func TestEdgeDNSLiveTLSProbeSupersedesNodeTLSReadiness(t *testing.T) {
+	t.Parallel()
+
+	record := model.EdgeDNSRecord{
+		Name: "app.dns.fugue.pro",
+		Type: model.EdgeDNSRecordTypeA,
+		AnswerPolicy: model.DNSAnswerPolicy{
+			PolicyKind:         model.DNSAnswerPolicyKindWeighted,
+			HealthRequired:     true,
+			RouteReadyRequired: true,
+		},
+		Candidates: []model.EdgeDNSAnswerCandidate{
+			{IP: "15.204.94.71", EdgeID: "edge-us", EdgeGroupID: "edge-group-country-us", Healthy: true, RouteReady: true, TLSReady: false},
+		},
+	}
+	now := time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)
+
+	withoutProbe, _, _ := edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, now, nil, nil)
+	if len(withoutProbe) != 0 {
+		t.Fatalf("expected node TLS readiness to remain fail-closed without a live probe, got %+v", withoutProbe)
+	}
+
+	withHealthyProbe, filtered, _ := edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, now, func(hostname, ip string) bool {
+		return hostname == "app.dns.fugue.pro" && ip == "15.204.94.71"
+	}, nil)
+	if len(withHealthyProbe) != 1 || withHealthyProbe[0].IP != "15.204.94.71" || len(filtered) != 0 {
+		t.Fatalf("expected healthy hostname probe to supersede pending node TLS readiness, got answers=%+v filtered=%+v", withHealthyProbe, filtered)
+	}
+
+	withFailedProbe, filtered, _ := edgeDNSAnswerCandidateDecision(record, dnsGeoHint{}, now, func(string, string) bool {
+		return false
+	}, nil)
+	if len(withFailedProbe) != 0 || len(filtered) != 1 || filtered[0].Reason != "local_edge_probe_unhealthy" {
+		t.Fatalf("expected failed hostname probe to remain fail-closed, got answers=%+v filtered=%+v", withFailedProbe, filtered)
 	}
 }
 
