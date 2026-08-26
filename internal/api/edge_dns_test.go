@@ -615,8 +615,9 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 		}
 		artifacts = append(artifacts, projected)
 	}
-	if !artifacts[0].GeneratedAt.Equal(now) || !artifacts[1].GeneratedAt.Equal(now) {
-		t.Fatalf("expected projections to share canonical generation time %s, got %s and %s", now, artifacts[0].GeneratedAt, artifacts[1].GeneratedAt)
+	canonicalNow := canonicalEdgeDNSArtifactTime(now)
+	if !artifacts[0].GeneratedAt.Equal(canonicalNow) || !artifacts[1].GeneratedAt.Equal(canonicalNow) {
+		t.Fatalf("expected projections to share canonical generation time %s, got %s and %s", canonicalNow, artifacts[0].GeneratedAt, artifacts[1].GeneratedAt)
 	}
 	if artifacts[0].DNSNodeID == artifacts[1].DNSNodeID || artifacts[0].ScopeKey == artifacts[1].ScopeKey || artifacts[0].Bundle.Signature == artifacts[1].Bundle.Signature {
 		t.Fatalf("expected node-scoped artifact identities and signatures to remain isolated: %+v %+v", artifacts[0], artifacts[1])

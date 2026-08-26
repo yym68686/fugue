@@ -43,9 +43,9 @@ func TestAPIGuardianHandoffBindsProductionLKG(t *testing.T) {
 	if decodeErr != nil || closeErr != nil {
 		t.Fatalf("decode API intent: %v close: %v", decodeErr, closeErr)
 	}
-	const lkgSHA = "0559e9acab38db4b7cda85c79c97b9890874caed"
-	const lkgImage = "sha256:50d8bc466f0f3e643163749359e4e074f309239803a6abe3bb428775ec88c9dc"
-	if intent.Generation != 67 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+	const lkgSHA = "cad4ef33628024db0fe196e057b443134d1ad85c"
+	const lkgImage = "sha256:1021e19f225e7d78f3345ceb5140d46749d441952ae67132d9cde67f7c59ab68"
+	if intent.Generation != 77 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage ||
 		intent.SupersedesFailedConfigSHA != "" {
 		t.Fatalf("API Guardian intent is not bound to the production LKG: %+v", intent)

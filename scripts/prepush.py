@@ -36,6 +36,12 @@ TEST_HUNK_RE = re.compile(
     r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ func "
     r"(Test(?:[A-Z0-9_][A-Za-z0-9_]*)?)\("
 )
+FAILURE_OUTPUT_MARKER_RE = re.compile(
+    r"(?:--- FAIL:|panic:|fatal error:|DATA RACE|^FAIL(?:\s|$)|"
+    r"command exceeded|deadline exceeded|signal:|exit status)",
+    re.MULTILINE,
+)
+FAILURE_OUTPUT_LIMIT = 12000
 
 
 def run(command: list[str], timeout: float) -> tuple[int, str]:
@@ -60,6 +66,30 @@ def run(command: list[str], timeout: float) -> tuple[int, str]:
 
 def command_env() -> dict[str, str]:
     return os.environ.copy()
+
+
+def bounded_failure_output(output: str, limit: int = FAILURE_OUTPUT_LIMIT) -> str:
+    if len(output) <= limit:
+        return output
+
+    lines = output.splitlines(keepends=True)
+    context_lines: set[int] = set()
+    for index, line in enumerate(lines):
+        if FAILURE_OUTPUT_MARKER_RE.search(line):
+            context_lines.update(range(max(0, index - 2), min(len(lines), index + 8)))
+    context = "".join(lines[index] for index in sorted(context_lines))
+
+    head_budget = limit // 6
+    tail_budget = limit // 6
+    context_budget = limit - head_budget - tail_budget - 96
+    return (
+        "--- output head ---\n"
+        + output[:head_budget]
+        + "\n--- failure context ---\n"
+        + context[:context_budget]
+        + "\n--- output tail ---\n"
+        + output[-tail_budget:]
+    )
 
 
 def task_timeout_seconds(name: str, remaining: float) -> float:
@@ -437,7 +467,7 @@ def main() -> int:
     def record(name: str, before: float, status: int, output: str) -> None:
         checks[name] = {"durationMs": round((time.monotonic() - before) * 1000), "status": "pass" if status == 0 else "fail"}
         if status != 0:
-            failures.append((name, output[-12000:]))
+            failures.append((name, bounded_failure_output(output)))
 
     def execute(name: str, command: list[str] | None) -> tuple[int, str, float]:
         before = time.monotonic()

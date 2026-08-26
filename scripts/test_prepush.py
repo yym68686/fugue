@@ -340,6 +340,24 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertIn("$ go test ./internal/a\na failed", output)
         self.assertIn("$ go test ./internal/b\nb failed", output)
 
+    def test_bounded_failure_output_keeps_failure_context_and_ends(self) -> None:
+        output = (
+            "head sentinel\n"
+            + ("before noise\n" * 700)
+            + "--- FAIL: TestCanonicalTime (0.01s)\n"
+            + "    edge_dns_test.go:619: precision mismatch\n"
+            + ("after noise\n" * 700)
+            + "tail sentinel\n"
+        )
+
+        bounded = prepush.bounded_failure_output(output, 1200)
+
+        self.assertLessEqual(len(bounded), 1200)
+        self.assertIn("head sentinel", bounded)
+        self.assertIn("--- FAIL: TestCanonicalTime", bounded)
+        self.assertIn("precision mismatch", bounded)
+        self.assertIn("tail sentinel", bounded)
+
     def test_dedicated_declarative_packages_are_not_run_twice(self) -> None:
         commands = [
             ["go", "test", "./cmd/fugue-declarative-release"],
