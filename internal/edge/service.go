@@ -63,29 +63,32 @@ const (
 )
 
 type Service struct {
-	Config                      config.EdgeConfig
-	RouteBundleSource           RouteBundleSourceConfig
-	InventoryProducer           InventoryProducerConfig
-	HTTPClient                  *http.Client
-	RouteBundleHTTPClient       *http.Client
-	InventoryProducerHTTPClient *http.Client
-	Logger                      *log.Logger
-	caddyWarmup                 func(context.Context, string, string) error
-	cacheWarmupClientFactory    func(string, string) *http.Client
-	proxyBase                   http.RoundTripper
-	proxyTransportMu            sync.Mutex
-	proxyTransportPrototype     *http.Transport
-	proxyTransports             map[string]*http.Transport
-	proxyTransportActiveKeys    map[string]struct{}
-	proxyTransportBundleSet     bool
-	bodyBuffer                  *edgeRequestBodyBufferManager
-	requestBodyPolicyMu         sync.Mutex
-	requestBodyPolicyGuards     map[string]*edgeRequestBodyPolicyGuard
-	caddyWarmupMu               sync.Mutex
-	caddyWarmupCancel           context.CancelFunc
-	caddyWarmupDone             <-chan struct{}
-	caddyWarmupIdentity         string
-	caddyWarmupSequence         uint64
+	Config            config.EdgeConfig
+	RouteBundleSource RouteBundleSourceConfig
+	// requireEdgeControlRouteSource is set by the production constructor. The
+	// legacy constructor remains available only to package-local unit fixtures.
+	requireEdgeControlRouteSource bool
+	InventoryProducer             InventoryProducerConfig
+	HTTPClient                    *http.Client
+	RouteBundleHTTPClient         *http.Client
+	InventoryProducerHTTPClient   *http.Client
+	Logger                        *log.Logger
+	caddyWarmup                   func(context.Context, string, string) error
+	cacheWarmupClientFactory      func(string, string) *http.Client
+	proxyBase                     http.RoundTripper
+	proxyTransportMu              sync.Mutex
+	proxyTransportPrototype       *http.Transport
+	proxyTransports               map[string]*http.Transport
+	proxyTransportActiveKeys      map[string]struct{}
+	proxyTransportBundleSet       bool
+	bodyBuffer                    *edgeRequestBodyBufferManager
+	requestBodyPolicyMu           sync.Mutex
+	requestBodyPolicyGuards       map[string]*edgeRequestBodyPolicyGuard
+	caddyWarmupMu                 sync.Mutex
+	caddyWarmupCancel             context.CancelFunc
+	caddyWarmupDone               <-chan struct{}
+	caddyWarmupIdentity           string
+	caddyWarmupSequence           uint64
 
 	mu                    sync.Mutex
 	snapshot              Status
@@ -440,14 +443,18 @@ func (e statusError) Error() string {
 }
 
 func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
-	return NewServiceWithEdgeSources(cfg, RouteBundleSourceConfig{}, InventoryProducerConfig{}, logger)
+	return newServiceWithEdgeSources(cfg, RouteBundleSourceConfig{}, InventoryProducerConfig{}, false, logger)
 }
 
 func NewServiceWithRouteBundleSource(cfg config.EdgeConfig, routeBundleSource RouteBundleSourceConfig, logger *log.Logger) *Service {
-	return NewServiceWithEdgeSources(cfg, routeBundleSource, InventoryProducerConfig{}, logger)
+	return newServiceWithEdgeSources(cfg, routeBundleSource, InventoryProducerConfig{}, true, logger)
 }
 
 func NewServiceWithEdgeSources(cfg config.EdgeConfig, routeBundleSource RouteBundleSourceConfig, inventoryProducer InventoryProducerConfig, logger *log.Logger) *Service {
+	return newServiceWithEdgeSources(cfg, routeBundleSource, inventoryProducer, true, logger)
+}
+
+func newServiceWithEdgeSources(cfg config.EdgeConfig, routeBundleSource RouteBundleSourceConfig, inventoryProducer InventoryProducerConfig, requireEdgeControlRouteSource bool, logger *log.Logger) *Service {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -456,9 +463,10 @@ func NewServiceWithEdgeSources(cfg config.EdgeConfig, routeBundleSource RouteBun
 		timeout = 10 * time.Second
 	}
 	service := &Service{
-		Config:            cfg,
-		RouteBundleSource: routeBundleSource,
-		InventoryProducer: inventoryProducer,
+		Config:                        cfg,
+		RouteBundleSource:             routeBundleSource,
+		requireEdgeControlRouteSource: requireEdgeControlRouteSource,
+		InventoryProducer:             inventoryProducer,
 		HTTPClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -3639,6 +3647,9 @@ func (s *Service) validateConfig() error {
 	}
 	if err := validateEdgeControlRouteSourceConfig(s.edgeRouteSourceConfig()); err != nil {
 		return err
+	}
+	if s.requireEdgeControlRouteSource && !s.edgeControlRouteSourceEnabled() {
+		return errors.New("production edge worker requires the Edge Control route bundle source")
 	}
 	if err := validateInventoryProducerConfig(s.InventoryProducer, s.Config); err != nil {
 		return err

@@ -188,6 +188,17 @@ func TestRouteBundleSourceFromEnvIsIndependentFromHeartbeatAPI(t *testing.T) {
 	}
 }
 
+func TestProductionEdgeServiceRequiresEdgeControlRouteSource(t *testing.T) {
+	service := NewServiceWithEdgeSources(config.EdgeConfig{
+		APIURL:      "http://api.example.test",
+		EdgeToken:   "edge-heartbeat-token",
+		EdgeGroupID: "edge-group-country-us",
+	}, RouteBundleSourceConfig{}, InventoryProducerConfig{}, log.New(io.Discard, "", 0))
+	if err := service.validateConfig(); err == nil || !strings.Contains(err.Error(), "requires the Edge Control route bundle source") {
+		t.Fatalf("missing production Edge Control source was accepted: %v", err)
+	}
+}
+
 func TestInactiveWorkerLoadsCandidateWithoutChangingActiveWorkerOrAuthority(t *testing.T) {
 	const groupID = "edge-group-country-us"
 	const readerToken = "reader-token-0123456789-abcdef-0123456789"
