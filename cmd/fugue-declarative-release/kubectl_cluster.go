@@ -1313,8 +1313,7 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 		}
 		addDeclaredContainerEnvValuePointers(desired, target.ContainerType, target.Container, add)
 	}
-	if release.Workload.APIVersion == identity.APIVersion && release.Workload.Kind == "DaemonSet" &&
-		release.Workload.Namespace == identity.Namespace && release.Workload.Name == identity.Name {
+	if identity.Kind == "DaemonSet" && releaseDeclaresResource(release, identity) {
 		if _, ok := declaredCaddyDataHostPath(desired); ok {
 			add(caddyDataHostPathPointer)
 		}
@@ -1328,6 +1327,20 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 	}
 	sort.Strings(allowed)
 	return allowed
+}
+
+func releaseDeclaresResource(release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity) bool {
+	if release.Workload.APIVersion == identity.APIVersion && release.Workload.Kind == identity.Kind &&
+		release.Workload.Namespace == identity.Namespace && release.Workload.Name == identity.Name {
+		return true
+	}
+	for _, target := range release.ArtifactTargets {
+		if target.APIVersion == identity.APIVersion && target.Kind == identity.Kind &&
+			target.Namespace == identity.Namespace && target.Name == identity.Name {
+			return true
+		}
+	}
+	return false
 }
 
 // ownershipCleanupPointers includes only the associative-list identities and

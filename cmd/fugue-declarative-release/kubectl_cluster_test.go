@@ -1860,9 +1860,12 @@ func TestScalarTransferRebindsOnlyFreshResourceVersion(t *testing.T) {
 
 func TestOwnershipConvergenceTransfersOnlyDeclaredCaddyDataHostPath(t *testing.T) {
 	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front",
+		Container: "edge-front", FieldManager: "fugue-edge-worker-declarative",
+	}, ArtifactTargets: []declarativerelease.ArtifactTarget{{
 		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker",
-		Container: "edge", FieldManager: "fugue-edge-worker-declarative",
-	}}
+		Container: "edge", ContainerType: "container",
+	}}}
 	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker"}
 	desired := map[string]any{
 		"metadata": map[string]any{"uid": "worker-uid", "resourceVersion": "42"},
@@ -1880,6 +1883,11 @@ func TestOwnershipConvergenceTransfersOnlyDeclaredCaddyDataHostPath(t *testing.T
 	}
 	if stringSubset([]string{caddyDataHostPathPointer}, emergencyOwnershipPointers(release, identity, desired)) {
 		t.Fatal("caddy-data hostPath entered emergency rollback allowlist")
+	}
+	unownedIdentity := identity
+	unownedIdentity.Name = "unowned-worker"
+	if unowned := ownershipConvergencePointers(release, unownedIdentity, desired); stringSubset([]string{caddyDataHostPathPointer}, unowned) {
+		t.Fatalf("caddy-data hostPath entered an undeclared resource allowlist: %v", unowned)
 	}
 	for _, forbidden := range []string{
 		"/spec/template/spec/volumes[name=worker-state]/hostPath/path",
