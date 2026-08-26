@@ -118,7 +118,7 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
 	const lkgSHA = "9253d52ead439783432bec879ef2f987910af5fe"
-	if intent.Generation != 36 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
+	if intent.Generation != 37 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
 		intent.ExpectedPreviousImageDigest != "sha256:b45f31923fab7bff378a519a73789e34f8997a0f51b4ab7468d46c1981e694b0" ||
 		intent.SupersedesFailedConfigSHA != "54e3a4fa1f9f93aec146d2a45923e014010291e3" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
@@ -133,7 +133,7 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 35
+	prior.Generation = 36
 	failed := intent
 	failed.Generation = 32
 	failed.SupersedesFailedConfigSHA = "4a5c93325d8c6aac734ba35d04932f1ed21f25fd"

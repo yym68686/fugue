@@ -300,7 +300,7 @@ func (compiler GroupShadowCompiler) reconcileGroupAttempt(ctx context.Context, s
 	entry.ActiveHealthyInstances = len(view.servingEdgeIDs)
 	entry.ActiveBootstrapInstances = len(view.bootstrapEdgeIDs)
 
-	bundle, compileErr := compileGroupShadowCandidate(snapshot, inventory, view, lastSuccessful, now)
+	bundle, compileErr := compileGroupShadowCandidate(snapshot, inventory, entry.InventoryDigest, view, lastSuccessful, now)
 	if compileErr != nil {
 		entry.Status = GroupShadowStatusFailed
 		entry.FailureCode = GroupShadowFailureCompile
@@ -451,7 +451,7 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot, all
 	return groupInventoryView{activeEpoch: epoch, servingEdgeIDs: serving, bootstrapEdgeIDs: bootstrap, candidateEdgeIDs: candidates}, nil
 }
 
-func compileGroupShadowCandidate(snapshot model.EdgeRouteIntentSnapshot, inventory GroupInventorySnapshot, view groupInventoryView, previousGeneration string, now time.Time) (model.EdgeRouteBundle, error) {
+func compileGroupShadowCandidate(snapshot model.EdgeRouteIntentSnapshot, inventory GroupInventorySnapshot, inventoryDigest string, view groupInventoryView, previousGeneration string, now time.Time) (model.EdgeRouteBundle, error) {
 	groupID := normalizeGroupID(inventory.GroupID)
 	routes := append([]model.EdgeRouteIntent(nil), snapshot.Routes...)
 	sort.Slice(routes, func(i, j int) bool {
@@ -484,7 +484,7 @@ func compileGroupShadowCandidate(snapshot model.EdgeRouteIntentSnapshot, invento
 		if !applies {
 			continue
 		}
-		binding, included, err := compileGroupRouteBinding(intent, snapshot.Generation, inventory.Generation, groupID, view.candidateEdgeIDs)
+		binding, included, err := compileGroupRouteBinding(intent, snapshot.Generation, inventoryDigest, groupID, view.candidateEdgeIDs)
 		if err != nil {
 			return model.EdgeRouteBundle{}, err
 		}
@@ -520,7 +520,7 @@ func compileGroupShadowCandidate(snapshot model.EdgeRouteIntentSnapshot, invento
 		TLSAllowlist:  tlsAllowlist,
 		CachePolicies: cachePolicies,
 	}
-	bundle.Version = groupShadowBundleGeneration(bundle, snapshot.Generation, inventory)
+	bundle.Version = groupShadowBundleGeneration(bundle, snapshot.Generation, inventoryDigest)
 	bundle.Generation = bundle.Version
 	if previousGeneration = strings.TrimSpace(previousGeneration); previousGeneration != "" && previousGeneration != bundle.Generation {
 		bundle.PreviousGeneration = previousGeneration
@@ -864,11 +864,9 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 		GroupID       string             `json:"edge_group_id"`
 		FaultDomainID string             `json:"fault_domain_id,omitempty"`
 		EdgePoolID    string             `json:"edge_pool_id,omitempty"`
-		Sequence      uint64             `json:"sequence"`
-		Generation    string             `json:"generation"`
 		Epoch         any                `json:"active_epoch"`
 		Instances     []instanceIdentity `json:"instances"`
-	}{snapshot.Schema, normalizeGroupID(snapshot.GroupID), strings.TrimSpace(snapshot.FaultDomainID), strings.TrimSpace(snapshot.EdgePoolID), snapshot.Sequence, strings.TrimSpace(snapshot.Generation), epoch, instances})
+	}{snapshot.Schema, normalizeGroupID(snapshot.GroupID), strings.TrimSpace(snapshot.FaultDomainID), strings.TrimSpace(snapshot.EdgePoolID), epoch, instances})
 }
 
 func inventoryProducerGeneration(generation uint64) string {
@@ -911,17 +909,16 @@ func shadowDecisionID(routeIntentGeneration, inventoryGeneration, groupID, route
 	})
 }
 
-func groupShadowBundleGeneration(bundle model.EdgeRouteBundle, routeIntentGeneration string, inventory GroupInventorySnapshot) string {
+func groupShadowBundleGeneration(bundle model.EdgeRouteBundle, routeIntentGeneration, inventoryDigest string) string {
 	bundle.Version = ""
 	bundle.Generation = ""
 	bundle.PreviousGeneration = ""
 	bundle.GeneratedAt = time.Time{}
 	return "edgegroupbundle_" + rawDigestHex(struct {
 		RouteIntentGeneration string                `json:"route_intent_generation"`
-		InventoryGeneration   string                `json:"inventory_generation"`
 		InventoryDigest       string                `json:"inventory_digest"`
 		Bundle                model.EdgeRouteBundle `json:"bundle"`
-	}{strings.TrimSpace(routeIntentGeneration), strings.TrimSpace(inventory.Generation), groupInventorySemanticDigest(inventory), bundle})
+	}{strings.TrimSpace(routeIntentGeneration), strings.TrimSpace(inventoryDigest), bundle})
 }
 
 func digestJSON(value any) string {

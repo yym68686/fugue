@@ -279,6 +279,7 @@ func TestGroupPromotionPromotesExactCanariedEpochAfterCandidatePointerAdvances(t
 	}
 	inventory.Sequence++
 	inventory.Generation = "inventory-after-canary"
+	inventory.ActiveEpoch.FenceSequence++
 	inventory.ObservedAt = now.Add(90 * time.Second)
 	if err := store.StoreGroupInventoryCAS(ctx, groupID, inventory.Sequence-1, inventory); err != nil {
 		t.Fatalf("advance inventory: %v", err)

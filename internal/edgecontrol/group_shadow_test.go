@@ -271,6 +271,8 @@ func TestGroupShadowCompilerCandidateGenerationIsCanonical(t *testing.T) {
 	})
 	firstInventory := groupInventoryFixture(groupID, "b", "epoch-de-b", "inventory-de-1", true)
 	secondInventory := groupInventoryFixture(groupID, "b", "epoch-de-b", "inventory-de-1", true)
+	secondInventory.Sequence++
+	secondInventory.Generation = "inventory-de-heartbeat-2"
 	secondInventory.ObservedAt = secondInventory.ObservedAt.Add(24 * time.Hour)
 	sort.Slice(secondInventory.Instances, func(i, j int) bool { return secondInventory.Instances[i].Slot > secondInventory.Instances[j].Slot })
 
@@ -293,6 +295,53 @@ func TestGroupShadowCompilerCandidateGenerationIsCanonical(t *testing.T) {
 	second := compile(secondIntent, secondInventory, time.Date(2026, 8, 5, 11, 0, 0, 0, time.UTC))
 	if first.BundleGeneration != second.BundleGeneration || first.InputDigest != second.InputDigest {
 		t.Fatalf("transport order/time changed candidate identity: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestGroupShadowCompilerDoesNotRematerializeForHeartbeatOnlyInventory(t *testing.T) {
+	t.Parallel()
+
+	const groupID = "edge-group-country-us"
+	now := time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC)
+	reader := &shadowInventoryReader{snapshots: map[string]GroupInventorySnapshot{
+		groupID: groupInventoryFixture(groupID, "b", "epoch-us-b", "inventory-us-1", false),
+	}}
+	ledger := NewMemoryGroupShadowLedger()
+	compiler := GroupShadowCompiler{Inventory: reader, Ledger: ledger, Now: func() time.Time { return now }}
+
+	first, err := compiler.Reconcile(context.Background(), routeIntentFixture(), []string{groupID})
+	if err != nil || first.Succeeded != 1 {
+		t.Fatalf("initial Reconcile() = %+v, %v", first, err)
+	}
+	initial := ledger.History(groupID)
+	if len(initial) != 1 || initial[0].Bundle == nil || len(initial[0].Bundle.Routes) == 0 {
+		t.Fatalf("initial candidate = %+v", initial)
+	}
+
+	heartbeat := reader.snapshots[groupID]
+	heartbeat.Sequence++
+	heartbeat.Generation = "inventory-us-heartbeat-2"
+	heartbeat.ObservedAt = heartbeat.ObservedAt.Add(30 * time.Second)
+	reader.snapshots[groupID] = heartbeat
+	now = now.Add(30 * time.Second)
+	second, err := compiler.Reconcile(context.Background(), routeIntentFixture(), []string{groupID})
+	if err != nil || second.Succeeded != 1 || second.Results[0].LedgerSequence != first.Results[0].LedgerSequence {
+		t.Fatalf("heartbeat-only Reconcile() = %+v, %v", second, err)
+	}
+	if history := ledger.History(groupID); len(history) != 1 || history[0].BundleGeneration != initial[0].BundleGeneration ||
+		history[0].Bundle.Routes[0].DecisionID != initial[0].Bundle.Routes[0].DecisionID {
+		t.Fatalf("heartbeat-only inventory rematerialized candidate: %+v", history)
+	}
+
+	epochChange := heartbeat
+	epochChange.ActiveEpoch.FenceSequence++
+	epochChange.Sequence++
+	epochChange.Generation = "inventory-us-epoch-change"
+	reader.snapshots[groupID] = epochChange
+	now = now.Add(30 * time.Second)
+	third, err := compiler.Reconcile(context.Background(), routeIntentFixture(), []string{groupID})
+	if err != nil || third.Succeeded != 1 || third.Results[0].LedgerSequence != 2 || third.Results[0].BundleGeneration == first.Results[0].BundleGeneration {
+		t.Fatalf("epoch-changing Reconcile() = %+v, %v", third, err)
 	}
 }
 
