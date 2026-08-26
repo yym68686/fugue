@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	platformReleaseEvidenceSchema        = "platform-release-evidence/v1"
+	platformReleaseEvidenceSchema        = "platform-release-evidence/v2"
 	platformReleaseEvidenceDefaultWindow = 5 * time.Minute
 	platformReleaseEvidenceMaxWindow     = 30 * time.Minute
 	platformReleaseHeartbeatMaxAge       = 90 * time.Second
@@ -26,6 +26,7 @@ type platformReleaseEvidenceGroup struct {
 	EdgeGroupID    string `json:"group"`
 	Slot           string `json:"slot"`
 	ReleaseEpoch   string `json:"release_epoch"`
+	BundleVersion  string `json:"bundle_version"`
 	MinHealthy     int    `json:"min_healthy"`
 	FreshHealthy   int    `json:"fresh_healthy"`
 	BundleFresh    bool   `json:"bundle_fresh"`
@@ -85,9 +86,8 @@ func (s *Server) handleAdminGetPlatformReleaseEvidence(w http.ResponseWriter, r 
 		s.writeStoreError(w, err)
 		return
 	}
-	bundle, bundleErr := s.deriveEdgeRouteBundle(r, edgeRouteBundleOptions{})
 	metrics, metricsErr := s.queryPlatformReleaseEvidenceMetrics(r.Context(), releaseEpoch, now.Add(-window), now)
-	evidence := evaluatePlatformReleaseEvidence(now, releaseEpoch, activation, instances, epochs, bundle, bundleErr, metrics, metricsErr)
+	evidence := evaluatePlatformReleaseEvidence(now, releaseEpoch, activation, instances, epochs, metrics, metricsErr)
 	s.appendAudit(principal, "platform.release_evidence.read", "edge_release", releaseEpoch, "", map[string]string{
 		"status": evidence.Status, "evidence_digest": evidence.EvidenceDigest,
 	})
@@ -163,14 +163,15 @@ func stringSliceField(value any) []string {
 	return out
 }
 
-func evaluatePlatformReleaseEvidence(now time.Time, releaseEpoch string, activation model.EdgeActivationState, instances []model.EdgeNodeInstance, epochs []model.EdgeActiveEpoch, bundle model.EdgeRouteBundle, bundleErr error, metrics platformReleaseEvidenceMetrics, metricsErr error) platformReleaseEvidence {
+func evaluatePlatformReleaseEvidence(now time.Time, releaseEpoch string, activation model.EdgeActivationState, instances []model.EdgeNodeInstance, epochs []model.EdgeActiveEpoch, metrics platformReleaseEvidenceMetrics, metricsErr error) platformReleaseEvidence {
 	evidence := platformReleaseEvidence{
 		Schema: platformReleaseEvidenceSchema, Status: "unknown", Reason: "evidence is incomplete",
-		GeneratedAt: now.UTC(), ReleaseEpoch: releaseEpoch, BundleVersion: strings.TrimSpace(bundle.Version),
+		GeneratedAt: now.UTC(), ReleaseEpoch: releaseEpoch,
 		ActivationPhase: activation.Phase, Metrics: metrics,
 	}
 	finish := func(status, reason string) platformReleaseEvidence {
 		evidence.Status, evidence.Reason = status, reason
+		evidence.BundleVersion = platformReleaseBundleSetVersion(evidence.Groups)
 		copy := evidence
 		copy.EvidenceDigest = ""
 		body, _ := json.Marshal(copy)
@@ -180,14 +181,6 @@ func evaluatePlatformReleaseEvidence(now time.Time, releaseEpoch string, activat
 	}
 	if activation.RouteAuthority != model.EdgeRouteAuthorityActiveEpoch || (activation.Phase != model.EdgeActivationPhaseActive && activation.Phase != model.EdgeActivationPhaseEnforced) {
 		return finish("unknown", "active-epoch route authority is not durably established")
-	}
-	if bundleErr != nil || strings.TrimSpace(bundle.Version) == "" {
-		return finish("unknown", "route bundle evidence is unavailable")
-	}
-	for _, route := range bundle.Routes {
-		if route.Status != model.EdgeRouteStatusActive {
-			return finish("failed", "route bundle contains an unavailable route")
-		}
 	}
 	if len(epochs) == 0 {
 		return finish("unknown", "active epoch inventory is empty")
@@ -204,12 +197,21 @@ func evaluatePlatformReleaseEvidence(now time.Time, releaseEpoch string, activat
 			}
 			fresh := !instance.LastHeartbeatAt.IsZero() && !instance.LastHeartbeatAt.After(now.Add(5*time.Second)) && now.Sub(instance.LastHeartbeatAt) <= platformReleaseHeartbeatMaxAge
 			signatureClean := strings.TrimSpace(instance.FailureClass) == ""
-			bundleFresh := strings.TrimSpace(instance.Node.CaddyAppliedVersion) == strings.TrimSpace(bundle.Version)
+			reportedBundle := strings.TrimSpace(instance.Node.RouteBundleVersion)
+			bundleFresh := reportedBundle != "" && strings.TrimSpace(instance.Node.CaddyAppliedVersion) == reportedBundle
+			if group.BundleVersion == "" {
+				group.BundleVersion = reportedBundle
+			} else if reportedBundle != group.BundleVersion {
+				bundleFresh = false
+			}
 			group.SignatureClean = group.SignatureClean && signatureClean
 			group.BundleFresh = group.BundleFresh && bundleFresh
 			if fresh && signatureClean && bundleFresh && instance.EffectiveHealthy && instance.ConsecutiveHealthy >= 2 && !instance.Node.Draining && model.NormalizeEdgeTLSStatus(instance.Node.TLSStatus) == model.EdgeTLSStatusReady {
 				group.FreshHealthy++
 			}
+		}
+		if group.BundleVersion == "" {
+			group.BundleFresh = false
 		}
 		evidence.Groups = append(evidence.Groups, group)
 		if group.FreshHealthy < group.MinHealthy || !group.BundleFresh || !group.SignatureClean {
@@ -223,4 +225,20 @@ func evaluatePlatformReleaseEvidence(now time.Time, releaseEpoch string, activat
 		return finish("failed", "platform request evidence contains a hard failure")
 	}
 	return finish("passed", "active cohort, bundle, route, origin, link, and latency evidence passed")
+}
+
+func platformReleaseBundleSetVersion(groups []platformReleaseEvidenceGroup) string {
+	versions := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if groupID, version := strings.TrimSpace(group.EdgeGroupID), strings.TrimSpace(group.BundleVersion); groupID != "" && version != "" {
+			versions = append(versions, groupID+"\x00"+version)
+		}
+	}
+	if len(versions) == 0 {
+		return ""
+	}
+	sort.Strings(versions)
+	body, _ := json.Marshal(versions)
+	sum := sha256.Sum256(body)
+	return "edgebundles_" + hex.EncodeToString(sum[:])
 }
