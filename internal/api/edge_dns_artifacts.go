@@ -295,7 +295,10 @@ func (s *Server) publishImmutableEdgeDNSBundleArtifact(legacy store.EdgeDNSBundl
 		Pass:     true,
 		Severity: model.RobustnessSeverityInfo,
 		Message:  "signed DNS bundle and node scope passed activation validation",
-		Evidence: map[string]string{"source_fingerprint": legacy.SourceFingerprint},
+		Evidence: map[string]string{
+			"dns_envelope_generation": strings.TrimSpace(legacy.Bundle.Generation),
+			"source_fingerprint":      legacy.SourceFingerprint,
+		},
 	}})
 	if err != nil {
 		return model.PlatformArtifact{}, fmt.Errorf("validate immutable generation: %w", err)
