@@ -25,8 +25,6 @@ const (
 	edgeDNSArtifactFreshMargin        = 30 * time.Second
 )
 
-var errEdgeDNSArtifactParityMismatch = errors.New("immutable and compatibility DNS artifact digests differ")
-
 type edgeDNSArtifactPublicationStats struct {
 	Artifacts            int
 	SourceSnapshots      int
@@ -205,15 +203,11 @@ func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Tim
 		artifact := newEdgeDNSBundleArtifact(target.options, bundle, now)
 		platformArtifact, err := s.publishEdgeDNSBundleArtifact(artifact, target.options, now)
 		if err != nil {
-			if errors.Is(err, errEdgeDNSArtifactParityMismatch) {
-				stats.ParityMismatches++
-			}
 			stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
 			return stats, fmt.Errorf("publish edge dns artifact for node %s: %w", target.node.ID, err)
 		}
 		stats.ImmutableWrites++
 		stats.ShadowActive++
-		stats.LegacyWrites++
 		if reconciliation.ReadyForFull {
 			if err := s.releaseFullEdgeDNSBundleArtifact(platformArtifact); err != nil {
 				stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
@@ -234,16 +228,6 @@ func (s *Server) publishEdgeDNSBundleArtifact(artifact store.EdgeDNSBundleArtifa
 	platformArtifact, err := s.publishImmutableEdgeDNSBundleArtifact(artifact)
 	if err != nil {
 		return model.PlatformArtifact{}, fmt.Errorf("publish immutable generation: %w", err)
-	}
-	if err := s.store.UpsertEdgeDNSBundleArtifact(artifact); err != nil {
-		return model.PlatformArtifact{}, fmt.Errorf("publish compatibility row: %w", err)
-	}
-	stored, err := s.store.GetEdgeDNSBundleArtifact(artifact.ScopeKey)
-	if err != nil {
-		return model.PlatformArtifact{}, fmt.Errorf("read compatibility row: %w", err)
-	}
-	if !edgeDNSBundleArtifactsEquivalent(artifact, stored) {
-		return model.PlatformArtifact{}, errEdgeDNSArtifactParityMismatch
 	}
 	return platformArtifact, nil
 }
@@ -420,16 +404,28 @@ func (s *Server) verifyObservedEdgeDNSArtifactRelease(artifact model.PlatformArt
 	if err := s.validateEdgeDNSBundleArtifact(activated, options, now); err != nil {
 		return false, nil
 	}
-	compatibility, err := s.store.GetEdgeDNSBundleArtifact(artifact.ScopeKey)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return false, nil
-		}
-		return false, fmt.Errorf("load compatibility current for verification: %w", err)
-	}
-	databaseRollbackCompatible := edgeDNSBundleArtifactsEquivalent(projected, compatibility)
 	heartbeatAt := node.LastHeartbeatAt
 	watchWindow := heartbeatAt != nil && !heartbeatAt.IsZero() && heartbeatAt.UTC().After(release.ReleasedAt.UTC())
+	if !watchWindow {
+		return false, nil
+	}
+	rollbackCompatible := true
+	evidenceRefs := []string{
+		"dns-heartbeat:" + strings.TrimSpace(node.ID) + ":" + heartbeatAt.UTC().Format(time.RFC3339Nano),
+		"dns-envelope:" + strings.TrimSpace(projected.Bundle.Generation),
+		"platform-artifact:" + artifact.ID,
+		"platform-release:" + release.ID,
+	}
+	if lkg != nil {
+		rollbackArtifact, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
+		if err != nil {
+			return false, fmt.Errorf("load immutable rollback artifact: %w", err)
+		}
+		rollbackCompatible = strings.TrimSpace(release.PinnedRollbackGeneration) == strings.TrimSpace(lkg.Generation) &&
+			rollbackArtifact.ID == lkg.ArtifactID && rollbackArtifact.Generation == lkg.Generation &&
+			s.store.VerifyPlatformArtifactIntegrity(rollbackArtifact) == nil
+		evidenceRefs = append(evidenceRefs, "platform-lkg:"+lkg.ID, "platform-rollback-artifact:"+rollbackArtifact.ID)
+	}
 	consumerConvergence := strings.TrimSpace(node.DNSBundleVersion) == strings.TrimSpace(projected.Bundle.Version) &&
 		strings.TrimSpace(node.ServingGeneration) == strings.TrimSpace(projected.Bundle.Generation) &&
 		strings.TrimSpace(node.LKGGeneration) == strings.TrimSpace(projected.Bundle.Generation) &&
@@ -437,7 +433,7 @@ func (s *Server) verifyObservedEdgeDNSArtifactRelease(artifact model.PlatformArt
 	localProbe := dnsNodeHeartbeatFresh(node, now) && dnsNodeServingHealthOK(node) &&
 		strings.EqualFold(strings.TrimSpace(node.CacheStatus), "ready") && node.UDPListen && node.TCPListen && strings.TrimSpace(node.LastError) == ""
 	baselineMonotonic := lkg == nil || artifact.GenerationSequence > lkg.GenerationSequence
-	if !consumerConvergence || !localProbe || !watchWindow || !baselineMonotonic || !databaseRollbackCompatible {
+	if !consumerConvergence || !localProbe || !watchWindow || !baselineMonotonic || !rollbackCompatible {
 		return false, nil
 	}
 	_, _, _, verifiedLKG, err := s.store.VerifyPlatformArtifactReleaseLKG(release.ID, model.PlatformArtifactVerifyLKGRequest{
@@ -452,12 +448,7 @@ func (s *Server) verifyObservedEdgeDNSArtifactRelease(artifact model.PlatformArt
 			BaselineMonotonic:          true,
 			DatabaseRollbackCompatible: true,
 			ExpectedConsumerSetID:      "dns-node:" + strings.TrimSpace(node.ID),
-			EvidenceRefs: []string{
-				"dns-heartbeat:" + strings.TrimSpace(node.ID) + ":" + heartbeatAt.UTC().Format(time.RFC3339Nano),
-				"dns-envelope:" + strings.TrimSpace(projected.Bundle.Generation),
-				"platform-artifact:" + artifact.ID,
-				"platform-release:" + release.ID,
-			},
+			EvidenceRefs:               evidenceRefs,
 		},
 	}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-artifact-controller"})
 	if err != nil {
