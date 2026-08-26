@@ -1858,6 +1858,66 @@ func TestScalarTransferRebindsOnlyFreshResourceVersion(t *testing.T) {
 	}
 }
 
+func TestOwnershipConvergenceTransfersOnlyDeclaredCaddyDataHostPath(t *testing.T) {
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker",
+		Container: "edge", FieldManager: "fugue-edge-worker-declarative",
+	}}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker"}
+	desired := map[string]any{
+		"metadata": map[string]any{"uid": "worker-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+			"containers": []any{map[string]any{"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("a", 64)}},
+			"volumes": []any{
+				map[string]any{"name": "caddy-data", "hostPath": map[string]any{"path": "/var/lib/fugue/edge-owned/edge-group/caddy-data"}},
+				map[string]any{"name": "worker-state", "hostPath": map[string]any{"path": "/var/lib/fugue/edge-owned/edge-group/slot-a"}},
+			},
+		}}},
+	}
+	allowed := ownershipConvergencePointers(release, identity, desired)
+	if !stringSubset([]string{caddyDataHostPathPointer}, allowed) {
+		t.Fatalf("declared caddy-data hostPath is absent from ownership allowlist: %v", allowed)
+	}
+	if stringSubset([]string{caddyDataHostPathPointer}, emergencyOwnershipPointers(release, identity, desired)) {
+		t.Fatal("caddy-data hostPath entered emergency rollback allowlist")
+	}
+	for _, forbidden := range []string{
+		"/spec/template/spec/volumes[name=worker-state]/hostPath/path",
+		"/spec/template/spec/volumes[name=caddy-data]/hostPath/type",
+	} {
+		if stringSubset([]string{forbidden}, allowed) {
+			t.Fatalf("unreviewed volume field entered ownership allowlist: %s", forbidden)
+		}
+	}
+	duplicate := deepCopyJSONMap(t, desired)
+	duplicateSpec := mapField(mapField(mapField(duplicate, "spec"), "template"), "spec")
+	duplicateSpec["volumes"] = append(anySlice(duplicateSpec["volumes"]), map[string]any{
+		"name": "caddy-data", "hostPath": map[string]any{"path": "/tmp/duplicate"},
+	})
+	if duplicateAllowed := ownershipConvergencePointers(release, identity, duplicate); stringSubset([]string{caddyDataHostPathPointer}, duplicateAllowed) {
+		t.Fatalf("ambiguous caddy-data volume entered ownership allowlist: %v", duplicateAllowed)
+	}
+	live := deepCopyJSONMap(t, desired)
+	mapField(live, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{caddyDataHostPathPointer, "/spec/template/spec/nodeSelector"}),
+	}}
+	volumes := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["volumes"])
+	volumes[0].(map[string]any)["hostPath"].(map[string]any)["path"] = "/var/lib/fugue/edge-owned/edge-group/caddy-slot-a"
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: ` + ssaFieldForPointer(caddyDataHostPathPointer))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, applyErr); err != nil {
+		t.Fatalf("exact caddy-data ownership transfer was rejected: %v", err)
+	}
+	outside := errors.New(`Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: .spec.template.spec.volumes[name="worker-state"].hostPath.path`)
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, outside); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
+		t.Fatalf("unreviewed worker-state hostPath conflict was accepted: %v", err)
+	}
+	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
+	if err != nil || !found || len(patch) != 5 || patch[2]["path"] != "/spec/template/spec/volumes/0/name" || patch[4]["path"] != "/spec/template/spec/volumes/0/hostPath/path" {
+		t.Fatalf("caddy-data ownership transfer patch=%v found=%v err=%v", patch, found, err)
+	}
+}
+
 func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 	allowed := []string{"/spec/template/spec/containers[name=edge-control]/image"}
 	for _, failure := range []error{

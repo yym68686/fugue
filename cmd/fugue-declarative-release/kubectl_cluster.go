@@ -334,6 +334,9 @@ func emergencyRuntimePointerValue(resource map[string]any, pointer string) (stri
 	}
 	field, name, tail, ok := emergencyContainerPointerParts(pointer)
 	if !ok {
+		if emergencyCaddyDataHostPathPointer(pointer) {
+			return declaredCaddyDataHostPath(resource)
+		}
 		return "", false
 	}
 	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")[field]) {
@@ -376,6 +379,9 @@ func setEmergencyRuntimePointerValue(resource map[string]any, pointer, value str
 	}
 	field, name, tail, ok := emergencyContainerPointerParts(pointer)
 	if !ok {
+		if emergencyCaddyDataHostPathPointer(pointer) {
+			return setDeclaredCaddyDataHostPath(resource, value)
+		}
 		return false
 	}
 	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")[field]) {
@@ -437,6 +443,55 @@ func emergencyContainerPointerParts(pointer string) (string, string, string, boo
 		}
 	}
 	return field, name, tail, true
+}
+
+const caddyDataHostPathPointer = "/spec/template/spec/volumes[name=caddy-data]/hostPath/path"
+
+func emergencyCaddyDataHostPathPointer(pointer string) bool {
+	return pointer == caddyDataHostPathPointer
+}
+
+func declaredCaddyDataHostPath(resource map[string]any) (string, bool) {
+	var value string
+	found := false
+	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")["volumes"]) {
+		volume, _ := raw.(map[string]any)
+		if stringValue(volume["name"]) != "caddy-data" {
+			continue
+		}
+		if found {
+			return "", false
+		}
+		value, found = mapField(volume, "hostPath")["path"].(string)
+		if !found {
+			return "", false
+		}
+	}
+	return value, found
+}
+
+func setDeclaredCaddyDataHostPath(resource map[string]any, value string) bool {
+	volumes := anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")["volumes"])
+	index := -1
+	for candidate, raw := range volumes {
+		volume, _ := raw.(map[string]any)
+		if stringValue(volume["name"]) != "caddy-data" {
+			continue
+		}
+		if index >= 0 {
+			return false
+		}
+		if _, ok := mapField(volume, "hostPath")["path"].(string); !ok {
+			return false
+		}
+		index = candidate
+	}
+	if index < 0 {
+		return false
+	}
+	volume, _ := volumes[index].(map[string]any)
+	mapField(volume, "hostPath")["path"] = value
+	return true
 }
 
 func resourceQuantityTail(tail string) (string, string, bool) {
@@ -1258,6 +1313,12 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 		}
 		addDeclaredContainerEnvValuePointers(desired, target.ContainerType, target.Container, add)
 	}
+	if release.Workload.APIVersion == identity.APIVersion && release.Workload.Kind == "DaemonSet" &&
+		release.Workload.Namespace == identity.Namespace && release.Workload.Name == identity.Name {
+		if _, ok := declaredCaddyDataHostPath(desired); ok {
+			add(caddyDataHostPathPointer)
+		}
+	}
 	if declaredRoleRulesResource(desired) {
 		add("/rules")
 	}
@@ -1564,6 +1625,24 @@ func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []st
 				}
 				valuePath = base + "/resources/" + scope + "/" + resource
 			}
+		} else if emergencyCaddyDataHostPathPointer(pointer) {
+			volumeIndex := -1
+			for candidate, raw := range anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["volumes"]) {
+				volume, _ := raw.(map[string]any)
+				if stringValue(volume["name"]) != "caddy-data" {
+					continue
+				}
+				if volumeIndex >= 0 {
+					return nil, false, errors.New("legacy ownership transfer caddy-data volume identity is ambiguous")
+				}
+				volumeIndex = candidate
+			}
+			if volumeIndex < 0 {
+				return nil, false, errors.New("legacy ownership transfer caddy-data volume is absent")
+			}
+			base := "/spec/template/spec/volumes/" + strconv.Itoa(volumeIndex)
+			selectors = []selectorTest{{path: base + "/name", value: "caddy-data"}}
+			valuePath = base + "/hostPath/path"
 		} else if !strings.HasPrefix(pointer, "/metadata/annotations/") &&
 			!strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
 			return nil, false, errors.New("legacy ownership transfer pointer is invalid")
@@ -1657,10 +1736,11 @@ func emergencyProbePathPointer(pointer string) bool {
 // Historical hotfixes can leave one kubectl-patch Update entry owning both
 // release identity annotations and unrelated fields. The transfer patch still
 // tests UID/RV and replaces only the exact SSA-conflicting scalar. Permit that
-// broad witness for immutable artifact identity annotations, as already done
-// for probe paths, without extending the set of fields that may conflict.
+// broad witness for immutable artifact identity annotations, probe paths and
+// the reviewed Caddy data path, without extending the set of fields that may
+// conflict.
 func broadEmergencyOwnershipTransferPointer(pointer string) bool {
-	if emergencyProbePathPointer(pointer) {
+	if emergencyProbePathPointer(pointer) || emergencyCaddyDataHostPathPointer(pointer) {
 		return true
 	}
 	for _, prefix := range []string{"/metadata/annotations/", "/spec/template/metadata/annotations/"} {
@@ -1682,6 +1762,9 @@ func emergencyEnvValuePointer(pointer string) bool {
 
 func legacyOwnershipTransferPointer(pointer string) bool {
 	if strings.HasPrefix(pointer, "/metadata/annotations/") || strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
+		return true
+	}
+	if emergencyCaddyDataHostPathPointer(pointer) {
 		return true
 	}
 	_, _, _, ok := emergencyContainerPointerParts(pointer)
