@@ -591,7 +591,7 @@ func TestCandidateImporterRejectsDegradedPreviousAuthorizationWithoutServingWitn
 	}
 }
 
-func TestCandidateImporterAcceptsDegradedServingAuthorityWithinCurrentRecovery(t *testing.T) {
+func TestCandidateImporterAcceptsDegradedServingAuthorityAcrossRecoveryEpochs(t *testing.T) {
 	now := time.Date(2026, 8, 14, 20, 50, 0, 0, time.UTC)
 	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
 	envelope.AllowDegradedPrevious = true
@@ -613,12 +613,12 @@ func TestCandidateImporterAcceptsDegradedServingAuthorityWithinCurrentRecovery(t
 	}
 
 	envelope.ServingAuthority.BundleVersion = "routes-future.p4.r0"
-	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
-		t.Fatal("non-historical degraded serving publication was accepted")
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("normalized degraded serving publication was rejected: %v", err)
 	}
 	envelope.ServingAuthority.BundleVersion = "routes-previous-recovery.p3.r1"
-	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
-		t.Fatal("cross-recovery degraded serving publication was accepted")
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("cross-recovery degraded serving publication was rejected: %v", err)
 	}
 	envelope.ServingAuthority.BundleVersion = "routes-pruned.p3.r0"
 	envelope.AllowDegradedPrevious = false
@@ -650,17 +650,65 @@ func TestCandidateImporterAcceptsNormalizedServingAuthorityAheadOfControl(t *tes
 	}
 
 	envelope.ServingAuthority.BundleVersion = "routes-recovery.p8.r1"
-	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
-		t.Fatal("future serving authority with a nonzero recovery epoch was accepted")
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("normalized serving authority in a newer recovery epoch was rejected: %v", err)
 	}
 	envelope.ServingAuthority.BundleVersion = "routes-normalized.p4.r0"
-	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
-		t.Fatal("cross-generation serving authority at the current publication was accepted")
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("cross-generation serving authority at the current publication was rejected: %v", err)
 	}
 	envelope.ServingAuthority.BundleVersion = "routes-normalized.p8.r0"
 	envelope.AllowDegradedPrevious = false
 	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
 		t.Fatal("normalized serving authority without degraded recovery authorization was accepted")
+	}
+}
+
+func TestCandidateImporterBindsCrossRecoveryWitnessToExactGuardianCurrent(t *testing.T) {
+	now := time.Date(2026, 8, 26, 19, 20, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-group-country-de", now)
+	envelope.AllowDegradedPrevious = true
+	envelope.CurrentBundle.Generation = "edgegroupbundle-control"
+	envelope.CurrentBundle.Version = "edgegroupbundle-control.p26640.r513"
+	envelope.Bundle.Generation = envelope.CurrentBundle.Generation
+	envelope.Bundle.Version = "edgegroupbundle-control.p26641.r0"
+	envelope.Bundle.PreviousGeneration = envelope.CurrentBundle.Generation
+	envelope.CurrentRecord.Epoch = 26640
+	envelope.CurrentRecord.BundleDigest = candidateBundleDigest(*envelope.CurrentBundle)
+	currentRecord, err := envelope.CurrentRecord.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.CurrentRecord = &currentRecord
+	envelope.Epoch = 26641
+	envelope.Record.Epoch = 26641
+	envelope.Record.BundleDigest = candidateBundleDigest(envelope.Bundle)
+	candidateRecord, err := envelope.Record.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Record = candidateRecord
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{
+		CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), AuthorityEpoch: 26082,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "78363034", FrontGeneration: 157,
+		BundleVersion: "edgegroupbundle-front.p26135.r503", WorkerSlot: envelope.CurrentWorkerSlot,
+		WorkerSourceSHA: strings.Repeat("b", 40), WorkerImageDigest: "sha256:" + strings.Repeat("c", 64),
+	}
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("cross-recovery candidate envelope was rejected: %v", err)
+	}
+	current := releaseguardian.CurrentAuthority{
+		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind, GroupID: envelope.GroupID,
+		CurrentRecordDigest: envelope.ServingAuthority.CurrentRecordDigest, CurrentWorkerSlot: envelope.ServingAuthority.WorkerSlot,
+		CurrentFrontGeneration: envelope.ServingAuthority.FrontGeneration, CurrentBundleGeneration: envelope.ServingAuthority.BundleVersion,
+		CurrentWorkerSourceSHA: envelope.ServingAuthority.WorkerSourceSHA, CurrentWorkerImageDigest: envelope.ServingAuthority.WorkerImageDigest,
+		AuthorityEpoch: envelope.ServingAuthority.AuthorityEpoch,
+	}
+	if err := validateCandidateServingAuthorityBinding(envelope, current, "current-authority", "78363034"); err != nil {
+		t.Fatalf("exact Guardian CurrentAuthority binding was rejected: %v", err)
+	}
+	if err := validateCandidateServingAuthorityBinding(envelope, current, "current-authority", "78363035"); err == nil {
+		t.Fatal("cross-recovery candidate accepted a stale Guardian resource version")
 	}
 }
 

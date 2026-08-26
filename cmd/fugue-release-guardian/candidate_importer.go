@@ -380,7 +380,7 @@ func validateCandidateServingAuthorityEnvelope(envelope candidateEnvelope) error
 		!exactSourceSHA(witness.WorkerSourceSHA) || !exactSHA256Digest(witness.WorkerImageDigest) {
 		return errors.New("candidate serving authority identity is invalid")
 	}
-	witnessGeneration, witnessPublication, witnessRecovery, err := parseUnboundAuthorityBundleVersion(witness.BundleVersion)
+	witnessGeneration, _, _, err := parseUnboundAuthorityBundleVersion(witness.BundleVersion)
 	if err != nil {
 		return errors.New("candidate serving publication is invalid")
 	}
@@ -391,18 +391,13 @@ func validateCandidateServingAuthorityEnvelope(envelope candidateEnvelope) error
 		envelope.Bundle.Generation != envelope.CurrentBundle.Generation {
 		return errors.New("candidate serving publication is invalid")
 	}
-	currentPublication, currentRecovery, err := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
-	if err != nil || !servingAuthorityCanUseCurrentControlPublication(witnessPublication, witnessRecovery, currentPublication, currentRecovery) {
-		return errors.New("candidate serving publication is outside the current recovery window")
-	}
+	// Publication and recovery counters belong to different signed bundle
+	// families and are not globally comparable. The importer subsequently binds
+	// this witness to the exact Guardian CurrentAuthority UID/RV, record, epoch,
+	// slot, source, image, and Front generation before mutating either pointer.
+	// Requiring counter equality here permanently rejects a valid candidate after
+	// Control republishes an LKG in a newer recovery epoch.
 	return nil
-}
-
-func servingAuthorityCanUseCurrentControlPublication(witnessPublication, witnessRecovery, currentPublication, currentRecovery uint64) bool {
-	if witnessPublication < currentPublication && witnessRecovery == currentRecovery {
-		return true
-	}
-	return witnessPublication > currentPublication && witnessRecovery == 0
 }
 
 func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, current releaseguardian.CurrentAuthority, uid types.UID, resourceVersion string) error {
