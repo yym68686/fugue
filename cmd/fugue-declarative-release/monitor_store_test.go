@@ -65,7 +65,7 @@ func TestControllerIntentBindsCurrentProductionLKG(t *testing.T) {
 	}
 	const lkgSHA = "52ca342a7a5324ad9eff5ddd3629a2c71d5ebd91"
 	const lkgImage = "sha256:aab3a4498e76706e21da55a1a6bd90584105530e7c004d719f9e2d654283ba24"
-	if intent.Generation != 6 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+	if intent.Generation != 7 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != "" {
 		t.Fatalf("controller intent is not bound to the production LKG: %+v", intent)
 	}
