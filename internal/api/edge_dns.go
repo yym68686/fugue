@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"net"
@@ -35,6 +36,29 @@ type edgeDNSBundleOptions struct {
 	AnswerIPs        []string
 	RouteAAnswerIPs  []string
 	TTL              int
+}
+
+type edgeDNSBundleCompileSnapshot struct {
+	generatedAt                  time.Time
+	apps                         []model.App
+	domains                      []model.AppDomain
+	runtimeByID                  map[string]model.Runtime
+	runtimeNodeLabelsByID        map[string]map[string]string
+	policyByHostname             map[string]model.EdgeRoutePolicy
+	healthyEdgeGroups            map[string]bool
+	healthyEdgeNodeIDsByGroup    map[string][]string
+	hostedZoneNames              []string
+	zoneDataByName               map[string]edgeDNSZoneCompileData
+	edgeAnswerIPsByGroup         map[string][]string
+	edgeCandidateByIP            map[string]model.EdgeDNSAnswerCandidate
+	latencyProfiles              edgeDNSLatencyProfileCatalog
+	applyQualityRanking          bool
+	routeBindingByCompilationKey map[string]model.EdgeRouteBinding
+}
+
+type edgeDNSZoneCompileData struct {
+	acmeChallenges []model.DNSACMEChallenge
+	hostedRecords  []model.DNSRecord
 }
 
 func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
@@ -174,25 +198,122 @@ func (e errInvalidEdgeDNSOption) Error() string {
 	return string(e)
 }
 
-func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptions) (model.EdgeDNSBundle, error) {
+func (s *Server) loadEdgeDNSBundleCompileSnapshot(ctx context.Context, zones []string, now time.Time) (*edgeDNSBundleCompileSnapshot, error) {
+	if s == nil || s.store == nil {
+		return nil, errors.New("edge DNS compile store is unavailable")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
 	apps, err := s.store.ListAppsMetadata("", true)
 	if err != nil {
-		return model.EdgeDNSBundle{}, err
+		return nil, err
 	}
 	domains, err := s.store.ListVerifiedAppDomains()
 	if err != nil {
-		return model.EdgeDNSBundle{}, err
+		return nil, err
 	}
 	runtimes, err := s.store.ListRuntimes("", true)
 	if err != nil {
-		return model.EdgeDNSBundle{}, err
+		return nil, err
 	}
 	policies, err := s.store.ListEdgeRoutePolicies()
 	if err != nil {
-		return model.EdgeDNSBundle{}, err
+		return nil, err
 	}
-	now := time.Now().UTC()
 	healthyEdgeGroups, healthyEdgeNodeIDsByGroup, err := s.edgeRouteHealthyEdgeGroupInventory()
+	if err != nil {
+		return nil, err
+	}
+	hostedZones, err := s.store.ListHostedZones("", true)
+	if err != nil {
+		return nil, err
+	}
+
+	runtimeByID := make(map[string]model.Runtime, len(runtimes))
+	for _, runtimeObj := range runtimes {
+		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
+	}
+	apps = s.overlayManagedAppStatusesCached(apps)
+	edgeAnswerIPsByGroup, edgeCandidateByIP, err := s.edgeDNSAnswerInventory(ctx, "", now)
+	if err != nil {
+		return nil, err
+	}
+	latencyProfiles, err := s.edgeDNSLatencyProfilesAt(now)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot := &edgeDNSBundleCompileSnapshot{
+		generatedAt:                  now,
+		apps:                         apps,
+		domains:                      domains,
+		runtimeByID:                  runtimeByID,
+		runtimeNodeLabelsByID:        s.edgeRouteRuntimeNodeLabels(ctx),
+		policyByHostname:             edgeRoutePolicyByHostname(policies),
+		healthyEdgeGroups:            healthyEdgeGroups,
+		healthyEdgeNodeIDsByGroup:    healthyEdgeNodeIDsByGroup,
+		hostedZoneNames:              edgeDNSPublishableHostedZoneNames(hostedZones),
+		zoneDataByName:               make(map[string]edgeDNSZoneCompileData),
+		edgeAnswerIPsByGroup:         edgeAnswerIPsByGroup,
+		edgeCandidateByIP:            edgeCandidateByIP,
+		latencyProfiles:              latencyProfiles,
+		applyQualityRanking:          s.edgeQualityRankingActive(),
+		routeBindingByCompilationKey: make(map[string]model.EdgeRouteBinding),
+	}
+	for _, zone := range uniqueSortedStrings(zones) {
+		zone = normalizeExternalAppDomain(zone)
+		if zone == "" {
+			continue
+		}
+		acmeChallenges, err := s.store.ListDNSACMEChallenges(zone, false)
+		if err != nil {
+			return nil, err
+		}
+		hostedRecords := []model.DNSRecord{}
+		hostedZone, err := s.store.GetHostedZoneByName(zone)
+		if err == nil && hostedZone.Status != model.HostedZoneStatusDeleted {
+			hostedRecords, err = s.store.ListDNSRecords(hostedZone.ID)
+			if err != nil {
+				return nil, err
+			}
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		snapshot.zoneDataByName[zone] = edgeDNSZoneCompileData{
+			acmeChallenges: acmeChallenges,
+			hostedRecords:  hostedRecords,
+		}
+	}
+	return snapshot, nil
+}
+
+func edgeDNSRouteBindingCompilationKey(app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time) string {
+	return strings.Join([]string{
+		strings.TrimSpace(app.ID),
+		normalizeExternalAppDomain(hostname),
+		strings.TrimSpace(routeKind),
+		strings.TrimSpace(tlsPolicy),
+		createdAt.UTC().Format(time.RFC3339Nano),
+		updatedAt.UTC().Format(time.RFC3339Nano),
+	}, "\x00")
+}
+
+func (snapshot *edgeDNSBundleCompileSnapshot) compileRouteBinding(s *Server, ctx context.Context, app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time) model.EdgeRouteBinding {
+	key := edgeDNSRouteBindingCompilationKey(app, hostname, routeKind, tlsPolicy, createdAt, updatedAt)
+	if binding, ok := snapshot.routeBindingByCompilationKey[key]; ok {
+		return binding
+	}
+	binding := s.compileTrafficEpochRouteBinding(ctx, app, hostname, routeKind, tlsPolicy, createdAt, updatedAt, snapshot.runtimeByID, snapshot.runtimeNodeLabelsByID)
+	snapshot.routeBindingByCompilationKey[key] = binding
+	return binding
+}
+
+func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptions) (model.EdgeDNSBundle, error) {
+	now := time.Now().UTC()
+	snapshot, err := s.loadEdgeDNSBundleCompileSnapshot(r.Context(), []string{options.Zone}, now)
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
@@ -201,54 +322,38 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if err != nil {
 			return model.EdgeDNSBundle{}, err
 		}
-		healthyEdgeGroups[groupID] = true
-		healthyEdgeNodeIDsByGroup[groupID] = nodeIDs
+		snapshot.healthyEdgeGroups[groupID] = true
+		snapshot.healthyEdgeNodeIDsByGroup[groupID] = nodeIDs
 	}
-	acmeChallenges, err := s.store.ListDNSACMEChallenges(options.Zone, false)
-	if err != nil {
-		return model.EdgeDNSBundle{}, err
-	}
-	hostedZones, err := s.store.ListHostedZones("", true)
-	if err != nil {
-		return model.EdgeDNSBundle{}, err
-	}
-	hostedZoneNames := edgeDNSPublishableHostedZoneNames(hostedZones)
-	var hostedZone model.HostedZone
-	hostedRecords := []model.DNSRecord{}
-	hostedZone, err = s.store.GetHostedZoneByName(options.Zone)
-	if err == nil && hostedZone.Status != model.HostedZoneStatusDeleted {
-		hostedRecords, err = s.store.ListDNSRecords(hostedZone.ID)
-		if err != nil {
-			return model.EdgeDNSBundle{}, err
-		}
-	} else if err != nil && err != store.ErrNotFound {
-		return model.EdgeDNSBundle{}, err
-	}
+	return s.compileEdgeDNSBundle(r.Context(), options, snapshot)
+}
 
-	runtimeByID := make(map[string]model.Runtime, len(runtimes))
-	for _, runtimeObj := range runtimes {
-		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
+func (s *Server) compileEdgeDNSBundle(ctx context.Context, options edgeDNSBundleOptions, snapshot *edgeDNSBundleCompileSnapshot) (model.EdgeDNSBundle, error) {
+	if snapshot == nil {
+		return model.EdgeDNSBundle{}, errors.New("edge DNS compile snapshot is unavailable")
 	}
-	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(r.Context())
-	apps = s.overlayManagedAppStatusesCached(apps)
+	zoneData, ok := snapshot.zoneDataByName[normalizeExternalAppDomain(options.Zone)]
+	if !ok {
+		return model.EdgeDNSBundle{}, fmt.Errorf("edge DNS compile snapshot does not contain zone %s", options.Zone)
+	}
+	apps := snapshot.apps
+	domains := snapshot.domains
+	policyByHostname := snapshot.policyByHostname
+	healthyEdgeGroups := snapshot.healthyEdgeGroups
+	healthyEdgeNodeIDsByGroup := snapshot.healthyEdgeNodeIDsByGroup
+	hostedZoneNames := snapshot.hostedZoneNames
+	edgeAnswerIPsByGroup := snapshot.edgeAnswerIPsByGroup
+	edgeCandidateByIP := snapshot.edgeCandidateByIP
+	latencyProfiles := snapshot.latencyProfiles
+	applyQualityRanking := snapshot.applyQualityRanking
+	now := snapshot.generatedAt
+	acmeChallenges := zoneData.acmeChallenges
+	hostedRecords := zoneData.hostedRecords
+
 	appByID := make(map[string]model.App, len(apps))
 	for _, app := range apps {
 		appByID[strings.TrimSpace(app.ID)] = app
 	}
-	policyByHostname := edgeRoutePolicyByHostname(policies)
-	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(r.Context())
-	if err != nil {
-		return model.EdgeDNSBundle{}, err
-	}
-	edgeCandidateByIP, err := s.edgeDNSAnswerCandidateByIP(r.Context(), options, now)
-	if err != nil {
-		return model.EdgeDNSBundle{}, err
-	}
-	latencyProfiles, err := s.edgeDNSLatencyProfiles(options)
-	if err != nil {
-		return model.EdgeDNSBundle{}, err
-	}
-	applyQualityRanking := s.edgeQualityRankingActive()
 	routeReadyByHostnameEdgeGroup := map[string]map[string]bool{}
 	recordRouteHostsByName := map[string][]string{}
 
@@ -333,7 +438,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if !edgeDNSTargetWithinZone(hostname, options.Zone) || protectedNames[hostname] {
 			continue
 		}
-		binding := s.compileTrafficEpochRouteBinding(r.Context(), app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		binding := snapshot.compileRouteBinding(s, ctx, app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
@@ -371,7 +476,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if !ok || app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
 			continue
 		}
-		binding := s.compileTrafficEpochRouteBinding(r.Context(), app, fqdn, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, record.CreatedAt, record.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		binding := snapshot.compileRouteBinding(s, ctx, app, fqdn, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, record.CreatedAt, record.UpdatedAt)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
@@ -416,7 +521,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			protectedNames[target] {
 			continue
 		}
-		binding := s.compileTrafficEpochRouteBinding(r.Context(), app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		binding := snapshot.compileRouteBinding(s, ctx, app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
@@ -468,7 +573,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		default:
 			continue
 		}
-		binding := s.compileTrafficEpochRouteBinding(r.Context(), app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		binding := snapshot.compileRouteBinding(s, ctx, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		binding = applyCustomDomainReadiness(binding, domain)
 		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup)
@@ -519,7 +624,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 
 	records = dedupeAndSortEdgeDNSRecords(records)
 	bundle := model.EdgeDNSBundle{
-		GeneratedAt: time.Now().UTC(),
+		GeneratedAt: now,
 		DNSNodeID:   options.DNSNodeID,
 		EdgeGroupID: options.EdgeGroupID,
 		Zone:        options.Zone,
@@ -914,72 +1019,53 @@ func hostedDNSRecordApp(record model.DNSRecord, appByID map[string]model.App) (m
 }
 
 func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context) (map[string][]string, error) {
-	out := map[string][]string{}
-	if s.store != nil {
-		nodes, _, err := s.store.ListActiveEdgeNodes("")
-		if err != nil {
-			if errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
-				return out, nil
-			}
-			return nil, err
-		}
-		now := time.Now().UTC()
-		liveServingByNode := s.edgeLiveServingByNode(ctx, now)
-		for _, node := range nodes {
-			if !edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
-				continue
-			}
-			if !edgeNodeDNSEligible(node) {
-				continue
-			}
-			if !edgeNodeDNSCacheValid(node) {
-				continue
-			}
-			groupID := strings.TrimSpace(node.EdgeGroupID)
-			if groupID == "" {
-				continue
-			}
-			out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv4)
-			out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv6)
-		}
-	}
-	return out, nil
+	byGroup, _, err := s.edgeDNSAnswerInventory(ctx, "", time.Now().UTC())
+	return byGroup, err
 }
 
 func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNSBundleOptions, now time.Time) (map[string]model.EdgeDNSAnswerCandidate, error) {
-	out := map[string]model.EdgeDNSAnswerCandidate{}
-	if s.store != nil {
-		nodes, _, err := s.store.ListActiveEdgeNodes("")
-		if err != nil {
-			if errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
-				return out, nil
-			}
-			return nil, err
+	_, byIP, err := s.edgeDNSAnswerInventory(ctx, options.EdgeGroupID, now)
+	return byIP, err
+}
+
+func (s *Server) edgeDNSAnswerInventory(ctx context.Context, localEdgeGroupID string, now time.Time) (map[string][]string, map[string]model.EdgeDNSAnswerCandidate, error) {
+	byGroup := map[string][]string{}
+	byIP := map[string]model.EdgeDNSAnswerCandidate{}
+	if s == nil || s.store == nil {
+		return byGroup, byIP, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	nodes, _, err := s.store.ListActiveEdgeNodes("")
+	if err != nil {
+		if errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
+			return byGroup, byIP, nil
 		}
-		liveServingByNode := s.edgeLiveServingByNode(ctx, now)
-		for _, node := range nodes {
-			if !edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
+		return nil, nil, err
+	}
+	liveServingByNode := s.edgeLiveServingByNode(ctx, now)
+	for _, node := range nodes {
+		if !edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) || !edgeNodeDNSEligible(node) || !edgeNodeDNSCacheValid(node) {
+			continue
+		}
+		groupID := strings.TrimSpace(node.EdgeGroupID)
+		if groupID == "" {
+			continue
+		}
+		for _, rawIP := range []string{node.PublicIPv4, node.PublicIPv6} {
+			normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, rawIP)
+			if normalized == "" {
+				normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, rawIP)
+			}
+			if normalized == "" {
 				continue
 			}
-			if !edgeNodeDNSEligible(node) {
-				continue
-			}
-			if !edgeNodeDNSCacheValid(node) {
-				continue
-			}
-			for _, ip := range []string{node.PublicIPv4, node.PublicIPv6} {
-				normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
-				if normalized == "" {
-					normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, ip)
-				}
-				if normalized == "" {
-					continue
-				}
-				out[normalized] = edgeDNSAnswerCandidateForNode(normalized, node, options.EdgeGroupID)
-			}
+			byGroup[groupID] = appendEdgeDNSUniqueIP(byGroup[groupID], normalized)
+			byIP[normalized] = edgeDNSAnswerCandidateForNode(normalized, node, localEdgeGroupID)
 		}
 	}
-	return out, nil
+	return byGroup, byIP, nil
 }
 
 func edgeNodeDNSCacheValid(node model.EdgeNode) bool {
@@ -1516,10 +1602,16 @@ type edgeDNSLatencyScope struct {
 }
 
 func (s *Server) edgeDNSLatencyProfiles(_ edgeDNSBundleOptions) (edgeDNSLatencyProfileCatalog, error) {
+	return s.edgeDNSLatencyProfilesAt(time.Now().UTC())
+}
+
+func (s *Server) edgeDNSLatencyProfilesAt(now time.Time) (edgeDNSLatencyProfileCatalog, error) {
 	if s.store == nil || s.edgeQualityRankingDisabled() {
 		return edgeDNSLatencyProfileCatalog{}, nil
 	}
-	now := time.Now().UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	samples, err := s.store.ListEdgePerformanceSamples("", now.Add(-edgeDNSLatencyWindow))
 	if err != nil {
 		return edgeDNSLatencyProfileCatalog{}, err

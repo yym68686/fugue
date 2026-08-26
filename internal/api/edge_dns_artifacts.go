@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -25,6 +24,14 @@ const (
 	edgeDNSArtifactControllerLockName = "edge-dns-artifact-controller"
 	edgeDNSArtifactFreshMargin        = 30 * time.Second
 )
+
+type edgeDNSArtifactPublicationStats struct {
+	Artifacts         int
+	SourceSnapshots   int
+	NodeProjections   int
+	RouteCompilations int
+	LegacyDerivations int
+}
 
 func (s *Server) StartBackgroundEdgeDNSArtifacts(ctx context.Context) {
 	if s == nil || s.store == nil {
@@ -45,18 +52,18 @@ func (s *Server) StartBackgroundEdgeDNSArtifacts(ctx context.Context) {
 
 func (s *Server) runEdgeDNSArtifactController(ctx context.Context, now time.Time) {
 	started := time.Now().UTC()
-	artifactCount := 0
+	publication := edgeDNSArtifactPublicationStats{}
 	decisionCount := 0
 	acquired := true
 	var err error
 	if s.store != nil {
 		acquired, err = s.store.WithAdvisoryLock(ctx, edgeDNSArtifactControllerLockName, func() error {
 			var runErr error
-			artifactCount, decisionCount, runErr = s.rebuildEdgeDNSArtifacts(ctx, now)
+			publication, decisionCount, runErr = s.rebuildEdgeDNSArtifacts(ctx, now)
 			return runErr
 		})
 	} else {
-		artifactCount, decisionCount, err = s.rebuildEdgeDNSArtifacts(ctx, now)
+		publication, decisionCount, err = s.rebuildEdgeDNSArtifacts(ctx, now)
 	}
 	duration := time.Since(started)
 
@@ -71,8 +78,12 @@ func (s *Server) runEdgeDNSArtifactController(ctx context.Context, now time.Time
 	}
 	s.edgeDNSArtifactLastRun = started
 	s.edgeDNSArtifactLastDuration = duration
-	s.edgeDNSArtifactLastCount = artifactCount
+	s.edgeDNSArtifactLastCount = publication.Artifacts
 	s.edgeDNSArtifactLastDecisions = decisionCount
+	s.edgeDNSArtifactLastSourceSnapshots = publication.SourceSnapshots
+	s.edgeDNSArtifactLastNodeProjections = publication.NodeProjections
+	s.edgeDNSArtifactLastRouteCompilations = publication.RouteCompilations
+	s.edgeDNSArtifactLastLegacyDerivations = publication.LegacyDerivations
 	s.edgeDNSArtifactRunCount++
 	if err != nil {
 		s.edgeDNSArtifactLastError = err.Error()
@@ -85,16 +96,16 @@ func (s *Server) runEdgeDNSArtifactController(ctx context.Context, now time.Time
 
 	if err != nil {
 		if s.log != nil {
-			s.log.Printf("edge dns artifact controller failed: artifacts=%d decisions=%d duration=%s err=%v", artifactCount, decisionCount, duration, err)
+			s.log.Printf("edge dns artifact controller failed: artifacts=%d snapshots=%d projections=%d route_compilations=%d legacy_derivations=%d decisions=%d duration=%s err=%v", publication.Artifacts, publication.SourceSnapshots, publication.NodeProjections, publication.RouteCompilations, publication.LegacyDerivations, decisionCount, duration, err)
 		}
 		return
 	}
 	if s.log != nil {
-		s.log.Printf("edge dns artifact controller complete: artifacts=%d decisions=%d duration=%s", artifactCount, decisionCount, duration)
+		s.log.Printf("edge dns artifact controller complete: artifacts=%d snapshots=%d projections=%d route_compilations=%d legacy_derivations=%d decisions=%d duration=%s", publication.Artifacts, publication.SourceSnapshots, publication.NodeProjections, publication.RouteCompilations, publication.LegacyDerivations, decisionCount, duration)
 	}
 }
 
-func (s *Server) rebuildEdgeDNSArtifacts(ctx context.Context, now time.Time) (int, int, error) {
+func (s *Server) rebuildEdgeDNSArtifacts(ctx context.Context, now time.Time) (edgeDNSArtifactPublicationStats, int, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -107,22 +118,23 @@ func (s *Server) rebuildEdgeDNSArtifacts(ctx context.Context, now time.Time) (in
 	}
 	decisionCount, err := s.reconcileEdgeDNSRoutingDecisions(now)
 	if err != nil {
-		return 0, decisionCount, fmt.Errorf("reconcile edge dns routing decisions: %w", err)
+		return edgeDNSArtifactPublicationStats{}, decisionCount, fmt.Errorf("reconcile edge dns routing decisions: %w", err)
 	}
-	artifactCount, err := s.publishEdgeDNSBundleArtifacts(ctx, now)
+	publication, err := s.publishEdgeDNSBundleArtifacts(ctx, now)
 	if err != nil {
-		return artifactCount, decisionCount, err
+		return publication, decisionCount, err
 	}
-	return artifactCount, decisionCount, nil
+	return publication, decisionCount, nil
 }
 
-func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Time) (int, error) {
+func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Time) (edgeDNSArtifactPublicationStats, error) {
+	stats := edgeDNSArtifactPublicationStats{}
 	if s == nil || s.store == nil {
-		return 0, nil
+		return stats, nil
 	}
 	nodes, err := s.store.ListDNSNodes("")
 	if err != nil {
-		return 0, fmt.Errorf("list dns nodes for artifact publication: %w", err)
+		return stats, fmt.Errorf("list dns nodes for artifact publication: %w", err)
 	}
 	nodes = freshDNSNodes(nodes, now)
 	sort.Slice(nodes, func(i, j int) bool {
@@ -132,7 +144,12 @@ func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Tim
 		return nodes[i].ID < nodes[j].ID
 	})
 
-	count := 0
+	type publicationTarget struct {
+		nodeID  string
+		options edgeDNSBundleOptions
+	}
+	targets := make([]publicationTarget, 0, len(nodes))
+	zones := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		if !edgeDNSArtifactNodePublishable(node) {
 			continue
@@ -141,21 +158,33 @@ func (s *Server) publishEdgeDNSBundleArtifacts(ctx context.Context, now time.Tim
 		if !ok {
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/v1/edge/dns", nil)
-		if err != nil {
-			return count, fmt.Errorf("build edge dns artifact request context: %w", err)
-		}
-		bundle, err := s.deriveEdgeDNSBundle(req, options)
-		if err != nil {
-			return count, fmt.Errorf("derive edge dns artifact for node %s: %w", node.ID, err)
-		}
-		artifact := newEdgeDNSBundleArtifact(options, bundle, now)
-		if err := s.store.UpsertEdgeDNSBundleArtifact(artifact); err != nil {
-			return count, fmt.Errorf("publish edge dns artifact for node %s: %w", node.ID, err)
-		}
-		count++
+		targets = append(targets, publicationTarget{nodeID: node.ID, options: options})
+		zones = append(zones, options.Zone)
 	}
-	return count, nil
+	if len(targets) == 0 {
+		return stats, nil
+	}
+	snapshot, err := s.loadEdgeDNSBundleCompileSnapshot(ctx, zones, now)
+	if err != nil {
+		return stats, fmt.Errorf("load canonical edge DNS compile snapshot: %w", err)
+	}
+	stats.SourceSnapshots = 1
+	for _, target := range targets {
+		bundle, err := s.compileEdgeDNSBundle(ctx, target.options, snapshot)
+		if err != nil {
+			stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
+			return stats, fmt.Errorf("project edge dns artifact for node %s: %w", target.nodeID, err)
+		}
+		stats.NodeProjections++
+		artifact := newEdgeDNSBundleArtifact(target.options, bundle, now)
+		if err := s.store.UpsertEdgeDNSBundleArtifact(artifact); err != nil {
+			stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
+			return stats, fmt.Errorf("publish edge dns artifact for node %s: %w", target.nodeID, err)
+		}
+		stats.Artifacts++
+	}
+	stats.RouteCompilations = len(snapshot.routeBindingByCompilationKey)
+	return stats, nil
 }
 
 func edgeDNSArtifactNodePublishable(node model.DNSNode) bool {
@@ -385,6 +414,10 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	lastDuration := s.edgeDNSArtifactLastDuration
 	lastCount := s.edgeDNSArtifactLastCount
 	lastDecisions := s.edgeDNSArtifactLastDecisions
+	lastSourceSnapshots := s.edgeDNSArtifactLastSourceSnapshots
+	lastNodeProjections := s.edgeDNSArtifactLastNodeProjections
+	lastRouteCompilations := s.edgeDNSArtifactLastRouteCompilations
+	lastLegacyDerivations := s.edgeDNSArtifactLastLegacyDerivations
 	runCount := s.edgeDNSArtifactRunCount
 	skippedCount := s.edgeDNSArtifactSkippedCount
 	errorCount := s.edgeDNSArtifactErrorCount
@@ -400,6 +433,10 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_duration_seconds", "Duration of the last edge DNS artifact controller run.", nil, lastDuration.Seconds())
 	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_count", "Number of DNS bundle artifacts written by the last controller run.", nil, float64(lastCount))
 	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_decisions", "Number of DNS routing decisions written by the last controller run.", nil, float64(lastDecisions))
+	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_source_snapshots", "Number of canonical source snapshots loaded by the last controller run.", nil, float64(lastSourceSnapshots))
+	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_node_projections", "Number of node-scoped projections compiled from the canonical source snapshot by the last controller run.", nil, float64(lastNodeProjections))
+	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_route_compilations", "Number of unique TrafficEpoch route bindings compiled by the last controller run.", nil, float64(lastRouteCompilations))
+	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_legacy_derivations", "Number of legacy per-node full derivations executed by the last controller run.", nil, float64(lastLegacyDerivations))
 	if !lastRun.IsZero() {
 		observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_run_timestamp_seconds", "Unix timestamp of the last edge DNS artifact controller run.", nil, float64(lastRun.Unix()))
 	}

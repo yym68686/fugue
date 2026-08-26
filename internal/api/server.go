@@ -147,6 +147,10 @@ type Server struct {
 	edgeDNSArtifactLastDuration            time.Duration
 	edgeDNSArtifactLastCount               int
 	edgeDNSArtifactLastDecisions           int
+	edgeDNSArtifactLastSourceSnapshots     int
+	edgeDNSArtifactLastNodeProjections     int
+	edgeDNSArtifactLastRouteCompilations   int
+	edgeDNSArtifactLastLegacyDerivations   int
 	edgeDNSArtifactRunCount                int64
 	edgeDNSArtifactSkippedCount            int64
 	edgeDNSArtifactErrorCount              int64

@@ -402,6 +402,108 @@ func TestEdgeDNSBundleRejectsInvalidSignedArtifact(t *testing.T) {
 	}
 }
 
+func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	for _, node := range []model.DNSNode{
+		{
+			ID: "dns-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro",
+			PublicIPv4: "203.0.113.10", Status: model.EdgeHealthHealthy, Healthy: true,
+		},
+		{
+			ID: "dns-de-1", EdgeGroupID: "edge-group-country-de", Zone: "fugue.pro",
+			PublicIPv4: "203.0.113.20", Status: model.EdgeHealthHealthy, Healthy: true,
+		},
+	} {
+		if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+			t.Fatalf("record DNS heartbeat for %s: %v", node.ID, err)
+		}
+	}
+
+	now := time.Now().UTC()
+	server.runEdgeDNSArtifactController(context.Background(), now)
+	server.edgeDNSArtifactMu.Lock()
+	artifactCount := server.edgeDNSArtifactLastCount
+	snapshotCount := server.edgeDNSArtifactLastSourceSnapshots
+	projectionCount := server.edgeDNSArtifactLastNodeProjections
+	routeCompilationCount := server.edgeDNSArtifactLastRouteCompilations
+	legacyDerivationCount := server.edgeDNSArtifactLastLegacyDerivations
+	lastError := server.edgeDNSArtifactLastError
+	server.edgeDNSArtifactMu.Unlock()
+	if lastError != "" {
+		t.Fatalf("publish node projections: %s", lastError)
+	}
+	if artifactCount != 2 || snapshotCount != 1 || projectionCount != 2 || legacyDerivationCount != 0 {
+		t.Fatalf("expected one snapshot, two projections and no legacy derivations; artifacts=%d snapshots=%d projections=%d legacy=%d", artifactCount, snapshotCount, projectionCount, legacyDerivationCount)
+	}
+	if routeCompilationCount != 1 {
+		t.Fatalf("expected shared TrafficEpoch route binding to compile once, got %d", routeCompilationCount)
+	}
+
+	var artifacts []store.EdgeDNSBundleArtifact
+	for _, options := range []edgeDNSBundleOptions{
+		{DNSNodeID: "dns-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro", AnswerIPs: []string{"203.0.113.10"}, TTL: defaultEdgeDNSTTL},
+		{DNSNodeID: "dns-de-1", EdgeGroupID: "edge-group-country-de", Zone: "fugue.pro", AnswerIPs: []string{"203.0.113.20"}, TTL: defaultEdgeDNSTTL},
+	} {
+		artifact, err := storeState.GetEdgeDNSBundleArtifact(edgeDNSBundleArtifactScopeKey(options))
+		if err != nil {
+			t.Fatalf("load artifact for %s: %v", options.DNSNodeID, err)
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	if !artifacts[0].GeneratedAt.Equal(now) || !artifacts[1].GeneratedAt.Equal(now) {
+		t.Fatalf("expected projections to share canonical generation time %s, got %s and %s", now, artifacts[0].GeneratedAt, artifacts[1].GeneratedAt)
+	}
+	if artifacts[0].DNSNodeID == artifacts[1].DNSNodeID || artifacts[0].ScopeKey == artifacts[1].ScopeKey || artifacts[0].Bundle.Signature == artifacts[1].Bundle.Signature {
+		t.Fatalf("expected node-scoped artifact identities and signatures to remain isolated: %+v %+v", artifacts[0], artifacts[1])
+	}
+
+	var metrics strings.Builder
+	server.writeEdgeDNSArtifactMetrics(&metrics)
+	for _, sample := range []string{
+		`fugue_edge_dns_artifact_last_source_snapshots 1.000000`,
+		`fugue_edge_dns_artifact_last_node_projections 2.000000`,
+		`fugue_edge_dns_artifact_last_route_compilations 1.000000`,
+		`fugue_edge_dns_artifact_last_legacy_derivations 0.000000`,
+	} {
+		if !strings.Contains(metrics.String(), sample) {
+			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
+		}
+	}
+}
+
+func TestEdgeDNSArtifactPublisherSkipsWhenAdvisoryLockIsHeld(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := storeState.WithAdvisoryLock(context.Background(), edgeDNSArtifactControllerLockName, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+		done <- err
+	}()
+	<-locked
+
+	server.runEdgeDNSArtifactController(context.Background(), time.Now().UTC())
+	server.edgeDNSArtifactMu.Lock()
+	skippedCount := server.edgeDNSArtifactSkippedCount
+	runCount := server.edgeDNSArtifactRunCount
+	server.edgeDNSArtifactMu.Unlock()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("hold advisory lock: %v", err)
+	}
+	if skippedCount != 1 || runCount != 0 {
+		t.Fatalf("expected lock contention to skip without running publisher, skipped=%d runs=%d", skippedCount, runCount)
+	}
+}
+
 func TestEdgeDNSStaticAnswerIPsDoNotBecomeBusinessCandidatesWithoutEvidence(t *testing.T) {
 	t.Parallel()
 
