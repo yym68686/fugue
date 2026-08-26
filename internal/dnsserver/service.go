@@ -110,11 +110,6 @@ type cacheFile struct {
 	Bundle   model.EdgeDNSBundle `json:"bundle"`
 }
 
-type decodedDNSCacheFile struct {
-	Cache    cacheFile
-	Envelope bool
-}
-
 type telemetry struct {
 	BundleSyncSuccess     uint64
 	BundleSyncNotModified uint64
@@ -125,8 +120,6 @@ type telemetry struct {
 	CacheLoadSuccess      uint64
 	CacheLoadMiss         uint64
 	CacheLoadError        uint64
-	CacheLoadEnvelope     uint64
-	CacheLoadRaw          uint64
 	QueryTotal            map[dnsQueryMetricKey]uint64
 	ScopeResolutionTotal  map[string]uint64
 }
@@ -734,10 +727,6 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "fugue_dns_cache_load_total{result=\"success\"} %d\n", snapshot.Metrics.CacheLoadSuccess)
 	fmt.Fprintf(w, "fugue_dns_cache_load_total{result=\"miss\"} %d\n", snapshot.Metrics.CacheLoadMiss)
 	fmt.Fprintf(w, "fugue_dns_cache_load_total{result=\"error\"} %d\n", snapshot.Metrics.CacheLoadError)
-	fmt.Fprintln(w, "# HELP fugue_dns_cache_load_format_total Successfully loaded DNS bundle caches by on-disk format.")
-	fmt.Fprintln(w, "# TYPE fugue_dns_cache_load_format_total counter")
-	fmt.Fprintf(w, "fugue_dns_cache_load_format_total{format=\"envelope\"} %d\n", snapshot.Metrics.CacheLoadEnvelope)
-	fmt.Fprintf(w, "fugue_dns_cache_load_format_total{format=\"raw\"} %d\n", snapshot.Metrics.CacheLoadRaw)
 	fmt.Fprintln(w, "# HELP fugue_dns_bundle_sync_duration_seconds Duration of the last DNS bundle sync attempt.")
 	fmt.Fprintln(w, "# TYPE fugue_dns_bundle_sync_duration_seconds gauge")
 	fmt.Fprintf(w, "fugue_dns_bundle_sync_duration_seconds %.6f\n", snapshot.Metrics.LastSyncDuration.Seconds())
@@ -908,7 +897,7 @@ func (s *Service) LoadCache() error {
 		s.recordCacheLoad("error")
 		return err
 	}
-	decoded, err := s.decodeDNSCacheFile(data, time.Now().UTC())
+	cached, err := s.decodeDNSCacheFile(data, time.Now().UTC())
 	if err != nil {
 		s.recordCacheLoad("error")
 		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
@@ -917,7 +906,6 @@ func (s *Service) LoadCache() error {
 		}
 		return err
 	}
-	cached := decoded.Cache
 	if cached.Version != cacheFileVersion {
 		s.recordCacheLoad("error")
 		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
@@ -936,7 +924,6 @@ func (s *Service) LoadCache() error {
 	}
 	s.setBundle(cached.Bundle, cached.ETag, true, "")
 	s.recordCacheLoad("success")
-	s.recordCacheLoadFormat(decoded.Envelope)
 	s.Logger.Printf("dns bundle cache loaded; version=%s etag=%s cached_at=%s records=%d path=%s", cached.Bundle.Version, cached.ETag, cached.CachedAt.Format(time.RFC3339Nano), len(cached.Bundle.Records), path)
 	return nil
 }
@@ -1148,16 +1135,6 @@ func (s *Service) recordCacheLoad(result string) {
 		s.metrics.CacheLoadMiss++
 	default:
 		s.metrics.CacheLoadError++
-	}
-}
-
-func (s *Service) recordCacheLoadFormat(envelope bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if envelope {
-		s.metrics.CacheLoadEnvelope++
-	} else {
-		s.metrics.CacheLoadRaw++
 	}
 }
 
@@ -1662,13 +1639,12 @@ func (s *Service) LoadPreviousCache() error {
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		decoded, err := s.decodeDNSCacheFile(candidate.Data, time.Now().UTC())
+		cached, err := s.decodeDNSCacheFile(candidate.Data, time.Now().UTC())
 		if err != nil {
 			lastErr = fmt.Errorf("decode previous dns cache %s: %w", candidate.Path, err)
 			s.recordCacheLoad("error")
 			continue
 		}
-		cached := decoded.Cache
 		if cached.Version != cacheFileVersion {
 			lastErr = fmt.Errorf("unsupported dns cache file version %d in %s", cached.Version, candidate.Path)
 			s.recordCacheLoad("error")
@@ -1681,7 +1657,6 @@ func (s *Service) LoadPreviousCache() error {
 		}
 		s.setBundle(cached.Bundle, cached.ETag, true, "")
 		s.recordCacheLoad("success")
-		s.recordCacheLoadFormat(decoded.Envelope)
 		if s.Logger != nil {
 			s.Logger.Printf("dns previous cache loaded; version=%s etag=%s path=%s", cached.Bundle.Version, cached.ETag, candidate.Path)
 		}
@@ -1695,53 +1670,30 @@ func (s *Service) LoadPreviousCache() error {
 
 func (s *Service) preservePreviousCache(path string) {
 	err := lkgcache.PreservePrevious(path, func(data []byte) bool {
-		decoded, err := s.decodeDNSCacheFile(data, time.Now().UTC())
-		if err != nil || decoded.Cache.Version != cacheFileVersion {
+		cached, err := s.decodeDNSCacheFile(data, time.Now().UTC())
+		if err != nil || cached.Version != cacheFileVersion {
 			return false
 		}
-		return s.verifyCachedBundle(decoded.Cache.Bundle, time.Now().UTC()) == nil
+		return s.verifyCachedBundle(cached.Bundle, time.Now().UTC()) == nil
 	})
 	if err != nil && !os.IsNotExist(err) && s.Logger != nil {
 		s.Logger.Printf("preserve previous dns cache failed: %v", err)
 	}
 }
 
-func (s *Service) decodeDNSCacheFile(data []byte, now time.Time) (decodedDNSCacheFile, error) {
-	if dnsCacheLooksLikeEnvelope(data) {
-		envelope, err := lkgcache.DecodeEnvelope(data, lkgcache.ReadEnvelopeOptions{
-			Now:          now,
-			ExpectedKind: dnsCacheEnvelopeKind,
-		})
-		if err != nil {
-			return decodedDNSCacheFile{}, err
-		}
-		var cached cacheFile
-		if err := json.Unmarshal(envelope.Payload, &cached); err != nil {
-			return decodedDNSCacheFile{}, err
-		}
-		return decodedDNSCacheFile{Cache: cached, Envelope: true}, nil
+func (s *Service) decodeDNSCacheFile(data []byte, now time.Time) (cacheFile, error) {
+	envelope, err := lkgcache.DecodeEnvelope(data, lkgcache.ReadEnvelopeOptions{
+		Now:          now,
+		ExpectedKind: dnsCacheEnvelopeKind,
+	})
+	if err != nil {
+		return cacheFile{}, err
 	}
 	var cached cacheFile
-	if err := json.Unmarshal(data, &cached); err != nil {
-		return decodedDNSCacheFile{}, err
+	if err := json.Unmarshal(envelope.Payload, &cached); err != nil {
+		return cacheFile{}, err
 	}
-	return decodedDNSCacheFile{Cache: cached}, nil
-}
-
-func dnsCacheLooksLikeEnvelope(data []byte) bool {
-	var marker struct {
-		SchemaVersion string          `json:"schema_version"`
-		Kind          string          `json:"kind"`
-		ContentHash   string          `json:"content_hash"`
-		Payload       json.RawMessage `json:"payload"`
-	}
-	if err := json.Unmarshal(data, &marker); err != nil {
-		return false
-	}
-	return strings.TrimSpace(marker.SchemaVersion) != "" ||
-		strings.TrimSpace(marker.Kind) != "" ||
-		strings.TrimSpace(marker.ContentHash) != "" ||
-		len(marker.Payload) > 0
+	return cached, nil
 }
 
 func (s *Service) dnsCacheEnvelopeExpiresAt(cached cacheFile, createdAt time.Time) time.Time {

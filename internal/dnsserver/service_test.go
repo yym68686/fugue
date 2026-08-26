@@ -1590,18 +1590,6 @@ func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 	if status := reloaded.Status(); !status.Healthy || !status.StaleCache || status.BundleVersion != "dnsgen_test" {
 		t.Fatalf("unexpected status after cache load: %+v", status)
 	}
-	loadMetrics := reloaded.metricSnapshot().Metrics
-	if loadMetrics.CacheLoadEnvelope != 1 || loadMetrics.CacheLoadRaw != 0 {
-		t.Fatalf("unexpected envelope cache load metrics: %+v", loadMetrics)
-	}
-	recorder := httptest.NewRecorder()
-	reloaded.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	metricsBody := recorder.Body.String()
-	if !strings.Contains(metricsBody, `fugue_dns_cache_load_format_total{format="envelope"} 1`) ||
-		!strings.Contains(metricsBody, `fugue_dns_cache_load_format_total{format="raw"} 0`) {
-		t.Fatalf("expected exported envelope cache load metrics, got %s", metricsBody)
-	}
-
 	if err := service.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("second sync failed: %v", err)
 	}
@@ -1675,7 +1663,7 @@ func TestServiceSyncUnavailableArtifactRetainsVerifiedLKG(t *testing.T) {
 	}
 }
 
-func TestLoadCacheReadsLegacyDNSCacheFile(t *testing.T) {
+func TestLoadCacheRejectsLegacyRawDNSCacheFile(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "dns-cache.json")
@@ -1704,16 +1692,17 @@ func TestLoadCacheReadsLegacyDNSCacheFile(t *testing.T) {
 		t.Fatalf("write legacy cache: %v", err)
 	}
 
-	if err := service.LoadCache(); err != nil {
-		t.Fatalf("load legacy dns cache: %v", err)
+	err = service.LoadCache()
+	if err == nil || !strings.Contains(err.Error(), "unsupported lkg envelope schema_version") {
+		t.Fatalf("load legacy raw dns cache error=%v, want unsupported envelope", err)
 	}
 	status := service.Status()
-	if !status.Healthy || !status.StaleCache || status.ServingGeneration != "dnsgen_legacy" {
-		t.Fatalf("unexpected legacy cache status: %+v", status)
+	if status.ServingGeneration != "" || status.BundleVersion != "" || status.StaleCache {
+		t.Fatalf("legacy raw cache activated serving state: %+v", status)
 	}
 	loadMetrics := service.metricSnapshot().Metrics
-	if loadMetrics.CacheLoadEnvelope != 0 || loadMetrics.CacheLoadRaw != 1 {
-		t.Fatalf("unexpected raw cache load metrics: %+v", loadMetrics)
+	if loadMetrics.CacheLoadSuccess != 0 || loadMetrics.CacheLoadError != 1 || loadMetrics.CacheLoadMiss != 1 {
+		t.Fatalf("unexpected rejected raw cache load metrics: %+v", loadMetrics)
 	}
 }
 
