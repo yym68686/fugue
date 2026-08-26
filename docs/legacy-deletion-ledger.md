@@ -1,7 +1,7 @@
 # Fugue 历史兼容/重复逻辑删除台账
 
 状态：按原子步骤执行中；每项删除或迁移均需独立推送、生产收敛并记录证据后，才进入下一项。
-审计基线：后端 `origin/main`，commit `f21f522e8dd1eb14972a3805b5a2f08f6b09cde0`（2026-08-26）。本轮只审计该主线快照；未提交工作树和其他分支不计入“已收敛”。凡台账记录生产收敛，均同时列出当次 CI 和只读生产现场证据。
+审计基线：后端 `origin/main`，commit `510d74b51ceaf7ffb49e55ec3937173f22a13a1f`（2026-08-26）。本轮只审计该主线快照；未提交工作树和其他分支不计入“已收敛”。凡台账记录生产收敛，均同时列出当次 CI 和只读生产现场证据。
 
 范围：本台账覆盖已确认的流量、Edge、DNS、artifact、Guardian、发布和相关存储路径。它不把全仓库所有带 `legacy` 名称的业务数据兼容都列为删除对象。表中的“生产”表示代码入口或仓库内生产资源已启用；凡标记“需现场证明”的项目，都必须通过实际节点、请求和 metrics 再确认，不能只看 manifest。
 
@@ -45,7 +45,7 @@
 | R06 | `REMOVED` | `internal/api/edge_routes.go` `deriveEdgeRouteBinding` | 无；旧 API compiler 已删除，RouteIntent/DNS 改走 TrafficEpoch compiler | 收敛提交 `0559e9ac`；该提交 API component-build/deploy 成功（CI run `32931866847` 的 `component-build (api)`、`deploy_api`）；同次 workflow 仅无关 controller atom 失败。当前生产 API 仍加载 `0559e9ac`，2/2 Ready、零重启、monitor failures=0；RouteIntent 专用 TLS 入口与 DE/US health/ready、平台 DNS/HTTPS 均正常 | `internal/trafficepoch.CompileRouteBinding`，由 API 只提供 facts | 无；保留此行作为 API compiler 历史审计记录 | `internal/trafficepoch/compiler_test.go`; `edge_request_body_policy_test.go`; `edge_route_intents_test.go`; `go test ./internal/trafficepoch ./internal/api ./internal/edgecontrol`; 生产 Pod/monitor/RouteIntent/DNS/HTTPS 核验 |
 | R07 | `KEEP` | `internal/api/edge_route_intents.go` `deriveEdgeRouteIntentSnapshot` | `/v1/edge/route-intents`，Edge Control | `b0a539c8`；CI run `32949421873` 成功；生产 API 2/2 Ready、零重启；DE/US 连续读取稳定 generation `routeintents_c39b...` | 唯一 TrafficEpoch RouteIntent 编译入口；generation 仅由语义 material 决定 | 已满足；保留 canonical producer，不删除 | `internal/api/edge_route_intents_test.go`; ETag/generation tests；生产跨区 generation/Pod/health 核验 |
 | R08 | `KEEP` | `internal/edgecontrol/group_shadow.go` `compileGroupShadowCandidate` | Edge Control group candidate/promotion | 语义修复 `8a45dc35`；DE release `a4516b27`，US release `f21f522e`；Guardian executor `fa07b185`；CI runs `32955491905`、`32956322862` 成功；DE/US authority healthy/current、Pod Ready/零重启 | canonical epoch + inventory per-group materializer；只对语义 inventory 变化生成 candidate | 已满足；纯心跳不物化，原始 generation 仅用于审计/CAS；保留该能力 | `internal/edgecontrol/group_shadow_test.go`；focused repeat 10x/20x；US 四次生产采样 publication/bundle/digest/recovery/ledger 稳定；跨区服务探针 |
-| D01 | `CONVERGE` | `internal/api/edge_dns.go` handler artifact fallback/`deriveEdgeDNSBundle` | `/v1/edge/dns`；artifact miss/error时现场推导 | handler 明确先读 artifact，miss/error 后执行 read-only derive | 只读取已激活签名 DNS artifact；错误时保留正向LKG | 所有权威节点准备同一digest；fallback命中为0；禁止空答案回退 | `internal/api/edge_dns_test.go`; US/DE公共DNS + artifact digest |
+| D01 | `REMOVED` | `internal/api/edge_dns.go` handler artifact fallback/`deriveEdgeDNSBundle` | 无；handler 已不再现场编译，canonical compiler 仅供后台 publisher 和诊断路径使用 | 观测 `4e85abe3`、删除 `510d74b5`；CI runs `32958306976`、`32960481925` 成功；生产 artifact hit 持续增长且 miss/error/fallback 为0；API 2/2 Ready、零重启；US/DE DNS healthy、非 stale、持续同步；跨区权威 DNS 与 OAIX/DataOcean 探针正常 | 只读取已激活且 scope/material/source/signature/freshness 全部验证通过的签名 DNS artifact；错误时返回503并由节点保留正向LKG | 已满足；保留后台 canonical compiler，禁止 handler 现场 derive 和空答案回退 | `internal/api/edge_dns_test.go`; `internal/dnsserver/service_test.go` 503/LKG regression；`make prepush`；生产 artifact metrics、DNS health、US/DE公共DNS/HTTPS |
 | D02 | `MIGRATE_THEN_DELETE` | `internal/api/edge_dns.go` DNS-node -> Edge candidate/group合成 | DNS bundle编译器 | eligible DNS node会进入生产候选 | 只接受 Edge ACK/inventory facts；DNS心跳只描述DNS | Edge inventory非空且新鲜；ACK覆盖所有答案；故障注入证明不再伪造route-ready | `bundle_invariants_test.go`; Host/TLS/route-generation e2e |
 | D03 | `CONVERGE` | `internal/api/edge_dns_artifacts.go` background publisher | `cmd/fugue-api/main.go` 每分钟启动 | 明确启用 | canonical publisher一次生成，多节点消费 | TrafficEpoch publisher取代逐节点重编译；旧发布metrics归零 | `edge_dns_test.go`; `fugue_edge_dns_artifact_*`; advisory-lock注入 |
 | D04 | `CONVERGE` | `internal/store/edge_dns_bundle_artifacts.go` mutable scoped artifact | D03、DNS handler | 明确启用；`ON CONFLICT DO UPDATE` | immutable artifact ledger + per-node receipt/current pointer | 数据迁移和digest对账完成；current只能原子指向不可变内容 | rollback semantic tests；Postgres migration/integrity tests |
@@ -108,6 +108,6 @@
 - 删除 P10 的不可达 `allowLegacy`/`legacySource` 参数、`LegacyIdentity` 字段和测试 wrapper；R02 已完成，不要重复安排。
 - R03 已完成：`FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP` 已停止发布并在 DE/US 生产收敛，不要重复安排。
 - R04 已完成：Core API `/v1/edge/routes` 已在零命中窗口后删除；Edge Control 同名组内签名 reader 继续保留，不能与已删除的 Core API 入口混为一项。
-- R05/R06 已完成删除；R07/R08 已完成语义收敛并确认为目标架构所需的 `KEEP` 能力，不再安排删除。下一项按表推进 D01：先证明并消除 DNS handler 的 artifact miss/error 现场 derive fallback，同时保留已激活签名 DNS artifact 的正向 LKG。
+- R05/R06/D01 已完成删除；R07/R08 已完成语义收敛并确认为目标架构所需的 `KEEP` 能力，不再安排删除。下一项按表推进 D02：停止从 DNS-node heartbeat 合成 Edge candidate/group，只允许新鲜 Edge inventory/ACK 决定 DNS 答案资格。
 - 继续为 DNS 现场 derive、raw DNS cache fallback、legacy Edge token 和空 topology pair 增加命中计数；没有计数证据前不删除生产路径。
 - 为 G09-G12、P06-P09、C01、I01、W01、M01 增加迁移计数和零命中门禁；是否允许下一枚生产 atom 必须以当次只读 authority/monitor/route 证据判断，不能沿用 2026-08-22 的历史现场状态。
