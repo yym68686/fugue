@@ -8,17 +8,6 @@ import (
 	"fugue/internal/model"
 )
 
-type edgeRouteBundleInvariantInput struct {
-	Apps                       []model.App
-	Domains                    []model.AppDomain
-	PlatformRoutes             []model.PlatformRoute
-	HealthyEdgeGroups          map[string]bool
-	ExpectedNonEmptyEdgeGroups map[string]bool
-	ExpectedMinTrafficRoutes   map[string]int
-	ExplicitlyExcludedRoutes   int
-	Options                    edgeRouteBundleOptions
-}
-
 type edgeDNSBundleInvariantInput struct {
 	Options                       edgeDNSBundleOptions
 	ProtectedRecords              []model.EdgeDNSRecord
@@ -86,113 +75,6 @@ func newBundleInvariantError(artifactKind, name, subject, expected, observed, me
 			RepairHint: robustnessRepairHint(name),
 		}},
 	}
-}
-
-func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeRouteBundleInvariantInput) error {
-	if strings.TrimSpace(bundle.Version) == "" || strings.TrimSpace(bundle.Generation) == "" {
-		return newBundleInvariantError("edge_route_bundle", "bundle_generation", "edge_route_bundle", "version and generation are set", fmt.Sprintf("version=%s generation=%s", bundle.Version, bundle.Generation), "generation is required", nil)
-	}
-	for _, route := range bundle.Routes {
-		if normalizeExternalAppDomain(route.Hostname) == "" {
-			return newBundleInvariantError("edge_route_bundle", "route_hostname", "edge_route_bundle", "every route has a hostname", fmt.Sprintf("route_kind=%s edge_group=%s", route.RouteKind, route.EdgeGroupID), "route hostname is required", nil)
-		}
-		if strings.TrimSpace(route.RouteGeneration) == "" {
-			return newBundleInvariantError("edge_route_bundle", "route_generation", "hostname:"+route.Hostname, "route_generation is set", "route_generation=", fmt.Sprintf("route generation is required for %s", route.Hostname), nil)
-		}
-		if strings.EqualFold(route.Status, model.EdgeRouteStatusActive) && model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
-			if strings.TrimSpace(route.EdgeGroupID) == "" {
-				return newBundleInvariantError("edge_route_bundle", "route_active", "hostname:"+route.Hostname, "active traffic route has edge group", "edge_group=", fmt.Sprintf("active route %s missing edge group", route.Hostname), nil)
-			}
-			if strings.TrimSpace(route.UpstreamURL) == "" {
-				return newBundleInvariantError("edge_route_bundle", "route_active", "hostname:"+route.Hostname, "active traffic route has upstream", "upstream=", fmt.Sprintf("active route %s missing upstream", route.Hostname), nil)
-			}
-		}
-	}
-	if len(bundle.Routes) == 0 && input.ExplicitlyExcludedRoutes == 0 && edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
-		return newBundleInvariantError("edge_route_bundle", "route_bundle_non_empty", "edge_route_bundle", "non-empty route bundle for non-empty routable inventory", fmt.Sprintf("routes=0 expected_hosts=%d excluded_routes=%d", edgeRouteBundleExpectedRoutableHosts(input), input.ExplicitlyExcludedRoutes), "refusing to publish empty route bundle for non-empty routable inventory", nil)
-	}
-	if edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
-		trafficRoutes := edgeRouteBundleTrafficRouteCount(bundle, input.Options)
-		if edgeRouteSelectorHadTraffic(input.Options, input.ExpectedNonEmptyEdgeGroups) && trafficRoutes == 0 && input.ExplicitlyExcludedRoutes == 0 {
-			return newBundleInvariantError("edge_route_bundle", "route_bundle_traffic_routes", "edge_route_bundle", "at least one traffic route for non-empty routable inventory", fmt.Sprintf("traffic_routes=0 expected_hosts=%d excluded_routes=%d", edgeRouteBundleExpectedRoutableHosts(input), input.ExplicitlyExcludedRoutes), "refusing to publish route bundle without traffic routes for non-empty routable inventory", nil)
-		}
-		if minimum := edgeRouteExpectedMinTrafficRoutes(input.Options, input.ExpectedMinTrafficRoutes); minimum >= 5 {
-			minimum -= input.ExplicitlyExcludedRoutes
-			if minimum < 0 {
-				minimum = 0
-			}
-			floor := (minimum*8 + 9) / 10
-			if trafficRoutes < floor {
-				return newBundleInvariantError("edge_route_bundle", "route_bundle_traffic_drop", "edge_route_bundle", fmt.Sprintf("traffic routes >= %d", floor), fmt.Sprintf("traffic_routes=%d previous_minimum=%d", trafficRoutes, minimum), fmt.Sprintf("refusing to publish route bundle with abnormal traffic route drop: got %d, previous %d", trafficRoutes, minimum), nil)
-			}
-		}
-	}
-	return nil
-}
-
-func edgeRouteSelectorHadTraffic(options edgeRouteBundleOptions, expectedNonEmptyEdgeGroups map[string]bool) bool {
-	edgeGroupID := strings.TrimSpace(options.EdgeGroupID)
-	if edgeGroupID == "" {
-		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
-	}
-	return edgeGroupID != "" && expectedNonEmptyEdgeGroups[edgeGroupID]
-}
-
-func edgeRouteBundleExpectedRoutableHosts(input edgeRouteBundleInvariantInput) int {
-	count := 0
-	for _, app := range input.Apps {
-		if app.Route != nil && normalizeExternalAppDomain(app.Route.Hostname) != "" {
-			count++
-		}
-	}
-	for _, domain := range input.Domains {
-		if normalizeExternalAppDomain(domain.Hostname) != "" {
-			count++
-		}
-	}
-	for _, route := range input.PlatformRoutes {
-		if normalizeExternalAppDomain(route.Hostname) != "" {
-			count++
-		}
-	}
-	return count
-}
-
-func edgeRouteSelectorShouldHaveRoutes(options edgeRouteBundleOptions, healthyEdgeGroups, expectedNonEmptyEdgeGroups map[string]bool) bool {
-	if strings.TrimSpace(options.EdgeGroupID) == "" && strings.TrimSpace(options.EdgeID) == "" {
-		return true
-	}
-	edgeGroupID := strings.TrimSpace(options.EdgeGroupID)
-	if edgeGroupID == "" {
-		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
-	}
-	return edgeGroupID != "" && (expectedNonEmptyEdgeGroups[edgeGroupID] || healthyEdgeGroups[edgeGroupID])
-}
-
-func edgeRouteBundleTrafficRouteCount(bundle model.EdgeRouteBundle, _ edgeRouteBundleOptions) int {
-	count := 0
-	for _, route := range bundle.Routes {
-		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) ||
-			!strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) ||
-			strings.TrimSpace(route.UpstreamURL) == "" {
-			continue
-		}
-		count++
-	}
-	return count
-}
-
-func edgeRouteExpectedMinTrafficRoutes(_ edgeRouteBundleOptions, expected map[string]int) int {
-	if len(expected) == 0 {
-		return 0
-	}
-	minimum := 0
-	for _, count := range expected {
-		if count > minimum {
-			minimum = count
-		}
-	}
-	return minimum
 }
 
 func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, input edgeDNSBundleInvariantInput) error {

@@ -40,10 +40,6 @@ func signDiscoveryBundle(bundle model.DiscoveryBundle, keyring bundleauth.Keyrin
 	return bundleauth.SignDiscoveryBundleWithKeyring(bundle, keyring, validFor)
 }
 
-func signEdgeRouteBundle(bundle model.EdgeRouteBundle, keyring bundleauth.Keyring, validFor time.Duration) model.EdgeRouteBundle {
-	return bundleauth.SignEdgeRouteBundleWithKeyring(bundle, keyring, validFor)
-}
-
 func signEdgeSSHRouteBundle(bundle model.EdgeSSHRouteBundle, keyring bundleauth.Keyring, validFor time.Duration) model.EdgeSSHRouteBundle {
 	return bundleauth.SignEdgeSSHRouteBundleWithKeyring(bundle, keyring, validFor)
 }

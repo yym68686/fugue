@@ -235,7 +235,7 @@ func TestEdgeRouteIntentTreatsTrafficPlacementAsDNSDrain(t *testing.T) {
 	}
 }
 
-func TestEdgeRouteIntentEndpointDoesNotMutateLegacyRouteBundle(t *testing.T) {
+func TestEdgeRouteIntentEndpointReadIsDeterministic(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -251,20 +251,20 @@ func TestEdgeRouteIntentEndpointDoesNotMutateLegacyRouteBundle(t *testing.T) {
 	}
 	activateExactEpochForAPITest(t, storeState, active...)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes", nil)
-	before, err := server.deriveEdgeRouteBundle(req, edgeRouteBundleOptions{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/route-intents", nil)
+	before, err := server.deriveEdgeRouteIntentSnapshot(req, storeState)
 	if err != nil {
-		t.Fatalf("derive legacy route bundle before intent read: %v", err)
+		t.Fatalf("derive first route intent snapshot: %v", err)
 	}
-	if _, err := server.deriveEdgeRouteIntentSnapshot(req, storeState); err != nil {
-		t.Fatalf("derive route intent snapshot: %v", err)
-	}
-	after, err := server.deriveEdgeRouteBundle(req, edgeRouteBundleOptions{})
+	after, err := server.deriveEdgeRouteIntentSnapshot(req, storeState)
 	if err != nil {
-		t.Fatalf("derive legacy route bundle after intent read: %v", err)
+		t.Fatalf("derive second route intent snapshot: %v", err)
 	}
-	if before.Version != after.Version || !reflect.DeepEqual(before.Routes, after.Routes) || !reflect.DeepEqual(before.TLSAllowlist, after.TLSAllowlist) || !reflect.DeepEqual(before.CachePolicies, after.CachePolicies) {
-		t.Fatalf("read-only RouteIntent changed legacy bundle: before=%+v after=%+v", before, after)
+	if before.Generation != after.Generation ||
+		!reflect.DeepEqual(before.Routes, after.Routes) ||
+		!reflect.DeepEqual(before.TLSAllowlist, after.TLSAllowlist) ||
+		!reflect.DeepEqual(before.CachePolicies, after.CachePolicies) {
+		t.Fatalf("read-only RouteIntent is not deterministic: before=%+v after=%+v", before, after)
 	}
 }
 

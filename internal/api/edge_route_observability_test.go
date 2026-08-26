@@ -18,7 +18,6 @@ func TestFinalizeEdgeRouteDecisionIsBehaviorNeutralAndStable(t *testing.T) {
 	route := edgeRouteObservationTestRoute()
 	before := route
 	beforeGeneration := edgeRouteGeneration(route)
-	beforeBundleVersion := edgeRouteBundleVersion(model.EdgeRouteBundle{Routes: []model.EdgeRouteBinding{route}})
 	provenance := edgeRouteObservationTestProvenance()
 
 	routes := finalizeEdgeRouteDecisions(
@@ -37,9 +36,6 @@ func TestFinalizeEdgeRouteDecisionIsBehaviorNeutralAndStable(t *testing.T) {
 	routes[0].DecisionID = decisionID
 	if got := edgeRouteGeneration(routes[0]); got != beforeGeneration {
 		t.Fatalf("decision metadata changed route generation: before=%s after=%s", beforeGeneration, got)
-	}
-	if got := edgeRouteBundleVersion(model.EdgeRouteBundle{Routes: routes}); got != beforeBundleVersion {
-		t.Fatalf("decision metadata changed bundle version: before=%s after=%s", beforeBundleVersion, got)
 	}
 	repeated := finalizeEdgeRouteDecisions(
 		[]model.EdgeRouteBinding{route},
