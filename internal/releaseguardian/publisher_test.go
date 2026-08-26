@@ -279,13 +279,18 @@ func TestDegradedPredecessorPublishRequiresExactStableBindings(t *testing.T) {
 	if !fencedDesiredReplacementEligible(localFenced, bundle, record) || !publishDesiredEligible(localFenced, bundle, record) {
 		t.Fatal("exact superseded local failure was rejected")
 	}
+	legacyConfigBundle := bundle
+	legacyConfigBundle.Prepared.Prewrite.ConfigSHA = strings.Repeat("3", 40)
+	if !fencedDesiredReplacementEligible(localFenced, legacyConfigBundle, record) || !publishDesiredEligible(localFenced, legacyConfigBundle, record) {
+		t.Fatal("CAS-bound legacy config annotation was rejected")
+	}
 	for name, mutate := range map[string]func(*Snapshot, *ExecutionBundle){
 		"not superseded": func(_ *Snapshot, value *ExecutionBundle) { value.Release.SupersedesFailedConfigSHA = "" },
 		"wrong failed SHA": func(_ *Snapshot, value *ExecutionBundle) {
 			value.Release.SupersedesFailedConfigSHA = strings.Repeat("3", 40)
 		},
-		"prewrite drift": func(_ *Snapshot, value *ExecutionBundle) {
-			value.Prepared.Prewrite.ConfigSHA = strings.Repeat("3", 40)
+		"invalid prewrite CAS": func(_ *Snapshot, value *ExecutionBundle) {
+			value.Prepared.Prewrite.ConfigSHA = "invalid"
 		},
 		"image drift": func(_ *Snapshot, value *ExecutionBundle) {
 			value.Prepared.Prewrite.ImageRef = repository + "@" + otherDigest
