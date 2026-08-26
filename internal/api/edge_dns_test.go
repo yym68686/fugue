@@ -413,7 +413,7 @@ func TestEdgeDNSStaticAnswerIPsDoNotBecomeBusinessCandidatesWithoutEvidence(t *t
 	}
 	now := time.Now().UTC()
 
-	byGroup, err := server.edgeDNSAnswerIPsByGroupWithDNSNodes(context.Background(), options, nil, now)
+	byGroup, err := server.edgeDNSAnswerIPsByGroup(context.Background())
 	if err != nil {
 		t.Fatalf("build answer IPs by group: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestEdgeDNSStaticAnswerIPsDoNotBecomeBusinessCandidatesWithoutEvidence(t *t
 		t.Fatalf("expected no business answer IPs without inventory and route evidence, got %+v", byGroup)
 	}
 
-	candidates, err := server.edgeDNSAnswerCandidateByIP(context.Background(), options, nil, now)
+	candidates, err := server.edgeDNSAnswerCandidateByIP(context.Background(), options, now)
 	if err != nil {
 		t.Fatalf("build answer candidates: %v", err)
 	}
@@ -899,7 +899,7 @@ func TestEdgeDNSBundleUsesHealthyPolicyEdgeGroupIPsForOptInTargets(t *testing.T)
 	}
 }
 
-func TestEdgeDNSBundleUsesDNSNodeInventoryAfterEdgeInventoryMovesPerGroup(t *testing.T) {
+func TestEdgeDNSBundleDoesNotTreatDNSHeartbeatAsEdgeInventory(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -913,24 +913,32 @@ func TestEdgeDNSBundleUsesDNSNodeInventoryAfterEdgeInventoryMovesPerGroup(t *tes
 	}); err != nil {
 		t.Fatalf("put verified app domain: %v", err)
 	}
-	for _, node := range []model.DNSNode{
-		{ID: "dns-de", PhysicalNodeID: "edge-de-1", EdgeGroupID: "edge-group-country-de", Zone: "fugue.pro", PublicIPv4: "192.0.2.10", Status: model.EdgeHealthHealthy, Healthy: true, DNSBundleVersion: "dnsgen-de", ServingGeneration: "dnsgen-de", LKGGeneration: "dnsgen-de", CacheStatus: "ready"},
-		{ID: "dns-us", PhysicalNodeID: "edge-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro", PublicIPv4: "198.51.100.20", Status: model.EdgeHealthHealthy, Healthy: true, DNSBundleVersion: "dnsgen-us", ServingGeneration: "dnsgen-us", LKGGeneration: "dnsgen-us", CacheStatus: "ready"},
-	} {
-		if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
-			t.Fatalf("record DNS node heartbeat: %v", err)
-		}
-	}
-	if _, err := storeState.PutEdgeRoutePolicy(model.EdgeRoutePolicy{
-		Hostname: "service.example.com", AppID: app.ID, TenantID: app.TenantID,
-		RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true,
-		ExcludedEdgeIDs: []string{"edge-de-1"}, ExclusionReason: "operator quarantine",
+	if _, err := storeState.UpdateDNSHeartbeat(model.DNSNode{
+		ID: "dns-us", PhysicalNodeID: "edge-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro",
+		PublicIPv4: "198.51.100.20", Status: model.EdgeHealthHealthy, Healthy: true,
+		DNSBundleVersion: "dnsgen-us", ServingGeneration: "dnsgen-us", LKGGeneration: "dnsgen-us", CacheStatus: "ready",
 	}); err != nil {
-		t.Fatalf("put edge exclusion policy: %v", err)
+		t.Fatalf("record DNS node heartbeat: %v", err)
+	}
+	byGroup, err := server.edgeDNSAnswerIPsByGroup(context.Background())
+	if err != nil {
+		t.Fatalf("build answer IPs by group: %v", err)
+	}
+	if len(byGroup) != 0 {
+		t.Fatalf("DNS heartbeat must not create Edge group answer inventory: %+v", byGroup)
+	}
+	candidateByIP, err := server.edgeDNSAnswerCandidateByIP(context.Background(), edgeDNSBundleOptions{
+		Zone: "fugue.pro", EdgeGroupID: "edge-group-country-us",
+	}, now)
+	if err != nil {
+		t.Fatalf("build Edge answer candidates: %v", err)
+	}
+	if len(candidateByIP) != 0 {
+		t.Fatalf("DNS heartbeat must not create Edge answer candidates: %+v", candidateByIP)
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=192.0.2.10", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=198.51.100.20", nil)
 	serveEdgeDNSBundleRequest(t, server, recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
@@ -938,11 +946,12 @@ func TestEdgeDNSBundleUsesDNSNodeInventoryAfterEdgeInventoryMovesPerGroup(t *tes
 	var bundle model.EdgeDNSBundle
 	mustDecodeJSON(t, recorder, &bundle)
 	record := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
-	if record == nil || strings.Join(record.Values, ",") != "198.51.100.20" {
-		t.Fatalf("expected every authority to exclude the quarantined physical edge and use the healthy group, got %+v", record)
+	if record == nil || !stringSliceContains(record.Values, "198.51.100.20") {
+		t.Fatalf("expected configured answer IP to remain represented for answer-time fail-closed filtering: %+v", record)
 	}
-	if len(record.Candidates) != 1 || record.Candidates[0].EdgeID != "edge-us-1" || record.Candidates[0].EdgeGroupID != "edge-group-country-us" {
-		t.Fatalf("DNS node inventory did not preserve the physical edge identity: %+v", record.Candidates)
+	if len(record.Candidates) != 1 || record.Candidates[0].EdgeID != "" || record.Candidates[0].EdgeGroupID != "" ||
+		record.Candidates[0].RouteReady || record.Candidates[0].DNSEligible || record.Candidates[0].Reason == "dns_node_inventory" {
+		t.Fatalf("DNS heartbeat must not synthesize a route-ready or DNS-eligible Edge candidate: %+v", record.Candidates)
 	}
 }
 

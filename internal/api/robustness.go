@@ -407,7 +407,7 @@ func (s *Server) robustnessGeneratedArtifactChecks(r *http.Request, dnsOpts dnsD
 	if zone == "" {
 		zone = normalizeExternalAppDomain(s.appBaseDomain)
 	}
-	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(r.Context(), edgeDNSBundleOptions{Zone: zone})
+	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(r.Context())
 	if err != nil {
 		return nil, err
 	}

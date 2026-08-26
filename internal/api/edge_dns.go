@@ -191,16 +191,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
-	dnsNodes, err := s.store.ListDNSNodes("")
-	if err != nil {
-		return model.EdgeDNSBundle{}, err
-	}
 	now := time.Now().UTC()
 	healthyEdgeGroups, healthyEdgeNodeIDsByGroup, err := s.edgeRouteHealthyEdgeGroupInventory()
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
-	mergeEdgeDNSNodeGroupInventory(healthyEdgeGroups, healthyEdgeNodeIDsByGroup, dnsNodes, options.Zone, now)
 	if options.AuthorityService != "" {
 		groupID, nodeIDs, err := s.edgeDNSAuthorityReady(r.Context(), options.AuthorityService, options.EdgeGroupID, now)
 		if err != nil {
@@ -241,11 +236,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		appByID[strings.TrimSpace(app.ID)] = app
 	}
 	policyByHostname := edgeRoutePolicyByHostname(policies)
-	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroupWithDNSNodes(r.Context(), options, dnsNodes, now)
+	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(r.Context())
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
-	edgeCandidateByIP, err := s.edgeDNSAnswerCandidateByIP(r.Context(), options, dnsNodes, now)
+	edgeCandidateByIP, err := s.edgeDNSAnswerCandidateByIP(r.Context(), options, now)
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
@@ -918,15 +913,7 @@ func hostedDNSRecordApp(record model.DNSRecord, appByID map[string]model.App) (m
 	return model.App{}, false
 }
 
-func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBundleOptions) (map[string][]string, error) {
-	dnsNodes, err := s.store.ListDNSNodes("")
-	if err != nil {
-		return nil, err
-	}
-	return s.edgeDNSAnswerIPsByGroupWithDNSNodes(ctx, options, dnsNodes, time.Now().UTC())
-}
-
-func (s *Server) edgeDNSAnswerIPsByGroupWithDNSNodes(ctx context.Context, options edgeDNSBundleOptions, dnsNodes []model.DNSNode, now time.Time) (map[string][]string, error) {
+func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context) (map[string][]string, error) {
 	out := map[string][]string{}
 	if s.store != nil {
 		nodes, _, err := s.store.ListActiveEdgeNodes("")
@@ -936,6 +923,7 @@ func (s *Server) edgeDNSAnswerIPsByGroupWithDNSNodes(ctx context.Context, option
 			}
 			return nil, err
 		}
+		now := time.Now().UTC()
 		liveServingByNode := s.edgeLiveServingByNode(ctx, now)
 		for _, node := range nodes {
 			if !edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
@@ -955,24 +943,10 @@ func (s *Server) edgeDNSAnswerIPsByGroupWithDNSNodes(ctx context.Context, option
 			out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv6)
 		}
 	}
-	for _, node := range dnsNodes {
-		if !edgeDNSNodeMatchesZone(node, options.Zone) {
-			continue
-		}
-		groupID := strings.TrimSpace(node.EdgeGroupID)
-		if groupID == "" {
-			continue
-		}
-		if !edgeDNSNodeServingEligible(node, now) {
-			continue
-		}
-		out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv4)
-		out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv6)
-	}
 	return out, nil
 }
 
-func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNSBundleOptions, dnsNodes []model.DNSNode, now time.Time) (map[string]model.EdgeDNSAnswerCandidate, error) {
+func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNSBundleOptions, now time.Time) (map[string]model.EdgeDNSAnswerCandidate, error) {
 	out := map[string]model.EdgeDNSAnswerCandidate{}
 	if s.store != nil {
 		nodes, _, err := s.store.ListActiveEdgeNodes("")
@@ -1005,64 +979,7 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 			}
 		}
 	}
-	for _, node := range dnsNodes {
-		if !edgeDNSNodeMatchesZone(node, options.Zone) {
-			continue
-		}
-		for _, raw := range []string{node.PublicIPv4, node.PublicIPv6} {
-			normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, raw)
-			if normalized == "" {
-				normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, raw)
-			}
-			if normalized == "" {
-				continue
-			}
-			if !edgeDNSNodeServingEligible(node, now) {
-				continue
-			}
-			if candidate, exists := out[normalized]; exists && strings.TrimSpace(candidate.EdgeID) != "" {
-				continue
-			}
-			edgeID := strings.TrimSpace(node.PhysicalNodeID)
-			if edgeID == "" {
-				edgeID = strings.TrimSpace(node.ID)
-			}
-			out[normalized] = model.EdgeDNSAnswerCandidate{
-				IP: normalized, EdgeID: edgeID, EdgeGroupID: strings.TrimSpace(node.EdgeGroupID),
-				Priority: edgeDNSCandidatePriority(strings.TrimSpace(node.EdgeGroupID), strings.TrimSpace(options.EdgeGroupID), ""),
-				Weight:   100, Reason: "dns_node_inventory", Healthy: true, RouteReady: true, TLSReady: true, DNSEligible: true,
-			}
-		}
-	}
 	return out, nil
-}
-
-func mergeEdgeDNSNodeGroupInventory(healthy map[string]bool, nodeIDs map[string][]string, nodes []model.DNSNode, zone string, now time.Time) {
-	for _, node := range nodes {
-		if !edgeDNSNodeMatchesZone(node, zone) || !edgeDNSNodeServingEligible(node, now) {
-			continue
-		}
-		groupID := strings.TrimSpace(node.EdgeGroupID)
-		physicalNodeID := strings.TrimSpace(node.PhysicalNodeID)
-		if physicalNodeID == "" {
-			physicalNodeID = strings.TrimSpace(node.ID)
-		}
-		if groupID == "" || physicalNodeID == "" {
-			continue
-		}
-		healthy[groupID] = true
-		nodeIDs[groupID] = appendUniqueString(nodeIDs[groupID], physicalNodeID)
-	}
-}
-
-func edgeDNSNodeMatchesZone(node model.DNSNode, zone string) bool {
-	return normalizeExternalAppDomain(node.Zone) == normalizeExternalAppDomain(zone)
-}
-
-func edgeDNSNodeServingEligible(node model.DNSNode, now time.Time) bool {
-	return node.Healthy && model.NormalizeEdgeHealthStatus(node.Status) == model.EdgeHealthHealthy &&
-		dnsNodeHeartbeatFresh(node, now) && dnsNodeCacheHealthy(node.CacheStatus, node.DNSBundleVersion, node.CacheWriteErrors, node.CacheLoadErrors) &&
-		strings.TrimSpace(node.ServingGeneration) != ""
 }
 
 func edgeNodeDNSCacheValid(node model.EdgeNode) bool {
