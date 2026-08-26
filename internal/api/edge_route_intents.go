@@ -245,6 +245,62 @@ func edgeRouteIntentFromBinding(binding model.EdgeRouteBinding, policy model.Edg
 	return intent
 }
 
+// edgeRouteIntentDiagnosticBindings projects Core-owned route intent into the
+// existing admin response shape without inventing Edge Control materialization
+// facts such as the selected group, healthy instance count, or decision ID.
+func edgeRouteIntentDiagnosticBindings(intents []model.EdgeRouteIntent) []model.EdgeRouteBinding {
+	bindings := make([]model.EdgeRouteBinding, 0, len(intents))
+	for _, intent := range intents {
+		status := strings.TrimSpace(intent.OriginStatus)
+		if status == "" {
+			status = model.EdgeRouteStatusActive
+		}
+		binding := model.EdgeRouteBinding{
+			Hostname:             normalizeExternalAppDomain(intent.Hostname),
+			PathPrefix:           model.NormalizeAppRoutePathPrefix(intent.PathPrefix),
+			RouteKind:            strings.TrimSpace(intent.RouteKind),
+			AppID:                strings.TrimSpace(intent.AppID),
+			TenantID:             strings.TrimSpace(intent.TenantID),
+			RuntimeID:            strings.TrimSpace(intent.RuntimeID),
+			RuntimeType:          strings.TrimSpace(intent.RuntimeType),
+			RuntimeEdgeGroup:     strings.TrimSpace(intent.RuntimeEdgeGroupID),
+			RuntimeEdgeGroupID:   strings.TrimSpace(intent.RuntimeEdgeGroupID),
+			RuntimeClusterNode:   strings.TrimSpace(intent.RuntimeClusterNode),
+			ExcludedEdgeIDs:      normalizeEdgeRouteExclusionIDs(intent.ExcludedEdgeIDs),
+			ExcludedEdgeGroupIDs: normalizeEdgeRouteExclusionIDs(intent.ExcludedEdgeGroupIDs),
+			ExclusionReason:      strings.TrimSpace(intent.ExclusionReason),
+			ExclusionExpiresAt:   intent.ExclusionExpiresAt,
+			MinHealthyEdgeNodes:  intent.MinHealthyEdgeNodes,
+			RoutePolicy:          model.NormalizeEdgeRoutePolicy(intent.RoutePolicy),
+			UpstreamKind:         strings.TrimSpace(intent.UpstreamKind),
+			UpstreamScope:        strings.TrimSpace(intent.UpstreamScope),
+			UpstreamURL:          strings.TrimSpace(intent.UpstreamURL),
+			Upstreams:            append([]model.EdgeRouteUpstream(nil), intent.Upstreams...),
+			ServicePort:          intent.ServicePort,
+			TLSPolicy:            strings.TrimSpace(intent.TLSPolicy),
+			CachePolicyID:        strings.TrimSpace(intent.CachePolicyID),
+			CacheNamespace:       strings.TrimSpace(intent.CacheNamespace),
+			DeploymentGeneration: strings.TrimSpace(intent.DeploymentGeneration),
+			RequestBodyPolicies:  model.CloneEdgeRequestBodyPolicies(intent.RequestBodyPolicies),
+			Streaming:            intent.Streaming,
+			Status:               status,
+			StatusReason:         strings.TrimSpace(intent.OriginStatusReason),
+			RouteGeneration:      strings.TrimSpace(intent.Generation),
+			CreatedAt:            intent.CreatedAt,
+			UpdatedAt:            intent.UpdatedAt,
+		}
+		if strings.TrimSpace(intent.TargetGroupMode) == model.EdgeRouteIntentGroupModePinnedGroup {
+			binding.PolicyEdgeGroupID = strings.TrimSpace(intent.PinnedEdgeGroupID)
+		}
+		if binding.Status != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) {
+			binding.UpstreamURL = ""
+			binding.Upstreams = nil
+		}
+		bindings = append(bindings, binding)
+	}
+	return bindings
+}
+
 func edgeRouteIntentFromPlatformRoute(route model.PlatformRoute) model.EdgeRouteIntent {
 	routePolicy := model.NormalizeEdgeRoutePolicy(route.RoutePolicy)
 	if routePolicy == "" {

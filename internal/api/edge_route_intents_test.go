@@ -128,6 +128,47 @@ func TestEdgeRouteIntentSnapshotIsIndependentOfMixedEdgeInventory(t *testing.T) 
 	}
 }
 
+func TestEdgeRouteIntentDiagnosticBindingsDoNotInventMaterializedGroupFacts(t *testing.T) {
+	bindings := edgeRouteIntentDiagnosticBindings([]model.EdgeRouteIntent{{
+		Generation:          "routeintent_all",
+		Hostname:            "API.Example.com.",
+		PathPrefix:          "/v1",
+		RouteKind:           model.EdgeRouteKindPlatform,
+		RuntimeEdgeGroupID:  "runtime-group",
+		TargetGroupMode:     model.EdgeRouteIntentGroupModeAllGroups,
+		MinHealthyEdgeNodes: 2,
+		RoutePolicy:         model.EdgeRoutePolicyEnabled,
+		UpstreamURL:         "http://app.internal",
+		OriginStatus:        model.EdgeRouteStatusActive,
+	}, {
+		Generation:        "routeintent_pinned",
+		Hostname:          "pinned.example.com",
+		RouteKind:         model.EdgeRouteKindPlatform,
+		TargetGroupMode:   model.EdgeRouteIntentGroupModePinnedGroup,
+		PinnedEdgeGroupID: "edge-group-country-de",
+		RoutePolicy:       model.EdgeRoutePolicyRouteAOnly,
+		UpstreamURL:       "http://pinned.internal",
+		OriginStatus:      model.EdgeRouteStatusActive,
+	}})
+	if len(bindings) != 2 {
+		t.Fatalf("expected two diagnostic bindings, got %+v", bindings)
+	}
+	all := bindings[0]
+	if all.Hostname != "api.example.com" || all.RuntimeEdgeGroup != "runtime-group" || all.RouteGeneration != "routeintent_all" {
+		t.Fatalf("expected canonical intent fields in diagnostic binding, got %+v", all)
+	}
+	if all.SelectedEdgeGroup != "" || all.EdgeGroupID != "" || all.HealthyEdgeNodeCount != 0 || all.DecisionID != "" {
+		t.Fatalf("diagnostic projection must not invent Edge Control facts: %+v", all)
+	}
+	pinned := bindings[1]
+	if pinned.PolicyEdgeGroupID != "edge-group-country-de" || pinned.SelectedEdgeGroup != "" || pinned.EdgeGroupID != "" {
+		t.Fatalf("pinned intent must remain policy without claiming materialization: %+v", pinned)
+	}
+	if pinned.UpstreamURL != "" {
+		t.Fatalf("route-a-only intent must not expose an active edge upstream: %+v", pinned)
+	}
+}
+
 func TestEdgeRouteIntentTreatsTrafficPlacementAsDNSDrain(t *testing.T) {
 	t.Parallel()
 

@@ -164,7 +164,7 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
 		return
 	}
-	bundle, err := s.deriveEdgeRouteBundle(r, edgeRouteBundleOptions{})
+	snapshot, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -180,7 +180,7 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 		HealthyEdgeGroups: healthyEdgeGroups,
 		GeneratedAt:       time.Now().UTC(),
 	}
-	for _, route := range bundle.Routes {
+	for _, route := range edgeRouteIntentDiagnosticBindings(snapshot.Routes) {
 		if !strings.EqualFold(normalizeExternalAppDomain(route.Hostname), hostname) {
 			continue
 		}
@@ -202,13 +202,13 @@ func (s *Server) handleListRouteServingModes(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
 		return
 	}
-	bundle, err := s.deriveEdgeRouteBundle(r, edgeRouteBundleOptions{})
+	snapshot, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	generatedAt := time.Now().UTC()
-	routes := routeServingModes(bundle.Routes, generatedAt)
+	routes := routeServingModes(edgeRouteIntentDiagnosticBindings(snapshot.Routes), generatedAt)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"routes":       routes,
 		"generated_at": generatedAt,
