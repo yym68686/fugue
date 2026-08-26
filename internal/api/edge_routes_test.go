@@ -1,8 +1,7 @@
 package api
 
 import (
-	"net/http"
-	"net/http/httptest"
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +108,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 	t.Parallel()
 
 	server := &Server{}
-	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes", nil)
+	ctx := context.Background()
 	runtimes := map[string]model.Runtime{
 		model.DefaultManagedRuntimeID: {
 			ID:     model.DefaultManagedRuntimeID,
@@ -117,7 +116,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 		},
 	}
 
-	disabled := server.deriveEdgeRouteBinding(req, model.App{
+	disabled := server.deriveEdgeRouteBinding(ctx, model.App{
 		ID:       "app_disabled",
 		TenantID: "tenant_demo",
 		Name:     "disabled",
@@ -131,7 +130,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 		t.Fatalf("expected disabled route without upstream, got %+v", disabled)
 	}
 
-	missingRuntime := server.deriveEdgeRouteBinding(req, model.App{
+	missingRuntime := server.deriveEdgeRouteBinding(ctx, model.App{
 		ID:       "app_missing_runtime",
 		TenantID: "tenant_demo",
 		Name:     "missing-runtime",
@@ -146,7 +145,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 		t.Fatalf("expected runtime-missing route without upstream, got %+v", missingRuntime)
 	}
 
-	unavailable := server.deriveEdgeRouteBinding(req, model.App{
+	unavailable := server.deriveEdgeRouteBinding(ctx, model.App{
 		ID:       "app_unavailable",
 		TenantID: "tenant_demo",
 		Name:     "unavailable",
@@ -161,7 +160,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 		t.Fatalf("expected unavailable route without upstream, got %+v", unavailable)
 	}
 
-	nonHTTP := server.deriveEdgeRouteBinding(req, model.App{
+	nonHTTP := server.deriveEdgeRouteBinding(ctx, model.App{
 		ID:       "app_redis",
 		TenantID: "tenant_demo",
 		Name:     "redis",

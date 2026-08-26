@@ -41,15 +41,15 @@ type edgeLiveServingState struct {
 	Reason  string
 }
 
-func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
+func (s *Server) deriveEdgeRouteBinding(ctx context.Context, app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
 	pathPrefix := "/"
 	if routeKind == model.EdgeRouteKindPlatform && app.Route != nil {
 		pathPrefix = model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix)
 	}
-	return s.deriveEdgeRouteBindingForRoute(r, app, hostname, pathPrefix, 0, routeKind, tlsPolicy, createdAt, updatedAt, runtimeByID, runtimeNodeLabelsByID)
+	return s.deriveEdgeRouteBindingForRoute(ctx, app, hostname, pathPrefix, 0, routeKind, tlsPolicy, createdAt, updatedAt, runtimeByID, runtimeNodeLabelsByID)
 }
 
-func (s *Server) deriveEdgeRouteBindingForRoute(r *http.Request, app model.App, hostname, pathPrefix string, servicePort int, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
+func (s *Server) deriveEdgeRouteBindingForRoute(ctx context.Context, app model.App, hostname, pathPrefix string, servicePort int, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
 	runtimeID := appProxyRuntimeID(app)
 	runtimeObj, runtimeFound := runtimeByID[runtimeID]
 	edgeGroupID := derivedEdgeGroupIDForRuntime(runtimeObj, runtimeFound, runtimeNodeLabelsByID[runtimeID])
@@ -61,7 +61,7 @@ func (s *Server) deriveEdgeRouteBindingForRoute(r *http.Request, app model.App, 
 	if servicePort <= 0 {
 		servicePort = edgeServicePortForApp(app)
 	}
-	upstream := s.edgeRouteUpstream(r.Context(), app, runtimeObj, runtimeFound)
+	upstream := s.edgeRouteUpstream(ctx, app, runtimeObj, runtimeFound)
 	if status == model.EdgeRouteStatusActive && upstream.Status != model.EdgeRouteStatusActive {
 		status = upstream.Status
 		reason = upstream.StatusReason

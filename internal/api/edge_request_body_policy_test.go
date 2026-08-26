@@ -1,8 +1,7 @@
 package api
 
 import (
-	"net/http"
-	"net/http/httptest"
+	"context"
 	"testing"
 	"time"
 
@@ -29,7 +28,7 @@ func TestDeriveEdgeRouteBindingCarriesAppScopedRequestBodyPolicies(t *testing.T)
 	runtimeObj := model.Runtime{ID: app.Spec.RuntimeID, Type: model.RuntimeTypeManagedShared}
 	now := time.Now().UTC()
 	binding := server.deriveEdgeRouteBinding(
-		httptest.NewRequest(http.MethodGet, "/v1/edge/routes", nil),
+		context.Background(),
 		app,
 		"demo.fugue.pro",
 		model.EdgeRouteKindPlatform,
@@ -62,7 +61,7 @@ func TestDeriveEdgeRouteBindingFailsInvalidOptInPolicyClosed(t *testing.T) {
 	runtimeObj := model.Runtime{ID: app.Spec.RuntimeID, Type: model.RuntimeTypeManagedShared}
 	now := time.Now().UTC()
 	binding := server.deriveEdgeRouteBinding(
-		httptest.NewRequest(http.MethodGet, "/v1/edge/routes", nil),
+		context.Background(),
 		app,
 		"demo.fugue.pro",
 		model.EdgeRouteKindPlatform,
