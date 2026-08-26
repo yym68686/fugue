@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -429,6 +430,10 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 	projectionCount := server.edgeDNSArtifactLastNodeProjections
 	routeCompilationCount := server.edgeDNSArtifactLastRouteCompilations
 	legacyDerivationCount := server.edgeDNSArtifactLastLegacyDerivations
+	immutableWriteCount := server.edgeDNSArtifactLastImmutableWrites
+	legacyWriteCount := server.edgeDNSArtifactLastLegacyWrites
+	parityMismatchCount := server.edgeDNSArtifactLastParityMismatches
+	shadowActiveCount := server.edgeDNSArtifactLastShadowActive
 	lastError := server.edgeDNSArtifactLastError
 	server.edgeDNSArtifactMu.Unlock()
 	if lastError != "" {
@@ -439,6 +444,9 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 	}
 	if routeCompilationCount != 1 {
 		t.Fatalf("expected shared TrafficEpoch route binding to compile once, got %d", routeCompilationCount)
+	}
+	if immutableWriteCount != 2 || legacyWriteCount != 2 || parityMismatchCount != 0 || shadowActiveCount != 2 {
+		t.Fatalf("expected two reconciled immutable/compatibility writes; immutable=%d legacy=%d mismatches=%d shadow=%d", immutableWriteCount, legacyWriteCount, parityMismatchCount, shadowActiveCount)
 	}
 
 	var artifacts []store.EdgeDNSBundleArtifact
@@ -451,6 +459,24 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 			t.Fatalf("load artifact for %s: %v", options.DNSNodeID, err)
 		}
 		artifacts = append(artifacts, artifact)
+		platformArtifact, release, found, err := storeState.GetActivePlatformArtifact(
+			model.PlatformArtifactKindDNSAnswerBundle,
+			edgeDNSBundleArtifactScopeKey(options),
+			model.PlatformArtifactReleaseChannelShadow,
+		)
+		if err != nil {
+			t.Fatalf("load immutable shadow artifact for %s: %v", options.DNSNodeID, err)
+		}
+		if !found || platformArtifact.Status != model.PlatformArtifactStatusValidated || release.Status != model.PlatformArtifactReleaseStatusActive {
+			t.Fatalf("expected active validated immutable shadow for %s, found=%t artifact=%+v release=%+v", options.DNSNodeID, found, platformArtifact, release)
+		}
+		projected, err := edgeDNSBundleArtifactFromPlatformArtifact(platformArtifact)
+		if err != nil {
+			t.Fatalf("decode immutable shadow artifact for %s: %v", options.DNSNodeID, err)
+		}
+		if !edgeDNSBundleArtifactsEquivalent(artifact, projected) {
+			t.Fatalf("immutable shadow differs from compatibility artifact for %s", options.DNSNodeID)
+		}
 	}
 	if !artifacts[0].GeneratedAt.Equal(now) || !artifacts[1].GeneratedAt.Equal(now) {
 		t.Fatalf("expected projections to share canonical generation time %s, got %s and %s", now, artifacts[0].GeneratedAt, artifacts[1].GeneratedAt)
@@ -466,10 +492,94 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 		`fugue_edge_dns_artifact_last_node_projections 2.000000`,
 		`fugue_edge_dns_artifact_last_route_compilations 1.000000`,
 		`fugue_edge_dns_artifact_last_legacy_derivations 0.000000`,
+		`fugue_edge_dns_artifact_last_immutable_writes 2.000000`,
+		`fugue_edge_dns_artifact_last_legacy_writes 2.000000`,
+		`fugue_edge_dns_artifact_last_parity_mismatches 0.000000`,
+		`fugue_edge_dns_artifact_last_shadow_active 2.000000`,
 	} {
 		if !strings.Contains(metrics.String(), sample) {
 			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
 		}
+	}
+}
+
+func TestEdgeDNSArtifactPublisherRejectsInvalidBundleBeforeReplacingEitherCurrent(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	node := model.DNSNode{
+		ID: "dns-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro",
+		PublicIPv4: "203.0.113.10", Status: model.EdgeHealthHealthy, Healthy: true,
+	}
+	if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+		t.Fatalf("record DNS heartbeat: %v", err)
+	}
+	now := time.Now().UTC()
+	server.runEdgeDNSArtifactController(context.Background(), now)
+	options, ok := server.edgeDNSBundleOptionsForDNSNode(node)
+	if !ok {
+		t.Fatal("expected DNS node publication options")
+	}
+	scopeKey := edgeDNSBundleArtifactScopeKey(options)
+	before, err := storeState.GetEdgeDNSBundleArtifact(scopeKey)
+	if err != nil {
+		t.Fatalf("load compatibility current before invalid publication: %v", err)
+	}
+	platformBefore, releaseBefore, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelShadow,
+	)
+	if err != nil || !found {
+		t.Fatalf("load immutable current before invalid publication: found=%t err=%v", found, err)
+	}
+	if err := server.publishEdgeDNSBundleArtifact(before, options, now); err != nil {
+		t.Fatalf("retry identical generation: %v", err)
+	}
+	_, retryRelease, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelShadow,
+	)
+	if err != nil || !found || retryRelease.ID != releaseBefore.ID || retryRelease.FencingToken != releaseBefore.FencingToken {
+		t.Fatalf("identical generation was not idempotent: found=%t err=%v before=%+v after=%+v", found, err, releaseBefore, retryRelease)
+	}
+
+	invalid := before
+	encoded, err := json.Marshal(before)
+	if err != nil {
+		t.Fatalf("clone compatibility current: %v", err)
+	}
+	if err := json.Unmarshal(encoded, &invalid); err != nil {
+		t.Fatalf("decode compatibility current clone: %v", err)
+	}
+	invalid.Bundle.Records[0].Values = []string{"198.51.100.99"}
+	if err := server.publishEdgeDNSBundleArtifact(invalid, options, now.Add(time.Second)); err == nil {
+		t.Fatal("expected tampered signed bundle publication to fail")
+	}
+	after, err := storeState.GetEdgeDNSBundleArtifact(scopeKey)
+	if err != nil {
+		t.Fatalf("load compatibility current after invalid publication: %v", err)
+	}
+	platformAfter, releaseAfter, found, err := storeState.GetActivePlatformArtifact(
+		model.PlatformArtifactKindDNSAnswerBundle,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelShadow,
+	)
+	if err != nil || !found {
+		t.Fatalf("load immutable current after invalid publication: found=%t err=%v", found, err)
+	}
+	if !edgeDNSBundleArtifactsEquivalent(before, after) {
+		t.Fatal("invalid bundle replaced compatibility current")
+	}
+	if platformAfter.ID != platformBefore.ID || releaseAfter.ID != releaseBefore.ID {
+		t.Fatalf("invalid bundle replaced immutable current: before=%s/%s after=%s/%s", platformBefore.ID, releaseBefore.ID, platformAfter.ID, releaseAfter.ID)
+	}
+	postgresRounded := before
+	postgresRounded.GeneratedAt = before.GeneratedAt.Truncate(time.Microsecond)
+	postgresRounded.ValidUntil = before.ValidUntil.Truncate(time.Microsecond)
+	if !edgeDNSBundleArtifactsEquivalent(before, postgresRounded) {
+		t.Fatal("Postgres timestamp precision changed immutable/compatibility parity digest")
 	}
 }
 

@@ -151,6 +151,10 @@ type Server struct {
 	edgeDNSArtifactLastNodeProjections     int
 	edgeDNSArtifactLastRouteCompilations   int
 	edgeDNSArtifactLastLegacyDerivations   int
+	edgeDNSArtifactLastImmutableWrites     int
+	edgeDNSArtifactLastLegacyWrites        int
+	edgeDNSArtifactLastParityMismatches    int
+	edgeDNSArtifactLastShadowActive        int
 	edgeDNSArtifactRunCount                int64
 	edgeDNSArtifactSkippedCount            int64
 	edgeDNSArtifactErrorCount              int64
