@@ -947,6 +947,8 @@ func TestDefaultControlPlaneResourceEnvelopeKeepsK3SHeadroom(t *testing.T) {
 		"memory: 256Mi",
 		`cpu: "1"`,
 		"memory: 768Mi",
+		"name: GOMEMLIMIT",
+		"value: 512MiB",
 	}
 	controllerMatchesContract := func(doc string) bool {
 		if strings.Contains(doc, "memory: 512Mi") {

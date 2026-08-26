@@ -322,7 +322,9 @@ controller:
     limits:
       cpu: "1"
       memory: 768Mi
-  extraEnv: []
+  extraEnv:
+    - name: GOMEMLIMIT
+      value: 512MiB
 
 runtime:
   strictDrain:
