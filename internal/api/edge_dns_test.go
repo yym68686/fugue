@@ -329,6 +329,43 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 	if edgeDNSRecordByNameAndType(got.Records, "artifact.fugue.pro", model.EdgeDNSRecordTypeA) == nil {
 		t.Fatalf("expected artifact record, got %+v", got.Records)
 	}
+	var metrics strings.Builder
+	server.writeEdgeDNSArtifactMetrics(&metrics)
+	for _, sample := range []string{
+		`fugue_edge_dns_artifact_handler_lookups_total{outcome="hit"} 1.000000`,
+		`fugue_edge_dns_artifact_handler_lookups_total{outcome="miss"} 0.000000`,
+		`fugue_edge_dns_artifact_handler_fallbacks_total{outcome="served"} 0.000000`,
+	} {
+		if !strings.Contains(metrics.String(), sample) {
+			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
+		}
+	}
+}
+
+func TestEdgeDNSBundleRecordsArtifactMissFallback(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var metrics strings.Builder
+	server.writeEdgeDNSArtifactMetrics(&metrics)
+	for _, sample := range []string{
+		`fugue_edge_dns_artifact_handler_lookups_total{outcome="hit"} 0.000000`,
+		`fugue_edge_dns_artifact_handler_lookups_total{outcome="miss"} 1.000000`,
+		`fugue_edge_dns_artifact_handler_lookups_total{outcome="error"} 0.000000`,
+		`fugue_edge_dns_artifact_handler_fallbacks_total{outcome="served"} 1.000000`,
+		`fugue_edge_dns_artifact_handler_fallbacks_total{outcome="error"} 0.000000`,
+	} {
+		if !strings.Contains(metrics.String(), sample) {
+			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
+		}
+	}
 }
 
 func TestEdgeDNSStaticAnswerIPsDoNotBecomeBusinessCandidatesWithoutEvidence(t *testing.T) {

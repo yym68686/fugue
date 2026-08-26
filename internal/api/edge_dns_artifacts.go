@@ -239,6 +239,35 @@ func edgeDNSBundleArtifactFresh(artifact store.EdgeDNSBundleArtifact, now time.T
 	return now.Add(edgeDNSArtifactFreshMargin).Before(validUntil)
 }
 
+func (s *Server) recordEdgeDNSArtifactHandlerLookup(hit bool, err error) {
+	if s == nil {
+		return
+	}
+	s.edgeDNSArtifactMu.Lock()
+	defer s.edgeDNSArtifactMu.Unlock()
+	switch {
+	case err != nil:
+		s.edgeDNSArtifactHandlerLookupErrorCount++
+	case hit:
+		s.edgeDNSArtifactHandlerLookupHitCount++
+	default:
+		s.edgeDNSArtifactHandlerLookupMissCount++
+	}
+}
+
+func (s *Server) recordEdgeDNSArtifactHandlerFallback(err error) {
+	if s == nil {
+		return
+	}
+	s.edgeDNSArtifactMu.Lock()
+	defer s.edgeDNSArtifactMu.Unlock()
+	if err != nil {
+		s.edgeDNSArtifactHandlerFallbackErrCount++
+		return
+	}
+	s.edgeDNSArtifactHandlerFallbackCount++
+}
+
 type edgeDNSBundleArtifactScopeMaterial struct {
 	DNSNodeID       string   `json:"dns_node_id,omitempty"`
 	EdgeGroupID     string   `json:"edge_group_id,omitempty"`
@@ -291,6 +320,11 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	skippedCount := s.edgeDNSArtifactSkippedCount
 	errorCount := s.edgeDNSArtifactErrorCount
 	lastError := s.edgeDNSArtifactLastError
+	handlerLookupHitCount := s.edgeDNSArtifactHandlerLookupHitCount
+	handlerLookupMissCount := s.edgeDNSArtifactHandlerLookupMissCount
+	handlerLookupErrorCount := s.edgeDNSArtifactHandlerLookupErrorCount
+	handlerFallbackCount := s.edgeDNSArtifactHandlerFallbackCount
+	handlerFallbackErrCount := s.edgeDNSArtifactHandlerFallbackErrCount
 	s.edgeDNSArtifactMu.Unlock()
 
 	observability.WriteCounterMetric(w, "fugue_edge_dns_artifact_runs_total", "Total edge DNS artifact controller runs.", nil, float64(runCount))
@@ -306,4 +340,11 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 		observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_success_timestamp_seconds", "Unix timestamp of the last successful edge DNS artifact controller run.", nil, float64(lastSuccess.Unix()))
 	}
 	observability.WriteGaugeMetric(w, "fugue_edge_dns_artifact_last_error", "Whether the last edge DNS artifact controller run failed.", map[string]string{"error": truncateMetricLabel(lastError, 160)}, boolMetric(lastError != ""))
+	observability.WriteMetricHeader(w, "fugue_edge_dns_artifact_handler_lookups_total", "Edge DNS handler artifact lookups by outcome.", "counter")
+	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "hit"}, float64(handlerLookupHitCount))
+	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "miss"}, float64(handlerLookupMissCount))
+	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "error"}, float64(handlerLookupErrorCount))
+	observability.WriteMetricHeader(w, "fugue_edge_dns_artifact_handler_fallbacks_total", "Edge DNS handler read-only derive fallbacks by outcome.", "counter")
+	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_fallbacks_total", map[string]string{"outcome": "served"}, float64(handlerFallbackCount))
+	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_fallbacks_total", map[string]string{"outcome": "error"}, float64(handlerFallbackErrCount))
 }

@@ -61,14 +61,17 @@ func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "dns token cannot access another DNS zone")
 		return
 	}
-	if bundle, ok, err := s.edgeDNSBundleArtifactForOptions(options, time.Now().UTC()); err == nil && ok {
+	bundle, artifactOK, artifactErr := s.edgeDNSBundleArtifactForOptions(options, time.Now().UTC())
+	s.recordEdgeDNSArtifactHandlerLookup(artifactOK, artifactErr)
+	if artifactErr == nil && artifactOK {
 		writeEdgeDNSBundleResponse(w, bundle)
 		return
-	} else if err != nil && s.log != nil {
-		s.log.Printf("edge dns artifact lookup failed; falling back to read-only derive: dns_node_id=%s edge_group_id=%s zone=%s err=%v", options.DNSNodeID, options.EdgeGroupID, options.Zone, err)
+	} else if artifactErr != nil && s.log != nil {
+		s.log.Printf("edge dns artifact lookup failed; falling back to read-only derive: dns_node_id=%s edge_group_id=%s zone=%s err=%v", options.DNSNodeID, options.EdgeGroupID, options.Zone, artifactErr)
 	}
 
-	bundle, err := s.deriveEdgeDNSBundle(r, options)
+	bundle, err = s.deriveEdgeDNSBundle(r, options)
+	s.recordEdgeDNSArtifactHandlerFallback(err)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
