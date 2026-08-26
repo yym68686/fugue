@@ -51,7 +51,7 @@ func TestRobustnessStatusExposesStructuredChecksAndIncidents(t *testing.T) {
 		t.Fatalf("expected missing DNS nodes to block rollout: %+v", response.Status)
 	}
 	for _, want := range []string{
-		"generated_artifact_edge_route_bundle",
+		"generated_artifact_edge_route_intent",
 		"generated_artifact_edge_dns_bundle",
 		"backup_backend_readiness",
 		"operation_inventory",

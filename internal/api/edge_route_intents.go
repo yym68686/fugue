@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -299,6 +300,42 @@ func edgeRouteIntentDiagnosticBindings(intents []model.EdgeRouteIntent) []model.
 		bindings = append(bindings, binding)
 	}
 	return bindings
+}
+
+func validateEdgeRouteIntentSnapshotForDiagnostics(snapshot model.EdgeRouteIntentSnapshot) error {
+	if snapshot.SchemaVersion != model.EdgeRouteIntentSchemaVersionV1 {
+		return fmt.Errorf("route intent schema is %q", snapshot.SchemaVersion)
+	}
+	if strings.TrimSpace(snapshot.Generation) == "" || edgeRouteIntentSnapshotGeneration(snapshot) != snapshot.Generation {
+		return fmt.Errorf("route intent snapshot generation is invalid")
+	}
+	for _, intent := range snapshot.Routes {
+		hostname := normalizeExternalAppDomain(intent.Hostname)
+		if hostname == "" || strings.TrimSpace(intent.RouteKind) == "" || strings.TrimSpace(intent.Generation) == "" || edgeRouteIntentGeneration(intent) != intent.Generation {
+			return fmt.Errorf("route intent identity is invalid for hostname %q", hostname)
+		}
+		switch strings.TrimSpace(intent.TargetGroupMode) {
+		case model.EdgeRouteIntentGroupModeAllGroups:
+		case model.EdgeRouteIntentGroupModePinnedGroup:
+			if strings.TrimSpace(intent.PinnedEdgeGroupID) == "" {
+				return fmt.Errorf("pinned route intent is missing edge group for hostname %q", hostname)
+			}
+		default:
+			return fmt.Errorf("route intent target group mode is invalid for hostname %q", hostname)
+		}
+		policy := model.NormalizeEdgeRoutePolicy(intent.RoutePolicy)
+		if policy == "" {
+			return fmt.Errorf("route intent policy is invalid for hostname %q", hostname)
+		}
+		status := strings.TrimSpace(intent.OriginStatus)
+		if status == "" {
+			status = model.EdgeRouteStatusActive
+		}
+		if status == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(policy) && strings.TrimSpace(intent.UpstreamURL) == "" && len(intent.Upstreams) == 0 {
+			return fmt.Errorf("active route intent has no upstream for hostname %q", hostname)
+		}
+	}
+	return nil
 }
 
 func edgeRouteIntentFromPlatformRoute(route model.PlatformRoute) model.EdgeRouteIntent {

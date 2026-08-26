@@ -169,6 +169,40 @@ func TestEdgeRouteIntentDiagnosticBindingsDoNotInventMaterializedGroupFacts(t *t
 	}
 }
 
+func TestValidateEdgeRouteIntentSnapshotForDiagnosticsRejectsDrift(t *testing.T) {
+	intent := model.EdgeRouteIntent{
+		Hostname:        "api.example.com",
+		RouteKind:       model.EdgeRouteKindPlatform,
+		TargetGroupMode: model.EdgeRouteIntentGroupModeAllGroups,
+		RoutePolicy:     model.EdgeRoutePolicyEnabled,
+		UpstreamURL:     "http://app.internal",
+		OriginStatus:    model.EdgeRouteStatusActive,
+	}
+	intent.Generation = edgeRouteIntentGeneration(intent)
+	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Routes: []model.EdgeRouteIntent{intent}}
+	snapshot.Generation = edgeRouteIntentSnapshotGeneration(snapshot)
+	if err := validateEdgeRouteIntentSnapshotForDiagnostics(snapshot); err != nil {
+		t.Fatalf("expected canonical snapshot to validate: %v", err)
+	}
+
+	drifted := snapshot
+	drifted.Routes = append([]model.EdgeRouteIntent(nil), snapshot.Routes...)
+	drifted.Routes[0].UpstreamURL = "http://different.internal"
+	drifted.Generation = edgeRouteIntentSnapshotGeneration(drifted)
+	if err := validateEdgeRouteIntentSnapshotForDiagnostics(drifted); err == nil || !strings.Contains(err.Error(), "identity is invalid") {
+		t.Fatalf("expected route generation drift rejection, got %v", err)
+	}
+
+	missingGroup := snapshot
+	missingGroup.Routes = append([]model.EdgeRouteIntent(nil), snapshot.Routes...)
+	missingGroup.Routes[0].TargetGroupMode = model.EdgeRouteIntentGroupModePinnedGroup
+	missingGroup.Routes[0].Generation = edgeRouteIntentGeneration(missingGroup.Routes[0])
+	missingGroup.Generation = edgeRouteIntentSnapshotGeneration(missingGroup)
+	if err := validateEdgeRouteIntentSnapshotForDiagnostics(missingGroup); err == nil || !strings.Contains(err.Error(), "missing edge group") {
+		t.Fatalf("expected missing pinned group rejection, got %v", err)
+	}
+}
+
 func TestEdgeRouteIntentTreatsTrafficPlacementAsDNSDrain(t *testing.T) {
 	t.Parallel()
 

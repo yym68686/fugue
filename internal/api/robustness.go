@@ -361,36 +361,44 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 
 func (s *Server) robustnessGeneratedArtifactChecks(r *http.Request, dnsOpts dnsDelegationPreflightOptions) ([]model.RobustnessCheck, error) {
 	checks := []model.RobustnessCheck{}
-	routeBundle, err := s.deriveEdgeRouteBundle(r, edgeRouteBundleOptions{})
+	routeIntents, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
 	if err != nil {
-		if failures := bundleInvariantChecks(err); len(failures) > 0 {
-			checks = append(checks, robustnessChecksWithGuardian(failures, "bundle-rollout")...)
-			return checks, nil
-		}
 		checks = append(checks, model.RobustnessCheck{
-			Name:       "generated_artifact_edge_route_bundle",
+			Name:       "generated_artifact_edge_route_intent",
 			Pass:       false,
 			Severity:   model.RobustnessSeverityWarning,
-			Subject:    "edge_route_bundle",
-			Expected:   "route bundle can be derived and validated",
+			Subject:    "edge_route_intent",
+			Expected:   "canonical route intent snapshot can be derived and validated",
 			Observed:   err.Error(),
-			Message:    "edge route bundle derivation failed",
-			RepairHint: "inspect app route, runtime, and edge node inventory before publishing route bundles",
-			Evidence:   map[string]string{"guardian": "bundle-rollout", "validation_path": "validateEdgeRouteBundleForPublish"},
+			Message:    "edge route intent derivation failed",
+			RepairHint: "inspect app route and runtime inputs before Edge Control materializes group bundles",
+			Evidence:   map[string]string{"guardian": "bundle-rollout", "artifact_kind": model.PlatformArtifactKindEdgeRouteIntent, "validation_path": "validateEdgeRouteIntentSnapshotForDiagnostics"},
+		})
+	} else if err := validateEdgeRouteIntentSnapshotForDiagnostics(routeIntents); err != nil {
+		checks = append(checks, model.RobustnessCheck{
+			Name:       "generated_artifact_edge_route_intent",
+			Pass:       false,
+			Severity:   model.RobustnessSeverityBlockPublish,
+			Subject:    "edge_route_intent",
+			Expected:   "canonical route intent snapshot passes identity and generation validation",
+			Observed:   err.Error(),
+			Message:    "edge route intent validation failed",
+			RepairHint: "repair the canonical route intent before Edge Control materializes group bundles",
+			Evidence:   map[string]string{"guardian": "bundle-rollout", "artifact_kind": model.PlatformArtifactKindEdgeRouteIntent, "validation_path": "validateEdgeRouteIntentSnapshotForDiagnostics", "generation": routeIntents.Generation},
 		})
 	} else {
 		checks = append(checks, model.RobustnessCheck{
-			Name:     "generated_artifact_edge_route_bundle",
+			Name:     "generated_artifact_edge_route_intent",
 			Pass:     true,
 			Severity: model.RobustnessSeverityInfo,
-			Subject:  "edge_route_bundle",
-			Expected: "route bundle can be derived and validated",
-			Observed: fmt.Sprintf("version=%s routes=%d tls_allowlist=%d", routeBundle.Version, len(routeBundle.Routes), len(routeBundle.TLSAllowlist)),
+			Subject:  "edge_route_intent",
+			Expected: "canonical route intent snapshot can be derived and validated",
+			Observed: fmt.Sprintf("generation=%s routes=%d tls_allowlist=%d", routeIntents.Generation, len(routeIntents.Routes), len(routeIntents.TLSAllowlist)),
 			Evidence: map[string]string{
 				"guardian":        "bundle-rollout",
-				"artifact_kind":   "edge_route_bundle",
-				"validation_path": "validateEdgeRouteBundleForPublish",
-				"generation":      routeBundle.Generation,
+				"artifact_kind":   model.PlatformArtifactKindEdgeRouteIntent,
+				"validation_path": "validateEdgeRouteIntentSnapshotForDiagnostics",
+				"generation":      routeIntents.Generation,
 			},
 		})
 	}
@@ -1488,7 +1496,7 @@ func (s *Server) explainRouteForRobustness(r *http.Request, hostname string) (mo
 	if hostname == "" {
 		return model.RouteExplainResponse{}, nil
 	}
-	bundle, err := s.deriveEdgeRouteBundle(r, edgeRouteBundleOptions{})
+	snapshot, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
 	if err != nil {
 		return model.RouteExplainResponse{}, err
 	}
@@ -1502,7 +1510,7 @@ func (s *Server) explainRouteForRobustness(r *http.Request, hostname string) (mo
 		HealthyEdgeGroups: healthyEdgeGroups,
 		GeneratedAt:       time.Now().UTC(),
 	}
-	for _, route := range bundle.Routes {
+	for _, route := range edgeRouteIntentDiagnosticBindings(snapshot.Routes) {
 		if !strings.EqualFold(normalizeExternalAppDomain(route.Hostname), hostname) {
 			continue
 		}
@@ -1519,12 +1527,12 @@ func (s *Server) explainRouteForRobustness(r *http.Request, hostname string) (mo
 }
 
 func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.RobustnessCheck, error) {
-	bundle, err := s.deriveEdgeRouteBundle(r, edgeRouteBundleOptions{})
+	snapshot, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
 	if err != nil {
 		return nil, err
 	}
 	latestBySubject := map[string]model.EdgeRouteBinding{}
-	for _, route := range bundle.Routes {
+	for _, route := range edgeRouteIntentDiagnosticBindings(snapshot.Routes) {
 		hostname := normalizeExternalAppDomain(route.Hostname)
 		if hostname == "" {
 			continue
@@ -1538,7 +1546,6 @@ func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.Robustn
 			hostname,
 			strings.TrimSpace(route.PathPrefix),
 			strings.TrimSpace(route.RouteKind),
-			strings.TrimSpace(route.EdgeGroupID),
 		}, "\x00")
 		if existing, ok := latestBySubject[key]; ok && existing.RouteGeneration >= route.RouteGeneration {
 			continue
@@ -1551,10 +1558,10 @@ func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.Robustn
 			Pass:       true,
 			Severity:   model.RobustnessSeverityInfo,
 			Subject:    "edge-routes",
-			Expected:   "generated route bundle exposes service traffic-safety metadata",
+			Expected:   "canonical route intent exposes service traffic-safety metadata",
 			Observed:   "routes=0",
 			Evidence:   map[string]string{"guardian": "traffic-safety"},
-			RepairHint: "publish an edge route bundle before traffic-safety incidents can be generated",
+			RepairHint: "publish canonical route intent before traffic-safety incidents can be generated",
 		}}, nil
 	}
 	keys := make([]string, 0, len(latestBySubject))
@@ -1598,8 +1605,8 @@ func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.Robustn
 			Severity:   severity,
 			Subject:    subject,
 			Expected:   fmt.Sprintf("DNS-eligible healthy edge count >= min_healthy_edge_nodes (%d)", minHealthy),
-			Observed:   fmt.Sprintf("dns_eligible_healthy_edge_count=%d min_healthy_edge_nodes=%d route_kind=%s edge_group=%s status=%s", healthy, minHealthy, route.RouteKind, route.EdgeGroupID, route.Status),
-			Evidence:   map[string]string{"guardian": "traffic-safety", "hostname": hostname, "path_prefix": strings.TrimSpace(route.PathPrefix), "route_kind": strings.TrimSpace(route.RouteKind), "edge_group_id": strings.TrimSpace(route.EdgeGroupID), "route_generation": strings.TrimSpace(route.RouteGeneration), "edge_redundancy_status": map[bool]string{true: "ok", false: "at_risk"}[pass]},
+			Observed:   fmt.Sprintf("dns_eligible_healthy_edge_count=%d min_healthy_edge_nodes=%d route_kind=%s target_group=%s status=%s", healthy, minHealthy, route.RouteKind, route.PolicyEdgeGroupID, route.Status),
+			Evidence:   map[string]string{"guardian": "traffic-safety", "hostname": hostname, "path_prefix": strings.TrimSpace(route.PathPrefix), "route_kind": strings.TrimSpace(route.RouteKind), "target_edge_group_id": strings.TrimSpace(route.PolicyEdgeGroupID), "route_generation": strings.TrimSpace(route.RouteGeneration), "edge_redundancy_status": map[bool]string{true: "ok", false: "at_risk"}[pass]},
 			RepairHint: "restore or add a DNS-eligible healthy edge, or explicitly lower the service minimum if the single-edge risk is accepted",
 		}
 		if !pass {
@@ -1612,7 +1619,7 @@ func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.Robustn
 		Pass:       true,
 		Severity:   model.RobustnessSeverityInfo,
 		Subject:    "edge-routes",
-		Expected:   "generated route bundle exposes minimum healthy edge metadata",
+		Expected:   "canonical route intent exposes minimum healthy edge metadata",
 		Observed:   fmt.Sprintf("routes=%d at_risk=%d", len(latestBySubject), atRisk),
 		Evidence:   map[string]string{"guardian": "traffic-safety"},
 		RepairHint: "use fugue admin traffic-safety explain <hostname> for per-service edge eligibility details",
@@ -1721,8 +1728,8 @@ func robustnessChecksFromRouteExplain(explain model.RouteExplainResponse) []mode
 			Pass:       pass,
 			Severity:   model.RobustnessSeverityBlockPublish,
 			Subject:    subject,
-			Expected:   "active route with selected edge group",
-			Observed:   fmt.Sprintf("status=%s edge_group=%s policy=%s excluded_edges=%s", route.Status, route.EdgeGroupID, route.RoutePolicy, strings.Join(route.ExcludedEdgeIDs, ",")),
+			Expected:   "active canonical route intent",
+			Observed:   fmt.Sprintf("status=%s target_edge_group=%s policy=%s excluded_edges=%s generation=%s", route.Status, route.PolicyEdgeGroupID, route.RoutePolicy, strings.Join(route.ExcludedEdgeIDs, ","), route.RouteGeneration),
 			RepairHint: "repair the route source or hold DNS publication for this hostname",
 		})
 	}
