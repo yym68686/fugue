@@ -229,6 +229,15 @@ func TestPostgresSchemaIncludesOperationLookupIndexes(t *testing.T) {
 	}
 }
 
+func TestPostgresSchemaDoesNotRecreateRetiredEdgeDNSCompatibilityStore(t *testing.T) {
+	t.Parallel()
+
+	schema := strings.Join(postgresSchemaStatements, "\n")
+	if strings.Contains(schema, "fugue_edge_dns_bundle_artifacts") {
+		t.Fatal("PostgreSQL bootstrap must not recreate the retired mutable Edge DNS artifact store")
+	}
+}
+
 func TestPostgresSchemaIncludesBoundedAppPaginationIndexes(t *testing.T) {
 	t.Parallel()
 

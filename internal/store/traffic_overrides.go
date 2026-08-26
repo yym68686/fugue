@@ -22,6 +22,24 @@ import (
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
+func uniqueSortedTrafficOverrideStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 const trafficOverrideMaxLifetime = 24 * time.Hour
 
 func (s *Store) ListTrafficOverrides() ([]model.TrafficOverride, error) {
@@ -162,7 +180,7 @@ func normalizeTrafficOverride(candidate model.TrafficOverride, now time.Time) (m
 	if candidate.State != model.TrafficOverrideStateStaged && candidate.State != model.TrafficOverrideStateRevoked {
 		return model.TrafficOverride{}, ErrInvalidInput
 	}
-	candidate.Answers = uniqueSortedStoreStrings(candidate.Answers)
+	candidate.Answers = uniqueSortedTrafficOverrideStrings(candidate.Answers)
 	if len(candidate.Answers) == 0 || len(candidate.Answers) > model.TrafficOverrideMaxAnswers {
 		return model.TrafficOverride{}, ErrInvalidInput
 	}
@@ -179,7 +197,7 @@ func normalizeTrafficOverride(candidate model.TrafficOverride, now time.Time) (m
 		}
 		routes = append(routes, route)
 	}
-	candidate.RequiredHostRoutes = uniqueSortedStoreStrings(routes)
+	candidate.RequiredHostRoutes = uniqueSortedTrafficOverrideStrings(routes)
 	if len(candidate.RequiredHostRoutes) == 0 || len(candidate.RequiredHostRoutes) > model.TrafficOverrideMaxRequiredRoutes {
 		return model.TrafficOverride{}, ErrInvalidInput
 	}

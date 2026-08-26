@@ -335,6 +335,15 @@ func migrationEvidenceSignals(evidence model.OperationEvidence) []string {
 	return signals
 }
 
+func firstNonEmptyOperationEvidenceString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func payloadSearchText(payload map[string]any) string {
 	if len(payload) == 0 {
 		return ""
@@ -434,7 +443,7 @@ func BuildOperationTimeline(op model.Operation, evidence []model.OperationEviden
 			Source:      model.OperationEvidenceSourceController,
 			Severity:    model.OperationEvidenceSeverityInfo,
 			Confidence:  model.OperationEvidenceConfidenceConfirmed,
-			Summary:     firstNonEmptyStoreString(op.ResultMessage, "operation started"),
+			Summary:     firstNonEmptyOperationEvidenceString(op.ResultMessage, "operation started"),
 			At:          op.StartedAt.UTC(),
 		})
 	}
@@ -478,7 +487,7 @@ func BuildOperationTimeline(op model.Operation, evidence []model.OperationEviden
 			Source:      model.OperationEvidenceSourceController,
 			Severity:    severity,
 			Confidence:  model.OperationEvidenceConfidenceConfirmed,
-			Summary:     firstNonEmptyStoreString(op.ErrorMessage, op.ResultMessage, "operation finished"),
+			Summary:     firstNonEmptyOperationEvidenceString(op.ErrorMessage, op.ResultMessage, "operation finished"),
 			At:          op.CompletedAt.UTC(),
 		})
 	}
@@ -739,7 +748,7 @@ func normalizeOperationEvidence(in model.OperationEvidence) model.OperationEvide
 	in.OperationID = strings.TrimSpace(in.OperationID)
 	in.ReleaseAttemptID = strings.TrimSpace(in.ReleaseAttemptID)
 	in.Type = strings.TrimSpace(in.Type)
-	in.Source = firstNonEmptyStoreString(in.Source, model.OperationEvidenceSourceController)
+	in.Source = firstNonEmptyOperationEvidenceString(in.Source, model.OperationEvidenceSourceController)
 	in.Severity = normalizeEvidenceSeverity(in.Severity)
 	in.Confidence = normalizeEvidenceConfidence(in.Confidence)
 	in.SubjectKind = strings.TrimSpace(in.SubjectKind)
@@ -992,7 +1001,7 @@ func normalizeReleaseAttempt(in model.ReleaseAttempt) model.ReleaseAttempt {
 	in.ProjectID = strings.TrimSpace(in.ProjectID)
 	in.AppID = strings.TrimSpace(in.AppID)
 	in.TriggerType = strings.TrimSpace(in.TriggerType)
-	in.TriggerActorType = firstNonEmptyStoreString(in.TriggerActorType, model.ReleaseAttemptActorSystem)
+	in.TriggerActorType = firstNonEmptyOperationEvidenceString(in.TriggerActorType, model.ReleaseAttemptActorSystem)
 	in.TriggerActorID = strings.TrimSpace(in.TriggerActorID)
 	in.SourceOperationID = strings.TrimSpace(in.SourceOperationID)
 	in.RootOperationID = strings.TrimSpace(in.RootOperationID)

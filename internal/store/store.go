@@ -36,9 +36,7 @@ type Store struct {
 	dbInitMu    sync.Mutex
 	dbReady     bool
 
-	advisoryLockMu          sync.Mutex
-	edgeDNSBundleArtifactMu sync.Mutex
-	edgeDNSBundleArtifacts  map[string]EdgeDNSBundleArtifact
+	advisoryLockMu sync.Mutex
 
 	// backupArtifactPhysicalCleanup tracks successful object deletion for the
 	// file-backed store. PostgreSQL persists this marker in the artifact row;

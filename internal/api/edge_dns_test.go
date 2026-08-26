@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -302,18 +301,6 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 	bundle = signEdgeDNSBundle(bundle, server.bundleKeyring(), 10*time.Minute)
 	immutable := newEdgeDNSBundleArtifact(options, bundle, now)
 	publishFullEdgeDNSArtifactForTest(t, storeState, server, immutable)
-	legacy := immutable
-	legacy.Bundle.Version = "dnsgen_legacy_row_must_not_serve"
-	legacy.Bundle.Generation = legacy.Bundle.Version
-	legacy.Bundle = signEdgeDNSBundle(legacy.Bundle, server.bundleKeyring(), 10*time.Minute)
-	legacy.Version = legacy.Bundle.Version
-	legacy.ETag = edgeRouteBundleETag(legacy.Bundle.Version)
-	legacy.SourceFingerprint = edgeDNSBundleArtifactSourceFingerprint(options, legacy.Bundle)
-	legacy.GeneratedAt = legacy.Bundle.GeneratedAt
-	legacy.ValidUntil = legacy.Bundle.ValidUntil
-	if err := storeState.UpsertEdgeDNSBundleArtifact(legacy); err != nil {
-		t.Fatalf("publish conflicting legacy compatibility row: %v", err)
-	}
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&dns_node_id=dns-us-1&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=203.0.113.10&route_a_answer_ip=136.112.185.40&ttl=60", nil)
@@ -336,10 +323,14 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="miss"} 0.000000`,
 		`fugue_edge_dns_artifact_handler_lookups_total{outcome="error"} 0.000000`,
 		`fugue_edge_dns_artifact_handler_source_total{source="immutable_full"} 1.000000`,
-		`fugue_edge_dns_artifact_handler_source_total{source="legacy_fallback"} 0.000000`,
 	} {
 		if !strings.Contains(metrics.String(), sample) {
 			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
+		}
+	}
+	for _, retired := range []string{"legacy_derivations", "legacy_writes", "parity_mismatches", "legacy_fallback"} {
+		if strings.Contains(metrics.String(), retired) {
+			t.Fatalf("retired compatibility metric %q remains:\n%s", retired, metrics.String())
 		}
 	}
 }
@@ -347,20 +338,7 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 func TestEdgeDNSBundleRejectsArtifactMissWithoutDerive(t *testing.T) {
 	t.Parallel()
 
-	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
-	now := time.Now().UTC()
-	options := edgeDNSBundleOptions{Zone: "fugue.pro", AnswerIPs: []string{"203.0.113.10"}, TTL: 60}
-	legacyBundle := signEdgeDNSBundle(model.EdgeDNSBundle{
-		Version: "dnsgen_legacy_only", Generation: "dnsgen_legacy_only", GeneratedAt: now,
-		Zone: options.Zone,
-		Records: []model.EdgeDNSRecord{{
-			Name: "legacy-only.fugue.pro", Type: model.EdgeDNSRecordTypeA, Values: []string{"203.0.113.10"},
-			TTL: 60, RecordKind: model.EdgeDNSRecordKindProbe, Status: model.EdgeRouteStatusActive,
-		}},
-	}, server.bundleKeyring(), 10*time.Minute)
-	if err := storeState.UpsertEdgeDNSBundleArtifact(newEdgeDNSBundleArtifact(options, legacyBundle, now)); err != nil {
-		t.Fatalf("publish legacy-only compatibility row: %v", err)
-	}
+	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
 	server.Handler().ServeHTTP(recorder, req)
@@ -486,9 +464,9 @@ func TestEdgeDNSBundleRejectsInvalidImmutableFullRelease(t *testing.T) {
 	}
 }
 
-func publishFullEdgeDNSArtifactForTest(t *testing.T, storeState *store.Store, server *Server, legacy store.EdgeDNSBundleArtifact) {
+func publishFullEdgeDNSArtifactForTest(t *testing.T, storeState *store.Store, server *Server, projection edgeDNSBundleArtifact) {
 	t.Helper()
-	content, err := edgeDNSImmutableArtifactContentMap(legacy)
+	content, err := edgeDNSImmutableArtifactContentMap(projection)
 	if err != nil {
 		t.Fatalf("encode immutable DNS fixture: %v", err)
 	}
@@ -499,10 +477,10 @@ func publishFullEdgeDNSArtifactForTest(t *testing.T, storeState *store.Store, se
 	artifact, _, err := storeState.EnsurePlatformArtifact(model.PlatformArtifact{
 		ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle,
 		Scope: model.PlatformArtifactScope{
-			ScopeType: "dns-node", Key: legacy.ScopeKey, NodeID: legacy.DNSNodeID, EdgeGroupID: legacy.EdgeGroupID,
+			ScopeType: "dns-node", Key: projection.ScopeKey, NodeID: projection.DNSNodeID, EdgeGroupID: projection.EdgeGroupID,
 		},
 		Generation: generation, Content: content, CompatibilityFloor: model.PlatformArtifactSchemaVersionV1,
-		CreatedByType: model.ActorTypeSystem, CreatedByID: "edge-dns-handler-test", CreatedAt: legacy.GeneratedAt,
+		CreatedByType: model.ActorTypeSystem, CreatedByID: "edge-dns-handler-test", CreatedAt: projection.GeneratedAt,
 	})
 	if err != nil {
 		t.Fatalf("ensure immutable DNS fixture: %v", err)
@@ -513,7 +491,7 @@ func publishFullEdgeDNSArtifactForTest(t *testing.T, storeState *store.Store, se
 	if err != nil {
 		t.Fatalf("validate immutable DNS fixture: %v", err)
 	}
-	lkg, err := storeState.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, legacy.ScopeKey)
+	lkg, err := storeState.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, projection.ScopeKey)
 	if err != nil {
 		t.Fatalf("load immutable DNS rollback fixture: %v", err)
 	}
@@ -531,7 +509,7 @@ func publishFullEdgeDNSArtifactForTest(t *testing.T, storeState *store.Store, se
 			Evidence: model.PlatformArtifactVerificationEvidence{
 				ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true,
 				BaselineMonotonic: true, DatabaseRollbackCompatible: true,
-				ExpectedConsumerSetID: "dns-node:" + legacy.DNSNodeID,
+				ExpectedConsumerSetID: "dns-node:" + projection.DNSNodeID,
 				EvidenceRefs:          []string{"handler-test:" + generation},
 			},
 		}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-handler-test"})
@@ -570,34 +548,28 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 	snapshotCount := server.edgeDNSArtifactLastSourceSnapshots
 	projectionCount := server.edgeDNSArtifactLastNodeProjections
 	routeCompilationCount := server.edgeDNSArtifactLastRouteCompilations
-	legacyDerivationCount := server.edgeDNSArtifactLastLegacyDerivations
 	immutableWriteCount := server.edgeDNSArtifactLastImmutableWrites
-	legacyWriteCount := server.edgeDNSArtifactLastLegacyWrites
-	parityMismatchCount := server.edgeDNSArtifactLastParityMismatches
 	shadowActiveCount := server.edgeDNSArtifactLastShadowActive
 	lastError := server.edgeDNSArtifactLastError
 	server.edgeDNSArtifactMu.Unlock()
 	if lastError != "" {
 		t.Fatalf("publish node projections: %s", lastError)
 	}
-	if artifactCount != 2 || snapshotCount != 1 || projectionCount != 2 || legacyDerivationCount != 0 {
-		t.Fatalf("expected one snapshot, two projections and no legacy derivations; artifacts=%d snapshots=%d projections=%d legacy=%d", artifactCount, snapshotCount, projectionCount, legacyDerivationCount)
+	if artifactCount != 2 || snapshotCount != 1 || projectionCount != 2 {
+		t.Fatalf("expected one snapshot and two projections; artifacts=%d snapshots=%d projections=%d", artifactCount, snapshotCount, projectionCount)
 	}
 	if routeCompilationCount != 1 {
 		t.Fatalf("expected shared TrafficEpoch route binding to compile once, got %d", routeCompilationCount)
 	}
-	if immutableWriteCount != 2 || legacyWriteCount != 0 || parityMismatchCount != 0 || shadowActiveCount != 2 {
-		t.Fatalf("expected only immutable writes; immutable=%d legacy=%d mismatches=%d shadow=%d", immutableWriteCount, legacyWriteCount, parityMismatchCount, shadowActiveCount)
+	if immutableWriteCount != 2 || shadowActiveCount != 2 {
+		t.Fatalf("expected two immutable shadow writes; immutable=%d shadow=%d", immutableWriteCount, shadowActiveCount)
 	}
 
-	var artifacts []store.EdgeDNSBundleArtifact
+	var artifacts []edgeDNSBundleArtifact
 	for _, options := range []edgeDNSBundleOptions{
 		{DNSNodeID: "dns-us-1", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro", AnswerIPs: []string{"203.0.113.10"}, TTL: defaultEdgeDNSTTL},
 		{DNSNodeID: "dns-de-1", EdgeGroupID: "edge-group-country-de", Zone: "fugue.pro", AnswerIPs: []string{"203.0.113.20"}, TTL: defaultEdgeDNSTTL},
 	} {
-		if _, err := storeState.GetEdgeDNSBundleArtifact(edgeDNSBundleArtifactScopeKey(options)); !errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("publisher wrote compatibility artifact for %s: %v", options.DNSNodeID, err)
-		}
 		platformArtifact, release, found, err := storeState.GetActivePlatformArtifact(
 			model.PlatformArtifactKindDNSAnswerBundle,
 			edgeDNSBundleArtifactScopeKey(options),
@@ -629,10 +601,7 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 		`fugue_edge_dns_artifact_last_source_snapshots 1.000000`,
 		`fugue_edge_dns_artifact_last_node_projections 2.000000`,
 		`fugue_edge_dns_artifact_last_route_compilations 1.000000`,
-		`fugue_edge_dns_artifact_last_legacy_derivations 0.000000`,
 		`fugue_edge_dns_artifact_last_immutable_writes 2.000000`,
-		`fugue_edge_dns_artifact_last_legacy_writes 0.000000`,
-		`fugue_edge_dns_artifact_last_parity_mismatches 0.000000`,
 		`fugue_edge_dns_artifact_last_shadow_active 2.000000`,
 		`fugue_edge_dns_artifact_last_verified_lkg 0.000000`,
 		`fugue_edge_dns_artifact_last_full_active 0.000000`,
@@ -640,6 +609,11 @@ func TestEdgeDNSArtifactPublisherProjectsMultipleNodesFromOneSnapshot(t *testing
 	} {
 		if !strings.Contains(metrics.String(), sample) {
 			t.Fatalf("expected metric sample %q, got:\n%s", sample, metrics.String())
+		}
+	}
+	for _, retired := range []string{"legacy_derivations", "legacy_writes", "parity_mismatches"} {
+		if strings.Contains(metrics.String(), retired) {
+			t.Fatalf("retired publication metric %q remains:\n%s", retired, metrics.String())
 		}
 	}
 }
@@ -710,9 +684,6 @@ func TestEdgeDNSArtifactPublisherRejectsInvalidBundleBeforeReplacingImmutableCur
 	}
 	if platformAfter.ID != platformBefore.ID || releaseAfter.ID != releaseBefore.ID {
 		t.Fatalf("invalid bundle replaced immutable current: before=%s/%s after=%s/%s", platformBefore.ID, releaseBefore.ID, platformAfter.ID, releaseAfter.ID)
-	}
-	if _, err := storeState.GetEdgeDNSBundleArtifact(scopeKey); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("publisher wrote compatibility current: %v", err)
 	}
 }
 

@@ -150,10 +150,7 @@ type Server struct {
 	edgeDNSArtifactLastSourceSnapshots     int
 	edgeDNSArtifactLastNodeProjections     int
 	edgeDNSArtifactLastRouteCompilations   int
-	edgeDNSArtifactLastLegacyDerivations   int
 	edgeDNSArtifactLastImmutableWrites     int
-	edgeDNSArtifactLastLegacyWrites        int
-	edgeDNSArtifactLastParityMismatches    int
 	edgeDNSArtifactLastShadowActive        int
 	edgeDNSArtifactLastVerifiedLKG         int
 	edgeDNSArtifactLastFullActive          int
@@ -166,7 +163,6 @@ type Server struct {
 	edgeDNSArtifactHandlerLookupMissCount  int64
 	edgeDNSArtifactHandlerLookupErrorCount int64
 	edgeDNSArtifactHandlerFullCount        int64
-	edgeDNSArtifactHandlerFallbackCount    int64
 	ready                                  atomic.Bool
 	trafficOverrideRouteProbe              trafficOverrideRouteProbeFunc
 }
