@@ -390,8 +390,8 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 			return degraded("workload Pod is not Ready")
 		}
 		for _, status := range pod.Status.ContainerStatuses {
-			if status.Name == release.Workload.Container && (status.RestartCount != 0 || status.ImageID == "") {
-				return degraded("workload container restarted or lacks immutable image identity")
+			if status.Name == release.Workload.Container && status.ImageID == "" {
+				return degraded("workload container lacks immutable image identity")
 			}
 		}
 	}
@@ -669,8 +669,8 @@ func artifactTargetContainers(release declarativerelease.PlanRelease, kind, name
 func immutableContainerStatus(statuses []corev1.ContainerStatus, name string) error {
 	for _, status := range statuses {
 		if status.Name == name {
-			if status.RestartCount != 0 || status.ImageID == "" {
-				return fmt.Errorf("artifact container %s restarted or lacks immutable image identity", name)
+			if status.ImageID == "" {
+				return fmt.Errorf("artifact container %s lacks immutable image identity", name)
 			}
 			return nil
 		}

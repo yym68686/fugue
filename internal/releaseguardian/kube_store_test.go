@@ -190,6 +190,8 @@ func TestLocalHealthCoversEveryDeclaredDaemonSetArtifact(t *testing.T) {
 			},
 		)
 	}
+	workerBPod := objects[len(objects)-1].(*corev1.Pod)
+	workerBPod.Status.ContainerStatuses[0].RestartCount = 3
 	client := fake.NewSimpleClientset(objects...)
 	store := &KubeStore{client: client}
 	if health := store.localHealth(context.Background(), release, target, nil, now); health.State != HealthHealthy {
@@ -233,6 +235,8 @@ func TestLocalHealthUsesPodTemplateLabelsForBroadDeploymentSelector(t *testing.T
 		}
 	}
 	replicas := int32(2)
+	apiOne := readyPod("api-1", apiLabels, "api")
+	apiOne.Status.ContainerStatuses[0].RestartCount = 3
 	client := fake.NewSimpleClientset(
 		&appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "fugue-fugue-api", Namespace: "fugue-system", Generation: 1, Annotations: map[string]string{"fugue.pro/production-config-sha": testSHA}},
@@ -242,18 +246,34 @@ func TestLocalHealthUsesPodTemplateLabelsForBroadDeploymentSelector(t *testing.T
 			},
 			Status: appsv1.DeploymentStatus{ObservedGeneration: 1, Replicas: 2, UpdatedReplicas: 2, ReadyReplicas: 2, AvailableReplicas: 2},
 		},
-		readyPod("api-1", apiLabels, "api"),
+		apiOne,
 		readyPod("api-2", apiLabels, "api"),
 		readyPod("controller-1", controllerLabels, "controller"),
 	)
 	store := &KubeStore{client: client}
 	if health := store.localHealth(context.Background(), release, target, nil, now); health.State != HealthHealthy {
-		t.Fatalf("broad workload selector included another component: %+v", health)
+		t.Fatalf("broad workload selector or historical restart changed health: %+v", health)
+	}
+	pod, err := client.CoreV1().Pods("fugue-system").Get(context.Background(), "api-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.ContainerStatuses[0].ImageID = ""
+	if _, err := client.CoreV1().Pods("fugue-system").UpdateStatus(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	health := store.localHealth(context.Background(), release, target, nil, now)
+	if health.State != HealthDegraded || !strings.Contains(health.Reason, "lacks immutable image identity") {
+		t.Fatalf("missing runtime image identity was accepted: %+v", health)
+	}
+	pod.Status.ContainerStatuses[0].ImageID = image
+	if _, err := client.CoreV1().Pods("fugue-system").UpdateStatus(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := client.CoreV1().Pods("fugue-system").Create(context.Background(), readyPod("api-collision", apiLabels, "api"), metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	health := store.localHealth(context.Background(), release, target, nil, now)
+	health = store.localHealth(context.Background(), release, target, nil, now)
 	if health.State != HealthDegraded || !strings.Contains(health.Reason, "inventory") {
 		t.Fatalf("same-template label collision was not rejected: %+v", health)
 	}
