@@ -65,8 +65,8 @@ const (
 type Service struct {
 	Config            config.EdgeConfig
 	RouteBundleSource RouteBundleSourceConfig
-	// requireEdgeControlRouteSource is set by the production constructor. The
-	// legacy constructor remains available only to package-local unit fixtures.
+	// requireEdgeControlRouteSource is false only for package-local unit
+	// fixtures. Production constructors always set it to true.
 	requireEdgeControlRouteSource bool
 	InventoryProducer             InventoryProducerConfig
 	HTTPClient                    *http.Client
@@ -442,10 +442,6 @@ func (e statusError) Error() string {
 	return fmt.Sprintf("edge routes returned status %d: %s", e.StatusCode, e.Body)
 }
 
-func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
-	return newServiceWithEdgeSources(cfg, RouteBundleSourceConfig{}, InventoryProducerConfig{}, false, logger)
-}
-
 func NewServiceWithRouteBundleSource(cfg config.EdgeConfig, routeBundleSource RouteBundleSourceConfig, logger *log.Logger) *Service {
 	return newServiceWithEdgeSources(cfg, routeBundleSource, InventoryProducerConfig{}, true, logger)
 }
@@ -614,11 +610,7 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		return err
 	}
 
-	routeClient := s.HTTPClient
-	if s.edgeControlRouteSourceEnabled() {
-		routeClient = s.RouteBundleHTTPClient
-	}
-	resp, err := routeClient.Do(req)
+	resp, err := s.RouteBundleHTTPClient.Do(req)
 	if err != nil {
 		err = fmt.Errorf("fetch edge route bundle: %s", s.redact(err.Error()))
 		s.recordSyncError(err)
@@ -644,40 +636,37 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			s.recordSyncError(err)
 			return err
 		}
-		publication := routePublicationMetadata{}
-		if s.edgeControlRouteSourceEnabled() {
-			publication, err = routePublicationFromResponse(resp.Header, bundle, s.Config.EdgeGroupID)
+		publication, err := routePublicationFromResponse(resp.Header, bundle, s.Config.EdgeGroupID)
+		if err != nil {
+			s.recordSyncError(err)
+			return err
+		}
+		if routeSelection.candidate {
+			publication, err = bindCandidatePublication(resp.Header, publication, s.Config.EdgeSlot)
 			if err != nil {
 				s.recordSyncError(err)
 				return err
 			}
-			if routeSelection.candidate {
-				publication, err = bindCandidatePublication(resp.Header, publication, s.Config.EdgeSlot)
-				if err != nil {
-					s.recordSyncError(err)
-					return err
-				}
-			}
-			if err = validateRouteBundleActivationBinding(routeSelection, publication); err != nil {
-				s.recordSyncError(err)
-				return err
-			}
-			currentPublication, currentBundle := s.currentRoutePublicationAndBundle()
-			previousBundle = currentBundle
-			if err = validateRoutePublicationAdvance(currentPublication, publication); err != nil {
-				s.recordSyncError(err)
-				return err
-			}
-			if err = validateNonCatastrophicGroupBundle(currentBundle, bundle, publication.RecoveryEpoch > currentPublication.RecoveryEpoch); err != nil {
-				s.recordSyncError(err)
-				return err
-			}
-			if err = s.validateRouteBundleSourceSelection(routeSelection); err != nil {
-				s.recordSyncError(err)
-				return err
-			}
-			publication = retainActivatedCandidateAttestation(routeSelection, s.Config.EdgeSlot, currentPublication, publication)
 		}
+		if err = validateRouteBundleActivationBinding(routeSelection, publication); err != nil {
+			s.recordSyncError(err)
+			return err
+		}
+		currentPublication, currentBundle := s.currentRoutePublicationAndBundle()
+		previousBundle = currentBundle
+		if err = validateRoutePublicationAdvance(currentPublication, publication); err != nil {
+			s.recordSyncError(err)
+			return err
+		}
+		if err = validateNonCatastrophicGroupBundle(currentBundle, bundle, publication.RecoveryEpoch > currentPublication.RecoveryEpoch); err != nil {
+			s.recordSyncError(err)
+			return err
+		}
+		if err = s.validateRouteBundleSourceSelection(routeSelection); err != nil {
+			s.recordSyncError(err)
+			return err
+		}
+		publication = retainActivatedCandidateAttestation(routeSelection, s.Config.EdgeSlot, currentPublication, publication)
 		etag := strings.TrimSpace(resp.Header.Get("ETag"))
 		if etag == "" {
 			etag = quoteETag(bundle.Version)
@@ -721,26 +710,24 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			s.recordSyncError(err)
 			return err
 		}
-		if s.edgeControlRouteSourceEnabled() {
-			currentPublication, currentBundle := s.currentRoutePublicationAndBundle()
-			if currentBundle == nil {
-				err := fmt.Errorf("edge-control routes returned 304 without a cached publication")
-				s.recordSyncError(err)
-				return err
-			}
-			observedPublication, publicationErr := routePublicationFromResponse(resp.Header, *currentBundle, s.Config.EdgeGroupID)
-			if routeSelection.candidate {
-				observedPublication, publicationErr = bindCandidatePublication(resp.Header, observedPublication, s.Config.EdgeSlot)
-			}
-			if publicationErr == nil {
-				observedPublication = retainActivatedCandidateAttestation(routeSelection, s.Config.EdgeSlot, currentPublication, observedPublication)
-			}
-			if publicationErr != nil || validateRouteBundleActivationBinding(routeSelection, observedPublication) != nil ||
-				observedPublication != currentPublication || s.validateRouteBundleSourceSelection(routeSelection) != nil {
-				err := fmt.Errorf("edge-control routes returned 304 with mismatched publication metadata")
-				s.recordSyncError(err)
-				return err
-			}
+		currentPublication, currentBundle := s.currentRoutePublicationAndBundle()
+		if currentBundle == nil {
+			err := fmt.Errorf("edge-control routes returned 304 without a cached publication")
+			s.recordSyncError(err)
+			return err
+		}
+		observedPublication, publicationErr := routePublicationFromResponse(resp.Header, *currentBundle, s.Config.EdgeGroupID)
+		if routeSelection.candidate {
+			observedPublication, publicationErr = bindCandidatePublication(resp.Header, observedPublication, s.Config.EdgeSlot)
+		}
+		if publicationErr == nil {
+			observedPublication = retainActivatedCandidateAttestation(routeSelection, s.Config.EdgeSlot, currentPublication, observedPublication)
+		}
+		if publicationErr != nil || validateRouteBundleActivationBinding(routeSelection, observedPublication) != nil ||
+			observedPublication != currentPublication || s.validateRouteBundleSourceSelection(routeSelection) != nil {
+			err := fmt.Errorf("edge-control routes returned 304 with mismatched publication metadata")
+			s.recordSyncError(err)
+			return err
 		}
 		s.recordNotModified(now)
 		if err := s.applyCurrentCaddyConfig(ctx); err != nil {
@@ -2872,27 +2859,16 @@ func (s *Service) newRoutesRequestWithSelection(ctx context.Context) (*http.Requ
 		return nil, routeSourceSelection{}, err
 	}
 	routeSource := selection.config
-	baseURL := strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/")
-	token := strings.TrimSpace(s.Config.EdgeToken)
-	if s.edgeControlRouteSourceEnabled() {
-		baseURL = routeSource.url
-		var err error
-		token, err = loadEdgeRouteReaderToken(routeSource.tokenFile)
-		if err != nil {
-			return nil, routeSourceSelection{}, err
-		}
+	baseURL := routeSource.url
+	token, err := loadEdgeRouteReaderToken(routeSource.tokenFile)
+	if err != nil {
+		return nil, routeSourceSelection{}, err
 	}
 	base, err := url.Parse(baseURL)
 	if err != nil || base.Scheme == "" || base.Host == "" {
 		return nil, routeSourceSelection{}, fmt.Errorf("invalid edge route bundle URL")
 	}
-	if !s.edgeControlRouteSourceEnabled() {
-		base.Path = strings.TrimRight(base.Path, "/") + edgeControlBundlePath
-	}
 	query := base.Query()
-	if !s.edgeControlRouteSourceEnabled() {
-		query.Set("token", token)
-	}
 	if edgeID := strings.TrimSpace(s.Config.EdgeID); edgeID != "" {
 		query.Set("edge_id", edgeID)
 	}
@@ -2905,9 +2881,7 @@ func (s *Service) newRoutesRequestWithSelection(ctx context.Context) (*http.Requ
 	if err != nil {
 		return nil, routeSourceSelection{}, fmt.Errorf("build edge routes request: %w", err)
 	}
-	if s.edgeControlRouteSourceEnabled() {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	if etag := s.currentETag(); etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}

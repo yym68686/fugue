@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -37,6 +38,41 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+// NewService is a test-only constructor for unit fixtures that do not execute
+// the production route synchronization path. Production workers must provide
+// an explicit Edge Control route bundle source.
+func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
+	return newServiceWithEdgeSources(cfg, RouteBundleSourceConfig{}, InventoryProducerConfig{}, false, logger)
+}
+
+func newTestEdgeControlRouteSource(t *testing.T, serverURL, groupID string) RouteBundleSourceConfig {
+	t.Helper()
+	root := t.TempDir()
+	tokenFile := filepath.Join(root, "reader-token")
+	const token = "test-edge-control-reader-token-0123456789"
+	if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatalf("write route reader token: %v", err)
+	}
+	keyringFile := filepath.Join(root, "verifier-keyring.json")
+	writeEdgeVerifierKeyring(t, keyringFile, groupID, "test-edge-control-key-v1", []byte("0123456789abcdef0123456789abcdef"))
+	return RouteBundleSourceConfig{
+		URL:                 serverURL + edgeControlBundlePath,
+		TokenFile:           tokenFile,
+		VerifierKeyringFile: keyringFile,
+	}
+}
+
+func writeTestEdgeControlBundle(w http.ResponseWriter, bundle model.EdgeRouteBundle, groupID string, sequence uint64) {
+	w.Header().Set("ETag", strconv.Quote(bundle.Version))
+	w.Header().Set(edgeControlGroupHeader, groupID)
+	w.Header().Set(edgeControlGenerationHeader, bundle.Generation)
+	w.Header().Set(edgeControlPublicationHeader, strconv.FormatUint(sequence, 10))
+	w.Header().Set(edgeControlRecoveryEpochHeader, "0")
+	if err := json.NewEncoder(w).Encode(bundle); err != nil {
+		panic(err)
+	}
 }
 
 func isolateParallelTestHTTPClient(t *testing.T, service *Service, server *httptest.Server) {
@@ -871,22 +907,20 @@ func TestRootedKubernetesServiceDialKeepsUpstreamHostUnchanged(t *testing.T) {
 func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	t.Parallel()
 
-	bundle := testBundle("routegen_first")
-	var gotToken string
+	groupID := "edge-group-country-hk"
+	bundle := signedEdgeControlTestBundle(groupID, "routegen_first", 1, 0, "test-edge-control-key-v1", []byte("0123456789abcdef0123456789abcdef"))
+	var gotAuthorization string
 	var gotEdgeGroupID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/edge/routes" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		gotToken = r.URL.Query().Get("token")
+		gotAuthorization = r.Header.Get("Authorization")
 		gotEdgeGroupID = r.URL.Query().Get("edge_group_id")
 		if got := r.Header.Get("If-None-Match"); got != "" {
 			t.Fatalf("expected no conditional header on first sync, got %q", got)
 		}
-		w.Header().Set("ETag", `"routegen_first"`)
-		if err := json.NewEncoder(w).Encode(bundle); err != nil {
-			t.Fatalf("encode bundle: %v", err)
-		}
+		writeTestEdgeControlBundle(w, bundle, groupID, 1)
 	}))
 	defer server.Close()
 
@@ -895,17 +929,18 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	var logs bytes.Buffer
 	service := NewService(config.EdgeConfig{
 		APIURL:          server.URL,
-		EdgeToken:       "edge-secret",
-		EdgeGroupID:     "edge-group-country-hk",
+		EdgeToken:       "heartbeat-secret",
+		EdgeGroupID:     groupID,
 		CachePath:       cachePath,
 		AutonomyWALPath: walPath,
 	}, log.New(&logs, "", 0))
+	service = NewServiceWithRouteBundleSource(service.Config, newTestEdgeControlRouteSource(t, server.URL, groupID), service.Logger)
 
 	if err := service.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("sync once: %v", err)
 	}
-	if gotToken != "edge-secret" {
-		t.Fatalf("expected edge token to be sent, got %q", gotToken)
+	if gotAuthorization != "Bearer test-edge-control-reader-token-0123456789" {
+		t.Fatalf("expected Edge Control bearer credential, got %q", gotAuthorization)
 	}
 	if gotEdgeGroupID != "edge-group-country-hk" {
 		t.Fatalf("expected edge group filter, got %q", gotEdgeGroupID)
@@ -919,11 +954,11 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	if err := json.Unmarshal(data, &cached); err != nil {
 		t.Fatalf("decode cache: %v", err)
 	}
-	if cached.Bundle.Version != "routegen_first" || cached.ETag != `"routegen_first"` {
+	if cached.Bundle.Version != bundle.Version || cached.ETag != strconv.Quote(bundle.Version) {
 		t.Fatalf("unexpected cached bundle: %+v", cached)
 	}
 	status := service.Status()
-	if !status.Healthy || status.Status != "ok" || status.BundleVersion != "routegen_first" || status.RouteCount != 1 {
+	if !status.Healthy || status.Status != "ok" || status.BundleVersion != bundle.Version || status.RouteCount != 1 {
 		t.Fatalf("unexpected status after sync: %+v", status)
 	}
 	metrics := renderMetrics(t, service)
@@ -941,7 +976,7 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
 		}
 	}
-	if !strings.Contains(logs.String(), "edge route bundle sync success; version=routegen_first routes=1 tls_allowlist=1") {
+	if !strings.Contains(logs.String(), "edge route bundle sync success; version="+bundle.Version+" routes=1 tls_allowlist=1") {
 		t.Fatalf("expected sync success log, got %s", logs.String())
 	}
 	records, err := localwal.ReadAll(walPath)
@@ -955,7 +990,7 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	if record.Component != "edge-worker" || record.Action != "lkg_write" || record.SafetyClass != "L0_observe_only" {
 		t.Fatalf("unexpected edge WAL record: %+v", record)
 	}
-	if record.Generation != "routegen_first" || record.Subject != "routegen_first" {
+	if record.Generation != bundle.Generation || record.Subject != bundle.Generation {
 		t.Fatalf("unexpected edge WAL generation/subject: %+v", record)
 	}
 	if record.ExpiresAt == nil {
@@ -976,14 +1011,12 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 func TestSyncOnceActivatesBundleBeforeAsynchronousWarmupCompletes(t *testing.T) {
 	t.Parallel()
 
-	bundle := testBundle("routegen_async_warmup")
+	groupID := "edge-group-default"
+	bundle := signedEdgeControlTestBundle(groupID, "routegen_async_warmup", 1, 0, "test-edge-control-key-v1", []byte("0123456789abcdef0123456789abcdef"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/edge/routes":
-			w.Header().Set("ETag", `"routegen_async_warmup"`)
-			if err := json.NewEncoder(w).Encode(bundle); err != nil {
-				t.Fatalf("encode bundle: %v", err)
-			}
+			writeTestEdgeControlBundle(w, bundle, groupID, 1)
 		case "/load":
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -1007,6 +1040,7 @@ func TestSyncOnceActivatesBundleBeforeAsynchronousWarmupCompletes(t *testing.T) 
 		CaddyProxyListenAddr: "127.0.0.1:7833",
 		CacheWarmupEnabled:   false,
 	}, log.New(ioDiscard{}, "", 0))
+	service = NewServiceWithRouteBundleSource(service.Config, newTestEdgeControlRouteSource(t, server.URL, groupID), service.Logger)
 	service.caddyWarmup = func(context.Context, string, string) error {
 		close(warmupStarted)
 		<-releaseWarmup
@@ -1034,18 +1068,21 @@ func TestSyncOnceActivatesBundleBeforeAsynchronousWarmupCompletes(t *testing.T) 
 func TestSyncOnceDoesNotCancelEquivalentWarmupOnNotModified(t *testing.T) {
 	t.Parallel()
 
-	bundle := testBundle("routegen_warmup_idempotent")
+	groupID := "edge-group-default"
+	bundle := signedEdgeControlTestBundle(groupID, "routegen_warmup_idempotent", 1, 0, "test-edge-control-key-v1", []byte("0123456789abcdef0123456789abcdef"))
 	var routeFetches atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/edge/routes":
 			if routeFetches.Add(1) == 1 {
-				w.Header().Set("ETag", `"routegen_warmup_idempotent"`)
-				if err := json.NewEncoder(w).Encode(bundle); err != nil {
-					t.Fatalf("encode bundle: %v", err)
-				}
+				writeTestEdgeControlBundle(w, bundle, groupID, 1)
 				return
 			}
+			w.Header().Set("ETag", strconv.Quote(bundle.Version))
+			w.Header().Set(edgeControlGroupHeader, groupID)
+			w.Header().Set(edgeControlGenerationHeader, bundle.Generation)
+			w.Header().Set(edgeControlPublicationHeader, "1")
+			w.Header().Set(edgeControlRecoveryEpochHeader, "0")
 			w.WriteHeader(http.StatusNotModified)
 		case "/load":
 			w.WriteHeader(http.StatusOK)
@@ -1072,6 +1109,7 @@ func TestSyncOnceDoesNotCancelEquivalentWarmupOnNotModified(t *testing.T) {
 		CaddyProxyListenAddr: "127.0.0.1:7833",
 		CacheWarmupEnabled:   false,
 	}, log.New(ioDiscard{}, "", 0))
+	service = NewServiceWithRouteBundleSource(service.Config, newTestEdgeControlRouteSource(t, server.URL, groupID), service.Logger)
 	service.caddyWarmup = func(ctx context.Context, _ string, _ string) error {
 		if warmupStarts.Add(1) == 1 {
 			close(warmupStarted)
@@ -1196,15 +1234,17 @@ func TestSyncOnceDoesNotPromoteBundleToLKGWhenCaddyApplyFails(t *testing.T) {
 			t.Fatalf("new bundle should not be written as LKG after failed Caddy apply: %+v", records)
 		}
 	}
-	if !strings.Contains(logs.String(), "edge route bundle sync failed; error=apply caddy config") {
-		t.Fatalf("expected Caddy apply sync failure log, got %s", logs.String())
+	if !strings.Contains(logs.String(), "edge route bundle sync failed; using stale cache; version=routegen_old") ||
+		!strings.Contains(logs.String(), "read edge route reader credential") {
+		t.Fatalf("expected Edge Control source failure with stale-cache replay, got %s", logs.String())
 	}
 }
 
 func TestSyncOnceRefreshesDynamicDesiredStateBeforeRoutes(t *testing.T) {
 	t.Parallel()
 
-	bundle := testBundle("routegen_dynamic")
+	groupID := "edge-group-country-jp"
+	bundle := signedEdgeControlTestBundle(groupID, "routegen_dynamic", 1, 0, "test-edge-control-key-v1", []byte("0123456789abcdef0123456789abcdef"))
 	var gotDesiredToken string
 	var gotRoutesToken string
 	var gotRoutesEdgeID string
@@ -1227,13 +1267,10 @@ func TestSyncOnceRefreshesDynamicDesiredStateBeforeRoutes(t *testing.T) {
 				},
 			})
 		case "/v1/edge/routes":
-			gotRoutesToken = r.URL.Query().Get("token")
+			gotRoutesToken = r.Header.Get("Authorization")
 			gotRoutesEdgeID = r.URL.Query().Get("edge_id")
 			gotRoutesEdgeGroupID = r.URL.Query().Get("edge_group_id")
-			w.Header().Set("ETag", `"routegen_dynamic"`)
-			if err := json.NewEncoder(w).Encode(bundle); err != nil {
-				t.Fatalf("encode bundle: %v", err)
-			}
+			writeTestEdgeControlBundle(w, bundle, groupID, 1)
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -1248,6 +1285,7 @@ func TestSyncOnceRefreshesDynamicDesiredStateBeforeRoutes(t *testing.T) {
 		WorkloadMode:        "dynamic",
 		CachePath:           filepath.Join(t.TempDir(), "routes-cache.json"),
 	}, log.New(ioDiscard{}, "", 0))
+	service = NewServiceWithRouteBundleSource(service.Config, newTestEdgeControlRouteSource(t, server.URL, groupID), service.Logger)
 
 	if err := service.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("sync once: %v", err)
@@ -1255,7 +1293,7 @@ func TestSyncOnceRefreshesDynamicDesiredStateBeforeRoutes(t *testing.T) {
 	if gotDesiredToken != "edge-secret" {
 		t.Fatalf("expected desired-state token, got %q", gotDesiredToken)
 	}
-	if gotRoutesToken != "edge-secret" || gotRoutesEdgeID != "dynamic-edge-1" || gotRoutesEdgeGroupID != "edge-group-country-jp" {
+	if gotRoutesToken != "Bearer test-edge-control-reader-token-0123456789" || gotRoutesEdgeID != "dynamic-edge-1" || gotRoutesEdgeGroupID != "edge-group-country-jp" {
 		t.Fatalf("unexpected route query token=%q edge_id=%q edge_group_id=%q", gotRoutesToken, gotRoutesEdgeID, gotRoutesEdgeGroupID)
 	}
 	if service.Config.EdgeGroupID != "edge-group-country-jp" || service.Config.WorkloadMode != model.EdgeWorkloadModeDynamic {
@@ -1355,7 +1393,7 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 		"public_ipv4":           "203.0.113.10",
 		"mesh_ip":               "100.64.0.10",
 		"route_bundle_version":  "routegen_heartbeat",
-		"route_bundle_source":   coreAPIRouteSourceV1,
+		"route_bundle_source":   "",
 		"caddy_applied_version": "routegen_heartbeat",
 		"cache_status":          "ready",
 		"tls_status":            "",
@@ -1528,20 +1566,22 @@ func TestHeartbeatOnceReportsPerformanceSamples(t *testing.T) {
 func TestSyncOnceNotModifiedKeepsExistingCacheFile(t *testing.T) {
 	t.Parallel()
 
-	bundle := testBundle("routegen_cached")
+	groupID := "edge-group-default"
+	bundle := signedEdgeControlTestBundle(groupID, "routegen_cached", 1, 0, "test-edge-control-key-v1", []byte("0123456789abcdef0123456789abcdef"))
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		switch requests {
 		case 1:
-			w.Header().Set("ETag", `"routegen_cached"`)
-			if err := json.NewEncoder(w).Encode(bundle); err != nil {
-				t.Fatalf("encode bundle: %v", err)
-			}
+			writeTestEdgeControlBundle(w, bundle, groupID, 1)
 		case 2:
-			if got := r.Header.Get("If-None-Match"); got != `"routegen_cached"` {
-				t.Fatalf("expected If-None-Match header %q, got %q", `"routegen_cached"`, got)
+			if got := r.Header.Get("If-None-Match"); got != strconv.Quote(bundle.Version) {
+				t.Fatalf("expected If-None-Match header %q, got %q", strconv.Quote(bundle.Version), got)
 			}
+			w.Header().Set(edgeControlGroupHeader, "edge-group-default")
+			w.Header().Set(edgeControlGenerationHeader, bundle.Generation)
+			w.Header().Set(edgeControlPublicationHeader, "1")
+			w.Header().Set(edgeControlRecoveryEpochHeader, "0")
 			w.WriteHeader(http.StatusNotModified)
 		default:
 			t.Fatalf("unexpected request %d", requests)
@@ -1551,10 +1591,12 @@ func TestSyncOnceNotModifiedKeepsExistingCacheFile(t *testing.T) {
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
 	service := NewService(config.EdgeConfig{
-		APIURL:    server.URL,
-		EdgeToken: "edge-secret",
-		CachePath: cachePath,
+		APIURL:      server.URL,
+		EdgeToken:   "heartbeat-secret",
+		EdgeGroupID: groupID,
+		CachePath:   cachePath,
 	}, log.New(ioDiscard{}, "", 0))
+	service = NewServiceWithRouteBundleSource(service.Config, newTestEdgeControlRouteSource(t, server.URL, groupID), service.Logger)
 
 	if err := service.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("first sync: %v", err)
