@@ -1538,7 +1538,7 @@ func ipAddrStrings(addrs []net.IPAddr) []string {
 }
 
 func (s *Server) authorizeEdgeToken(w http.ResponseWriter, r *http.Request) bool {
-	if strings.TrimSpace(s.edgeTLSAskToken) == "" && s.store == nil {
+	if s.store == nil {
 		httpx.WriteError(w, http.StatusNotFound, "edge endpoints are disabled")
 		return false
 	}

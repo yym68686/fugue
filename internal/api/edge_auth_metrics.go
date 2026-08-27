@@ -32,7 +32,7 @@ func (s *Server) writeEdgeAuthMetrics(w io.Writer) {
 		}
 		s.edgeAuthMu.Unlock()
 	}
-	observability.WriteMetricHeader(w, "fugue_edge_authentications_total", "Authenticated edge requests by credential method.", "counter")
+	observability.WriteMetricHeader(w, "fugue_edge_authentications_total", "Edge authentication attempts by outcome method.", "counter")
 	for _, method := range []string{"scoped", "legacy", "denied"} {
 		observability.WriteMetricSample(w, "fugue_edge_authentications_total", map[string]string{"method": method}, float64(counts[method]))
 	}

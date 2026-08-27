@@ -191,12 +191,11 @@ func setupAppSSHTestServer(t *testing.T) (*store.Store, *Server, string, model.A
 		t.Fatalf("create api key: %v", err)
 	}
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		AppBaseDomain:        "fugue.pro",
-		SSHPublicPortStart:   model.DefaultAppSSHPublicPortStart,
-		SSHPublicPortEnd:     model.DefaultAppSSHPublicPortStart + 10,
-		EdgeTLSAskToken:      "edge-secret",
-		AllowLegacyEdgeToken: true,
+		AppBaseDomain:      "fugue.pro",
+		SSHPublicPortStart: model.DefaultAppSSHPublicPortStart,
+		SSHPublicPortEnd:   model.DefaultAppSSHPublicPortStart + 10,
 	})
+	server.testLegacyEdgeToken = "edge-secret"
 	return s, server, apiKey, app
 }
 

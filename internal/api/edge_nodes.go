@@ -1118,7 +1118,7 @@ func (s *Server) authorizeEdgeRequest(w http.ResponseWriter, r *http.Request) (e
 			return edgeAuthContext{}, false
 		}
 	}
-	if s.allowLegacyEdgeToken && strings.TrimSpace(s.edgeTLSAskToken) != "" && subtleConstantCompare(token, s.edgeTLSAskToken) {
+	if strings.TrimSpace(s.testLegacyEdgeToken) != "" && subtleConstantCompare(token, s.testLegacyEdgeToken) {
 		s.recordEdgeAuthMethod("legacy")
 		return edgeAuthContext{}, true
 	}

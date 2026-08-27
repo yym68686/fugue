@@ -77,8 +77,6 @@ func main() {
 		PlatformRoutesJSON:                     cfg.PlatformRoutesJSON,
 		EdgeQualityRankingMode:                 cfg.EdgeQualityRankingMode,
 		AppSafeZeroDowntimePublicEnabled:       cfg.AppSafeZeroDowntimePublicEnabled,
-		EdgeTLSAskToken:                        cfg.EdgeTLSAskToken,
-		AllowLegacyEdgeToken:                   cfg.AllowLegacyEdgeToken,
 		ImageStoreMode:                         cfg.ImageStoreMode,
 		RegistryPushBase:                       cfg.RegistryPushBase,
 		RegistryPullBase:                       cfg.RegistryPullBase,

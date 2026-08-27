@@ -43,8 +43,6 @@ type ServerConfig struct {
 	PlatformRoutesJSON                     string
 	EdgeQualityRankingMode                 string
 	AppSafeZeroDowntimePublicEnabled       bool
-	EdgeTLSAskToken                        string
-	AllowLegacyEdgeToken                   bool
 	ImageStoreMode                         string
 	ImageStoreMinReplicas                  int
 	RegistryPushBase                       string

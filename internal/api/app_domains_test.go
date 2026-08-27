@@ -514,8 +514,7 @@ func TestEdgeAuthorizationErrorsUseJSONContract(t *testing.T) {
 		{
 			name: "missing edge credential",
 			server: &Server{
-				edgeTLSAskToken:      "edge-secret",
-				allowLegacyEdgeToken: true,
+				testLegacyEdgeToken: "edge-secret",
 			},
 			target: "/v1/edge/routes",
 			authorize: func(server *Server, w http.ResponseWriter, r *http.Request) bool {
@@ -530,8 +529,7 @@ func TestEdgeAuthorizationErrorsUseJSONContract(t *testing.T) {
 		{
 			name: "invalid edge credential",
 			server: &Server{
-				edgeTLSAskToken:      "edge-secret",
-				allowLegacyEdgeToken: true,
+				testLegacyEdgeToken: "edge-secret",
 			},
 			target: "/v1/edge/routes?token=wrong",
 			authorize: func(server *Server, w http.ResponseWriter, r *http.Request) bool {
@@ -1169,14 +1167,15 @@ func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain string) (*s
 		AppBaseDomain:                          appBaseDomain,
 		APIPublicDomain:                        "api.example.com",
 		EdgeQualityRankingMode:                 "active",
-		EdgeTLSAskToken:                        "edge-secret",
-		AllowLegacyEdgeToken:                   true,
 		BundleSigningKey:                       "platform-artifact-api-test-signing-key",
 		BundleSigningKeyID:                     "platform-artifact-api-test",
 		EdgeActivationPlanSigningKey:           "edge-activation-api-test-signing-key-material",
 		EdgeActivationPlanSigningKeyID:         "public-data-plane-release",
 		EdgeActivationPlanSigningKeyGeneration: "generation-test-0001",
 	})
+	// Test-only fixture for legacy-auth coverage. Production Server instances
+	// cannot set this unexported field and authenticate only scoped node tokens.
+	server.testLegacyEdgeToken = "edge-secret"
 	resolver := &fakeAppDomainResolver{
 		cname: map[string]string{},
 		ip:    map[string][]net.IPAddr{},

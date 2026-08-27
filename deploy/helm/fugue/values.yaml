@@ -202,7 +202,6 @@ api:
   platformRoutesJSON: ""
   edgeQualityRankingMode: shadow
   edgeTLSAskToken: ""
-  allowLegacyEdgeToken: false
   registryPushBase: ""
   registryPullBase: ""
   clusterJoinRegistryEndpoint: ""

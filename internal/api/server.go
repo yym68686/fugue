@@ -60,8 +60,7 @@ type Server struct {
 	platformRoutes                         []model.PlatformRoute
 	edgeQualityRankingMode                 string
 	appSafeZeroDowntimePublicEnabled       bool
-	edgeTLSAskToken                        string
-	allowLegacyEdgeToken                   bool
+	testLegacyEdgeToken                    string
 	imageStoreMode                         string
 	imageStoreMinReplicas                  int
 	registryPushBase                       string
@@ -229,8 +228,6 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		platformRoutes:                         parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
 		edgeQualityRankingMode:                 normalizeEdgeQualityRankingMode(cfg.EdgeQualityRankingMode),
 		appSafeZeroDowntimePublicEnabled:       cfg.AppSafeZeroDowntimePublicEnabled,
-		edgeTLSAskToken:                        strings.TrimSpace(cfg.EdgeTLSAskToken),
-		allowLegacyEdgeToken:                   cfg.AllowLegacyEdgeToken,
 		imageStoreMode:                         strings.TrimSpace(cfg.ImageStoreMode),
 		imageStoreMinReplicas:                  imageStoreMinReplicas,
 		registryPushBase:                       strings.TrimSpace(cfg.RegistryPushBase),

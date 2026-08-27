@@ -201,13 +201,6 @@ spec:
             {{- end }}
             - name: FUGUE_EDGE_QUALITY_RANKING_MODE
               value: {{ .Values.api.edgeQualityRankingMode | quote }}
-            - name: FUGUE_EDGE_TLS_ASK_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "fugue.configSecretName" . }}
-                  key: FUGUE_EDGE_TLS_ASK_TOKEN
-            - name: FUGUE_ALLOW_LEGACY_EDGE_TOKEN
-              value: {{ .Values.api.allowLegacyEdgeToken | quote }}
             - name: FUGUE_IMAGE_STORE_MODE
               value: {{ include "fugue.imageStoreMode" . | quote }}
             - name: FUGUE_IMAGE_STORE_MIN_REPLICAS

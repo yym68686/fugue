@@ -45,8 +45,6 @@ type APIConfig struct {
 	PlatformRoutesJSON                     string
 	EdgeQualityRankingMode                 string
 	AppSafeZeroDowntimePublicEnabled       bool
-	EdgeTLSAskToken                        string
-	AllowLegacyEdgeToken                   bool
 	ImageStoreMode                         string
 	RegistryPushBase                       string
 	RegistryPullBase                       string
@@ -353,8 +351,6 @@ func APIFromEnv() APIConfig {
 		PlatformRoutesJSON:                     strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
 		EdgeQualityRankingMode:                 getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
 		AppSafeZeroDowntimePublicEnabled:       getenvBool("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", true),
-		EdgeTLSAskToken:                        strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
-		AllowLegacyEdgeToken:                   getenvBool("FUGUE_ALLOW_LEGACY_EDGE_TOKEN", false),
 		ImageStoreMode:                         getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
 		RegistryPushBase:                       getenv("FUGUE_REGISTRY_PUSH_BASE", ""),
 		RegistryPullBase:                       strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
