@@ -15,6 +15,8 @@ import (
 	"fugue/internal/model"
 )
 
+const sourceUploadClientTimeout = 6 * time.Minute
+
 type Client struct {
 	baseURL              string
 	token                string
@@ -648,7 +650,7 @@ func (c *Client) ListRuntimes() ([]model.Runtime, error) {
 
 func (c *Client) ImportUpload(req importUploadRequest, archiveName string, archiveBytes []byte) (importUploadResponse, error) {
 	var response importUploadResponse
-	if err := c.doMultipartJSON("/v1/apps/import-upload", req, archiveName, archiveBytes, &response); err != nil {
+	if err := c.doMultipartJSONWithTimeout("/v1/apps/import-upload", req, archiveName, archiveBytes, &response, sourceUploadClientTimeout); err != nil {
 		return importUploadResponse{}, err
 	}
 	return response, nil
@@ -656,7 +658,7 @@ func (c *Client) ImportUpload(req importUploadRequest, archiveName string, archi
 
 func (c *Client) InspectUploadTemplate(req importUploadRequest, archiveName string, archiveBytes []byte) (inspectUploadTemplateResponse, error) {
 	var response inspectUploadTemplateResponse
-	if err := c.doMultipartJSON("/v1/templates/inspect-upload", req, archiveName, archiveBytes, &response); err != nil {
+	if err := c.doMultipartJSONWithTimeout("/v1/templates/inspect-upload", req, archiveName, archiveBytes, &response, sourceUploadClientTimeout); err != nil {
 		return inspectUploadTemplateResponse{}, err
 	}
 	return response, nil
@@ -664,6 +666,17 @@ func (c *Client) InspectUploadTemplate(req importUploadRequest, archiveName stri
 
 func (c *Client) doMultipartJSON(relativePath string, requestBody any, archiveName string, archiveBytes []byte, responseBody any) error {
 	return c.doMultipartJSONWithFileField(relativePath, requestBody, "archive", archiveName, archiveBytes, responseBody)
+}
+
+func (c *Client) doMultipartJSONWithTimeout(relativePath string, requestBody any, archiveName string, archiveBytes []byte, responseBody any, timeout time.Duration) error {
+	if timeout <= 0 || c == nil || c.httpClient == nil {
+		return c.doMultipartJSON(relativePath, requestBody, archiveName, archiveBytes, responseBody)
+	}
+	scoped := *c
+	httpClient := *c.httpClient
+	httpClient.Timeout = timeout
+	scoped.httpClient = &httpClient
+	return scoped.doMultipartJSON(relativePath, requestBody, archiveName, archiveBytes, responseBody)
 }
 
 func (c *Client) doMultipartJSONWithFileField(relativePath string, requestBody any, fileFieldName, fileName string, fileBytes []byte, responseBody any) error {

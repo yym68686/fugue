@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +110,36 @@ func TestDataObjectRequestsUseDedicatedClientWithoutAPITimeout(t *testing.T) {
 	}
 	if objectAttempts != 1 {
 		t.Fatalf("expected one data object attempt, got %d", objectAttempts)
+	}
+}
+
+func TestSourceUploadRequestsUseDedicatedTimeout(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newClientWithOptions(server.URL, "token", clientOptions{
+		RequireToken:   true,
+		RequestTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	if _, err := client.InspectUploadTemplate(importUploadRequest{Name: "demo"}, "demo.tgz", []byte("archive")); err != nil {
+		t.Fatalf("inspect upload: %v", err)
+	}
+	if _, err := client.ImportUpload(importUploadRequest{Name: "demo"}, "demo.tgz", []byte("archive")); err != nil {
+		t.Fatalf("import upload: %v", err)
+	}
+	if client.httpClient.Timeout != 10*time.Millisecond {
+		t.Fatalf("source upload must not mutate the base client timeout, got %s", client.httpClient.Timeout)
 	}
 }
