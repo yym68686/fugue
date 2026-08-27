@@ -36,6 +36,8 @@ const (
 	defaultKubectlReadAttempts                 = 2
 	defaultKubectlReadRetryDelay               = 250 * time.Millisecond
 	maxScalarOwnershipApplyAttempts            = 4
+	maxLegacyEnvironmentCleanupAttempts        = 5
+	legacyEnvironmentCleanupRetryDelay         = 100 * time.Millisecond
 	probeBridgeManagerPrefix                   = "fugue-probe-bridge-"
 	trustedCurrentArtifactEnv                  = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
 	retryLegacyEnvironmentTombstonesAnnotation = "fugue.pro/retry-legacy-environment-tombstones"
@@ -1125,52 +1127,68 @@ func (cluster *kubectlCluster) pruneOmittedLegacyEnvironment(ctx context.Context
 	if len(legacyEnvironmentRemovalNames(desired)) == 0 {
 		return nil
 	}
-	liveRaw, err := cluster.getResource(ctx, identity)
-	if err != nil || resourceAbsent(liveRaw) {
-		return err
-	}
-	live, err := decodeJSONObject(liveRaw)
-	if err != nil {
-		return err
-	}
-	removals, err := omittedLegacyEnvironmentEntries(desired, live)
-	if err != nil || len(removals) == 0 {
-		return err
-	}
-	metadata := mapField(live, "metadata")
-	uid, rv := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"])
-	if !validKubernetesResourceVersion(rv) || uid == "" {
-		return errors.New("legacy environment cleanup lacks UID/RV")
-	}
-	sort.Slice(removals, func(i, j int) bool {
-		if removals[i].containerIndex != removals[j].containerIndex {
-			return removals[i].containerIndex < removals[j].containerIndex
+	var lastErr error
+	for attempt := 1; attempt <= maxLegacyEnvironmentCleanupAttempts; attempt++ {
+		if attempt > 1 {
+			timer := time.NewTimer(legacyEnvironmentCleanupRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
-		return removals[i].envIndex > removals[j].envIndex
-	})
-	patch := []map[string]any{
-		{"op": "test", "path": "/metadata/uid", "value": uid},
-		{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
+		liveRaw, err := cluster.getResource(ctx, identity)
+		if err != nil || resourceAbsent(liveRaw) {
+			return err
+		}
+		live, err := decodeJSONObject(liveRaw)
+		if err != nil {
+			return err
+		}
+		removals, err := omittedLegacyEnvironmentEntries(desired, live)
+		if err != nil || len(removals) == 0 {
+			return err
+		}
+		metadata := mapField(live, "metadata")
+		uid, rv := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"])
+		if !validKubernetesResourceVersion(rv) || uid == "" {
+			return errors.New("legacy environment cleanup lacks UID/RV")
+		}
+		sort.Slice(removals, func(i, j int) bool {
+			if removals[i].containerIndex != removals[j].containerIndex {
+				return removals[i].containerIndex < removals[j].containerIndex
+			}
+			return removals[i].envIndex > removals[j].envIndex
+		})
+		patch := []map[string]any{
+			{"op": "test", "path": "/metadata/uid", "value": uid},
+			{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
+		}
+		for _, removal := range removals {
+			base := "/spec/template/spec/containers/" + strconv.Itoa(removal.containerIndex)
+			envPath := base + "/env/" + strconv.Itoa(removal.envIndex)
+			patch = append(patch,
+				map[string]any{"op": "test", "path": base + "/name", "value": removal.containerName},
+				map[string]any{"op": "test", "path": envPath + "/name", "value": removal.envName},
+				map[string]any{"op": "remove", "path": envPath},
+			)
+		}
+		encoded, err := declarativerelease.CanonicalJSON(patch)
+		if err != nil {
+			return err
+		}
+		if _, err := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
+			"--namespace", identity.Namespace, "--type=json", "--field-manager", release.Workload.FieldManager,
+			"--patch", string(encoded), "--output", "json"); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
 	}
-	for _, removal := range removals {
-		base := "/spec/template/spec/containers/" + strconv.Itoa(removal.containerIndex)
-		envPath := base + "/env/" + strconv.Itoa(removal.envIndex)
-		patch = append(patch,
-			map[string]any{"op": "test", "path": base + "/name", "value": removal.containerName},
-			map[string]any{"op": "test", "path": envPath + "/name", "value": removal.envName},
-			map[string]any{"op": "remove", "path": envPath},
-		)
-	}
-	encoded, err := declarativerelease.CanonicalJSON(patch)
-	if err != nil {
-		return err
-	}
-	if _, err := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
-		"--namespace", identity.Namespace, "--type=json", "--field-manager", release.Workload.FieldManager,
-		"--patch", string(encoded), "--output", "json"); err != nil {
-		return fmt.Errorf("remove omitted legacy environment: %w", err)
-	}
-	return nil
+	return fmt.Errorf("remove omitted legacy environment after %d attempts: %w", maxLegacyEnvironmentCleanupAttempts, lastErr)
 }
 
 type omittedLegacyEnvironmentEntry struct {
