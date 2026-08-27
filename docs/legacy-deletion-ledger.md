@@ -1,7 +1,7 @@
 # Fugue 历史兼容/重复逻辑删除台账
 
 状态：按原子步骤执行中；每项删除或迁移均需独立推送、生产收敛并记录证据后，才进入下一项。
-审计基线：后端 `origin/main`，commit `9446727fe109e2bb9b00499e6e1c2a50f68772c8`（2026-08-26）。本轮只审计该主线快照；未提交工作树和其他分支不计入“已收敛”。凡台账记录生产收敛，均同时列出当次 CI 和只读生产现场证据。
+审计基线：后端 `origin/main`，commit `31a9d03ffe61a3ebaf650d4ee2f447f6136e2c6a`（2026-08-27）。本轮只审计该主线快照；未提交工作树和其他分支不计入“已收敛”。凡台账记录生产收敛，均同时列出当次 CI 和只读生产现场证据。
 
 范围：本台账覆盖已确认的流量、Edge、DNS、artifact、Guardian、发布和相关存储路径。它不把全仓库所有带 `legacy` 名称的业务数据兼容都列为删除对象。表中的“生产”表示代码入口或仓库内生产资源已启用；凡标记“需现场证明”的项目，都必须通过实际节点、请求和 metrics 再确认，不能只看 manifest。
 
@@ -99,7 +99,7 @@
 | P07 | `MIGRATE_THEN_DELETE` | `cmd/fugue-declarative-release/kubectl_cluster.go` legacy SSA ownership transfer，含 `helm`/`before-first-apply` | server-side apply 冲突恢复 | 正常 execute 路径会在 apply conflict 后尝试严格 scalar CAS transfer；`181d11de` 新增 synthetic owner | 生产对象 managedFields 全部归属 canonical declarative field manager | legacy manager 冲突和 transfer 命中为0；所有对象有 canonical ownership receipt；升级/回滚演练通过 | `kubectl_cluster_test.go`; ownership conflict/transfer metrics；managedFields scan |
 | P08 | `CONVERGE` | `internal/declarativerelease/execution.go` `CommittedForwardReconciler`；`edge_group_transition.go` `ReconcileCommittedForward`；`monitor.go` `adopt-committed-monitor`；`releaseguardian.AdoptCurrentStable` | Edge authority CAS 已提交但 executor/monitor terminal receipt 丢失后的只读恢复 | `5ee59c06` 加入主线；命令入口、ReconcileExecution 分支和 Guardian store CAS 均已连接 | 将 authority transaction receipt 与 monitor terminal 原子化，常规 reconcile 直接消费同一 immutable receipt | 注入 executor crash 后无需专用 CLI；无 monitor pointer/DesiredRelease 分叉；Lease、UID/RV、digest 和 current/previous identity 约束保持 | `execution_test.go`; `edge_group_transition_test.go`; `publisher_test.go`; `kube_store_test.go` |
 | P09 | `MIGRATE_THEN_DELETE` | `internal/declarativerelease/edge_group_registry.go` `componentSourceRootsStrictlyNarrowed` | planner 允许未选中组件只缩小 `sourceRoots` | `5ee59c06` 主线调用；仅在其余 Component canonical JSON 完全相同时放行 | registry schema migration atom 或独立配置迁移，不借代码 release 选择规则修正依赖 | 所有历史 over-broad `sourceRoots` 已迁移；后续 registry parent 不再需要例外；测试改为拒绝未选中组件变化 | `edge_group_registry_test.go`; production registry ancestry scan |
-| P10 | `DELETE_NOW` | `cmd/fugue-declarative-release/edge_group_transition.go` `LegacyIdentity`、`parseEdgeGroupPods` wrapper、`allowLegacy`/`legacySource` 参数分支 | 仅测试直接调用 wrapper；唯一非测试 caller 对 `parseEdgeGroupPodsWithReadiness` 固定传 `false, ""`；`LegacyIdentity` 无读取者 | 生产分支不可达 | 删除字段和 legacy 参数，保留严格 group/source identity 校验 | 更新测试调用；确认 `rg` 无动态/反射消费者 | `rg LegacyIdentity`; `rg parseEdgeGroupPods`; `go test ./cmd/fugue-declarative-release` |
+| P10 | `REMOVED` | `cmd/fugue-declarative-release/edge_group_transition.go` `LegacyIdentity`、`parseEdgeGroupPods` wrapper、`allowLegacy`/`legacySource` 参数分支 | 无；严格要求 `fugue.io/edge-group-id`，保留 source identity 校验 | CI run `33035009798`：prepush、component-build、`deploy_release_guardian` 成功；生产 guardian/canary 两 Deployment 均加载 `31a9d03f`，镜像 `sha256:22337a5d19f1f32fe9bd05a7721f2c546a16f97d299f6c3cd00f5d0969c74b98`，1/1 Ready、重启 0；API `/healthz` 200 | 严格 group/source identity parser | `rg` 无 `LegacyIdentity`/`parseEdgeGroupPods`/该文件 legacy 参数；`go test ./...`、`make prepush` 通过；生产滚动后 Deployment events 仅正常替换 |
 | S01 | `MIGRATE_THEN_DELETE` | `internal/store/edge_node_instances_pg.go` `pgEnsureEdgeInstanceFencing` | Postgres Store `Init()` | 每次API启动检查/首次迁移 | 独立离线schema migration | 所有DB有marker+receipt；旧表零活跃消费者；冷启动和回滚通过 | `edge_node_instances_pg_integration_test.go`; migration rehearsal |
 | S02 | `MIGRATE_THEN_DELETE` | `internal/store/edge_node_instances.go` file migration | JSON Store `Init()` | dev/test启动路径 | 离线fixture migration | 支持窗口结束或移入test migration tool | `edge_node_instances_test.go`; fixture migration test |
 | S03 | `MIGRATE_THEN_DELETE` | `internal/store/edge_route_policies.go` legacy exclusions migration | JSON Store `Init()` | dev/test启动路径 | 一次性policy migration | 所有fixture/state已转为hold/drain语义；旧字段扫描为0 | `edge_route_policies_test.go`; migration fixture scan |
@@ -120,9 +120,9 @@
 
 ## 当前最先可执行的安全清理
 
-- 删除 P10 的不可达 `allowLegacy`/`legacySource` 参数、`LegacyIdentity` 字段和测试 wrapper；R02 已完成，不要重复安排。
+- P10 已完成：不可达 `allowLegacy`/`legacySource` 参数、`LegacyIdentity` 字段和测试 wrapper 已删除，并经 CI run `33035009798` 和生产滚动后只读门禁确认；不要重复安排。
 - R03 已完成：`FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP` 已停止发布并在 DE/US 生产收敛，不要重复安排。
 - R04 已完成：Core API `/v1/edge/routes` 已在零命中窗口后删除；Edge Control 同名组内签名 reader 继续保留，不能与已删除的 Core API 入口混为一项。
 - R05/R06/D01-D05 已完成删除/收敛；R07/R08/A01 已完成语义收敛并确认为目标架构所需的 `KEEP` 能力，不再安排删除。D04 已完成 immutable shadow、每节点 verified LKG/full current、handler 只读 immutable full、停止 compatibility 写入/移除旧 row 验证依赖，以及删除旧 mutable store/schema bootstrap；D05 已在零 raw 命中门禁后删除 raw cache reader，DNS LKG 只接受 envelope。两项生产切换均通过连续最多 10 分钟门禁，旧表历史数据仅作审计保留，不再进入运行时。
 - 继续为 legacy Edge token 和空 topology pair 增加命中计数；没有计数证据前不删除生产路径。
-- 为 G09-G12、P06-P09、C01、I01、W01、M01 增加迁移计数和零命中门禁；是否允许下一枚生产 atom 必须以当次只读 authority/monitor/route 证据判断，不能沿用 2026-08-22 的历史现场状态。
+- 为 E01-E04、G09-G12、P06-P09、C01、I01、W01、M01 增加迁移计数和零命中门禁；是否允许下一枚生产 atom 必须以当次只读 authority/monitor/route 证据判断，不能沿用 2026-08-22 的历史现场状态。P10 完成后，按台账顺序先评估 E01。
