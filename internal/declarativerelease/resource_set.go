@@ -508,12 +508,15 @@ func BootstrapPredecessorConvergenceManifest(manifest []byte, release PlanReleas
 	return CanonicalJSON(set)
 }
 
+const retryLegacyEnvironmentTombstonesAnnotation = "fugue.pro/retry-legacy-environment-tombstones"
+
 // RetryPredecessorConvergenceManifest binds an unhealthy prior declarative
 // attempt to the current reviewed resource shape while excluding only the
-// immutable image and release identity injected by the renderer. The caller
-// separately verifies that the live object is owned by this component's field
-// manager and that its immutable image carries the same OCI revision as its
-// source annotations.
+// immutable image, release identity, and explicitly reviewed legacy
+// environment tombstones injected by the renderer. The caller separately
+// verifies that the live object is owned by this component's field manager and
+// that its immutable image carries the same OCI revision as its source
+// annotations.
 func RetryPredecessorConvergenceManifest(manifest []byte, release PlanRelease) ([]byte, error) {
 	set, err := DecodeResourceSet(bytes.NewReader(manifest))
 	if err != nil {
@@ -559,6 +562,11 @@ func RetryPredecessorConvergenceManifest(manifest []byte, release PlanRelease) (
 				return nil, metadataErr
 			}
 			if annotations, ok := templateMetadata["annotations"].(map[string]any); ok {
+				if tombstones, ok := annotations["fugue.pro/declarative-environment-tombstones"].(string); ok && strings.TrimSpace(tombstones) != "" {
+					// Keep this only as an in-memory recovery witness marker. It is
+					// consumed by the recovery convergence check and is never applied.
+					annotations[retryLegacyEnvironmentTombstonesAnnotation] = tombstones
+				}
 				for _, key := range []string{
 					"fugue.pro/artifact-image",
 					"fugue.pro/artifact-receipt-digest",
@@ -566,6 +574,7 @@ func RetryPredecessorConvergenceManifest(manifest []byte, release PlanRelease) (
 					"fugue.pro/production-config-sha",
 					"fugue.pro/release-plan-digest",
 					"fugue.pro/source-commit",
+					"fugue.pro/declarative-environment-tombstones",
 				} {
 					delete(annotations, key)
 				}

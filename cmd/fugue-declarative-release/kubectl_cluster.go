@@ -31,13 +31,14 @@ import (
 )
 
 const (
-	maxKubernetesOutputBytes        = 4 << 20
-	defaultKubectlReadTimeout       = 15 * time.Second
-	defaultKubectlReadAttempts      = 2
-	defaultKubectlReadRetryDelay    = 250 * time.Millisecond
-	maxScalarOwnershipApplyAttempts = 4
-	probeBridgeManagerPrefix        = "fugue-probe-bridge-"
-	trustedCurrentArtifactEnv       = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
+	maxKubernetesOutputBytes                   = 4 << 20
+	defaultKubectlReadTimeout                  = 15 * time.Second
+	defaultKubectlReadAttempts                 = 2
+	defaultKubectlReadRetryDelay               = 250 * time.Millisecond
+	maxScalarOwnershipApplyAttempts            = 4
+	probeBridgeManagerPrefix                   = "fugue-probe-bridge-"
+	trustedCurrentArtifactEnv                  = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
+	retryLegacyEnvironmentTombstonesAnnotation = "fugue.pro/retry-legacy-environment-tombstones"
 )
 
 var (
@@ -2401,11 +2402,73 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 		if decodeErr != nil {
 			return decodeErr
 		}
-		if !declarativerelease.ResourceDesiredSubset(desired, live) {
+		convergenceDesired, convergenceLive, normalizeErr := normalizeRetryLegacyEnvironment(desired, live)
+		if normalizeErr != nil {
+			return normalizeErr
+		}
+		if !declarativerelease.ResourceDesiredSubset(convergenceDesired, convergenceLive) {
 			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
 		}
 	}
 	return nil
+}
+
+// normalizeRetryLegacyEnvironment prepares the in-memory predecessor witness
+// for an old Helm-owned env entry that the reviewed release explicitly deletes.
+// It removes only those exact entries from the comparison copy; all other
+// environment and workload fields remain subject to the normal subset check.
+func normalizeRetryLegacyEnvironment(desired, live map[string]any) (map[string]any, map[string]any, error) {
+	templateMetadata := mapField(mapField(mapField(desired, "spec"), "template"), "metadata")
+	annotations := mapField(templateMetadata, "annotations")
+	raw := strings.TrimSpace(stringValue(annotations[retryLegacyEnvironmentTombstonesAnnotation]))
+	if raw == "" {
+		return desired, live, nil
+	}
+	// Reuse the ownership-aware selector used by the post-apply cleanup. The
+	// temporary annotation is removed before subset comparison so it cannot
+	// become a live-resource requirement.
+	annotations["fugue.pro/declarative-environment-tombstones"] = raw
+	entries, err := omittedLegacyEnvironmentEntries(desired, live)
+	delete(annotations, "fugue.pro/declarative-environment-tombstones")
+	delete(annotations, retryLegacyEnvironmentTombstonesAnnotation)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(entries) == 0 {
+		return desired, live, nil
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].containerIndex != entries[j].containerIndex {
+			return entries[i].containerIndex < entries[j].containerIndex
+		}
+		return entries[i].envIndex > entries[j].envIndex
+	})
+	liveSpec := mapField(mapField(live, "spec"), "template")
+	liveSpec = mapField(liveSpec, "spec")
+	containers := anySlice(liveSpec["containers"])
+	for _, entry := range entries {
+		if entry.containerIndex < 0 || entry.containerIndex >= len(containers) {
+			return nil, nil, errors.New("retry legacy environment container index is invalid")
+		}
+		container, ok := containers[entry.containerIndex].(map[string]any)
+		if !ok {
+			return nil, nil, errors.New("retry legacy environment container is invalid")
+		}
+		env := anySlice(container["env"])
+		if entry.envIndex < 0 || entry.envIndex >= len(env) {
+			return nil, nil, errors.New("retry legacy environment index is invalid")
+		}
+		if stringValue(mapFieldFromAny(env[entry.envIndex])["name"]) != entry.envName {
+			return nil, nil, errors.New("retry legacy environment identity changed")
+		}
+		container["env"] = append(env[:entry.envIndex], env[entry.envIndex+1:]...)
+	}
+	return desired, live, nil
+}
+
+func mapFieldFromAny(value any) map[string]any {
+	field, _ := value.(map[string]any)
+	return field
 }
 
 func (cluster *kubectlCluster) VerifyOwnershipConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
