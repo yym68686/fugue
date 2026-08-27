@@ -414,6 +414,26 @@ func validateCandidateServingAuthorityBinding(envelope candidateEnvelope, curren
 		current.CurrentWorkerImageDigest == witness.WorkerImageDigest {
 		return nil
 	}
+	// Edge Control may republish the signed route bundle without changing the
+	// serving Front activation or Worker code.  In that narrow case the old
+	// CurrentAuthority pointer can name the previous bundle family while the
+	// live Front witness names the newer signed current bundle.  Keep the
+	// authority identity, Front generation, slot, source, and image exact; only
+	// accept a strictly newer publication from the envelope's signed current
+	// bundle.  A slot/code change still follows the parity and degraded-recovery
+	// checks below.
+	if current.CurrentFrontGeneration == witness.FrontGeneration && current.CurrentWorkerSlot == witness.WorkerSlot &&
+		current.CurrentWorkerSourceSHA == witness.WorkerSourceSHA && current.CurrentWorkerImageDigest == witness.WorkerImageDigest {
+		_, currentSequence, currentRecovery, currentErr := parseUnboundAuthorityBundleVersion(current.CurrentBundleGeneration)
+		witnessGeneration, witnessSequence, witnessRecovery, witnessErr := parseUnboundAuthorityBundleVersion(witness.BundleVersion)
+		envelopeGeneration := strings.TrimSpace(envelope.CurrentBundle.Generation)
+		envelopeSequence, envelopeRecovery, envelopeErr := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
+		if currentErr == nil && witnessErr == nil && envelopeErr == nil && witnessGeneration == envelopeGeneration &&
+			envelopeSequence > currentSequence && envelopeRecovery >= currentRecovery && envelopeRecovery == witnessRecovery &&
+			witnessSequence == envelopeSequence {
+			return nil
+		}
+	}
 	// During controlled recovery Front may already have committed several signed
 	// slot switches beyond Guardian CurrentAuthority. Slot parity is the durable
 	// invariant: an odd delta changes slots and an even delta returns to the same

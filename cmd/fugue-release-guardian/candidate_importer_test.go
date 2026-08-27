@@ -712,6 +712,53 @@ func TestCandidateImporterBindsCrossRecoveryWitnessToExactGuardianCurrent(t *tes
 	}
 }
 
+func TestCandidateImporterAcceptsSameFrontGenerationAfterSignedBundleRepublish(t *testing.T) {
+	now := time.Date(2026, 8, 27, 19, 0, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-group-country-de", now)
+	oldGeneration := "edgegroupbundle-old"
+	newGeneration := "edgegroupbundle-new"
+	envelope.CurrentBundle.Generation = newGeneration
+	envelope.CurrentBundle.Version = newGeneration + ".p4.r513"
+	envelope.Bundle.Generation = newGeneration
+	envelope.Bundle.Version = newGeneration + ".p5.r0"
+	envelope.Bundle.PreviousGeneration = newGeneration
+	envelope.CurrentRecord.BundleDigest = candidateBundleDigest(*envelope.CurrentBundle)
+	currentRecord, err := envelope.CurrentRecord.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.CurrentRecord = &currentRecord
+	envelope.Record.BundleDigest = candidateBundleDigest(envelope.Bundle)
+	candidateRecord, err := envelope.Record.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Record = candidateRecord
+	envelope.ServingAuthority = &candidateServingAuthorityWitness{
+		CurrentRecordDigest: "sha256:" + strings.Repeat("a", 64), AuthorityEpoch: 26086,
+		CurrentAuthorityUID: "current-authority", CurrentAuthorityRV: "78994090", FrontGeneration: 161,
+		BundleVersion: envelope.CurrentBundle.Version, WorkerSlot: envelope.CurrentWorkerSlot,
+		WorkerSourceSHA: strings.Repeat("b", 40), WorkerImageDigest: "sha256:" + strings.Repeat("c", 64),
+	}
+	current := releaseguardian.CurrentAuthority{
+		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind, GroupID: envelope.GroupID,
+		CurrentRecordDigest: envelope.ServingAuthority.CurrentRecordDigest, AuthorityEpoch: envelope.ServingAuthority.AuthorityEpoch,
+		CurrentFrontGeneration: envelope.ServingAuthority.FrontGeneration, CurrentBundleGeneration: oldGeneration + ".p3.r513",
+		CurrentWorkerSlot: envelope.ServingAuthority.WorkerSlot, CurrentWorkerSourceSHA: envelope.ServingAuthority.WorkerSourceSHA,
+		CurrentWorkerImageDigest: envelope.ServingAuthority.WorkerImageDigest,
+	}
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("republished candidate envelope was rejected: %v", err)
+	}
+	if err := validateCandidateServingAuthorityBinding(envelope, current, "current-authority", "78994090"); err != nil {
+		t.Fatalf("same-front-generation bundle republish was rejected: %v", err)
+	}
+	envelope.ServingAuthority.WorkerSourceSHA = strings.Repeat("d", 40)
+	if err := validateCandidateServingAuthorityBinding(envelope, current, "current-authority", "78994090"); err == nil {
+		t.Fatal("same-front-generation code drift was accepted")
+	}
+}
+
 func TestCandidateImporterAcceptsTheSharedEdgeControlRecordIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 12, 5, 0, 0, 0, time.UTC)
 	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
