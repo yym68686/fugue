@@ -29,6 +29,7 @@ spec:
         {{- end }}
       annotations:
         fugue.pro/source-commit: {{ .Values.api.image.tag | quote }}
+        fugue.pro/declarative-environment-tombstones: FUGUE_EDGE_TLS_ASK_TOKEN,FUGUE_ALLOW_LEGACY_EDGE_TOKEN
         checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
         checksum/platform-component-identity-secret: {{ include "fugue.platformComponentIdentitySecretChecksum" . }}
         checksum/headscale-config: {{ include (print $.Template.BasePath "/headscale-config.yaml") . | sha256sum }}
