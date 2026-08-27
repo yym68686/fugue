@@ -115,6 +115,8 @@ type Server struct {
 	edgeRouteDecisionLast                  map[string]string
 	edgeRouteSourceMu                      sync.Mutex
 	edgeRouteSourceHeartbeats              map[string]uint64
+	edgeAuthMu                             sync.Mutex
+	edgeAuthMethods                        map[string]uint64
 	consoleGalleryCache                    expiringResponseCache[consoleGalleryResponse]
 	billingImageStorageRefresh             billingImageStorageRefreshScheduler
 	sourceUploadSlots                      chan struct{}
@@ -387,6 +389,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.writeHostedDNSMetrics(w)
 	s.writeEdgeExclusionMetrics(w)
 	s.writeEdgeRouteSourceMetrics(w)
+	s.writeEdgeAuthMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {

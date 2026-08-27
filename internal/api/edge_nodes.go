@@ -1099,12 +1099,14 @@ func (ctx edgeAuthContext) constrain(edgeID *string, edgeGroupID *string) error 
 func (s *Server) authorizeEdgeRequest(w http.ResponseWriter, r *http.Request) (edgeAuthContext, bool) {
 	token := edgeTokenFromRequest(r)
 	if token == "" {
+		s.recordEdgeAuthMethod("denied")
 		httpx.WriteError(w, http.StatusForbidden, "forbidden")
 		return edgeAuthContext{}, false
 	}
 	if s.store != nil {
 		node, err := s.store.AuthenticateEdgeNode(token)
 		if err == nil {
+			s.recordEdgeAuthMethod("scoped")
 			return edgeAuthContext{
 				EdgeID:      node.ID,
 				EdgeGroupID: node.EdgeGroupID,
@@ -1117,8 +1119,10 @@ func (s *Server) authorizeEdgeRequest(w http.ResponseWriter, r *http.Request) (e
 		}
 	}
 	if s.allowLegacyEdgeToken && strings.TrimSpace(s.edgeTLSAskToken) != "" && subtleConstantCompare(token, s.edgeTLSAskToken) {
+		s.recordEdgeAuthMethod("legacy")
 		return edgeAuthContext{}, true
 	}
+	s.recordEdgeAuthMethod("denied")
 	httpx.WriteError(w, http.StatusForbidden, "forbidden")
 	return edgeAuthContext{}, false
 }

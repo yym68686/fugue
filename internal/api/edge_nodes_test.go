@@ -135,6 +135,36 @@ func TestEdgeHeartbeatRouteSourceMetricsAreLowCardinality(t *testing.T) {
 	}
 }
 
+func TestEdgeAuthenticationMethodMetricsAreLowCardinality(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	_, scopedToken, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID: "edge-auth-1", EdgeGroupID: "edge-group-country-us", Status: model.EdgeHealthHealthy,
+	})
+	if err != nil {
+		t.Fatalf("create scoped edge token: %v", err)
+	}
+	for _, token := range []string{scopedToken, "edge-secret", "wrong-token"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token, nil)
+		server.authorizeEdgeRequest(recorder, request)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics := recorder.Body.String()
+	for _, want := range []string{
+		`fugue_edge_authentications_total{method="scoped"} 1.000000`,
+		`fugue_edge_authentications_total{method="legacy"} 1.000000`,
+		`fugue_edge_authentications_total{method="denied"} 1.000000`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+}
+
 func TestEdgeHeartbeatStoresPerformanceSamples(t *testing.T) {
 	t.Parallel()
 
