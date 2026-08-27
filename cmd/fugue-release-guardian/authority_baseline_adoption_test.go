@@ -23,6 +23,16 @@ type baselineActivationExecutor struct {
 	raw []byte
 }
 
+type candidateLoadCountingBaselineStore struct {
+	authorityBaselineStore
+	candidateLoads int
+}
+
+func (store *candidateLoadCountingBaselineStore) LoadCandidate(ctx context.Context, groupID string) (releaseguardian.CandidateAuthority, types.UID, string, error) {
+	store.candidateLoads++
+	return store.authorityBaselineStore.LoadCandidate(ctx, groupID)
+}
+
 func TestAuthorityRecoveryCohortLimitLeavesPaginationHeadroom(t *testing.T) {
 	for _, test := range []struct {
 		nodes int
@@ -268,8 +278,12 @@ func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *t
 	if next, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), object.Name, metav1.GetOptions{}); err != nil || next.Data["normalization-receipt.json"] == "" {
 		t.Fatalf("normalization receipt missing: %v", err)
 	}
-	if done, err := adoptAuthorityBaselineOnce(context.Background(), store, client, "fugue-system", config, now.Add(time.Minute)); err != nil || !done {
+	countingStore := &candidateLoadCountingBaselineStore{authorityBaselineStore: store}
+	if done, err := adoptAuthorityBaselineOnce(context.Background(), countingStore, client, "fugue-system", config, now.Add(time.Minute)); err != nil || !done {
 		t.Fatalf("established current without candidate flag done=%v err=%v", done, err)
+	}
+	if countingStore.candidateLoads != 0 {
+		t.Fatalf("established baseline entered orphan repair with a matching active slot: candidate loads=%d", countingStore.candidateLoads)
 	}
 }
 

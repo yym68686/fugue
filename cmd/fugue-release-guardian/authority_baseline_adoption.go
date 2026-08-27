@@ -184,7 +184,7 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 	if activeSlot.Validate() != nil {
 		return false, errors.New("Front baseline has an invalid active authority")
 	}
-	if before.BaselineReceiptDigest != "" {
+	if before.BaselineReceiptDigest != "" && activeSlot != before.CurrentWorkerSlot {
 		repaired, repairErr := repairOrphanedAuthority(ctx, store, client, namespace, config, before, uid, rv, fronts)
 		if repairErr != nil {
 			return false, repairErr

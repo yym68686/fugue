@@ -16,6 +16,7 @@ import (
 
 type testFrontActivator struct {
 	beginErr    error
+	beginCount  *int
 	transaction *testFrontTransaction
 	settled     bool
 	settleErr   error
@@ -49,6 +50,14 @@ type testAuthorityDecisionStore struct {
 	deleteCount   *int
 	journal       *AuthorityTransitionJournal
 	normalization *AuthorityNormalizationReceipt
+	claimErr      error
+}
+
+func (store testAuthorityDecisionStore) ClaimVerifiedCandidate(ctx context.Context, candidate CandidateAuthority, uid types.UID, rv string) error {
+	if store.claimErr != nil {
+		return store.claimErr
+	}
+	return store.AuthorityStore.ClaimVerifiedCandidate(ctx, candidate, uid, rv)
 }
 
 func (store testAuthorityDecisionStore) LoadBaselineReceipt(context.Context, string) (AuthorityBaselineReceipt, error) {
@@ -98,6 +107,9 @@ func (store testAuthorityDecisionStore) DeleteTransitionJournal(_ context.Contex
 }
 
 func (activator testFrontActivator) BeginPromote(_ context.Context, target FrontAuthorityTarget) (FrontAuthorityTransaction, error) {
+	if activator.beginCount != nil {
+		*activator.beginCount++
+	}
 	if activator.beginErr != nil {
 		return nil, activator.beginErr
 	}
@@ -483,6 +495,91 @@ func TestAuthorityControllerDropsPreparedJournalAfterTypedPrewriteCASWithoutTraf
 	candidate, _, _, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
 	if err != nil || candidate.State != CandidateAuthorityVerified {
 		t.Fatalf("typed prewrite CAS did not retain terminal candidate: candidate=%+v err=%v", candidate, err)
+	}
+}
+
+func TestAuthorityControllerReplaysVerifiedCandidateAfterJournalWasSettled(t *testing.T) {
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{})
+	candidate, candidateUID, candidateRV, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := candidate
+	verified.State, verified.Generation, verified.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, fixture.result.ResultDigest
+	if _, _, err := fixture.store.PutCandidate(context.Background(), verified, candidateUID, candidateRV); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := fixture.store.LoadTransitionJournal(context.Background(), fixture.group); err != nil || exists {
+		t.Fatalf("verified candidate unexpectedly has a transition journal: exists=%v err=%v", exists, err)
+	}
+	receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group)
+	if err != nil || !changed || receipt.Action != AuthorityCurrentSwitched {
+		t.Fatalf("verified candidate was not replayed: receipt=%+v changed=%v err=%v", receipt, changed, err)
+	}
+	current, _, _, err := fixture.store.LoadCurrent(context.Background(), fixture.group)
+	if err != nil || current.CurrentRecordDigest != verified.RecordDigest || current.CurrentWorkerSlot != verified.WorkerSlot {
+		t.Fatalf("replayed candidate did not become current: current=%+v err=%v", current, err)
+	}
+}
+
+func TestAuthorityControllerLeavesVerifiedCurrentCandidateSettled(t *testing.T) {
+	beginCount := 0
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{beginCount: &beginCount})
+	candidate, candidateUID, candidateRV, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := candidate
+	verified.State, verified.Generation, verified.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, fixture.result.ResultDigest
+	if _, _, err := fixture.store.PutCandidate(context.Background(), verified, candidateUID, candidateRV); err != nil {
+		t.Fatal(err)
+	}
+	settled := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: fixture.group,
+		CurrentRecordDigest: verified.RecordDigest, CurrentWorkerSlot: verified.WorkerSlot,
+		CurrentFrontGeneration: fixture.current.CurrentFrontGeneration + 1, CurrentBundleGeneration: verified.ServingGeneration + ".p8.r0",
+		CurrentWorkerSourceSHA: verified.WorkerSourceSHA, CurrentWorkerImageDigest: verified.WorkerImageDigest,
+		PreviousRecordDigest: fixture.current.CurrentRecordDigest, PreviousWorkerSlot: fixture.current.CurrentWorkerSlot,
+		PreviousFrontGeneration: fixture.current.CurrentFrontGeneration, PreviousBundleGeneration: fixture.current.CurrentBundleGeneration,
+		PreviousWorkerSourceSHA: fixture.current.CurrentWorkerSourceSHA, PreviousWorkerImageDigest: fixture.current.CurrentWorkerImageDigest,
+		AuthorityEpoch: fixture.current.AuthorityEpoch + 1, BaselineReceiptDigest: fixture.current.BaselineReceiptDigest}
+	object, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), currentAuthorityName(fixture.group), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.Data["authority.json"] = mustCanonicalJSON(t, settled)
+	if _, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group)
+	if err != nil || changed || receipt.ReceiptDigest != "" || beginCount != 0 {
+		t.Fatalf("settled current candidate was replayed: receipt=%+v changed=%v begins=%d err=%v", receipt, changed, beginCount, err)
+	}
+}
+
+func TestAuthorityControllerDoesNotReplayCandidateLostDuringClaim(t *testing.T) {
+	beginCount := 0
+	journal := AuthorityTransitionJournal{}
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{beginCount: &beginCount})
+	candidate, candidateUID, candidateRV, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := candidate
+	verified.State, verified.Generation, verified.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, fixture.result.ResultDigest
+	if _, _, err := fixture.store.PutCandidate(context.Background(), verified, candidateUID, candidateRV); err != nil {
+		t.Fatal(err)
+	}
+	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline, journal: &journal, claimErr: errors.New("candidate replacement won CAS")}
+	receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group)
+	if err == nil || changed || receipt.ReceiptDigest != "" || !strings.Contains(err.Error(), "candidate replacement won CAS") {
+		t.Fatalf("lost candidate claim was accepted: receipt=%+v changed=%v err=%v", receipt, changed, err)
+	}
+	if beginCount != 0 || journal.JournalDigest != "" {
+		t.Fatalf("lost candidate claim reached traffic or retained its journal: begins=%d journal=%+v", beginCount, journal)
+	}
+	current, _, _, err := fixture.store.LoadCurrent(context.Background(), fixture.group)
+	if err != nil || current != fixture.current {
+		t.Fatalf("lost candidate claim changed current authority: current=%+v err=%v", current, err)
 	}
 }
 

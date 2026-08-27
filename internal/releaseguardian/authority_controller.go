@@ -22,6 +22,7 @@ type authorityDecisionStore interface {
 	LoadCandidateCanaryResult(context.Context, CandidateAuthority, string, time.Time) (CandidateCanaryResult, error)
 	LoadLatestCandidateCanaryResult(context.Context, CandidateAuthority, time.Time) (CandidateCanaryResult, error)
 	PutCandidate(context.Context, CandidateAuthority, types.UID, string) (types.UID, string, error)
+	ClaimVerifiedCandidate(context.Context, CandidateAuthority, types.UID, string) error
 	SwitchCurrent(context.Context, CurrentAuthority, types.UID, string) (types.UID, string, error)
 	CreateTransitionJournal(context.Context, AuthorityTransitionJournal) error
 	UpdateTransitionJournal(context.Context, AuthorityTransitionJournal, AuthorityTransitionJournal) error
@@ -106,11 +107,16 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 		return receipt, changed, resumeErr
 	}
 	if candidate.State == CandidateAuthorityVerified {
-		// A verified candidate can only enter production while its immutable
-		// transition journal exists. With no journal it is either already
-		// current or a settled failed attempt awaiting importer replacement.
-		// Never reconstruct a production transaction from an expired canary.
-		return AuthorityTransitionReceipt{}, false, nil
+		if current.CurrentRecordDigest == candidate.RecordDigest && current.CurrentWorkerSlot == candidate.WorkerSlot {
+			return AuthorityTransitionReceipt{}, false, nil
+		}
+		// If a verified candidate's journal was retired after a prewrite CAS failure,
+		// replay the same signed canary and candidate through the normal CAS
+		// transaction. VerifyAndSwitch claims the candidate after creating the
+		// journal, so a concurrent settled-candidate replacement and this replay
+		// cannot both commit.
+		receipt, err := controller.VerifyAndSwitch(ctx, groupID, candidate.CanaryResultDigest)
+		return receipt, err == nil, err
 	}
 	resultDigest := candidate.CanaryResultDigest
 	if candidate.State == CandidateAuthorityLoaded {
@@ -424,6 +430,9 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 				return AuthorityTransitionReceipt{}, err
 			}
 			candidate = verifiedCandidate
+		} else if err := controller.store.ClaimVerifiedCandidate(ctx, candidate, candidateUID, candidateRV); err != nil {
+			_ = controller.store.DeleteTransitionJournal(context.WithoutCancel(ctx), journal)
+			return AuthorityTransitionReceipt{}, err
 		}
 	} else {
 		journal = *resume

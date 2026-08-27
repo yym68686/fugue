@@ -591,8 +591,9 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 }
 
 // ReplaceSettledCandidate advances a terminal pointer only after no immutable
-// transition journal remains. Reconcile never starts a verified candidate
-// without such a journal, so this CAS cannot race a production activation.
+// transition journal remains. A verified-candidate replay creates its journal
+// before claiming the candidate resourceVersion, so replacement and replay
+// cannot both win their CAS.
 func (store *AuthorityStore) ReplaceSettledCandidate(ctx context.Context, candidate CandidateAuthority, expectedUID types.UID, expectedResourceVersion string) (types.UID, string, error) {
 	if err := candidate.Validate(); err != nil || candidate.State != CandidateAuthorityLoaded {
 		return "", "", errors.New("settled candidate replacement is invalid")
@@ -614,6 +615,24 @@ func (store *AuthorityStore) ReplaceSettledCandidate(ctx context.Context, candid
 		}
 		return nil
 	})
+}
+
+// ClaimVerifiedCandidate advances only the Kubernetes resourceVersion while
+// preserving the exact terminal payload. It closes the cross-object race
+// between creating a replay journal and replacing a settled candidate: a
+// replacement that observed the journal as absent must still lose this CAS.
+func (store *AuthorityStore) ClaimVerifiedCandidate(ctx context.Context, candidate CandidateAuthority, expectedUID types.UID, expectedResourceVersion string) error {
+	if candidate.Validate() != nil || candidate.State != CandidateAuthorityVerified {
+		return errors.New("verified candidate claim is invalid")
+	}
+	_, _, err := store.putMutable(ctx, candidateAuthorityName(candidate.GroupID), candidate.GroupID, "candidate.json", candidate, expectedUID, expectedResourceVersion, func(raw string) error {
+		var current CandidateAuthority
+		if decodeStrict([]byte(raw), &current) != nil || current != candidate {
+			return errors.New("verified candidate claim changed")
+		}
+		return nil
+	})
+	return err
 }
 
 func (store *AuthorityStore) SwitchCurrent(ctx context.Context, authority CurrentAuthority, expectedUID types.UID, expectedResourceVersion string) (types.UID, string, error) {
