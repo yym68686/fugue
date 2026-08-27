@@ -248,7 +248,9 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 		fallback := servingAuthorityCanUseCandidateFallback(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
 			authority.Published.PublicationSequence, authority.Published.RecoveryEpoch, snapshot.ServingExists,
 			request.AllowDegradedPrevious && !request.StandbyOnly)
-		if fallback {
+		publicationRefresh := servingAuthorityCanUsePublicationRefresh(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
+			authority.Published.PublicationSequence, authority.Published.RecoveryEpoch, request.ExpectedCurrentWorkerSlot)
+		if fallback || publicationRefresh {
 			head = currentHead
 		} else if !snapshot.ServingExists || snapshot.ServingCandidate.Bundle == nil || snapshot.ServingCandidate.BundleArchived ||
 			snapshot.ServingCandidate.Status != GroupShadowStatusCompiled || snapshot.ServingCandidate.ActiveSlot != request.ExpectedCurrentWorkerSlot ||
@@ -376,6 +378,18 @@ func servingAuthorityCanUseCandidateFallback(version, currentGeneration string, 
 		}
 	}
 	return allowDegraded && servingAuthorityCanUseCurrentPublishedFallback(version, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, true)
+}
+
+// servingAuthorityCanUsePublicationRefresh binds a stale Front witness to the
+// current publication when only the validity-refresh sequence advanced. The
+// immutable route generation, active slot, and recovery epoch remain bounded;
+// no worker or traffic authority identity is relaxed.
+func servingAuthorityCanUsePublicationRefresh(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64, expectedWorkerSlot string) bool {
+	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
+	return ok && generation == strings.TrimSpace(currentGeneration) &&
+		publicationSequence <= currentPublicationSequence && recoveryEpoch <= currentRecoveryEpoch &&
+		(expectedWorkerSlot == "a" || expectedWorkerSlot == "b") &&
+		(publicationSequence < currentPublicationSequence || recoveryEpoch < currentRecoveryEpoch)
 }
 
 func servingAuthorityCanUsePrunedDegradedHistory(version string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {

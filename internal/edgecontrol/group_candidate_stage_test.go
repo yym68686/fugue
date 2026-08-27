@@ -237,6 +237,24 @@ func TestWorkerCandidateStageAllowsBoundedDegradedPublicationRefresh(t *testing.
 	}
 }
 
+func TestServingAuthorityPublicationRefreshSurvivesPrunedHistory(t *testing.T) {
+	const generation = "edgegroupbundle_same-generation"
+	if !servingAuthorityCanUsePublicationRefresh(groupPublicationVersion(generation, 26702, 513), generation, 26746, 513, "a") {
+		t.Fatal("same-generation validity refresh with pruned history was rejected")
+	}
+	for name, version := range map[string]string{
+		"different generation": groupPublicationVersion("edgegroupbundle_other", 26702, 513),
+		"future publication":   groupPublicationVersion(generation, 26747, 513),
+		"future recovery":      groupPublicationVersion(generation, 26702, 514),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if servingAuthorityCanUsePublicationRefresh(version, generation, 26746, 513, "a") {
+				t.Fatalf("unsafe publication refresh accepted: %s", version)
+			}
+		})
+	}
+}
+
 func TestWorkerCandidateStageAcceptsFailedAuditTailThatPreservesPublication(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 13, 8, 30, 0, 0, time.UTC)

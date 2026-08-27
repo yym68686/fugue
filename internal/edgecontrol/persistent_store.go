@@ -453,7 +453,10 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 				state.Published.PublicationSequence, state.Published.RecoveryEpoch, exists,
 				candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
 				candidate.CandidateLedgerSequence == state.Published.CandidateLedgerSequence
-			if fallback {
+			publicationRefresh := servingAuthorityCanUsePublicationRefresh(serving.BundleVersion, state.Published.Bundle.Generation,
+				state.Published.PublicationSequence, state.Published.RecoveryEpoch, candidate.CurrentWorkerSlot) &&
+				candidate.CandidateLedgerSequence == state.Published.CandidateLedgerSequence
+			if fallback || publicationRefresh {
 				head = state.Ledger[state.Published.CandidateLedgerSequence-1]
 			} else if !exists || servingHead.ActiveSlot != serving.WorkerSlot {
 				return groupCandidateCASConflict(fmt.Sprintf("store_serving_authority_history_mismatch version=%s exists=%t expected_slot=%s actual_slot=%s",
