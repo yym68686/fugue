@@ -2415,6 +2415,9 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 
 // normalizeRetryLegacyEnvironment prepares the in-memory predecessor witness
 // for an old Helm-owned env entry that the reviewed release explicitly deletes.
+// Keeping this recovery-only normalization in the Guardian runtime binary is
+// required because the CI submitter and in-cluster executor are separate
+// release lanes.
 // It removes only those exact entries from the comparison copy; all other
 // environment and workload fields remain subject to the normal subset check.
 func normalizeRetryLegacyEnvironment(desired, live map[string]any) (map[string]any, map[string]any, error) {
