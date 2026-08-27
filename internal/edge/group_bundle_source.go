@@ -488,9 +488,6 @@ func validateRoutePublicationAdvance(current, candidate routePublicationMetadata
 }
 
 func routePublicationFromCache(cached cacheFile) routePublicationMetadata {
-	if strings.TrimSpace(cached.RouteBundleSource) == "" {
-		return routePublicationMetadata{}
-	}
 	metadata := routePublicationMetadata{
 		Source:                       strings.TrimSpace(cached.RouteBundleSource),
 		GroupID:                      strings.TrimSpace(cached.Bundle.EdgeGroupID),
@@ -526,14 +523,11 @@ func (s *Service) currentRoutePublicationAndBundle() (routePublicationMetadata, 
 
 func (s *Service) validateCachedRouteSource(cached cacheFile) error {
 	metadata := routePublicationFromCache(cached)
-	if !s.edgeControlRouteSourceEnabled() {
-		if metadata.Source != "" {
-			return errors.New("legacy edge route source cannot load an edge-control publication cache")
-		}
-		return nil
-	}
-	if cached.Version != cacheFileVersion || metadata.Source != edgeControlRouteSourceV1 || metadata.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) ||
+	if cached.Version != cacheFileVersion || metadata.Source != edgeControlRouteSourceV1 || metadata.GroupID == "" ||
 		metadata.Generation == "" || metadata.PublicationSequence == 0 || cached.Bundle.Version != groupPublicationVersion(metadata.Generation, metadata.PublicationSequence, metadata.RecoveryEpoch) {
+		return errors.New("edge-control route publication cache is invalid or belongs to another source")
+	}
+	if s.edgeControlRouteSourceEnabled() && metadata.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) {
 		return errors.New("edge-control route publication cache is invalid or belongs to another source")
 	}
 	hasCandidateAttestation := metadata.CandidateRecord != "" || metadata.ReleaseRecord != "" || metadata.WorkerSlot != ""

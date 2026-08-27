@@ -32,6 +32,9 @@ import (
 const (
 	testEdgeRouteDigestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	testEdgeRouteDigestB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testCacheEdgeGroupID = "edge-group-country-hk"
+	testCacheKeyID       = "test-edge-control-key-v1"
+	testCacheKey         = "0123456789abcdef0123456789abcdef"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -1172,15 +1175,14 @@ func TestSyncOnceDoesNotPromoteBundleToLKGWhenCaddyApplyFails(t *testing.T) {
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
 	walPath := filepath.Join(t.TempDir(), "edge-autonomy.wal")
-	writeTestCache(t, cachePath, testBundle("routegen_old"), `"routegen_old"`)
-	newBundle := testBundle("routegen_new")
+	oldCached := testEdgeControlCacheFile("generation-old", 1, 0, time.Now().UTC(), 30*time.Minute)
+	writeTestCache(t, cachePath, oldCached)
+	newCached := testEdgeControlCacheFile("generation-new", 2, 0, time.Now().UTC(), 30*time.Minute)
+	newBundle := newCached.Bundle
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/edge/routes":
-			w.Header().Set("ETag", `"routegen_new"`)
-			if err := json.NewEncoder(w).Encode(newBundle); err != nil {
-				t.Fatalf("encode bundle: %v", err)
-			}
+			writeTestEdgeControlBundle(w, newBundle, testCacheEdgeGroupID, 2)
 		case "/load":
 			http.Error(w, "bad caddy config", http.StatusInternalServerError)
 		default:
@@ -1190,10 +1192,10 @@ func TestSyncOnceDoesNotPromoteBundleToLKGWhenCaddyApplyFails(t *testing.T) {
 	defer server.Close()
 
 	var logs bytes.Buffer
-	service := NewService(config.EdgeConfig{
+	service := NewServiceWithRouteBundleSource(config.EdgeConfig{
 		APIURL:                server.URL,
 		EdgeToken:             "edge-secret",
-		EdgeGroupID:           "edge-group-country-hk",
+		EdgeGroupID:           testCacheEdgeGroupID,
 		CachePath:             cachePath,
 		AutonomyWALPath:       walPath,
 		CaddyEnabled:          true,
@@ -1202,7 +1204,7 @@ func TestSyncOnceDoesNotPromoteBundleToLKGWhenCaddyApplyFails(t *testing.T) {
 		CaddyProxyListenAddr:  "127.0.0.1:7833",
 		CaddySharedTLSEnabled: false,
 		CacheWarmupEnabled:    false,
-	}, log.New(&logs, "", 0))
+	}, newTestEdgeControlRouteSource(t, server.URL, testCacheEdgeGroupID), log.New(&logs, "", 0))
 	service.HTTPClient = server.Client()
 	if err := service.LoadCache(); err != nil {
 		t.Fatalf("load old cache: %v", err)
@@ -1218,11 +1220,11 @@ func TestSyncOnceDoesNotPromoteBundleToLKGWhenCaddyApplyFails(t *testing.T) {
 	if err := json.Unmarshal(data, &cached); err != nil {
 		t.Fatalf("decode cache: %v", err)
 	}
-	if cached.Bundle.Version != "routegen_old" {
+	if cached.Bundle.Version != oldCached.Bundle.Version {
 		t.Fatalf("failed Caddy apply must not promote new LKG, got %+v", cached.Bundle.Version)
 	}
 	status := service.Status()
-	if status.BundleVersion != "routegen_old" || !status.StaleCache || status.Healthy || status.Status != "caddy-error" {
+	if status.BundleVersion != oldCached.Bundle.Version || !status.StaleCache || status.Healthy || status.Status != "caddy-error" {
 		t.Fatalf("expected old LKG to remain stale with Caddy error, got %+v", status)
 	}
 	records, err := localwal.ReadAll(walPath)
@@ -1230,13 +1232,13 @@ func TestSyncOnceDoesNotPromoteBundleToLKGWhenCaddyApplyFails(t *testing.T) {
 		t.Fatalf("read edge autonomy wal: %v", err)
 	}
 	for _, record := range records {
-		if record.Action == "lkg_write" && record.Generation == "routegen_new" {
+		if record.Action == "lkg_write" && record.Generation == newCached.Bundle.Generation {
 			t.Fatalf("new bundle should not be written as LKG after failed Caddy apply: %+v", records)
 		}
 	}
-	if !strings.Contains(logs.String(), "edge route bundle sync failed; using stale cache; version=routegen_old") ||
-		!strings.Contains(logs.String(), "read edge route reader credential") {
-		t.Fatalf("expected Edge Control source failure with stale-cache replay, got %s", logs.String())
+	if !strings.Contains(logs.String(), "edge route bundle sync failed; error=apply caddy config") ||
+		!strings.Contains(logs.String(), "edge caddy cached config reapply failed; reason=route sync failed") {
+		t.Fatalf("expected Caddy failure with stale-cache replay, got %s", logs.String())
 	}
 }
 
@@ -1305,25 +1307,17 @@ func TestLoadCacheFallsBackToPreviousVerifiedGeneration(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
-	service := NewService(config.EdgeConfig{
+	service := newTestEdgeControlCacheService(t, config.EdgeConfig{
 		CachePath:         cachePath,
 		CacheArchiveLimit: 3,
 		MaxStale:          time.Hour,
 	}, log.New(ioDiscard{}, "", 0))
-	if err := service.writeCache(cacheFile{
-		Version:  cacheFileVersion,
-		ETag:     `"routegen_old"`,
-		CachedAt: time.Now().UTC(),
-		Bundle:   testBundle("routegen_old"),
-	}); err != nil {
+	oldCached := testEdgeControlCacheFile("generation-old", 1, 0, time.Now().UTC(), 30*time.Minute)
+	if err := service.writeCache(oldCached); err != nil {
 		t.Fatalf("write old cache: %v", err)
 	}
-	if err := service.writeCache(cacheFile{
-		Version:  cacheFileVersion,
-		ETag:     `"routegen_new"`,
-		CachedAt: time.Now().UTC(),
-		Bundle:   testBundle("routegen_new"),
-	}); err != nil {
+	newCached := testEdgeControlCacheFile("generation-new", 2, 0, time.Now().UTC(), 30*time.Minute)
+	if err := service.writeCache(newCached); err != nil {
 		t.Fatalf("write new cache: %v", err)
 	}
 	if err := os.WriteFile(cachePath, []byte("{corrupt"), 0o600); err != nil {
@@ -1334,8 +1328,22 @@ func TestLoadCacheFallsBackToPreviousVerifiedGeneration(t *testing.T) {
 		t.Fatalf("load cache with fallback: %v", err)
 	}
 	status := service.Status()
-	if status.ServingGeneration != "routegen_old" || status.CacheCorruptGeneration != "unknown" {
+	if status.ServingGeneration != oldCached.Bundle.Generation || status.CacheCorruptGeneration != "unknown" {
 		t.Fatalf("expected previous LKG after corrupt current cache, got %+v", status)
+	}
+}
+
+func TestLoadCacheRejectsEmptyPublicationSource(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	cached := testEdgeControlCacheFile("generation-empty-source", 1, 0, time.Now().UTC(), 30*time.Minute)
+	cached.RouteBundleSource = ""
+	cached.PublicationSequence = 0
+	writeTestCache(t, cachePath, cached)
+	service := newTestEdgeControlCacheService(t, config.EdgeConfig{CachePath: cachePath}, log.New(ioDiscard{}, "", 0))
+	if err := service.LoadCache(); err == nil {
+		t.Fatal("cache without a signed publication source was accepted")
 	}
 }
 
@@ -1637,9 +1645,10 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
 	walPath := filepath.Join(t.TempDir(), "edge-autonomy.wal")
-	writeTestCache(t, cachePath, testBundle("routegen_stale"), `"routegen_stale"`)
+	cached := testEdgeControlCacheFile("generation-stale", 1, 0, time.Now().UTC(), 30*time.Minute)
+	writeTestCache(t, cachePath, cached)
 	var logs bytes.Buffer
-	service := NewService(config.EdgeConfig{
+	service := newTestEdgeControlCacheService(t, config.EdgeConfig{
 		APIURL:          "https://api.example.invalid",
 		EdgeToken:       "edge-secret",
 		CachePath:       cachePath,
@@ -1656,11 +1665,11 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 		t.Fatal("expected sync error")
 	}
 	status := service.Status()
-	if !status.Healthy || status.Status != "stale" || !status.StaleCache || status.BundleVersion != "routegen_stale" {
+	if !status.Healthy || status.Status != "stale" || !status.StaleCache || status.BundleVersion != cached.Bundle.Version {
 		t.Fatalf("expected stale but healthy status, got %+v", status)
 	}
 	bundle, ok := service.Bundle()
-	if !ok || bundle.Version != "routegen_stale" {
+	if !ok || bundle.Version != cached.Bundle.Version {
 		t.Fatalf("expected cached bundle to remain available, got ok=%v bundle=%+v", ok, bundle)
 	}
 	recorder := httptest.NewRecorder()
@@ -1680,8 +1689,8 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 		t.Fatalf("expected stale cache metrics, got %s", metrics.Body.String())
 	}
 	logOutput := logs.String()
-	if !strings.Contains(logOutput, "edge route cache loaded; version=routegen_stale") ||
-		!strings.Contains(logOutput, "edge route bundle sync failed; using stale cache; version=routegen_stale") {
+	if !strings.Contains(logOutput, "edge route cache loaded; version="+cached.Bundle.Version) ||
+		!strings.Contains(logOutput, "edge route bundle sync failed; using stale cache; version="+cached.Bundle.Version) {
 		t.Fatalf("expected cache loaded and stale fallback logs, got %s", logOutput)
 	}
 	records, err := localwal.ReadAll(walPath)
@@ -1696,7 +1705,7 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 		if record.Component != "edge-worker" || record.Action != "serve_lkg" || record.SafetyClass != "L0_observe_only" {
 			t.Fatalf("unexpected stale LKG WAL record: %+v", record)
 		}
-		if record.Generation != "routegen_stale" || record.Subject != "routegen_stale" {
+		if record.Generation != cached.Bundle.Generation || record.Subject != cached.Bundle.Generation {
 			t.Fatalf("unexpected stale WAL generation/subject: %+v", record)
 		}
 		byReason[record.Evidence["reason"]] = record
@@ -1782,18 +1791,15 @@ func TestLoadCacheServesSignedLKGAfterMaxStaleWhileUnhealthy(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
-	key := "edge-route-signing-key-material"
 	now := time.Now().UTC()
-	bundle := testBundle("routegen_expired_lkg")
-	bundle.GeneratedAt = now.Add(-72 * time.Hour)
-	bundle = bundleauth.SignEdgeRouteBundle(bundle, key, "control-plane", 24*time.Hour)
-	writeTestCache(t, cachePath, bundle, quoteETag(bundle.Version))
-	service := NewService(config.EdgeConfig{APIURL: "https://api.example.invalid", EdgeToken: "edge-secret", CachePath: cachePath, MaxStale: time.Hour, BundleSigningKey: key, BundleSigningKeyID: "control-plane"}, log.New(ioDiscard{}, "", 0))
+	cached := testEdgeControlCacheFile("generation-expired-lkg", 1, 0, now.Add(-72*time.Hour), 24*time.Hour)
+	writeTestCache(t, cachePath, cached)
+	service := newTestEdgeControlCacheService(t, config.EdgeConfig{APIURL: "https://api.example.invalid", EdgeToken: "edge-secret", CachePath: cachePath, MaxStale: time.Hour}, log.New(ioDiscard{}, "", 0))
 	if err := service.LoadCache(); err != nil {
 		t.Fatalf("expired signed LKG was rejected: %v", err)
 	}
 	status := service.Status()
-	if status.BundleVersion != bundle.Version || status.Healthy || !status.MaxStaleExceeded || status.Status != "unhealthy" {
+	if status.BundleVersion != cached.Bundle.Version || status.Healthy || !status.MaxStaleExceeded || status.Status != "unhealthy" {
 		t.Fatalf("expired LKG must remain available but unhealthy: %+v", status)
 	}
 }
@@ -1801,13 +1807,9 @@ func TestLoadCacheServesSignedLKGAfterMaxStaleWhileUnhealthy(t *testing.T) {
 func TestExpiredLKGServingRequiresValidSignatureAndBoundedAge(t *testing.T) {
 	t.Parallel()
 
-	key := "edge-route-signing-key-material"
 	now := time.Now().UTC()
-	signed := testBundle("routegen_emergency_lkg")
-	signed.GeneratedAt = now.Add(-72 * time.Hour)
-	signed = bundleauth.SignEdgeRouteBundle(signed, key, "control-plane", 24*time.Hour)
-	service := NewService(config.EdgeConfig{BundleSigningKey: key, BundleSigningKeyID: "control-plane"}, log.New(ioDiscard{}, "", 0))
-	cached := cacheFile{Version: cacheFileVersion, Bundle: signed}
+	cached := testEdgeControlCacheFile("generation-emergency-lkg", 1, 0, now.Add(-72*time.Hour), 24*time.Hour)
+	service := newTestEdgeControlCacheService(t, config.EdgeConfig{}, log.New(ioDiscard{}, "", 0))
 	if err := service.verifyCachedBundleForServing(cached, now); err != nil {
 		t.Fatalf("bounded signed LKG was rejected: %v", err)
 	}
@@ -1816,7 +1818,7 @@ func TestExpiredLKGServingRequiresValidSignatureAndBoundedAge(t *testing.T) {
 	if err := service.verifyCachedBundleForServing(tampered, now); err == nil {
 		t.Fatal("tampered expired LKG was accepted")
 	}
-	if err := service.verifyCachedBundleForServing(cached, signed.ValidUntil.Add(edgeEmergencyLKGMaxAge+time.Second)); err == nil {
+	if err := service.verifyCachedBundleForServing(cached, cached.Bundle.ValidUntil.Add(edgeEmergencyLKGMaxAge+time.Second)); err == nil {
 		t.Fatal("expired LKG outside the emergency window was accepted")
 	}
 }
@@ -1825,21 +1827,18 @@ func TestLoadCacheKeepsRouteAvailableDuringProlongedControlPlaneOutage(t *testin
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
-	key := "edge-route-signing-key-material"
 	now := time.Now().UTC()
-	bundle := testBundle("routegen_prolonged_outage")
-	bundle.GeneratedAt = now.Add(-10 * 24 * time.Hour)
-	bundle = bundleauth.SignEdgeRouteBundle(bundle, key, "control-plane", 24*time.Hour)
-	writeTestCache(t, cachePath, bundle, quoteETag(bundle.Version))
-	service := NewService(config.EdgeConfig{
+	cached := testEdgeControlCacheFile("generation-prolonged-outage", 1, 0, now.Add(-10*24*time.Hour), 24*time.Hour)
+	writeTestCache(t, cachePath, cached)
+	service := newTestEdgeControlCacheService(t, config.EdgeConfig{
 		APIURL: "https://api.example.invalid", EdgeToken: "edge-secret", CachePath: cachePath,
-		MaxStale: time.Hour, BundleSigningKey: key, BundleSigningKeyID: "control-plane",
+		MaxStale: time.Hour,
 	}, log.New(ioDiscard{}, "", 0))
 	if err := service.LoadCache(); err != nil {
 		t.Fatalf("signed LKG should survive a prolonged outage: %v", err)
 	}
 	got, ok := service.Bundle()
-	if !ok || got.Version != bundle.Version {
+	if !ok || got.Version != cached.Bundle.Version {
 		t.Fatalf("expected the signed LKG to remain routable, ok=%v bundle=%+v", ok, got)
 	}
 	if status := service.Status(); status.Healthy || !status.MaxStaleExceeded || status.RouteCount != 1 {
@@ -4408,14 +4407,47 @@ func writeLocalCaddyTLSBundle(t *testing.T, dataDir, hostname, certPEM, keyPEM, 
 	}
 }
 
-func writeTestCache(t *testing.T, path string, bundle model.EdgeRouteBundle, etag string) {
+func newTestEdgeControlCacheService(t *testing.T, cfg config.EdgeConfig, logger *log.Logger) *Service {
 	t.Helper()
-	cached := cacheFile{
-		Version:  cacheFileVersion,
-		ETag:     etag,
-		CachedAt: time.Date(2026, 5, 10, 2, 0, 0, 0, time.UTC),
-		Bundle:   bundle,
+	root := t.TempDir()
+	tokenPath := filepath.Join(root, "reader-token")
+	if err := os.WriteFile(tokenPath, []byte("test-reader-token\n"), 0o600); err != nil {
+		t.Fatalf("write test reader token: %v", err)
 	}
+	keyringPath := filepath.Join(root, "verifier-keyring.json")
+	writeEdgeVerifierKeyring(t, keyringPath, testCacheEdgeGroupID, testCacheKeyID, []byte(testCacheKey))
+	if strings.TrimSpace(cfg.EdgeGroupID) == "" {
+		cfg.EdgeGroupID = testCacheEdgeGroupID
+	}
+	return NewServiceWithRouteBundleSource(cfg, RouteBundleSourceConfig{
+		URL:                 "http://edge-control.invalid/v1/edge/routes",
+		TokenFile:           tokenPath,
+		VerifierKeyringFile: keyringPath,
+	}, logger)
+}
+
+func testEdgeControlCacheFile(generation string, sequence, recoveryEpoch uint64, generatedAt time.Time, validFor time.Duration) cacheFile {
+	bundle := testBundle(groupPublicationVersion(generation, sequence, recoveryEpoch))
+	bundle.Generation = generation
+	bundle.EdgeGroupID = testCacheEdgeGroupID
+	bundle.Issuer = "fugue-edge-control"
+	bundle.GeneratedAt = generatedAt
+	bundle.Routes[0].EdgeGroupID = testCacheEdgeGroupID
+	bundle.Routes[0].RuntimeEdgeGroupID = testCacheEdgeGroupID
+	bundle = bundleauth.SignEdgeRouteBundle(bundle, testCacheKey, testCacheKeyID, validFor)
+	return cacheFile{
+		Version:             cacheFileVersion,
+		ETag:                quoteETag(bundle.Version),
+		CachedAt:            generatedAt,
+		RouteBundleSource:   edgeControlRouteSourceV1,
+		PublicationSequence: sequence,
+		RecoveryEpoch:       recoveryEpoch,
+		Bundle:              bundle,
+	}
+}
+
+func writeTestCache(t *testing.T, path string, cached cacheFile) {
+	t.Helper()
 	data, err := json.MarshalIndent(cached, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal cache: %v", err)

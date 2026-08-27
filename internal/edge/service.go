@@ -858,9 +858,6 @@ func (s *Service) verifyCachedBundleForServing(cached cacheFile, now time.Time) 
 	// Verify at the end of the original validity window. This path can retain
 	// a signed LKG for emergency serving, but it cannot extend its validity.
 	verifyAt := validUntil.Add(-time.Nanosecond)
-	if s.edgeControlRouteSourceEnabled() && routePublicationFromCache(cached).Source == "" {
-		return errors.New("legacy route cache is forbidden for an edge-control route source")
-	}
 	return s.verifyBundle(cached.Bundle, verifyAt)
 }
 
@@ -3818,9 +3815,6 @@ func (s *Service) verifyCachedBundle(cached cacheFile, now time.Time) error {
 	verifyAt, err := staleBundleVerificationTime(cached.Bundle.ValidUntil, now, s.Config.MaxStale)
 	if err != nil {
 		return err
-	}
-	if s.edgeControlRouteSourceEnabled() && routePublicationFromCache(cached).Source == "" {
-		return errors.New("legacy route cache is forbidden for an edge-control route source")
 	}
 	return s.verifyBundle(cached.Bundle, verifyAt)
 }
