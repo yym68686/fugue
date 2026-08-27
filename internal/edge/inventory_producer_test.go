@@ -64,6 +64,7 @@ func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *te
 				t.Fatal(err)
 			}
 			if heartbeat.GroupID != groupID || heartbeat.ProducerNodeID != nodeID || heartbeat.ProducerGeneration != 8 ||
+				heartbeat.FaultDomainID != "fault-domain-primary-b" || heartbeat.EdgePoolID != "edge-pool-public-b" ||
 				heartbeat.ExpectedSequence != 9 || heartbeat.Inventory.Sequence != 10 || heartbeat.Inventory.ActiveEpoch.FenceSequence != 1 ||
 				heartbeat.Inventory.ActiveEpoch.ReleaseEpoch != workerSourceCommit || len(heartbeat.Inventory.Instances) != 1 ||
 				heartbeat.Inventory.Instances[0].EdgeID != nodeID || heartbeat.Inventory.Instances[0].InstanceUID != "pod-uid-us-b" ||
@@ -82,7 +83,7 @@ func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *te
 	})}
 
 	edgeConfig := config.EdgeConfig{
-		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-us-b", EdgeReleaseEpoch: workerSourceCommit,
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-us-b", EdgeReleaseEpoch: workerSourceCommit, FaultDomainID: "fault-domain-primary-b", EdgePoolID: "edge-pool-public-b",
 		HTTPTimeout: time.Second,
 	}
 	producer := InventoryProducerConfig{
@@ -176,7 +177,7 @@ func TestInventoryProducerPublishesBootstrapHealthyHeartbeat(t *testing.T) {
 	keyringFile, _ := writeInventoryProducerKeyringFixture(t, groupID)
 
 	service := NewServiceWithEdgeSources(config.EdgeConfig{
-		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-us-bootstrap", EdgeReleaseEpoch: sourceCommit,
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-us-bootstrap", EdgeReleaseEpoch: sourceCommit, FaultDomainID: "fault-domain-primary-b", EdgePoolID: "edge-pool-public-b",
 		HTTPTimeout: time.Second, CaddyEnabled: true,
 	}, RouteBundleSourceConfig{}, InventoryProducerConfig{
 		URL:                 "http://edge-control-us.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
@@ -267,7 +268,7 @@ func TestInventoryProducerInteroperatesWithGroupAuthorityVerifierAndDurableLedge
 	}
 	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, sourceCommit)
 	service := NewServiceWithEdgeSources(config.EdgeConfig{
-		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-de-a", EdgeReleaseEpoch: sourceCommit,
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-de-a", EdgeReleaseEpoch: sourceCommit, FaultDomainID: "fault-domain-primary-a", EdgePoolID: "edge-pool-public-a",
 		HTTPTimeout: time.Second,
 	}, RouteBundleSourceConfig{}, InventoryProducerConfig{
 		URL:                 "http://edge-control-de.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
@@ -309,7 +310,7 @@ func TestInventoryProducerInactiveSlotDoesNotWriteAndCrossGroupIdentityFailsClos
 		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
 	}
 	edgeConfig := config.EdgeConfig{
-		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-de-b", EdgeReleaseEpoch: sourceCommit,
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-de-b", EdgeReleaseEpoch: sourceCommit, FaultDomainID: "fault-domain-primary-a", EdgePoolID: "edge-pool-public-a",
 		HTTPTimeout: time.Second,
 	}
 	service := NewServiceWithEdgeSources(edgeConfig, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
@@ -345,7 +346,7 @@ func TestInventoryProducerTransportFailureDoesNotExposeProjectedIdentity(t *test
 		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
 	}
 	service := NewServiceWithEdgeSources(config.EdgeConfig{
-		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-us-a", EdgeReleaseEpoch: sourceCommit,
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-us-a", EdgeReleaseEpoch: sourceCommit, FaultDomainID: "fault-domain-primary-b", EdgePoolID: "edge-pool-public-b",
 		HTTPTimeout: time.Second,
 	}, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
 	service.InventoryProducerHTTPClient = &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -373,7 +374,7 @@ func TestInventoryProducerRetriesTransportFailureWithFreshCursor(t *testing.T) {
 		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
 	}
 	service := NewServiceWithEdgeSources(config.EdgeConfig{
-		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-de-b", EdgeReleaseEpoch: sourceCommit,
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-de-b", EdgeReleaseEpoch: sourceCommit, FaultDomainID: "fault-domain-primary-a", EdgePoolID: "edge-pool-public-a",
 		HTTPTimeout: time.Second,
 	}, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
 	var postAttempts atomic.Int32
@@ -426,7 +427,7 @@ func TestInventoryProducerDoesNotRetryHTTPFailure(t *testing.T) {
 	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, sourceCommit)
 	keyringFile, _ := writeInventoryProducerKeyringFixture(t, groupID)
 	service := NewServiceWithEdgeSources(config.EdgeConfig{
-		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-de-a", EdgeReleaseEpoch: sourceCommit,
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-de-a", EdgeReleaseEpoch: sourceCommit, FaultDomainID: "fault-domain-primary-a", EdgePoolID: "edge-pool-public-a",
 		HTTPTimeout: time.Second,
 	}, RouteBundleSourceConfig{}, InventoryProducerConfig{
 		URL:              "http://edge-control-de.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
@@ -456,14 +457,14 @@ func TestInventoryProducerUsesExplicitAuthorityServiceNotCountryDerivedName(t *t
 		Interval: 30 * time.Second,
 	}
 	if err := validateInventoryProducerConfig(producer, config.EdgeConfig{
-		EdgeID: "edge-01", EdgeGroupID: groupID, EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40),
+		EdgeID: "edge-01", EdgeGroupID: groupID, EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40), FaultDomainID: "fault-domain-primary-a", EdgePoolID: "edge-pool-public-a",
 	}); err != nil {
 		t.Fatalf("explicit authority service was rejected: %v", err)
 	}
 	producer.URL = "http://edge-control-de.fugue-system.svc:8092" + groupAuthorityInventoryHeartbeatPathV1
 	producer.AuthorityService = "edge-control-eu-backup"
 	if err := validateInventoryProducerConfig(producer, config.EdgeConfig{
-		EdgeID: "edge-01", EdgeGroupID: "edge-group-neutral-a", EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40),
+		EdgeID: "edge-01", EdgeGroupID: "edge-group-neutral-a", EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40), FaultDomainID: "fault-domain-primary-a", EdgePoolID: "edge-pool-public-a",
 	}); err == nil {
 		t.Fatal("endpoint accepted when it did not match the explicit authority service")
 	}
@@ -475,7 +476,7 @@ func TestInventoryProducerRejectsMissingExplicitAuthorityService(t *testing.T) {
 		IdentityKeyringFile: "/var/run/keyring.json", ActivationStateFile: "/var/run/activation.json", Interval: 30 * time.Second,
 	}
 	if err := validateInventoryProducerConfig(producer, config.EdgeConfig{
-		EdgeID: "edge-01", EdgeGroupID: "edge-group-country-de", EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40),
+		EdgeID: "edge-01", EdgeGroupID: "edge-group-country-de", EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40), FaultDomainID: "fault-domain-primary-a", EdgePoolID: "edge-pool-public-a",
 	}); err == nil || !strings.Contains(err.Error(), "authority service") {
 		t.Fatalf("missing authority service was not rejected: %v", err)
 	}

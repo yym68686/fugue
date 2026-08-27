@@ -108,7 +108,8 @@ func validateInventoryProducerConfig(producer InventoryProducerConfig, edgeConfi
 		return errors.New("Edge inventory producer projection or interval is invalid")
 	}
 	if strings.TrimSpace(edgeConfig.EdgeID) == "" || strings.TrimSpace(edgeConfig.EdgeGroupID) == "" ||
-		strings.TrimSpace(edgeConfig.EdgeSlot) == "" || strings.TrimSpace(edgeConfig.EdgeInstanceUID) == "" || strings.TrimSpace(edgeConfig.EdgeReleaseEpoch) == "" {
+		strings.TrimSpace(edgeConfig.EdgeSlot) == "" || strings.TrimSpace(edgeConfig.EdgeInstanceUID) == "" || strings.TrimSpace(edgeConfig.EdgeReleaseEpoch) == "" ||
+		strings.TrimSpace(edgeConfig.FaultDomainID) == "" || strings.TrimSpace(edgeConfig.EdgePoolID) == "" {
 		return errors.New("Edge inventory producer requires the complete projected workload identity")
 	}
 	return nil
@@ -254,17 +255,18 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 	}
 	heartbeat := groupInventoryHeartbeat{
 		Schema: groupInventoryHeartbeatSchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID),
+		FaultDomainID: strings.TrimSpace(edgeConfig.FaultDomainID), EdgePoolID: strings.TrimSpace(edgeConfig.EdgePoolID),
 		ProducerNodeID: strings.TrimSpace(edgeConfig.EdgeID), ProducerGeneration: nextProducerGeneration,
 		ExpectedSequence: sequence, IssuedAtUnix: now.Unix(), ExpiresAtUnix: expiresAt.Unix(), Nonce: nonce,
 		Inventory: groupInventorySnapshot{
-			Schema: groupInventorySchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Sequence: sequence + 1,
+			Schema: groupInventorySchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), FaultDomainID: strings.TrimSpace(edgeConfig.FaultDomainID), EdgePoolID: strings.TrimSpace(edgeConfig.EdgePoolID), Sequence: sequence + 1,
 			Generation: producerInventoryEnvelopeGeneration(nextProducerGeneration), ObservedAt: now,
 			ActiveEpoch: groupActiveEpoch{
-				GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Slot: activation.ActiveSlot, ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
+				GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), FaultDomainID: strings.TrimSpace(edgeConfig.FaultDomainID), EdgePoolID: strings.TrimSpace(edgeConfig.EdgePoolID), Slot: activation.ActiveSlot, ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
 				FenceSequence: activation.Generation, MinHealthyInstances: 1,
 			},
 			Instances: []groupInstance{{
-				EdgeID: strings.TrimSpace(edgeConfig.EdgeID), GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Slot: strings.TrimSpace(edgeConfig.EdgeSlot),
+				EdgeID: strings.TrimSpace(edgeConfig.EdgeID), GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), FaultDomainID: strings.TrimSpace(edgeConfig.FaultDomainID), EdgePoolID: strings.TrimSpace(edgeConfig.EdgePoolID), Slot: strings.TrimSpace(edgeConfig.EdgeSlot),
 				InstanceUID: strings.TrimSpace(edgeConfig.EdgeInstanceUID), ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
 				EffectiveHealthy: servingHealthy, ServingHealthy: &servingHealthyValue, BootstrapEligibility: bootstrap,
 				NodeHealthy: nodeHealthy, NodeStatus: nodeStatus, Draining: edgeConfig.Draining,

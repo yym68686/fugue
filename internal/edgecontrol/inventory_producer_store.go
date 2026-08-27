@@ -119,7 +119,7 @@ func (store *PersistentGroupStore) StoreGroupInventoryProducerHeartbeat(
 			return left < right
 		})
 		stored = GroupInventorySnapshot{
-			Schema: GroupInventorySchemaV1, GroupID: groupID, Sequence: currentSequence + 1,
+			Schema: GroupInventorySchemaV1, GroupID: groupID, FaultDomainID: producer.ActiveEpoch.FaultDomainID, EdgePoolID: producer.ActiveEpoch.EdgePoolID, Sequence: currentSequence + 1,
 			ActiveEpoch: producer.ActiveEpoch, Instances: instances, ObservedAt: now,
 		}
 		stored.Generation = groupInventoryProducerGeneration(producer.Generation, stored)

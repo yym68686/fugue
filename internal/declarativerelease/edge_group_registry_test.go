@@ -721,6 +721,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		IntentPath: "deploy/releases/edge-worker-" + id + "/intent.json", ManifestPath: "internal/edge/component/resources.inventory-producer.group.json",
 		ManifestVariables: map[string]string{
 			"API_SECRET": "fugue-edge-worker-api-" + id, "CONTROL_NAME": controlName, "FRONT_NAME": frontName, "GROUP": id, "GROUP_ID": groupID,
+			"FAULT_DOMAIN_ID": "fault-domain-test-" + id, "EDGE_POOL_ID": "edge-pool-test-" + id,
 			"FRONT_COMPONENT":             "edge-" + id + "-front",
 			"INVENTORY_IDENTITY_A_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-a", "INVENTORY_IDENTITY_B_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-b",
 			"READER_SECRET": "fugue-edge-worker-reader-" + id, "SERVICE_ACCOUNT": "edge-worker-" + id, "VERIFIER_SECRET": "fugue-edge-worker-verifier-" + id,

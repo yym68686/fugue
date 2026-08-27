@@ -75,6 +75,13 @@ func TestGroupInventoryHeartbeatAuthenticatesAndAdvancesExactGroupCAS(t *testing
 		receipt.Authority != "edge-control" || !receipt.Publication || receipt.ProducerNodeID != nodeID || receipt.ProducerGeneration != 1 {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
+	if metrics, ok := handler.(InventoryTopologyMetrics); !ok || metrics.EmptyPairAccepted() != 1 {
+		count := uint64(0)
+		if ok {
+			count = metrics.EmptyPairAccepted()
+		}
+		t.Fatalf("legacy empty topology acceptance was not counted: ok=%t count=%d", ok, count)
+	}
 	stored, err := store.ReadGroupInventory(context.Background(), groupID)
 	if err != nil || stored.Sequence != 1 || stored.Generation != receipt.Generation {
 		t.Fatalf("stored inventory = %+v, %v", stored, err)

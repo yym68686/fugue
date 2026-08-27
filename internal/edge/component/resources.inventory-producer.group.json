@@ -269,6 +269,8 @@
               "fugue.io/edge-control-client": "true",
               "fugue.io/edge-control-inventory-writer": "true",
               "fugue.io/edge-group-id": "@@GROUP_ID@@",
+              "fugue.io/fault-domain-id": "@@FAULT_DOMAIN_ID@@",
+              "fugue.io/edge-pool-id": "@@EDGE_POOL_ID@@",
               "fugue.io/edge-slot": "a"
             }
           },
@@ -553,7 +555,7 @@
             "initContainers": [
               {
                 "args": [
-                  "umask 022\ntest -n \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\"\nfor field in edge_group_id slot instance_uid release_epoch heartbeat_fenced; do\n  test -s \"/var/run/fugue/edge-identity-source/${field}\"\ndone\nprintf '%s\\n' \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\" \u003e/var/run/fugue/edge-identity/edge_id\nfor field in edge_group_id slot instance_uid release_epoch heartbeat_fenced; do\n  cat \"/var/run/fugue/edge-identity-source/${field}\" \u003e\"/var/run/fugue/edge-identity/${field}\"\ndone\nchmod 0444 /var/run/fugue/edge-identity/*\n"
+                  "umask 022\ntest -n \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\"\nfor field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do\n  test -s \"/var/run/fugue/edge-identity-source/${field}\"\ndone\nprintf '%s\\n' \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\" \u003e/var/run/fugue/edge-identity/edge_id\nfor field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do\n  cat \"/var/run/fugue/edge-identity-source/${field}\" \u003e\"/var/run/fugue/edge-identity/${field}\"\ndone\nchmod 0444 /var/run/fugue/edge-identity/*\n"
                 ],
                 "command": [
                   "/bin/sh",
@@ -652,6 +654,18 @@
                         "fieldPath": "metadata.annotations['fugue.pro/source-commit']"
                       },
                       "path": "release_epoch"
+                    },
+                    {
+                      "fieldRef": {
+                        "fieldPath": "metadata.labels['fugue.io/fault-domain-id']"
+                      },
+                      "path": "fault_domain_id"
+                    },
+                    {
+                      "fieldRef": {
+                        "fieldPath": "metadata.labels['fugue.io/edge-pool-id']"
+                      },
+                      "path": "edge_pool_id"
                     },
                     {
                       "fieldRef": {
@@ -780,6 +794,8 @@
               "fugue.io/edge-control-client": "true",
               "fugue.io/edge-control-inventory-writer": "true",
               "fugue.io/edge-group-id": "@@GROUP_ID@@",
+              "fugue.io/fault-domain-id": "@@FAULT_DOMAIN_ID@@",
+              "fugue.io/edge-pool-id": "@@EDGE_POOL_ID@@",
               "fugue.io/edge-slot": "b"
             }
           },
@@ -1064,7 +1080,7 @@
             "initContainers": [
               {
                 "args": [
-                  "umask 022; test -n \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\"; printf '%s\\n' \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\" \u003e/var/run/fugue/edge-identity/edge_id; for field in edge_group_id slot instance_uid release_epoch heartbeat_fenced; do test -s \"/var/run/fugue/edge-identity-source/${field}\"; cat \"/var/run/fugue/edge-identity-source/${field}\" \u003e\"/var/run/fugue/edge-identity/${field}\"; done; chmod 0444 /var/run/fugue/edge-identity/*"
+                  "umask 022; test -n \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\"; printf '%s\\n' \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\" \u003e/var/run/fugue/edge-identity/edge_id; for field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do test -s \"/var/run/fugue/edge-identity-source/${field}\"; cat \"/var/run/fugue/edge-identity-source/${field}\" \u003e\"/var/run/fugue/edge-identity/${field}\"; done; chmod 0444 /var/run/fugue/edge-identity/*"
                 ],
                 "command": [
                   "/bin/sh",
@@ -1163,6 +1179,18 @@
                         "fieldPath": "metadata.annotations['fugue.pro/source-commit']"
                       },
                       "path": "release_epoch"
+                    },
+                    {
+                      "fieldRef": {
+                        "fieldPath": "metadata.labels['fugue.io/fault-domain-id']"
+                      },
+                      "path": "fault_domain_id"
+                    },
+                    {
+                      "fieldRef": {
+                        "fieldPath": "metadata.labels['fugue.io/edge-pool-id']"
+                      },
+                      "path": "edge_pool_id"
                     },
                     {
                       "fieldRef": {

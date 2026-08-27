@@ -220,6 +220,8 @@ type EdgeConfig struct {
 	EdgeSlot                        string
 	EdgeInstanceUID                 string
 	EdgeReleaseEpoch                string
+	FaultDomainID                   string
+	EdgePoolID                      string
 	EdgeHeartbeatFenced             bool
 	Region                          string
 	Country                         string
@@ -589,6 +591,8 @@ func EdgeFromEnv() EdgeConfig {
 		EdgeSlot:                  readTrimmedFile("/var/run/fugue/edge-identity/slot"),
 		EdgeInstanceUID:           readTrimmedFile("/var/run/fugue/edge-identity/instance_uid"),
 		EdgeReleaseEpoch:          readTrimmedFile("/var/run/fugue/edge-identity/release_epoch"),
+		FaultDomainID:             readTrimmedFile("/var/run/fugue/edge-identity/fault_domain_id"),
+		EdgePoolID:                readTrimmedFile("/var/run/fugue/edge-identity/edge_pool_id"),
 		EdgeHeartbeatFenced:       strings.EqualFold(readTrimmedFile("/var/run/fugue/edge-identity/heartbeat_fenced"), "true"),
 		Region:                    getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_REGION", ""),
 		Country:                   getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_COUNTRY", ""),

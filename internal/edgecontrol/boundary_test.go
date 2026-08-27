@@ -56,3 +56,15 @@ func TestBoundaryMetricsAreStaticAndNonAuthoritative(t *testing.T) {
 		t.Fatalf("unexpected metrics response: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }
+
+type topologyMetricsFixture uint64
+
+func (fixture topologyMetricsFixture) EmptyPairAccepted() uint64 { return uint64(fixture) }
+
+func TestAuthorityBoundaryExposesInventoryTopologyMigrationMetric(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	NewAuthorityBoundaryWithInventoryTopologyMetrics(true, topologyMetricsFixture(7)).Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "fugue_edge_control_inventory_topology_empty_pair_accepted_total 7") {
+		t.Fatalf("topology migration metric missing: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+}

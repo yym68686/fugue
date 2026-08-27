@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -88,6 +89,12 @@ type GroupInventoryHeartbeatHandlerConfig struct {
 	Now                func() time.Time
 }
 
+// InventoryTopologyMetrics exposes migration progress without coupling the
+// Worker to Edge Control implementation details.
+type InventoryTopologyMetrics interface {
+	EmptyPairAccepted() uint64
+}
+
 type inventoryWriterKeyring struct {
 	Schema     string               `json:"schema"`
 	Generation uint64               `json:"generation"`
@@ -104,14 +111,22 @@ type inventoryWriterKey struct {
 }
 
 type groupInventoryHeartbeatHandler struct {
-	store       GroupInventoryHeartbeatStore
-	groups      map[string]struct{}
-	keyringFile string
-	keyringDir  string
-	authority   string
-	publication bool
-	path        string
-	now         func() time.Time
+	store             GroupInventoryHeartbeatStore
+	groups            map[string]struct{}
+	keyringFile       string
+	keyringDir        string
+	authority         string
+	publication       bool
+	path              string
+	now               func() time.Time
+	emptyPairAccepted atomic.Uint64
+}
+
+func (handler *groupInventoryHeartbeatHandler) EmptyPairAccepted() uint64 {
+	if handler == nil {
+		return 0
+	}
+	return handler.emptyPairAccepted.Load()
 }
 
 func NewGroupInventoryHeartbeatHandler(config GroupInventoryHeartbeatHandlerConfig) (http.Handler, error) {

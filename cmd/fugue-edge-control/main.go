@@ -344,7 +344,11 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	if err != nil {
 		return nil, nil, err
 	}
-	handler, err := edgecontrol.NewAuthorityControlHandler(edgecontrol.NewAuthorityBoundary(cfg.Enabled).Handler(), heartbeat, status, bundles, recovery, promotion, staging, candidateRecovery)
+	metrics, ok := heartbeat.(edgecontrol.InventoryTopologyMetrics)
+	if !ok {
+		return nil, nil, errors.New("edge-control inventory heartbeat handler does not expose topology metrics")
+	}
+	handler, err := edgecontrol.NewAuthorityControlHandler(edgecontrol.NewAuthorityBoundaryWithInventoryTopologyMetrics(cfg.Enabled, metrics).Handler(), heartbeat, status, bundles, recovery, promotion, staging, candidateRecovery)
 	if err != nil {
 		return nil, nil, err
 	}

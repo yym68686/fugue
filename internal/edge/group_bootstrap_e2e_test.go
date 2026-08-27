@@ -32,7 +32,7 @@ func TestEmptyGroupBootstrapsSignedBundleThenServesRealRoute(t *testing.T) {
 
 	service := NewServiceWithEdgeSources(config.EdgeConfig{
 		EdgeID: edgeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "worker-bootstrap-uid",
-		EdgeReleaseEpoch: releaseEpoch, APIURL: "http://core.invalid", EdgeToken: "bootstrap-heartbeat-token",
+		EdgeReleaseEpoch: releaseEpoch, FaultDomainID: "fault-domain-test-bootstrap", EdgePoolID: "edge-pool-test-bootstrap", APIURL: "http://core.invalid", EdgeToken: "bootstrap-heartbeat-token",
 		HTTPTimeout: 2 * time.Second, CaddyEnabled: true,
 	}, RouteBundleSourceConfig{}, InventoryProducerConfig{
 		URL:              "http://edge-control-bootstrap.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,

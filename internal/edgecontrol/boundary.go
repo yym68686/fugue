@@ -29,9 +29,10 @@ type BoundaryStatus struct {
 // Boundary serves the process identity view; concrete runtime handlers own
 // stores, signers, inventory, publication, and recovery endpoints.
 type Boundary struct {
-	enabled   bool
-	mode      string
-	authority bool
+	enabled                  bool
+	mode                     string
+	authority                bool
+	inventoryTopologyMetrics InventoryTopologyMetrics
 }
 
 func NewBoundary(enabled bool) *Boundary {
@@ -40,6 +41,10 @@ func NewBoundary(enabled bool) *Boundary {
 
 func NewAuthorityBoundary(enabled bool) *Boundary {
 	return &Boundary{enabled: enabled, mode: "group-authority", authority: true}
+}
+
+func NewAuthorityBoundaryWithInventoryTopologyMetrics(enabled bool, metrics InventoryTopologyMetrics) *Boundary {
+	return &Boundary{enabled: enabled, mode: "group-authority", authority: true, inventoryTopologyMetrics: metrics}
 }
 
 func (b *Boundary) Status(status string) BoundaryStatus {
@@ -86,6 +91,11 @@ func (b *Boundary) Handler() http.Handler {
 		_, _ = fmt.Fprintln(w, "# HELP fugue_edge_control_boundary_info Static identity of the Edge control boundary.")
 		_, _ = fmt.Fprintln(w, "# TYPE fugue_edge_control_boundary_info gauge")
 		_, _ = fmt.Fprintf(w, "fugue_edge_control_boundary_info{authority=%q,mode=%q} 1\n", boundaryStatus.Authority, boundaryStatus.Mode)
+		if b != nil && b.inventoryTopologyMetrics != nil {
+			_, _ = fmt.Fprintln(w, "# HELP fugue_edge_control_inventory_topology_empty_pair_accepted_total Accepted authenticated inventory heartbeats with the legacy empty topology pair.")
+			_, _ = fmt.Fprintln(w, "# TYPE fugue_edge_control_inventory_topology_empty_pair_accepted_total counter")
+			_, _ = fmt.Fprintf(w, "fugue_edge_control_inventory_topology_empty_pair_accepted_total %d\n", b.inventoryTopologyMetrics.EmptyPairAccepted())
+		}
 	})
 	return mux
 }

@@ -21,6 +21,8 @@ type groupInventoryHeartbeat struct {
 	Schema             string                 `json:"schema"`
 	KeyID              string                 `json:"key_id"`
 	GroupID            string                 `json:"edge_group_id"`
+	FaultDomainID      string                 `json:"fault_domain_id,omitempty"`
+	EdgePoolID         string                 `json:"edge_pool_id,omitempty"`
 	ProducerNodeID     string                 `json:"producer_node_id,omitempty"`
 	ProducerGeneration uint64                 `json:"producer_generation,omitempty"`
 	ExpectedSequence   uint64                 `json:"expected_sequence"`
@@ -44,17 +46,21 @@ type groupInventoryHeartbeatReceipt struct {
 }
 
 type groupInventorySnapshot struct {
-	Schema      string           `json:"schema"`
-	GroupID     string           `json:"edge_group_id"`
-	Sequence    uint64           `json:"sequence"`
-	Generation  string           `json:"generation"`
-	ActiveEpoch groupActiveEpoch `json:"active_epoch"`
-	Instances   []groupInstance  `json:"instances"`
-	ObservedAt  time.Time        `json:"observed_at"`
+	Schema        string           `json:"schema"`
+	GroupID       string           `json:"edge_group_id"`
+	FaultDomainID string           `json:"fault_domain_id,omitempty"`
+	EdgePoolID    string           `json:"edge_pool_id,omitempty"`
+	Sequence      uint64           `json:"sequence"`
+	Generation    string           `json:"generation"`
+	ActiveEpoch   groupActiveEpoch `json:"active_epoch"`
+	Instances     []groupInstance  `json:"instances"`
+	ObservedAt    time.Time        `json:"observed_at"`
 }
 
 type groupActiveEpoch struct {
 	GroupID             string `json:"edge_group_id"`
+	FaultDomainID       string `json:"fault_domain_id,omitempty"`
+	EdgePoolID          string `json:"edge_pool_id,omitempty"`
 	Slot                string `json:"slot"`
 	ReleaseEpoch        string `json:"release_epoch"`
 	FenceSequence       uint64 `json:"fence_sequence"`
@@ -64,6 +70,8 @@ type groupActiveEpoch struct {
 type groupInstance struct {
 	EdgeID               string                     `json:"edge_id"`
 	GroupID              string                     `json:"edge_group_id"`
+	FaultDomainID        string                     `json:"fault_domain_id,omitempty"`
+	EdgePoolID           string                     `json:"edge_pool_id,omitempty"`
 	Slot                 string                     `json:"slot"`
 	InstanceUID          string                     `json:"instance_uid"`
 	ReleaseEpoch         string                     `json:"release_epoch"`

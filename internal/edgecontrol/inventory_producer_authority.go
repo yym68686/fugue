@@ -75,6 +75,9 @@ func (handler *groupInventoryHeartbeatHandler) serveAuthorityHeartbeat(
 		}
 		return
 	}
+	if heartbeat.FaultDomainID == "" && heartbeat.EdgePoolID == "" {
+		handler.emptyPairAccepted.Add(1)
+	}
 	writeJSON(w, http.StatusCreated, GroupInventoryHeartbeatReceipt{
 		Schema: GroupInventoryHeartbeatReceiptSchemaV1, GroupID: groupID,
 		Sequence: stored.Sequence, Generation: stored.Generation,
@@ -182,6 +185,12 @@ func validateAuthorityInventoryProducerHeartbeat(value GroupInventoryHeartbeat, 
 	}
 	if instance.Slot != epoch.Slot || instance.ReleaseEpoch != epoch.ReleaseEpoch {
 		return ErrGroupInventoryProducerIdentity
+	}
+	if err := validateInventoryTopology(value.FaultDomainID, value.EdgePoolID); err != nil ||
+		inventory.FaultDomainID != value.FaultDomainID || inventory.EdgePoolID != value.EdgePoolID ||
+		epoch.FaultDomainID != value.FaultDomainID || epoch.EdgePoolID != value.EdgePoolID ||
+		instance.FaultDomainID != value.FaultDomainID || instance.EdgePoolID != value.EdgePoolID {
+		return errGroupInventoryInvalid
 	}
 	if instance.EffectiveHealthy && (!instance.NodeHealthy || instance.Draining || instance.FailureClass != "" ||
 		model.NormalizeEdgeHealthStatus(instance.NodeStatus) != model.EdgeHealthHealthy) {
