@@ -106,6 +106,35 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 	}
 }
 
+func TestEdgeHeartbeatRouteSourceMetricsAreLowCardinality(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	for _, body := range []map[string]any{
+		{"edge_id": "edge-us-1", "edge_group_id": "edge-group-country-us", "route_bundle_source": "edge-control-group-authority/v1", "status": model.EdgeHealthHealthy, "healthy": true},
+		{"edge_id": "edge-us-1", "edge_group_id": "edge-group-country-us", "route_bundle_source": "core-api/v1", "status": model.EdgeHealthHealthy, "healthy": true},
+		{"edge_id": "edge-us-1", "edge_group_id": "edge-group-country-us", "status": model.EdgeHealthHealthy, "healthy": true},
+	} {
+		recorder := performJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", "", body)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("edge heartbeat status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+	recorder := httptest.NewRecorder()
+	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics := recorder.Body.String()
+	for _, want := range []string{
+		`fugue_edge_route_source_heartbeats_total{source="edge_control"} 1.000000`,
+		`fugue_edge_route_source_heartbeats_total{source="core_api"} 1.000000`,
+		`fugue_edge_route_source_heartbeats_total{source="unknown"} 1.000000`,
+		`fugue_edge_route_source_heartbeats_total{source="other"} 0.000000`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+}
+
 func TestEdgeHeartbeatStoresPerformanceSamples(t *testing.T) {
 	t.Parallel()
 

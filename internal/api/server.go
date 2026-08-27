@@ -113,6 +113,8 @@ type Server struct {
 	managedAppStatusCache                  managedAppStatusCache
 	edgeRouteDecisionMu                    sync.Mutex
 	edgeRouteDecisionLast                  map[string]string
+	edgeRouteSourceMu                      sync.Mutex
+	edgeRouteSourceHeartbeats              map[string]uint64
 	consoleGalleryCache                    expiringResponseCache[consoleGalleryResponse]
 	billingImageStorageRefresh             billingImageStorageRefreshScheduler
 	sourceUploadSlots                      chan struct{}
@@ -271,6 +273,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		newClusterNodeClient:                   newClusterNodeClient,
 		newManagedAppStatusClient:              newManagedAppStatusClient,
 		managedAppStatusCache:                  newManagedAppStatusCache(0, 0),
+		edgeRouteSourceHeartbeats:              map[string]uint64{"edge_control": 0, "core_api": 0, "unknown": 0, "other": 0},
 		consoleGalleryCache:                    newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
 		sourceUploadSlots:                      make(chan struct{}, maxConcurrentSourceUploadRequests),
 		billingImageStorageRefresh:             newBillingImageStorageRefreshScheduler(0, 0),
@@ -383,6 +386,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.writeEdgeDNSArtifactMetrics(w)
 	s.writeHostedDNSMetrics(w)
 	s.writeEdgeExclusionMetrics(w)
+	s.writeEdgeRouteSourceMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {

@@ -14609,6 +14609,9 @@ components:
           type: boolean
         route_bundle_version:
           type: string
+        route_bundle_source:
+          type: string
+          description: Route-bundle authority selected by the edge worker.
         dns_bundle_version:
           type: string
         serving_generation:

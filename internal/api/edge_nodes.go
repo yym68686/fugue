@@ -45,6 +45,7 @@ type edgeHeartbeatRequest struct {
 	PublicIPv6             string                        `json:"public_ipv6,omitempty"`
 	MeshIP                 string                        `json:"mesh_ip,omitempty"`
 	RouteBundleVersion     string                        `json:"route_bundle_version,omitempty"`
+	RouteBundleSource      string                        `json:"route_bundle_source,omitempty"`
 	DNSBundleVersion       string                        `json:"dns_bundle_version,omitempty"`
 	ServingGeneration      string                        `json:"serving_generation,omitempty"`
 	LKGGeneration          string                        `json:"lkg_generation,omitempty"`
@@ -546,6 +547,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 			s.writeStoreError(w, updateErr)
 			return
 		}
+		s.recordEdgeRouteSourceHeartbeat(req.RouteBundleSource)
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": legacyNode, "accepted": true, "activation_phase": activation.Phase})
 		return
 	}
@@ -585,6 +587,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 			s.log.Printf("edge performance sample ingest failed; edge_id=%s edge_group_id=%s error=%v", req.EdgeID, req.EdgeGroupID, err)
 		}
 	}
+	s.recordEdgeRouteSourceHeartbeat(req.RouteBundleSource)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":             instance.Node,
 		"instance":         instance,
