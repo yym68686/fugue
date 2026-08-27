@@ -195,11 +195,18 @@ func (store *AuthorityStore) PruneExpiredCandidateCanaryResults(ctx context.Cont
 	if !groupPattern.MatchString(groupID) || now.IsZero() || !now.Equal(now.UTC()) {
 		return errors.New("candidate canary prune request is invalid")
 	}
-	protectedDigest := ""
+	protectedDigests := map[string]bool{}
 	if journal, exists, err := store.LoadTransitionJournal(ctx, groupID); err != nil {
 		return err
 	} else if exists {
-		protectedDigest = journal.CanaryResultDigest
+		protectedDigests[journal.CanaryResultDigest] = true
+	}
+	if candidate, _, _, err := store.LoadCandidate(ctx, groupID); err == nil {
+		if candidate.State == CandidateAuthorityVerified {
+			protectedDigests[candidate.CanaryResultDigest] = true
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
 	}
 	selector := labels.Set{"fugue.pro/group": groupID, "fugue.pro/authority-kind": "candidate-canary"}.AsSelector().String()
 	objects, err := store.client.CoreV1().ConfigMaps(store.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 257})
@@ -220,7 +227,7 @@ func (store *AuthorityStore) PruneExpiredCandidateCanaryResults(ctx context.Cont
 			return errors.New("candidate canary cleanup encountered an invalid object")
 		}
 		expiresAt, _ := time.Parse(time.RFC3339Nano, result.ExpiresAt)
-		if now.Before(expiresAt) || result.ResultDigest == protectedDigest {
+		if now.Before(expiresAt) || protectedDigests[result.ResultDigest] {
 			continue
 		}
 		uid := object.UID
@@ -629,6 +636,36 @@ func (store *AuthorityStore) ClaimVerifiedCandidate(ctx context.Context, candida
 		var current CandidateAuthority
 		if decodeStrict([]byte(raw), &current) != nil || current != candidate {
 			return errors.New("verified candidate claim changed")
+		}
+		return nil
+	})
+	return err
+}
+
+// RefreshVerifiedCandidateCanary binds a freshly signed result only when the
+// exact previous result object has been lost and no transition journal exists.
+// Candidate identity is otherwise immutable, and UID/resourceVersion prevents
+// a refresh from crossing an importer replacement.
+func (store *AuthorityStore) RefreshVerifiedCandidateCanary(ctx context.Context, candidate CandidateAuthority, resultDigest string, expectedUID types.UID, expectedResourceVersion string) error {
+	if candidate.Validate() != nil || candidate.State != CandidateAuthorityVerified || !digestPattern.MatchString(resultDigest) || resultDigest == candidate.CanaryResultDigest {
+		return errors.New("verified candidate canary refresh is invalid")
+	}
+	if _, err := store.LoadCandidateCanaryResult(ctx, candidate, candidate.CanaryResultDigest, time.Time{}); err == nil || !apierrors.IsNotFound(err) {
+		return errors.New("verified candidate canary refresh predecessor is not missing")
+	}
+	if _, err := store.LoadCandidateCanaryResult(ctx, candidate, resultDigest, time.Time{}); err != nil {
+		return errors.New("verified candidate canary refresh result is unavailable")
+	}
+	if _, exists, err := store.LoadTransitionJournal(ctx, candidate.GroupID); err != nil || exists {
+		return errors.New("verified candidate canary refresh has an active transition")
+	}
+	refreshed := candidate
+	refreshed.Generation++
+	refreshed.CanaryResultDigest = resultDigest
+	_, _, err := store.putMutable(ctx, candidateAuthorityName(candidate.GroupID), candidate.GroupID, "candidate.json", refreshed, expectedUID, expectedResourceVersion, func(raw string) error {
+		var current CandidateAuthority
+		if decodeStrict([]byte(raw), &current) != nil || current != candidate {
+			return errors.New("verified candidate canary refresh changed identity")
 		}
 		return nil
 	})

@@ -164,6 +164,108 @@ func TestCandidateCanaryStoreScopesLookupAndPrunesOnlyExpiredValidResults(t *tes
 	}
 }
 
+func TestCandidateCanaryReferencedByVerifiedCandidateIsNotPruned(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1_500, 0).UTC()
+	client := fake.NewSimpleClientset()
+	store, err := NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := bindCandidatePromotionWitness(CandidateAuthority{
+		APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: "edge-pool-a",
+		RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest,
+		State: CandidateAuthorityLoaded, Generation: 1,
+	})
+	result, err := SignCandidateCanaryResult(candidateResultFixture(candidate, now, HealthHealthy, HealthHealthy), candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateCandidateCanaryResult(ctx, result, now); err != nil {
+		t.Fatal(err)
+	}
+	candidate.State, candidate.Generation, candidate.CanaryResultDigest = CandidateAuthorityVerified, 2, result.ResultDigest
+	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	candidateObject, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, candidateAuthorityName(candidate.GroupID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateObject.UID, candidateObject.ResourceVersion = types.UID("verified-candidate"), "40"
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(ctx, candidateObject, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, uid, rv, err := store.LoadCandidate(ctx, candidate.GroupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PruneExpiredCandidateCanaryResults(ctx, candidate.GroupID, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, candidateCanaryResultName(candidate.GroupID, result.ResultDigest), metav1.GetOptions{}); err != nil {
+		t.Fatalf("verified candidate canary was pruned: %v", err)
+	}
+	if uid == "" || rv == "" {
+		t.Fatal("verified candidate did not receive a CAS identity")
+	}
+}
+
+func TestRefreshVerifiedCandidateCanaryRequiresMissingPredecessorAndCAS(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1_600, 0).UTC()
+	client := fake.NewSimpleClientset()
+	store, err := NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := bindCandidatePromotionWitness(CandidateAuthority{
+		APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: "edge-pool-a",
+		RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest,
+		State: CandidateAuthorityLoaded, Generation: 1,
+	})
+	oldResult, err := SignCandidateCanaryResult(candidateResultFixture(candidate, now, HealthHealthy, HealthHealthy), candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateCandidateCanaryResult(ctx, oldResult, now); err != nil {
+		t.Fatal(err)
+	}
+	candidate.State, candidate.Generation, candidate.CanaryResultDigest = CandidateAuthorityVerified, 2, oldResult.ResultDigest
+	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	candidateObject, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, candidateAuthorityName(candidate.GroupID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateObject.UID, candidateObject.ResourceVersion = types.UID("refresh-candidate"), "50"
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(ctx, candidateObject, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, uid, rv, err := store.LoadCandidate(ctx, candidate.GroupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CoreV1().ConfigMaps("fugue-system").Delete(ctx, candidateCanaryResultName(candidate.GroupID, oldResult.ResultDigest), metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	newResult, err := SignCandidateCanaryResult(candidateResultFixture(candidate, now.Add(time.Second), HealthHealthy, HealthHealthy), candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateCandidateCanaryResult(ctx, newResult, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RefreshVerifiedCandidateCanary(ctx, candidate, newResult.ResultDigest, uid, rv); err != nil {
+		t.Fatalf("verified candidate canary was not refreshed: %v", err)
+	}
+	refreshed, _, _, err := store.LoadCandidate(ctx, candidate.GroupID)
+	if err != nil || refreshed.Generation != candidate.Generation+1 || refreshed.CanaryResultDigest != newResult.ResultDigest {
+		t.Fatalf("refreshed candidate=%+v err=%v", refreshed, err)
+	}
+}
+
 func TestLegacyCandidateCanaryCanOnlyBeRecognizedForBoundedExpiryCleanup(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(2_000, 0).UTC()

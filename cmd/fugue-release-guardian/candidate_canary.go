@@ -145,17 +145,29 @@ func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthoritySt
 	if err != nil {
 		return err
 	}
-	if candidate.State != releaseguardian.CandidateAuthorityLoaded {
-		return nil
-	}
-	if _, err := store.LoadLatestCandidateCanaryResult(ctx, candidate, now); err == nil {
-		return nil
-	} else if !errors.Is(err, releaseguardian.ErrCandidateCanaryUnavailable) {
-		return err
+	refreshVerified := candidate.State == releaseguardian.CandidateAuthorityVerified
+	if refreshVerified {
+		if _, err := store.LoadCandidateCanaryResult(ctx, candidate, candidate.CanaryResultDigest, time.Time{}); err == nil {
+			return nil
+		} else if !apierrors.IsNotFound(err) {
+			return err
+		}
+	} else {
+		if candidate.State != releaseguardian.CandidateAuthorityLoaded {
+			return nil
+		}
+		if _, err := store.LoadLatestCandidateCanaryResult(ctx, candidate, now); err == nil {
+			return nil
+		} else if !errors.Is(err, releaseguardian.ErrCandidateCanaryUnavailable) {
+			return err
+		}
 	}
 	current, currentUID, currentRV, err := store.LoadCurrent(ctx, probe.GroupID)
 	if err != nil {
 		return err
+	}
+	if refreshVerified && current.CurrentRecordDigest == candidate.RecordDigest && current.CurrentWorkerSlot == candidate.WorkerSlot {
+		return nil
 	}
 	cohort, err := observeCandidateWorkerCohort(ctx, client, namespace, candidate)
 	if err != nil {
@@ -164,10 +176,10 @@ func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthoritySt
 	candidateSamples := make([]releaseguardian.CandidateRouteSample, 0, releaseguardian.CandidateCanaryRequiredSamples)
 	previousSamples := make([]releaseguardian.CandidateRouteSample, 0, releaseguardian.CandidateCanaryRequiredSamples)
 	for index := 0; index < releaseguardian.CandidateCanaryRequiredSamples; index++ {
-		candidateSamples = append(candidateSamples, observeCandidateRoute(ctx, probe, candidate, candidate.WorkerSlot))
+		candidateSamples = append(candidateSamples, observeCandidateRouteForCanary(ctx, probe, candidate, candidate.WorkerSlot))
 		previousBinding := candidate
 		previousBinding.RecordDigest, previousBinding.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
-		previousSamples = append(previousSamples, observeCandidateRoute(ctx, probe, previousBinding, current.CurrentWorkerSlot))
+		previousSamples = append(previousSamples, observeCandidateRouteForCanary(ctx, probe, previousBinding, current.CurrentWorkerSlot))
 	}
 	observedAt := time.Now().UTC()
 	latestCandidate, latestCandidateUID, latestCandidateRV, err := store.LoadCandidate(ctx, probe.GroupID)
@@ -182,11 +194,22 @@ func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthoritySt
 	if err != nil || latestCohort.CohortDigest != cohort.CohortDigest {
 		return errors.New("candidate worker cohort changed during route canary")
 	}
-	result, err := releaseguardian.EvaluateCandidateCanary(candidate, current, cohort, candidateSamples, previousSamples, observedAt, 3*probe.Interval, probe.KeyID, probe.SigningMaterial)
+	evaluatedCandidate := candidate
+	if refreshVerified {
+		evaluatedCandidate.State = releaseguardian.CandidateAuthorityLoaded
+		evaluatedCandidate.CanaryResultDigest = ""
+	}
+	result, err := releaseguardian.EvaluateCandidateCanary(evaluatedCandidate, current, cohort, candidateSamples, previousSamples, observedAt, 3*probe.Interval, probe.KeyID, probe.SigningMaterial)
 	if err != nil {
 		return err
 	}
-	return store.CreateCandidateCanaryResult(ctx, result, observedAt)
+	if err := store.CreateCandidateCanaryResult(ctx, result, observedAt); err != nil {
+		return err
+	}
+	if refreshVerified {
+		return store.RefreshVerifiedCandidateCanary(ctx, candidate, result.ResultDigest, candidateUID, candidateRV)
+	}
+	return nil
 }
 
 func observeCandidateWorkerCohort(ctx context.Context, client kubernetes.Interface, namespace string, candidate releaseguardian.CandidateAuthority) (releaseguardian.CandidateWorkerCohort, error) {
@@ -288,6 +311,8 @@ func observeCandidateRoute(ctx context.Context, probe candidateCanaryProbe, bind
 		ObservedWorkerSlot:    releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))),
 	}
 }
+
+var observeCandidateRouteForCanary = observeCandidateRoute
 
 // requestCandidateRoute exercises the same public-TLS worker listener used by
 // edge-front. The PROXY v1 preamble is part of that listener contract; there

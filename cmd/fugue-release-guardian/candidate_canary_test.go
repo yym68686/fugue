@@ -117,6 +117,75 @@ func TestCandidateWorkerCohortRejectsRuntimeDigestAndRestartDrift(t *testing.T) 
 	}
 }
 
+func TestCandidateCanaryReissuesMissingVerifiedEvidence(t *testing.T) {
+	ctx := context.Background()
+	group := "edge-pool-a"
+	source := strings.Repeat("d", 40)
+	imageDigest := "sha256:" + strings.Repeat("c", 64)
+	candidate := releaseguardian.CandidateAuthority{
+		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind, GroupID: group,
+		RecordDigest: "sha256:" + strings.Repeat("a", 64), BundleGeneration: "candidate-generation-1", ServingGeneration: "candidate-generation-1",
+		AuthoritySequence: 12, CandidateSequence: 14, CurrentPublicationSequence: 11, CurrentRecoveryEpoch: 2,
+		CurrentBundleDigest: "sha256:" + strings.Repeat("e", 64), CurrentServingGeneration: "current-generation-1", CandidateEpoch: 13,
+		WorkerSlot: releaseguardian.AuthoritySlotB, ReleaseRecordDigest: "sha256:" + strings.Repeat("b", 64),
+		WorkerSourceSHA: source, WorkerImageDigest: imageDigest, State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
+	}
+	worker := candidateWorkerPod("worker-b", "edge-node-a", "pod-uid-worker-b", string(candidate.WorkerSlot), source,
+		"ghcr.io/example/fugue-edge@"+imageDigest)
+	client := fake.NewSimpleClientset(worker)
+	store, err := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	setMutableAuthorityFixture(t, client, "fugue-candidate-authority-"+group, "candidate-uid", "10")
+	loaded, uid, rv, err := store.LoadCandidate(ctx, group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := loaded
+	verified.State, verified.Generation = releaseguardian.CandidateAuthorityVerified, loaded.Generation+1
+	verified.CanaryResultDigest = "sha256:" + strings.Repeat("f", 64)
+	if _, _, err := store.PutCandidate(ctx, verified, uid, rv); err != nil {
+		t.Fatal(err)
+	}
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: group, CurrentRecordDigest: "sha256:" + strings.Repeat("9", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotA, AuthorityEpoch: 7}
+	if _, _, err := store.SwitchCurrent(ctx, current, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	setMutableAuthorityFixture(t, client, "fugue-current-authority-"+group, "current-uid", "20")
+
+	previousObserver := observeCandidateRouteForCanary
+	defer func() { observeCandidateRouteForCanary = previousObserver }()
+	observeCandidateRouteForCanary = func(_ context.Context, probe candidateCanaryProbe, binding releaseguardian.CandidateAuthority, slot releaseguardian.AuthoritySlot) releaseguardian.CandidateRouteSample {
+		sample := releaseguardian.CandidateRouteSample{GroupID: group, AuthorityRecordDigest: binding.RecordDigest,
+			WorkerSlot: slot, ReleaseRecordDigest: binding.ReleaseRecordDigest, StatusCode: http.StatusOK,
+			BodyDigest: probe.ExpectedBodyDigest, ExpectedBodyDigest: probe.ExpectedBodyDigest,
+			OriginEvidenceDigest: "sha256:" + strings.Repeat("8", 64), ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		if slot == verified.WorkerSlot {
+			sample.Attested, sample.ObservedRecordDigest, sample.ObservedReleaseDigest, sample.ObservedWorkerSlot = true, verified.RecordDigest, verified.ReleaseRecordDigest, verified.WorkerSlot
+		}
+		return sample
+	}
+	probe := candidateCanaryProbe{GroupID: group, Interval: 10 * time.Second, ExpectedBodyDigest: "sha256:" + strings.Repeat("7", 64),
+		KeyID: "candidate-canary-v1", SigningMaterial: []byte("candidate-canary-test-signing-material-32-bytes")}
+	if err := candidateCanaryOnce(ctx, store, client, "fugue-system", probe); err != nil {
+		t.Fatalf("reissue missing verified canary: %v", err)
+	}
+	refreshed, _, _, err := store.LoadCandidate(ctx, group)
+	if err != nil || refreshed.State != releaseguardian.CandidateAuthorityVerified || refreshed.Generation != verified.Generation+1 ||
+		refreshed.CanaryResultDigest == verified.CanaryResultDigest {
+		t.Fatalf("refreshed candidate=%+v err=%v", refreshed, err)
+	}
+	result, err := store.LoadCandidateCanaryResult(ctx, refreshed, refreshed.CanaryResultDigest, time.Time{})
+	if err != nil || result.RouteState != releaseguardian.HealthHealthy || result.DependencyState != releaseguardian.HealthHealthy {
+		t.Fatalf("refreshed result=%+v err=%v", result, err)
+	}
+}
+
 func candidateWorkerPod(name, node, uid, slot, source, image string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "fugue-system", UID: types.UID(uid), Labels: map[string]string{
