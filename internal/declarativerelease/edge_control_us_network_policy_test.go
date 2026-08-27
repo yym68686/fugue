@@ -117,11 +117,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	const lkgSHA = "9253d52ead439783432bec879ef2f987910af5fe"
-	if intent.Generation != 40 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
+	const lkgSHA = "f21f522e8dd1eb14972a3805b5a2f08f6b09cde0"
+	if intent.Generation != 42 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:b45f31923fab7bff378a519a73789e34f8997a0f51b4ab7468d46c1981e694b0" ||
-		intent.SupersedesFailedConfigSHA != "54e3a4fa1f9f93aec146d2a45923e014010291e3" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
+		intent.ExpectedPreviousImageDigest != "sha256:23531b7db3f416f5999b4ee6161e8fcf7a1ef9cb359c2d5d6f81694b9210d424" ||
+		intent.SupersedesFailedConfigSHA != "" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
 	registry, err := MergeEdgeGroupRegistry(base, edge)
@@ -133,11 +133,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 39
+	prior.Generation = intent.Generation - 1
 	failed := intent
 	failed.Generation = 32
 	failed.SupersedesFailedConfigSHA = "4a5c93325d8c6aac734ba35d04932f1ed21f25fd"
-	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior}, nil, SupersededIntents{us.Control.ID: {intent.SupersedesFailedConfigSHA: failed}})
+	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior}, map[string]string{us.Control.ID: lkgSHA}, SupersededIntents{us.Control.ID: {intent.SupersedesFailedConfigSHA: failed}})
 	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" {
 		t.Fatalf("US Edge Control prerequisite planner expanded: releases=%+v err=%v", bound.Releases, err)
 	}

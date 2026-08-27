@@ -701,6 +701,35 @@ func TestServingAuthorityWitnessAllowsExplicitRuntimeDriftWithActiveWorkerProof(
 	}
 }
 
+func TestServingAuthorityWitnessUsesCurrentWorkerPublicationAfterAuthorityBundleDrift(t *testing.T) {
+	now := time.Date(2026, 8, 27, 18, 0, 0, 0, time.UTC)
+	source := strings.Repeat("a", 40)
+	image := "sha256:" + strings.Repeat("b", 64)
+	witness := &edgeServingAuthorityWitness{WorkerSlot: "a", WorkerSourceSHA: source, WorkerImageDigest: image,
+		BundleVersion: "edgegroupbundle_old.p26702.r513"}
+	worker := edgeGroupPod{Name: "worker-a", NodeName: "edge-de", Ready: true, SourceCommit: source,
+		ImageRef: "ghcr.io/example/fugue-edge@" + image, RouteBundleSource: edgeGroupAuthoritySource,
+		BundleGeneration: "edgegroupbundle_current.p26746.r513", ServingGeneration: "edgegroupbundle_current",
+		PublicationSequence: 26746, InventoryProducerActive: true, InventoryHeartbeatGeneration: 34953,
+		InventoryHeartbeatAt: now.Add(-time.Second)}
+	before := edgeGroupState{Front: map[string]edgeGroupPod{"edge-de": {Name: "front", NodeName: "edge-de"}},
+		WorkerA: map[string]edgeGroupPod{"edge-de": worker}}
+	status := edgeCandidateStageStatus{Ready: true, ServingHealthy: true, PublicationDecision: "published", LKGState: "current",
+		BundleGeneration: "edgegroupbundle_current", CurrentPublicationSequence: 26750, RecoveryEpoch: 513,
+		PublishedBundleDigest: "sha256:" + strings.Repeat("c", 64)}
+	updated, err := edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, now)
+	if err != nil || updated.BundleVersion != worker.BundleGeneration || updated.WorkerSlot != witness.WorkerSlot ||
+		updated.WorkerSourceSHA != source || updated.WorkerImageDigest != image {
+		t.Fatalf("current publication witness=%+v err=%v", updated, err)
+	}
+	worker.SourceCommit = strings.Repeat("d", 40)
+	before.WorkerA["edge-de"] = worker
+	unchanged, err := edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, now)
+	if err != nil || unchanged.BundleVersion != witness.BundleVersion {
+		t.Fatalf("mismatched worker identity changed witness: witness=%+v err=%v", unchanged, err)
+	}
+}
+
 func TestServingAuthorityWitnessOmitsLegacyUnboundFront(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),

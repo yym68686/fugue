@@ -1095,7 +1095,7 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidateOnce(ctx context.Context, 
 	if !strings.HasPrefix(recordDigest, "sha256:") || len(recordDigest) != 71 {
 		return edgeCandidateStageReceipt{}, errors.New("Guardian release record digest is invalid")
 	}
-	servingAuthority, err := runtime.readServingAuthorityWitness(ctx, before)
+	servingAuthority, err := runtime.readServingAuthorityWitness(ctx, before, status)
 	if err != nil {
 		return edgeCandidateStageReceipt{}, err
 	}
@@ -1121,12 +1121,46 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidateOnce(ctx context.Context, 
 	return postEdgeCandidateStage(ctx, runtime.transition.CandidateStageURL, request)
 }
 
-func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.Context, before edgeGroupState) (*edgeServingAuthorityWitness, error) {
+func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.Context, before edgeGroupState, status edgeCandidateStageStatus) (*edgeServingAuthorityWitness, error) {
 	current, object, err := runtime.readCurrentAuthority(ctx)
 	if err != nil || object == nil {
 		return nil, err
 	}
-	return edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "", runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest)
+	witness, err := edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "", runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest)
+	if err != nil || witness == nil {
+		return witness, err
+	}
+	return edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, time.Now().UTC())
+}
+
+func edgeServingAuthorityWitnessWithCurrentPublication(before edgeGroupState, witness *edgeServingAuthorityWitness, status edgeCandidateStageStatus, now time.Time) (*edgeServingAuthorityWitness, error) {
+	if witness == nil || !status.Ready || !status.ServingHealthy || status.PublicationDecision != "published" || status.LKGState != "current" ||
+		status.BundleGeneration == "" || status.CurrentPublicationSequence == 0 || status.PublishedBundleDigest == "" {
+		return witness, nil
+	}
+	workers := edgeWorkerPods(before, witness.WorkerSlot)
+	if len(workers) == 0 || len(workers) != len(before.Front) || !sameEdgeNodes(workers, before.Front) {
+		return witness, nil
+	}
+	servingVersion := ""
+	for _, worker := range workers {
+		digest, err := immutableDigestFromRef(worker.ImageRef)
+		generation, publication, recovery, versionOK := parseEdgePublicationVersion(worker.BundleGeneration)
+		if err != nil || !worker.Ready || worker.RestartCount != 0 || worker.SourceCommit != witness.WorkerSourceSHA ||
+			digest != witness.WorkerImageDigest || !edgePodHasGroupAuthority(worker) || !edgePodHasActiveInventoryAt(worker, now) ||
+			!versionOK || generation != status.BundleGeneration || worker.ServingGeneration != generation ||
+			worker.PublicationSequence != publication || publication > status.CurrentPublicationSequence || recovery > status.RecoveryEpoch {
+			return witness, nil
+		}
+		if servingVersion == "" {
+			servingVersion = worker.BundleGeneration
+		} else if servingVersion != worker.BundleGeneration {
+			return nil, errors.New("active Edge Worker cohort disagrees on serving publication")
+		}
+	}
+	updated := *witness
+	updated.BundleVersion = servingVersion
+	return &updated, nil
 }
 
 func (runtime *kubectlEdgeGroupRuntime) readCurrentAuthority(ctx context.Context) (releaseguardian.CurrentAuthority, *unstructured.Unstructured, error) {
