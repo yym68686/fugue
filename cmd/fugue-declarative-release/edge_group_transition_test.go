@@ -857,20 +857,26 @@ func TestParseEdgeGroupPodsRequiresOneReadyGroupBoundPodPerNode(t *testing.T) {
 		edgeGroupPodFixture("worker-2", "uid-2", "node-2", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64)),
 	}}
 	raw, _ := json.Marshal(pods)
-	got, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us", false, "")
+	got, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 2, "edge-group-country-us", true)
 	if err != nil || len(got) != 2 || got["node-1"].Name != "worker-1" || !got["node-2"].Ready {
 		t.Fatalf("parse edge group pods: got=%+v err=%v", got, err)
 	}
 
 	pods["items"].([]any)[1].(map[string]any)["metadata"].(map[string]any)["labels"].(map[string]any)["fugue.io/edge-group-id"] = "edge-group-country-de"
 	raw, _ = json.Marshal(pods)
-	if _, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us", false, ""); err == nil || !strings.Contains(err.Error(), "group identity") {
+	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 2, "edge-group-country-us", true); err == nil || !strings.Contains(err.Error(), "group identity") {
 		t.Fatalf("cross-group pod was accepted: %v", err)
+	}
+
+	delete(pods["items"].([]any)[1].(map[string]any)["metadata"].(map[string]any)["labels"].(map[string]any), "fugue.io/edge-group-id")
+	raw, _ = json.Marshal(pods)
+	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 2, "edge-group-country-us", true); err == nil || !strings.Contains(err.Error(), "group identity") {
+		t.Fatalf("pod without group identity was accepted: %v", err)
 	}
 
 	pods["items"] = []any{edgeGroupPodFixture("worker-1", "uid-1", "node-1", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64))}
 	raw, _ = json.Marshal(pods)
-	if _, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us", false, ""); err == nil || !strings.Contains(err.Error(), "want 2") {
+	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 2, "edge-group-country-us", true); err == nil || !strings.Contains(err.Error(), "want 2") {
 		t.Fatalf("partial group cohort was accepted: %v", err)
 	}
 }
@@ -880,10 +886,10 @@ func TestParseEdgeGroupPodsSnapshotPreservesUnreadyImmutableIdentity(t *testing.
 	pod["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": "Ready", "status": "False"}}
 	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
 
-	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", false, ""); err == nil || !strings.Contains(err.Error(), "readiness") {
+	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", true); err == nil || !strings.Contains(err.Error(), "readiness") {
 		t.Fatalf("strict worker read accepted an unready active slot: %v", err)
 	}
-	got, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false, "", false)
+	got, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -895,7 +901,7 @@ func TestParseEdgeGroupPodsSnapshotPreservesUnreadyImmutableIdentity(t *testing.
 
 	delete(pod["metadata"].(map[string]any), "uid")
 	raw, _ = json.Marshal(map[string]any{"items": []any{pod}})
-	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false, "", false); err == nil || !strings.Contains(err.Error(), "identity") {
+	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("lenient snapshot accepted missing immutable identity: %v", err)
 	}
 
@@ -903,7 +909,7 @@ func TestParseEdgeGroupPodsSnapshotPreservesUnreadyImmutableIdentity(t *testing.
 	delete(pod["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any), "imageID")
 	delete(pod["metadata"].(map[string]any)["annotations"].(map[string]any), "fugue.pro/source-commit")
 	raw, _ = json.Marshal(map[string]any{"items": []any{pod}})
-	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false, "", false); err != nil {
+	if _, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", false); err != nil {
 		t.Fatalf("snapshot rejected pod without runtime-only evidence: %v", err)
 	}
 }
@@ -913,7 +919,7 @@ func TestParseEdgeGroupPodsAcceptsReadyLKGWithHistoricalRestarts(t *testing.T) {
 	pod["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["restartCount"] = 2
 	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
 
-	got, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-de", false, "")
+	got, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-de", true)
 	if err != nil || !got["node-1"].Ready || got["node-1"].RestartCount != 2 {
 		t.Fatalf("ready LKG with historical restarts was rejected: got=%+v err=%v", got, err)
 	}

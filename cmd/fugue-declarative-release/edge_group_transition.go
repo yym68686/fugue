@@ -269,7 +269,6 @@ type edgeGroupPod struct {
 	CandidateRecordDigest        string
 	CandidateReleaseRecordDigest string
 	CandidateWorkerSlot          string
-	LegacyIdentity               bool
 	Ready                        bool
 }
 
@@ -1913,7 +1912,7 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	if err != nil {
 		return nil, err
 	}
-	pods, err := parseEdgeGroupPodsWithReadiness(podsRaw, container, expectedNodes, groupID, false, "", requireReady)
+	pods, err := parseEdgeGroupPodsWithReadiness(podsRaw, container, expectedNodes, groupID, requireReady)
 	if err != nil {
 		return nil, fmt.Errorf("parse DaemonSet/%s pods: %w", name, err)
 	}
@@ -1984,11 +1983,7 @@ func edgeHealthPortNames() []string {
 	return []string{"health"}
 }
 
-func parseEdgeGroupPods(raw []byte, container string, expectedNodes int, groupID string, allowLegacy bool, legacySource string) (map[string]edgeGroupPod, error) {
-	return parseEdgeGroupPodsWithReadiness(raw, container, expectedNodes, groupID, allowLegacy, legacySource, true)
-}
-
-func parseEdgeGroupPodsWithReadiness(raw []byte, container string, expectedNodes int, groupID string, allowLegacy bool, legacySource string, requireReady bool) (map[string]edgeGroupPod, error) {
+func parseEdgeGroupPodsWithReadiness(raw []byte, container string, expectedNodes int, groupID string, requireReady bool) (map[string]edgeGroupPod, error) {
 	value, err := decodeJSONObject(raw)
 	if err != nil {
 		return nil, err
@@ -2009,17 +2004,13 @@ func parseEdgeGroupPodsWithReadiness(raw []byte, container string, expectedNodes
 		}
 		labels := mapStringField(metadata, "labels")
 		podGroupID := labels["fugue.io/edge-group-id"]
-		if podGroupID != groupID && !(allowLegacy && podGroupID == "") {
+		if podGroupID != groupID {
 			return nil, errors.New("pod edge group identity mismatch")
 		}
 		spec := mapField(item, "spec")
 		node := stringValue(spec["nodeName"])
 		pod := edgeGroupPod{Name: stringValue(metadata["name"]), UID: stringValue(metadata["uid"]), ResourceVersion: stringValue(metadata["resourceVersion"]), NodeName: node,
 			SourceCommit: mapStringField(metadata, "annotations")["fugue.pro/source-commit"]}
-		if pod.SourceCommit == "" && allowLegacy {
-			pod.SourceCommit = legacySource
-			pod.LegacyIdentity = true
-		}
 		containers, _ := spec["containers"].([]any)
 		for _, rawContainer := range containers {
 			entry, _ := rawContainer.(map[string]any)
