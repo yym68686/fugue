@@ -24,6 +24,7 @@ import (
 
 const (
 	edgeControlRouteSourceV1          = "edge-control-group-authority/v1"
+	coreAPIRouteSourceV1              = "core-api/v1"
 	edgeControlSigningKeyringSchemaV1 = "edge-control-group-bundle-signing-keyring/v1"
 	edgeControlBundlePath             = "/v1/edge/routes"
 	edgeControlCandidateBundlePath    = "/v1/edge/candidate-routes"
@@ -99,6 +100,13 @@ func (s *Service) edgeControlRouteSourceEnabled() bool {
 	return strings.TrimSpace(s.RouteBundleSource.URL) != "" ||
 		strings.TrimSpace(s.RouteBundleSource.TokenFile) != "" ||
 		strings.TrimSpace(s.RouteBundleSource.VerifierKeyringFile) != ""
+}
+
+func (s *Service) routeBundleSourceObservation() string {
+	if s.edgeControlRouteSourceEnabled() {
+		return edgeControlRouteSourceV1
+	}
+	return coreAPIRouteSourceV1
 }
 
 func validateEdgeControlRouteSourceConfig(cfg configEdgeRouteSource) error {

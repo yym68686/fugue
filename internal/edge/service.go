@@ -3088,6 +3088,7 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, telem
 		"public_ipv6":              strings.TrimSpace(s.Config.PublicIPv6),
 		"mesh_ip":                  strings.TrimSpace(s.Config.MeshIP),
 		"route_bundle_version":     strings.TrimSpace(status.BundleVersion),
+		"route_bundle_source":      s.routeBundleSourceObservation(),
 		"dns_bundle_version":       "",
 		"serving_generation":       strings.TrimSpace(status.ServingGeneration),
 		"lkg_generation":           strings.TrimSpace(status.LKGGeneration),

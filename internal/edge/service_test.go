@@ -1355,6 +1355,7 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 		"public_ipv4":           "203.0.113.10",
 		"mesh_ip":               "100.64.0.10",
 		"route_bundle_version":  "routegen_heartbeat",
+		"route_bundle_source":   coreAPIRouteSourceV1,
 		"caddy_applied_version": "routegen_heartbeat",
 		"cache_status":          "ready",
 		"tls_status":            "",
