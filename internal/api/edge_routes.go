@@ -897,7 +897,8 @@ func (s *Server) listRouteInventoryNodes(edgeGroupID string) ([]model.EdgeNode, 
 		return nodes, groups, err
 	}
 	activation, activationErr := s.store.GetEdgeActivationState()
-	if !edgeRouteInventoryAllowsLegacyFallback(err, nodes, activation, activationErr) {
+	fallbackReason := edgeRouteInventoryFallbackReason(err, nodes, activation, activationErr)
+	if fallbackReason == "" {
 		if err != nil {
 			return nil, nil, err
 		}
@@ -906,14 +907,25 @@ func (s *Server) listRouteInventoryNodes(edgeGroupID string) ([]model.EdgeNode, 
 		}
 		return nil, nil, err
 	}
+	s.recordEdgeRouteInventoryFallback(fallbackReason)
 	return s.store.ListEdgeNodes(edgeGroupID)
 }
 
 func edgeRouteInventoryAllowsLegacyFallback(inventoryErr error, activeNodes []model.EdgeNode, activation model.EdgeActivationState, activationErr error) bool {
+	return edgeRouteInventoryFallbackReason(inventoryErr, activeNodes, activation, activationErr) != ""
+}
+
+func edgeRouteInventoryFallbackReason(inventoryErr error, activeNodes []model.EdgeNode, activation model.EdgeActivationState, activationErr error) string {
 	if activationErr != nil || activation.RouteAuthority != model.EdgeRouteAuthorityLegacy {
-		return false
+		return ""
 	}
-	return errors.Is(inventoryErr, store.ErrEdgeInstanceFencingNotReady) || (inventoryErr == nil && len(activeNodes) == 0)
+	if errors.Is(inventoryErr, store.ErrEdgeInstanceFencingNotReady) {
+		return edgeRouteInventoryFallbackFencingNotReady
+	}
+	if inventoryErr == nil && len(activeNodes) == 0 {
+		return edgeRouteInventoryFallbackActiveEmpty
+	}
+	return ""
 }
 
 func applyEdgeRouteInventoryBlastRadiusCap(beforeHealthy map[string]bool, beforeIDs map[string][]string, afterHealthy map[string]bool, afterIDs map[string][]string) (map[string]bool, map[string][]string) {

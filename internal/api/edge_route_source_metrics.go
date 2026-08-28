@@ -9,6 +9,11 @@ import (
 
 const edgeControlRouteSourceV1 = "edge-control-group-authority/v1"
 
+const (
+	edgeRouteInventoryFallbackFencingNotReady = "fencing_not_ready"
+	edgeRouteInventoryFallbackActiveEmpty     = "active_inventory_empty"
+)
+
 func normalizeEdgeRouteSourceMetric(raw string) string {
 	switch strings.TrimSpace(raw) {
 	case edgeControlRouteSourceV1:
@@ -48,4 +53,32 @@ func (s *Server) writeEdgeRouteSourceMetrics(w io.Writer) {
 	for _, source := range []string{"edge_control", "core_api", "unknown", "other"} {
 		observability.WriteMetricSample(w, "fugue_edge_route_source_heartbeats_total", map[string]string{"source": source}, float64(counts[source]))
 	}
+	fallbacks := map[string]uint64{}
+	if s != nil {
+		s.edgeRouteSourceMu.Lock()
+		for reason, count := range s.edgeRouteInventoryFallbacks {
+			fallbacks[reason] = count
+		}
+		s.edgeRouteSourceMu.Unlock()
+	}
+	observability.WriteMetricHeader(w, "fugue_edge_route_inventory_legacy_fallback_total", "Route inventory selections that used the legacy-authoritative compatibility path.", "counter")
+	for _, reason := range []string{edgeRouteInventoryFallbackFencingNotReady, edgeRouteInventoryFallbackActiveEmpty} {
+		observability.WriteMetricSample(w, "fugue_edge_route_inventory_legacy_fallback_total", map[string]string{"reason": reason}, float64(fallbacks[reason]))
+	}
+}
+
+func (s *Server) recordEdgeRouteInventoryFallback(reason string) {
+	if s == nil {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason != edgeRouteInventoryFallbackFencingNotReady && reason != edgeRouteInventoryFallbackActiveEmpty {
+		return
+	}
+	s.edgeRouteSourceMu.Lock()
+	if s.edgeRouteInventoryFallbacks == nil {
+		s.edgeRouteInventoryFallbacks = map[string]uint64{}
+	}
+	s.edgeRouteInventoryFallbacks[reason]++
+	s.edgeRouteSourceMu.Unlock()
 }

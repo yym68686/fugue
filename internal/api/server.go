@@ -114,6 +114,7 @@ type Server struct {
 	edgeRouteDecisionLast                  map[string]string
 	edgeRouteSourceMu                      sync.Mutex
 	edgeRouteSourceHeartbeats              map[string]uint64
+	edgeRouteInventoryFallbacks            map[string]uint64
 	edgeAuthMu                             sync.Mutex
 	edgeAuthMethods                        map[string]uint64
 	consoleGalleryCache                    expiringResponseCache[consoleGalleryResponse]
@@ -273,6 +274,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		newManagedAppStatusClient:              newManagedAppStatusClient,
 		managedAppStatusCache:                  newManagedAppStatusCache(0, 0),
 		edgeRouteSourceHeartbeats:              map[string]uint64{"edge_control": 0, "core_api": 0, "unknown": 0, "other": 0},
+		edgeRouteInventoryFallbacks:            map[string]uint64{"fencing_not_ready": 0, "active_inventory_empty": 0},
 		consoleGalleryCache:                    newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
 		sourceUploadSlots:                      make(chan struct{}, maxConcurrentSourceUploadRequests),
 		billingImageStorageRefresh:             newBillingImageStorageRefreshScheduler(0, 0),
