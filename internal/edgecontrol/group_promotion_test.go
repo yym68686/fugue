@@ -385,6 +385,10 @@ func TestGroupPromotionAcceptsSameGenerationPublicationRefresh(t *testing.T) {
 	if err != nil || after.Published.Bundle.Generation != candidate.Bundle.Generation || after.LedgerHead.Sequence != receipt.PublicationSequence {
 		t.Fatalf("same-generation refresh changed wrong authority: after=%+v receipt=%+v err=%v", after, receipt, err)
 	}
+	_, exact, recoveryEpoch, err := store.ReadGroupRecoveryTarget(ctx, groupID, after.Published.Bundle.Version)
+	if err != nil || exact.Sequence != after.Published.CandidateLedgerSequence || recoveryEpoch != after.Published.RecoveryEpoch {
+		t.Fatalf("normal publication after recovery refresh was not addressable by exact epoch: target=%+v epoch=%d err=%v", exact, recoveryEpoch, err)
+	}
 }
 
 func groupPromotionFixture(t *testing.T, groupID string, now time.Time) (*PersistentGroupStore, *fixtureGroupSigner, GroupCandidateBundle, GroupAuthorityState) {

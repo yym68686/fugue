@@ -682,17 +682,18 @@ func (store *PersistentGroupStore) ReadGroupRecoveryTarget(ctx context.Context, 
 		authority.PublishedExists = true
 		targetCandidateSequence := uint64(0)
 		targetBundleGeneration := ""
-		for index := len(state.AuthorityLedger) - 1; index >= 0; index-- {
-			entry := state.AuthorityLedger[index]
+		for _, entry := range state.AuthorityLedger {
 			if entry.RecoveryEpoch > recoveryEpoch {
 				recoveryEpoch = entry.RecoveryEpoch
 			}
 			// A base generation can be shared by many publications. Recovery
 			// callers that have a Front activation witness must be able to name
 			// the exact immutable publication (generation.pN.rM), otherwise a
-			// retry can silently select the failed candidate again.
-			entryVersion := groupPublicationVersion(entry.BundleGeneration, entry.Sequence, entry.RecoveryEpoch)
-			if targetCandidateSequence == 0 && entry.Status == GroupAuthorityStatusPublished &&
+			// retry can silently select the failed candidate again. Normal
+			// publication rows carry a zero RecoveryEpoch, so their effective
+			// version inherits the latest monotonic recovery epoch.
+			entryVersion := groupPublicationVersion(entry.BundleGeneration, entry.Sequence, recoveryEpoch)
+			if entry.Status == GroupAuthorityStatusPublished &&
 				(entry.BundleGeneration == generation || entryVersion == generation) {
 				targetCandidateSequence = entry.CandidateLedgerSequence
 				targetBundleGeneration = entry.BundleGeneration
