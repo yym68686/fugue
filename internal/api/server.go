@@ -117,8 +117,6 @@ type Server struct {
 	edgeRouteInventoryFallbacks            map[string]uint64
 	edgeAuthMu                             sync.Mutex
 	edgeAuthMethods                        map[string]uint64
-	nodeUpdaterEdgeInventoryMu             sync.Mutex
-	nodeUpdaterEdgeInventoryFallbacks      map[string]uint64
 	nodeUpdaterEdgeIdentityMu              sync.Mutex
 	nodeUpdaterEdgeIdentityLookups         map[string]uint64
 	consoleGalleryCache                    expiringResponseCache[consoleGalleryResponse]
@@ -394,7 +392,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.writeEdgeRouteSourceMetrics(w)
 	s.writeEdgeAuthMetrics(w)
 	s.writeNodeUpdaterEdgeIdentityMetrics(w)
-	s.writeNodeUpdaterEdgeInventoryMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {

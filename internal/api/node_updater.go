@@ -236,30 +236,9 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 			}
 		} else if errors.Is(err, store.ErrNotFound) {
 			s.recordNodeUpdaterEdgeIdentityLookup(nodeUpdaterEdgeIdentityMissing)
-			if nodes, _, err := s.store.ListEdgeNodes(""); err == nil {
-				matched := false
-				for _, node := range nodes {
-					if strings.TrimSpace(node.ID) == edgeID || (publicIP != "" && (node.PublicIPv4 == publicIP || node.PublicIPv6 == publicIP)) {
-						edgeGroupID = strings.TrimSpace(node.EdgeGroupID)
-						if edgeGroupID != "" {
-							matched = true
-							warnings = append(warnings, "edge credential reused explicit edge group from inventory")
-						}
-						break
-					}
-				}
-				if matched {
-					s.recordNodeUpdaterEdgeInventoryFallback(nodeUpdaterEdgeInventoryMatched)
-				} else {
-					s.recordNodeUpdaterEdgeInventoryFallback(nodeUpdaterEdgeInventoryNoMatch)
-				}
-			} else {
-				s.recordNodeUpdaterEdgeInventoryFallback(nodeUpdaterEdgeInventoryError)
-				warnings = append(warnings, "edge credential inventory lookup failed")
-			}
+			warnings = append(warnings, "edge credential identity not found")
 		} else {
 			s.recordNodeUpdaterEdgeIdentityLookup(nodeUpdaterEdgeIdentityError)
-			s.recordNodeUpdaterEdgeInventoryFallback(nodeUpdaterEdgeInventoryError)
 			warnings = append(warnings, "edge credential inventory lookup failed")
 		}
 	}
