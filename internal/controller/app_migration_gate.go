@@ -231,7 +231,12 @@ func (s *Service) verifyManagedAppMigrationCutover(ctx context.Context, op model
 		// strict distributed mode additionally requires a fresh Present report
 		// scoped to the target runtime/node.
 		targetVerified, targetResult, targetErr := s.verifyMigrationTargetImageReplication(
-			readCtx, app, op, managedImageRef, imagePreflightVerified,
+			readCtx,
+			app,
+			op,
+			managedImageRef,
+			strings.TrimSpace(managed.Spec.Scheduling.NodeSelector[kubeHostnameLabelKey]),
+			imagePreflightVerified,
 		)
 		if targetErr != nil {
 			return model.AppMigrationLedger{}, fmt.Errorf("verify target image replication: %w", targetErr)
@@ -350,15 +355,21 @@ func (s *Service) verifyMigrationTargetImageReplication(
 	app model.App,
 	op model.Operation,
 	managedImageRef string,
+	targetClusterNodeName string,
 	imagePreflightVerified bool,
 ) (bool, string, error) {
 	if s == nil || s.Store == nil {
 		return false, "target image replication evidence store is unavailable", nil
 	}
-	target := deployImageTarget{RuntimeID: strings.TrimSpace(op.TargetRuntimeID)}
+	target := deployImageTarget{
+		RuntimeID:       strings.TrimSpace(op.TargetRuntimeID),
+		ClusterNodeName: strings.TrimSpace(targetClusterNodeName),
+	}
 	if target.RuntimeID != "" {
 		if runtimeObj, err := s.Store.GetRuntime(target.RuntimeID); err == nil {
-			target.ClusterNodeName = strings.TrimSpace(runtimeObj.ClusterNodeName)
+			if target.ClusterNodeName == "" {
+				target.ClusterNodeName = strings.TrimSpace(runtimeObj.ClusterNodeName)
+			}
 		}
 	}
 	refs := []string{managedImageRef, strings.TrimSpace(app.Spec.Image)}

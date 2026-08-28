@@ -45,7 +45,7 @@ func migrationImageEvidenceFixture(t *testing.T, strict bool) (*Service, model.A
 func TestMigrationTargetImageReplicationRequiresTargetScopedEvidence(t *testing.T) {
 	t.Parallel()
 	svc, app, op, imageRef := migrationImageEvidenceFixture(t, true)
-	verified, reason, err := svc.verifyMigrationTargetImageReplication(context.Background(), app, op, imageRef, true)
+	verified, reason, err := svc.verifyMigrationTargetImageReplication(context.Background(), app, op, imageRef, "", true)
 	if err != nil || verified || reason == "" {
 		t.Fatalf("source image evidence must not verify target replication: verified=%v reason=%q err=%v", verified, reason, err)
 	}
@@ -57,7 +57,7 @@ func TestMigrationTargetImageReplicationRequiresTargetScopedEvidence(t *testing.
 	}); err != nil {
 		t.Fatalf("record target image location: %v", err)
 	}
-	verified, reason, err = svc.verifyMigrationTargetImageReplication(context.Background(), app, op, imageRef, true)
+	verified, reason, err = svc.verifyMigrationTargetImageReplication(context.Background(), app, op, imageRef, "", true)
 	if err != nil || !verified || reason == "" {
 		t.Fatalf("fresh target image evidence must verify replication: verified=%v reason=%q err=%v", verified, reason, err)
 	}
@@ -66,13 +66,33 @@ func TestMigrationTargetImageReplicationRequiresTargetScopedEvidence(t *testing.
 func TestMigrationTargetImageReplicationRequiresPreflightOutsideStrictStore(t *testing.T) {
 	t.Parallel()
 	svc, app, op, imageRef := migrationImageEvidenceFixture(t, false)
-	verified, reason, err := svc.verifyMigrationTargetImageReplication(context.Background(), app, op, imageRef, false)
+	verified, reason, err := svc.verifyMigrationTargetImageReplication(context.Background(), app, op, imageRef, "", false)
 	if err != nil || verified || reason == "" {
 		t.Fatalf("missing target preflight must block fallback cutover: verified=%v reason=%q err=%v", verified, reason, err)
 	}
-	verified, reason, err = svc.verifyMigrationTargetImageReplication(context.Background(), app, op, imageRef, true)
+	verified, reason, err = svc.verifyMigrationTargetImageReplication(context.Background(), app, op, imageRef, "", true)
 	if err != nil || !verified || reason == "" {
 		t.Fatalf("successful target preflight must permit fallback cutover: verified=%v reason=%q err=%v", verified, reason, err)
+	}
+}
+
+func TestMigrationTargetImageReplicationUsesAppliedSchedulingNode(t *testing.T) {
+	t.Parallel()
+	svc, app, op, imageRef := migrationImageEvidenceFixture(t, true)
+	now := time.Now().UTC()
+	if _, err := svc.Store.UpsertImageLocation(model.ImageLocation{
+		TenantID: app.TenantID, AppID: app.ID, ImageRef: imageRef,
+		RuntimeID: "runtime-physical-node", ClusterNodeName: "node-de",
+		Status: model.ImageLocationStatusPresent, LastSeenAt: &now,
+	}); err != nil {
+		t.Fatalf("record physical target image location: %v", err)
+	}
+
+	verified, reason, err := svc.verifyMigrationTargetImageReplication(
+		context.Background(), app, op, imageRef, "node-de", true,
+	)
+	if err != nil || !verified || reason == "" {
+		t.Fatalf("applied target scheduling node must verify replication: verified=%v reason=%q err=%v", verified, reason, err)
 	}
 }
 
