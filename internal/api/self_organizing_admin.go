@@ -459,7 +459,7 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 	if err != nil {
 		nodePolicies = nil
 	}
-	edgeNodes, _, err := s.store.ListEdgeNodes("")
+	edgeNodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		return model.PlatformAutonomyStatus{}, err
 	}
