@@ -484,7 +484,7 @@ func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Prin
 	now := time.Now().UTC()
 	checks := []model.RobustnessCheck{}
 
-	edgeNodes, _, err := s.store.ListEdgeNodes("")
+	edgeNodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		return nil, err
 	}
