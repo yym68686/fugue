@@ -191,11 +191,7 @@ func (handler *groupCandidateStageHandler) ServeHTTP(w http.ResponseWriter, requ
 }
 
 func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Context, request GroupCandidateStageRequest, now time.Time) (GroupCandidateBundle, error) {
-	servingBundleVersion := ""
-	if request.ServingAuthority != nil {
-		servingBundleVersion = request.ServingAuthority.BundleVersion
-	}
-	snapshot, err := publisher.Store.ReadGroupCandidateStage(ctx, request.GroupID, servingBundleVersion)
+	snapshot, err := publisher.Store.ReadGroupCandidateStage(ctx, request.GroupID)
 	authority := snapshot.Authority
 	if err != nil {
 		return GroupCandidateBundle{}, fmt.Errorf("read candidate stage snapshot: %w", err)
@@ -244,25 +240,20 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 			return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("bootstrap_active_slot_mismatch expected=%s actual=%s", request.ExpectedCurrentWorkerSlot, head.ActiveSlot))
 		}
 	} else {
-		servingVersion := groupPublicationVersion(snapshot.ServingAuthority.BundleGeneration, snapshot.ServingAuthority.Sequence, snapshot.ServingAuthority.RecoveryEpoch)
-		fallback := servingAuthorityCanUseCandidateFallback(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
-			authority.Published.PublicationSequence, authority.Published.RecoveryEpoch, snapshot.ServingExists,
-			request.AllowDegradedPrevious && !request.StandbyOnly)
-		publicationRefresh := servingAuthorityCanUsePublicationRefresh(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
-			authority.Published.PublicationSequence, authority.Published.RecoveryEpoch, request.ExpectedCurrentWorkerSlot)
-		if fallback || publicationRefresh {
-			head = currentHead
-		} else if !snapshot.ServingExists || snapshot.ServingCandidate.Bundle == nil || snapshot.ServingCandidate.BundleArchived ||
-			snapshot.ServingCandidate.Status != GroupShadowStatusCompiled || snapshot.ServingCandidate.ActiveSlot != request.ExpectedCurrentWorkerSlot ||
-			request.ServingAuthority.WorkerSlot != request.ExpectedCurrentWorkerSlot || servingVersion != request.ServingAuthority.BundleVersion {
-			_, witnessPublication, witnessRecovery, witnessParsed := parseGroupPublicationVersion(request.ServingAuthority.BundleVersion)
-			return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("serving_authority_history_mismatch exists=%t bundle_present=%t archived=%t status=%s expected_slot=%s candidate_slot=%s witness_slot=%s expected_version=%s actual_version=%s witness_parsed=%t witness_publication=%d current_publication=%d witness_recovery=%d current_recovery=%d",
-				snapshot.ServingExists, snapshot.ServingCandidate.Bundle != nil, snapshot.ServingCandidate.BundleArchived, snapshot.ServingCandidate.Status,
-				request.ExpectedCurrentWorkerSlot, snapshot.ServingCandidate.ActiveSlot, request.ServingAuthority.WorkerSlot, request.ServingAuthority.BundleVersion,
-				servingVersion, witnessParsed, witnessPublication, authority.Published.PublicationSequence, witnessRecovery, authority.Published.RecoveryEpoch))
-		} else {
-			head = snapshot.ServingCandidate
+		if request.ServingAuthority.WorkerSlot != request.ExpectedCurrentWorkerSlot {
+			return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("serving_authority_slot_mismatch expected=%s actual=%s",
+				request.ExpectedCurrentWorkerSlot, request.ServingAuthority.WorkerSlot))
 		}
+		if !servingAuthorityMatchesCurrentPublication(request.ServingAuthority.BundleVersion, authority.Published) &&
+			!servingAuthorityCanUsePublicationRefresh(request.ServingAuthority.BundleVersion, authority.Published.Bundle.Generation,
+				authority.Published.PublicationSequence, authority.Published.RecoveryEpoch, request.ExpectedCurrentWorkerSlot) {
+			return GroupCandidateBundle{}, groupCandidateCASConflict(fmt.Sprintf("serving_authority_current_mismatch expected_version=%s current_version=%s",
+				request.ServingAuthority.BundleVersion, authority.Published.Bundle.Version))
+		}
+		// Candidate staging is always based on the current published shadow head.
+		// A stale Front witness may be accepted only as a same-generation epoch
+		// refresh; it never selects an historical publication or predecessor.
+		head = currentHead
 	}
 	sequence := head.Sequence
 	epoch := authority.Published.PublicationSequence + 1
@@ -319,10 +310,9 @@ func stagePublicationMatchesAuthority(published GroupPublishedBundle, request Gr
 	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(serving.BundleVersion)
 	if request.AllowDegradedPrevious && ok && generation == published.Bundle.Generation &&
 		publicationSequence <= published.PublicationSequence && recoveryEpoch <= published.RecoveryEpoch {
-		// A publication refresh may advance the authority sequence while the
-		// serving Front still presents an older version of the same immutable
-		// bundle. This is safe only for an explicitly authorized degraded
-		// recovery; ordinary transitions remain exact-CAS bound below.
+		// A degraded retry may have observed an earlier validity refresh of the
+		// same immutable generation. The epoch/digest CAS below still prevents
+		// selecting a different route publication.
 		return published.PublicationSequence >= request.ExpectedPublicationSequence &&
 			published.RecoveryEpoch >= request.ExpectedRecoveryEpoch
 	}
@@ -345,39 +335,9 @@ func groupCandidateCASConflict(reason string) error {
 	return fmt.Errorf("%s: %w", reason, ErrGroupAuthorityCandidateCAS)
 }
 
-func servingAuthorityCanUseCurrentPublishedFallback(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64, allowFallback bool) bool {
+func servingAuthorityMatchesCurrentPublication(version string, current GroupPublishedBundle) bool {
 	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
-	if !ok || strings.TrimSpace(currentGeneration) == "" {
-		return false
-	}
-	if publicationSequence == currentPublicationSequence && recoveryEpoch == currentRecoveryEpoch {
-		return generation == currentGeneration
-	}
-	if !allowFallback {
-		return false
-	}
-	// Republishing an exact bundle generation only advances its authority
-	// sequence, recovery epoch, and validity window. Candidates already bound
-	// to that immutable generation retain their serving witness; requiring
-	// every retained candidate to be rewritten would make LKG renewal depend
-	// on candidate-history mutation.
-	if generation == currentGeneration {
-		return true
-	}
-	return (recoveryEpoch == currentRecoveryEpoch && publicationSequence < currentPublicationSequence) ||
-		(currentRecoveryEpoch != 0 && recoveryEpoch == 0 && publicationSequence > currentPublicationSequence)
-}
-
-func servingAuthorityCanUseCandidateFallback(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64, historyExists, allowDegraded bool) bool {
-	if !historyExists {
-		if servingAuthorityCanUsePrunedCurrentGeneration(version, currentGeneration, currentPublicationSequence, currentRecoveryEpoch) {
-			return true
-		}
-		if allowDegraded && servingAuthorityCanUsePrunedDegradedHistory(version, currentPublicationSequence, currentRecoveryEpoch) {
-			return true
-		}
-	}
-	return allowDegraded && servingAuthorityCanUseCurrentPublishedFallback(version, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, true)
+	return ok && generation == current.Bundle.Generation && publicationSequence == current.PublicationSequence && recoveryEpoch == current.RecoveryEpoch
 }
 
 // servingAuthorityCanUsePublicationRefresh binds a stale Front witness to the
@@ -390,17 +350,6 @@ func servingAuthorityCanUsePublicationRefresh(version, currentGeneration string,
 		publicationSequence <= currentPublicationSequence && recoveryEpoch <= currentRecoveryEpoch &&
 		(expectedWorkerSlot == "a" || expectedWorkerSlot == "b") &&
 		(publicationSequence < currentPublicationSequence || recoveryEpoch < currentRecoveryEpoch)
-}
-
-func servingAuthorityCanUsePrunedDegradedHistory(version string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {
-	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
-	return ok && generation != "" && publicationSequence < currentPublicationSequence && recoveryEpoch <= currentRecoveryEpoch
-}
-
-func servingAuthorityCanUsePrunedCurrentGeneration(version, currentGeneration string, currentPublicationSequence, currentRecoveryEpoch uint64) bool {
-	generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(version)
-	return ok && generation == strings.TrimSpace(currentGeneration) && publicationSequence <= currentPublicationSequence &&
-		recoveryEpoch <= currentRecoveryEpoch
 }
 
 func stagedCandidateMatchesRequest(candidate GroupCandidateBundle, request GroupCandidateStageRequest, authority GroupAuthorityState) bool {

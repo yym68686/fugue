@@ -76,7 +76,7 @@ type GroupCandidateStore interface {
 	ReadGroupInventory(context.Context, string) (GroupInventorySnapshot, error)
 	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
 	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
-	ReadGroupCandidateStage(context.Context, string, string) (GroupCandidateStageSnapshot, error)
+	ReadGroupCandidateStage(context.Context, string) (GroupCandidateStageSnapshot, error)
 	PutGroupCandidateCAS(context.Context, string, uint64, uint64, GroupCandidateBundle) (GroupCandidateBundle, error)
 	PutGroupCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, string, GroupCandidateBundle) (GroupCandidateBundle, error)
 	PutGroupStagedCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, uint64, string, *GroupServingAuthorityWitness, GroupCandidateBundle) (GroupCandidateBundle, error)
@@ -92,9 +92,6 @@ type GroupCandidateStageSnapshot struct {
 	Inventory          GroupInventorySnapshot
 	InventoryExists    bool
 	PublishedCandidate GroupShadowLedgerEntry
-	ServingAuthority   GroupAuthorityLedgerEntry
-	ServingCandidate   GroupShadowLedgerEntry
-	ServingExists      bool
 }
 
 type GroupCandidatePublisher struct {
@@ -443,19 +440,16 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 			candidate.ServingAuthority.WorkerSlot == candidate.WorkerSlot {
 			return errors.New("edge-control group candidate serving authority witness is invalid")
 		}
-		generation, _, _, ok := parseGroupPublicationVersion(candidate.ServingAuthority.BundleVersion)
-		exactHistoricalPublication := ok && generation == candidate.Bundle.Generation
-		degradedRecoveryPublication := false
-		if ok && !exactHistoricalPublication && candidate.AllowDegradedPrevious && !candidate.StandbyOnly && candidate.CurrentBundle != nil &&
-			candidate.CurrentRecord != nil && candidate.CurrentRecord.Epoch > 0 && candidate.Bundle.Generation == candidate.CurrentBundle.Generation {
-			currentPublication := uint64(candidate.CurrentRecord.Epoch)
-			_, _, currentRecovery, currentOK := parseGroupPublicationVersion(candidate.CurrentBundle.Version)
-			degradedRecoveryPublication = currentOK &&
-				(servingAuthorityCanUseCurrentPublishedFallback(candidate.ServingAuthority.BundleVersion, candidate.CurrentBundle.Generation,
-					currentPublication, currentRecovery, true) ||
-					servingAuthorityCanUsePrunedDegradedHistory(candidate.ServingAuthority.BundleVersion, currentPublication, currentRecovery))
+		if candidate.CurrentBundle == nil {
+			return errors.New("edge-control group candidate serving publication is invalid")
 		}
-		if !exactHistoricalPublication && !degradedRecoveryPublication {
+		generation, publicationSequence, recoveryEpoch, ok := parseGroupPublicationVersion(candidate.ServingAuthority.BundleVersion)
+		currentGeneration, currentPublicationSequence, currentRecoveryEpoch, currentOK := parseGroupPublicationVersion(candidate.CurrentBundle.Version)
+		exactCurrent := ok && currentOK && generation == currentGeneration &&
+			publicationSequence == currentPublicationSequence && recoveryEpoch == currentRecoveryEpoch
+		if candidate.CurrentBundle == nil || candidate.Bundle.Generation != currentGeneration ||
+			(!exactCurrent && !servingAuthorityCanUsePublicationRefresh(candidate.ServingAuthority.BundleVersion, currentGeneration,
+				currentPublicationSequence, currentRecoveryEpoch, candidate.CurrentWorkerSlot)) {
 			return errors.New("edge-control group candidate serving publication is invalid")
 		}
 	}

@@ -280,22 +280,7 @@ func (store *PersistentGroupStore) ReadGroupServingCandidate(ctx context.Context
 	return cloneGroupCandidateBundle(summary.status.Candidate), true, nil
 }
 
-func (store *PersistentGroupStore) ReadGroupCandidateStage(ctx context.Context, groupID, servingBundleVersion string) (GroupCandidateStageSnapshot, error) {
-	servingBundleVersion = strings.TrimSpace(servingBundleVersion)
-	if servingBundleVersion != "" {
-		var snapshot GroupCandidateStageSnapshot
-		err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
-			snapshot = summarizePersistentGroupState(*state).stage
-			authority, candidate, exists := persistentPublishedCandidateByVersion(state, servingBundleVersion)
-			if exists {
-				snapshot.ServingAuthority = authority
-				snapshot.ServingCandidate = candidate
-				snapshot.ServingExists = true
-			}
-			return nil
-		})
-		return cloneGroupCandidateStageSnapshot(snapshot), err
-	}
+func (store *PersistentGroupStore) ReadGroupCandidateStage(ctx context.Context, groupID string) (GroupCandidateStageSnapshot, error) {
 	summary, err := store.readGroupSummary(ctx, groupID)
 	return cloneGroupCandidateStageSnapshot(summary.stage), err
 }
@@ -448,22 +433,15 @@ func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx cont
 			if serving.Validate() != nil || !servingAuthorityWitnessesEqual(serving, candidate.ServingAuthority) {
 				return groupCandidateCASConflict("store_serving_authority_witness_invalid")
 			}
-			_, servingHead, exists := persistentPublishedCandidateByVersion(state, serving.BundleVersion)
-			fallback := servingAuthorityCanUseCandidateFallback(serving.BundleVersion, state.Published.Bundle.Generation,
-				state.Published.PublicationSequence, state.Published.RecoveryEpoch, exists,
-				candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
-				candidate.CandidateLedgerSequence == state.Published.CandidateLedgerSequence
-			publicationRefresh := servingAuthorityCanUsePublicationRefresh(serving.BundleVersion, state.Published.Bundle.Generation,
-				state.Published.PublicationSequence, state.Published.RecoveryEpoch, candidate.CurrentWorkerSlot) &&
-				candidate.CandidateLedgerSequence == state.Published.CandidateLedgerSequence
-			if fallback || publicationRefresh {
-				head = state.Ledger[state.Published.CandidateLedgerSequence-1]
-			} else if !exists || servingHead.ActiveSlot != serving.WorkerSlot {
-				return groupCandidateCASConflict(fmt.Sprintf("store_serving_authority_history_mismatch version=%s exists=%t expected_slot=%s actual_slot=%s",
-					serving.BundleVersion, exists, serving.WorkerSlot, servingHead.ActiveSlot))
-			} else {
-				head = servingHead
+			if candidate.CandidateLedgerSequence != state.Published.CandidateLedgerSequence ||
+				serving.WorkerSlot != candidate.CurrentWorkerSlot ||
+				(!servingAuthorityMatchesCurrentPublication(serving.BundleVersion, *state.Published) &&
+					!servingAuthorityCanUsePublicationRefresh(serving.BundleVersion, state.Published.Bundle.Generation,
+						state.Published.PublicationSequence, state.Published.RecoveryEpoch, candidate.CurrentWorkerSlot)) {
+				return groupCandidateCASConflict(fmt.Sprintf("store_serving_authority_current_mismatch version=%s current_version=%s expected_slot=%s actual_slot=%s",
+					serving.BundleVersion, state.Published.Bundle.Version, candidate.CurrentWorkerSlot, serving.WorkerSlot))
 			}
+			head = state.Ledger[state.Published.CandidateLedgerSequence-1]
 		} else if candidate.ServingAuthority != nil || candidate.CandidateLedgerSequence != state.Published.CandidateLedgerSequence {
 			return groupCandidateCASConflict("store_bootstrap_candidate_binding_invalid")
 		}
@@ -562,27 +540,6 @@ func candidateCurrentRecordEpoch(candidate GroupCandidateBundle) int64 {
 		return 0
 	}
 	return candidate.CurrentRecord.Epoch
-}
-
-func persistentPublishedCandidateByVersion(state *persistentGroupState, version string) (GroupAuthorityLedgerEntry, GroupShadowLedgerEntry, bool) {
-	if state == nil {
-		return GroupAuthorityLedgerEntry{}, GroupShadowLedgerEntry{}, false
-	}
-	for index := len(state.AuthorityLedger) - 1; index >= 0; index-- {
-		authority := state.AuthorityLedger[index]
-		if authority.Status != GroupAuthorityStatusPublished ||
-			groupPublicationVersion(authority.BundleGeneration, authority.Sequence, authority.RecoveryEpoch) != version ||
-			authority.CandidateLedgerSequence == 0 || authority.CandidateLedgerSequence > uint64(len(state.Ledger)) {
-			continue
-		}
-		candidate := state.Ledger[authority.CandidateLedgerSequence-1]
-		if candidate.Sequence != authority.CandidateLedgerSequence || candidate.Status != GroupShadowStatusCompiled ||
-			candidate.Bundle == nil || candidate.BundleArchived || candidate.BundleGeneration != authority.BundleGeneration {
-			continue
-		}
-		return authority, cloneGroupShadowLedgerEntry(candidate), true
-	}
-	return GroupAuthorityLedgerEntry{}, GroupShadowLedgerEntry{}, false
 }
 
 func retainReplacedCandidate(state *persistentGroupState, nextEpoch uint64) {
@@ -1086,9 +1043,6 @@ func cloneGroupCandidateStageSnapshot(value GroupCandidateStageSnapshot) GroupCa
 		value.Inventory = cloneGroupInventorySnapshot(value.Inventory)
 	}
 	value.PublishedCandidate = cloneGroupShadowLedgerEntry(value.PublishedCandidate)
-	if value.ServingExists {
-		value.ServingCandidate = cloneGroupShadowLedgerEntry(value.ServingCandidate)
-	}
 	return value
 }
 
@@ -1445,13 +1399,11 @@ func validatePersistentCandidateBinding(state persistentGroupState, groupID stri
 		return errors.New("edge-control persistent candidate is not bound to the group shadow ledger")
 	}
 	if candidate.ServingAuthority != nil {
-		authority, servingCandidate, exists := persistentPublishedCandidateByVersion(&state, candidate.ServingAuthority.BundleVersion)
-		fallback := state.Published != nil && servingAuthorityCanUseCandidateFallback(candidate.ServingAuthority.BundleVersion,
-			state.Published.Bundle.Generation, state.Published.PublicationSequence, state.Published.RecoveryEpoch, exists,
-			candidate.AllowDegradedPrevious && !candidate.StandbyOnly) &&
-			state.Published.CandidateLedgerSequence == candidate.CandidateLedgerSequence
-		if !fallback && (!exists || authority.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
-			servingCandidate.ActiveSlot != candidate.ServingAuthority.WorkerSlot) {
+		if state.Published == nil || state.Published.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
+			candidate.ServingAuthority.WorkerSlot != candidate.CurrentWorkerSlot ||
+			(!servingAuthorityMatchesCurrentPublication(candidate.ServingAuthority.BundleVersion, *state.Published) &&
+				!servingAuthorityCanUsePublicationRefresh(candidate.ServingAuthority.BundleVersion, state.Published.Bundle.Generation,
+					state.Published.PublicationSequence, state.Published.RecoveryEpoch, candidate.CurrentWorkerSlot)) {
 			return errors.New("edge-control persistent candidate lost its serving authority witness")
 		}
 	}

@@ -182,18 +182,18 @@ func TestWorkerCandidateStageAcceptsMonotonicLKGRefreshForSameGeneration(t *test
 	if stagePublicationMatchesAuthority(renewed, request, serving) {
 		t.Fatal("route generation change was accepted as an LKG refresh")
 	}
-	if !servingAuthorityCanUsePrunedCurrentGeneration(serving.BundleVersion, before.Published.Bundle.Generation,
-		renewed.PublicationSequence, renewed.RecoveryEpoch) {
+	if !servingAuthorityCanUsePublicationRefresh(serving.BundleVersion, before.Published.Bundle.Generation,
+		renewed.PublicationSequence, renewed.RecoveryEpoch, "a") {
 		t.Fatal("same-generation serving witness was rejected after candidate history pruning")
 	}
 	crossGenerationWitness := groupPublicationVersion(renewed.Bundle.Generation, renewed.PublicationSequence, renewed.RecoveryEpoch)
-	if servingAuthorityCanUsePrunedCurrentGeneration(crossGenerationWitness, before.Published.Bundle.Generation,
-		renewed.PublicationSequence, renewed.RecoveryEpoch) {
+	if servingAuthorityCanUsePublicationRefresh(crossGenerationWitness, before.Published.Bundle.Generation,
+		renewed.PublicationSequence, renewed.RecoveryEpoch, "a") {
 		t.Fatal("cross-generation serving witness was accepted by fallback")
 	}
 	futureWitness := groupPublicationVersion(before.Published.Bundle.Generation, renewed.PublicationSequence+1, renewed.RecoveryEpoch)
-	if servingAuthorityCanUsePrunedCurrentGeneration(futureWitness, before.Published.Bundle.Generation,
-		renewed.PublicationSequence, renewed.RecoveryEpoch) {
+	if servingAuthorityCanUsePublicationRefresh(futureWitness, before.Published.Bundle.Generation,
+		renewed.PublicationSequence, renewed.RecoveryEpoch, "a") {
 		t.Fatal("future serving publication was accepted by pruned-history fallback")
 	}
 }
@@ -401,7 +401,7 @@ func TestWorkerCandidateStageWithoutServingAuthorityRejectsExpiredBootstrapWindo
 	}
 }
 
-func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChangingCurrentAuthority(t *testing.T) {
+func TestWorkerCandidateStageRejectsHistoricalServingPublication(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 	stageAt := now.Add(maxGroupBundleValidity + 2*time.Minute)
@@ -495,209 +495,35 @@ func TestWorkerCandidateStageCanBindExactServingHistoricalPublicationWithoutChan
 		t.Fatal(err)
 	}
 	recorder := postGroupCandidateStage(t, handler, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("stage historical serving publication status=%d body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("historical serving publication status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	staged, exists, err := store.ReadGroupCandidate(ctx, groupID)
-	if err != nil || !exists || staged.Bundle.Generation != servingAuthority.Published.Bundle.Generation ||
-		staged.Bundle.Generation == current.Published.Bundle.Generation || staged.CandidateLedgerSequence != servingAuthority.Published.CandidateLedgerSequence ||
-		!servingAuthorityWitnessesEqual(staged.ServingAuthority, witness) || !staged.AllowDegradedPrevious || staged.CurrentRecord == nil ||
-		staged.CurrentRecord.BundleDigest != current.Published.Digest || staged.CurrentBundle == nil ||
-		signedGroupBundleDigest(*staged.CurrentBundle) != current.Published.Digest {
-		t.Fatalf("historical serving candidate was not bound exactly: staged=%+v exists=%v err=%v", staged, exists, err)
+	if err != nil || exists {
+		t.Fatalf("historical serving candidate was stored: staged=%+v exists=%v err=%v", staged, exists, err)
 	}
 	authorityAfter, err := store.ReadGroupAuthority(ctx, groupID)
 	if err != nil || !reflect.DeepEqual(authorityAfter, authorityBefore) {
-		t.Fatalf("historical staging changed current Control authority: before=%+v after=%+v err=%v", authorityBefore, authorityAfter, err)
-	}
-	var receipt GroupCandidateStageReceipt
-	if json.Unmarshal(recorder.Body.Bytes(), &receipt) != nil || !receipt.AllowDegradedPrevious {
-		t.Fatalf("historical staging receipt omitted degraded previous authorization: %+v", receipt)
-	}
-
-	request.ExpectedCandidateEpoch = staged.Epoch
-	request.AllowDegradedPrevious = false
-	request.StandbyOnly = true
-	request.Nonce = strings.Repeat("u", 24)
-	request.Signature = ""
-	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
-		t.Fatal(err)
-	}
-	standbyRecorder := postGroupCandidateStage(t, handler, request)
-	if standbyRecorder.Code != http.StatusOK {
-		t.Fatalf("stage standby status=%d body=%s", standbyRecorder.Code, standbyRecorder.Body.String())
-	}
-	standbyCandidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
-	if err != nil || !exists || !standbyCandidate.StandbyOnly || standbyCandidate.AllowDegradedPrevious {
-		t.Fatalf("standby candidate=%+v exists=%v err=%v", standbyCandidate, exists, err)
-	}
-	var standbyReceipt GroupCandidateStageReceipt
-	if json.Unmarshal(standbyRecorder.Body.Bytes(), &standbyReceipt) != nil || !standbyReceipt.StandbyOnly || standbyReceipt.AllowDegradedPrevious {
-		t.Fatalf("standby receipt omitted non-promotable authorization: %+v", standbyReceipt)
-	}
-
-	request.ExpectedCandidateEpoch = standbyCandidate.Epoch
-	request.StandbyOnly = false
-	request.AllowDegradedPrevious = true
-	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
-		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
-		BundleVersion: groupPublicationVersion("pruned-serving-generation", current.Published.PublicationSequence-1, current.Published.RecoveryEpoch),
-		WorkerSlot:    witness.WorkerSlot, WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest}
-	request.Nonce = strings.Repeat("v", 24)
-	request.Signature = ""
-	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
-		t.Fatal(err)
-	}
-	fallbackRecorder := postGroupCandidateStage(t, handler, request)
-	if fallbackRecorder.Code != http.StatusOK {
-		t.Fatalf("pruned serving publication fallback status=%d body=%s", fallbackRecorder.Code, fallbackRecorder.Body.String())
-	}
-	fallbackCandidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
-	if err != nil || !exists || !fallbackCandidate.AllowDegradedPrevious || fallbackCandidate.StandbyOnly ||
-		fallbackCandidate.Bundle.Generation != current.Published.Bundle.Generation ||
-		fallbackCandidate.CandidateLedgerSequence != current.Published.CandidateLedgerSequence ||
-		!servingAuthorityWitnessesEqual(fallbackCandidate.ServingAuthority, request.ServingAuthority) {
-		t.Fatalf("pruned serving publication fallback candidate=%+v exists=%v err=%v", fallbackCandidate, exists, err)
-	}
-
-	request.ExpectedCandidateEpoch = fallbackCandidate.Epoch
-	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
-		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
-		BundleVersion: groupPublicationVersion("normalized-serving-generation", current.Published.PublicationSequence+377, 0),
-		WorkerSlot:    witness.WorkerSlot, WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest}
-	request.Nonce = strings.Repeat("n", 24)
-	request.Signature = ""
-	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
-		t.Fatal(err)
-	}
-	normalizedRecorder := postGroupCandidateStage(t, handler, request)
-	if normalizedRecorder.Code != http.StatusOK {
-		t.Fatalf("normalized serving publication fallback status=%d body=%s", normalizedRecorder.Code, normalizedRecorder.Body.String())
-	}
-	normalizedCandidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
-	if err != nil || !exists || !normalizedCandidate.AllowDegradedPrevious || normalizedCandidate.StandbyOnly ||
-		normalizedCandidate.Bundle.Generation != current.Published.Bundle.Generation ||
-		normalizedCandidate.CandidateLedgerSequence != current.Published.CandidateLedgerSequence ||
-		!servingAuthorityWitnessesEqual(normalizedCandidate.ServingAuthority, request.ServingAuthority) {
-		t.Fatalf("normalized serving publication fallback candidate=%+v exists=%v err=%v", normalizedCandidate, exists, err)
-	}
-
-	request.ExpectedCandidateEpoch = normalizedCandidate.Epoch
-	request.AllowDegradedPrevious = false
-	request.StandbyOnly = true
-	request.Nonce = strings.Repeat("w", 24)
-	request.Signature = ""
-	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
-		t.Fatal(err)
-	}
-	standbyFallbackRejected := postGroupCandidateStage(t, handler, request)
-	if standbyFallbackRejected.Code != http.StatusConflict {
-		t.Fatalf("standby used pruned serving publication fallback status=%d body=%s", standbyFallbackRejected.Code, standbyFallbackRejected.Body.String())
-	}
-
-	request.AllowDegradedPrevious = true
-	request.StandbyOnly = false
-	request.ServingAuthority = &GroupServingAuthorityWitness{CurrentRecordDigest: witness.CurrentRecordDigest, AuthorityEpoch: witness.AuthorityEpoch,
-		CurrentAuthorityUID: witness.CurrentAuthorityUID, CurrentAuthorityRV: witness.CurrentAuthorityRV, FrontGeneration: witness.FrontGeneration,
-		BundleVersion: groupPublicationVersion("future-serving-generation", current.Published.PublicationSequence+1, current.Published.RecoveryEpoch),
-		WorkerSlot:    witness.WorkerSlot, WorkerSourceSHA: witness.WorkerSourceSHA, WorkerImageDigest: witness.WorkerImageDigest}
-	request.Nonce = strings.Repeat("t", 24)
-	request.Signature = ""
-	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
-		t.Fatal(err)
-	}
-	rejected := postGroupCandidateStage(t, handler, request)
-	if rejected.Code != http.StatusConflict {
-		t.Fatalf("future serving publication status=%d body=%s", rejected.Code, rejected.Body.String())
-	}
-
-	request.ServingAuthority.BundleVersion = groupPublicationVersion("previous-recovery-generation", current.Published.PublicationSequence-1, current.Published.RecoveryEpoch-1)
-	request.Nonce = strings.Repeat("r", 24)
-	request.Signature = ""
-	if err := SignGroupCandidateStageRequest(&request, secret); err != nil {
-		t.Fatal(err)
-	}
-	crossRecoveryFallback := postGroupCandidateStage(t, handler, request)
-	if crossRecoveryFallback.Code != http.StatusOK {
-		t.Fatalf("pruned cross-recovery serving publication status=%d body=%s", crossRecoveryFallback.Code, crossRecoveryFallback.Body.String())
-	}
-	crossRecoveryCandidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
-	if err != nil || !exists || crossRecoveryCandidate.Bundle.Generation != current.Published.Bundle.Generation ||
-		crossRecoveryCandidate.CandidateLedgerSequence != current.Published.CandidateLedgerSequence ||
-		!crossRecoveryCandidate.AllowDegradedPrevious || crossRecoveryCandidate.StandbyOnly {
-		t.Fatalf("pruned cross-recovery fallback candidate=%+v exists=%v err=%v", crossRecoveryCandidate, exists, err)
+		t.Fatalf("rejected historical staging changed current authority: before=%+v after=%+v err=%v", authorityBefore, authorityAfter, err)
 	}
 }
 
-func TestServingAuthorityCanUseCurrentPublishedFallback(t *testing.T) {
-	currentGeneration := "edgegroupbundle_" + strings.Repeat("a", 64)
-	currentPublicationSequence := uint64(12244)
-	tests := []struct {
-		name       string
-		version    string
-		allowOlder bool
-		want       bool
-	}{
-		{name: "stored current bundle publication", version: groupPublicationVersion(currentGeneration, 12238, 142), allowOlder: true, want: true},
-		{name: "older publication", version: groupPublicationVersion("pruned-generation", 12237, 142), allowOlder: true, want: true},
-		{name: "older publication without authorization", version: groupPublicationVersion("pruned-generation", 12237, 142)},
-		{name: "exact republished current generation", version: groupPublicationVersion(currentGeneration, currentPublicationSequence, 142), want: true},
-		{name: "same sequence different generation", version: groupPublicationVersion("other-generation", currentPublicationSequence, 142)},
-		{name: "future publication", version: groupPublicationVersion(currentGeneration, currentPublicationSequence+1, 142)},
-		{name: "normalized serving publication ahead", version: groupPublicationVersion("normalized-serving-generation", currentPublicationSequence+388, 0), allowOlder: true, want: true},
-		{name: "normalized serving publication ahead without authorization", version: groupPublicationVersion("normalized-serving-generation", currentPublicationSequence+388, 0)},
-		{name: "same generation normalized serving publication behind refreshed LKG", version: groupPublicationVersion(currentGeneration, currentPublicationSequence-388, 0), allowOlder: true, want: true},
-		{name: "different generation normalized serving publication behind", version: groupPublicationVersion("old-serving-generation", currentPublicationSequence-388, 0), allowOlder: true},
-		{name: "same generation normalized serving publication behind without authorization", version: groupPublicationVersion(currentGeneration, currentPublicationSequence-388, 0)},
-		{name: "future nonzero recovery", version: groupPublicationVersion("future-recovery-generation", currentPublicationSequence+388, 1), allowOlder: true},
-		{name: "same generation previous recovery with authorization", version: groupPublicationVersion(currentGeneration, 12237, 141), allowOlder: true, want: true},
-		{name: "same generation previous recovery without authorization", version: groupPublicationVersion(currentGeneration, 12237, 141)},
-		{name: "malformed", version: "not-a-publication"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := servingAuthorityCanUseCurrentPublishedFallback(test.version, currentGeneration, currentPublicationSequence, 142, test.allowOlder); got != test.want {
-				t.Fatalf("servingAuthorityCanUseCurrentPublishedFallback(%q)=%t want %t", test.version, got, test.want)
-			}
-		})
-	}
-	if servingAuthorityCanUseCurrentPublishedFallback(groupPublicationVersion(currentGeneration, currentPublicationSequence, 142), "", currentPublicationSequence, 142, false) {
-		t.Fatal("empty current generation was accepted")
-	}
-}
-
-func TestServingAuthorityCandidateFallbackRequiresDegradedAuthorizationForRetainedHistory(t *testing.T) {
+func TestServingAuthorityFallbacksRejectHistoricalPublications(t *testing.T) {
 	currentGeneration := "edgegroupbundle_" + strings.Repeat("a", 64)
 	currentPublicationSequence, currentRecoveryEpoch := uint64(22855), uint64(388)
-	servingVersion := groupPublicationVersion(currentGeneration, 19710, 328)
-	if !servingAuthorityCanUseCandidateFallback(servingVersion, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, true, true) {
-		t.Fatal("authorized same-generation fallback was rejected when retained slot history existed")
-	}
-	if servingAuthorityCanUseCandidateFallback(servingVersion, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, true, false) {
-		t.Fatal("ordinary transition ignored retained serving history")
-	}
-	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("changed-generation", 19710, 328), currentGeneration,
-		currentPublicationSequence, currentRecoveryEpoch, true, true) {
-		t.Fatal("degraded fallback accepted a different immutable route generation")
-	}
-	if !servingAuthorityCanUseCandidateFallback(groupPublicationVersion("pruned-generation", 19710, 328), currentGeneration,
-		currentPublicationSequence, currentRecoveryEpoch, false, true) {
-		t.Fatal("authorized degraded fallback rejected a monotonic pruned publication")
-	}
-	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("pruned-generation", 19710, 328), currentGeneration,
-		currentPublicationSequence, currentRecoveryEpoch, false, false) {
-		t.Fatal("ordinary transition accepted a pruned cross-generation publication")
-	}
-	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("pruned-generation", currentPublicationSequence, 328), currentGeneration,
-		currentPublicationSequence, currentRecoveryEpoch, false, true) {
-		t.Fatal("degraded fallback accepted a same-sequence cross-generation publication")
-	}
-	if servingAuthorityCanUseCandidateFallback(groupPublicationVersion("pruned-generation", 19710, currentRecoveryEpoch+1), currentGeneration,
-		currentPublicationSequence, currentRecoveryEpoch, false, true) {
-		t.Fatal("degraded fallback accepted a future recovery epoch")
-	}
-	if !servingAuthorityCanUseCandidateFallback(servingVersion, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, false, false) {
-		t.Fatal("pruned same-generation history fallback was rejected")
+	for name, version := range map[string]string{
+		"cross generation":    groupPublicationVersion("pruned-generation", 19710, 328),
+		"normalized ahead":    groupPublicationVersion("normalized-generation", currentPublicationSequence+388, 0),
+		"previous recovery":   groupPublicationVersion("previous-recovery-generation", currentPublicationSequence-1, currentRecoveryEpoch-1),
+		"future publication":  groupPublicationVersion(currentGeneration, currentPublicationSequence+1, currentRecoveryEpoch),
+		"future recovery":     groupPublicationVersion(currentGeneration, currentPublicationSequence, currentRecoveryEpoch+1),
+		"malformed authority": "not-a-publication",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if servingAuthorityCanUsePublicationRefresh(version, currentGeneration, currentPublicationSequence, currentRecoveryEpoch, "a") {
+				t.Fatalf("historical serving publication was accepted: %s", version)
+			}
+		})
 	}
 }
 
