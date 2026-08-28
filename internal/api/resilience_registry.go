@@ -151,13 +151,13 @@ func (s *Server) buildResilienceInventory(rSubject string) []model.ResilienceInv
 			UpdatedAt: now,
 		})
 	}
-	if edgeNodes, _, err := s.store.ListEdgeNodes(""); err == nil {
+	if edgeNodes, _, err := s.store.ListActiveEdgeNodes(""); err == nil {
 		out = append(out, model.ResilienceInventoryItem{
 			Category:  "service_route",
 			Subject:   "edge_nodes",
 			Status:    "visible",
 			Summary:   fmt.Sprintf("edge_nodes=%d", len(edgeNodes)),
-			Evidence:  map[string]string{"source": "store.ListEdgeNodes"},
+			Evidence:  map[string]string{"source": "store.ListActiveEdgeNodes"},
 			UpdatedAt: now,
 		})
 	}
