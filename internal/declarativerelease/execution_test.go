@@ -313,6 +313,31 @@ func TestFailedEdgeGroupTransitionSkipsMixedIdentityHealthCheck(t *testing.T) {
 	}
 }
 
+func TestSuccessfulEdgeGroupTransitionUsesCommittedAuthorityReconciler(t *testing.T) {
+	target := TargetIdentity{Present: true, ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("b", 64),
+		ConfigSHA: testSHA2, ManifestSHA: testSHA2, OCIRevision: testSHA2}
+	committed := stableObservation("front", "12", target.ImageRef, target.ConfigSHA)
+	committed.ManifestSHA, committed.OCIRevision = target.ManifestSHA, target.OCIRevision
+	fake := &committedFakeCluster{fakeCluster: &fakeCluster{}, committed: committed}
+	release := PlanRelease{Transition: &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{}}}
+
+	observed, healthErr, convergedErr := observeForwardResult(context.Background(), fake, release, target,
+		[]byte(`{"kind":"ComponentResourceSet"}`), nil)
+	if healthErr != nil || convergedErr != nil || fake.committedCalls != 1 || !observed.SameSpecIdentity(committed) {
+		t.Fatalf("committed edge result=%+v health=%v converged=%v calls=%d", observed, healthErr, convergedErr, fake.committedCalls)
+	}
+	if len(fake.healthTargets) != 0 || len(fake.converged) != 0 {
+		t.Fatalf("successful edge transition ran generic target checks: health=%d converged=%d", len(fake.healthTargets), len(fake.converged))
+	}
+
+	fake.committedError = errors.New("authority drift")
+	_, healthErr, convergedErr = observeForwardResult(context.Background(), fake, release, target,
+		[]byte(`{"kind":"ComponentResourceSet"}`), nil)
+	if !errors.Is(healthErr, fake.committedError) || convergedErr != nil {
+		t.Fatalf("unproven committed edge transition was accepted: health=%v converged=%v", healthErr, convergedErr)
+	}
+}
+
 func TestReconcileExecutionUsesCommittedAuthorityForEdgeGroup(t *testing.T) {
 	forwardManifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[],"kind":"ComponentResourceSet"}`)
 	lkgManifest := append([]byte(nil), forwardManifest...)

@@ -832,7 +832,15 @@ func rollbackConvergenceWitness(lkgManifest []byte, release PlanRelease) ([]byte
 }
 
 func observeForwardResult(ctx context.Context, cluster Cluster, release PlanRelease, target TargetIdentity, manifest []byte, applyErr error) (Observation, error, error) {
-	if applyErr != nil && release.Transition != nil && release.Transition.Type == "edge-group-ab" {
+	if release.Transition != nil && release.Transition.Type == "edge-group-ab" {
+		if applyErr == nil {
+			reconciler, ok := cluster.(CommittedForwardReconciler)
+			if !ok {
+				return Observation{}, errors.New("committed edge reconciliation is unavailable"), nil
+			}
+			observed, reconcileErr := reconciler.ReconcileCommittedForward(ctx, release, target, manifest)
+			return observed, reconcileErr, nil
+		}
 		observed, observeErr := cluster.ObserveCAS(ctx, release, manifest)
 		if observeErr != nil {
 			return observed, errors.Join(applyErr, fmt.Errorf("observe failed edge group transition: %w", observeErr)), nil
