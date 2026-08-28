@@ -1264,7 +1264,7 @@ type staticEdgeNodeLister struct {
 	nodes []model.EdgeNode
 }
 
-func (l staticEdgeNodeLister) ListEdgeNodes(string) ([]model.EdgeNode, []model.EdgeGroup, error) {
+func (l staticEdgeNodeLister) ListActiveEdgeNodes(string) ([]model.EdgeNode, []model.EdgeGroup, error) {
 	return l.nodes, nil, nil
 }
 

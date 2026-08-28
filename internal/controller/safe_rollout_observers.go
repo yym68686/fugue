@@ -64,7 +64,7 @@ type storeSafeRolloutEdgeBundleObserver struct {
 }
 
 type edgeNodeLister interface {
-	ListEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.EdgeGroup, error)
+	ListActiveEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.EdgeGroup, error)
 }
 
 func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ctx context.Context, app model.App, release model.AppRelease, since time.Time) (safeRolloutEdgeBundleObservation, error) {
@@ -97,7 +97,7 @@ func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ct
 }
 
 func (o storeSafeRolloutEdgeBundleObserver) observe(app model.App, release model.AppRelease, since time.Time) (safeRolloutEdgeBundleObservation, error) {
-	nodes, _, err := o.Store.ListEdgeNodes("")
+	nodes, _, err := o.Store.ListActiveEdgeNodes("")
 	if err != nil {
 		return safeRolloutEdgeBundleObservation{}, err
 	}
