@@ -81,6 +81,8 @@ runs:
         "${RELEASE_TOOL}" execute "${EXECUTION}" >"${RESULT}"
     - name: Publish one immutable target to the in-cluster Guardian
       if: steps.delivery.outputs.writer == 'guardian'
+      id: execute_guardian
+      continue-on-error: true
       shell: bash
       env:
         EXECUTION: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-${{ github.run_id }}-${{ github.run_attempt }}
@@ -89,6 +91,19 @@ runs:
       run: |
         set -euo pipefail
         "${RELEASE_TOOL}" guardian-submit "${EXECUTION}" >"${RESULT}"
+    - name: Adopt a committed Guardian authority after executor failure
+      if: steps.delivery.outputs.writer == 'guardian' && steps.execute_guardian.outcome == 'failure'
+      shell: bash
+      env:
+        EXECUTION: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-${{ github.run_id }}-${{ github.run_attempt }}
+        FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
+        FUGUE_REGISTRY_PASSWORD: ${{ inputs.registry-token }}
+        RESULT: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-result.json
+        RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
+      run: |
+        set -euo pipefail
+        "${RELEASE_TOOL}" adopt-committed-monitor "${EXECUTION}" >"${RESULT}.adopted"
+        mv "${RESULT}.adopted" "${RESULT}"
     - name: Reconcile terminal state read-only after executor failure
       if: steps.delivery.outputs.writer == 'direct' && steps.execute_direct.outcome == 'failure'
       shell: bash

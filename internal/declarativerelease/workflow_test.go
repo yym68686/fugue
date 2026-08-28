@@ -113,19 +113,22 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatalf("decode declarative component action: %v", err)
 	}
 	action := string(actionRaw)
-	if strings.Count(action, "FUGUE_REGISTRY_PASSWORD: ${{ inputs.registry-token }}") != 3 {
-		t.Fatal("prepare, execute, and reconcile must share the masked read-only registry credential")
+	if strings.Count(action, "FUGUE_REGISTRY_PASSWORD: ${{ inputs.registry-token }}") != 4 {
+		t.Fatal("prepare, execute, reconcile, and committed Guardian adoption must share the masked read-only registry credential")
 	}
 	for _, required := range []string{
-		"\"${RELEASE_TOOL}\" prepare", "\"${RELEASE_TOOL}\" emit-delivery", "\"${RELEASE_TOOL}\" execute", "\"${RELEASE_TOOL}\" guardian-submit", "\"${RELEASE_TOOL}\" reconcile",
+		"\"${RELEASE_TOOL}\" prepare", "\"${RELEASE_TOOL}\" emit-delivery", "\"${RELEASE_TOOL}\" execute", "\"${RELEASE_TOOL}\" guardian-submit", "\"${RELEASE_TOOL}\" reconcile", "\"${RELEASE_TOOL}\" adopt-committed-monitor",
 		"Upload the durable prewrite plan before mutation", "Upload terminal component receipt",
 		"cache: false",
-		"continue-on-error: true", "if: steps.delivery.outputs.writer == 'direct' && steps.execute_direct.outcome == 'failure'",
-		"if: steps.delivery.outputs.writer == 'guardian'",
+		"if: steps.delivery.outputs.writer == 'direct' && steps.execute_direct.outcome == 'failure'",
+		"if: steps.delivery.outputs.writer == 'guardian' && steps.execute_guardian.outcome == 'failure'",
 	} {
 		if strings.Count(action, required) != 1 {
 			t.Fatalf("declarative component action must contain %q exactly once", required)
 		}
+	}
+	if strings.Count(action, "continue-on-error: true") != 2 || strings.Count(action, "if: steps.delivery.outputs.writer == 'guardian'\n") != 1 {
+		t.Fatal("direct and Guardian writers must expose failure to their bounded reconciliation steps")
 	}
 	for _, forbidden := range []string{
 		"workflow_" + "dispatch", "deploy-" + "control-plane", "api_" + "hotfix", "historical_" + "controller",
