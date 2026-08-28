@@ -54,6 +54,16 @@ FROM fugue_edge_nodes`
 	return nodes, groups, nil
 }
 
+func (s *Store) pgEdgeGroupExists(edgeGroupID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_edge_groups WHERE id = $1)`, edgeGroupID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check edge group existence: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *Store) pgGetEdgeNode(edgeID string) (model.EdgeNode, model.EdgeGroup, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

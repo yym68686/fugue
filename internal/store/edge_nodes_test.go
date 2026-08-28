@@ -44,6 +44,29 @@ func TestEdgeRouteSyncActivityRequiresSuccessfulFetch(t *testing.T) {
 	}
 }
 
+func TestEdgeGroupExistsDoesNotRequireEdgeNodeInventory(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if _, _, err := s.UpdateEdgeHeartbeat(model.EdgeNode{ID: "edge-group-exists", EdgeGroupID: "edge-group-country-us", Status: model.EdgeHealthUnknown}); err != nil {
+		t.Fatalf("create edge group: %v", err)
+	}
+	exists, err := s.EdgeGroupExists("edge-group-country-us")
+	if err != nil || !exists {
+		t.Fatalf("expected existing edge group, exists=%v err=%v", exists, err)
+	}
+	exists, err = s.EdgeGroupExists("edge-group-missing")
+	if err != nil {
+		t.Fatalf("check missing edge group: %v", err)
+	}
+	if exists {
+		t.Fatal("missing edge group reported as existing")
+	}
+}
+
 func TestEdgeNodeControlStateSurvivesHeartbeat(t *testing.T) {
 	t.Parallel()
 

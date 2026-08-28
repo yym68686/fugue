@@ -31,6 +31,34 @@ func (s *Store) ListEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.Edg
 	return nodes, groups, err
 }
 
+// EdgeGroupExists validates control-plane group identity without loading the
+// complete edge-node inventory. File-backed stores retain the legacy behavior
+// of recognizing groups inferred from node rows.
+func (s *Store) EdgeGroupExists(edgeGroupID string) (bool, error) {
+	edgeGroupID = normalizeEdgeGroupID(edgeGroupID)
+	if edgeGroupID == "" {
+		return false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgEdgeGroupExists(edgeGroupID)
+	}
+	var exists bool
+	err := s.withLockedState(false, func(state *model.State) error {
+		exists = findEdgeGroup(state, edgeGroupID) >= 0
+		if exists {
+			return nil
+		}
+		for _, node := range state.EdgeNodes {
+			if normalizeEdgeGroupID(node.EdgeGroupID) == edgeGroupID {
+				exists = true
+				break
+			}
+		}
+		return nil
+	})
+	return exists, err
+}
+
 func (s *Store) GetEdgeNode(edgeID string) (model.EdgeNode, model.EdgeGroup, error) {
 	edgeID = normalizeEdgeID(edgeID)
 	if edgeID == "" {

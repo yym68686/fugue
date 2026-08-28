@@ -270,18 +270,11 @@ func (s *Server) validateEdgeRoutePolicyExclusions(edgeIDs, edgeGroupIDs []strin
 		}
 	}
 	for _, edgeGroupID := range edgeGroupIDs {
-		_, groups, err := s.store.ListEdgeNodes(edgeGroupID)
+		exists, err := s.store.EdgeGroupExists(edgeGroupID)
 		if err != nil {
 			return err
 		}
-		found := false
-		for _, group := range groups {
-			if strings.EqualFold(strings.TrimSpace(group.ID), edgeGroupID) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !exists {
 			return fmt.Errorf("excluded edge group %q does not exist", edgeGroupID)
 		}
 	}
