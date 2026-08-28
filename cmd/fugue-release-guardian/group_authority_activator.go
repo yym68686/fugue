@@ -23,8 +23,6 @@ import (
 	"fugue/internal/edgecontrol"
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -255,47 +253,6 @@ func (activator *groupAuthorityActivator) Finalize(ctx context.Context) error {
 
 func (*groupAuthorityActivator) IsPrewriteCASChanged(err error) bool {
 	return errors.Is(err, errAuthorityPrewriteCASChanged)
-}
-
-// PreparedSettled proves that a historical Control self-candidate never
-// became authority (or was exactly compensated) before its immutable prepared
-// journal is retired. It performs no mutation and cannot bless a staged
-// Worker candidate.
-func (activator *groupAuthorityActivator) PreparedSettled(ctx context.Context, journal releaseguardian.AuthorityTransitionJournal) (bool, error) {
-	if activator == nil || journal.Validate() != nil || journal.Phase != releaseguardian.AuthorityTransitionPrepared ||
-		journal.GroupID != activator.config.GroupID || journal.Candidate.HasWorkerReleaseIdentity() {
-		return false, errors.New("prepared authority settlement input is invalid")
-	}
-	target := releaseguardian.FrontAuthorityTarget{GroupID: journal.GroupID, TargetSlot: journal.Candidate.WorkerSlot,
-		CandidateBundleGeneration: journal.Candidate.BundleGeneration, ServingGeneration: journal.Candidate.ServingGeneration,
-		FrontBundleGeneration: journal.Candidate.BundleGeneration, WorkerSourceSHA: journal.Before.CurrentWorkerSourceSHA,
-		WorkerImageDigest: journal.Before.CurrentWorkerImageDigest, CandidateRecordDigest: journal.Candidate.RecordDigest,
-		PreviousSlot:            journal.Before.CurrentWorkerSlot,
-		PreviousFrontGeneration: journal.Before.CurrentFrontGeneration, PreviousBundleGeneration: journal.Before.CurrentBundleGeneration,
-		PreviousWorkerSourceSHA: journal.Before.CurrentWorkerSourceSHA, PreviousWorkerImageDigest: journal.Before.CurrentWorkerImageDigest}
-	preflight, err := activator.front.preflightForOperation(ctx, target, edgegroupfront.ActivationOperationPromote)
-	if err != nil {
-		return false, err
-	}
-	if preflight.alreadyAtNew {
-		return false, nil
-	}
-	lease, err := activator.front.client.CoordinationV1().Leases(activator.front.config.Namespace).
-		Get(ctx, "fugue-authority-"+journal.GroupID, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return true, nil
-	}
-	if err != nil || lease.UID == "" || lease.ResourceVersion == "" {
-		return false, errors.New("prepared authority Lease observation is unavailable")
-	}
-	holder := strings.TrimSpace(valueOrEmpty(lease.Spec.HolderIdentity))
-	if holder == "" {
-		return true, nil
-	}
-	if lease.Spec.RenewTime == nil || lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds <= 0 {
-		return false, nil
-	}
-	return !activator.now().UTC().Before(lease.Spec.RenewTime.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second)), nil
 }
 
 // CompensationSettled proves both sides of an activated-but-uncommitted
