@@ -74,3 +74,29 @@ func TestVerifyEdgeInstanceMigrationReceiptRequiresImmutableSchemaReceipt(t *tes
 		})
 	}
 }
+
+func TestPgReadEdgeControlNodesUsesMigratedInstanceIdentities(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT edge_id, edge_group_id
+FROM fugue_edge_node_instances
+GROUP BY edge_id, edge_group_id
+ORDER BY edge_id`)).WillReturnRows(
+		sqlmock.NewRows([]string{"edge_id", "edge_group_id"}).
+			AddRow("edge-de-1", "edge-group-country-de").
+			AddRow("edge-us-1", "edge-group-country-us"),
+	)
+	nodes, err := pgReadEdgeControlNodes(context.Background(), database)
+	if err != nil {
+		t.Fatalf("pgReadEdgeControlNodes: %v", err)
+	}
+	if len(nodes) != 2 || nodes[0].ID != "edge-de-1" || nodes[1].EdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("unexpected control identities: %+v", nodes)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

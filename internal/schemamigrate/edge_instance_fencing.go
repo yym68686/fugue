@@ -44,7 +44,8 @@ type EdgeInstanceFencingReceipt struct {
 }
 
 // MigrateEdgeInstanceFencing performs the additive edge-instance migration in
-// the schema-owned lane. It is safe to rerun and never advances activation.
+// the schema-owned lane. It is safe to rerun, fills only previously unmapped
+// legacy rows, and never advances activation.
 func MigrateEdgeInstanceFencing(ctx context.Context, databaseURL string) error {
 	databaseURL, err := normalizeDatabaseURL(databaseURL)
 	if err != nil {
@@ -133,10 +134,10 @@ func applyEdgeInstanceFencing(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("%w: unsupported edge-instance schema marker %q", errEdgeInstanceFencingMigrationRequired, marker)
 	}
 	if needsCopy {
-		if err := copyLegacyEdgeInstances(ctx, tx); err != nil {
-			return err
-		}
 		marker = edgeInstanceFencingSchema
+	}
+	if err := copyLegacyEdgeInstances(ctx, tx); err != nil {
+		return err
 	}
 	if err := ensureEdgeInstanceReceipt(ctx, tx, marker); err != nil {
 		return err
@@ -181,7 +182,12 @@ func readEdgeInstanceMarker(ctx context.Context, queryer interface {
 }
 
 func copyLegacyEdgeInstances(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id, edge_group_id, to_jsonb(n), last_heartbeat_at FROM fugue_edge_nodes AS n ORDER BY id FOR UPDATE`)
+	rows, err := tx.QueryContext(ctx, `SELECT n.id, n.edge_group_id, to_jsonb(n), n.last_heartbeat_at
+FROM fugue_edge_nodes AS n
+LEFT JOIN fugue_edge_node_instances AS i
+  ON i.edge_id=n.id AND i.edge_group_id=n.edge_group_id AND i.slot=$1 AND i.release_epoch=$2
+WHERE i.edge_id IS NULL
+ORDER BY n.id FOR UPDATE OF n`, edgeLegacyMigrationSlot, edgeLegacyMigrationEpoch)
 	if err != nil {
 		return fmt.Errorf("list legacy edge nodes for independent migration: %w", err)
 	}

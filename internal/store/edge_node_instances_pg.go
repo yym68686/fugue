@@ -402,9 +402,12 @@ func verifyEdgeInstanceMaterial(instances []model.EdgeNodeInstance, epochs []mod
 }
 
 func pgReadEdgeControlNodes(ctx context.Context, db sqlQueryer) ([]model.EdgeNode, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, edge_group_id FROM fugue_edge_nodes ORDER BY id`)
+	rows, err := db.QueryContext(ctx, `SELECT edge_id, edge_group_id
+FROM fugue_edge_node_instances
+GROUP BY edge_id, edge_group_id
+ORDER BY edge_id`)
 	if err != nil {
-		return nil, fmt.Errorf("list edge control identities: %w", err)
+		return nil, fmt.Errorf("list edge control identities from instances: %w", err)
 	}
 	defer rows.Close()
 	controls := []model.EdgeNode{}
@@ -416,7 +419,7 @@ func pgReadEdgeControlNodes(ctx context.Context, db sqlQueryer) ([]model.EdgeNod
 		controls = append(controls, node)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate edge control identities: %w", err)
+		return nil, fmt.Errorf("iterate edge control identities from instances: %w", err)
 	}
 	return controls, nil
 }

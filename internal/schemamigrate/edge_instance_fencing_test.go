@@ -44,7 +44,13 @@ func TestCopyLegacyEdgeInstancesRedactsCredentialAndIsIdempotent(t *testing.T) {
 	}
 	defer database.Close()
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, edge_group_id, to_jsonb(n), last_heartbeat_at FROM fugue_edge_nodes AS n ORDER BY id FOR UPDATE`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT n.id, n.edge_group_id, to_jsonb(n), n.last_heartbeat_at
+FROM fugue_edge_nodes AS n
+LEFT JOIN fugue_edge_node_instances AS i
+  ON i.edge_id=n.id AND i.edge_group_id=n.edge_group_id AND i.slot=$1 AND i.release_epoch=$2
+WHERE i.edge_id IS NULL
+ORDER BY n.id FOR UPDATE OF n`)).
+		WithArgs(edgeLegacyMigrationSlot, edgeLegacyMigrationEpoch).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "edge_group_id", "node_json", "last_heartbeat_at"}).
 			AddRow("edge-us-1", "group-us", []byte(`{"id":"edge-us-1","token_hash":"secret"}`), nil))
 	mock.ExpectExec(`INSERT INTO fugue_edge_node_instances \(\s*edge_id, edge_group_id, slot, instance_uid, release_epoch`).
