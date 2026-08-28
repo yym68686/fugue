@@ -102,7 +102,7 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 	}
 }
 
-func TestEdgeGroupRegistryAllowsOnlyUnselectedSourceRootNarrowing(t *testing.T) {
+func TestEdgeGroupRegistryRejectsUnselectedSourceRootNarrowing(t *testing.T) {
 	previous := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind,
 		Groups: []EdgeGroup{edgeGroupFixture("gamma", "edge-group-metro-gamma")}}
 	current := previous
@@ -110,8 +110,8 @@ func TestEdgeGroupRegistryAllowsOnlyUnselectedSourceRootNarrowing(t *testing.T) 
 	current.Groups[0].Worker.SourceRoots = append([]string(nil), previous.Groups[0].Worker.SourceRoots[1:]...)
 	guardianPlan := Plan{Releases: []PlanRelease{{ComponentID: "release-guardian"}}}
 
-	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, guardianPlan, []string{"deploy/releases/edge-groups.json", "deploy/releases/guardian/intent.json"}); err != nil {
-		t.Fatalf("strict source-root narrowing was rejected: %v", err)
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, guardianPlan, []string{"deploy/releases/edge-groups.json", "deploy/releases/guardian/intent.json"}); err == nil || !strings.Contains(err.Error(), "unselected component") {
+		t.Fatalf("unselected source-root narrowing was accepted: %v", err)
 	}
 	added := current
 	added.Groups = append([]EdgeGroup(nil), current.Groups...)
