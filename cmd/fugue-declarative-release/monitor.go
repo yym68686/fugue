@@ -127,7 +127,7 @@ func runAdoptCommittedMonitorContext(parent context.Context, args []string, outp
 		return err
 	}
 	monitorAdopted := monitorBundleMatchesExecution(stableMonitor.Bundle, files, prepared)
-	predecessorRecordDigest := before.Record.RecordDigest
+	predecessorRecordDigest := before.CurrentRecordDigest
 	if monitorAdopted {
 		stable, stableErr := committedStableRecord(key, release, artifact, prepared, stableMonitor.Bundle.Record)
 		if stableErr != nil || before.CurrentRecordDigest != stable.RecordDigest || before.LastSuccessfulLKG != stable.RecordDigest {
@@ -142,16 +142,13 @@ func runAdoptCommittedMonitorContext(parent context.Context, args []string, outp
 			return encodeErr
 		}
 		predecessorRecordDigest = before.Desired.RecordDigest
-	} else if before.CurrentRecordDigest != before.Record.RecordDigest || before.Desired.RecordDigest != before.Record.RecordDigest ||
-		before.LastSuccessfulLKG != before.Record.RecordDigest || before.PreviousStatus == nil ||
-		before.PreviousStatus.State != releaseguardian.StateRecoveryRequired || before.PreviousStatus.Key() != key ||
-		before.PreviousStatus.CurrentRecordDigest != before.Record.RecordDigest ||
-		(!strings.Contains(before.PreviousStatus.Reason, "monitor") && !strings.Contains(before.PreviousStatus.Reason, "rollout")) {
-		return errors.New("Guardian is not fenced on the exact failed committed transition")
 	}
 	candidateRecord, err := candidate.ReleaseRecord(key, predecessorRecordDigest)
 	if err != nil {
 		return err
+	}
+	if !monitorAdopted && !committedGuardianCandidateFenced(before, key, candidateRecord) {
+		return errors.New("Guardian is not fenced on the exact failed committed transition")
 	}
 	lkgMonitorDigest, err := verifyPublishedGuardianCandidate(ctx, client, release.Workload.Namespace, key, candidateRecord, files)
 	if err != nil {
@@ -219,6 +216,18 @@ func runAdoptCommittedMonitorContext(parent context.Context, args []string, outp
 	}
 	_, err = output.Write(append(raw, '\n'))
 	return err
+}
+
+func committedGuardianCandidateFenced(snapshot releaseguardian.Snapshot, key releaseguardian.Key, candidate releaseguardian.ReleaseRecord) bool {
+	status := snapshot.PreviousStatus
+	unproven := status != nil && (status.Reason == "lkg-unproven" || strings.HasPrefix(status.Reason, "lkg-unproven: ") ||
+		strings.HasPrefix(status.Reason, "failed candidate is fenced while LKG health awaits complete evidence"))
+	return snapshot.Managed && candidate.Validate() == nil && candidate.Key() == key && snapshot.Record == candidate &&
+		snapshot.Desired.Key() == key && snapshot.Desired.RecordDigest == candidate.RecordDigest &&
+		candidate.LKGRecordDigest == snapshot.CurrentRecordDigest && snapshot.LastSuccessfulLKG == snapshot.CurrentRecordDigest &&
+		status != nil && status.Key() == key && status.State == releaseguardian.StateRecoveryRequired && unproven &&
+		status.CurrentRecordDigest == snapshot.CurrentRecordDigest && status.LastSuccessfulLKG == snapshot.CurrentRecordDigest &&
+		status.TargetRecordDigest == candidate.RecordDigest && status.RolloutReceiptDigest != "" && status.RollbackReceiptDigest == ""
 }
 
 func monitorBundleMatchesExecution(bundle monitorBundle, files map[string][]byte, prepared declarativerelease.ExecutionPlan) bool {
