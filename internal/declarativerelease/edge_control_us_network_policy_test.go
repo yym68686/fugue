@@ -117,10 +117,10 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	const lkgSHA = "d0adfc530693687b8ad9cbe35fcc539e64c687c6"
-	if intent.Generation != 50 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
+	const lkgSHA = "fd63acff36890f6ad1afaa0f9212d1c53df8e69e"
+	if intent.Generation != 51 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:b7c8cb4447f91e979371bf737d57d08f847acdf1f85bc4fcc7c5864da8f6633b" ||
+		intent.ExpectedPreviousImageDigest != "sha256:627bf0ecea46032a4e49cae24ec42bd0b78d09cc8cd24fbdfc2950b6d71992b1" ||
 		intent.SupersedesFailedConfigSHA != "" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
