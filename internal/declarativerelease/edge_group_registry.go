@@ -47,40 +47,6 @@ func DecodeEdgeGroupRegistry(reader io.Reader) (EdgeGroupRegistry, error) {
 	return registry, nil
 }
 
-// DecodeHistoricalEdgeGroupRegistry reads the predecessor shape that predates
-// the data-owned client lane. It is used only to compare an exact Git parent;
-// current registries must still use DecodeEdgeGroupRegistry and include client.
-func DecodeHistoricalEdgeGroupRegistry(reader io.Reader) (EdgeGroupRegistry, error) {
-	var legacy struct {
-		APIVersion string `json:"apiVersion"`
-		Kind       string `json:"kind"`
-		Groups     []struct {
-			ID            string            `json:"id"`
-			GroupID       string            `json:"groupId"`
-			FaultDomainID string            `json:"faultDomainId,omitempty"`
-			EdgePoolID    string            `json:"edgePoolId,omitempty"`
-			Labels        map[string]string `json:"labels,omitempty"`
-			Client        Component         `json:"client,omitempty"`
-			Control       Component         `json:"control"`
-			Worker        Component         `json:"worker"`
-		} `json:"groups"`
-	}
-	if err := decodeStrict(reader, &legacy); err != nil {
-		return EdgeGroupRegistry{}, fmt.Errorf("decode historical edge group registry: %w", err)
-	}
-	registry := EdgeGroupRegistry{APIVersion: legacy.APIVersion, Kind: legacy.Kind, Groups: make([]EdgeGroup, 0, len(legacy.Groups))}
-	for _, group := range legacy.Groups {
-		registry.Groups = append(registry.Groups, EdgeGroup{
-			ID: group.ID, GroupID: group.GroupID, FaultDomainID: group.FaultDomainID, EdgePoolID: group.EdgePoolID, Labels: group.Labels,
-			Client: group.Client, Control: group.Control, Worker: group.Worker,
-		})
-	}
-	if err := registry.validate(false); err != nil {
-		return EdgeGroupRegistry{}, err
-	}
-	return registry, nil
-}
-
 func (registry EdgeGroupRegistry) Validate() error {
 	return registry.validate(true)
 }

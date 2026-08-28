@@ -416,9 +416,6 @@ func loadGitEdgeGroupRegistry(revision, registryPath string) (*declarativereleas
 	}
 	edge, err := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(raw))
 	if err != nil {
-		edge, err = declarativerelease.DecodeHistoricalEdgeGroupRegistry(bytes.NewReader(raw))
-	}
-	if err != nil {
 		return nil, fmt.Errorf("decode previous edge group registry: %w", err)
 	}
 	return &edge, nil

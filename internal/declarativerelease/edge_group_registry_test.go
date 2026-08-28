@@ -1,6 +1,7 @@
 package declarativerelease
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,13 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestDecodeEdgeGroupRegistryRejectsPreClientShape(t *testing.T) {
+	legacy := []byte(`{"apiVersion":"release.fugue.dev/v1","kind":"EdgeGroupRegistry","groups":[{"id":"de","groupId":"edge-group-country-de","control":{},"worker":{}}]}`)
+	if _, err := DecodeEdgeGroupRegistry(bytes.NewReader(legacy)); err == nil {
+		t.Fatal("pre-client edge group registry shape was accepted")
+	}
+}
 
 func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 	baseFile, err := os.Open("../../deploy/releases/components.json")
