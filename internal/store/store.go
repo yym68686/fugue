@@ -140,7 +140,7 @@ func (s *Store) Init() error {
 		if err := s.pgRepairAppStatuses(); err != nil {
 			return err
 		}
-		if err := s.pgEnsureEdgeInstanceFencing(); err != nil {
+		if err := s.pgVerifyEdgeInstanceFencing(); err != nil {
 			return err
 		}
 		return nil

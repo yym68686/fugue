@@ -21,109 +21,80 @@ const edgeActiveEpochSelectColumns = `edge_group_id, slot, release_epoch, fence_
 
 const edgeInstanceFencingMetaKey = "edge_instance_fencing_schema"
 
-func (s *Store) pgEnsureEdgeInstanceFencing() error {
+const (
+	edgeInstanceFencingReceiptKey    = "edge_instance_fencing_receipt"
+	edgeInstanceFencingReceiptSchema = "edge-instance-fencing/migration-receipt/v1"
+	edgeInstanceUIDAlgorithm         = "sha256(normalized-edge-id)-first-12-bytes"
+)
+
+func (s *Store) pgVerifyEdgeInstanceFencing() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
-		return fmt.Errorf("begin edge instance migration: %w", err)
+		return fmt.Errorf("begin edge instance migration verification: %w", err)
 	}
 	defer tx.Rollback()
-	now, err := pgEdgeServerTime(ctx, tx)
-	if err != nil {
+	if err := verifyEdgeInstanceMigrationReceipt(ctx, tx); err != nil {
 		return err
 	}
-	defaultActivation := defaultEdgeActivationState(now)
-	defaultActivationJSON, err := json.Marshal(defaultActivation)
-	if err != nil {
-		return fmt.Errorf("encode default edge activation: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO fugue_edge_activation (singleton, phase, generation, state_json, created_at, updated_at)
-VALUES (true,$1,$2,$3,$4,$4) ON CONFLICT (singleton) DO NOTHING`, defaultActivation.Phase, defaultActivation.Generation, defaultActivationJSON, now); err != nil {
-		return fmt.Errorf("ensure default edge activation: %w", err)
-	}
-
-	var schema string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1 FOR UPDATE`, edgeInstanceFencingMetaKey).Scan(&schema)
-	if err == nil {
-		if schema != model.EdgeInstanceFencingSchemaV1 {
-			return fmt.Errorf("%w: unsupported postgres schema %q", ErrEdgeInstanceFencingNotReady, schema)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit edge instance migration check: %w", err)
-		}
-		return s.pgVerifyEdgeActivationReadiness(ctx)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("read edge instance schema marker: %w", err)
-	}
-	var instanceCount, epochCount int
-	if err := tx.QueryRowContext(ctx, `SELECT
-		(SELECT count(*) FROM fugue_edge_node_instances),
-		(SELECT count(*) FROM fugue_edge_active_epochs)`).Scan(&instanceCount, &epochCount); err != nil {
-		return fmt.Errorf("inspect edge instance migration state: %w", err)
-	}
-	if instanceCount != 0 || epochCount != 0 {
-		return fmt.Errorf("%w: partial postgres edge instance schema", ErrEdgeInstanceFencingNotReady)
-	}
-
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, public_probe_last_error, public_probe_last_at,
-	region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
-	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
-	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
-	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
-FROM fugue_edge_nodes ORDER BY id FOR UPDATE`)
-	if err != nil {
-		return fmt.Errorf("list legacy edge nodes for migration: %w", err)
-	}
-	legacyNodes := []model.EdgeNode{}
-	for rows.Next() {
-		node, err := scanEdgeNode(rows)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		legacyNodes = append(legacyNodes, node)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate legacy edge nodes for migration: %w", err)
-	}
-	rows.Close()
-	for _, node := range legacyNodes {
-		node.TokenHash = ""
-		nodeJSON, err := json.Marshal(node)
-		if err != nil {
-			return fmt.Errorf("encode legacy edge node: %w", err)
-		}
-		lastHeartbeatAt := any(nil)
-		if node.LastHeartbeatAt != nil {
-			lastHeartbeatAt = node.LastHeartbeatAt.UTC()
-		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_edge_node_instances (
-	edge_id, edge_group_id, slot, instance_uid, release_epoch, node_json, failure_class,
-	effective_healthy, consecutive_healthy, consecutive_unhealthy, health_state_since,
-	last_heartbeat_at, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,'',false,0,0,NULL,$7,$8,$8)`,
-			node.ID, node.EdgeGroupID, edgeLegacyMigrationSlot, legacyEdgeInstanceUID(node.ID), edgeLegacyMigrationEpoch,
-			nodeJSON, lastHeartbeatAt, now); err != nil {
-			return mapDBErr(err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO fugue_meta (key,value,updated_at)
-VALUES ($1,$2,$3)`, edgeInstanceFencingMetaKey, model.EdgeInstanceFencingSchemaV1, now); err != nil {
-		return fmt.Errorf("write edge instance schema marker: %w", err)
+	if err := pgVerifyEdgeActivationReadinessSnapshot(ctx, tx); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit edge instance migration: %w", err)
+		return fmt.Errorf("commit edge instance migration verification: %w", err)
 	}
-	return s.pgVerifyEdgeActivationReadiness(ctx)
+	return nil
 }
 
-func (s *Store) pgVerifyEdgeInstanceFencing(ctx context.Context) error {
-	return s.pgVerifyEdgeActivationReadiness(ctx)
+type edgeInstanceMigrationReceipt struct {
+	Schema               string    `json:"schema"`
+	Marker               string    `json:"marker"`
+	LegacyRowCount       int64     `json:"legacy_row_count"`
+	MigratedRowCount     int64     `json:"migrated_row_count"`
+	ActiveEpochCount     int64     `json:"active_epoch_count"`
+	ActivationPhase      string    `json:"activation_phase"`
+	ActivationGeneration int64     `json:"activation_generation"`
+	InstanceUIDAlgorithm string    `json:"instance_uid_algorithm"`
+	RecordedAt           time.Time `json:"recorded_at"`
+}
+
+func verifyEdgeInstanceMigrationReceipt(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) error {
+	var marker string
+	if err := queryer.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, edgeInstanceFencingMetaKey).Scan(&marker); err != nil {
+		return fmt.Errorf("read edge instance schema marker: %w", err)
+	}
+	if marker != model.EdgeInstanceFencingSchemaV1 {
+		return fmt.Errorf("%w: unsupported postgres schema %q", ErrEdgeInstanceFencingNotReady, marker)
+	}
+	var rawReceipt string
+	if err := queryer.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, edgeInstanceFencingReceiptKey).Scan(&rawReceipt); err != nil {
+		return fmt.Errorf("read edge instance migration receipt: %w", err)
+	}
+	var receipt edgeInstanceMigrationReceipt
+	if err := json.Unmarshal([]byte(rawReceipt), &receipt); err != nil {
+		return fmt.Errorf("decode edge instance migration receipt: %w", err)
+	}
+	if receipt.Schema != edgeInstanceFencingReceiptSchema || receipt.Marker != model.EdgeInstanceFencingSchemaV1 ||
+		receipt.LegacyRowCount < 0 || receipt.MigratedRowCount < receipt.LegacyRowCount ||
+		receipt.ActiveEpochCount < 0 || receipt.ActivationGeneration <= 0 ||
+		receipt.InstanceUIDAlgorithm != edgeInstanceUIDAlgorithm || receipt.RecordedAt.IsZero() {
+		return fmt.Errorf("%w: invalid edge instance migration receipt", ErrEdgeInstanceFencingNotReady)
+	}
+	var missing int64
+	if err := queryer.QueryRowContext(ctx, `
+SELECT count(*) FROM fugue_edge_nodes AS n
+LEFT JOIN fugue_edge_node_instances AS i
+  ON i.edge_id=n.id AND i.edge_group_id=n.edge_group_id AND i.slot=$1 AND i.release_epoch=$2
+WHERE i.edge_id IS NULL`, edgeLegacyMigrationSlot, edgeLegacyMigrationEpoch).Scan(&missing); err != nil {
+		return fmt.Errorf("verify legacy edge instance mapping: %w", err)
+	}
+	if missing != 0 {
+		return fmt.Errorf("%w: current legacy rows missing instance mapping=%d", ErrEdgeInstanceFencingNotReady, missing)
+	}
+	return nil
 }
 
 func (s *Store) pgPutEdgeActiveEpoch(epoch model.EdgeActiveEpoch) (model.EdgeActiveEpoch, error) {

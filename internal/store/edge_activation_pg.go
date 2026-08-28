@@ -117,27 +117,34 @@ func (s *Store) pgVerifyEdgeActivationReadiness(ctx context.Context) error {
 		return fmt.Errorf("begin edge activation readiness snapshot: %w", err)
 	}
 	defer tx.Rollback()
-	activation, err := pgReadEdgeActivation(ctx, tx, false)
+	if err := pgVerifyEdgeActivationReadinessSnapshot(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit edge activation readiness snapshot: %w", err)
+	}
+	return nil
+}
+
+func pgVerifyEdgeActivationReadinessSnapshot(ctx context.Context, db sqlQueryer) error {
+	activation, err := pgReadEdgeActivation(ctx, db, false)
 	if err != nil {
 		return err
 	}
-	instances, err := pgReadEdgeNodeInstances(ctx, tx, "")
+	instances, err := pgReadEdgeNodeInstances(ctx, db, "")
 	if err != nil {
 		return err
 	}
-	epochs, err := pgReadEdgeActiveEpochs(ctx, tx, "")
+	epochs, err := pgReadEdgeActiveEpochs(ctx, db, "")
 	if err != nil {
 		return err
 	}
-	controls, err := pgReadEdgeControlNodes(ctx, tx)
+	controls, err := pgReadEdgeControlNodes(ctx, db)
 	if err != nil {
 		return err
 	}
 	if err := verifyEdgeInstanceMaterialForActivation(instances, epochs, controls, activation); err != nil {
 		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit edge activation readiness snapshot: %w", err)
 	}
 	return nil
 }
