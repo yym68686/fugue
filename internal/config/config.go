@@ -178,9 +178,6 @@ type ControllerConfig struct {
 	LeaderElectionRenewDeadline                time.Duration
 	LeaderElectionRetryPeriod                  time.Duration
 	LeaderElectionIdentity                     string
-	LegacyControllerLabelSelector              string
-	LegacyControllerContainerName              string
-	LegacyControllerCheckInterval              time.Duration
 	// Managed PostgreSQL in-place resize is intentionally split into explicit
 	// capabilities. All capabilities default to false so installing the code
 	// cannot change production behavior until each gate is deliberately armed.
@@ -530,9 +527,6 @@ func ControllerFromEnv() ControllerConfig {
 		LeaderElectionRenewDeadline:                getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_RENEW_DEADLINE", 10*time.Second),
 		LeaderElectionRetryPeriod:                  getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_RETRY_PERIOD", 2*time.Second),
 		LeaderElectionIdentity:                     getenv("FUGUE_CONTROLLER_LEADER_ELECTION_IDENTITY", hostnameFallback()),
-		LegacyControllerLabelSelector:              getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_LABEL_SELECTOR", ""),
-		LegacyControllerContainerName:              getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME", "controller"),
-		LegacyControllerCheckInterval:              getenvDuration("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL", 2*time.Second),
 		ManagedPostgresInPlaceResize: ManagedPostgresInPlaceResizeConfig{
 			Enabled:                       getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", false),
 			CPURequestUpscaleEnabled:      getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", false),

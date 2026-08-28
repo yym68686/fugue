@@ -2391,9 +2391,6 @@ controller:
     leaseDuration: "15s"
     renewDeadline: "10s"
     retryPeriod: "2s"
-  migrationGuard:
-    legacyControllerContainerName: "controller"
-    checkInterval: "2s"
   resources:
     requests:
       cpu: 100m

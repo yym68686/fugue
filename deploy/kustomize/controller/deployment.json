@@ -424,18 +424,6 @@
                 }
               },
               {
-                "name": "FUGUE_CONTROLLER_LEGACY_CONTROLLER_LABEL_SELECTOR",
-                "value": "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api"
-              },
-              {
-                "name": "FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME",
-                "value": "controller"
-              },
-              {
-                "name": "FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL",
-                "value": "2s"
-              },
-              {
                 "name": "FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED",
                 "value": "false"
               },

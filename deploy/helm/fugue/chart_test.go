@@ -169,6 +169,26 @@ func TestManagedPostgresInPlaceResizeGatesDefaultClosed(t *testing.T) {
 	}
 }
 
+func TestControllerLegacyMigrationGuardIsRetired(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	controller := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-controller")
+	if strings.Contains(controller, "FUGUE_CONTROLLER_LEGACY_CONTROLLER_") {
+		t.Fatalf("retired Controller migration guard remains in the rendered Deployment:\n%s", controller)
+	}
+}
+
 func TestAutomationShadowLoopConfigurationIsScopedToAPI(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

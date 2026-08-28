@@ -215,9 +215,6 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.LeaderElectionRenewDeadline <= 0 {
 		s.Config.LeaderElectionRenewDeadline = 10 * time.Second
 	}
-	if s.Config.LegacyControllerCheckInterval <= 0 {
-		s.Config.LegacyControllerCheckInterval = 2 * time.Second
-	}
 	if s.now == nil {
 		s.now = time.Now
 	}

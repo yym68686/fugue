@@ -564,25 +564,6 @@ func (c *kubeClient) updateLease(ctx context.Context, namespace string, lease ku
 	return err
 }
 
-func (c *kubeClient) podWithContainerExists(ctx context.Context, namespace, labelSelector, containerName string) (bool, error) {
-	pods, err := c.listPodsBySelector(ctx, namespace, labelSelector)
-	if err != nil {
-		return false, err
-	}
-
-	for _, pod := range pods {
-		if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
-			continue
-		}
-		for _, container := range pod.Spec.Containers {
-			if container.Name == containerName {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
 func (c *kubeClient) getPod(ctx context.Context, namespace, name string) (kubePod, bool, error) {
 	var pod kubePod
 	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/pods/"+url.PathEscape(strings.TrimSpace(name)), nil, &pod)

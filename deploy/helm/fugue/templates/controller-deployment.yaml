@@ -268,12 +268,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: FUGUE_CONTROLLER_LEGACY_CONTROLLER_LABEL_SELECTOR
-              value: 'app.kubernetes.io/name={{ include "fugue.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=api'
-            - name: FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME
-              value: {{ .Values.controller.migrationGuard.legacyControllerContainerName | quote }}
-            - name: FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL
-              value: {{ .Values.controller.migrationGuard.checkInterval | quote }}
             - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED
               value: {{ .Values.controller.managedPostgresInPlaceResize.enabled | quote }}
             - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED
