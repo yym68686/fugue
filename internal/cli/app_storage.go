@@ -20,7 +20,6 @@ type appStorageView struct {
 	AppID             string                            `json:"app_id"`
 	Enabled           bool                              `json:"enabled"`
 	StorageMode       string                            `json:"storage_mode"`
-	Workspace         *model.AppWorkspaceSpec           `json:"workspace,omitempty"`
 	PersistentStorage *model.AppPersistentStorageSpec   `json:"persistent_storage,omitempty"`
 	Mounts            []model.AppPersistentStorageMount `json:"mounts,omitempty"`
 }
@@ -205,9 +204,6 @@ func (c *CLI) newAppStorageSetCommand() *cobra.Command {
 		Long: strings.TrimSpace(`
 Use --mount for directories and --mount-file for persisted files seeded from a
 local file.
-
-If the app still uses the older workspace model, Fugue migrates that config to
-the new persistent_storage representation before applying your changes.
 `),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -230,7 +226,10 @@ the new persistent_storage representation before applying your changes.
 			}
 
 			spec := cloneAppSpec(app.Spec)
-			storage, _ := appStorageForMutation(spec)
+			storage, err := appStorageForMutation(spec)
+			if err != nil {
+				return err
+			}
 			storage = cloneAppPersistentStorageSpec(storage)
 			if storage == nil {
 				storage = &model.AppPersistentStorageSpec{}
@@ -418,39 +417,28 @@ func (c *CLI) newAppStorageDisableCommand() *cobra.Command {
 	return cmd
 }
 
-func appStorageForMutation(spec model.AppSpec) (*model.AppPersistentStorageSpec, string) {
-	switch {
-	case spec.PersistentStorage != nil:
-		return cloneAppPersistentStorageSpec(spec.PersistentStorage), "persistent_storage"
-	case spec.Workspace != nil:
-		storage := legacyWorkspacePersistentStorageSpec(spec.Workspace)
-		return storage, "workspace"
-	default:
-		return nil, "none"
+func appStorageForMutation(spec model.AppSpec) (*model.AppPersistentStorageSpec, error) {
+	if spec.PersistentStorage != nil {
+		return cloneAppPersistentStorageSpec(spec.PersistentStorage), nil
 	}
+	if spec.Workspace != nil {
+		return nil, fmt.Errorf("legacy workspace storage is no longer supported; migrate the app to persistent_storage before using app storage set")
+	}
+	return nil, nil
 }
 
 func appStorageViewFromSpec(app model.App) appStorageView {
 	mode := "disabled"
-	workspace := cloneAppWorkspaceSpec(app.Spec.Workspace)
 	storage := cloneAppPersistentStorageSpec(app.Spec.PersistentStorage)
 	mounts := []model.AppPersistentStorageMount(nil)
-	switch {
-	case storage != nil:
+	if storage != nil {
 		mode = "persistent_storage"
 		mounts = cloneAppPersistentStorageMounts(storage.Mounts)
-	case workspace != nil:
-		mode = "workspace"
-		converted := legacyWorkspacePersistentStorageSpec(workspace)
-		if converted != nil {
-			mounts = converted.Mounts
-		}
 	}
 	return appStorageView{
 		AppID:             app.ID,
 		Enabled:           mode != "disabled",
 		StorageMode:       mode,
-		Workspace:         workspace,
 		PersistentStorage: storage,
 		Mounts:            mounts,
 	}
@@ -493,15 +481,6 @@ func (c *CLI) renderAppStorageState(app model.App, operation *model.Operation, r
 			kvPair{Key: "storage_class", Value: strings.TrimSpace(view.PersistentStorage.StorageClassName)},
 			kvPair{Key: "mount_count", Value: fmt.Sprintf("%d", len(view.PersistentStorage.Mounts))},
 		)
-	case "workspace":
-		pairs = append(pairs,
-			kvPair{Key: "storage_size", Value: strings.TrimSpace(view.Workspace.StorageSize)},
-			kvPair{Key: "storage_class", Value: strings.TrimSpace(view.Workspace.StorageClassName)},
-			kvPair{Key: "mount_count", Value: fmt.Sprintf("%d", len(view.Mounts))},
-		)
-		if view.Workspace != nil {
-			pairs = append(pairs, kvPair{Key: "mount_path", Value: strings.TrimSpace(view.Workspace.MountPath)})
-		}
 	default:
 		pairs = append(pairs, kvPair{Key: "mount_count", Value: "0"})
 	}

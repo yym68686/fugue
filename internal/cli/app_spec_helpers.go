@@ -93,29 +93,6 @@ func cloneAppPostgresSpec(spec *model.AppPostgresSpec) *model.AppPostgresSpec {
 	return model.CloneAppPostgresSpec(spec)
 }
 
-func legacyWorkspacePersistentStorageSpec(workspace *model.AppWorkspaceSpec) *model.AppPersistentStorageSpec {
-	if workspace == nil {
-		return nil
-	}
-	mountPath, err := model.NormalizeAppWorkspaceMountPath(workspace.MountPath)
-	if err != nil {
-		mountPath = model.DefaultAppWorkspaceMountPath
-	}
-	return &model.AppPersistentStorageSpec{
-		StoragePath:      strings.TrimSpace(workspace.StoragePath),
-		StorageSize:      strings.TrimSpace(workspace.StorageSize),
-		StorageClassName: strings.TrimSpace(workspace.StorageClassName),
-		ResetToken:       strings.TrimSpace(workspace.ResetToken),
-		Mounts: []model.AppPersistentStorageMount{
-			{
-				Kind: model.AppPersistentStorageMountKindDirectory,
-				Path: mountPath,
-				Mode: 0o755,
-			},
-		},
-	}
-}
-
 func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 	out := spec
 	if len(spec.Command) > 0 {
