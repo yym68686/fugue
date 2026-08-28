@@ -198,15 +198,6 @@ func TestRetryPredecessorConvergenceManifestDropsOnlyRenderedTargetIdentity(t *t
 		}
 	}
 
-	tombstoneManifest := bytes.Replace(manifest, []byte(`"stable.example/template-key":"keep"`), []byte(`"fugue.pro/declarative-environment-tombstones":"OLD","stable.example/template-key":"keep"`), 1)
-	tombstoneWitness, err := RetryPredecessorConvergenceManifest(tombstoneManifest, release)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(tombstoneWitness, []byte(`"fugue.pro/declarative-environment-tombstones"`)) ||
-		!bytes.Contains(tombstoneWitness, []byte(`"fugue.pro/retry-legacy-environment-tombstones":"OLD"`)) {
-		t.Fatalf("legacy environment tombstone was not isolated as recovery evidence: %s", tombstoneWitness)
-	}
 	witness, err := DecodeResourceSet(bytes.NewReader(witnessRaw))
 	if err != nil {
 		t.Fatal(err)

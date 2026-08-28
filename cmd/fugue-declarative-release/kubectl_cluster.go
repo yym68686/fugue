@@ -31,16 +31,13 @@ import (
 )
 
 const (
-	maxKubernetesOutputBytes                   = 4 << 20
-	defaultKubectlReadTimeout                  = 15 * time.Second
-	defaultKubectlReadAttempts                 = 2
-	defaultKubectlReadRetryDelay               = 250 * time.Millisecond
-	maxScalarOwnershipApplyAttempts            = 4
-	maxLegacyEnvironmentCleanupAttempts        = 5
-	legacyEnvironmentCleanupRetryDelay         = 100 * time.Millisecond
-	probeBridgeManagerPrefix                   = "fugue-probe-bridge-"
-	trustedCurrentArtifactEnv                  = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
-	retryLegacyEnvironmentTombstonesAnnotation = "fugue.pro/retry-legacy-environment-tombstones"
+	maxKubernetesOutputBytes        = 4 << 20
+	defaultKubectlReadTimeout       = 15 * time.Second
+	defaultKubectlReadAttempts      = 2
+	defaultKubectlReadRetryDelay    = 250 * time.Millisecond
+	maxScalarOwnershipApplyAttempts = 4
+	probeBridgeManagerPrefix        = "fugue-probe-bridge-"
+	trustedCurrentArtifactEnv       = "FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT"
 )
 
 var (
@@ -68,14 +65,6 @@ var releaseArtifactAnnotationKeys = map[string]bool{
 	"fugue.pro/production-config-sha":   true,
 	"fugue.pro/release-plan-digest":     true,
 	"fugue.pro/source-commit":           true,
-}
-
-// before-first-apply is Kubernetes' synthetic owner for fields that predate
-// managedFields. It receives the same scalar-only CAS transfer as Helm; it is
-// never authorized to expand the reviewed emergency ownership allowlist.
-var legacyOwnershipManagers = map[string]bool{
-	"helm":               true,
-	"before-first-apply": true,
 }
 
 func emergencyOwnershipManager(manager string) bool {
@@ -1040,11 +1029,6 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 // accepts only the same typed proof.
 func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
 	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
-	if applyErr == nil && !dryRun {
-		if err := cluster.pruneOmittedLegacyEnvironment(ctx, release, identity, desired); err != nil {
-			return err
-		}
-	}
 	if applyErr != nil {
 		// A server-side apply may commit before the client loses its response.
 		// Continue only when a fresh GET proves the same pre-existing UID now
@@ -1079,7 +1063,7 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if dryRun {
 			return nil
 		}
-		transferPatch, transferFound, transferErr := nextLegacyOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
+		transferPatch, transferFound, transferErr := nextOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
 		if transferErr != nil {
 			return transferErr
 		}
@@ -1103,7 +1087,7 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if decodeErr != nil {
 			return decodeErr
 		}
-		expected, transferErr := expectedStateAfterLegacyOwnershipTransfer(desired, live, fresh, allowed, applyErr)
+		expected, transferErr := expectedStateAfterOwnershipTransfer(desired, live, fresh, allowed, applyErr)
 		if transferErr != nil {
 			return transferErr
 		}
@@ -1113,179 +1097,6 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		return nil
 	}
 	return nil
-}
-
-// pruneOmittedLegacyEnvironment removes only environment entries that are
-// absent from the reviewed manifest and still owned by a historical manager
-// such as Helm. Server-side apply intentionally preserves those entries when
-// another manager owns them; a UID/RV-bound JSON Patch makes the declarative
-// omission explicit without taking over unrelated fields or using force.
-func (cluster *kubectlCluster) pruneOmittedLegacyEnvironment(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) error {
-	if cluster == nil || (identity.Kind != "Deployment" && identity.Kind != "DaemonSet" && identity.Kind != "Job") {
-		return nil
-	}
-	if len(legacyEnvironmentRemovalNames(desired)) == 0 {
-		return nil
-	}
-	var lastErr error
-	for attempt := 1; attempt <= maxLegacyEnvironmentCleanupAttempts; attempt++ {
-		if attempt > 1 {
-			timer := time.NewTimer(legacyEnvironmentCleanupRetryDelay)
-			select {
-			case <-ctx.Done():
-				if !timer.Stop() {
-					<-timer.C
-				}
-				return ctx.Err()
-			case <-timer.C:
-			}
-		}
-		liveRaw, err := cluster.getResource(ctx, identity)
-		if err != nil || resourceAbsent(liveRaw) {
-			return err
-		}
-		live, err := decodeJSONObject(liveRaw)
-		if err != nil {
-			return err
-		}
-		removals, err := omittedLegacyEnvironmentEntries(desired, live)
-		if err != nil || len(removals) == 0 {
-			return err
-		}
-		metadata := mapField(live, "metadata")
-		uid, rv := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"])
-		if !validKubernetesResourceVersion(rv) || uid == "" {
-			return errors.New("legacy environment cleanup lacks UID/RV")
-		}
-		sort.Slice(removals, func(i, j int) bool {
-			if removals[i].containerIndex != removals[j].containerIndex {
-				return removals[i].containerIndex < removals[j].containerIndex
-			}
-			return removals[i].envIndex > removals[j].envIndex
-		})
-		patch := []map[string]any{
-			{"op": "test", "path": "/metadata/uid", "value": uid},
-			{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
-		}
-		for _, removal := range removals {
-			base := "/spec/template/spec/containers/" + strconv.Itoa(removal.containerIndex)
-			envPath := base + "/env/" + strconv.Itoa(removal.envIndex)
-			patch = append(patch,
-				map[string]any{"op": "test", "path": base + "/name", "value": removal.containerName},
-				map[string]any{"op": "test", "path": envPath + "/name", "value": removal.envName},
-				map[string]any{"op": "remove", "path": envPath},
-			)
-		}
-		encoded, err := declarativerelease.CanonicalJSON(patch)
-		if err != nil {
-			return err
-		}
-		if _, err := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
-			"--namespace", identity.Namespace, "--type=json", "--field-manager", release.Workload.FieldManager,
-			"--patch", string(encoded), "--output", "json"); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-	}
-	return fmt.Errorf("remove omitted legacy environment after %d attempts: %w", maxLegacyEnvironmentCleanupAttempts, lastErr)
-}
-
-type omittedLegacyEnvironmentEntry struct {
-	containerIndex int
-	containerName  string
-	envIndex       int
-	envName        string
-}
-
-func omittedLegacyEnvironmentEntries(desired, live map[string]any) ([]omittedLegacyEnvironmentEntry, error) {
-	desiredSpec := mapField(mapField(desired, "spec"), "template")
-	desiredSpec = mapField(desiredSpec, "spec")
-	liveSpec := mapField(mapField(live, "spec"), "template")
-	liveSpec = mapField(liveSpec, "spec")
-	removableNames := legacyEnvironmentRemovalNames(desired)
-	if len(removableNames) == 0 {
-		return nil, nil
-	}
-	desiredContainers := make(map[string]map[string]any)
-	for _, raw := range anySlice(desiredSpec["containers"]) {
-		container, ok := raw.(map[string]any)
-		if !ok || strings.TrimSpace(stringValue(container["name"])) == "" {
-			return nil, errors.New("declared container is invalid")
-		}
-		desiredContainers[stringValue(container["name"])] = container
-	}
-	entries := make([]omittedLegacyEnvironmentEntry, 0)
-	for containerIndex, raw := range anySlice(liveSpec["containers"]) {
-		liveContainer, ok := raw.(map[string]any)
-		if !ok {
-			return nil, errors.New("live container is invalid")
-		}
-		containerName := stringValue(liveContainer["name"])
-		desiredContainer, declared := desiredContainers[containerName]
-		if !declared {
-			continue
-		}
-		desiredNames := make(map[string]bool)
-		for _, rawEnv := range anySlice(desiredContainer["env"]) {
-			env, ok := rawEnv.(map[string]any)
-			if !ok || strings.TrimSpace(stringValue(env["name"])) == "" {
-				return nil, errors.New("declared environment is invalid")
-			}
-			desiredNames[stringValue(env["name"])] = true
-		}
-		for envIndex, rawEnv := range anySlice(liveContainer["env"]) {
-			env, ok := rawEnv.(map[string]any)
-			if !ok {
-				return nil, errors.New("live environment is invalid")
-			}
-			envName := stringValue(env["name"])
-			if envName == "" || desiredNames[envName] || !removableNames[envName] || !legacyEnvironmentItemOwned(live, containerName, envName) {
-				continue
-			}
-			entries = append(entries, omittedLegacyEnvironmentEntry{containerIndex: containerIndex, containerName: containerName, envIndex: envIndex, envName: envName})
-		}
-	}
-	return entries, nil
-}
-
-func legacyEnvironmentRemovalNames(desired map[string]any) map[string]bool {
-	templateMetadata := mapField(mapField(mapField(desired, "spec"), "template"), "metadata")
-	annotations := mapField(templateMetadata, "annotations")
-	raw := strings.TrimSpace(stringValue(annotations["fugue.pro/declarative-environment-tombstones"]))
-	if raw == "" {
-		return nil
-	}
-	names := make(map[string]bool)
-	for _, value := range strings.Split(raw, ",") {
-		value = strings.TrimSpace(value)
-		if runtimeEnvNamePattern.MatchString(value) {
-			names[value] = true
-		}
-	}
-	return names
-}
-
-func legacyEnvironmentItemOwned(live map[string]any, containerName, envName string) bool {
-	prefix := "/spec/template/spec/containers[name=" + containerName + "]/env[name=" + envName + "]"
-	metadata := mapField(live, "metadata")
-	for _, rawEntry := range anySlice(metadata["managedFields"]) {
-		entry, _ := rawEntry.(map[string]any)
-		manager := stringValue(entry["manager"])
-		if !legacyOwnershipManagers[manager] || (stringValue(entry["operation"]) != "Apply" && stringValue(entry["operation"]) != "Update") || stringValue(entry["subresource"]) != "" {
-			continue
-		}
-		pointers, err := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
-		if err != nil {
-			continue
-		}
-		for _, pointer := range pointers {
-			if pointer == prefix || strings.HasPrefix(pointer, prefix+"/") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (cluster *kubectlCluster) applyAfterScalarOwnershipTransfer(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired, before, fresh map[string]any) error {
@@ -1669,11 +1480,8 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
 		ownDeclarativeUpdate := declarativeManager != "" && conflict.manager == declarativeManager
-		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !legacyOwnershipManagers[conflict.manager] && !ownDeclarativeUpdate) {
+		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !ownDeclarativeUpdate) {
 			return fmt.Errorf("emergency ownership conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
-		}
-		if legacyOwnershipManagers[conflict.manager] && !legacyOwnershipTransferPointer(pointer) {
-			return fmt.Errorf("legacy ownership conflict %s:%s is outside the exact allowlist for scalar transfer", conflict.manager, conflict.field)
 		}
 		key := conflict.manager + "\x00" + pointer
 		if seen[key] {
@@ -1715,7 +1523,7 @@ func validKubernetesResourceVersion(value string) bool {
 	return true
 }
 
-func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []string, declarativeManager string, applyErr error) ([]map[string]any, bool, error) {
+func nextOwnershipTransferPatch(desired, live map[string]any, allowed []string, declarativeManager string, applyErr error) ([]map[string]any, bool, error) {
 	conflicts, err := parseEmergencySSAConflicts(applyErr)
 	if err != nil {
 		return nil, false, err
@@ -1731,8 +1539,8 @@ func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []st
 	hasTransfer, hasOther := false, false
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
-		if pointer != "" && legacyOwnershipTransferPointer(pointer) &&
-			(legacyOwnershipManagers[conflict.manager] || emergencyOwnershipManager(conflict.manager) ||
+		if pointer != "" && ownershipTransferPointer(pointer) &&
+			(emergencyOwnershipManager(conflict.manager) ||
 				(declarativeManager != "" && conflict.manager == declarativeManager)) {
 			hasTransfer = true
 		} else {
@@ -1758,7 +1566,7 @@ func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []st
 	replacements := make([]replacement, 0, len(conflicts))
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
-		if !legacyOwnershipTransferPointer(pointer) {
+		if !ownershipTransferPointer(pointer) {
 			return nil, false, fmt.Errorf("legacy ownership conflict %s:%s is outside the exact scalar transfer allowlist", conflict.manager, conflict.field)
 		}
 		desiredValue, desiredFound := emergencyRuntimePointerValue(desired, pointer)
@@ -1867,7 +1675,7 @@ func nextLegacyOwnershipTransferPatch(desired, live map[string]any, allowed []st
 	return patch, true, nil
 }
 
-func expectedStateAfterLegacyOwnershipTransfer(desired, before, fresh map[string]any, allowed []string, applyErr error) (map[string]any, error) {
+func expectedStateAfterOwnershipTransfer(desired, before, fresh map[string]any, allowed []string, applyErr error) (map[string]any, error) {
 	beforeMetadata, freshMetadata := mapField(before, "metadata"), mapField(fresh, "metadata")
 	beforeUID, freshUID := stringValue(beforeMetadata["uid"]), stringValue(freshMetadata["uid"])
 	beforeGeneration, freshGeneration := int64Value(beforeMetadata["generation"]), int64Value(freshMetadata["generation"])
@@ -1954,7 +1762,7 @@ func emergencyEnvValuePointer(pointer string) bool {
 	return ok
 }
 
-func legacyOwnershipTransferPointer(pointer string) bool {
+func ownershipTransferPointer(pointer string) bool {
 	if strings.HasPrefix(pointer, "/metadata/annotations/") || strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
 		return true
 	}
@@ -2420,76 +2228,11 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 		if decodeErr != nil {
 			return decodeErr
 		}
-		convergenceDesired, convergenceLive, normalizeErr := normalizeRetryLegacyEnvironment(desired, live)
-		if normalizeErr != nil {
-			return normalizeErr
-		}
-		if !declarativerelease.ResourceDesiredSubset(convergenceDesired, convergenceLive) {
+		if !declarativerelease.ResourceDesiredSubset(desired, live) {
 			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
 		}
 	}
 	return nil
-}
-
-// normalizeRetryLegacyEnvironment prepares the in-memory predecessor witness
-// for an old Helm-owned env entry that the reviewed release explicitly deletes.
-// Keeping this recovery-only normalization in the Guardian runtime binary is
-// required because the CI submitter and in-cluster executor are separate
-// release lanes.
-// It removes only those exact entries from the comparison copy; all other
-// environment and workload fields remain subject to the normal subset check.
-func normalizeRetryLegacyEnvironment(desired, live map[string]any) (map[string]any, map[string]any, error) {
-	templateMetadata := mapField(mapField(mapField(desired, "spec"), "template"), "metadata")
-	annotations := mapField(templateMetadata, "annotations")
-	raw := strings.TrimSpace(stringValue(annotations[retryLegacyEnvironmentTombstonesAnnotation]))
-	if raw == "" {
-		return desired, live, nil
-	}
-	// Reuse the ownership-aware selector used by the post-apply cleanup. The
-	// temporary annotation is removed before subset comparison so it cannot
-	// become a live-resource requirement.
-	annotations["fugue.pro/declarative-environment-tombstones"] = raw
-	entries, err := omittedLegacyEnvironmentEntries(desired, live)
-	delete(annotations, "fugue.pro/declarative-environment-tombstones")
-	delete(annotations, retryLegacyEnvironmentTombstonesAnnotation)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(entries) == 0 {
-		return desired, live, nil
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].containerIndex != entries[j].containerIndex {
-			return entries[i].containerIndex < entries[j].containerIndex
-		}
-		return entries[i].envIndex > entries[j].envIndex
-	})
-	liveSpec := mapField(mapField(live, "spec"), "template")
-	liveSpec = mapField(liveSpec, "spec")
-	containers := anySlice(liveSpec["containers"])
-	for _, entry := range entries {
-		if entry.containerIndex < 0 || entry.containerIndex >= len(containers) {
-			return nil, nil, errors.New("retry legacy environment container index is invalid")
-		}
-		container, ok := containers[entry.containerIndex].(map[string]any)
-		if !ok {
-			return nil, nil, errors.New("retry legacy environment container is invalid")
-		}
-		env := anySlice(container["env"])
-		if entry.envIndex < 0 || entry.envIndex >= len(env) {
-			return nil, nil, errors.New("retry legacy environment index is invalid")
-		}
-		if stringValue(mapFieldFromAny(env[entry.envIndex])["name"]) != entry.envName {
-			return nil, nil, errors.New("retry legacy environment identity changed")
-		}
-		container["env"] = append(env[:entry.envIndex], env[entry.envIndex+1:]...)
-	}
-	return desired, live, nil
-}
-
-func mapFieldFromAny(value any) map[string]any {
-	field, _ := value.(map[string]any)
-	return field
 }
 
 func (cluster *kubectlCluster) VerifyOwnershipConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {

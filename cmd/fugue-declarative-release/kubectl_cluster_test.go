@@ -739,7 +739,7 @@ func TestOwnershipConvergenceAllowlistIncludesOnlyReviewedRuntimeScalars(t *test
 	}
 }
 
-func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
+func TestOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 	liveness := "/spec/template/spec/containers[name=edge]/livenessProbe/httpGet/path"
 	readiness := "/spec/template/spec/containers[name=edge]/readinessProbe/httpGet/path"
 	image := "/spec/template/spec/containers[name=edge]/image"
@@ -753,7 +753,7 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 		}}}}},
 	}
 	entry := map[string]any{
-		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
+		"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1",
 		"fieldsV1": managedFieldsTree(t, []string{liveness, readiness, image, port}),
 	}
 	live := deepCopyJSONMap(t, desired)
@@ -767,14 +767,14 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 	mapField(mapField(edge, "readinessProbe"), "httpGet")["path"] = "/healthz"
 	allowed := []string{liveness, readiness, image}
 	applyErr := errors.New(strings.Join([]string{
-		"Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:",
+		"Apply failed with 2 conflicts: conflicts with \"kubectl-patch\" using apps/v1:",
 		"- " + ssaFieldForPointer(liveness),
 		"- " + ssaFieldForPointer(readiness),
 	}, "\n"))
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err != nil {
 		t.Fatalf("exact legacy probe conflicts were rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, "", applyErr)
 	if err != nil || !found {
 		t.Fatalf("legacy probe value patch was not produced: patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -798,10 +798,10 @@ func TestLegacyOwnershipTransferPatchMovesOnlyExactProbePaths(t *testing.T) {
 	}
 	mixed := errors.New(strings.Join([]string{
 		"Apply failed with 2 conflicts:",
-		`conflict with "helm" using apps/v1: ` + ssaFieldForPointer(liveness),
+		`conflict with "kubectl-patch" using apps/v1: ` + ssaFieldForPointer(liveness),
 		`conflict with "kubectl" using apps/v1: ` + ssaFieldForPointer(image),
 	}, "\n"))
-	if patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", mixed); err != nil || !found || len(patch) == 0 {
+	if patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, "", mixed); err != nil || !found || len(patch) == 0 {
 		t.Fatalf("mixed reviewed scalar ownership transfer was rejected: patch=%v found=%v err=%v", patch, found, err)
 	}
 }
@@ -828,7 +828,7 @@ func TestEmergencyOwnershipWitnessAcceptsStatusOnlyResourceVersionAdvance(t *tes
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "declarative", applyErr); err != nil {
 		t.Fatalf("status-only resourceVersion advance was rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{pointer}, "declarative", applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, []string{pointer}, "declarative", applyErr)
 	if err != nil || !found || len(patch) < 2 || patch[1]["path"] != "/metadata/resourceVersion" || patch[1]["value"] != "57" {
 		t.Fatalf("ownership transfer was not bound to the latest live RV: patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -842,84 +842,6 @@ func TestEmergencyOwnershipWitnessAcceptsStatusOnlyResourceVersionAdvance(t *tes
 	mapField(invalidRV, "metadata")["resourceVersion"] = "057"
 	if err := validateEmergencyOwnershipConflictEvidence(desired, invalidRV, []string{pointer}, "declarative", applyErr); err == nil || !strings.Contains(err.Error(), "valid resourceVersion") {
 		t.Fatalf("non-canonical live RV was accepted: %v", err)
-	}
-}
-
-func TestLegacyOwnershipTransferPatchMovesOnlyExactEnvironmentValues(t *testing.T) {
-	enabled := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED]/value"
-	timeout := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT]/value"
-	unreviewed := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_DNS_MAX_STALE]/value"
-	desired := map[string]any{
-		"metadata": map[string]any{"uid": "dns-uid", "resourceVersion": "42", "generation": json.Number("7")},
-		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
-			"name": "dns",
-			"env": []any{
-				map[string]any{"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "value": "true"},
-				map[string]any{"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT", "value": "2s"},
-				map[string]any{"name": "FUGUE_DNS_MAX_STALE", "value": "24h"},
-			},
-		}}}}},
-	}
-	live := deepCopyJSONMap(t, desired)
-	liveMetadata := mapField(live, "metadata")
-	liveMetadata["managedFields"] = []any{map[string]any{
-		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, []string{enabled, timeout, unreviewed}),
-	}}
-	dns := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
-	anySlice(dns["env"])[0].(map[string]any)["value"] = "false"
-	anySlice(dns["env"])[1].(map[string]any)["value"] = "250ms"
-	allowed := []string{enabled, timeout}
-	applyErr := errors.New(strings.Join([]string{
-		"Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:",
-		"- " + ssaFieldForPointer(enabled),
-		"- " + ssaFieldForPointer(timeout),
-	}, "\n"))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err != nil {
-		t.Fatalf("exact legacy environment conflicts were rejected: %v", err)
-	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", applyErr)
-	if err != nil || !found {
-		t.Fatalf("legacy environment value patch was not produced: patch=%v found=%v err=%v", patch, found, err)
-	}
-	if len(patch) != 9 || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" ||
-		patch[2]["path"] != "/spec/template/spec/containers/0/name" ||
-		patch[3]["path"] != "/spec/template/spec/containers/0/env/0/name" ||
-		patch[6]["path"] != "/spec/template/spec/containers/0/env/1/name" {
-		t.Fatalf("legacy environment patch lacks exact identity tests: %v", patch)
-	}
-	replacements := make(map[string]any)
-	for _, operation := range patch {
-		path := fmt.Sprint(operation["path"])
-		if strings.Contains(path, "/managedFields/") {
-			t.Fatalf("legacy environment patch mutates managedFields internals: %v", patch)
-		}
-		if operation["op"] == "replace" {
-			replacements[path] = operation["value"]
-		}
-	}
-	if replacements["/spec/template/spec/containers/0/env/0/value"] != "true" ||
-		replacements["/spec/template/spec/containers/0/env/1/value"] != "2s" {
-		t.Fatalf("legacy environment patch moved unexpected values: %v", patch)
-	}
-	fresh := deepCopyJSONMap(t, desired)
-	mapField(fresh, "metadata")["resourceVersion"] = "43"
-	mapField(fresh, "metadata")["generation"] = json.Number("8")
-	expected, err := expectedStateAfterLegacyOwnershipTransfer(desired, live, fresh, allowed, applyErr)
-	if err != nil {
-		t.Fatalf("legacy environment expected state failed: %v", err)
-	}
-	if value, ok := emergencyRuntimePointerValue(expected, enabled); !ok || value != "true" {
-		t.Fatalf("expected environment state did not contain enabled probe: value=%q ok=%v", value, ok)
-	}
-
-	ambiguous := deepCopyJSONMap(t, live)
-	ambiguousDNS := anySlice(mapField(mapField(mapField(ambiguous, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
-	ambiguousDNS["env"] = append(anySlice(ambiguousDNS["env"]), map[string]any{
-		"name": "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "value": "false",
-	})
-	if _, _, err := nextLegacyOwnershipTransferPatch(desired, ambiguous, allowed, "", applyErr); err == nil {
-		t.Fatalf("ambiguous environment identity was accepted: %v", err)
 	}
 }
 
@@ -944,7 +866,7 @@ func TestExistingBridgeOwnershipTransfersOnlyReviewedAssociativeValue(t *testing
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{enabled}, "", applyErr); err != nil {
 		t.Fatalf("reviewed associative identity conflict was rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{enabled}, "", applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, []string{enabled}, "", applyErr)
 	if err != nil || !found {
 		t.Fatalf("reviewed associative value transfer failed: patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -990,7 +912,7 @@ func TestProbeOwnershipTransferAcceptsAlreadyDesiredBroadEmergencyManager(t *tes
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err != nil {
 		t.Fatalf("broad emergency probe witness was rejected before exact transfer: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, "", applyErr)
 	if err != nil || !found {
 		t.Fatalf("already-desired probe transfer patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -1019,7 +941,7 @@ func TestExistingProbeBridgeManagerNamesRemainRecognized(t *testing.T) {
 	}
 }
 
-func TestLegacyProbeOwnershipConvergenceUsesCASBoundValueMove(t *testing.T) {
+func TestProbeOwnershipConvergenceUsesCASBoundValueMove(t *testing.T) {
 	directory := t.TempDir()
 	kubectl := filepath.Join(directory, "kubectl")
 	livePath := filepath.Join(directory, "live.json")
@@ -1054,7 +976,7 @@ func TestLegacyProbeOwnershipConvergenceUsesCASBoundValueMove(t *testing.T) {
 	mapField(mapField(edge, "readinessProbe"), "httpGet")["path"] = "/healthz"
 	liveMetadata["managedFields"] = []any{
 		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
-		map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
+		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{liveness, readiness})},
 	}
 	transferred := deepCopyJSONMap(t, desired)
 	transferredMetadata := mapField(transferred, "metadata")
@@ -1080,7 +1002,7 @@ case "$1" in
 	  cat "$TRANSFERRED_JSON"
 	else
 	  cat >/dev/null
-	  printf '%s\n' 'Apply failed with 2 conflicts: conflicts with "helm" using apps/v1:' >&2
+	  printf '%s\n' 'Apply failed with 2 conflicts: conflicts with "kubectl-patch" using apps/v1:' >&2
 	  printf '%s\n' '- .spec.template.spec.containers[name="edge"].livenessProbe.httpGet.path' >&2
 	  printf '%s\n' '- .spec.template.spec.containers[name="edge"].readinessProbe.httpGet.path' >&2
 	  exit 1
@@ -1174,7 +1096,7 @@ func TestScalarOwnershipApplyRetriesStatusOnlyResourceVersionConflict(t *testing
 	liveContainers[0].(map[string]any)["image"] = "ghcr.io/example/edge@sha256:" + strings.Repeat("b", 64)
 	liveMetadata["managedFields"] = []any{
 		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image})},
-		map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image})},
+		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{image})},
 	}
 	transferred := deepCopyJSONMap(t, desired)
 	transferredMetadata := mapField(transferred, "metadata")
@@ -1203,7 +1125,7 @@ case "$1" in
     count=$((count + 1))
     printf '%s' "$count" >"$APPLY_COUNT"
     case "$count" in
-      1) cat >/dev/null; printf '%s\n' 'Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="edge"].image' >&2; exit 1 ;;
+      1) cat >/dev/null; printf '%s\n' 'Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: .spec.template.spec.containers[name="edge"].image' >&2; exit 1 ;;
       2) cat >"$APPLY_INPUT"; printf '%s\n' 'The request is invalid: Operation cannot be fulfilled on daemonsets.apps "worker-a": the object has been modified; please apply your changes to the latest version and try again' >&2; exit 1 ;;
       3) cat >"$SECOND_APPLY_INPUT"; cat "$RACED_JSON" ;;
       *) exit 52 ;;
@@ -1278,7 +1200,7 @@ func TestManagedFieldsOwnershipMaySpanDeclarativeApplyAndUpdateEntries(t *testin
 	if !managedFieldsOwnPointers(metadata, manager, pointers) {
 		t.Fatalf("same declarative manager ownership was not aggregated across Apply and Update entries: %v", pointers)
 	}
-	metadata["managedFields"].([]any)[1].(map[string]any)["manager"] = "helm"
+	metadata["managedFields"].([]any)[1].(map[string]any)["manager"] = "kubectl-patch"
 	if managedFieldsOwnPointers(metadata, manager, pointers) {
 		t.Fatal("legacy manager ownership was incorrectly accepted as declarative")
 	}
@@ -1307,7 +1229,7 @@ func TestDeclarativeUpdateOwnershipTransfersOnlyExactEnvironmentValue(t *testing
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{enabled}, manager, applyErr); err != nil {
 		t.Fatalf("exact declarative Update ownership was rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{enabled}, manager, applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, []string{enabled}, manager, applyErr)
 	if err != nil || !found {
 		t.Fatalf("exact declarative Update ownership did not produce a scalar transfer: patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -1792,7 +1714,7 @@ func TestEmergencyOwnershipConvergenceIsExactAndCASBound(t *testing.T) {
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", applyErr); err != nil {
 		t.Fatalf("exact emergency conflict rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "", applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, "", applyErr)
 	if err != nil || !found || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" ||
 		strings.Contains(string(mustJSON(t, patch)), "/managedFields/") {
 		t.Fatalf("unexpected exact scalar transfer patch: patch=%v found=%v err=%v", patch, found, err)
@@ -1920,7 +1842,7 @@ func TestOwnershipConvergenceTransfersOnlyDeclaredCaddyDataHostPath(t *testing.T
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, outside); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
 		t.Fatalf("unreviewed worker-state hostPath conflict was accepted: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
 	if err != nil || !found || len(patch) != 5 || patch[2]["path"] != "/spec/template/spec/volumes/0/name" || patch[4]["path"] != "/spec/template/spec/volumes/0/hostPath/path" {
 		t.Fatalf("caddy-data ownership transfer patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -1936,6 +1858,29 @@ func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 		live := map[string]any{"metadata": map[string]any{"uid": "u", "resourceVersion": "1", "managedFields": []any{}}}
 		if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "", failure); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
 			t.Fatalf("unknown ownership conflict was accepted: %v", err)
+		}
+	}
+}
+
+func TestRemovedLegacyOwnershipManagersAreRejected(t *testing.T) {
+	pointer := "/metadata/annotations/fugue.pro~1artifact-receipt-digest"
+	desired := map[string]any{"metadata": map[string]any{
+		"uid": "control-uid", "resourceVersion": "42",
+		"annotations": map[string]any{"fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("a", 64)},
+	}}
+	for _, manager := range []string{"helm", "before-first-apply"} {
+		live := deepCopyJSONMap(t, desired)
+		metadata := mapField(live, "metadata")
+		metadata["managedFields"] = []any{map[string]any{
+			"manager": manager, "operation": "Update", "fieldsType": "FieldsV1",
+			"fieldsV1": managedFieldsTree(t, []string{pointer}),
+		}}
+		applyErr := errors.New(`Apply failed with 1 conflict: conflict with "` + manager + `" using apps/v1: ` + ssaFieldForPointer(pointer))
+		if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "", applyErr); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
+			t.Fatalf("removed legacy manager %q was accepted: %v", manager, err)
+		}
+		if patch, found, err := nextOwnershipTransferPatch(desired, live, []string{pointer}, "", applyErr); err != nil || found {
+			t.Fatalf("removed legacy manager %q produced a transfer patch: patch=%v found=%v err=%v", manager, patch, found, err)
 		}
 	}
 }
@@ -1980,7 +1925,7 @@ func TestArtifactIdentityOwnershipTransfersFromBroadKubectlPatch(t *testing.T) {
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, applyErr); err != nil {
 		t.Fatalf("exact artifact identity transfer was blocked by unrelated kubectl-patch ownership: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
 	if err != nil || !found || len(patch) != 4 || patch[3]["path"] != pointer {
 		t.Fatalf("artifact identity transfer patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -1992,59 +1937,6 @@ func TestArtifactIdentityOwnershipTransfersFromBroadKubectlPatch(t *testing.T) {
 	imageConflict := errors.New(`Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: ` + ssaFieldForPointer(imagePointer))
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, imageConflict); err == nil || !strings.Contains(err.Error(), "expands beyond") {
 		t.Fatalf("broad kubectl-patch ownership escaped the artifact annotation boundary: %v", err)
-	}
-}
-
-func TestBeforeFirstApplyOwnershipTransfersOnlyAllowlistedScalars(t *testing.T) {
-	pointer := "/metadata/annotations/fugue.pro~1artifact-receipt-digest"
-	desired := map[string]any{"metadata": map[string]any{
-		"uid": "control-uid", "resourceVersion": "42",
-		"annotations": map[string]any{"fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("a", 64)},
-	}}
-	live := deepCopyJSONMap(t, desired)
-	metadata := mapField(live, "metadata")
-	metadata["managedFields"] = []any{map[string]any{
-		"manager": "before-first-apply", "operation": "Update", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
-	}}
-	mapField(metadata, "annotations")["fugue.pro/artifact-receipt-digest"] = "sha256:" + strings.Repeat("b", 64)
-	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: ` + ssaFieldForPointer(pointer))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "", applyErr); err != nil {
-		t.Fatalf("synthetic pre-SSA ownership blocked an exact release scalar: %v", err)
-	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{pointer}, "", applyErr)
-	if err != nil || !found || len(patch) != 4 || patch[3]["path"] != pointer {
-		t.Fatalf("synthetic pre-SSA scalar transfer is invalid: patch=%v found=%v err=%v", patch, found, err)
-	}
-	outside := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: .spec.replicas`)
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "", outside); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
-		t.Fatalf("synthetic pre-SSA ownership expanded beyond the allowlist: %v", err)
-	}
-}
-
-func TestBeforeFirstApplyOwnershipTransfersDeclaredMemoryQuantity(t *testing.T) {
-	pointer := "/spec/template/spec/containers[name=edge-control]/resources/limits/memory"
-	desired := map[string]any{
-		"metadata": map[string]any{"uid": "control-uid", "resourceVersion": "42"},
-		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
-			"name": "edge-control", "resources": map[string]any{"limits": map[string]any{"memory": "2Gi"}},
-		}}}}},
-	}
-	live := deepCopyJSONMap(t, desired)
-	metadata := mapField(live, "metadata")
-	metadata["managedFields"] = []any{map[string]any{
-		"manager": "before-first-apply", "operation": "Update", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
-	}}
-	container := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
-	mapField(mapField(container, "resources"), "limits")["memory"] = "1Gi"
-	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "before-first-apply" using apps/v1: ` + ssaFieldForPointer(pointer))
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "", applyErr); err != nil {
-		t.Fatalf("synthetic pre-SSA memory ownership blocked an exact scalar: %v", err)
-	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, []string{pointer}, "", applyErr)
-	if err != nil || !found || len(patch) != 5 || patch[4]["path"] != "/spec/template/spec/containers/0/resources/limits/memory" || patch[4]["value"] != "2Gi" {
-		t.Fatalf("synthetic pre-SSA memory transfer patch=%v found=%v err=%v", patch, found, err)
 	}
 }
 
@@ -2072,7 +1964,7 @@ func TestGuardianRoleRulesOwnershipTransfersByExactCAS(t *testing.T) {
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "fugue-release-guardian-declarative", applyErr); err != nil {
 		t.Fatalf("exact Role rules conflict rejected: %v", err)
 	}
-	patch, found, err := nextLegacyOwnershipTransferPatch(desired, live, allowed, "fugue-release-guardian-declarative", applyErr)
+	patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, "fugue-release-guardian-declarative", applyErr)
 	if err != nil || !found || len(patch) != 4 || patch[2]["path"] != "/rules" || patch[3]["path"] != "/rules" {
 		t.Fatalf("Role rules transfer patch=%v found=%v err=%v", patch, found, err)
 	}
@@ -2083,7 +1975,7 @@ func TestGuardianRoleRulesOwnershipTransfersByExactCAS(t *testing.T) {
 		"manager": "fugue-release-guardian-declarative", "operation": "Update", "fieldsType": "FieldsV1",
 		"fieldsV1": managedFieldsTree(t, []string{"/rules"}),
 	}}
-	expected, err := expectedStateAfterLegacyOwnershipTransfer(desired, live, fresh, allowed, applyErr)
+	expected, err := expectedStateAfterOwnershipTransfer(desired, live, fresh, allowed, applyErr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2104,9 +1996,9 @@ func TestGuardianRoleRulesOwnershipTransfersByExactCAS(t *testing.T) {
 	if err := validateEmergencyOwnershipConflictEvidence(desired, expanded, allowed, "fugue-release-guardian-declarative", applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
 		t.Fatalf("expanded Role ownership was accepted: %v", err)
 	}
-	helmErr := errors.New(`Apply failed with 1 conflict: conflict with "helm" using rbac.authorization.k8s.io/v1: .rules`)
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "fugue-release-guardian-declarative", helmErr); err == nil || !strings.Contains(err.Error(), "scalar transfer") {
-		t.Fatalf("legacy manager received structural Role takeover: %v", err)
+	legacyErr := errors.New(`Apply failed with 1 conflict: conflict with "helm" using rbac.authorization.k8s.io/v1: .rules`)
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, "fugue-release-guardian-declarative", legacyErr); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
+		t.Fatalf("removed legacy manager received structural Role takeover: %v", err)
 	}
 }
 
