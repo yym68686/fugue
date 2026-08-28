@@ -140,5 +140,8 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigratePlatformState(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate platform-state schema: %w", err)
 	}
+	if err := schemamigrate.MigrateEdgeInstanceFencing(ctx, databaseURL); err != nil {
+		return fmt.Errorf("migrate edge-instance fencing schema: %w", err)
+	}
 	return nil
 }

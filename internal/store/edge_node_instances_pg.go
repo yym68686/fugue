@@ -29,6 +29,9 @@ func (s *Store) pgEnsureEdgeInstanceFencing() error {
 		return fmt.Errorf("begin edge instance migration: %w", err)
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "edge-instance-fencing-migration"); err != nil {
+		return fmt.Errorf("lock edge instance migration: %w", err)
+	}
 	now, err := pgEdgeServerTime(ctx, tx)
 	if err != nil {
 		return err
