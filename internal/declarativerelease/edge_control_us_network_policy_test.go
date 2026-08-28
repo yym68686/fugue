@@ -117,11 +117,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	const lkgSHA = "a70fbd8c607eeb0eb0be094b9f6e6cfb8f7016c9"
-	if intent.Generation != 45 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
+	const lkgSHA = "99ed48d5dc8627ecae8ee149d161de6f06e9a28a"
+	if intent.Generation != 46 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:7db76a62a1907e0e12cdfedfcb9d7acf23701fd4826df4db1da0481aa03fa7a3" ||
-		intent.SupersedesFailedConfigSHA != "52fe00b82a18dac3a8649e7641f5153372c52dce" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
+		intent.ExpectedPreviousImageDigest != "sha256:273fe17f48026ee6610120f027d5c81c68b8fc1fbac2e6c3eaa3fbeb7107dd39" ||
+		intent.SupersedesFailedConfigSHA != "" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
 	registry, err := MergeEdgeGroupRegistry(base, edge)
