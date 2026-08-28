@@ -75,9 +75,6 @@ func (handler *groupInventoryHeartbeatHandler) serveAuthorityHeartbeat(
 		}
 		return
 	}
-	if heartbeat.FaultDomainID == "" && heartbeat.EdgePoolID == "" {
-		handler.emptyPairAccepted.Add(1)
-	}
 	writeJSON(w, http.StatusCreated, GroupInventoryHeartbeatReceipt{
 		Schema: GroupInventoryHeartbeatReceiptSchemaV1, GroupID: groupID,
 		Sequence: stored.Sequence, Generation: stored.Generation,

@@ -45,7 +45,7 @@ func TestGroupInventoryHeartbeatAuthenticatesAndAdvancesExactGroupCAS(t *testing
 	inventory.Instances = inventory.Instances[len(inventory.Instances)-1:]
 	inventory.Instances[0].EdgeID = nodeID
 	envelope := GroupInventoryHeartbeat{
-		Schema: GroupInventoryHeartbeatSchemaV1, GroupID: groupID, ProducerNodeID: nodeID, ProducerGeneration: 1,
+		Schema: GroupInventoryHeartbeatSchemaV1, GroupID: groupID, FaultDomainID: inventory.FaultDomainID, EdgePoolID: inventory.EdgePoolID, ProducerNodeID: nodeID, ProducerGeneration: 1,
 		ExpectedSequence: 0, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(),
 		Nonce: "heartbeat-us-00000001", Inventory: inventory,
 	}
@@ -74,13 +74,6 @@ func TestGroupInventoryHeartbeatAuthenticatesAndAdvancesExactGroupCAS(t *testing
 	if receipt.Schema != GroupInventoryHeartbeatReceiptSchemaV1 || receipt.GroupID != groupID || receipt.Sequence != 1 || receipt.Generation == inventory.Generation || receipt.InventoryDigest == "" ||
 		receipt.Authority != "edge-control" || !receipt.Publication || receipt.ProducerNodeID != nodeID || receipt.ProducerGeneration != 1 {
 		t.Fatalf("unexpected receipt: %+v", receipt)
-	}
-	if metrics, ok := handler.(InventoryTopologyMetrics); !ok || metrics.EmptyPairAccepted() != 1 {
-		count := uint64(0)
-		if ok {
-			count = metrics.EmptyPairAccepted()
-		}
-		t.Fatalf("legacy empty topology acceptance was not counted: ok=%t count=%d", ok, count)
 	}
 	stored, err := store.ReadGroupInventory(context.Background(), groupID)
 	if err != nil || stored.Sequence != 1 || stored.Generation != receipt.Generation {
@@ -333,7 +326,7 @@ func TestGroupInventoryHeartbeatKeyringProjectionRotatesAndRevokes(t *testing.T)
 	makeEnvelope := func(sequence uint64, keyID string, secret []byte) GroupInventoryHeartbeat {
 		inventory := groupInventoryFixture(groupID, model.EdgeSlotB, "epoch-us-b", "inventory-us-"+keyID, false)
 		inventory.Sequence = sequence
-		value := GroupInventoryHeartbeat{Schema: GroupInventoryHeartbeatSchemaV1, KeyID: keyID, GroupID: groupID, ExpectedSequence: sequence - 1,
+		value := GroupInventoryHeartbeat{Schema: GroupInventoryHeartbeatSchemaV1, KeyID: keyID, GroupID: groupID, FaultDomainID: inventory.FaultDomainID, EdgePoolID: inventory.EdgePoolID, ExpectedSequence: sequence - 1,
 			IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(), Nonce: "heartbeat-rotation-" + keyID, Inventory: inventory}
 		if err := SignGroupInventoryHeartbeat(&value, secret); err != nil {
 			t.Fatal(err)
@@ -391,18 +384,42 @@ func performAuthorityInventoryHeartbeat(t *testing.T, handler http.Handler, enve
 func authorityInventoryHeartbeatFixture(groupID, nodeID string, expectedSequence, producerGeneration uint64, now time.Time, nonce string) GroupInventoryHeartbeat {
 	slot := model.EdgeSlotB
 	releaseEpoch := "release-" + groupID
+	faultDomainID := "fault-domain-primary"
+	edgePoolID := "edge-pool-public"
 	return GroupInventoryHeartbeat{
 		Schema: GroupInventoryHeartbeatSchemaV1, GroupID: groupID, ProducerNodeID: nodeID, ProducerGeneration: producerGeneration,
+		FaultDomainID: faultDomainID, EdgePoolID: edgePoolID,
 		ExpectedSequence: expectedSequence, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(), Nonce: nonce,
 		Inventory: GroupInventorySnapshot{
-			Schema: GroupInventorySchemaV1, GroupID: groupID, Sequence: expectedSequence + 1,
+			Schema: GroupInventorySchemaV1, GroupID: groupID, FaultDomainID: faultDomainID, EdgePoolID: edgePoolID, Sequence: expectedSequence + 1,
 			Generation: ProducerInventoryEnvelopeGeneration(producerGeneration), ObservedAt: now,
-			ActiveEpoch: GroupActiveEpoch{GroupID: groupID, Slot: slot, ReleaseEpoch: releaseEpoch, FenceSequence: 7, MinHealthyInstances: 1},
+			ActiveEpoch: GroupActiveEpoch{GroupID: groupID, FaultDomainID: faultDomainID, EdgePoolID: edgePoolID, Slot: slot, ReleaseEpoch: releaseEpoch, FenceSequence: 7, MinHealthyInstances: 1},
 			Instances: []GroupInstance{{
-				EdgeID: nodeID, GroupID: groupID, Slot: slot, InstanceUID: "uid-" + nodeID, ReleaseEpoch: releaseEpoch,
+				EdgeID: nodeID, GroupID: groupID, FaultDomainID: faultDomainID, EdgePoolID: edgePoolID, Slot: slot, InstanceUID: "uid-" + nodeID, ReleaseEpoch: releaseEpoch,
 				EffectiveHealthy: true, NodeHealthy: true, NodeStatus: model.EdgeHealthHealthy,
 			}},
 		},
+	}
+}
+
+func TestInventoryTopologyRequiresCompleteCanonicalPair(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []struct {
+		faultDomainID string
+		edgePoolID    string
+	}{
+		{},
+		{faultDomainID: "fault-domain-primary"},
+		{edgePoolID: "edge-pool-public"},
+		{faultDomainID: "Country/DE", edgePoolID: "edge-pool-public"},
+	} {
+		if err := validateInventoryTopology(value.faultDomainID, value.edgePoolID); err == nil {
+			t.Fatalf("invalid topology pair was accepted: %+v", value)
+		}
+	}
+	if err := validateInventoryTopology("fault-domain-primary", "edge-pool-public"); err != nil {
+		t.Fatalf("canonical topology pair was rejected: %v", err)
 	}
 }
 

@@ -129,11 +129,13 @@ func TestGroupAuthorityConsumesBootstrapEligibilityOnlyForFirstPublicationAndRes
 		t.Fatal(err)
 	}
 	serving := false
+	faultDomainID := "fault-domain-primary"
+	edgePoolID := "edge-pool-public"
 	bootstrapInventory := GroupInventorySnapshot{
-		Schema: GroupInventorySchemaV1, GroupID: groupID, Sequence: 1, Generation: ProducerInventoryEnvelopeGeneration(1), ObservedAt: now,
-		ActiveEpoch: GroupActiveEpoch{GroupID: groupID, Slot: "a", ReleaseEpoch: "worker-epoch-1", FenceSequence: 1, MinHealthyInstances: 1},
+		Schema: GroupInventorySchemaV1, GroupID: groupID, FaultDomainID: faultDomainID, EdgePoolID: edgePoolID, Sequence: 1, Generation: ProducerInventoryEnvelopeGeneration(1), ObservedAt: now,
+		ActiveEpoch: GroupActiveEpoch{GroupID: groupID, FaultDomainID: faultDomainID, EdgePoolID: edgePoolID, Slot: "a", ReleaseEpoch: "worker-epoch-1", FenceSequence: 1, MinHealthyInstances: 1},
 		Instances: []GroupInstance{{
-			EdgeID: "edge-us-1", GroupID: groupID, Slot: "a", InstanceUID: "worker-us-1", ReleaseEpoch: "worker-epoch-1",
+			EdgeID: "edge-us-1", GroupID: groupID, FaultDomainID: faultDomainID, EdgePoolID: edgePoolID, Slot: "a", InstanceUID: "worker-us-1", ReleaseEpoch: "worker-epoch-1",
 			ServingHealthy: &serving, NodeHealthy: true, NodeStatus: model.EdgeHealthHealthy,
 			BootstrapEligibility: &GroupBootstrapEligibility{GroupID: groupID, ReleaseEpoch: "worker-epoch-1", ProducerGeneration: 1, ValidUntil: now.Add(time.Minute)},
 		}},

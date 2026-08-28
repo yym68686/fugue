@@ -544,9 +544,13 @@ func (l *rejectingShadowLedger) AppendCAS(ctx context.Context, groupID string, e
 
 func groupInventoryFixture(groupID, slot, releaseEpoch, generation string, includeInactiveSameEdgeID bool) GroupInventorySnapshot {
 	now := time.Date(2026, 8, 4, 9, 0, 0, 0, time.UTC)
+	faultDomainID := "fault-domain-primary"
+	edgePoolID := "edge-pool-public"
 	active := GroupInstance{
 		EdgeID:           "edge-" + groupID,
 		GroupID:          groupID,
+		FaultDomainID:    faultDomainID,
+		EdgePoolID:       edgePoolID,
 		Slot:             slot,
 		InstanceUID:      "uid-" + groupID + "-" + slot,
 		ReleaseEpoch:     releaseEpoch,
@@ -564,12 +568,14 @@ func groupInventoryFixture(groupID, slot, releaseEpoch, generation string, inclu
 		instances = append([]GroupInstance{inactive}, instances...)
 	}
 	return GroupInventorySnapshot{
-		Schema:     GroupInventorySchemaV1,
-		GroupID:    groupID,
-		Sequence:   1,
-		Generation: generation,
+		Schema:        GroupInventorySchemaV1,
+		GroupID:       groupID,
+		FaultDomainID: faultDomainID,
+		EdgePoolID:    edgePoolID,
+		Sequence:      1,
+		Generation:    generation,
 		ActiveEpoch: GroupActiveEpoch{
-			GroupID: groupID, Slot: slot, ReleaseEpoch: releaseEpoch, FenceSequence: 7, MinHealthyInstances: 1,
+			GroupID: groupID, FaultDomainID: faultDomainID, EdgePoolID: edgePoolID, Slot: slot, ReleaseEpoch: releaseEpoch, FenceSequence: 7, MinHealthyInstances: 1,
 		},
 		Instances:  instances,
 		ObservedAt: now,

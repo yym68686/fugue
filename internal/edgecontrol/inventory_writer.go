@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -89,12 +88,6 @@ type GroupInventoryHeartbeatHandlerConfig struct {
 	Now                func() time.Time
 }
 
-// InventoryTopologyMetrics exposes migration progress without coupling the
-// Worker to Edge Control implementation details.
-type InventoryTopologyMetrics interface {
-	EmptyPairAccepted() uint64
-}
-
 type inventoryWriterKeyring struct {
 	Schema     string               `json:"schema"`
 	Generation uint64               `json:"generation"`
@@ -111,22 +104,14 @@ type inventoryWriterKey struct {
 }
 
 type groupInventoryHeartbeatHandler struct {
-	store             GroupInventoryHeartbeatStore
-	groups            map[string]struct{}
-	keyringFile       string
-	keyringDir        string
-	authority         string
-	publication       bool
-	path              string
-	now               func() time.Time
-	emptyPairAccepted atomic.Uint64
-}
-
-func (handler *groupInventoryHeartbeatHandler) EmptyPairAccepted() uint64 {
-	if handler == nil {
-		return 0
-	}
-	return handler.emptyPairAccepted.Load()
+	store       GroupInventoryHeartbeatStore
+	groups      map[string]struct{}
+	keyringFile string
+	keyringDir  string
+	authority   string
+	publication bool
+	path        string
+	now         func() time.Time
 }
 
 func NewGroupInventoryHeartbeatHandler(config GroupInventoryHeartbeatHandlerConfig) (http.Handler, error) {
@@ -262,11 +247,6 @@ func validateGroupInventoryHeartbeat(value GroupInventoryHeartbeat, groupID stri
 }
 
 func validateInventoryTopology(faultDomainID, edgePoolID string) error {
-	if faultDomainID == "" && edgePoolID == "" {
-		// The empty pair is accepted only as a wire-compatible predecessor. New
-		// workers always project both identities before publishing inventory.
-		return nil
-	}
 	if !topologyIdentityPattern.MatchString(faultDomainID) || !topologyIdentityPattern.MatchString(edgePoolID) {
 		return errors.New("inventory topology identities are invalid")
 	}
