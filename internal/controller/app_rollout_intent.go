@@ -35,6 +35,40 @@ func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp
 	return ""
 }
 
+func managedMigrateOperationIsStatelessRuntimeOnly(op model.Operation, currentApp, desiredApp model.App) bool {
+	if op.Type != model.OperationTypeMigrate || op.DesiredSpec == nil {
+		return false
+	}
+	if strings.TrimSpace(currentApp.Spec.RuntimeID) == "" ||
+		strings.TrimSpace(desiredApp.Spec.RuntimeID) == "" ||
+		strings.TrimSpace(currentApp.Spec.RuntimeID) == strings.TrimSpace(desiredApp.Spec.RuntimeID) {
+		return false
+	}
+	if currentApp.Spec.Workspace != nil || desiredApp.Spec.Workspace != nil ||
+		currentApp.Spec.PersistentStorage != nil || desiredApp.Spec.PersistentStorage != nil ||
+		currentApp.Spec.VolumeReplication != nil || desiredApp.Spec.VolumeReplication != nil ||
+		currentApp.Spec.Postgres != nil || desiredApp.Spec.Postgres != nil ||
+		currentApp.Spec.Data != nil || desiredApp.Spec.Data != nil {
+		return false
+	}
+
+	currentSpec, _ := model.StripFugueInjectedAppEnvFromSpec(currentApp.Spec)
+	desiredSpec, _ := model.StripFugueInjectedAppEnvFromSpec(desiredApp.Spec)
+	currentSpec.RuntimeID = ""
+	desiredSpec.RuntimeID = ""
+	currentSpec.RolloutIntent = ""
+	desiredSpec.RolloutIntent = ""
+	model.ApplyAppSpecDefaults(&currentSpec)
+	model.ApplyAppSpecDefaults(&desiredSpec)
+	if !reflect.DeepEqual(currentSpec, desiredSpec) {
+		return false
+	}
+	if !reflect.DeepEqual(model.AppOriginSource(currentApp), model.AppOriginSource(desiredApp)) {
+		return false
+	}
+	return reflect.DeepEqual(model.AppBuildSource(currentApp), model.AppBuildSource(desiredApp))
+}
+
 func rolloutIntentForManagedDesiredState(currentApp, desiredApp model.App) string {
 	return rolloutIntentForManagedOperation(model.Operation{
 		Type:        model.OperationTypeDeploy,

@@ -1008,12 +1008,22 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err != nil {
 		return err
 	}
+	currentScheduling := scheduling
+	if op.Type == model.OperationTypeMigrate {
+		currentScheduling, err = s.managedSchedulingConstraintsForApp(ctx, currentApp)
+		if err != nil {
+			return err
+		}
+	}
 	baseScheduling := scheduling
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app.Spec.RolloutIntent = rolloutIntentForManagedOperation(op, currentApp, app)
+	if err := s.applyManagedMigrationOnlineRolloutIntent(op, currentApp, &app); err != nil {
+		return err
+	}
 	scheduling = s.onlineDurableRolloutScheduling(ctx, currentApp, app, scheduling)
 	timer.Mark("scheduling")
-	if err := s.refuseNonZeroDowntimeRolloutIfNeeded(ctx, op, currentApp, app, scheduling); err != nil {
+	if err := s.refuseNonZeroDowntimeRolloutWithScheduling(ctx, op, currentApp, app, currentScheduling, scheduling, ""); err != nil {
 		return err
 	}
 	timer.Mark("zero_downtime_rollout_preflight")
@@ -1046,8 +1056,11 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	timer.Mark("movable_rwo_storage")
 
 	app.Spec.RolloutIntent = rolloutIntentForManagedOperation(op, currentApp, app)
+	if err := s.applyManagedMigrationOnlineRolloutIntent(op, currentApp, &app); err != nil {
+		return err
+	}
 	scheduling = s.onlineDurableRolloutScheduling(ctx, currentApp, app, baseScheduling)
-	if err := s.refuseNonZeroDowntimeRolloutIfNeeded(ctx, op, currentApp, app, scheduling); err != nil {
+	if err := s.refuseNonZeroDowntimeRolloutWithScheduling(ctx, op, currentApp, app, currentScheduling, scheduling, ""); err != nil {
 		return err
 	}
 	timer.Mark("zero_downtime_rollout_revalidation")

@@ -86,6 +86,37 @@ func TestZeroDowntimeRolloutGuardRefusesMigration(t *testing.T) {
 	}
 }
 
+func TestZeroDowntimeRolloutGuardAllowsStatelessManagedRuntimeMigration(t *testing.T) {
+	current := zeroDowntimeGuardTestApp("")
+	current.Spec.PersistentStorage = nil
+	current.Spec.RuntimeID = "runtime_source"
+	desired := current
+	desired.Spec.RuntimeID = "runtime_target"
+	op := model.Operation{Type: model.OperationTypeMigrate, DesiredSpec: &desired.Spec}
+	desired.Spec.RolloutIntent = model.AppRolloutIntentOnlineRestart
+
+	decision := (&Service{Renderer: runtime.Renderer{}}).zeroDowntimeRolloutGuardDecisionWithScheduling(
+		op,
+		current,
+		desired,
+		runtime.SchedulingConstraints{NodeSelector: map[string]string{"fugue.io/shared-pool": "internal"}},
+		runtime.SchedulingConstraints{NodeSelector: map[string]string{
+			"fugue.io/shared-pool":           "internal",
+			"fugue.io/location-country-code": "de",
+		}},
+		"",
+	)
+	if decision.Refused {
+		t.Fatalf("stateless managed runtime migration should have a validated online plan: %+v", decision)
+	}
+	if decision.RolloutIntent != model.AppRolloutIntentOnlineRestart {
+		t.Fatalf("expected online restart migration intent, got %+v", decision)
+	}
+	if !decision.PodTemplateChanged || decision.Strategy != "RollingUpdate" {
+		t.Fatalf("expected migration scheduling to produce an online RollingUpdate: %+v", decision)
+	}
+}
+
 func TestZeroDowntimeRolloutGuardRefusesRestartThatRemovesService(t *testing.T) {
 	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueLocalRWO)
 	desired := current

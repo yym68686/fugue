@@ -665,3 +665,77 @@ func TestRolloutIntentForManagedOperationDoesNotRequireOnlinePlanForInitialDeplo
 		t.Fatalf("initial deploy has no live service that requires an online restart plan, got %q", got)
 	}
 }
+
+func TestRolloutIntentForManagedOperationDetectsStatelessRuntimeMigration(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Source:   &model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "ghcr.io/example/demo:v1"},
+		Spec: model.AppSpec{
+			Image:     "registry.example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_source",
+		},
+	}
+	desired := current
+	desired.Spec.RuntimeID = "runtime_target"
+	op := model.Operation{Type: model.OperationTypeMigrate, DesiredSpec: &desired.Spec}
+
+	if !managedMigrateOperationIsStatelessRuntimeOnly(op, current, desired) {
+		t.Fatal("stateless managed runtime migration should satisfy the online-plan predicate")
+	}
+}
+
+func TestRolloutIntentForManagedOperationRejectsStatefulRuntimeMigration(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_source",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueLocalRWO,
+				Mounts: []model.AppPersistentStorageMount{{
+					Kind: model.AppPersistentStorageMountKindDirectory,
+					Path: "/data",
+				}},
+			},
+		},
+	}
+	desired := current
+	desired.Spec.RuntimeID = "runtime_target"
+	op := model.Operation{Type: model.OperationTypeMigrate, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("stateful runtime migration must not claim stateless online plan, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationRejectsRuntimeMigrationWithConfigDrift(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.example/demo:v1",
+			Env:       map[string]string{"MODE": "old"},
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_source",
+		},
+	}
+	desired := current
+	desired.Spec.RuntimeID = "runtime_target"
+	desired.Spec.Env = map[string]string{"MODE": "new"}
+	op := model.Operation{Type: model.OperationTypeMigrate, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("runtime migration with config drift must fail closed, got %q", got)
+	}
+}
