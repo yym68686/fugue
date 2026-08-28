@@ -722,8 +722,9 @@ func TestGroupBundleReaderAndRecoveryAreAuthenticatedGroupScopedCAS(t *testing.T
 	recoverySecret := bytes.Repeat([]byte{0x51}, 32)
 	writeGroupRecoveryFixture(t, recoveryDir, groups[1], recoverySecret, now)
 	writeGroupRecoveryFixture(t, recoveryDir, groups[0], bytes.Repeat([]byte{0x52}, 32), now)
+	recoveryMetrics := NewGroupRecoveryMetrics()
 	recovery, err := NewGroupRecoveryHandler(GroupRecoveryHandlerConfig{
-		Store: store, Signer: signer, GroupIDs: groups, KeyringDir: recoveryDir, Now: func() time.Time { return now },
+		Store: store, Signer: signer, GroupIDs: groups, KeyringDir: recoveryDir, Metrics: recoveryMetrics, Now: func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -766,6 +767,9 @@ func TestGroupBundleReaderAndRecoveryAreAuthenticatedGroupScopedCAS(t *testing.T
 	recovery.ServeHTTP(replay, replayRequest)
 	if replay.Code != http.StatusConflict {
 		t.Fatalf("replayed recovery status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	if metrics := recoveryMetrics.Snapshot(); metrics.Accepted != 1 || metrics.Rejected != 1 {
+		t.Fatalf("recovery metrics after accepted request and rejected replay = %+v", metrics)
 	}
 }
 

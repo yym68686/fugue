@@ -116,6 +116,13 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	if recoveryRecorder.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("unauthenticated recovery status=%d body=%s", recoveryRecorder.Code, recoveryRecorder.Body.String())
 	}
+	metricsRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(metricsRecorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metricsRecorder.Code != http.StatusOK ||
+		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_recovery_requests_total{result="accepted"} 0`) ||
+		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_recovery_requests_total{result="rejected"} 1`) {
+		t.Fatalf("recovery metrics status=%d body=%s", metricsRecorder.Code, metricsRecorder.Body.String())
+	}
 	stageRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(stageRecorder, httptest.NewRequest(http.MethodPost, "/v1/authority/group-worker-candidates", strings.NewReader("{}")))
 	if stageRecorder.Code != http.StatusUnsupportedMediaType {

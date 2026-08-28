@@ -29,9 +29,10 @@ type BoundaryStatus struct {
 // Boundary serves the process identity view; concrete runtime handlers own
 // stores, signers, inventory, publication, and recovery endpoints.
 type Boundary struct {
-	enabled   bool
-	mode      string
-	authority bool
+	enabled              bool
+	mode                 string
+	authority            bool
+	groupRecoveryMetrics *GroupRecoveryMetrics
 }
 
 func NewBoundary(enabled bool) *Boundary {
@@ -40,6 +41,15 @@ func NewBoundary(enabled bool) *Boundary {
 
 func NewAuthorityBoundary(enabled bool) *Boundary {
 	return &Boundary{enabled: enabled, mode: "group-authority", authority: true}
+}
+
+func (b *Boundary) WithGroupRecoveryMetrics(metrics *GroupRecoveryMetrics) *Boundary {
+	if b == nil {
+		return nil
+	}
+	configured := *b
+	configured.groupRecoveryMetrics = metrics
+	return &configured
 }
 
 func (b *Boundary) Status(status string) BoundaryStatus {
@@ -86,6 +96,13 @@ func (b *Boundary) Handler() http.Handler {
 		_, _ = fmt.Fprintln(w, "# HELP fugue_edge_control_boundary_info Static identity of the Edge control boundary.")
 		_, _ = fmt.Fprintln(w, "# TYPE fugue_edge_control_boundary_info gauge")
 		_, _ = fmt.Fprintf(w, "fugue_edge_control_boundary_info{authority=%q,mode=%q} 1\n", boundaryStatus.Authority, boundaryStatus.Mode)
+		if b != nil && b.groupRecoveryMetrics != nil {
+			recovery := b.groupRecoveryMetrics.Snapshot()
+			_, _ = fmt.Fprintln(w, "# HELP fugue_edge_control_group_recovery_requests_total Requests to the legacy group publication recovery endpoint by outcome.")
+			_, _ = fmt.Fprintln(w, "# TYPE fugue_edge_control_group_recovery_requests_total counter")
+			_, _ = fmt.Fprintf(w, "fugue_edge_control_group_recovery_requests_total{result=%q} %d\n", "accepted", recovery.Accepted)
+			_, _ = fmt.Fprintf(w, "fugue_edge_control_group_recovery_requests_total{result=%q} %d\n", "rejected", recovery.Rejected)
+		}
 	})
 	return mux
 }

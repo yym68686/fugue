@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fugue/internal/model"
@@ -69,7 +70,40 @@ type GroupRecoveryHandlerConfig struct {
 	Signer     GroupBundleSigner
 	GroupIDs   []string
 	KeyringDir string
+	Metrics    *GroupRecoveryMetrics
 	Now        func() time.Time
+}
+
+type GroupRecoveryMetrics struct {
+	accepted atomic.Uint64
+	rejected atomic.Uint64
+}
+
+type GroupRecoveryMetricsSnapshot struct {
+	Accepted uint64
+	Rejected uint64
+}
+
+func NewGroupRecoveryMetrics() *GroupRecoveryMetrics {
+	return &GroupRecoveryMetrics{}
+}
+
+func (metrics *GroupRecoveryMetrics) Snapshot() GroupRecoveryMetricsSnapshot {
+	if metrics == nil {
+		return GroupRecoveryMetricsSnapshot{}
+	}
+	return GroupRecoveryMetricsSnapshot{Accepted: metrics.accepted.Load(), Rejected: metrics.rejected.Load()}
+}
+
+func (metrics *GroupRecoveryMetrics) observe(accepted bool) {
+	if metrics == nil {
+		return
+	}
+	if accepted {
+		metrics.accepted.Add(1)
+		return
+	}
+	metrics.rejected.Add(1)
 }
 
 type groupRecoveryKeyring struct {
@@ -92,6 +126,7 @@ type groupRecoveryHandler struct {
 	signer     GroupBundleSigner
 	groups     map[string]struct{}
 	keyringDir string
+	metrics    *GroupRecoveryMetrics
 	now        func() time.Time
 }
 
@@ -115,7 +150,7 @@ func NewGroupRecoveryHandler(config GroupRecoveryHandlerConfig) (http.Handler, e
 	if config.Now != nil {
 		now = func() time.Time { return config.Now().UTC() }
 	}
-	return &groupRecoveryHandler{store: config.Store, signer: config.Signer, groups: allowed, keyringDir: keyringDir, now: now}, nil
+	return &groupRecoveryHandler{store: config.Store, signer: config.Signer, groups: allowed, keyringDir: keyringDir, metrics: config.Metrics, now: now}, nil
 }
 
 func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -123,6 +158,8 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 		http.NotFound(w, request)
 		return
 	}
+	accepted := false
+	defer func() { handler.metrics.observe(accepted) }()
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeGroupBundleError(w, http.StatusUnsupportedMediaType, "content_type_rejected")
@@ -167,7 +204,7 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 			targetGeneration = generation
 		}
 		if readErr == nil && authority.LedgerExists && authority.PublishedExists && authority.Published.Bundle.Generation == targetGeneration {
-			handler.recoverCurrentPublishedLKG(w, request, store, authority, recovery, now)
+			accepted = handler.recoverCurrentPublishedLKG(w, request, store, authority, recovery, now)
 			return
 		}
 	}
@@ -215,6 +252,7 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "recovery_unavailable")
 		return
 	}
+	accepted = true
 	writeJSON(w, http.StatusOK, GroupRecoveryReceipt{
 		Schema: GroupRecoveryReceiptSchemaV1, GroupID: groupID, PublicationSequence: appended.Sequence,
 		RecoveryEpoch: appended.RecoveryEpoch, BundleGeneration: appended.BundleGeneration,
@@ -223,15 +261,15 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 }
 
 func (handler *groupRecoveryHandler) recoverCurrentPublishedLKG(w http.ResponseWriter, request *http.Request, store currentPublishedLKGRecoveryStore,
-	authority GroupAuthorityState, recovery GroupRecoveryRequest, now time.Time) {
+	authority GroupAuthorityState, recovery GroupRecoveryRequest, now time.Time) bool {
 	if validateGroupPublishedBundle(recovery.GroupID, authority.Published) != nil {
 		writeGroupBundleError(w, http.StatusBadRequest, "target_rejected")
-		return
+		return false
 	}
 	if authority.Published.PublicationSequence != recovery.ExpectedPublicationSequence ||
 		authority.Published.RecoveryEpoch != recovery.ExpectedRecoveryEpoch {
 		writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
-		return
+		return false
 	}
 	bundle := cloneEdgeRouteBundle(authority.Published.Bundle)
 	bundle.Issuer = groupAuthorityIssuer
@@ -245,7 +283,7 @@ func (handler *groupRecoveryHandler) recoverCurrentPublishedLKG(w http.ResponseW
 	signed, err := handler.signer.SignGroupBundle(request.Context(), recovery.GroupID, bundle)
 	if err != nil {
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "signing_unavailable")
-		return
+		return false
 	}
 	appended, err := store.RecoverPublishedLKG(request.Context(), recovery.GroupID, recovery.ExpectedPublicationSequence,
 		recovery.ExpectedRecoveryEpoch, bundle.Generation, signed, recovery.Reason, now)
@@ -254,16 +292,17 @@ func (handler *groupRecoveryHandler) recoverCurrentPublishedLKG(w http.ResponseW
 			errors.Is(err, ErrGroupAuthorityRecoveryEpochCAS) || errors.Is(err, ErrGroupAuthorityAuditTailCAS) ||
 			errors.Is(err, ErrGroupAuthorityCASConflict) {
 			writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
-			return
+			return false
 		}
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "recovery_unavailable")
-		return
+		return false
 	}
 	writeJSON(w, http.StatusOK, GroupRecoveryReceipt{
 		Schema: GroupRecoveryReceiptSchemaV1, GroupID: recovery.GroupID, PublicationSequence: appended.Sequence,
 		RecoveryEpoch: appended.RecoveryEpoch, BundleGeneration: appended.BundleGeneration,
 		PublishedBundleDigest: appended.PublishedBundleDigest, Authority: "edge-control", PublicationEnabled: true,
 	})
+	return true
 }
 
 func authenticateGroupRecovery(path string, request GroupRecoveryRequest, now time.Time) error {

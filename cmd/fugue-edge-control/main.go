@@ -320,8 +320,9 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	if err != nil {
 		return nil, nil, err
 	}
+	recoveryMetrics := edgecontrol.NewGroupRecoveryMetrics()
 	recovery, err := edgecontrol.NewGroupRecoveryHandler(edgecontrol.GroupRecoveryHandlerConfig{
-		Store: store, Signer: signer, GroupIDs: cfg.AuthorityGroupIDs, KeyringDir: cfg.GroupRecoveryKeyringDir,
+		Store: store, Signer: signer, GroupIDs: cfg.AuthorityGroupIDs, KeyringDir: cfg.GroupRecoveryKeyringDir, Metrics: recoveryMetrics,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -344,7 +345,8 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	if err != nil {
 		return nil, nil, err
 	}
-	handler, err := edgecontrol.NewAuthorityControlHandler(edgecontrol.NewAuthorityBoundary(cfg.Enabled).Handler(), heartbeat, status, bundles, recovery, promotion, staging, candidateRecovery)
+	boundary := edgecontrol.NewAuthorityBoundary(cfg.Enabled).WithGroupRecoveryMetrics(recoveryMetrics).Handler()
+	handler, err := edgecontrol.NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery, promotion, staging, candidateRecovery)
 	if err != nil {
 		return nil, nil, err
 	}
