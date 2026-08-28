@@ -346,19 +346,10 @@ func (store *AuthorityStore) LoadCurrent(ctx context.Context, groupID string) (C
 // current authority. Older receipts remain valid audit data, but cannot settle
 // a transition journal after CurrentAuthority has advanced again.
 func (store *AuthorityStore) LoadNormalizationReceipt(ctx context.Context, groupID string) (AuthorityNormalizationReceipt, bool, error) {
-	return store.loadNormalizationReceipt(ctx, groupID, true)
+	return store.loadNormalizationReceipt(ctx, groupID)
 }
 
-// LoadNormalizationReceiptForRecovery returns the signed historical receipt
-// when its baseline binding is intact. Recovery uses this deliberately weaker
-// read because a later, possibly orphaned CurrentAuthority may have advanced
-// past the receipt's After pointer; the caller must establish the live
-// activation and Worker identities before using the receipt as LKG evidence.
-func (store *AuthorityStore) LoadNormalizationReceiptForRecovery(ctx context.Context, groupID string) (AuthorityNormalizationReceipt, bool, error) {
-	return store.loadNormalizationReceipt(ctx, groupID, false)
-}
-
-func (store *AuthorityStore) loadNormalizationReceipt(ctx context.Context, groupID string, requireCurrent bool) (AuthorityNormalizationReceipt, bool, error) {
+func (store *AuthorityStore) loadNormalizationReceipt(ctx context.Context, groupID string) (AuthorityNormalizationReceipt, bool, error) {
 	if !groupPattern.MatchString(groupID) {
 		return AuthorityNormalizationReceipt{}, false, errors.New("authority group identity is invalid")
 	}
@@ -389,7 +380,7 @@ func (store *AuthorityStore) loadNormalizationReceipt(ctx context.Context, group
 	}
 	var receipt AuthorityNormalizationReceipt
 	if decodeStrict([]byte(normalizationPayload), &receipt) != nil || receipt.Validate() != nil || receipt.GroupID != groupID ||
-		receipt.BaselineReceiptDigest != baseline.ReceiptDigest || (requireCurrent && receipt.After != authority) {
+		receipt.BaselineReceiptDigest != baseline.ReceiptDigest || receipt.After != authority {
 		return AuthorityNormalizationReceipt{}, false, errors.New("authority normalization receipt binding is invalid")
 	}
 	return receipt, true, nil

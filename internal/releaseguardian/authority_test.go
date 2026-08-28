@@ -487,6 +487,72 @@ func TestCurrentAuthorityCASRequiresExactPreviousAndSlotSwitch(t *testing.T) {
 	}
 }
 
+func TestLoadNormalizationReceiptRequiresCurrentAuthority(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	store, err := NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := "edge-pool-a"
+	baseline, err := (AuthorityBaselineReceipt{
+		GroupID: group, BeforeRecordDigest: testDigest, BeforeWorkerSlot: AuthoritySlotA, BeforeAuthorityEpoch: 1,
+		RecordDigest: otherDigest, WorkerSlot: AuthoritySlotB, AuthorityEpoch: 2,
+		Nodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-1", FrontResourceVersion: "10",
+			WorkerPodUID: "worker-pod-1", WorkerResourceVersion: "11", ActivationGeneration: 1,
+			BundleGeneration: "serving.p1.r0", ServingGeneration: "serving.p1.r0", WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest}},
+		ObservedAt: time.Unix(10_000, 0).UTC().Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: group,
+		CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, CurrentFrontGeneration: 1,
+		CurrentBundleGeneration: "serving.p1.r0", CurrentWorkerSourceSHA: testSHA, CurrentWorkerImageDigest: testDigest,
+		AuthorityEpoch: 1, BaselineReceiptDigest: baseline.ReceiptDigest}
+	after := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: group,
+		CurrentRecordDigest: otherDigest, CurrentWorkerSlot: AuthoritySlotB, CurrentFrontGeneration: 2,
+		CurrentBundleGeneration: "serving.p2.r0", CurrentWorkerSourceSHA: testSHA, CurrentWorkerImageDigest: otherDigest,
+		AuthorityEpoch: 2, BaselineReceiptDigest: baseline.ReceiptDigest}
+	receipt, err := (AuthorityNormalizationReceipt{GroupID: group, BaselineReceiptDigest: baseline.ReceiptDigest,
+		Before: before, After: after, Nodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-2", FrontResourceVersion: "20",
+			WorkerPodUID: "worker-pod-2", WorkerResourceVersion: "21", ActivationGeneration: 2,
+			BundleGeneration: "serving.p2.r0", ServingGeneration: "serving.p2.r0", WorkerSourceSHA: testSHA, WorkerImageDigest: otherDigest}},
+		ObservedAt: time.Unix(10_001, 0).UTC().Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := client.CoreV1().ConfigMaps("fugue-system").Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: currentAuthorityName(group), Namespace: "fugue-system", Labels: authorityLabels(group)},
+		Data:       map[string]string{"authority.json": mustCanonicalJSON(t, after), "baseline-receipt.json": mustCanonicalJSON(t, baseline), "normalization-receipt.json": mustCanonicalJSON(t, receipt)},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.UID, object.ResourceVersion = types.UID("normalization-uid"), "30"
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, exists, err := store.LoadNormalizationReceipt(ctx, group)
+	if err != nil || !exists || loaded.ReceiptDigest != receipt.ReceiptDigest || loaded.GroupID != receipt.GroupID {
+		t.Fatalf("current normalization receipt was not loaded: exists=%v receipt=%+v err=%v", exists, loaded, err)
+	}
+	later := after
+	later.CurrentRecordDigest, later.CurrentWorkerSlot = testDigest, AuthoritySlotA
+	later.CurrentFrontGeneration, later.CurrentBundleGeneration, later.CurrentWorkerImageDigest = 3, "serving.p3.r0", testDigest
+	later.PreviousRecordDigest, later.PreviousWorkerSlot = after.CurrentRecordDigest, after.CurrentWorkerSlot
+	later.PreviousFrontGeneration, later.PreviousBundleGeneration, later.PreviousWorkerSourceSHA, later.PreviousWorkerImageDigest = after.CurrentFrontGeneration, after.CurrentBundleGeneration, after.CurrentWorkerSourceSHA, after.CurrentWorkerImageDigest
+	later.AuthorityEpoch = 3
+	object.Data["authority.json"] = mustCanonicalJSON(t, later)
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.LoadNormalizationReceipt(ctx, group); err == nil {
+		t.Fatal("historical normalization receipt was accepted after authority advanced")
+	}
+}
+
 func TestLoadedCandidateReplacementIsBounded(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
