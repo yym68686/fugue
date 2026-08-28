@@ -417,6 +417,11 @@ func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
 	if node.TokenPrefix != existingNode.TokenPrefix {
 		t.Fatalf("expected stored legacy edge token to be preserved, got %+v", node)
 	}
+	metrics := httptest.NewRecorder()
+	server.MetricsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metrics.Body.String(), `fugue_node_updater_edge_inventory_fallback_total{outcome="matched"} 1.000000`) {
+		t.Fatalf("expected legacy edge inventory fallback metric, got:\n%s", metrics.Body.String())
+	}
 }
 
 func TestNodeUpdaterClaimRefusesProtectedImageCacheDeleteTask(t *testing.T) {
