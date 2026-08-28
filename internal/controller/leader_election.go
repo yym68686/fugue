@@ -243,41 +243,5 @@ func (s *Service) markLeadership(active bool, identity string) {
 }
 
 func (s *Service) runLeaderLoop(ctx context.Context, client *kubeClient) error {
-	if err := s.waitForLegacyControllerPods(ctx, client); err != nil {
-		return err
-	}
 	return s.runActiveLoop(ctx)
-}
-
-func (s *Service) waitForLegacyControllerPods(ctx context.Context, client *kubeClient) error {
-	labelSelector := strings.TrimSpace(s.Config.LegacyControllerLabelSelector)
-	containerName := strings.TrimSpace(s.Config.LegacyControllerContainerName)
-	if client == nil || labelSelector == "" || containerName == "" {
-		return nil
-	}
-
-	checkInterval := s.Config.LegacyControllerCheckInterval
-	if checkInterval <= 0 {
-		checkInterval = 2 * time.Second
-	}
-
-	waitingLogged := false
-	for {
-		exists, err := client.podWithContainerExists(ctx, client.namespace, labelSelector, containerName)
-		if err != nil {
-			s.Logger.Printf("legacy controller pod check error: %v", err)
-		} else if !exists {
-			if waitingLogged {
-				s.Logger.Printf("legacy controller pods drained; starting active controller loop")
-			}
-			return nil
-		} else if !waitingLogged {
-			waitingLogged = true
-			s.Logger.Printf("waiting for legacy controller pods with container %q to exit before activating new controller", containerName)
-		}
-
-		if !sleepContext(ctx, checkInterval) {
-			return ctx.Err()
-		}
-	}
 }
