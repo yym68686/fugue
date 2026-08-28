@@ -116,11 +116,20 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	if recoveryRecorder.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("unauthenticated recovery status=%d body=%s", recoveryRecorder.Code, recoveryRecorder.Body.String())
 	}
+	candidateRecoveryRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(candidateRecoveryRecorder, httptest.NewRequest(http.MethodPost, "/v1/recovery/group-worker-candidates", strings.NewReader("{}")))
+	if candidateRecoveryRecorder.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("unauthenticated candidate recovery status=%d body=%s", candidateRecoveryRecorder.Code, candidateRecoveryRecorder.Body.String())
+	}
 	metricsRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(metricsRecorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if metricsRecorder.Code != http.StatusOK ||
 		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_recovery_requests_total{result="accepted"} 0`) ||
-		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_recovery_requests_total{result="rejected"} 1`) {
+		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_recovery_requests_total{result="rejected"} 1`) ||
+		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_candidate_recovery_requests_total{result="accepted"} 0`) ||
+		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_candidate_recovery_requests_total{result="conflict"} 0`) ||
+		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_candidate_recovery_requests_total{result="rejected"} 1`) ||
+		!strings.Contains(metricsRecorder.Body.String(), `fugue_edge_control_group_candidate_recovery_requests_total{result="unavailable"} 0`) {
 		t.Fatalf("recovery metrics status=%d body=%s", metricsRecorder.Code, metricsRecorder.Body.String())
 	}
 	stageRecorder := httptest.NewRecorder()

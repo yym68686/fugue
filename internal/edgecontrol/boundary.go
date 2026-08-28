@@ -29,10 +29,11 @@ type BoundaryStatus struct {
 // Boundary serves the process identity view; concrete runtime handlers own
 // stores, signers, inventory, publication, and recovery endpoints.
 type Boundary struct {
-	enabled              bool
-	mode                 string
-	authority            bool
-	groupRecoveryMetrics *GroupRecoveryMetrics
+	enabled                  bool
+	mode                     string
+	authority                bool
+	groupRecoveryMetrics     *GroupRecoveryMetrics
+	candidateRecoveryMetrics *GroupCandidateRecoveryMetrics
 }
 
 func NewBoundary(enabled bool) *Boundary {
@@ -49,6 +50,15 @@ func (b *Boundary) WithGroupRecoveryMetrics(metrics *GroupRecoveryMetrics) *Boun
 	}
 	configured := *b
 	configured.groupRecoveryMetrics = metrics
+	return &configured
+}
+
+func (b *Boundary) WithGroupCandidateRecoveryMetrics(metrics *GroupCandidateRecoveryMetrics) *Boundary {
+	if b == nil {
+		return nil
+	}
+	configured := *b
+	configured.candidateRecoveryMetrics = metrics
 	return &configured
 }
 
@@ -102,6 +112,15 @@ func (b *Boundary) Handler() http.Handler {
 			_, _ = fmt.Fprintln(w, "# TYPE fugue_edge_control_group_recovery_requests_total counter")
 			_, _ = fmt.Fprintf(w, "fugue_edge_control_group_recovery_requests_total{result=%q} %d\n", "accepted", recovery.Accepted)
 			_, _ = fmt.Fprintf(w, "fugue_edge_control_group_recovery_requests_total{result=%q} %d\n", "rejected", recovery.Rejected)
+		}
+		if b != nil && b.candidateRecoveryMetrics != nil {
+			recovery := b.candidateRecoveryMetrics.Snapshot()
+			_, _ = fmt.Fprintln(w, "# HELP fugue_edge_control_group_candidate_recovery_requests_total Signed failed-candidate fencing requests by outcome.")
+			_, _ = fmt.Fprintln(w, "# TYPE fugue_edge_control_group_candidate_recovery_requests_total counter")
+			_, _ = fmt.Fprintf(w, "fugue_edge_control_group_candidate_recovery_requests_total{result=%q} %d\n", "accepted", recovery.Accepted)
+			_, _ = fmt.Fprintf(w, "fugue_edge_control_group_candidate_recovery_requests_total{result=%q} %d\n", "conflict", recovery.Conflict)
+			_, _ = fmt.Fprintf(w, "fugue_edge_control_group_candidate_recovery_requests_total{result=%q} %d\n", "rejected", recovery.Rejected)
+			_, _ = fmt.Fprintf(w, "fugue_edge_control_group_candidate_recovery_requests_total{result=%q} %d\n", "unavailable", recovery.Unavailable)
 		}
 	})
 	return mux

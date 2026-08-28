@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -58,13 +59,59 @@ type GroupCandidateRecoveryHandlerConfig struct {
 	Store      GroupCandidateRecoveryStore
 	GroupIDs   []string
 	KeyringDir string
+	Metrics    *GroupCandidateRecoveryMetrics
 	Now        func() time.Time
+}
+
+type GroupCandidateRecoveryMetrics struct {
+	accepted    atomic.Uint64
+	conflict    atomic.Uint64
+	rejected    atomic.Uint64
+	unavailable atomic.Uint64
+}
+
+type GroupCandidateRecoveryMetricsSnapshot struct {
+	Accepted    uint64
+	Conflict    uint64
+	Rejected    uint64
+	Unavailable uint64
+}
+
+func NewGroupCandidateRecoveryMetrics() *GroupCandidateRecoveryMetrics {
+	return &GroupCandidateRecoveryMetrics{}
+}
+
+func (metrics *GroupCandidateRecoveryMetrics) Snapshot() GroupCandidateRecoveryMetricsSnapshot {
+	if metrics == nil {
+		return GroupCandidateRecoveryMetricsSnapshot{}
+	}
+	return GroupCandidateRecoveryMetricsSnapshot{
+		Accepted: metrics.accepted.Load(), Conflict: metrics.conflict.Load(),
+		Rejected: metrics.rejected.Load(), Unavailable: metrics.unavailable.Load(),
+	}
+}
+
+func (metrics *GroupCandidateRecoveryMetrics) observe(result string) {
+	if metrics == nil {
+		return
+	}
+	switch result {
+	case "accepted":
+		metrics.accepted.Add(1)
+	case "conflict":
+		metrics.conflict.Add(1)
+	case "unavailable":
+		metrics.unavailable.Add(1)
+	default:
+		metrics.rejected.Add(1)
+	}
 }
 
 type groupCandidateRecoveryHandler struct {
 	store      GroupCandidateRecoveryStore
 	groups     map[string]struct{}
 	keyringDir string
+	metrics    *GroupCandidateRecoveryMetrics
 	now        func() time.Time
 }
 
@@ -88,7 +135,7 @@ func NewGroupCandidateRecoveryHandler(config GroupCandidateRecoveryHandlerConfig
 	for _, groupID := range groups {
 		allowed[groupID] = struct{}{}
 	}
-	return &groupCandidateRecoveryHandler{store: config.Store, groups: allowed, keyringDir: keyringDir, now: now}, nil
+	return &groupCandidateRecoveryHandler{store: config.Store, groups: allowed, keyringDir: keyringDir, metrics: config.Metrics, now: now}, nil
 }
 
 func (handler *groupCandidateRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -96,6 +143,8 @@ func (handler *groupCandidateRecoveryHandler) ServeHTTP(w http.ResponseWriter, r
 		http.NotFound(w, request)
 		return
 	}
+	result := "rejected"
+	defer func() { handler.metrics.observe(result) }()
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeGroupBundleError(w, http.StatusUnsupportedMediaType, "content_type_rejected")
@@ -126,12 +175,15 @@ func (handler *groupCandidateRecoveryHandler) ServeHTTP(w http.ResponseWriter, r
 		value.ExpectedCandidateEpoch, value.ExpectedWorkerSourceSHA)
 	if err != nil {
 		if errors.Is(err, ErrGroupAuthorityCandidateCAS) || errors.Is(err, ErrGroupAuthorityCASConflict) {
+			result = "conflict"
 			writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 			return
 		}
+		result = "unavailable"
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_recovery_unavailable")
 		return
 	}
+	result = "accepted"
 	writeJSON(w, http.StatusOK, receipt)
 }
 

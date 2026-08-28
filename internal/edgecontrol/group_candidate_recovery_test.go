@@ -68,8 +68,9 @@ func TestGroupCandidateRecoveryFencesOnlyExplicitFailedCandidate(t *testing.T) {
 		authority.Published.CandidateLedgerSequence, failed, nil); err != nil {
 		t.Fatalf("append publication-preserving audit tail: %v", err)
 	}
+	recoveryMetrics := NewGroupCandidateRecoveryMetrics()
 	handler, err := NewGroupCandidateRecoveryHandler(GroupCandidateRecoveryHandlerConfig{
-		Store: store, GroupIDs: []string{groupID}, KeyringDir: keyringDir, Now: func() time.Time { return now.Add(time.Minute) },
+		Store: store, GroupIDs: []string{groupID}, KeyringDir: keyringDir, Metrics: recoveryMetrics, Now: func() time.Time { return now.Add(time.Minute) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -116,5 +117,18 @@ func TestGroupCandidateRecoveryFencesOnlyExplicitFailedCandidate(t *testing.T) {
 	handler.ServeHTTP(replay, replayRequest)
 	if replay.Code != http.StatusOK {
 		t.Fatalf("fence replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	if metrics := recoveryMetrics.Snapshot(); metrics.Accepted != 2 || metrics.Conflict != 0 || metrics.Rejected != 0 || metrics.Unavailable != 0 {
+		t.Fatalf("candidate recovery metrics after accepted request and replay = %+v", metrics)
+	}
+}
+
+func TestGroupCandidateRecoveryMetricsTrackAllOutcomes(t *testing.T) {
+	metrics := NewGroupCandidateRecoveryMetrics()
+	for _, result := range []string{"accepted", "conflict", "rejected", "unavailable"} {
+		metrics.observe(result)
+	}
+	if snapshot := metrics.Snapshot(); snapshot.Accepted != 1 || snapshot.Conflict != 1 || snapshot.Rejected != 1 || snapshot.Unavailable != 1 {
+		t.Fatalf("candidate recovery metrics = %+v", snapshot)
 	}
 }
