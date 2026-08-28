@@ -419,8 +419,37 @@ func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
 	}
 	metrics := httptest.NewRecorder()
 	server.MetricsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(metrics.Body.String(), `fugue_node_updater_edge_inventory_fallback_total{outcome="matched"} 1.000000`) {
-		t.Fatalf("expected legacy edge inventory fallback metric, got:\n%s", metrics.Body.String())
+	if !strings.Contains(metrics.Body.String(), `fugue_node_updater_edge_identity_lookup_total{outcome="matched"} 1.000000`) {
+		t.Fatalf("expected exact edge identity lookup metric, got:\n%s", metrics.Body.String())
+	}
+	if !strings.Contains(metrics.Body.String(), `fugue_node_updater_edge_inventory_fallback_total{outcome="matched"} 0.000000`) {
+		t.Fatalf("expected legacy edge inventory fallback to remain unused, got:\n%s", metrics.Body.String())
+	}
+}
+
+func TestNodeUpdaterEdgeCredentialUsesLegacyInventoryOnlyWhenIdentityIsMissing(t *testing.T) {
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if _, _, err := s.CreateEdgeNodeToken(model.EdgeNode{ID: "legacy-edge", EdgeGroupID: "edge-group-country-us", PublicIPv4: "15.204.94.71", WorkloadMode: "static"}); err != nil {
+		t.Fatalf("seed edge node: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	req := httptest.NewRequest(http.MethodGet, "https://api.fugue.pro/v1/node-updater/desired-state", nil)
+	_, _, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{ClusterNodeName: "missing-edge", Labels: map[string]string{
+		"fugue.io/public-ip": "15.204.94.71", "fugue.io/role.edge": "true",
+	}}, &model.ClusterNodePolicyStatus{Policy: &model.ClusterNodePolicy{AllowEdge: true}, Labels: map[string]string{
+		"fugue.io/public-ip": "15.204.94.71", "fugue.io/role.edge": "true",
+	}})
+	if err != nil {
+		t.Fatalf("issue edge credential: %v", err)
+	}
+	metrics := httptest.NewRecorder()
+	server.MetricsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := metrics.Body.String()
+	if !strings.Contains(body, `fugue_node_updater_edge_identity_lookup_total{outcome="missing"} 1.000000`) || !strings.Contains(body, `fugue_node_updater_edge_inventory_fallback_total{outcome="matched"} 1.000000`) {
+		t.Fatalf("expected missing identity to use legacy inventory fallback, got:\n%s", body)
 	}
 }
 
