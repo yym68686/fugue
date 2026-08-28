@@ -585,6 +585,16 @@ func signedGroupBundleDigest(bundle model.EdgeRouteBundle) string {
 	return digestJSON(bundle)
 }
 
+// sameGroupBundleGeneration identifies a refresh of one immutable route
+// generation. Publication version, validity window, signer metadata, and
+// signature are deliberately excluded from this comparison because those
+// fields change on every validity refresh; route/config content must remain
+// byte-equivalent.
+func sameGroupBundleGeneration(left, right model.EdgeRouteBundle) bool {
+	return strings.TrimSpace(left.Generation) != "" && left.Generation == right.Generation &&
+		groupAuthorityCandidateDigest(left) == groupAuthorityCandidateDigest(right)
+}
+
 func groupAuthorityCandidateDigest(bundle model.EdgeRouteBundle) string {
 	bundle.Version = bundle.Generation
 	bundle.GeneratedAt = time.Time{}

@@ -667,15 +667,19 @@ func (store *PersistentGroupStore) PromoteGroupCandidateCAS(ctx context.Context,
 		candidateBundle, candidateExists := persistentCandidateByEpoch(state, request.ExpectedCandidateEpoch)
 		if state.Published == nil || !candidateExists || len(state.AuthorityLedger) == 0 ||
 			uint64(len(state.AuthorityLedger)) < request.ExpectedAuthoritySequence ||
-			state.Published.PublicationSequence != request.ExpectedPublicationSequence || state.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch ||
-			state.Published.Digest != request.ExpectedPublishedBundleDigest || candidateBundle.Record.RecordDigest != request.CandidateRecordDigest ||
+			state.Published.PublicationSequence < request.ExpectedPublicationSequence || state.Published.RecoveryEpoch < request.ExpectedRecoveryEpoch ||
+			candidateBundle.Record.RecordDigest != request.CandidateRecordDigest ||
 			candidateBundle.WorkerSlot != request.CandidateWorkerSlot || candidateBundle.Bundle.Generation != request.CandidateBundleGeneration ||
-			candidateBundle.AuthorityLedgerSequence != request.ExpectedAuthoritySequence {
+			candidateBundle.AuthorityLedgerSequence != request.ExpectedAuthoritySequence || candidateBundle.CurrentBundle == nil ||
+			candidateBundle.CurrentRecord == nil || candidateBundle.CurrentRecord.BundleDigest != request.ExpectedPublishedBundleDigest ||
+			!sameGroupBundleGeneration(state.Published.Bundle, *candidateBundle.CurrentBundle) {
+			return ErrGroupAuthorityCASConflict
+		}
+		if state.Published.PublicationSequence == request.ExpectedPublicationSequence && state.Published.Digest != request.ExpectedPublishedBundleDigest {
 			return ErrGroupAuthorityCASConflict
 		}
 		for _, audit := range state.AuthorityLedger[request.ExpectedAuthoritySequence:] {
-			if audit.Status != GroupAuthorityStatusFailed || audit.RecoveryEpoch != 0 ||
-				audit.LastPublishedBundleGeneration != state.Published.Bundle.Generation {
+			if !authorityAuditTailPreservesPublishedAuthority(audit, candidateBundle.CurrentBundle.Generation) {
 				return ErrGroupAuthorityCASConflict
 			}
 		}

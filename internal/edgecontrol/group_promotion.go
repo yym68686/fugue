@@ -159,11 +159,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 		writeJSON(w, http.StatusOK, receipt)
 		return
 	}
-	if authority.LedgerHead.Sequence < promotion.ExpectedAuthoritySequence ||
-		authority.Published.PublicationSequence != promotion.ExpectedPublicationSequence ||
-		authority.Published.RecoveryEpoch != promotion.ExpectedRecoveryEpoch ||
-		authority.Published.Digest != promotion.ExpectedPublishedBundleDigest ||
-		(authority.LedgerHead.Sequence > promotion.ExpectedAuthoritySequence && authority.LedgerHead.Status != GroupAuthorityStatusFailed) {
+	if !promotionPublishedAuthorityMatches(authority, candidate, promotion) {
 		writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 		return
 	}
@@ -174,7 +170,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 	bundle.ValidUntil = time.Time{}
 	bundle.KeyID, bundle.Signature, bundle.Signatures = "", "", nil
 	bundle.PreviousGeneration = authority.Published.Bundle.Generation
-	bundle.Version = groupPublicationVersion(bundle.Generation, previousAuthoritySequence+1, promotion.ExpectedRecoveryEpoch)
+	bundle.Version = groupPublicationVersion(bundle.Generation, previousAuthoritySequence+1, authority.Published.RecoveryEpoch)
 	signed, err := handler.signer.SignGroupBundle(request.Context(), promotion.GroupID, bundle)
 	if err != nil {
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "signing_unavailable")
@@ -196,17 +192,30 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 	}
 	writeJSON(w, http.StatusOK, GroupPromotionReceipt{Schema: GroupPromotionReceiptSchemaV1, GroupID: promotion.GroupID,
 		PreviousAuthoritySequence:   previousAuthoritySequence,
-		PreviousPublicationSequence: promotion.ExpectedPublicationSequence, PreviousRecoveryEpoch: promotion.ExpectedRecoveryEpoch,
-		PreviousBundleGeneration: authority.Published.Bundle.Generation, PreviousPublishedBundleDigest: promotion.ExpectedPublishedBundleDigest,
-		PublicationSequence: appended.Sequence, RecoveryEpoch: promotion.ExpectedRecoveryEpoch, BundleGeneration: appended.BundleGeneration,
+		PreviousPublicationSequence: authority.Published.PublicationSequence, PreviousRecoveryEpoch: authority.Published.RecoveryEpoch,
+		PreviousBundleGeneration: authority.Published.Bundle.Generation, PreviousPublishedBundleDigest: authority.Published.Digest,
+		PublicationSequence: appended.Sequence, RecoveryEpoch: authority.Published.RecoveryEpoch, BundleGeneration: appended.BundleGeneration,
 		PublishedBundleDigest: appended.PublishedBundleDigest, CandidateRecordDigest: promotion.CandidateRecordDigest,
 		WorkerSlot: promotion.CandidateWorkerSlot, Authority: "edge-control"})
+}
+
+func promotionPublishedAuthorityMatches(authority GroupAuthorityState, candidate GroupCandidateBundle, request GroupPromotionRequest) bool {
+	if !authority.LedgerExists || !authority.PublishedExists || authority.LedgerHead.Sequence < request.ExpectedAuthoritySequence ||
+		authority.Published.PublicationSequence < request.ExpectedPublicationSequence || authority.Published.RecoveryEpoch < request.ExpectedRecoveryEpoch ||
+		candidate.CurrentBundle == nil || candidate.CurrentRecord == nil || candidate.CurrentRecord.BundleDigest != request.ExpectedPublishedBundleDigest ||
+		!sameGroupBundleGeneration(authority.Published.Bundle, *candidate.CurrentBundle) {
+		return false
+	}
+	if authority.Published.PublicationSequence == request.ExpectedPublicationSequence {
+		return authority.Published.Digest == request.ExpectedPublishedBundleDigest
+	}
+	return true
 }
 
 func groupPromotionReplayReceipt(authority GroupAuthorityState, candidate GroupCandidateBundle, promotion GroupPromotionRequest) (GroupPromotionReceipt, bool) {
 	if authority.Published.PublicationSequence <= promotion.ExpectedAuthoritySequence ||
 		authority.Published.CandidateLedgerSequence != candidate.CandidateLedgerSequence ||
-		authority.Published.RecoveryEpoch != promotion.ExpectedRecoveryEpoch ||
+		authority.Published.RecoveryEpoch < promotion.ExpectedRecoveryEpoch ||
 		authority.Published.Bundle.Generation != promotion.CandidateBundleGeneration ||
 		authority.Published.Bundle.PreviousGeneration != candidate.CurrentBundle.Generation ||
 		candidate.CurrentRecord == nil || candidate.CurrentBundle == nil ||

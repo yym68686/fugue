@@ -339,6 +339,54 @@ func TestGroupPromotionPromotesExactCanariedEpochAfterCandidatePointerAdvances(t
 	}
 }
 
+func TestGroupPromotionAcceptsSameGenerationPublicationRefresh(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 11, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, signer, candidate, before := groupPromotionFixture(t, groupID, now)
+	// Refresh the exact published bundle after the candidate was staged. This
+	// advances publication/recovery CAS metadata but must not invalidate the
+	// immutable candidate predecessor generation.
+	refreshed, ok := (GroupAuthorityPublisher{Store: store, Signer: signer}).refreshPublishedLKG(ctx, groupID, before, now.Add(20*time.Minute), "test same-generation publication refresh")
+	if !ok || refreshed.Status != GroupAuthorityStatusPublished {
+		t.Fatalf("refresh exact published generation: result=%+v ok=%v", refreshed, ok)
+	}
+	keyDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x76}, 32)
+	writeGroupRecoveryFixture(t, keyDir, groupID, secret, now)
+	handler, err := NewGroupPromotionHandler(GroupPromotionHandlerConfig{Store: store, Signer: signer,
+		GroupIDs: []string{groupID}, KeyringDir: keyDir, Now: func() time.Time { return now.Add(21 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotion := GroupPromotionRequest{Schema: GroupPromotionRequestSchemaV1, KeyID: "recovery-de-1", GroupID: groupID,
+		ExpectedAuthoritySequence: before.LedgerHead.Sequence, ExpectedPublicationSequence: before.Published.PublicationSequence,
+		ExpectedRecoveryEpoch: before.Published.RecoveryEpoch, ExpectedPublishedBundleDigest: before.Published.Digest,
+		ExpectedCandidateEpoch: candidate.Epoch, CandidateRecordDigest: candidate.Record.RecordDigest,
+		CandidateWorkerSlot: candidate.WorkerSlot, CandidateBundleGeneration: candidate.Bundle.Generation,
+		IssuedAtUnix: now.Add(21 * time.Minute).Unix(), ExpiresAtUnix: now.Add(22 * time.Minute).Unix(),
+		Nonce: "promotion-refresh-0001", Reason: "promote after same-generation publication refresh"}
+	if err := SignGroupPromotionRequest(&promotion, secret); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(promotion)
+	request := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("same-generation refresh promotion status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var receipt GroupPromotionReceipt
+	if err := json.Unmarshal(recorder.Body.Bytes(), &receipt); err != nil || receipt.BundleGeneration != candidate.Bundle.Generation {
+		t.Fatalf("same-generation refresh promotion receipt=%+v err=%v", receipt, err)
+	}
+	after, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || after.Published.Bundle.Generation != candidate.Bundle.Generation || after.LedgerHead.Sequence != receipt.PublicationSequence {
+		t.Fatalf("same-generation refresh changed wrong authority: after=%+v receipt=%+v err=%v", after, receipt, err)
+	}
+}
+
 func groupPromotionFixture(t *testing.T, groupID string, now time.Time) (*PersistentGroupStore, *fixtureGroupSigner, GroupCandidateBundle, GroupAuthorityState) {
 	t.Helper()
 	ctx := context.Background()

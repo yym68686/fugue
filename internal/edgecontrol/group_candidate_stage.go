@@ -336,9 +336,9 @@ func authorityAuditTailPreservesPublishedAuthority(entry GroupAuthorityLedgerEnt
 	if entry.Status == GroupAuthorityStatusFailed {
 		return entry.RecoveryEpoch == 0 && entry.LastPublishedBundleGeneration == generation
 	}
-	return entry.Status == GroupAuthorityStatusPublished && entry.RecoveryEpoch > 0 &&
+	return entry.Status == GroupAuthorityStatusPublished &&
 		entry.BundleGeneration == generation && entry.LastPublishedBundleGeneration == generation &&
-		entry.RecoveryReason != "" && groupAuthorityDigestPattern.MatchString(entry.PublishedBundleDigest)
+		groupAuthorityDigestPattern.MatchString(entry.PublishedBundleDigest)
 }
 
 func groupCandidateCASConflict(reason string) error {
