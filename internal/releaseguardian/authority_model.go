@@ -102,11 +102,7 @@ func (candidate CandidateAuthority) Validate() error {
 	if (candidate.AuthoritySequence == 0) != (candidate.CandidateSequence == 0) {
 		return errors.New("candidate promotion witness is incomplete")
 	}
-	legacyLoadedWitness := candidate.State == CandidateAuthorityLoaded && candidate.AuthoritySequence > 0 && candidate.CandidateSequence > 0 &&
-		((candidate.CurrentPublicationSequence == 0 && candidate.CurrentRecoveryEpoch == 0 && candidate.CurrentBundleDigest == "" && candidate.CurrentServingGeneration == "" && candidate.CandidateEpoch == 0) ||
-			(candidate.CurrentPublicationSequence > 0 && candidate.CurrentPublicationSequence <= candidate.AuthoritySequence &&
-				digestPattern.MatchString(candidate.CurrentBundleDigest) && candidate.CurrentServingGeneration == "" && candidate.CandidateEpoch > candidate.CurrentPublicationSequence))
-	if candidate.AuthoritySequence != 0 && !legacyLoadedWitness && (candidate.CurrentPublicationSequence == 0 || candidate.CurrentPublicationSequence > candidate.AuthoritySequence ||
+	if candidate.AuthoritySequence != 0 && (candidate.CurrentPublicationSequence == 0 || candidate.CurrentPublicationSequence > candidate.AuthoritySequence ||
 		!digestPattern.MatchString(candidate.CurrentBundleDigest) || !authorityGenerationPattern.MatchString(candidate.CurrentServingGeneration) ||
 		candidate.CandidateEpoch == 0 || candidate.CandidateEpoch <= candidate.CurrentPublicationSequence) {
 		return errors.New("candidate promotion CAS witness is invalid")

@@ -91,6 +91,35 @@ func TestAuthorityModelsBindCandidateCurrentAndLKGIdentity(t *testing.T) {
 	}
 }
 
+func TestLoadedCandidateRejectsIncompletePromotionWitness(t *testing.T) {
+	complete := bindCandidatePromotionWitness(CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind,
+		GroupID: "edge-pool-a", RecordDigest: testDigest, BundleGeneration: testCandidateBundle,
+		WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest, State: CandidateAuthorityLoaded, Generation: 1})
+	if err := complete.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*CandidateAuthority){
+		"pre-publication witness": func(value *CandidateAuthority) {
+			value.CurrentPublicationSequence = 0
+			value.CurrentRecoveryEpoch = 0
+			value.CurrentBundleDigest = ""
+			value.CurrentServingGeneration = ""
+			value.CandidateEpoch = 0
+		},
+		"missing serving generation": func(value *CandidateAuthority) {
+			value.CurrentServingGeneration = ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := complete
+			mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("incomplete promotion witness was accepted")
+			}
+		})
+	}
+}
+
 func TestCandidateCanaryIsImmutableCandidateBoundAndFresh(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	candidate := CandidateAuthority{GroupID: "edge-pool-a", RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest}
