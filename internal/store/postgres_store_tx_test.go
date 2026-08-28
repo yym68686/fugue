@@ -58,8 +58,8 @@ func TestPGFinalizeAssignedAgentReleaseFailureTxIsAtomic(t *testing.T) {
 		// Migration ledgers have a 90-day retention boundary and must be
 		// pruned independently from ordinary 30-day operation evidence, even
 		// when both writes happen inside this atomic release-failure path.
-		mock.ExpectExec(`(?s)DELETE FROM fugue_operation_evidence.*evidence_type IN`).
-			WithArgs(scope.value, sqlmock.AnyArg(), scope.limit,
+		mock.ExpectExec(`(?s)DELETE FROM fugue_operation_evidence.*evidence_type IN \(\$3, \$4, \$5\)`).
+			WithArgs(scope.value, sqlmock.AnyArg(),
 				model.OperationEvidenceTypeMigrationStarted,
 				model.OperationEvidenceTypeMigrationCompleted,
 				model.OperationEvidenceTypeMigrationFailed).

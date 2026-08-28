@@ -238,9 +238,9 @@ func pruneOperationEvidenceScopeTx(ctx context.Context, tx *sql.Tx, column, valu
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 DELETE FROM fugue_operation_evidence
 WHERE %s = $1
-  AND evidence_type IN ($4, $5, $6)
+  AND evidence_type IN ($3, $4, $5)
   AND collected_at < $2
-`, column), value, migrationCutoff, limit, model.OperationEvidenceTypeMigrationStarted, model.OperationEvidenceTypeMigrationCompleted, model.OperationEvidenceTypeMigrationFailed); err != nil {
+`, column), value, migrationCutoff, model.OperationEvidenceTypeMigrationStarted, model.OperationEvidenceTypeMigrationCompleted, model.OperationEvidenceTypeMigrationFailed); err != nil {
 		return mapDBErr(err)
 	}
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
@@ -267,9 +267,9 @@ func pruneOperationEvidenceTenantWithoutAppTx(ctx context.Context, tx *sql.Tx, t
 DELETE FROM fugue_operation_evidence
 WHERE tenant_id = $1
   AND app_id = ''
-  AND evidence_type IN ($4, $5, $6)
+  AND evidence_type IN ($3, $4, $5)
   AND collected_at < $2
-`, tenantID, migrationCutoff, operationEvidenceRetentionLimitPerTenant, model.OperationEvidenceTypeMigrationStarted, model.OperationEvidenceTypeMigrationCompleted, model.OperationEvidenceTypeMigrationFailed); err != nil {
+`, tenantID, migrationCutoff, model.OperationEvidenceTypeMigrationStarted, model.OperationEvidenceTypeMigrationCompleted, model.OperationEvidenceTypeMigrationFailed); err != nil {
 		return mapDBErr(err)
 	}
 	_, err := tx.ExecContext(ctx, `
