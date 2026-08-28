@@ -193,13 +193,13 @@ func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, targ
 		return nil, err
 	}
 	frontBundleGeneration := promotedBundleVersion(target.ServingGeneration, promotion.PublicationSequence, promotion.RecoveryEpoch)
-	if target.FrontBundleGeneration != "" && target.FrontBundleGeneration != frontBundleGeneration {
+	if target.FrontBundleGeneration != "" && !sameAuthorityBundleGeneration(target.FrontBundleGeneration, frontBundleGeneration) {
 		if recoveryErr := activator.recoverControl(context.WithoutCancel(ctx), promotion, target.PreviousServingGeneration); recoveryErr != nil {
 			releaseOnError = false
-			return nil, errors.Join(errors.New("Edge Control promotion version is not target-bound"),
+			return nil, errors.Join(errors.New("Edge Control promotion generation is not target-bound"),
 				fmt.Errorf("Edge Control compensation is unknown: %w", recoveryErr))
 		}
-		return nil, errors.New("Edge Control promotion version is not target-bound")
+		return nil, errors.New("Edge Control promotion generation is not target-bound")
 	}
 	target.FrontBundleGeneration = frontBundleGeneration
 	preflight, err := activator.front.preflight(ctx, target)
@@ -422,25 +422,40 @@ func (activator *groupAuthorityActivator) promoteControl(ctx context.Context, ta
 		// serializing the large signed bundle. Reconcile the compact authority
 		// status first; only an explicit non-commit falls back to replaying the
 		// exact signed request.
-		reconcileCtx, cancel := context.WithTimeout(ctx, authorityReconcileTimeout)
-		reconciled, reconcileErr := activator.reconcilePromotionReceipt(reconcileCtx, target)
-		cancel()
-		if reconcileErr == nil {
-			receipt = reconciled
-		} else if replayErr := activator.post(ctx, edgecontrol.GroupPromotionPathV1, request, &receipt); replayErr != nil {
-			return receipt, errors.Join(err, reconcileErr, replayErr)
+		var reconcileErr error
+		// During a same-generation recovery, an ordinary validity refresh is
+		// indistinguishable from promotion in the compact status projection.
+		// Replay the exact signed request instead; Edge Control reconciles a
+		// committed request by its retained candidate epoch.
+		if target.ServingGeneration != target.PreviousServingGeneration {
+			reconcileCtx, cancel := context.WithTimeout(ctx, authorityReconcileTimeout)
+			receipt, reconcileErr = activator.reconcilePromotionReceipt(reconcileCtx, target)
+			cancel()
+		} else {
+			reconcileErr = errAuthorityMutationUnknown
+		}
+		if reconcileErr != nil {
+			if replayErr := activator.post(ctx, edgecontrol.GroupPromotionPathV1, request, &receipt); replayErr != nil {
+				return receipt, errors.Join(err, reconcileErr, replayErr)
+			}
 		}
 	}
 	if receipt.Schema != edgecontrol.GroupPromotionReceiptSchemaV1 || receipt.GroupID != target.GroupID ||
-		receipt.PreviousAuthoritySequence < target.AuthoritySequence || receipt.PreviousPublicationSequence != target.PublicationSequence ||
-		receipt.PreviousRecoveryEpoch != target.RecoveryEpoch || receipt.PreviousBundleGeneration != target.PreviousServingGeneration ||
-		receipt.PreviousPublishedBundleDigest != target.PublishedBundleDigest || receipt.PublicationSequence != receipt.PreviousAuthoritySequence+1 ||
+		receipt.PreviousAuthoritySequence < target.AuthoritySequence || receipt.PreviousPublicationSequence < target.PublicationSequence ||
+		receipt.PreviousRecoveryEpoch < target.RecoveryEpoch || receipt.PreviousBundleGeneration != target.PreviousServingGeneration ||
+		!exactSHA256Digest(receipt.PreviousPublishedBundleDigest) || receipt.PublicationSequence != receipt.PreviousAuthoritySequence+1 ||
 		receipt.RecoveryEpoch != target.RecoveryEpoch || receipt.BundleGeneration != target.ServingGeneration ||
 		receipt.CandidateRecordDigest != target.CandidateRecordDigest || receipt.WorkerSlot != string(target.TargetSlot) || receipt.Authority != "edge-control" ||
 		!exactSHA256Digest(receipt.PublishedBundleDigest) {
 		return receipt, errors.New("Edge Control promotion receipt is invalid")
 	}
 	return receipt, nil
+}
+
+func sameAuthorityBundleGeneration(left, right string) bool {
+	leftGeneration, _, _, leftErr := splitPromotedBundleVersion(left)
+	rightGeneration, _, _, rightErr := splitPromotedBundleVersion(right)
+	return leftErr == nil && rightErr == nil && leftGeneration == rightGeneration
 }
 
 func (activator *groupAuthorityActivator) reconcilePromotionReceipt(ctx context.Context, target releaseguardian.FrontAuthorityTarget) (edgecontrol.GroupPromotionReceipt, error) {

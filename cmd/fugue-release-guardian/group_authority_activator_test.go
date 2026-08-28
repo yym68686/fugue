@@ -245,6 +245,38 @@ func TestGroupAuthorityPromotionAcceptsFailedAuditTailReceipt(t *testing.T) {
 	}
 }
 
+func TestGroupAuthorityPromotionAcceptsSameGenerationRefreshReceipt(t *testing.T) {
+	now := time.Date(2026, 8, 13, 5, 20, 0, 0, time.UTC)
+	target := groupAuthorityTargetFixture()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(edgecontrol.GroupPromotionReceipt{Schema: edgecontrol.GroupPromotionReceiptSchemaV1,
+			GroupID: target.GroupID, PreviousAuthoritySequence: target.AuthoritySequence + 2,
+			PreviousPublicationSequence: target.PublicationSequence + 2, PreviousRecoveryEpoch: target.RecoveryEpoch,
+			PreviousBundleGeneration:      target.PreviousServingGeneration,
+			PreviousPublishedBundleDigest: "sha256:" + strings.Repeat("8", 64),
+			PublicationSequence:           target.AuthoritySequence + 3, RecoveryEpoch: target.RecoveryEpoch,
+			BundleGeneration: target.ServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("9", 64),
+			CandidateRecordDigest: target.CandidateRecordDigest, WorkerSlot: string(target.TargetSlot), Authority: "edge-control"})
+	}))
+	defer server.Close()
+	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
+	receipt, err := activator.promoteControl(context.Background(), target)
+	if err != nil || receipt.PreviousPublicationSequence != target.PublicationSequence+2 ||
+		receipt.PreviousPublishedBundleDigest == target.PublishedBundleDigest {
+		t.Fatalf("same-generation refresh receipt=%+v err=%v", receipt, err)
+	}
+}
+
+func TestSameAuthorityBundleGenerationIgnoresPublicationVersionOnly(t *testing.T) {
+	if !sameAuthorityBundleGeneration("bundle-a.p10.r2", "bundle-a.p14.r2") {
+		t.Fatal("same immutable generation was rejected after publication refresh")
+	}
+	if sameAuthorityBundleGeneration("bundle-a.p10.r2", "bundle-b.p14.r2") ||
+		sameAuthorityBundleGeneration("bundle-a", "bundle-a.p14.r2") {
+		t.Fatal("different or malformed immutable generation was accepted")
+	}
+}
+
 func TestGroupAuthorityPromotionTypesOnlyExplicitConflictAsPrewriteCAS(t *testing.T) {
 	for name, status := range map[string]int{"sequence_conflict": http.StatusConflict, "candidate_conflict": http.StatusConflict, "unavailable": http.StatusServiceUnavailable} {
 		t.Run(name, func(t *testing.T) {
