@@ -47,3 +47,19 @@ func TestNewAuthorityRuntimeRejectsAmbiguousOrMissingKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthorityRuntimeCohortLimitLeavesPaginationHeadroom(t *testing.T) {
+	for _, test := range []struct {
+		nodes int
+		want  int64
+	}{
+		{nodes: 1, want: 8},
+		{nodes: 3, want: 16},
+		{nodes: 100, want: 404},
+		{nodes: 0, want: 8},
+	} {
+		if got := authorityRuntimeCohortLimit(test.nodes); got != test.want {
+			t.Fatalf("authorityRuntimeCohortLimit(%d)=%d, want %d", test.nodes, got, test.want)
+		}
+	}
+}

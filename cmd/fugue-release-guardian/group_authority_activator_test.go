@@ -72,7 +72,7 @@ func TestCurrentCodeRouteAcceptsIndependentConfigurationRecord(t *testing.T) {
 func TestAuthorityWorkerHealthAcceptsMonotonicControlPublication(t *testing.T) {
 	group := "edge-group-country-de"
 	bundle := "serving-generation.p11481.r129"
-	health := baselineWorkerHealth{Status: "ok", Healthy: true, EdgeGroupID: group, BundleVersion: bundle, PublicationSequence: 11481, ServingGeneration: "serving-generation"}
+	health := authorityWorkerHealth{Status: "ok", Healthy: true, EdgeGroupID: group, BundleVersion: bundle, PublicationSequence: 11481, ServingGeneration: "serving-generation"}
 	if !authorityWorkerHealthAtOrAfter(health, group, bundle) {
 		t.Fatal("exact Worker route generation was rejected")
 	}
@@ -91,21 +91,21 @@ func TestAuthorityWorkerHealthAcceptsMonotonicControlPublication(t *testing.T) {
 	if !authorityWorkerHealthAtOrAfter(advanced, group, bundle) {
 		t.Fatal("newer independent configuration generation was rejected")
 	}
-	for name, mutate := range map[string]func(*baselineWorkerHealth){
-		"unhealthy": func(value *baselineWorkerHealth) { value.Healthy = false },
-		"missing status": func(value *baselineWorkerHealth) {
+	for name, mutate := range map[string]func(*authorityWorkerHealth){
+		"unhealthy": func(value *authorityWorkerHealth) { value.Healthy = false },
+		"missing status": func(value *authorityWorkerHealth) {
 			value.Status = ""
 		},
-		"degraded":     func(value *baselineWorkerHealth) { value.Status = "degraded" },
-		"wrong group":  func(value *baselineWorkerHealth) { value.EdgeGroupID = "edge-group-other" },
-		"wrong bundle": func(value *baselineWorkerHealth) { value.BundleVersion = "other-generation.p11481.r129" },
-		"stale publication": func(value *baselineWorkerHealth) {
+		"degraded":     func(value *authorityWorkerHealth) { value.Status = "degraded" },
+		"wrong group":  func(value *authorityWorkerHealth) { value.EdgeGroupID = "edge-group-other" },
+		"wrong bundle": func(value *authorityWorkerHealth) { value.BundleVersion = "other-generation.p11481.r129" },
+		"stale publication": func(value *authorityWorkerHealth) {
 			value.BundleVersion = "serving-generation.p11480.r129"
 			value.PublicationSequence = 11480
 		},
-		"stale recovery": func(value *baselineWorkerHealth) { value.BundleVersion = "serving-generation.p11481.r128" },
-		"wrong epoch":    func(value *baselineWorkerHealth) { value.PublicationSequence++ },
-		"wrong serving":  func(value *baselineWorkerHealth) { value.ServingGeneration += "-other" },
+		"stale recovery": func(value *authorityWorkerHealth) { value.BundleVersion = "serving-generation.p11481.r128" },
+		"wrong epoch":    func(value *authorityWorkerHealth) { value.PublicationSequence++ },
+		"wrong serving":  func(value *authorityWorkerHealth) { value.ServingGeneration += "-other" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := health
@@ -125,7 +125,7 @@ func TestGroupAuthorityRestoreNeverMutatesControlPublication(t *testing.T) {
 	}))
 	defer server.Close()
 	group := "edge-group-country-us"
-	front, err := newFrontAuthorityActivator(fake.NewSimpleClientset(), baselineActivationExecutor{}, frontAuthorityConfig{
+	front, err := newFrontAuthorityActivator(fake.NewSimpleClientset(), activationFixtureExecutor{}, frontAuthorityConfig{
 		GroupID: group, Namespace: "fugue-system", ExpectedNodes: 1,
 	}, "guardian-pod:edge-group-country-us")
 	if err != nil {

@@ -14,6 +14,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type activationFixtureExecutor struct {
+	raw []byte
+}
+
+func (executor activationFixtureExecutor) Exec(context.Context, string, string, string, ...string) ([]byte, error) {
+	return append([]byte(nil), executor.raw...), nil
+}
+
 func TestPostActivationRouteRequiresConsecutiveExactAttestations(t *testing.T) {
 	body := []byte("ok")
 	bodyDigest := shaDigest(body)
@@ -190,7 +198,7 @@ func TestCompensatedCurrentRuntimeAcceptsOnlyExactRollbackChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	activator := &frontAuthorityActivator{executor: baselineActivationExecutor{raw: raw}, config: frontAuthorityConfig{GroupID: group, Namespace: "fugue-system"}}
+	activator := &frontAuthorityActivator{executor: activationFixtureExecutor{raw: raw}, config: frontAuthorityConfig{GroupID: group, Namespace: "fugue-system"}}
 	if !activator.compensatedCurrentRuntimeMatches(context.Background(), workers, cohort, fronts, releaseguardian.AuthoritySlotA,
 		source, digest, 29, bundle) {
 		t.Fatal("production compensation chain 29 -> 79 was rejected")
@@ -212,7 +220,7 @@ func TestCompensatedCurrentRuntimeAcceptsOnlyExactRollbackChain(t *testing.T) {
 				t.Fatal(marshalErr)
 			}
 			candidate := *activator
-			candidate.executor = baselineActivationExecutor{raw: changedRaw}
+			candidate.executor = activationFixtureExecutor{raw: changedRaw}
 			if candidate.compensatedCurrentRuntimeMatches(context.Background(), workers, cohort, fronts, releaseguardian.AuthoritySlotA,
 				source, digest, 29, bundle) {
 				t.Fatal("invalid compensation chain was accepted")

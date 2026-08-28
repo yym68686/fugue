@@ -112,11 +112,6 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 		return err
 	}
 	startCandidateImporters(ctx, authorityStore, client, imports)
-	baselines, err := parseAuthorityBaselines(os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_BASELINES"))
-	if err != nil {
-		return err
-	}
-	startAuthorityBaselineAdopters(ctx, authorityStore, client, targets[0].Namespace, baselines, &kubePodExecutor{config: kubeConfig, client: client})
 	authority, err := newAuthorityRuntimeWithActivators(authorityStore, client, kubeConfig, targets[0].Namespace,
 		os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS"), os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS"))
 	if err != nil {

@@ -62,6 +62,9 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 	}
 	encoded, _ := json.Marshal(set)
 	source := string(encoded)
+	if strings.Contains(source, `"name":"FUGUE_RELEASE_GUARDIAN_AUTHORITY_BASELINES"`) {
+		t.Fatal("one-time authority baseline importer configuration is still present")
+	}
 	for _, required := range []string{
 		`"name":"fugue-release-guardian"`, `"name":"fugue-release-canary-prober"`,
 		`"value":"write"`, `"value":"guardian"`, `"value":"canary-prober"`,

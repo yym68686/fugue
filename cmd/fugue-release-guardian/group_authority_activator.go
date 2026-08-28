@@ -155,6 +155,14 @@ func recoverableLKGWitness(status edgecontrol.AuthorityGroupStatus, expectedBund
 	return observedSlot == string(slot) && exactSHA256Digest(observedRecord)
 }
 
+func authorityGenerationBase(value string) string {
+	value = strings.TrimSpace(value)
+	if pivot := strings.LastIndex(value, ".p"); pivot > 0 {
+		return value[:pivot]
+	}
+	return value
+}
+
 // authorityRouteMatches permits an unattested route only for a previous LKG.
 // Old LKG workers predate candidate headers; their record binding is instead
 // supplied by observeAuthorityRuntime's exact source/image and bundle witness.

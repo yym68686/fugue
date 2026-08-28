@@ -30,6 +30,7 @@ const (
 	frontActivationStatePath     = "/var/lib/fugue-edge-front/activation.json"
 	frontActivationCASBinary     = "/usr/local/bin/fugue-edge-front-cas"
 	frontHealthPort              = 7831
+	workerHealthPort             = 7832
 	authorityLeaseSeconds        = int32(120)
 	postActivationRouteAttempts  = 12
 	postActivationRouteSuccesses = 3
@@ -47,6 +48,28 @@ type frontAuthorityConfig struct {
 	RouteHost       string
 	RoutePath       string
 	RouteBodyDigest string
+}
+
+type authorityWorkerHealth struct {
+	Status                string `json:"status"`
+	Healthy               bool   `json:"healthy"`
+	EdgeGroupID           string `json:"edge_group_id"`
+	BundleVersion         string `json:"bundle_version"`
+	PublicationSequence   uint64 `json:"publication_sequence"`
+	ServingGeneration     string `json:"serving_generation"`
+	CandidateBundleLoaded bool   `json:"candidate_bundle_loaded"`
+	CandidateRecordDigest string `json:"candidate_record_digest"`
+	CandidateWorkerSlot   string `json:"candidate_worker_slot"`
+}
+
+func authorityRuntimeCohortLimit(expectedNodes int) int64 {
+	// One control-plane Pod, one Front, and two slot Workers may exist per
+	// node. Spare capacity covers a terminating predecessor without allowing
+	// an unbounded recovery list.
+	if expectedNodes < 1 {
+		return 8
+	}
+	return int64(4*expectedNodes + 4)
 }
 
 type podCommandExecutor interface {
@@ -265,7 +288,7 @@ func (activator *frontAuthorityActivator) observeFrontsForPreflight(ctx context.
 		return fronts, nil
 	}
 	selector := labels.Set{"fugue.io/edge-group-id": target.GroupID}.AsSelector().String()
-	list, listErr := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: authorityRecoveryCohortLimit(activator.config.ExpectedNodes)})
+	list, listErr := activator.client.CoreV1().Pods(activator.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: authorityRuntimeCohortLimit(activator.config.ExpectedNodes)})
 	if listErr != nil || list.Continue != "" {
 		return nil, fmt.Errorf("Front readiness failed and recovery cohort is unavailable: %w", err)
 	}
@@ -607,8 +630,8 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 		if worker.Status.PodIP == "" {
 			return false, errors.New("authority Worker route generation is unavailable")
 		}
-		var health baselineWorkerHealth
-		if err := readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil ||
+		var health authorityWorkerHealth
+		if err := readAuthorityRuntimeJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health); err != nil ||
 			!authorityWorkerHealthUsable(health, activator.config.GroupID) || (requireFront && !authorityWorkerHealthAtOrAfter(health, activator.config.GroupID, bundleGeneration)) {
 			return false, errors.New("authority Worker route generation does not match its pointer")
 		}
@@ -627,17 +650,17 @@ func (activator *frontAuthorityActivator) observeAuthorityRuntime(ctx context.Co
 	return true, nil
 }
 
-func authorityWorkerHealthMatches(health baselineWorkerHealth, groupID, bundleGeneration string) bool {
+func authorityWorkerHealthMatches(health authorityWorkerHealth, groupID, bundleGeneration string) bool {
 	serving, publication, _, err := splitPromotedBundleVersion(bundleGeneration)
 	return err == nil && authorityWorkerHealthUsable(health, groupID) && health.BundleVersion == bundleGeneration &&
 		health.ServingGeneration == serving && health.PublicationSequence == publication
 }
 
-func authorityWorkerHealthUsable(health baselineWorkerHealth, groupID string) bool {
+func authorityWorkerHealthUsable(health authorityWorkerHealth, groupID string) bool {
 	return health.Status == "ok" && health.Healthy && health.EdgeGroupID == groupID
 }
 
-func authorityWorkerHealthAtOrAfter(health baselineWorkerHealth, groupID, committedBundle string) bool {
+func authorityWorkerHealthAtOrAfter(health authorityWorkerHealth, groupID, committedBundle string) bool {
 	committedServing, committedPublication, committedRecovery, committedErr := splitPromotedBundleVersion(committedBundle)
 	observedServing, observedPublication, observedRecovery, observedErr := splitPromotedBundleVersion(health.BundleVersion)
 	if committedErr != nil || observedErr != nil || !authorityWorkerHealthUsable(health, groupID) ||
@@ -857,8 +880,8 @@ func (activator *frontAuthorityActivator) targetWorkersLoaded(ctx context.Contex
 		if worker.Status.PodIP == "" {
 			return false
 		}
-		var health baselineWorkerHealth
-		if readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health) != nil {
+		var health authorityWorkerHealth
+		if readAuthorityRuntimeJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health) != nil {
 			return false
 		}
 		matches := authorityWorkerHealthMatches(health, target.GroupID, target.FrontBundleGeneration)
@@ -941,6 +964,28 @@ func (lease *heldAuthorityLease) release(ctx context.Context) error {
 		return errors.New("group authority Lease release is unproven")
 	}
 	lease.rv = updated.ResourceVersion
+	return nil
+}
+
+func readAuthorityRuntimeJSON(ctx context.Context, endpoint string, destination any) error {
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return errors.New("health endpoint rejected runtime observation")
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("health endpoint has trailing data")
+	}
 	return nil
 }
 
