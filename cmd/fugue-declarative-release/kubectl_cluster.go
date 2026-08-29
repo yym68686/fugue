@@ -2480,7 +2480,12 @@ func sanitizeObservedResource(value map[string]any) map[string]any {
 	// template generations. It is not declarative intent and must not turn a
 	// prewrite CAS into a false drift between two read-only observations.
 	if annotations, ok := metadata["annotations"].(map[string]any); ok {
-		delete(annotations, "deprecated.daemonset.template.generation")
+		for _, key := range []string{
+			"deprecated.daemonset.template.generation",
+			"deployment.kubernetes.io/revision",
+		} {
+			delete(annotations, key)
+		}
 	}
 	return copyValue
 }

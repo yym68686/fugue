@@ -1486,6 +1486,24 @@ func TestSanitizeObservedResourceDropsDaemonSetControllerGenerationAnnotation(t 
 	}
 }
 
+func TestSanitizeObservedResourceDropsDeploymentControllerRevisionAnnotation(t *testing.T) {
+	resource := map[string]any{
+		"metadata": map[string]any{"annotations": map[string]any{
+			"deployment.kubernetes.io/revision": "701",
+			"fugue.pro/source-commit":           strings.Repeat("a", 40),
+		}},
+		"spec": map[string]any{"replicas": 2},
+	}
+	clean := sanitizeObservedResource(resource)
+	annotations := mapField(clean["metadata"].(map[string]any), "annotations")
+	if _, ok := annotations["deployment.kubernetes.io/revision"]; ok {
+		t.Fatal("deployment controller revision annotation remained in CAS digest")
+	}
+	if annotations["fugue.pro/source-commit"] != strings.Repeat("a", 40) {
+		t.Fatal("declarative source identity was removed")
+	}
+}
+
 func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ComponentID: "api",
