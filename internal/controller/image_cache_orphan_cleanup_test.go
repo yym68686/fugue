@@ -208,6 +208,58 @@ func TestScheduleOrphanImageCachePruneDeleteRefusesUntrackedManifest(t *testing.
 	}
 }
 
+func TestScheduleOrphanImageCachePruneDeleteKeepsUnsafeManifestOutOfBlobOnlyTask(t *testing.T) {
+	t.Parallel()
+
+	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	upsertControllerImageCacheManifest(t, stateStore)
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:                "machine-1",
+		ClusterNodeName:       "worker-1",
+		RuntimeID:             "runtime-1",
+		ObservedAt:            time.Now().UTC(),
+		Status:                "filesystem_pressure",
+		FilesystemUsedPercent: 91,
+		UnreferencedBlobCount: 1,
+		UnreferencedBlobBytes: 1 << 30,
+		UnreferencedBlobs: []model.ImageCachePruneBlobCandidate{{
+			Digest:             "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			SizeBytes:          1 << 30,
+			PlannedDeleteBytes: 1 << 30,
+			Reason:             "unreferenced_blob",
+		}},
+	}, nil); err != nil {
+		t.Fatalf("upsert blob inventory: %v", err)
+	}
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxTargetsPerNode:     10,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "1Gi",
+			ImageStoreOrphanPruneMinReplicaCount:       1,
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("schedule orphan prune: %v", err)
+	}
+	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Payload["allow_delete"] != "true" || tasks[0].Payload["include_unreferenced_blobs"] != "true" {
+		t.Fatalf("expected one deleting blob task, got %+v", tasks)
+	}
+	if tasks[0].Payload["targets_json"] != "[]" {
+		t.Fatalf("unsafe manifest leaked into automatic delete targets: %+v", tasks[0].Payload)
+	}
+}
+
 func TestControllerImageCacheAutomaticDeleteRequiresPositiveRemovalEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -222,6 +274,13 @@ func TestControllerImageCacheAutomaticDeleteRequiresPositiveRemovalEvidence(t *t
 		if unsafe := controllerImageCacheAutomaticDeleteUnsafeReason(plan); unsafe != "" {
 			t.Fatalf("explicit removal reason %q was rejected as %q", reason, unsafe)
 		}
+	}
+	mixed := controllerImageCacheAutomaticDeleteCandidates([]model.ImageCachePruneCandidate{
+		{Reason: "missing_control_plane_image", Target: "unsafe"},
+		{Reason: "deleted_image_generation", Target: "safe"},
+	})
+	if len(mixed) != 1 || mixed[0].Target != "safe" {
+		t.Fatalf("automatic delete filter did not preserve only the authorized target: %+v", mixed)
 	}
 }
 
@@ -321,7 +380,7 @@ func TestScheduleOrphanImageCachePrunePrioritizesPressureAndDoesNotLetPendingSta
 	}
 	if pressureTask.Payload["candidate_blob_bytes"] != "8589934592" ||
 		pressureTask.Payload["include_unreferenced_blobs"] != "true" ||
-		pressureTask.Payload["max_delete_bytes"] != "26843545600" {
+		pressureTask.Payload["max_delete_bytes"] != "1073741824" {
 		t.Fatalf("unexpected pressure prune payload: %+v", pressureTask.Payload)
 	}
 }
@@ -629,6 +688,33 @@ func TestScheduleOrphanImageCachePruneHaltsAfterControllerFailure(t *testing.T) 
 	}
 	if len(pending) != 0 {
 		t.Fatalf("failed controller prune did not halt automation: %+v", pending)
+	}
+}
+
+func TestControllerImageCachePruneDoesNotHaltAfterPreExecutionRefusal(t *testing.T) {
+	t.Parallel()
+
+	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	updater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache})
+	if err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	task, err := stateStore.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, "", "", model.NodeUpdateTaskTypePruneImageCache, map[string]string{
+		"prune_reason": "image-cache-orphan",
+	})
+	if err != nil {
+		t.Fatalf("create prune task: %v", err)
+	}
+	if _, err := stateStore.FailNodeUpdateTask(task.ID, updater.ID, controllerImageCacheRefusedBeforeExecutionResult, "task is stale"); err != nil {
+		t.Fatalf("refuse prune task: %v", err)
+	}
+	svc := &Service{Store: stateStore}
+	failed, halted, err := svc.controllerImageCacheAutomaticPruneFailedTask()
+	if err != nil {
+		t.Fatalf("inspect failed prune tasks: %v", err)
+	}
+	if halted {
+		t.Fatalf("pre-execution refusal permanently halted automation: %+v", failed)
 	}
 }
 

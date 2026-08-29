@@ -10,6 +10,11 @@ import (
 	"fugue/internal/model"
 )
 
+type latestAppMigrationLedgerArchive struct {
+	ledger    model.AppMigrationLedger
+	createdAt time.Time
+}
+
 // recordAppMigrationLedgerArchive writes the retention authority before the
 // diagnostic operation-evidence copy. The archive has no app/operation/tenant
 // foreign key, so normal product-data purge cannot shorten its 90-day life.
@@ -50,6 +55,39 @@ func (s *Store) listAppMigrationLedgerArchive(filter model.OperationEvidenceFilt
 		return nil
 	})
 	return out, err
+}
+
+// latestAppMigrationLedgerArchiveByOperation is the bounded read used by
+// global cleanup protection. Diagnostic callers keep the complete archive
+// listing above, while this path only transfers one snapshot per operation.
+func (s *Store) latestAppMigrationLedgerArchiveByOperation() (map[string]latestAppMigrationLedgerArchive, error) {
+	if s == nil {
+		return nil, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgLatestAppMigrationLedgerArchiveByOperation()
+	}
+	ledgers, err := s.listAppMigrationLedgerArchive(model.OperationEvidenceFilter{PlatformAdmin: true})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]latestAppMigrationLedgerArchive, len(ledgers))
+	for _, ledger := range ledgers {
+		opID := strings.TrimSpace(ledger.OperationID)
+		if opID == "" {
+			continue
+		}
+		current, exists := out[opID]
+		if !exists || ledger.UpdatedAt.After(current.ledger.UpdatedAt) ||
+			(ledger.UpdatedAt.Equal(current.ledger.UpdatedAt) && ledger.ID > current.ledger.ID) {
+			current.ledger = ledger
+		}
+		if current.createdAt.IsZero() || (!ledger.CreatedAt.IsZero() && ledger.CreatedAt.Before(current.createdAt)) {
+			current.createdAt = ledger.CreatedAt
+		}
+		out[opID] = current
+	}
+	return out, nil
 }
 
 func (s *Store) pgRecordAppMigrationLedgerArchive(ledger model.AppMigrationLedger) error {
@@ -137,6 +175,71 @@ func (s *Store) pgListAppMigrationLedgerArchive(filter model.OperationEvidenceFi
 			continue
 		}
 		out = append(out, model.NormalizeAppMigrationLedger(ledger, collectedAt))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapDBErr(err)
+	}
+	return out, nil
+}
+
+func (s *Store) pgLatestAppMigrationLedgerArchiveByOperation() (map[string]latestAppMigrationLedgerArchive, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+WITH latest AS (
+	SELECT DISTINCT ON (operation_id)
+		operation_id, tenant_id, app_id, ledger_json, collected_at
+	FROM fugue_app_migration_ledgers
+	WHERE operation_id <> ''
+	ORDER BY operation_id, collected_at DESC, id DESC
+), earliest AS (
+	SELECT operation_id, MIN(created_at) AS created_at
+	FROM fugue_app_migration_ledgers
+	WHERE operation_id <> ''
+	GROUP BY operation_id
+)
+SELECT latest.operation_id, latest.tenant_id, latest.app_id,
+	latest.ledger_json, latest.collected_at, earliest.created_at
+FROM latest
+JOIN earliest USING (operation_id)
+ORDER BY latest.collected_at DESC, latest.operation_id DESC
+`)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	out := map[string]latestAppMigrationLedgerArchive{}
+	for rows.Next() {
+		var operationID string
+		var tenantID string
+		var appID string
+		var payload []byte
+		var collectedAt time.Time
+		var createdAt time.Time
+		if err := rows.Scan(&operationID, &tenantID, &appID, &payload, &collectedAt, &createdAt); err != nil {
+			return nil, mapDBErr(err)
+		}
+		operationID = strings.TrimSpace(operationID)
+		if operationID == "" {
+			continue
+		}
+		var ledger model.AppMigrationLedger
+		if err := json.Unmarshal(payload, &ledger); err != nil {
+			ledger = model.AppMigrationLedger{
+				TenantID:              strings.TrimSpace(tenantID),
+				AppID:                 strings.TrimSpace(appID),
+				OperationID:           operationID,
+				CutoverStatus:         model.AppMigrationCutoverBlocked,
+				OldArtifactsProtected: true,
+				FailureReason:         "migration ledger archive payload is malformed",
+			}
+		} else {
+			ledger = model.NormalizeAppMigrationLedger(ledger, collectedAt)
+			ledger.TenantID = strings.TrimSpace(tenantID)
+			ledger.AppID = strings.TrimSpace(appID)
+			ledger.OperationID = operationID
+		}
+		out[operationID] = latestAppMigrationLedgerArchive{ledger: ledger, createdAt: createdAt}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, mapDBErr(err)

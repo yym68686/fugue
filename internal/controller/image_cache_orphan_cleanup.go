@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	defaultImageCachePruneGlobalConcurrency = 1
-	defaultImageCachePruneNodeCooldown      = 30 * time.Minute
-	defaultImageCachePressurePruneBudget    = int64(25 << 30)
+	defaultImageCachePruneGlobalConcurrency          = 1
+	defaultImageCachePruneNodeCooldown               = 30 * time.Minute
+	controllerImageCacheRefusedBeforeExecutionResult = "node update task refused before execution"
 )
 
 type nodeImageCachePrunePlan struct {
@@ -29,15 +29,18 @@ type nodeImageCachePrunePlan struct {
 
 func (s *Service) runImageCacheStorageMaintenance(ctx context.Context) error {
 	if err := s.scheduleImageCacheInventoryReports(ctx); err != nil {
-		return err
+		return fmt.Errorf("schedule image-cache inventory reports: %w", err)
 	}
 	if err := s.reconcileDistributedImageIntegrity(ctx); err != nil {
-		return err
+		return fmt.Errorf("reconcile distributed image integrity: %w", err)
 	}
 	if err := s.reconcileLegacyDistributedImageMetadata(ctx); err != nil {
-		return err
+		return fmt.Errorf("reconcile legacy distributed image metadata: %w", err)
 	}
-	return s.scheduleOrphanImageCachePrune(ctx)
+	if err := s.scheduleOrphanImageCachePrune(ctx); err != nil {
+		return fmt.Errorf("schedule orphan image-cache prune: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) scheduleImageCacheInventoryReports(ctx context.Context) error {
@@ -134,16 +137,6 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 	if mode == model.ImageCachePruneModeObserve {
 		return nil
 	}
-	if mode == model.ImageCachePruneModeDelete {
-		for _, item := range plans {
-			if reason := controllerImageCacheAutomaticDeleteUnsafeReason(item.plan); reason != "" {
-				if s.Logger != nil {
-					s.Logger.Printf("halt image-cache orphan auto prune: unsafe candidate reason=%s node=%s plan=%s", reason, item.plan.ClusterNodeName, item.plan.ID)
-				}
-				return nil
-			}
-		}
-	}
 	sortControllerImageCachePrunePlans(plans)
 	updaters, err := s.Store.ListNodeUpdaters("", true)
 	if err != nil {
@@ -202,7 +195,14 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 			}
 			continue
 		}
-		targets := controllerImageCachePruneTargets(plan.Candidates, s.Config.ImageStoreOrphanPruneMaxTargetsPerNode)
+		candidates := plan.Candidates
+		if mode == model.ImageCachePruneModeDelete {
+			if reason := controllerImageCacheAutomaticDeleteUnsafeReason(plan); reason != "" && s.Logger != nil {
+				s.Logger.Printf("exclude unsafe manifest candidates from image-cache orphan auto prune: reason=%s node=%s plan=%s", reason, plan.ClusterNodeName, plan.ID)
+			}
+			candidates = controllerImageCacheAutomaticDeleteCandidates(plan.Candidates)
+		}
+		targets := controllerImageCachePruneTargets(candidates, s.Config.ImageStoreOrphanPruneMaxTargetsPerNode)
 		if len(targets) == 0 && plan.CandidateBlobCount == 0 {
 			continue
 		}
@@ -254,6 +254,9 @@ func (s *Service) controllerImageCacheAutomaticPruneFailedTask() (model.NodeUpda
 			continue
 		}
 		if strings.TrimSpace(task.Payload["prune_reason"]) != "image-cache-orphan" {
+			continue
+		}
+		if strings.TrimSpace(task.ResultMessage) == controllerImageCacheRefusedBeforeExecutionResult {
 			continue
 		}
 		return task, true, nil
@@ -1057,21 +1060,36 @@ func controllerImageCachePruneTargets(candidates []model.ImageCachePruneCandidat
 
 func controllerImageCacheAutomaticDeleteUnsafeReason(plan model.ImageCachePrunePlan) string {
 	for _, candidate := range plan.Candidates {
-		if candidate.Protected {
-			return "protected_candidate"
-		}
-		reason := strings.TrimSpace(candidate.Reason)
-		switch reason {
-		case "deleted_image_generation", "stale_replica", "excess_replica":
-			continue
-		default:
-			if reason == "" {
-				return "empty_candidate_reason"
-			}
+		if reason := controllerImageCacheAutomaticDeleteUnsafeCandidateReason(candidate); reason != "" {
 			return reason
 		}
 	}
 	return ""
+}
+
+func controllerImageCacheAutomaticDeleteCandidates(candidates []model.ImageCachePruneCandidate) []model.ImageCachePruneCandidate {
+	out := make([]model.ImageCachePruneCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if controllerImageCacheAutomaticDeleteUnsafeCandidateReason(candidate) == "" {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func controllerImageCacheAutomaticDeleteUnsafeCandidateReason(candidate model.ImageCachePruneCandidate) string {
+	if candidate.Protected {
+		return "protected_candidate"
+	}
+	reason := strings.TrimSpace(candidate.Reason)
+	switch reason {
+	case "deleted_image_generation", "stale_replica", "excess_replica":
+		return ""
+	case "":
+		return "empty_candidate_reason"
+	default:
+		return reason
+	}
 }
 
 func normalizeControllerImageCachePruneMode(raw string) string {
@@ -1117,11 +1135,7 @@ func (s *Service) controllerImageCacheMaxDeleteBytes() int64 {
 }
 
 func (s *Service) controllerImageCacheMaxDeleteBytesForNode(node model.ImageCacheNodeInventory) int64 {
-	value := s.controllerImageCacheMaxDeleteBytes()
-	if controllerImageCacheNodePressure(node) && value > 0 && value < defaultImageCachePressurePruneBudget {
-		return defaultImageCachePressurePruneBudget
-	}
-	return value
+	return s.controllerImageCacheMaxDeleteBytes()
 }
 
 func (s *Service) controllerImageCacheMinReplicaCount() int {

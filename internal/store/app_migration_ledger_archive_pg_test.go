@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,72 @@ func TestPostgresRecordsMigrationLedgerArchiveBeforeRetentionPrune(t *testing.T)
 	s := &Store{db: db, databaseURL: "postgres://test"}
 	if err := s.pgRecordAppMigrationLedgerArchive(ledger); err != nil {
 		t.Fatalf("record migration archive: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("archive SQL mismatch: %v", err)
+	}
+}
+
+func TestPostgresLatestMigrationLedgerArchiveIsBoundedPerOperation(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock: %v", err)
+	}
+	defer db.Close()
+	createdAt := time.Now().UTC().Add(-48 * time.Hour)
+	collectedAt := time.Now().UTC()
+	ledger := model.AppMigrationLedger{
+		ID:          "migration-latest",
+		TenantID:    "tenant-archive",
+		AppID:       "app-archive",
+		OperationID: "op-archive",
+		CreatedAt:   createdAt.Add(24 * time.Hour),
+		UpdatedAt:   collectedAt,
+	}
+	payload, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatalf("marshal ledger: %v", err)
+	}
+	mock.ExpectQuery(`(?s)WITH latest AS \(.*SELECT DISTINCT ON \(operation_id\).*earliest AS \(.*MIN\(created_at\).*GROUP BY operation_id.*JOIN earliest USING \(operation_id\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"operation_id", "tenant_id", "app_id", "ledger_json", "collected_at", "created_at"}).
+			AddRow(ledger.OperationID, ledger.TenantID, ledger.AppID, payload, collectedAt, createdAt))
+	s := &Store{db: db, databaseURL: "postgres://test"}
+	got, err := s.pgLatestAppMigrationLedgerArchiveByOperation()
+	if err != nil {
+		t.Fatalf("latest migration archive: %v", err)
+	}
+	archive, ok := got[ledger.OperationID]
+	if !ok || archive.ledger.ID != ledger.ID || !archive.createdAt.Equal(createdAt) {
+		t.Fatalf("unexpected bounded archive result: %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("archive SQL mismatch: %v", err)
+	}
+}
+
+func TestPostgresLatestMigrationLedgerArchiveFailsClosedOnMalformedPayload(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock: %v", err)
+	}
+	defer db.Close()
+	createdAt := time.Now().UTC().Add(-48 * time.Hour)
+	collectedAt := time.Now().UTC()
+	mock.ExpectQuery(`(?s)WITH latest AS \(.*SELECT DISTINCT ON \(operation_id\).*JOIN earliest USING \(operation_id\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"operation_id", "tenant_id", "app_id", "ledger_json", "collected_at", "created_at"}).
+			AddRow("op-malformed", "tenant-malformed", "app-malformed", []byte(`{"schema_version":[]}`), collectedAt, createdAt))
+	s := &Store{db: db, databaseURL: "postgres://test"}
+	got, err := s.pgLatestAppMigrationLedgerArchiveByOperation()
+	if err != nil {
+		t.Fatalf("latest migration archive: %v", err)
+	}
+	archive, ok := got["op-malformed"]
+	if !ok || archive.ledger.AppID != "app-malformed" ||
+		archive.ledger.CutoverStatus != model.AppMigrationCutoverBlocked ||
+		!archive.ledger.OldArtifactsProtected {
+		t.Fatalf("malformed archive did not fail closed: %+v", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("archive SQL mismatch: %v", err)

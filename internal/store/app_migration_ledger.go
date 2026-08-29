@@ -331,7 +331,7 @@ func (s *Store) latestMigrationLedgerForApp(appID string) (model.AppMigrationLed
 // which has no app-specific request context. It applies the same operation
 // chronology rule as the per-app retirement gate.
 func (s *Store) LatestAppMigrationLedgersByApp() (map[string]model.AppMigrationLedger, error) {
-	ledgers, err := s.ListAppMigrationLedgers(model.OperationEvidenceFilter{PlatformAdmin: true})
+	latestArchiveByOperation, err := s.latestAppMigrationLedgerArchiveByOperation()
 	if err != nil {
 		return nil, err
 	}
@@ -340,22 +340,6 @@ func (s *Store) LatestAppMigrationLedgersByApp() (map[string]model.AppMigrationL
 	})
 	if err != nil {
 		return nil, err
-	}
-	latestByOperation := make(map[string]model.AppMigrationLedger, len(ledgers))
-	createdByOperation := make(map[string]time.Time, len(ledgers))
-	for _, ledger := range ledgers {
-		opID := strings.TrimSpace(ledger.OperationID)
-		if opID == "" {
-			continue
-		}
-		current, exists := latestByOperation[opID]
-		if !exists || ledger.UpdatedAt.After(current.UpdatedAt) ||
-			(ledger.UpdatedAt.Equal(current.UpdatedAt) && ledger.ID > current.ID) {
-			latestByOperation[opID] = ledger
-		}
-		if created, exists := createdByOperation[opID]; !exists || (!ledger.CreatedAt.IsZero() && ledger.CreatedAt.Before(created)) {
-			createdByOperation[opID] = ledger.CreatedAt
-		}
 	}
 	type migrationLedgerCandidate struct {
 		operationID    string
@@ -369,11 +353,12 @@ func (s *Store) LatestAppMigrationLedgersByApp() (map[string]model.AppMigrationL
 	for _, operation := range operations {
 		operationByID[strings.TrimSpace(operation.ID)] = operation
 	}
-	candidates := make([]migrationLedgerCandidate, 0, len(latestByOperation)+len(operations))
-	seenOperations := make(map[string]struct{}, len(latestByOperation)+len(operations))
-	for opID, ledger := range latestByOperation {
+	candidates := make([]migrationLedgerCandidate, 0, len(latestArchiveByOperation)+len(operations))
+	seenOperations := make(map[string]struct{}, len(latestArchiveByOperation)+len(operations))
+	for opID, archive := range latestArchiveByOperation {
+		ledger := archive.ledger
 		operation, operationFound := operationByID[opID]
-		createdAt := createdByOperation[opID]
+		createdAt := archive.createdAt
 		appID := strings.TrimSpace(ledger.AppID)
 		if operationFound {
 			createdAt = operation.CreatedAt
