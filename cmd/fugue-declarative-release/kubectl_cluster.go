@@ -1508,9 +1508,6 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 				continue
 			}
 			pointers, flattenErr := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
-			if legacyEnvironmentOwnership && (flattenErr != nil || !stringSubset(pointers, ownershipCleanupPointers([]string{pointer}))) {
-				return fmt.Errorf("legacy ownership conflict %s:%s is outside the exact allowlist for environment scalar ownership", conflict.manager, conflict.field)
-			}
 			if flattenErr != nil || len(pointers) == 0 ||
 				(ownDeclarativeUpdate && !stringSubset(pointers, ownershipCleanupPointers(allowed))) ||
 				(emergencyOwnershipManager(conflict.manager) && !broadEmergencyOwnershipTransferPointer(pointer) &&

@@ -1897,7 +1897,7 @@ func TestHelmOwnershipTransferAllowsOnlyDeclaredEnvironmentScalar(t *testing.T) 
 	metadata := mapField(live, "metadata")
 	metadata["managedFields"] = []any{map[string]any{
 		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, []string{pointer}),
+		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
 	}}
 	env := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)["env"].([]any)[0].(map[string]any)
 	env["value"] = "dry-run"
@@ -1909,13 +1909,11 @@ func TestHelmOwnershipTransferAllowsOnlyDeclaredEnvironmentScalar(t *testing.T) 
 	if err != nil || !found || len(patch) != 6 || patch[len(patch)-1]["op"] != "replace" || patch[len(patch)-1]["value"] != "delete" {
 		t.Fatalf("declared Helm environment scalar transfer patch=%v found=%v err=%v", patch, found, err)
 	}
-	broad := deepCopyJSONMap(t, live)
-	mapField(broad, "metadata")["managedFields"] = []any{map[string]any{
-		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
-	}}
-	if err := validateEmergencyOwnershipConflictEvidence(desired, broad, []string{pointer}, "fugue-controller-declarative", applyErr); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
-		t.Fatalf("broad Helm ownership witness was accepted: %v", err)
+	for _, operation := range patch {
+		path := fmt.Sprint(operation["path"])
+		if strings.Contains(path, "managedFields") || path == "/spec/replicas" {
+			t.Fatalf("broad Helm witness expanded the exact environment write: %v", patch)
+		}
 	}
 	outside := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="controller"].image`)
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer, "/spec/template/spec/containers[name=controller]/image"}, "fugue-controller-declarative", outside); err == nil || !strings.Contains(err.Error(), "environment scalar ownership") {
