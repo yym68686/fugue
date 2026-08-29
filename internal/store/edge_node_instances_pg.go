@@ -97,81 +97,6 @@ WHERE i.edge_id IS NULL`, edgeLegacyMigrationSlot, edgeLegacyMigrationEpoch).Sca
 	return nil
 }
 
-func (s *Store) pgPutEdgeActiveEpoch(epoch model.EdgeActiveEpoch) (model.EdgeActiveEpoch, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.EdgeActiveEpoch{}, fmt.Errorf("begin active edge epoch transaction: %w", err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, pgEdgeAdvisoryLockKey("active-epoch", epoch.EdgeGroupID)); err != nil {
-		return model.EdgeActiveEpoch{}, fmt.Errorf("lock active edge epoch: %w", err)
-	}
-
-	now, err := pgEdgeServerTime(ctx, tx)
-	if err != nil {
-		return model.EdgeActiveEpoch{}, err
-	}
-	current, err := scanEdgeActiveEpoch(tx.QueryRowContext(ctx, `SELECT `+edgeActiveEpochSelectColumns+`
-FROM fugue_edge_active_epochs WHERE edge_group_id = $1 FOR UPDATE`, epoch.EdgeGroupID))
-	switch {
-	case err == nil:
-		if epoch.FenceSequence < current.FenceSequence || (epoch.FenceSequence == current.FenceSequence && !sameEdgeActiveEpochIdentity(current, epoch)) {
-			return model.EdgeActiveEpoch{}, ErrConflict
-		}
-		if epoch.FenceSequence == current.FenceSequence {
-			return current, nil
-		}
-		epoch.CreatedAt = current.CreatedAt
-	case errors.Is(err, sql.ErrNoRows):
-		epoch.CreatedAt = now
-	default:
-		return model.EdgeActiveEpoch{}, mapDBErr(err)
-	}
-	if epoch.ActivatedAt.IsZero() {
-		epoch.ActivatedAt = now
-	}
-	epoch.UpdatedAt = now
-	stored, err := scanEdgeActiveEpoch(tx.QueryRowContext(ctx, `
-INSERT INTO fugue_edge_active_epochs (
-	edge_group_id, slot, release_epoch, fence_sequence, min_healthy_instances,
-	activated_at, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-ON CONFLICT (edge_group_id) DO UPDATE SET
-	slot = EXCLUDED.slot,
-	release_epoch = EXCLUDED.release_epoch,
-	fence_sequence = EXCLUDED.fence_sequence,
-	min_healthy_instances = EXCLUDED.min_healthy_instances,
-	activated_at = EXCLUDED.activated_at,
-	updated_at = EXCLUDED.updated_at
-WHERE fugue_edge_active_epochs.fence_sequence < EXCLUDED.fence_sequence
-RETURNING `+edgeActiveEpochSelectColumns,
-		epoch.EdgeGroupID, epoch.Slot, epoch.ReleaseEpoch, epoch.FenceSequence, epoch.MinHealthyInstances,
-		epoch.ActivatedAt, epoch.CreatedAt, epoch.UpdatedAt))
-	if errors.Is(err, sql.ErrNoRows) {
-		return model.EdgeActiveEpoch{}, ErrConflict
-	}
-	if err != nil {
-		return model.EdgeActiveEpoch{}, mapDBErr(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return model.EdgeActiveEpoch{}, fmt.Errorf("commit active edge epoch transaction: %w", err)
-	}
-	return stored, nil
-}
-
-func (s *Store) pgGetEdgeActiveEpoch(edgeGroupID string) (model.EdgeActiveEpoch, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	epoch, err := scanEdgeActiveEpoch(s.db.QueryRowContext(ctx, `SELECT `+edgeActiveEpochSelectColumns+`
-FROM fugue_edge_active_epochs WHERE edge_group_id = $1`, edgeGroupID))
-	if err != nil {
-		return model.EdgeActiveEpoch{}, mapDBErr(err)
-	}
-	return epoch, nil
-}
-
 func (s *Store) pgListEdgeNodeInstances(edgeGroupID string) ([]model.EdgeNodeInstance, []model.EdgeActiveEpoch, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -282,20 +207,6 @@ RETURNING `+edgeInstanceSelectColumns,
 func pgEdgeAdvisoryLockKey(scope, identity string) string {
 	sum := sha256.Sum256([]byte(scope + "\x00" + identity))
 	return fmt.Sprintf("fugue-edge:%s:%x", scope, sum[:])
-}
-
-func (s *Store) pgListActiveEdgeInstanceMaterial(edgeGroupID string) ([]model.EdgeNodeInstance, []model.EdgeActiveEpoch, []model.EdgeGroup, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	instances, epochs, err := s.pgListEdgeNodeInstances(edgeGroupID)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	groups, err := s.pgListEdgeGroups(ctx, edgeGroupID)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return instances, epochs, groups, nil
 }
 
 func pgReadEdgeNodeInstances(ctx context.Context, db sqlQueryer, edgeGroupID string) ([]model.EdgeNodeInstance, error) {

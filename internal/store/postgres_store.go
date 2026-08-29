@@ -260,10 +260,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	return project, nil
 }
 
-func (s *Store) pgUpdateProject(id string, name, description *string) (model.Project, error) {
-	return s.pgUpdateProjectFields(id, ProjectUpdate{Name: name, Description: description})
-}
-
 func (s *Store) pgUpdateProjectFields(id string, update ProjectUpdate) (model.Project, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -942,10 +938,6 @@ WHERE id = $1
 		return model.NodeKey{}, fmt.Errorf("commit authenticate node key transaction: %w", err)
 	}
 	return redactNodeKey(key), nil
-}
-
-func (s *Store) pgCreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
-	return s.pgCreateScopedNodeKey(tenantID, label, model.NodeKeyScopeTenantRuntime)
 }
 
 func (s *Store) pgCreateScopedNodeKey(tenantID, label, scope string) (model.NodeKey, string, error) {
@@ -1798,24 +1790,6 @@ func (s *Store) pgDeleteRuntime(runtimeID string) (model.Runtime, error) {
 		return model.Runtime{}, fmt.Errorf("commit delete runtime transaction: %w", err)
 	}
 	return runtime, nil
-}
-
-func (s *Store) pgFindManagedOwnedRuntimeTx(ctx context.Context, tx *sql.Tx, nodeKeyID, runtimeName string) (model.Runtime, bool, error) {
-	runtime, err := scanRuntime(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
-FROM fugue_runtimes
-WHERE type = $1
-  AND node_key_id = $2
-  AND lower(name) = lower($3)
-FOR UPDATE
-`, model.RuntimeTypeManagedOwned, nodeKeyID, strings.TrimSpace(runtimeName)))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return model.Runtime{}, false, nil
-		}
-		return model.Runtime{}, false, fmt.Errorf("find managed-owned runtime by node key %s and name %s: %w", nodeKeyID, runtimeName, err)
-	}
-	return runtime, true, nil
 }
 
 func (s *Store) pgGetRuntimeTx(ctx context.Context, tx *sql.Tx, id string, forUpdate bool) (model.Runtime, error) {
@@ -3804,10 +3778,6 @@ ORDER BY created_at ASC, id ASC
 	return active, nil
 }
 
-func (s *Store) pgListOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
-	return s.pgListOperationsFiltered(tenantID, platformAdmin, OperationListFilter{}, true)
-}
-
 func (s *Store) pgListOperationsFiltered(tenantID string, platformAdmin bool, filter OperationListFilter, includeDesired bool) ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -3882,117 +3852,6 @@ func (s *Store) pgListOperationsFiltered(tenantID string, platformAdmin bool, fi
 		return nil, fmt.Errorf("iterate operations: %w", err)
 	}
 	sortOperationsOldestFirst(ops)
-	return ops, nil
-}
-
-func (s *Store) pgListOperationSummaries(tenantID string, platformAdmin bool) ([]model.Operation, error) {
-	return s.pgListOperationsFiltered(tenantID, platformAdmin, OperationListFilter{}, false)
-}
-
-func (s *Store) pgListOperationSummariesLegacy(tenantID string, platformAdmin bool) ([]model.Operation, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
-FROM fugue_operations
-`
-	args := make([]any, 0, 1)
-	if !platformAdmin {
-		query += ` WHERE tenant_id = $1`
-		args = append(args, tenantID)
-	}
-	query += ` ORDER BY created_at ASC`
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list operation summaries: %w", err)
-	}
-	defer rows.Close()
-
-	ops := make([]model.Operation, 0)
-	for rows.Next() {
-		op, err := scanOperationSummary(rows)
-		if err != nil {
-			return nil, err
-		}
-		ops = append(ops, op)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate operation summaries: %w", err)
-	}
-	return ops, nil
-}
-
-func (s *Store) pgListOperationsByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
-FROM fugue_operations
-WHERE app_id = $1
-`
-	args := []any{appID}
-	if !platformAdmin {
-		query += ` AND tenant_id = $2`
-		args = append(args, tenantID)
-	}
-	query += ` ORDER BY created_at ASC`
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list operations by app: %w", err)
-	}
-	defer rows.Close()
-
-	ops := make([]model.Operation, 0)
-	for rows.Next() {
-		op, err := scanOperation(rows)
-		if err != nil {
-			return nil, err
-		}
-		ops = append(ops, op)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate operations by app: %w", err)
-	}
-	return ops, nil
-}
-
-func (s *Store) pgListOperationSummariesByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
-FROM fugue_operations
-WHERE app_id = $1
-`
-	args := []any{appID}
-	if !platformAdmin {
-		query += ` AND tenant_id = $2`
-		args = append(args, tenantID)
-	}
-	query += ` ORDER BY created_at ASC`
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list operation summaries by app: %w", err)
-	}
-	defer rows.Close()
-
-	ops := make([]model.Operation, 0)
-	for rows.Next() {
-		op, err := scanOperationSummary(rows)
-		if err != nil {
-			return nil, err
-		}
-		ops = append(ops, op)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate operation summaries by app: %w", err)
-	}
 	return ops, nil
 }
 
@@ -6234,12 +6093,6 @@ func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 	app.Status.LastFailedOperation = model.AppOperationFailureFromOperation(*op)
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
-}
-
-func sortOperationsByCreatedAt(ops []model.Operation) {
-	sort.Slice(ops, func(i, j int) bool {
-		return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-	})
 }
 
 func sqlPlaceholderList(start, count int) string {

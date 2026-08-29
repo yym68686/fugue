@@ -965,21 +965,6 @@ func (s *Store) pgDeleteOwnedBackingServicesByAppTx(ctx context.Context, tx *sql
 	return nil
 }
 
-func (s *Store) pgHasOwnedPostgresServiceTx(ctx context.Context, tx *sql.Tx, appID string) (bool, error) {
-	var exists bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-	SELECT 1
-	FROM fugue_backing_services
-	WHERE owner_app_id = $1
-	  AND type = $2
-)
-`, appID, model.BackingServiceTypePostgres).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check owned postgres service for app %s: %w", appID, err)
-	}
-	return exists, nil
-}
-
 func (s *Store) pgAppHasBindingToServiceTypeTx(ctx context.Context, tx *sql.Tx, appID, serviceType string) (bool, error) {
 	var exists bool
 	if err := tx.QueryRowContext(ctx, `
