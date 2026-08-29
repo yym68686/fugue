@@ -38,7 +38,7 @@ func TestBuilderPodPolicyEscalatesHeavyMemoryAfterOOM(t *testing.T) {
 		{oomRetries: 2, want: "12288Mi"},
 		{oomRetries: 3, want: "16384Mi"},
 	} {
-		got := builderPodPolicyForAttempt(policy, builderWorkloadProfileHeavy, tc.oomRetries)
+		got := builderPodPolicyForRetryCounts(policy, builderWorkloadProfileHeavy, tc.oomRetries, 0)
 		if limit := got.Heavy.Resources.Limits["memory"]; limit != tc.want {
 			t.Fatalf("OOM retries=%d: expected memory limit %s, got %s", tc.oomRetries, tc.want, limit)
 		}
@@ -85,7 +85,7 @@ func TestBuilderPodPolicyCapsOOMGrowthAtTenantCeiling(t *testing.T) {
 	t.Parallel()
 
 	policy := builderPodPolicyWithMemoryCeiling(defaultBuilderPodPolicy(), 10*1024*1024*1024)
-	got := builderPodPolicyForAttempt(policy, builderWorkloadProfileHeavy, 2)
+	got := builderPodPolicyForRetryCounts(policy, builderWorkloadProfileHeavy, 2, 0)
 	if limit := got.Heavy.Resources.Limits["memory"]; limit != "10240Mi" {
 		t.Fatalf("expected OOM memory growth capped at 10Gi, got %s", limit)
 	}
@@ -97,7 +97,8 @@ func TestBuilderPodPolicyCapsOOMGrowthAtTenantCeiling(t *testing.T) {
 func TestBuilderPodPolicyCapsEphemeralGrowthAtTenantCeiling(t *testing.T) {
 	t.Parallel()
 
-	policy := builderPodPolicyWithEphemeralCeiling(defaultBuilderPodPolicy(), 14*1024*1024*1024)
+	policy := defaultBuilderPodPolicy()
+	policy.HeavyEphemeralLimitCeiling = formatBuilderStorageBytes(14 * 1024 * 1024 * 1024)
 	got := builderPodPolicyForRetryCounts(policy, builderWorkloadProfileHeavy, 0, 2)
 	if limit := got.Heavy.Resources.Limits["ephemeral-storage"]; limit != "14Gi" {
 		t.Fatalf("expected ephemeral growth capped at 14Gi, got %s", limit)
@@ -119,16 +120,17 @@ func TestBuilderPodPolicyStopsWhenTenantCeilingCannotGrow(t *testing.T) {
 func TestBuilderPodPolicyStopsWhenEphemeralCeilingCannotGrow(t *testing.T) {
 	t.Parallel()
 
-	policy := builderPodPolicyWithEphemeralCeiling(defaultBuilderPodPolicy(), DefaultBuilderHeavyEphemeralLimitBytes())
+	policy := defaultBuilderPodPolicy()
+	policy.HeavyEphemeralLimitCeiling = formatBuilderStorageBytes(DefaultBuilderHeavyEphemeralLimitBytes())
 	if _, err := builderPodPolicyForJobAttempt(policy, builderWorkloadProfileHeavy, builderJobAttempt{Number: 2, EphemeralRetryCount: 1}); err == nil {
 		t.Fatal("expected builder ephemeral retry to stop when the tenant ceiling cannot grow")
 	}
 }
 
-func TestBuildArchiveKanikoJobObjectAppliesLightBuilderPolicy(t *testing.T) {
+func TestBuildKanikoJobObjectAppliesLightBuilderPolicyForArchive(t *testing.T) {
 	t.Parallel()
 
-	jobObject, err := buildArchiveKanikoJobObject("fugue-system", "build-demo", dockerfileBuildRequest{
+	jobObject, err := buildKanikoJobObject("fugue-system", "build-demo", dockerfileBuildRequest{
 		ArchiveDownloadURL: "https://example.com/archive.tar.gz",
 		DockerfilePath:     "Dockerfile",
 		BuildContextDir:    ".",
@@ -327,10 +329,10 @@ func TestBuildNixpacksJobObjectPassesInferredSystemPackages(t *testing.T) {
 	}
 }
 
-func TestBuildArchiveKanikoJobObjectAppliesBuilderTolerations(t *testing.T) {
+func TestBuildKanikoJobObjectAppliesBuilderTolerationsForArchive(t *testing.T) {
 	t.Parallel()
 
-	jobObject, err := buildArchiveKanikoJobObject("fugue-system", "build-demo", dockerfileBuildRequest{
+	jobObject, err := buildKanikoJobObject("fugue-system", "build-demo", dockerfileBuildRequest{
 		ArchiveDownloadURL: "https://example.com/archive.tar.gz",
 		DockerfilePath:     "Dockerfile",
 		BuildContextDir:    ".",

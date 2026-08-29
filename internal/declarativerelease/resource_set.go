@@ -718,11 +718,3 @@ func resourceIdentity(value map[string]any) (ResourceIdentity, error) {
 func (identity ResourceIdentity) key() string {
 	return identity.APIVersion + "\x00" + identity.Kind + "\x00" + identity.Namespace + "\x00" + identity.Name
 }
-
-func sortResourceSet(set *ResourceSet) {
-	sort.Slice(set.Items, func(i, j int) bool {
-		left, _ := resourceIdentity(set.Items[i])
-		right, _ := resourceIdentity(set.Items[j])
-		return left.key() < right.key()
-	})
-}

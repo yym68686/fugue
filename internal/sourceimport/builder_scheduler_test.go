@@ -133,7 +133,7 @@ func TestBuilderDemandForProfileUsesRequestedResourcesWhenPresent(t *testing.T) 
 func TestEscalatedBuilderDemandReservesOOMMemoryTier(t *testing.T) {
 	t.Parallel()
 
-	policy := builderPodPolicyForAttempt(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, 1)
+	policy := builderPodPolicyForRetryCounts(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, 1, 0)
 	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
 	if err != nil {
 		t.Fatalf("builder demand: %v", err)
@@ -159,7 +159,7 @@ func TestEscalatedBuilderDemandReservesEphemeralTier(t *testing.T) {
 func TestSelectBuilderCandidatesExcludesNodesBelowReservedDemand(t *testing.T) {
 	t.Parallel()
 
-	policy := builderPodPolicyForAttempt(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, 1)
+	policy := builderPodPolicyForRetryCounts(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, 1, 0)
 	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
 	if err != nil {
 		t.Fatalf("builder demand: %v", err)

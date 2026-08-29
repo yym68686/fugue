@@ -1326,15 +1326,6 @@ func isComposeMissingRequiredEnvValue(value string) bool {
 	return strings.HasPrefix(value, composeMissingRequiredEnvPrefix) && strings.HasSuffix(value, composeMissingRequiredEnvSuffix)
 }
 
-func composeMissingRequiredEnvName(value string) string {
-	if !isComposeMissingRequiredEnvValue(value) {
-		return ""
-	}
-	value = strings.TrimPrefix(value, composeMissingRequiredEnvPrefix)
-	value = strings.TrimSuffix(value, composeMissingRequiredEnvSuffix)
-	return strings.TrimSpace(value)
-}
-
 func composeMissingRequiredEnvNames(value string) []string {
 	if !strings.Contains(value, composeMissingRequiredEnvPrefix) {
 		return nil

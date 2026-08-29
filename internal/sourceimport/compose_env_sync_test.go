@@ -48,9 +48,9 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 		t.Fatalf("write compose file: %v", err)
 	}
 
-	services, err := inspectImportableServicesFromRepo(clonedGitHubRepo{RepoDir: repoDir, DefaultAppName: "demo"})
+	topology, err := inspectImportableTopologyFromRepo(clonedGitHubRepo{RepoDir: repoDir, DefaultAppName: "demo"})
 	if err != nil {
-		t.Fatalf("inspect importable services: %v", err)
+		t.Fatalf("inspect importable topology: %v", err)
 	}
 
 	appHosts := map[string]string{
@@ -66,7 +66,7 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 		},
 	}
 
-	workerEnv, err := suggestComposeServiceEnv(services, "worker", appHosts, managedPostgresByOwner)
+	workerEnv, err := suggestComposeServiceEnvForTopology(topology, "worker", appHosts, managedPostgresByOwner)
 	if err != nil {
 		t.Fatalf("suggest worker env: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 		t.Fatalf("expected logical compose service selector to be preserved, got %q", got)
 	}
 
-	apiEnv, err := suggestComposeServiceEnv(services, "api", appHosts, managedPostgresByOwner)
+	apiEnv, err := suggestComposeServiceEnvForTopology(topology, "api", appHosts, managedPostgresByOwner)
 	if err != nil {
 		t.Fatalf("suggest api env: %v", err)
 	}

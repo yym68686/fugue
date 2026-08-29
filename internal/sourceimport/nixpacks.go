@@ -230,10 +230,6 @@ func detectAutoImportInputs(repoDir, requestedSourceDir, requestedDockerfilePath
 	return model.AppBuildStrategyNixpacks, ".", "", "", nil
 }
 
-func detectNixpacksProviderAndPort(repoDir, sourceDir string) (string, int) {
-	return detectZeroConfigProviderAndPort(repoDir, sourceDir)
-}
-
 func detectZeroConfigProviderAndPort(repoDir, sourceDir string) (string, int) {
 	provider, port, _ := detectZeroConfigProviderAndPortSignal(repoDir, sourceDir)
 	return provider, port

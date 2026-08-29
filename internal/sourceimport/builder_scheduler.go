@@ -1185,14 +1185,6 @@ func newBuilderKubeClient(namespace string) (*builderKubeClient, error) {
 	}, nil
 }
 
-func (c *builderKubeClient) effectiveNamespace(namespace string) string {
-	namespace = strings.TrimSpace(namespace)
-	if namespace != "" {
-		return namespace
-	}
-	return c.namespace
-}
-
 func (c *builderKubeClient) listNodes(ctx context.Context) ([]builderKubeNode, error) {
 	var nodeList builderKubeNodeList
 	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes", nil, &nodeList); err != nil {

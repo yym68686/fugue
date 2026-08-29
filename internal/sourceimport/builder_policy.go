@@ -168,26 +168,6 @@ func builderPodPolicyWithMemoryCeiling(policy BuilderPodPolicy, ceilingBytes int
 	return policy
 }
 
-func builderPodPolicyWithEphemeralCeiling(policy BuilderPodPolicy, ceilingBytes int64) BuilderPodPolicy {
-	policy = normalizeBuilderPodPolicy(policy)
-	if ceilingBytes <= 0 {
-		return policy
-	}
-	baseBytes := parseBuilderBytes(policy.Heavy.Resources.Limits["ephemeral-storage"])
-	if ceilingBytes < baseBytes {
-		ceilingBytes = baseBytes
-	}
-	if maxBytes := MaxBuilderHeavyEphemeralLimitBytes(); maxBytes > 0 && ceilingBytes > maxBytes {
-		ceilingBytes = maxBytes
-	}
-	policy.HeavyEphemeralLimitCeiling = formatBuilderStorageBytes(ceilingBytes)
-	return policy
-}
-
-func builderPodPolicyForAttempt(policy BuilderPodPolicy, profile builderWorkloadProfile, oomRetryCount int) BuilderPodPolicy {
-	return builderPodPolicyForRetryCounts(policy, profile, oomRetryCount, 0)
-}
-
 func builderPodPolicyForRetryCounts(policy BuilderPodPolicy, profile builderWorkloadProfile, oomRetryCount, ephemeralRetryCount int) BuilderPodPolicy {
 	policy = normalizeBuilderPodPolicy(policy)
 	if profile != builderWorkloadProfileHeavy {

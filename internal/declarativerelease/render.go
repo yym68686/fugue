@@ -448,26 +448,6 @@ func mustCanonical(value any) []byte {
 	return encoded
 }
 
-func decodeManifest(reader io.Reader) (map[string]any, error) {
-	if reader == nil {
-		return nil, errors.New("workload manifest reader is nil")
-	}
-	decoder := json.NewDecoder(io.LimitReader(reader, maxWorkloadManifestBytes))
-	decoder.UseNumber()
-	var value map[string]any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("decode workload manifest: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, errors.New("workload manifest must contain exactly one JSON object")
-	}
-	if value == nil {
-		return nil, errors.New("workload manifest is empty")
-	}
-	return value, nil
-}
-
 func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest string, bindPodArtifactProvenance bool) error {
 	if _, err := set.Primary(release.Workload); err != nil {
 		return err
@@ -506,17 +486,6 @@ func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, m
 		if err := patchWorkloadContainer(item, target, image); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func validateManifestIdentity(value map[string]any, workload Workload) error {
-	if stringField(value, "apiVersion") != workload.APIVersion || stringField(value, "kind") != workload.Kind {
-		return errors.New("workload manifest apiVersion/kind mismatch")
-	}
-	metadata, err := objectField(value, "metadata")
-	if err != nil || stringField(metadata, "name") != workload.Name || stringField(metadata, "namespace") != workload.Namespace {
-		return errors.New("workload manifest namespace/name mismatch")
 	}
 	return nil
 }

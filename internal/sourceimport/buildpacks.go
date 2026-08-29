@@ -141,10 +141,6 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}, nil
 }
 
-func detectBuildpacksProviderAndPort(repoDir, sourceDir string) (string, int) {
-	return detectZeroConfigProviderAndPort(repoDir, sourceDir)
-}
-
 func suggestedBuildpacksEnv(port int) map[string]string {
 	if port <= 0 {
 		return nil

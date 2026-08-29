@@ -60,17 +60,6 @@ func TestDetectDockerBuildInputs(t *testing.T) {
 	}
 }
 
-func TestBuildGitContextURL(t *testing.T) {
-	got, err := buildGitContextURL("https://github.com/yym68686/sample-api", "main", "abcdef1234567890")
-	if err != nil {
-		t.Fatalf("build git context url: %v", err)
-	}
-	want := "git://github.com/yym68686/sample-api.git#refs/heads/main#abcdef1234567890"
-	if got != want {
-		t.Fatalf("unexpected git context url:\nwant: %s\ngot:  %s", want, got)
-	}
-}
-
 func TestDefaultImportedImageRefOmitsBlankOptionalSuffix(t *testing.T) {
 	t.Parallel()
 
@@ -210,26 +199,6 @@ func TestKanikoDestinationArgsAllowSnapshotModeAndExtraArgsOverrides(t *testing.
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected %s in args: %v", want, args)
 		}
-	}
-}
-
-func TestKanikoDockerfilePathRelativeToBuildContext(t *testing.T) {
-	t.Parallel()
-
-	got, err := kanikoDockerfilePath("apps/api/Dockerfile", "apps/api")
-	if err != nil {
-		t.Fatalf("kaniko dockerfile path: %v", err)
-	}
-	if got != "Dockerfile" {
-		t.Fatalf("unexpected dockerfile path: got %q want %q", got, "Dockerfile")
-	}
-}
-
-func TestKanikoDockerfilePathRejectsDockerfileOutsideBuildContext(t *testing.T) {
-	t.Parallel()
-
-	if _, err := kanikoDockerfilePath("Dockerfile", "apps/api"); err == nil {
-		t.Fatal("expected dockerfile outside build context to be rejected")
 	}
 }
 

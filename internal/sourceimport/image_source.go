@@ -318,14 +318,6 @@ func detectImageBackgroundOverrideFromImage(img v1.Image, configFile *v1.ConfigF
 	return "python", pythonProjectPrefersBackgroundNetwork(analysis), nil
 }
 
-func analyzePythonProjectInRemoteImage(imageRef string, configFile *v1.ConfigFile, options ...crane.Option) (pythonProjectAnalysis, bool, error) {
-	img, err := crane.Pull(imageRef, options...)
-	if err != nil {
-		return pythonProjectAnalysis{}, false, fmt.Errorf("pull image for python inspection: %w", err)
-	}
-	return analyzePythonProjectInImage(img, configFile)
-}
-
 func analyzePythonProjectInImage(img v1.Image, configFile *v1.ConfigFile) (pythonProjectAnalysis, bool, error) {
 	appDir, ok := pythonImageAnalysisDir(configFile)
 	if !ok {

@@ -94,18 +94,6 @@ func inspectImportableTopologyFromRepo(repo clonedGitHubRepo) (NormalizedTopolog
 	}
 }
 
-func inspectImportableServicesFromRepo(repo clonedGitHubRepo) ([]ComposeService, error) {
-	topology, err := inspectImportableTopologyFromRepo(repo)
-	if err != nil {
-		return nil, err
-	}
-	return topology.Services, nil
-}
-
-func suggestComposeServiceEnv(services []ComposeService, composeService string, appHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (map[string]string, error) {
-	return suggestComposeServiceEnvForTopology(NormalizedTopology{Services: append([]ComposeService(nil), services...)}, composeService, appHosts, managedPostgresByOwner)
-}
-
 func suggestComposeServiceEnvForTopology(topology NormalizedTopology, composeService string, appHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (map[string]string, error) {
 	composeService = slugifyOptional(composeService)
 	if composeService == "" {

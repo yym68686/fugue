@@ -578,52 +578,6 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 	return jobObject, nil
 }
 
-func buildArchiveKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {
-	if strings.TrimSpace(req.ArchiveDownloadURL) == "" {
-		return nil, fmt.Errorf("archive download url is empty")
-	}
-	return buildKanikoJobObject(namespace, jobName, req)
-}
-
-func kanikoDockerfilePath(dockerfilePath, buildContextDir string) (string, error) {
-	dockerfilePath = filepath.ToSlash(strings.TrimSpace(dockerfilePath))
-	if dockerfilePath == "" {
-		return "", fmt.Errorf("dockerfile path is empty")
-	}
-	buildContextDir = filepath.ToSlash(strings.TrimSpace(buildContextDir))
-	if buildContextDir == "" || buildContextDir == "." {
-		return dockerfilePath, nil
-	}
-
-	relPath, err := filepath.Rel(filepath.FromSlash(buildContextDir), filepath.FromSlash(dockerfilePath))
-	if err != nil {
-		return "", fmt.Errorf("rel dockerfile path from build context: %w", err)
-	}
-	relPath = filepath.ToSlash(relPath)
-	if relPath == "." || relPath == "" {
-		return filepath.Base(dockerfilePath), nil
-	}
-	if strings.HasPrefix(relPath, "../") || relPath == ".." {
-		return "", fmt.Errorf("dockerfile_path %q must be inside build_context_dir %q for kaniko git builds", dockerfilePath, buildContextDir)
-	}
-	return relPath, nil
-}
-
-func buildGitContextURL(repoURL, branch, commitSHA string) (string, error) {
-	owner, repo, err := parseGitHubRepoURL(repoURL)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(branch) == "" {
-		branch = "main"
-	}
-	contextURL := fmt.Sprintf("git://github.com/%s/%s.git#refs/heads/%s", owner, repo, branch)
-	if strings.TrimSpace(commitSHA) != "" {
-		contextURL += "#" + strings.TrimSpace(commitSHA)
-	}
-	return contextURL, nil
-}
-
 func kubectlRun(ctx context.Context, obj map[string]any, args ...string) error {
 	output, err := kubectlOutput(ctx, obj, args...)
 	if err != nil {

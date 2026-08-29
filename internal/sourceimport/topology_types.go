@@ -231,25 +231,6 @@ func defaultPortForService(service ComposeService) int {
 	return 0
 }
 
-func buildNormalizedTopology(sourceKind, sourcePath string, repo clonedGitHubRepo, primaryService string, services []ComposeService, warnings []string, inferences []TopologyInference) NormalizedTopology {
-	return NormalizedTopology{
-		SourceKind:        strings.TrimSpace(sourceKind),
-		SourcePath:        strings.TrimSpace(sourcePath),
-		RepoOwner:         strings.TrimSpace(repo.RepoOwner),
-		RepoName:          strings.TrimSpace(repo.RepoName),
-		Branch:            strings.TrimSpace(repo.Branch),
-		CommitSHA:         strings.TrimSpace(repo.CommitSHA),
-		CommitCommittedAt: strings.TrimSpace(repo.CommitCommittedAt),
-		DefaultAppName:    strings.TrimSpace(repo.DefaultAppName),
-		PrimaryService:    strings.TrimSpace(primaryService),
-		Domains:           nil,
-		Entrypoints:       nil,
-		Services:          append([]ComposeService(nil), services...),
-		Warnings:          append([]string(nil), warnings...),
-		InferenceReport:   append([]TopologyInference(nil), inferences...),
-	}
-}
-
 func appendInference(report []TopologyInference, level, category, service, format string, args ...any) []TopologyInference {
 	message := strings.TrimSpace(fmt.Sprintf(format, args...))
 	if message == "" {
