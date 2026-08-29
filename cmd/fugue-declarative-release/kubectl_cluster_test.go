@@ -1885,6 +1885,44 @@ func TestRemovedLegacyOwnershipManagersAreRejected(t *testing.T) {
 	}
 }
 
+func TestHelmOwnershipTransferAllowsOnlyDeclaredEnvironmentScalar(t *testing.T) {
+	pointer := "/spec/template/spec/containers[name=controller]/env[name=FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE]/value"
+	desired := map[string]any{"metadata": map[string]any{
+		"uid": "controller-uid", "resourceVersion": "42",
+		"annotations": map[string]any{},
+	}, "spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+		"name": "controller", "env": []any{map[string]any{"name": "FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE", "value": "delete"}},
+	}}}}}}
+	live := deepCopyJSONMap(t, desired)
+	metadata := mapField(live, "metadata")
+	metadata["managedFields"] = []any{map[string]any{
+		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{pointer}),
+	}}
+	env := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)["env"].([]any)[0].(map[string]any)
+	env["value"] = "dry-run"
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: ` + ssaFieldForPointer(pointer))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "fugue-controller-declarative", applyErr); err != nil {
+		t.Fatalf("declared Helm environment scalar conflict was rejected: %v", err)
+	}
+	patch, found, err := nextOwnershipTransferPatch(desired, live, []string{pointer}, "fugue-controller-declarative", applyErr)
+	if err != nil || !found || len(patch) != 6 || patch[len(patch)-1]["op"] != "replace" || patch[len(patch)-1]["value"] != "delete" {
+		t.Fatalf("declared Helm environment scalar transfer patch=%v found=%v err=%v", patch, found, err)
+	}
+	broad := deepCopyJSONMap(t, live)
+	mapField(broad, "metadata")["managedFields"] = []any{map[string]any{
+		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
+	}}
+	if err := validateEmergencyOwnershipConflictEvidence(desired, broad, []string{pointer}, "fugue-controller-declarative", applyErr); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
+		t.Fatalf("broad Helm ownership witness was accepted: %v", err)
+	}
+	outside := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="controller"].image`)
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer, "/spec/template/spec/containers[name=controller]/image"}, "fugue-controller-declarative", outside); err == nil || !strings.Contains(err.Error(), "environment scalar ownership") {
+		t.Fatalf("Helm image ownership conflict was accepted: %v", err)
+	}
+}
+
 func TestArtifactIdentityOwnershipTransfersFromBroadKubectlPatch(t *testing.T) {
 	desired := map[string]any{
 		"apiVersion": "apps/v1", "kind": "DaemonSet",

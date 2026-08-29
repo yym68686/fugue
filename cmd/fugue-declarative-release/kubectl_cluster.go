@@ -58,6 +58,14 @@ var emergencyOwnershipManagers = map[string]bool{
 	"kubectl-set":   true,
 }
 
+// Helm may still own a declared literal environment scalar on deployments
+// created before declarative ownership was introduced. Permit only the
+// UID/RV-bound scalar bridge for that narrow case; Helm remains unauthorized
+// to transfer images, annotations, probes, resources, or structural fields.
+var legacyEnvironmentOwnershipManagers = map[string]bool{
+	"helm": true,
+}
+
 var releaseArtifactAnnotationKeys = map[string]bool{
 	"fugue.pro/artifact-image":          true,
 	"fugue.pro/artifact-receipt-digest": true,
@@ -1480,8 +1488,12 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
 		ownDeclarativeUpdate := declarativeManager != "" && conflict.manager == declarativeManager
-		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !ownDeclarativeUpdate) {
+		legacyEnvironmentOwnership := legacyEnvironmentOwnershipManagers[conflict.manager]
+		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !legacyEnvironmentOwnership && !ownDeclarativeUpdate) {
 			return fmt.Errorf("emergency ownership conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
+		}
+		if legacyEnvironmentOwnership && !emergencyEnvValuePointer(pointer) {
+			return fmt.Errorf("legacy ownership conflict %s:%s is outside the exact allowlist for environment scalar ownership", conflict.manager, conflict.field)
 		}
 		key := conflict.manager + "\x00" + pointer
 		if seen[key] {
@@ -1496,6 +1508,9 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 				continue
 			}
 			pointers, flattenErr := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
+			if legacyEnvironmentOwnership && (flattenErr != nil || !stringSubset(pointers, ownershipCleanupPointers([]string{pointer}))) {
+				return fmt.Errorf("legacy ownership conflict %s:%s is outside the exact allowlist for environment scalar ownership", conflict.manager, conflict.field)
+			}
 			if flattenErr != nil || len(pointers) == 0 ||
 				(ownDeclarativeUpdate && !stringSubset(pointers, ownershipCleanupPointers(allowed))) ||
 				(emergencyOwnershipManager(conflict.manager) && !broadEmergencyOwnershipTransferPointer(pointer) &&
@@ -1541,6 +1556,7 @@ func nextOwnershipTransferPatch(desired, live map[string]any, allowed []string, 
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
 		if pointer != "" && ownershipTransferPointer(pointer) &&
 			(emergencyOwnershipManager(conflict.manager) ||
+				(legacyEnvironmentOwnershipManagers[conflict.manager] && emergencyEnvValuePointer(pointer)) ||
 				(declarativeManager != "" && conflict.manager == declarativeManager)) {
 			hasTransfer = true
 		} else {
