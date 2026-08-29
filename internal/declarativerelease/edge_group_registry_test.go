@@ -694,7 +694,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 	client := Component{
 		ID: "edge-client-" + id, Family: "edge-client",
 		IntentPath: "deploy/releases/edge-client-" + id + "/intent.json", ManifestPath: "deploy/releases/edge-client-" + id + "/resources.json",
-		SourceRoots:     []string{"Dockerfile.edge", "cmd/fugue-dns", "cmd/fugue-ssh-front", "internal/edgefront"},
+		SourceRoots:     []string{"Dockerfile.edge", "cmd/fugue-dns", "cmd/fugue-ssh-front"},
 		Artifact:        Artifact{Repository: "ghcr.io/example/fugue-edge", Dockerfile: "Dockerfile.edge", Context: ".", BuildPackage: "./cmd/fugue-ssh-front"},
 		ArtifactTargets: []ArtifactTarget{{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-client-" + id + "-front", Container: "ssh-front", ContainerType: "container"}},
 		Workload:        Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-client-" + id + "-front", Container: "ssh-front", FieldManager: "fugue-edge-client-" + id + "-declarative", RolloutMode: "rolling"},
