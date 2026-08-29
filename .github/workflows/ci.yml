@@ -79,7 +79,10 @@ jobs:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.release_count != '0' }}
     concurrency:
-      group: fugue-build-${{ matrix.build_lane }}-${{ github.sha }}
+      # GitHub keeps only one pending run per concurrency group. Include the
+      # component so shared GHCR repositories cannot cancel each other's
+      # immutable receipt producers.
+      group: fugue-build-${{ matrix.build_lane }}-${{ matrix.component }}-${{ github.sha }}
       cancel-in-progress: false
     strategy:
       fail-fast: false

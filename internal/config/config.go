@@ -13,6 +13,9 @@ import (
 	"fugue/internal/observability"
 )
 
+// DefaultManagedAppRolloutTimeout is shared by the active control-plane and
+// edge binaries; retired EdgeFront configuration is intentionally not part of
+// this canonical runtime contract.
 const DefaultManagedAppRolloutTimeout = time.Hour
 
 type APIConfig struct {
