@@ -303,6 +303,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	triggerPendingOperationWorkers(foregroundImports...)
 	triggerPendingOperationWorkers(foregroundActivations...)
 	triggerBackgroundOps()
+	if s.Config.HostJournaldPolicyEnabled {
+		if err := s.scheduleHostJournaldPolicyReconciliation(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("initial host journald policy scheduling error: %v", err)
+		}
+	}
 
 	if !eventDriven {
 		ticker := time.NewTicker(s.Config.PollInterval)
@@ -340,6 +345,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			localPVInventoryTicker = time.NewTicker(s.Config.LocalPVInventoryInterval)
 			defer localPVInventoryTicker.Stop()
 		}
+		var hostJournaldPolicyTicker *time.Ticker
+		if s.Config.HostJournaldPolicyEnabled && s.Config.HostJournaldPolicyCheckInterval > 0 {
+			hostJournaldPolicyTicker = time.NewTicker(s.Config.HostJournaldPolicyCheckInterval)
+			defer hostJournaldPolicyTicker.Stop()
+		}
 
 		for {
 			if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -376,6 +386,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			case <-githubTickerChan(localPVInventoryTicker):
 				if err := s.scheduleLocalPVInventoryReports(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("LocalPV inventory scheduling error: %v", err)
+				}
+			case <-githubTickerChan(hostJournaldPolicyTicker):
+				if err := s.scheduleHostJournaldPolicyReconciliation(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("host journald policy scheduling error: %v", err)
 				}
 			case <-ticker.C:
 			}
@@ -465,6 +479,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		localPVInventoryTicker = time.NewTicker(s.Config.LocalPVInventoryInterval)
 		defer localPVInventoryTicker.Stop()
 	}
+	var hostJournaldPolicyTicker *time.Ticker
+	if s.Config.HostJournaldPolicyEnabled && s.Config.HostJournaldPolicyCheckInterval > 0 {
+		hostJournaldPolicyTicker = time.NewTicker(s.Config.HostJournaldPolicyCheckInterval)
+		defer hostJournaldPolicyTicker.Stop()
+	}
 	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
 	for {
@@ -521,6 +540,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		case <-githubTickerChan(localPVInventoryTicker):
 			if err := s.scheduleLocalPVInventoryReports(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("LocalPV inventory scheduling error: %v", err)
+			}
+		case <-githubTickerChan(hostJournaldPolicyTicker):
+			if err := s.scheduleHostJournaldPolicyReconciliation(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("host journald policy scheduling error: %v", err)
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {

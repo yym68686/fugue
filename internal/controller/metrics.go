@@ -61,6 +61,9 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_controller_poll_interval_seconds", "Configured foreground controller poll interval.", nil, s.Config.PollInterval.Seconds())
 	observability.WriteGaugeMetric(w, "fugue_controller_fallback_poll_interval_seconds", "Configured fallback controller poll interval.", nil, s.Config.FallbackPollInterval.Seconds())
 	observability.WriteGaugeMetric(w, "fugue_controller_managed_app_reconcile_fallback_interval_seconds", "Configured full managed-app drift scan interval when operation events are available.", nil, s.Config.ManagedAppReconcileFallbackInterval.Seconds())
+	observability.WriteGaugeMetric(w, "fugue_controller_host_journald_policy_enabled", "Whether automatic host journald policy reconciliation is enabled.", nil, boolGauge(s.Config.HostJournaldPolicyEnabled))
+	observability.WriteGaugeMetric(w, "fugue_controller_host_journald_policy_check_interval_seconds", "Configured host journald policy reconciliation check interval.", nil, s.Config.HostJournaldPolicyCheckInterval.Seconds())
+	observability.WriteGaugeMetric(w, "fugue_controller_host_journald_policy_reconcile_interval_seconds", "Configured minimum interval between successful host journald policy reconciliations on a node.", nil, s.Config.HostJournaldPolicyReconcileInterval.Seconds())
 	resizeConfig := s.Config.ManagedPostgresInPlaceResize
 	observability.WriteGaugeMetric(w, "fugue_managed_postgres_in_place_resize_enabled", "Whether the global managed PostgreSQL in-place resize kill switch is enabled.", nil, boolGauge(resizeConfig.Enabled))
 	observability.WriteMetricHeader(w, "fugue_managed_postgres_in_place_resize_capability_enabled", "Whether each managed PostgreSQL in-place resize capability is enabled by configuration.", "gauge")

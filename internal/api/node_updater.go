@@ -586,7 +586,8 @@ func nodeUpdateTaskIsRepair(taskType string) bool {
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
-		model.NodeUpdateTaskTypeReconcileHostZRAM:
+		model.NodeUpdateTaskTypeReconcileHostZRAM,
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
 		return true
 	default:
 		return false
@@ -611,6 +612,14 @@ func refuseUnsafeNodeRepairTaskClaim(task model.NodeUpdateTask) string {
 	}
 	if task.Type == model.NodeUpdateTaskTypeReconcileHostZRAM && !nodeUpdatePayloadBool(task.Payload["allow_restart"]) {
 		return "refuse host zram reconciliation before execution: allow_restart=true is required"
+	}
+	if task.Type == model.NodeUpdateTaskTypeReconcileHostJournaldPolicy && !nodeUpdatePayloadBool(task.Payload["dry_run"]) {
+		if !nodeUpdatePayloadBool(task.Payload["allow_delete"]) {
+			return "refuse host journald policy reconciliation before execution: non-dry-run requires allow_delete=true"
+		}
+		if !nodeUpdatePayloadBool(task.Payload["allow_restart"]) {
+			return "refuse host journald policy reconciliation before execution: non-dry-run requires allow_restart=true"
+		}
 	}
 	return ""
 }
@@ -904,6 +913,14 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		} else if task.Status == model.NodeUpdateTaskStatusFailed {
 			action = "localpv_decommission_refused"
 		}
+	case model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
+		if task.Status == model.NodeUpdateTaskStatusCompleted && taskPayloadTruthy(task.Payload, "dry_run") {
+			action = "host_journald_policy_dry_run_completed"
+		} else if task.Status == model.NodeUpdateTaskStatusCompleted {
+			action = "host_journald_policy_reconciled"
+		} else if task.Status == model.NodeUpdateTaskStatusFailed {
+			action = "host_journald_policy_failed"
+		}
 	case model.NodeUpdateTaskTypeRepairManagedIPTables,
 		model.NodeUpdateTaskTypeRefreshDesiredState,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
@@ -948,6 +965,9 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		"allow_localpv_decommission",
 		"repair_id",
 		"repair_action",
+		"policy_hash",
+		"max_retention_sec",
+		"system_max_use",
 		"safety_class",
 		"dry_run",
 		"allow_delete",
@@ -1258,7 +1278,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="__FUGUE_NODE_UPDATER_SCRIPT_VERSION__"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,reconcile-host-journald-policy,time-sync"
 export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
@@ -1294,6 +1314,8 @@ FUGUE_LOCALPV_IMAGE_PATH="${FUGUE_LOCALPV_IMAGE_PATH:-/var/lib/fugue/lvm-localpv
 FUGUE_LOCALPV_LOOP_SERVICE="${FUGUE_LOCALPV_LOOP_SERVICE:-fugue-lvm-localpv-loop.service}"
 
 __FUGUE_HOST_MEMORY_SAFETY_LIBRARY__
+
+__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__
 
 log() {
   printf '[fugue-node-updater] %s\n' "$*" >&2
@@ -5527,6 +5549,36 @@ reconcile_host_zram_task() {
   log_task "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE}"
 }
 
+reconcile_host_journald_policy_task() {
+  local dry_run="${FUGUE_NODE_UPDATE_TASK_DRY_RUN:-true}"
+  local policy_hash="${FUGUE_NODE_UPDATE_TASK_POLICY_HASH:-manual}"
+
+  if [ "${dry_run}" != "true" ]; then
+    if ! truthy "${FUGUE_NODE_UPDATE_TASK_ALLOW_DELETE:-}"; then
+      FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE="reconcile-host-journald-policy requires allow_delete=true outside dry-run"
+      echo "${FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE}" >&2
+      return 2
+    fi
+    if ! truthy "${FUGUE_NODE_UPDATE_TASK_ALLOW_RESTART:-}"; then
+      FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE="reconcile-host-journald-policy requires allow_restart=true outside dry-run"
+      echo "${FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE}" >&2
+      return 2
+    fi
+  fi
+
+  FUGUE_JOURNALD_DRY_RUN="${dry_run}"
+  FUGUE_JOURNALD_MAX_RETENTION_SEC="${FUGUE_NODE_UPDATE_TASK_MAX_RETENTION_SEC:-30day}"
+  FUGUE_JOURNALD_SYSTEM_MAX_USE="${FUGUE_NODE_UPDATE_TASK_SYSTEM_MAX_USE:-1G}"
+  if ! fugue_journald_policy_reconcile; then
+    FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE="journald policy ${FUGUE_JOURNALD_POLICY_STATE}: ${FUGUE_JOURNALD_POLICY_REASON}"
+    echo "${FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE}" >&2
+    return 1
+  fi
+
+  FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="journald policy ${FUGUE_JOURNALD_POLICY_STATE}: policy_hash=${policy_hash} changed=${FUGUE_JOURNALD_POLICY_CHANGED} MaxRetentionSec=${FUGUE_JOURNALD_MAX_RETENTION_SEC} SystemMaxUse=${FUGUE_JOURNALD_SYSTEM_MAX_USE} before=${FUGUE_JOURNALD_POLICY_BEFORE_USAGE} after=${FUGUE_JOURNALD_POLICY_AFTER_USAGE}"
+  log_task "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE}"
+}
+
 run_task() {
   case "${FUGUE_NODE_UPDATE_TASK_TYPE}" in
     refresh-join-config)
@@ -5597,6 +5649,9 @@ run_task() {
     reconcile-host-zram)
       reconcile_host_zram_task
       ;;
+    reconcile-host-journald-policy)
+      reconcile_host_journald_policy_task
+      ;;
     *)
       echo "unsupported node update task type: ${FUGUE_NODE_UPDATE_TASK_TYPE}" >&2
       return 2
@@ -5638,6 +5693,7 @@ run_once() {
   log "claiming task ${FUGUE_NODE_UPDATE_TASK_ID} (${FUGUE_NODE_UPDATE_TASK_TYPE})"
   claim_task
   FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE=""
+  FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE=""
   # run_task is expected to return the task's exact status so this function
   # can durably acknowledge success or failure. Capture it with the outer
   # errexit disabled; otherwise a non-zero task exits the updater before the
@@ -5657,7 +5713,7 @@ run_once() {
     heartbeat || true
     return 0
   fi
-  record_last_error "task ${FUGUE_NODE_UPDATE_TASK_ID} failed with exit code ${rc}"
+  record_last_error "${FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE:-task ${FUGUE_NODE_UPDATE_TASK_ID} failed with exit code ${rc}}"
   if ! complete_task failed "node update task failed" "$(last_error)"; then
     log "task failure acknowledgement failed"
   fi
@@ -5694,5 +5750,6 @@ esac
 		"__FUGUE_API_BASE__", apiBase,
 		"__FUGUE_NODE_UPDATER_SCRIPT_VERSION__", nodeUpdaterScriptVersion,
 		"__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary(),
+		"__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__", hostJournaldPolicyShellLibrary(),
 	).Replace(script)
 }

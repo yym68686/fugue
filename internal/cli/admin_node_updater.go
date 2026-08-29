@@ -416,6 +416,7 @@ func nodeUpdateTaskTypes() []string {
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
 		model.NodeUpdateTaskTypeReconcileHostZRAM,
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy,
 	}
 }
 
@@ -644,7 +645,8 @@ func nodeUpdateTaskIsRepairHistory(task model.NodeUpdateTask) bool {
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
-		model.NodeUpdateTaskTypeReconcileHostZRAM:
+		model.NodeUpdateTaskTypeReconcileHostZRAM,
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
 		return true
 	default:
 		return false

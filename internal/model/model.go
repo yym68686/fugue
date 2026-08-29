@@ -121,7 +121,7 @@ const (
 	// uses this value to enqueue a safe self-update task for active nodes; a
 	// content-only change would otherwise leave existing agents on the old
 	// script indefinitely.
-	NodeUpdaterCurrentVersion = "v35"
+	NodeUpdaterCurrentVersion = "v36"
 
 	NodeUpdaterCapabilityRejoinK3SNode     = "rejoin-k3s-node"
 	NodeUpdaterCapabilitySafeK3SNodeRejoin = "safe-k3s-node-rejoin"
@@ -152,6 +152,7 @@ const (
 	NodeUpdateTaskTypeRestartStatelessNodeService = "restart-stateless-node-service"
 	NodeUpdateTaskTypeRunDeepHealth               = "run-deep-health"
 	NodeUpdateTaskTypeReconcileHostZRAM           = "reconcile-host-zram"
+	NodeUpdateTaskTypeReconcileHostJournaldPolicy = "reconcile-host-journald-policy"
 
 	NodeUpdateTaskStatusPending   = "pending"
 	NodeUpdateTaskStatusRunning   = "running"

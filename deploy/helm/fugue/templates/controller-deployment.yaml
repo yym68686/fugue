@@ -141,6 +141,16 @@ spec:
               value: {{ .Values.imageStore.imageCacheInventory.interval | quote }}
             - name: FUGUE_IMAGE_CACHE_INVENTORY_TTL
               value: {{ .Values.imageStore.imageCacheInventory.ttl | quote }}
+            - name: FUGUE_HOST_JOURNALD_POLICY_ENABLED
+              value: {{ .Values.controller.journaldPolicy.enabled | quote }}
+            - name: FUGUE_HOST_JOURNALD_POLICY_CHECK_INTERVAL
+              value: {{ .Values.controller.journaldPolicy.checkInterval | quote }}
+            - name: FUGUE_HOST_JOURNALD_POLICY_RECONCILE_INTERVAL
+              value: {{ .Values.controller.journaldPolicy.reconcileInterval | quote }}
+            - name: FUGUE_HOST_JOURNALD_MAX_RETENTION_SEC
+              value: {{ .Values.controller.journaldPolicy.maxRetentionSec | quote }}
+            - name: FUGUE_HOST_JOURNALD_SYSTEM_MAX_USE
+              value: {{ .Values.controller.journaldPolicy.systemMaxUse | quote }}
             - name: FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE
               value: {{ .Values.imageStore.orphanPrune.mode | quote }}
             - name: FUGUE_IMAGE_STORE_ORPHAN_PRUNE_GRACE_PERIOD

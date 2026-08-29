@@ -259,7 +259,8 @@ func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType stri
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
-		model.NodeUpdateTaskTypeReconcileHostZRAM:
+		model.NodeUpdateTaskTypeReconcileHostZRAM,
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
 	default:
 		return model.NodeUpdateTask{}, false
 	}
@@ -395,7 +396,8 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
 		model.NodeUpdateTaskTypeRepairManagedIPTables,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
-		model.NodeUpdateTaskTypeReconcileHostZRAM:
+		model.NodeUpdateTaskTypeReconcileHostZRAM,
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
 		return 3
 	default:
 		return 4
@@ -663,6 +665,8 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypeRunDeepHealth
 	case model.NodeUpdateTaskTypeReconcileHostZRAM:
 		return model.NodeUpdateTaskTypeReconcileHostZRAM
+	case model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
+		return model.NodeUpdateTaskTypeReconcileHostJournaldPolicy
 	default:
 		return ""
 	}

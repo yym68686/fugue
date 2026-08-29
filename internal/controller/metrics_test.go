@@ -42,6 +42,7 @@ func TestMetricsHandlerReportsControllerConfiguration(t *testing.T) {
 		`fugue_controller_leader_election_enabled 1.000000`,
 		`fugue_controller_poll_interval_seconds 15.000000`,
 		`fugue_controller_managed_app_reconcile_fallback_interval_seconds 300.000000`,
+		`fugue_controller_host_journald_policy_enabled 0.000000`,
 		`fugue_controller_workers_configured{lane="foreground_activate"} 4.000000`,
 		`fugue_controller_workers_configured{lane="github_sync_activate"} 2.000000`,
 		`fugue_managed_postgres_in_place_resize_enabled 1.000000`,

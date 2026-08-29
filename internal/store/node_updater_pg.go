@@ -298,7 +298,8 @@ func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
-		model.NodeUpdateTaskTypeReconcileHostZRAM:
+		model.NodeUpdateTaskTypeReconcileHostZRAM,
+		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
 	default:
 		return model.NodeUpdateTask{}, false, nil
 	}

@@ -53,6 +53,12 @@ controller:
   fallbackPollInterval: 30s
   managedAppReconcileFallbackInterval: 5m
   runtimeOfflineAfter: 90s
+  journaldPolicy:
+    enabled: true
+    checkInterval: 5m
+    reconcileInterval: 24h
+    maxRetentionSec: 30day
+    systemMaxUse: 1G
   kubectlApply: true
   leaderElection:
     enabled: true

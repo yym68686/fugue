@@ -157,6 +157,11 @@ type ControllerConfig struct {
 	ImageCacheInventoryEnabled                 bool
 	ImageCacheInventoryInterval                time.Duration
 	ImageCacheInventoryTTL                     time.Duration
+	HostJournaldPolicyEnabled                  bool
+	HostJournaldPolicyCheckInterval            time.Duration
+	HostJournaldPolicyReconcileInterval        time.Duration
+	HostJournaldMaxRetentionSec                string
+	HostJournaldSystemMaxUse                   string
 	LocalPVInventoryEnabled                    bool
 	LocalPVInventoryInterval                   time.Duration
 	ImageStoreOrphanPruneMode                  string
@@ -506,6 +511,11 @@ func ControllerFromEnv() ControllerConfig {
 		ImageCacheInventoryEnabled:                 getenvBool("FUGUE_IMAGE_CACHE_INVENTORY_ENABLED", true),
 		ImageCacheInventoryInterval:                getenvDuration("FUGUE_IMAGE_CACHE_INVENTORY_INTERVAL", 30*time.Minute),
 		ImageCacheInventoryTTL:                     getenvDuration("FUGUE_IMAGE_CACHE_INVENTORY_TTL", 2*time.Hour),
+		HostJournaldPolicyEnabled:                  getenvBool("FUGUE_HOST_JOURNALD_POLICY_ENABLED", false),
+		HostJournaldPolicyCheckInterval:            getenvDuration("FUGUE_HOST_JOURNALD_POLICY_CHECK_INTERVAL", 5*time.Minute),
+		HostJournaldPolicyReconcileInterval:        getenvDuration("FUGUE_HOST_JOURNALD_POLICY_RECONCILE_INTERVAL", 24*time.Hour),
+		HostJournaldMaxRetentionSec:                getenv("FUGUE_HOST_JOURNALD_MAX_RETENTION_SEC", "30day"),
+		HostJournaldSystemMaxUse:                   getenv("FUGUE_HOST_JOURNALD_SYSTEM_MAX_USE", "1G"),
 		LocalPVInventoryEnabled:                    getenvBool("FUGUE_LOCALPV_INVENTORY_ENABLED", true),
 		LocalPVInventoryInterval:                   getenvDuration("FUGUE_LOCALPV_INVENTORY_INTERVAL", 15*time.Minute),
 		ImageStoreOrphanPruneMode:                  getenv("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE", "delete"),
