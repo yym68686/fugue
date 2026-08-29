@@ -15,7 +15,8 @@ import (
 
 // DefaultManagedAppRolloutTimeout is shared by the active control-plane and
 // edge binaries; retired EdgeFront configuration is intentionally not part of
-// this canonical runtime contract.
+// this canonical runtime contract. Production release intents bind the live
+// immutable artifact digest separately from this shared configuration.
 const DefaultManagedAppRolloutTimeout = time.Hour
 
 type APIConfig struct {
