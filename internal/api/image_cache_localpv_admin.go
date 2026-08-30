@@ -727,6 +727,11 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 			if _, ok := activeApps[strings.TrimSpace(image.AppID)]; !ok {
 				continue
 			}
+			switch strings.TrimSpace(image.LifecycleState) {
+			case "", model.ImageLifecycleAvailable, model.ImageLifecycleImporting:
+			default:
+				continue
+			}
 			if digest := managedImageDigest(image.CanonicalDigest); digest != "" {
 				protected.protectedBlobDigests[digest] = struct{}{}
 			}

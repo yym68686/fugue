@@ -549,6 +549,61 @@ func TestImageCachePrunePlanClassifiesDeletedGenerationAPI(t *testing.T) {
 	}
 }
 
+func TestImageCachePrunePlanActiveAppDoesNotProtectDeletingGenerationAPI(t *testing.T) {
+	t.Parallel()
+
+	stateStore, adminSecret, updaterToken, server := newImageCacheAdminAPITest(t, "Active App Deleting Generation API Tenant")
+	tenants, err := stateStore.ListTenants()
+	if err != nil || len(tenants) != 1 {
+		t.Fatalf("list tenants: tenants=%+v err=%v", tenants, err)
+	}
+	project, err := stateStore.CreateProject(tenants[0].ID, "default", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	currentDigest := "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	oldDigest := "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	app, err := stateStore.CreateApp(tenants[0].ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.fugue.internal:5000/fugue-apps/demo@" + currentDigest,
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:current",
+		CanonicalDigest: currentDigest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("upsert current image: %v", err)
+	}
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:old",
+		CanonicalDigest: oldDigest,
+		LifecycleState:  model.ImageLifecycleDeleting,
+	}); err != nil {
+		t.Fatalf("upsert deleting image: %v", err)
+	}
+	reportImageCacheTestManifest(t, server, updaterToken, oldDigest)
+
+	planRequest := performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/prune-plan?cluster_node_name=worker-1", adminSecret, nil)
+	if planRequest.Code != http.StatusOK {
+		t.Fatalf("get prune plan status=%d body=%s", planRequest.Code, planRequest.Body.String())
+	}
+	var response struct {
+		Plan model.ImageCachePrunePlan `json:"plan"`
+	}
+	mustDecodeJSON(t, planRequest, &response)
+	if len(response.Plan.Candidates) != 1 || response.Plan.Candidates[0].Reason != "deleted_image_generation" {
+		t.Fatalf("expected active app's deleting generation to remain eligible, got %+v", response.Plan)
+	}
+}
+
 func TestImageCachePrunePlanProtectsAliasesSharingDigestAPI(t *testing.T) {
 	t.Parallel()
 
