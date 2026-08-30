@@ -703,6 +703,11 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 			if _, ok := activeApps[strings.TrimSpace(image.AppID)]; !ok {
 				continue
 			}
+			switch strings.TrimSpace(image.LifecycleState) {
+			case "", model.ImageLifecycleAvailable, model.ImageLifecycleImporting:
+			default:
+				continue
+			}
 			if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
 				protected.protectedBlobDigests[digest] = struct{}{}
 			}

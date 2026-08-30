@@ -783,6 +783,93 @@ func TestControllerImageCachePrunePlanClassifiesStaleReplica(t *testing.T) {
 	}
 }
 
+func TestControllerImageCacheActiveAppDoesNotProtectDeletingGeneration(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Active App Retention Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:            "registry.fugue.internal:5000/fugue-apps/demo:current",
+		ImageMirrorLimit: 1,
+		Replicas:         1,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	currentDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	oldDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:current",
+		CanonicalDigest: currentDigest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("upsert current image: %v", err)
+	}
+	oldImage, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:old",
+		CanonicalDigest: oldDigest,
+		LifecycleState:  model.ImageLifecycleDeleting,
+	})
+	if err != nil {
+		t.Fatalf("upsert deleting image: %v", err)
+	}
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         oldImage.ID,
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		Digest:          oldDigest,
+		NodeID:          "machine-1",
+		RuntimeID:       "runtime-1",
+		ClusterNodeName: "worker-1",
+		Status:          model.ImageReplicaStatusStale,
+	}); err != nil {
+		t.Fatalf("upsert stale replica: %v", err)
+	}
+	upsertControllerImageCacheManifestWithDigest(t, stateStore, oldDigest)
+
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "10Gi",
+			ImageStoreOrphanPruneMinReplicaCount:       1,
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	protected, err := svc.controllerImageCacheProtectedSet(context.Background())
+	if err != nil {
+		t.Fatalf("build protected set: %v", err)
+	}
+	if _, ok := protected.protectedBlobDigests[currentDigest]; !ok {
+		t.Fatal("active app current image digest was not protected")
+	}
+	if _, ok := protected.protectedBlobDigests[oldDigest]; ok {
+		t.Fatal("active app deleting image digest was over-protected")
+	}
+	node := model.ImageCacheNodeInventory{NodeID: "machine-1", RuntimeID: "runtime-1", ClusterNodeName: "worker-1"}
+	plan, err := svc.computeControllerImageCachePrunePlan(context.Background(), node, protected, model.ImageCachePruneModeObserve)
+	if err != nil {
+		t.Fatalf("compute prune plan: %v", err)
+	}
+	if len(plan.Candidates) != 1 || plan.Candidates[0].Reason != "deleted_image_generation" || plan.Candidates[0].Protected {
+		t.Fatalf("expected deleting generation candidate, got %+v", plan)
+	}
+}
+
 func TestControllerImageCachePrunePlanClassifiesDeletedGeneration(t *testing.T) {
 	t.Parallel()
 

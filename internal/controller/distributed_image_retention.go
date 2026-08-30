@@ -175,9 +175,6 @@ func (s *Service) applyDistributedImageRetentionPlan(ctx context.Context, app mo
 		if err := s.cancelObsoleteDistributedImageReplicationTasks(ctx, image, "retention_excess"); err != nil {
 			return err
 		}
-		if err := s.scheduleDistributedImagePrune(ctx, image); err != nil {
-			return err
-		}
 		if strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleAvailable || strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleImporting || strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleLost || strings.TrimSpace(image.LifecycleState) == "" {
 			image.LifecycleState = model.ImageLifecycleDeleting
 			image.RequiredReplicaCount = 1
@@ -185,6 +182,9 @@ func (s *Service) applyDistributedImageRetentionPlan(ctx context.Context, app mo
 			if _, err := s.Store.UpsertImage(image); err != nil {
 				return err
 			}
+		}
+		if err := s.scheduleDistributedImagePrune(ctx, image); err != nil {
+			return err
 		}
 		if err := s.markDistributedImageReplicasRetentionExcess(ctx, image, now); err != nil {
 			return err
