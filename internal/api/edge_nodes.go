@@ -16,6 +16,8 @@ import (
 	"fugue/internal/store"
 )
 
+const edgeServingActiveHeader = "X-Fugue-Edge-Serving-Active"
+
 type createEdgeNodeTokenRequest struct {
 	EdgeGroupID    string `json:"edge_group_id"`
 	WorkloadMode   string `json:"workload_mode,omitempty"`
@@ -474,6 +476,11 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	servingActive, err := edgeHeartbeatServingActive(r)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := authContext.constrain(&req.EdgeID, &req.EdgeGroupID); err != nil {
 		httpx.WriteError(w, http.StatusForbidden, err.Error())
 		return
@@ -576,7 +583,11 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	if activation.Phase != model.EdgeActivationPhaseEnforced {
+	// Edge Front is the node-local traffic authority for A/B workers. During
+	// the legacy compatibility phase, only its active slot may project instance
+	// health into the flat row consumed by older readers. A missing header keeps
+	// rolling upgrades compatible with workers from the previous release.
+	if activation.Phase != model.EdgeActivationPhaseEnforced && (servingActive == nil || *servingActive) {
 		if _, _, err := s.store.UpdateEdgeHeartbeat(node); err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -594,6 +605,25 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		"accepted":         true,
 		"activation_phase": activation.Phase,
 	})
+}
+
+func edgeHeartbeatServingActive(r *http.Request) (*bool, error) {
+	if r == nil {
+		return nil, nil
+	}
+	raw := strings.ToLower(strings.TrimSpace(r.Header.Get(edgeServingActiveHeader)))
+	if raw == "" {
+		return nil, nil
+	}
+	value := false
+	switch raw {
+	case "true":
+		value = true
+	case "false":
+	default:
+		return nil, errors.New("X-Fugue-Edge-Serving-Active must be true or false")
+	}
+	return &value, nil
 }
 
 func edgeHeartbeatIdentityComplete(req edgeHeartbeatRequest) bool {

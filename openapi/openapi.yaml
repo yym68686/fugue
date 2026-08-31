@@ -886,6 +886,13 @@ paths:
       x-fugue-handler: handleEdgeHeartbeat
       security:
         - EdgeToken: []
+      parameters:
+        - in: header
+          name: X-Fugue-Edge-Serving-Active
+          required: false
+          description: Whether this worker slot is the traffic-serving slot selected by the node-local Edge Front authority. Older workers may omit the header during a rolling upgrade.
+          schema:
+            type: boolean
       requestBody:
         required: true
         content:

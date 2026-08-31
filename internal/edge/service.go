@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,7 @@ const edgeRequestIDHeader = "X-Fugue-Edge-Request-Id"
 const edgeTraceIDHeader = "X-Fugue-Trace-Id"
 const edgeRouteDecisionIDHeader = "X-Fugue-Route-Decision-Id"
 const edgeRouteBundleVersionHeader = "X-Fugue-Route-Bundle-Version"
+const edgeServingActiveHeader = "X-Fugue-Edge-Serving-Active"
 const edgeStatusClientClosedRequest = 499
 
 const edgeRequestBodyCopyBufferSize = 32 * 1024
@@ -3093,7 +3095,23 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, telem
 		return nil, telemetry{}, fmt.Errorf("build edge heartbeat request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if servingActive, known := s.servingActiveForHeartbeat(); known {
+		req.Header.Set(edgeServingActiveHeader, strconv.FormatBool(servingActive))
+	}
 	return req, snapshot.Metrics, nil
+}
+
+func (s *Service) servingActiveForHeartbeat() (bool, bool) {
+	cfg := s.edgeRouteSourceConfig()
+	if cfg.candidateURL == "" {
+		return true, true
+	}
+	selection, err := s.selectRouteBundleSource()
+	if err != nil {
+		return false, false
+	}
+	slot := strings.TrimSpace(s.Config.EdgeSlot)
+	return !selection.candidate && selection.activeSlot == slot, true
 }
 
 func (s *Service) commitHeartbeatPerformanceBaseline(metrics telemetry) {
@@ -3566,7 +3584,8 @@ func (s *Service) edgeTLSHeartbeatStatus(status Status) (string, string, *time.T
 		now := time.Now().UTC()
 		return model.EdgeTLSStatusReady, "caddy internal certificate cache", &now
 	case caddyTLSModePublicOnDemand:
-		return model.EdgeTLSStatusPending, "public on-demand TLS configured; active hostnames still require warmup", nil
+		now := time.Now().UTC()
+		return model.EdgeTLSStatusReady, "public on-demand TLS serving is configured", &now
 	case caddyTLSModeOff:
 		return model.EdgeTLSStatusPending, "TLS is disabled", nil
 	default:

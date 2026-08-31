@@ -1351,12 +1351,14 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 	t.Parallel()
 
 	var gotToken string
+	var gotServingActive string
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/edge/heartbeat" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		gotToken = r.URL.Query().Get("token")
+		gotServingActive = r.Header.Get(edgeServingActiveHeader)
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode heartbeat: %v", err)
 		}
@@ -1389,6 +1391,9 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 	}
 	if gotToken != "edge-secret" {
 		t.Fatalf("expected edge token, got %q", gotToken)
+	}
+	if gotServingActive != "true" {
+		t.Fatalf("expected direct worker to report serving-active, got %q", gotServingActive)
 	}
 	for key, want := range map[string]any{
 		"edge_id":               "edge-us-1",
@@ -1440,6 +1445,17 @@ func TestHeartbeatClassifiesBundleSignatureFailure(t *testing.T) {
 	}
 	if body["failure_class"] != model.EdgeInstanceFailureSignatureInvalid {
 		t.Fatalf("signature failure must be a hard-failure heartbeat class: %#v", body)
+	}
+}
+
+func TestPublicOnDemandTLSHeartbeatReportsServingReady(t *testing.T) {
+	service := NewService(config.EdgeConfig{
+		CaddyEnabled: true,
+		CaddyTLSMode: caddyTLSModePublicOnDemand,
+	}, log.New(ioDiscard{}, "", 0))
+	status, message, readyAt := service.edgeTLSHeartbeatStatus(Status{CaddyEnabled: true})
+	if status != model.EdgeTLSStatusReady || readyAt == nil || message != "public on-demand TLS serving is configured" {
+		t.Fatalf("unexpected public on-demand TLS heartbeat: status=%q message=%q ready_at=%v", status, message, readyAt)
 	}
 }
 

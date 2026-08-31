@@ -340,6 +340,33 @@ func TestCandidateRouteSourceRejectsActivationChangeAndCrossSlotRecord(t *testin
 	}
 }
 
+func TestHeartbeatServingAuthorityFollowsFrontActiveSlot(t *testing.T) {
+	now := time.Now().UTC()
+	activationFile := writeInventoryActivationFixture(t, now, "edge-group-country-us", model.EdgeSlotB, strings.Repeat("1", 40))
+	newWorker := func(slot string) *Service {
+		root := t.TempDir()
+		return NewServiceWithRouteBundleSource(config.EdgeConfig{
+			EdgeGroupID: "edge-group-country-us",
+			EdgeSlot:    slot,
+		}, RouteBundleSourceConfig{
+			URL:                 "http://edge-control-us.fugue-system.svc:8092" + edgeControlBundlePath,
+			CandidateURL:        "http://edge-control-us.fugue-system.svc:8092" + edgeControlCandidateBundlePath,
+			TokenFile:           filepath.Join(root, "token"),
+			VerifierKeyringFile: filepath.Join(root, "keyring"),
+			ActivationStateFile: activationFile,
+		}, log.New(io.Discard, "", 0))
+	}
+
+	active, known := newWorker(model.EdgeSlotB).servingActiveForHeartbeat()
+	if !known || !active {
+		t.Fatalf("front-selected B slot was not reported active: known=%t active=%t", known, active)
+	}
+	inactive, known := newWorker(model.EdgeSlotA).servingActiveForHeartbeat()
+	if !known || inactive {
+		t.Fatalf("standby A slot was reported active: known=%t active=%t", known, inactive)
+	}
+}
+
 func TestActiveWorkerRejectsCurrentPublicationOutsideActivationGeneration(t *testing.T) {
 	selection := routeSourceSelection{candidate: false, activeSlot: model.EdgeSlotB, activationGeneration: 2, expectedGeneration: "verified-candidate-generation"}
 	oldCurrent := routePublicationMetadata{Source: edgeControlRouteSourceV1, GroupID: "edge-group-country-de",

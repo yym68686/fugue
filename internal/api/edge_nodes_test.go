@@ -106,6 +106,50 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 	}
 }
 
+func TestStandbyHeartbeatCannotOverwriteServingLegacyProjection(t *testing.T) {
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{ID: "edge-shared", EdgeGroupID: "edge-group-country-us", Status: model.EdgeHealthUnknown}); err != nil {
+		t.Fatalf("create edge control identity: %v", err)
+	}
+	heartbeat := func(slot, servingHeader, status string, healthy bool, bundle string) *httptest.ResponseRecorder {
+		body := map[string]any{
+			"edge_id": "edge-shared", "edge_group_id": "edge-group-country-us",
+			"slot": slot, "instance_uid": "pod-" + slot, "release_epoch": "release-" + slot,
+			"route_bundle_version": bundle, "caddy_route_count": 2,
+			"tls_status": model.EdgeTLSStatusReady, "status": status, "healthy": healthy, "draining": false,
+		}
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal heartbeat: %v", err)
+		}
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", bytes.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set(edgeServingActiveHeader, servingHeader)
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	for index := 0; index < 2; index++ {
+		if recorder := heartbeat(model.EdgeSlotB, "true", model.EdgeHealthHealthy, true, "bundle-serving"); recorder.Code != http.StatusOK {
+			t.Fatalf("serving heartbeat failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+	for index := 0; index < 2; index++ {
+		if recorder := heartbeat(model.EdgeSlotA, "false", model.EdgeHealthUnhealthy, false, "bundle-standby"); recorder.Code != http.StatusOK {
+			t.Fatalf("standby heartbeat failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+
+	node, _, err := storeState.GetEdgeNode("edge-shared")
+	if err != nil {
+		t.Fatalf("get projected edge node: %v", err)
+	}
+	if !node.Healthy || node.Status != model.EdgeHealthHealthy || node.RouteBundleVersion != "bundle-serving" {
+		t.Fatalf("standby heartbeat overwrote serving projection: %+v", node)
+	}
+}
+
 func TestEdgeHeartbeatRouteSourceMetricsAreLowCardinality(t *testing.T) {
 	t.Parallel()
 
