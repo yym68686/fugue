@@ -1951,6 +1951,28 @@ func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
 	for _, want := range []string{
 		"<clickhouse>",
 		"<console>true</console>",
+		"<max_memory_usage>805306368</max_memory_usage>",
+		"<max_bytes_before_external_group_by>268435456</max_bytes_before_external_group_by>",
+		"<max_bytes_before_external_sort>268435456</max_bytes_before_external_sort>",
+		"<join_algorithm>auto</join_algorithm>",
+		"<max_server_memory_usage>3221225472</max_server_memory_usage>",
+		"<memory_overcommit_ratio_denominator>2147483648</memory_overcommit_ratio_denominator>",
+		"<query_log>",
+		"<query_thread_log>",
+		"<query_views_log>",
+		"<trace_log>",
+		"<metric_log>",
+		"<asynchronous_metric_log>",
+		"<query_metric_log>",
+		"<asynchronous_insert_log>",
+		"<part_log>",
+		"<processors_profile_log>",
+		"<text_log>",
+		"<error_log>",
+		"<background_schedule_pool_log>",
+		"<partition_by>toDate(event_date)</partition_by>",
+		"<ttl>event_date + INTERVAL 1 DAY DELETE</ttl>",
+		"<settings>ttl_only_drop_parts = 1</settings>",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.request_facts",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.edge_route_decisions",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.edge_route_decision_missing_links",
@@ -1966,6 +1988,9 @@ func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
 		if !strings.Contains(configDoc, want) {
 			t.Fatalf("clickhouse config missing %q:\n%s", want, configDoc)
 		}
+	}
+	if !strings.Contains(deploymentDoc, "memory: 1Gi") || !strings.Contains(deploymentDoc, "memory: 4Gi") {
+		t.Fatalf("clickhouse deployment missing 4Gi memory envelope:\n%s", deploymentDoc)
 	}
 	if !strings.Contains(serviceDoc, "port: 8123") || !strings.Contains(serviceDoc, "port: 9000") {
 		t.Fatalf("clickhouse service missing expected ports:\n%s", serviceDoc)
