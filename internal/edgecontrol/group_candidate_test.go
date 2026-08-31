@@ -95,6 +95,28 @@ func TestCandidatePublisherPersistsInactiveBundleWithoutChangingCurrent(t *testi
 	}
 }
 
+func TestCandidateReaderReturnsNoContentWhenCandidateSlotIsEmpty(t *testing.T) {
+	now := time.Date(2026, 8, 12, 1, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerDir, readerToken := privateFixtureDir(t), strings.Repeat("r", 48)
+	writeGroupReaderFixture(t, readerDir, groupID, readerToken, now.Add(time.Minute))
+	handler, err := NewGroupBundleHandler(GroupBundleHandlerConfig{Store: store, GroupIDs: []string{groupID}, KeyringDir: readerDir, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, GroupCandidateEnvelopeReadPathV1+"?edge_group_id="+groupID+"&edge_id=edge-de-1", nil)
+	request.Header.Set("Authorization", "Bearer "+readerToken)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent || recorder.Body.Len() != 0 {
+		t.Fatalf("empty candidate slot status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestCandidatePublisherRejectsUnboundReleaseIdentity(t *testing.T) {
 	publisher := GroupCandidatePublisher{Identity: CandidateReleaseIdentity{SourceSHA: strings.Repeat("1", 40)}}
 	if _, err := publisher.Publish(context.Background(), GroupShadowBatch{}); err == nil {

@@ -138,7 +138,18 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 		} else {
 			candidate, exists, err = reader.ReadGroupCandidate(request.Context(), groupID)
 		}
-		if err != nil || !exists || !candidateHasStagedWorkerIdentity(candidate) || validateGroupCandidateBundle(groupID, candidate) != nil || !candidate.Bundle.ValidUntil.After(handler.now()) {
+		if err != nil {
+			writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_bundle_unavailable")
+			return
+		}
+		if !exists {
+			// An empty candidate slot is a normal steady state between staged
+			// releases. Let read-only importers stop polling without masking
+			// malformed or expired candidate material as success.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if !candidateHasStagedWorkerIdentity(candidate) || validateGroupCandidateBundle(groupID, candidate) != nil || !candidate.Bundle.ValidUntil.After(handler.now()) {
 			writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_bundle_unavailable")
 			return
 		}

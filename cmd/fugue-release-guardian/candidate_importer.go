@@ -156,9 +156,12 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	if len(token) < 32 || len(token) > 256 || strings.ContainsAny(token, "\r\n\t ") {
 		return false, errors.New("candidate import credential is invalid")
 	}
-	envelope, err := fetchCandidateEnvelope(ctx, config, edgeID, token)
+	envelope, present, err := fetchCandidateEnvelope(ctx, config, edgeID, token)
 	if err != nil {
 		return false, err
+	}
+	if !present {
+		return false, nil
 	}
 	if err := validateCandidateEnvelope(config.GroupID, envelope, now.UTC()); err != nil {
 		return false, err
@@ -292,7 +295,7 @@ func candidateImportEdgeID(ctx context.Context, client kubernetes.Interface, gro
 	return "", errors.New("candidate import worker identity is unavailable")
 }
 
-func fetchCandidateEnvelope(ctx context.Context, config candidateImportConfig, edgeID, token string) (candidateEnvelope, error) {
+func fetchCandidateEnvelope(ctx context.Context, config candidateImportConfig, edgeID, token string) (candidateEnvelope, bool, error) {
 	endpoint, _ := url.Parse(config.Endpoint)
 	query := endpoint.Query()
 	query.Set("edge_group_id", config.GroupID)
@@ -302,28 +305,31 @@ func fetchCandidateEnvelope(ctx context.Context, config candidateImportConfig, e
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
-		return candidateEnvelope{}, err
+		return candidateEnvelope{}, false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
-		return candidateEnvelope{}, errors.New("candidate envelope request failed")
+		return candidateEnvelope{}, false, errors.New("candidate envelope request failed")
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNoContent {
+		return candidateEnvelope{}, false, nil
+	}
 	if response.StatusCode != http.StatusOK {
-		return candidateEnvelope{}, errors.New("candidate envelope request was rejected")
+		return candidateEnvelope{}, false, errors.New("candidate envelope request was rejected")
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, maxCandidateEnvelopeBytes+1))
 	decoder.DisallowUnknownFields()
 	var envelope candidateEnvelope
 	if err := decoder.Decode(&envelope); err != nil {
-		return candidateEnvelope{}, errors.New("candidate envelope is invalid")
+		return candidateEnvelope{}, false, errors.New("candidate envelope is invalid")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return candidateEnvelope{}, errors.New("candidate envelope has trailing data")
+		return candidateEnvelope{}, false, errors.New("candidate envelope has trailing data")
 	}
-	return envelope, nil
+	return envelope, true, nil
 }
 
 func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now time.Time) error {

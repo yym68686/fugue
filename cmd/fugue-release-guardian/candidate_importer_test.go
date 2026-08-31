@@ -89,6 +89,31 @@ func TestCandidateImporterBootstrapsExactGroupPointersIdempotently(t *testing.T)
 	}
 }
 
+func TestCandidateImporterTreatsEmptyCandidateAsNoop(t *testing.T) {
+	groupID := "edge-pool-a"
+	token := strings.Repeat("t", 48)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Namespace: "fugue-system", Labels: map[string]string{
+		"fugue.io/edge-group-id": groupID, "fugue.io/edge-control-client": "true",
+	}}, Spec: corev1.PodSpec{NodeName: "edge-node-a"}}
+	client := fake.NewSimpleClientset(pod)
+	store, err := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := importCandidateOnce(context.Background(), store, client, candidateImportConfig{GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile}, time.Now().UTC())
+	if err != nil || changed {
+		t.Fatalf("empty candidate import changed=%v err=%v", changed, err)
+	}
+}
+
 func TestCandidateImporterNeverRefreshesAnExistingCurrentAuthority(t *testing.T) {
 	now := time.Date(2026, 8, 12, 4, 15, 0, 0, time.UTC)
 	groupID := "edge-pool-a"
