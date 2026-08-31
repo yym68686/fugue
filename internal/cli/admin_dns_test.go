@@ -30,6 +30,25 @@ func TestDNSAnswerEdgeReadyRequiresRouteReadyForHTTPRoutes(t *testing.T) {
 	}
 }
 
+func TestRouteReadyEdgeGroupsExpandsUnpinnedHealthyGroups(t *testing.T) {
+	t.Parallel()
+
+	got := routeReadyEdgeGroups(model.RouteExplainResponse{
+		Route: &model.EdgeRouteBinding{
+			Status:      model.EdgeRouteStatusActive,
+			RoutePolicy: model.EdgeRoutePolicyEnabled,
+			UpstreamURL: "http://fugue-fugue.fugue-system.svc.cluster.local:80",
+		},
+		HealthyEdgeGroups: map[string]bool{
+			"edge-group-country-de": true,
+			"edge-group-country-us": true,
+		},
+	})
+	if !got["edge-group-country-de"] || !got["edge-group-country-us"] || len(got) != 2 {
+		t.Fatalf("expected unpinned route to expand to both healthy groups, got %+v", got)
+	}
+}
+
 func TestDNSAnswerCheckQueryHostnameUsesFugueZoneCNAMECandidate(t *testing.T) {
 	t.Parallel()
 

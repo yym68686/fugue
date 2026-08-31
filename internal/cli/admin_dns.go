@@ -1024,12 +1024,21 @@ func dnsAnswerCheckQueryHostnameFromCandidates(hostname string, nodes []model.DN
 
 func routeReadyEdgeGroups(explain model.RouteExplainResponse) map[string]bool {
 	out := map[string]bool{}
+	globalTrafficRoute := false
 	add := func(route model.EdgeRouteBinding) {
 		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) &&
 			model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) &&
-			strings.TrimSpace(route.EdgeGroupID) != "" &&
 			strings.TrimSpace(route.UpstreamURL) != "" {
-			out[strings.TrimSpace(route.EdgeGroupID)] = true
+			if groupID := strings.TrimSpace(route.EdgeGroupID); groupID != "" {
+				out[groupID] = true
+			} else {
+				// An unpinned platform/custom route is served by every healthy
+				// edge group returned in the route explanation. Treating the
+				// route's empty group id as a literal group made DNS answer-check
+				// reject valid multi-group answers whenever min_healthy_edge_nodes
+				// was satisfied across groups.
+				globalTrafficRoute = true
+			}
 		}
 	}
 	for _, route := range explain.Routes {
@@ -1037,6 +1046,13 @@ func routeReadyEdgeGroups(explain model.RouteExplainResponse) map[string]bool {
 	}
 	if len(out) == 0 && explain.Route != nil {
 		add(*explain.Route)
+	}
+	if globalTrafficRoute {
+		for groupID, healthy := range explain.HealthyEdgeGroups {
+			if healthy && strings.TrimSpace(groupID) != "" {
+				out[strings.TrimSpace(groupID)] = true
+			}
+		}
 	}
 	return out
 }
