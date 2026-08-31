@@ -21479,6 +21479,11 @@ components:
           type: array
           items:
             type: string
+        referenced_manifests:
+          type: array
+          description: Child manifest digests referenced by an OCI index or Docker manifest list.
+          items:
+            type: string
         graph_status:
           type: string
           description: >-
@@ -21585,6 +21590,10 @@ components:
           type: integer
           format: int64
         referenced_blobs:
+          type: array
+          items:
+            type: string
+        referenced_manifests:
           type: array
           items:
             type: string

@@ -79,6 +79,10 @@ func TestImageCacheInventoryAndDryRunPrunePlanAPI(t *testing.T) {
 	if len(inventoryResponse.Nodes) != 1 || inventoryResponse.Nodes[0].ManifestCount != 1 || len(inventoryResponse.Manifests) != 1 {
 		t.Fatalf("unexpected inventory response: %+v", inventoryResponse)
 	}
+	if len(inventoryResponse.Manifests[0].ReferencedManifests) != 1 ||
+		inventoryResponse.Manifests[0].ReferencedManifests[0] != "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" {
+		t.Fatalf("manifest graph edges were not persisted: %+v", inventoryResponse.Manifests[0])
+	}
 
 	planRequest := performJSONRequest(t, server, http.MethodPost, "/v1/admin/image-cache/prune-plan", adminSecret, map[string]any{
 		"cluster_node_name": "worker-1",
@@ -125,6 +129,7 @@ func TestImageCacheInventoryPreservesBoundedGraphFailureEvidenceWithoutPruneCand
 			"manifest_size_bytes":        999,
 			"total_blob_bytes":           999,
 			"referenced_blobs":           []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			"referenced_manifests":       []string{"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
 			"unique_blob_bytes_observed": 999,
 			"present":                    true,
 		}},
@@ -156,6 +161,9 @@ func TestImageCacheInventoryPreservesBoundedGraphFailureEvidenceWithoutPruneCand
 	}
 	if refs, ok := manifest["referenced_blobs"].([]any); ok && len(refs) > 0 {
 		t.Fatalf("incomplete graph retained referenced blobs: %+v", manifest)
+	}
+	if refs, ok := manifest["referenced_manifests"].([]any); ok && len(refs) > 0 {
+		t.Fatalf("incomplete graph retained referenced manifests: %+v", manifest)
 	}
 
 	planRequest := performJSONRequest(t, server, http.MethodPost, "/v1/admin/image-cache/prune-plan", adminSecret, map[string]any{

@@ -17,7 +17,7 @@ func imageCacheNodeColumns() string {
 }
 
 func imageCacheManifestColumns() string {
-	return `id, node_id, cluster_node_name, runtime_id, image_ref, repo, target, digest, media_type, manifest_size_bytes, total_blob_bytes, referenced_blobs_json, graph_status, graph_failure_reason, created_at_observed, last_seen_at, pinned_locally, present, created_at, updated_at`
+	return `id, node_id, cluster_node_name, runtime_id, image_ref, repo, target, digest, media_type, manifest_size_bytes, total_blob_bytes, referenced_blobs_json, referenced_manifests_json, graph_status, graph_failure_reason, created_at_observed, last_seen_at, pinned_locally, present, created_at, updated_at`
 }
 
 func imageCachePrunePlanColumns() string {
@@ -124,17 +124,21 @@ RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName,
 		if jsonErr != nil {
 			return model.ImageCacheNodeInventory{}, jsonErr
 		}
+		referencedManifestsJSON, jsonErr := marshalNullableJSON(manifest.ReferencedManifests)
+		if jsonErr != nil {
+			return model.ImageCacheNodeInventory{}, jsonErr
+		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_image_cache_manifests (
 	id, node_id, cluster_node_name, runtime_id, image_ref, repo, target, digest,
-	media_type, manifest_size_bytes, total_blob_bytes, referenced_blobs_json,
+	media_type, manifest_size_bytes, total_blob_bytes, referenced_blobs_json, referenced_manifests_json,
 	graph_status, graph_failure_reason, created_at_observed, last_seen_at,
 	pinned_locally, present, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
-	$9, $10, $11, $12,
-	$13, $14, $15, $16,
-	$17, $18, $19, $20
+	$9, $10, $11, $12, $13,
+	$14, $15, $16, $17,
+	$18, $19, $20, $21
 )
 ON CONFLICT (node_id, cluster_node_name, repo, target, digest) DO UPDATE SET
 	runtime_id = EXCLUDED.runtime_id,
@@ -143,6 +147,7 @@ ON CONFLICT (node_id, cluster_node_name, repo, target, digest) DO UPDATE SET
 	manifest_size_bytes = EXCLUDED.manifest_size_bytes,
 	total_blob_bytes = EXCLUDED.total_blob_bytes,
 	referenced_blobs_json = EXCLUDED.referenced_blobs_json,
+	referenced_manifests_json = EXCLUDED.referenced_manifests_json,
 	graph_status = EXCLUDED.graph_status,
 	graph_failure_reason = EXCLUDED.graph_failure_reason,
 	created_at_observed = EXCLUDED.created_at_observed,
@@ -150,7 +155,7 @@ ON CONFLICT (node_id, cluster_node_name, repo, target, digest) DO UPDATE SET
 	pinned_locally = EXCLUDED.pinned_locally,
 	present = EXCLUDED.present,
 	updated_at = EXCLUDED.updated_at
-	`, manifest.ID, manifest.NodeID, manifest.ClusterNodeName, manifest.RuntimeID, manifest.ImageRef, manifest.Repo, manifest.Target, manifest.Digest, manifest.MediaType, manifest.ManifestSizeBytes, manifest.TotalBlobBytes, refsJSON, manifest.GraphStatus, manifest.GraphFailureReason, manifest.CreatedAtObserved, manifest.LastSeenAt, manifest.PinnedLocally, manifest.Present, manifest.CreatedAt, manifest.UpdatedAt); err != nil {
+	`, manifest.ID, manifest.NodeID, manifest.ClusterNodeName, manifest.RuntimeID, manifest.ImageRef, manifest.Repo, manifest.Target, manifest.Digest, manifest.MediaType, manifest.ManifestSizeBytes, manifest.TotalBlobBytes, refsJSON, referencedManifestsJSON, manifest.GraphStatus, manifest.GraphFailureReason, manifest.CreatedAtObserved, manifest.LastSeenAt, manifest.PinnedLocally, manifest.Present, manifest.CreatedAt, manifest.UpdatedAt); err != nil {
 			return model.ImageCacheNodeInventory{}, mapDBErr(err)
 		}
 	}
@@ -597,7 +602,7 @@ func scanImageCacheNodeInventory(scanner sqlScanner) (model.ImageCacheNodeInvent
 
 func scanImageCacheManifest(scanner sqlScanner) (model.ImageCacheManifest, error) {
 	var out model.ImageCacheManifest
-	var refsRaw []byte
+	var refsRaw, referencedManifestsRaw []byte
 	var createdAtObserved sql.NullTime
 	if err := scanner.Scan(
 		&out.ID,
@@ -612,6 +617,7 @@ func scanImageCacheManifest(scanner sqlScanner) (model.ImageCacheManifest, error
 		&out.ManifestSizeBytes,
 		&out.TotalBlobBytes,
 		&refsRaw,
+		&referencedManifestsRaw,
 		&out.GraphStatus,
 		&out.GraphFailureReason,
 		&createdAtObserved,
@@ -628,6 +634,11 @@ func scanImageCacheManifest(scanner sqlScanner) (model.ImageCacheManifest, error
 		return model.ImageCacheManifest{}, err
 	}
 	out.ReferencedBlobs = normalizeStringList(refs)
+	referencedManifests, err := decodeJSONValue[[]string](referencedManifestsRaw)
+	if err != nil {
+		return model.ImageCacheManifest{}, err
+	}
+	out.ReferencedManifests = normalizeStringList(referencedManifests)
 	if createdAtObserved.Valid {
 		out.CreatedAtObserved = &createdAtObserved.Time
 	}

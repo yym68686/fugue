@@ -305,21 +305,31 @@ func (s *Store) ListImageReplicas(filter model.ImageReplicaFilter) ([]model.Imag
 	return out, nil
 }
 
-func (s *Store) MarkStaleImageReplicas(cutoff time.Time) (int, error) {
+// MarkStaleImageReplicas expires leased replicas only after their lease ends.
+// The cutoff remains a compatibility fallback for historical replicas that do
+// not have lease metadata.
+func (s *Store) MarkStaleImageReplicas(now, unleasedCutoff time.Time) (int, error) {
 	if s.usingDatabase() {
-		return s.pgMarkStaleImageReplicas(cutoff)
+		return s.pgMarkStaleImageReplicas(now, unleasedCutoff)
 	}
 	count := 0
 	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
+		now = now.UTC()
+		unleasedCutoff = unleasedCutoff.UTC()
 		for idx := range state.ImageReplicas {
 			replica := &state.ImageReplicas[idx]
 			if replica.Status != model.ImageReplicaStatusPresent {
 				continue
 			}
-			seen := imageReplicaSeenAt(*replica)
-			if seen.IsZero() || !seen.Before(cutoff) {
-				continue
+			if replica.LeaseExpiresAt != nil {
+				if !replica.LeaseExpiresAt.Before(now) {
+					continue
+				}
+			} else {
+				seen := imageReplicaSeenAt(*replica)
+				if seen.IsZero() || !seen.Before(unleasedCutoff) {
+					continue
+				}
 			}
 			replica.Status = model.ImageReplicaStatusStale
 			replica.UpdatedAt = now

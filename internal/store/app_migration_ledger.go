@@ -439,24 +439,83 @@ func (s *Store) MigrationArtifactsRetirementBlocked(appID string) (bool, string,
 	if err != nil {
 		return false, "", err
 	}
+	gate := migrationArtifactRetirementGate(latest, operation, found)
+	return gate.Blocked, gate.Reason, nil
+}
+
+type MigrationArtifactRetirementGate struct {
+	Blocked bool
+	Reason  string
+}
+
+func migrationArtifactRetirementGate(latest model.AppMigrationLedger, operation model.Operation, found bool) MigrationArtifactRetirementGate {
 	if operation.ID != "" && !found {
-		return true, "migration ledger is missing for the latest migration operation", nil
+		return MigrationArtifactRetirementGate{Blocked: true, Reason: "migration ledger is missing for the latest migration operation"}
 	}
 	if !found {
-		return false, "", nil
+		return MigrationArtifactRetirementGate{}
 	}
 	if operation.Status == model.OperationStatusCompleted &&
 		(latest.CutoverStatus == model.AppMigrationCutoverVerified || latest.CutoverStatus == model.AppMigrationCutoverCompleted) {
 		if err := validateAppMigrationCutover(latest, false); err != nil {
-			return true, "migration cutover ledger failed re-validation: " + err.Error(), nil
+			return MigrationArtifactRetirementGate{Blocked: true, Reason: "migration cutover ledger failed re-validation: " + err.Error()}
 		}
-		return false, "", nil
+		return MigrationArtifactRetirementGate{}
 	}
 	reason := strings.TrimSpace(latest.FailureReason)
 	if reason == "" {
 		reason = "migration cutover has not been completed"
 	}
-	return true, reason, nil
+	return MigrationArtifactRetirementGate{Blocked: true, Reason: reason}
+}
+
+// MigrationArtifactRetirementGates resolves every app's migration gate from a
+// bounded pair of global snapshots. Periodic cleanup uses this instead of
+// rebuilding the entire migration archive for every app and expired pin.
+func (s *Store) MigrationArtifactRetirementGates() (map[string]MigrationArtifactRetirementGate, error) {
+	latestByApp, err := s.LatestAppMigrationLedgersByApp()
+	if err != nil {
+		return nil, err
+	}
+	operations, err := s.ListOperationsFiltered("", true, OperationListFilter{
+		Types: []string{model.OperationTypeMigrate},
+	})
+	if err != nil {
+		return nil, err
+	}
+	operationByID := make(map[string]model.Operation, len(operations))
+	latestOperationByApp := make(map[string]model.Operation)
+	for _, operation := range operations {
+		operationByID[strings.TrimSpace(operation.ID)] = operation
+		appID := strings.TrimSpace(operation.AppID)
+		current, exists := latestOperationByApp[appID]
+		if appID != "" && (!exists || operation.CreatedAt.After(current.CreatedAt) ||
+			(operation.CreatedAt.Equal(current.CreatedAt) && operation.ID > current.ID)) {
+			latestOperationByApp[appID] = operation
+		}
+	}
+	appIDs := make(map[string]struct{}, len(latestByApp)+len(latestOperationByApp))
+	for appID := range latestByApp {
+		appIDs[appID] = struct{}{}
+	}
+	for appID := range latestOperationByApp {
+		appIDs[appID] = struct{}{}
+	}
+	gates := make(map[string]MigrationArtifactRetirementGate, len(appIDs))
+	for appID := range appIDs {
+		ledger, found := latestByApp[appID]
+		operation := latestOperationByApp[appID]
+		if found {
+			if ledgerOperation, ok := operationByID[strings.TrimSpace(ledger.OperationID)]; ok {
+				operation = ledgerOperation
+			}
+		}
+		gate := migrationArtifactRetirementGate(ledger, operation, found)
+		if gate.Blocked {
+			gates[appID] = gate
+		}
+	}
+	return gates, nil
 }
 
 // RecordMigrationArtifactRetirementBlocked emits a durable ledger event when

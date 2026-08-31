@@ -118,7 +118,7 @@ func TestImageStoreReplicaPinAndTaskSemantics(t *testing.T) {
 		t.Fatalf("expected duplicate target to update same replica, got %s and %s", first.ID, second.ID)
 	}
 	staleCutoff := now.Add(time.Minute)
-	stale, err := s.MarkStaleImageReplicas(staleCutoff)
+	stale, err := s.MarkStaleImageReplicas(staleCutoff, staleCutoff)
 	if err != nil {
 		t.Fatalf("mark stale replicas: %v", err)
 	}

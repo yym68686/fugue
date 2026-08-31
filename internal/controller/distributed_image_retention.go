@@ -39,6 +39,10 @@ func (s *Service) reconcileDistributedImageRetentionForApp(ctx context.Context, 
 		}
 		return DistributedImageRetentionPlan{AppID: strings.TrimSpace(app.ID)}, nil
 	}
+	return s.reconcileDistributedImageRetentionForAppAfterMigrationGate(ctx, app, ops, liveRefs)
+}
+
+func (s *Service) reconcileDistributedImageRetentionForAppAfterMigrationGate(ctx context.Context, app model.App, ops []model.Operation, liveRefs map[string]struct{}) (DistributedImageRetentionPlan, error) {
 	images, err := s.Store.ListImages(model.ImageFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true})
 	if err != nil {
 		return DistributedImageRetentionPlan{}, err
@@ -183,7 +187,7 @@ func (s *Service) applyDistributedImageRetentionPlan(ctx context.Context, app mo
 				return err
 			}
 		}
-		if err := s.scheduleDistributedImagePrune(ctx, image); err != nil {
+		if err := s.scheduleDistributedImagePruneAfterMigrationGate(ctx, image); err != nil {
 			return err
 		}
 		if err := s.markDistributedImageReplicasRetentionExcess(ctx, image, now); err != nil {

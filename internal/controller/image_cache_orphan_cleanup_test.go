@@ -908,6 +908,64 @@ func TestControllerImageCachePrunePlanClassifiesDeletedGeneration(t *testing.T) 
 	}
 }
 
+func TestControllerImageCachePrunePlanRetiresAuthorizedManifestGraph(t *testing.T) {
+	t.Parallel()
+
+	stateStore, _ := newImageCacheControllerTestStore(t)
+	const (
+		parentDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		childDigest  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	)
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        "tenant_1",
+		AppID:           "app_1",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/graph:parent",
+		CanonicalDigest: parentDigest,
+		LifecycleState:  model.ImageLifecycleDeleting,
+	}); err != nil {
+		t.Fatalf("upsert deleting graph root: %v", err)
+	}
+	created := time.Now().UTC().Add(-48 * time.Hour)
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID: "machine-1", ClusterNodeName: "worker-1", RuntimeID: "runtime-1",
+		ObservedAt: time.Now().UTC(), Status: "reported", ManifestCount: 2,
+	}, []model.ImageCacheManifest{
+		{
+			Repo: "fugue-apps/graph", Target: "parent", Digest: parentDigest,
+			ReferencedManifests: []string{childDigest}, CreatedAtObserved: &created,
+			LastSeenAt: time.Now().UTC(), Present: true,
+		},
+		{
+			Repo: "fugue-apps/graph", Target: childDigest, Digest: childDigest,
+			CreatedAtObserved: &created, LastSeenAt: time.Now().UTC(), Present: true,
+		},
+	}); err != nil {
+		t.Fatalf("upsert manifest graph: %v", err)
+	}
+	svc := &Service{Store: stateStore, Config: config.ControllerConfig{
+		ImageStoreOrphanPruneGracePeriod: time.Hour, ImageStoreOrphanPruneMaxDeleteBytesPerNode: "1Gi",
+		ImageStoreOrphanPruneMinReplicaCount: 1, ImageCacheInventoryTTL: 2 * time.Hour,
+	}}
+	protected, err := svc.controllerImageCacheProtectedSet(context.Background())
+	if err != nil {
+		t.Fatalf("protected set: %v", err)
+	}
+	plan, err := svc.computeControllerImageCachePrunePlan(context.Background(), model.ImageCacheNodeInventory{
+		NodeID: "machine-1", ClusterNodeName: "worker-1", RuntimeID: "runtime-1",
+	}, protected, model.ImageCachePruneModeObserve)
+	if err != nil {
+		t.Fatalf("compute graph prune plan: %v", err)
+	}
+	if len(plan.Candidates) != 2 {
+		t.Fatalf("expected root and child candidates, got %+v", plan)
+	}
+	for _, candidate := range plan.Candidates {
+		if candidate.Protected || candidate.Reason != "deleted_image_generation" {
+			t.Fatalf("manifest graph member was not authorized with its root: %+v", candidate)
+		}
+	}
+}
+
 func newImageCacheControllerTestStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))

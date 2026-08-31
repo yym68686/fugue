@@ -219,3 +219,113 @@ func scheduleDistributedImagePruneTestPayload(t *testing.T, pruneEnabled bool) m
 	}
 	return tasks[0].Payload
 }
+
+func TestCleanupDeletedAppDistributedImagesRetiresUnreferencedImage(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		ID:                       "img_deleted_app",
+		TenantID:                 "tenant_deleted_app",
+		AppID:                    "app_deleted",
+		ImageRef:                 "registry.example/fugue-apps/deleted:old",
+		CanonicalDigest:          "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		LifecycleState:           model.ImageLifecycleAvailable,
+		RequiredReplicaCount:     1,
+		MinAvailableReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	if _, err := stateStore.UpsertImagePin(model.ImagePin{
+		ImageID: image.ID, TenantID: image.TenantID, AppID: image.AppID,
+		Reason: model.ImagePinReasonCurrentDeploy, MinReplicas: 1,
+	}); err != nil {
+		t.Fatalf("upsert image pin: %v", err)
+	}
+	now := time.Now().UTC()
+	lease := now.Add(time.Hour)
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID: image.ID, TenantID: image.TenantID, AppID: image.AppID,
+		Digest: image.CanonicalDigest, ClusterNodeName: "worker-1",
+		Status: model.ImageReplicaStatusPresent, LastVerifiedAt: &now, LeaseExpiresAt: &lease,
+	}); err != nil {
+		t.Fatalf("upsert image replica: %v", err)
+	}
+
+	svc := &Service{Store: stateStore, Config: config.ControllerConfig{ImageStoreMode: "distributed"}}
+	if err := svc.cleanupDeletedAppDistributedImages(context.Background(), model.App{ID: image.AppID, TenantID: image.TenantID}); err != nil {
+		t.Fatalf("cleanup deleted app images: %v", err)
+	}
+	got, err := stateStore.GetImage(image.ID, image.TenantID, false)
+	if err != nil {
+		t.Fatalf("get retired image: %v", err)
+	}
+	if got.LifecycleState != model.ImageLifecycleDeleting {
+		t.Fatalf("deleted app image lifecycle = %q, want deleting", got.LifecycleState)
+	}
+	pins, err := stateStore.ListImagePins(model.ImagePinFilter{ImageID: image.ID, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list image pins: %v", err)
+	}
+	if len(pins) != 0 {
+		t.Fatalf("deleted app pins should be removed: %+v", pins)
+	}
+	replicas, err := stateStore.ListImageReplicas(model.ImageReplicaFilter{ImageID: image.ID, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list image replicas: %v", err)
+	}
+	if len(replicas) != 1 || replicas[0].Status != model.ImageReplicaStatusStale || replicas[0].LastError != "retention_excess" {
+		t.Fatalf("retired image replica should be stale: %+v", replicas)
+	}
+}
+
+func TestCleanupDeletedAppDistributedImagesPreservesSharedPinnedImage(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		ID:              "img_shared_app",
+		TenantID:        "tenant_shared_app",
+		AppID:           "app_deleted",
+		ImageRef:        "registry.example/fugue-apps/shared:current",
+		CanonicalDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		LifecycleState:  model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	for _, appID := range []string{"app_deleted", "app_active"} {
+		if _, err := stateStore.UpsertImagePin(model.ImagePin{
+			ImageID: image.ID, TenantID: image.TenantID, AppID: appID,
+			Reason: model.ImagePinReasonCurrentDeploy, MinReplicas: 1,
+		}); err != nil {
+			t.Fatalf("upsert image pin for %s: %v", appID, err)
+		}
+	}
+
+	svc := &Service{Store: stateStore, Config: config.ControllerConfig{ImageStoreMode: "distributed"}}
+	if err := svc.cleanupDeletedAppDistributedImages(context.Background(), model.App{ID: "app_deleted", TenantID: image.TenantID}); err != nil {
+		t.Fatalf("cleanup deleted app images: %v", err)
+	}
+	got, err := stateStore.GetImage(image.ID, image.TenantID, false)
+	if err != nil {
+		t.Fatalf("get shared image: %v", err)
+	}
+	if got.LifecycleState != model.ImageLifecycleAvailable {
+		t.Fatalf("shared pinned image lifecycle = %q, want available", got.LifecycleState)
+	}
+	pins, err := stateStore.ListImagePins(model.ImagePinFilter{ImageID: image.ID, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list shared image pins: %v", err)
+	}
+	if len(pins) != 1 || pins[0].AppID != "app_active" {
+		t.Fatalf("active app pin must remain: %+v", pins)
+	}
+}

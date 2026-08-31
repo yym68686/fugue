@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/imagecacheevidence"
+	"fugue/internal/imagecachegraph"
 	"fugue/internal/imagecachekeys"
 	"fugue/internal/imagecacheusage"
 	"fugue/internal/localpvsafety"
@@ -336,17 +337,12 @@ type imageCacheInventoryDiskReport struct {
 
 type imageCacheInventoryManifestReport struct {
 	model.ImageCacheManifest
-	ContentType             string `json:"content_type"`
-	SizeBytes               int64  `json:"size_bytes"`
-	ReferencedBlobBytes     int64  `json:"referenced_blob_bytes"`
-	UniqueBlobBytesObserved int64  `json:"unique_blob_bytes_observed"`
-	// The node-local image-cache inventory includes the manifest-list/index
-	// graph in addition to the blob graph.  Keep accepting that field even
-	// though the control-plane inventory table currently only persists blob
-	// references; DecodeJSON is intentionally strict and would otherwise turn
-	// every inventory report into a 400 after a cache-agent rollout.
-	ReferencedManifests []string `json:"referenced_manifests"`
-	ModifiedAt          string   `json:"modified_at"`
+	ContentType             string   `json:"content_type"`
+	SizeBytes               int64    `json:"size_bytes"`
+	ReferencedBlobBytes     int64    `json:"referenced_blob_bytes"`
+	UniqueBlobBytesObserved int64    `json:"unique_blob_bytes_observed"`
+	ReferencedManifests     []string `json:"referenced_manifests"`
+	ModifiedAt              string   `json:"modified_at"`
 }
 
 type imageCacheInventoryBlobReport struct {
@@ -434,8 +430,10 @@ func decodeImageCacheInventoryReport(r *http.Request, updater model.NodeUpdater)
 			manifest.ManifestSizeBytes = 0
 			manifest.TotalBlobBytes = 0
 			manifest.ReferencedBlobs = nil
+			manifest.ReferencedManifests = nil
 		} else {
 			manifest.GraphFailureReason = ""
+			manifest.ReferencedManifests = append([]string(nil), reported.ReferencedManifests...)
 			manifest.ManifestSizeBytes = firstNonZeroInt64(manifest.ManifestSizeBytes, reported.SizeBytes)
 			manifest.TotalBlobBytes = firstNonZeroInt64(manifest.TotalBlobBytes, reported.ReferencedBlobBytes, reported.UniqueBlobBytesObserved)
 		}
@@ -561,6 +559,7 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 		classified = append(classified, imageCachePruneCandidateForManifest(manifest, protected, now))
 	}
 	classified = protectImageCacheSharedDigestAliases(classified)
+	classified = imagecachegraph.ProtectManifestGraph(manifests, classified)
 	for _, candidate := range classified {
 		if candidate.Protected {
 			plan.ProtectedManifestCount++
@@ -574,12 +573,7 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 		plan.PlannedDeleteBytes += candidate.PlannedDeleteBytes
 		plan.Candidates = append(plan.Candidates, candidate)
 	}
-	sort.SliceStable(plan.Candidates, func(i, j int) bool {
-		if plan.Candidates[i].Reason != plan.Candidates[j].Reason {
-			return plan.Candidates[i].Reason < plan.Candidates[j].Reason
-		}
-		return plan.Candidates[i].PlannedDeleteBytes > plan.Candidates[j].PlannedDeleteBytes
-	})
+	plan.Candidates = imagecachegraph.OrderCandidatesParentsFirst(plan.Candidates)
 	applyImageCachePrunePlanBudget(&plan)
 	sort.SliceStable(plan.ProtectedManifests, func(i, j int) bool {
 		return plan.ProtectedManifests[i].PlannedDeleteBytes > plan.ProtectedManifests[j].PlannedDeleteBytes
@@ -900,6 +894,7 @@ func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, prot
 		Target:              manifest.Target,
 		Digest:              manifest.Digest,
 		ReferencedBlobs:     append([]string(nil), manifest.ReferencedBlobs...),
+		ReferencedManifests: append([]string(nil), manifest.ReferencedManifests...),
 		PlannedDeleteBytes:  firstNonZeroInt64(manifest.TotalBlobBytes, manifest.ManifestSizeBytes),
 		ReferencedBlobCount: len(manifest.ReferencedBlobs),
 		ReferencedBlobBytes: manifest.TotalBlobBytes,
@@ -1137,22 +1132,14 @@ func (s *Server) findNodeUpdaterForImageCachePlan(plan model.ImageCachePrunePlan
 }
 
 func pruneTaskTargets(candidates []model.ImageCachePruneCandidate, limit int) []map[string]string {
-	if limit <= 0 || limit > len(candidates) {
-		limit = len(candidates)
-	}
-	out := make([]map[string]string, 0, limit)
-	for _, candidate := range candidates {
-		if candidate.Protected {
-			continue
-		}
+	selected := imagecachegraph.SelectCandidatesWithGraphClosure(candidates, limit)
+	out := make([]map[string]string, 0, len(selected))
+	for _, candidate := range selected {
 		out = append(out, map[string]string{
 			"repo":   candidate.Repo,
 			"target": candidate.Target,
 			"digest": candidate.Digest,
 		})
-		if len(out) >= limit {
-			break
-		}
 	}
 	return out
 }

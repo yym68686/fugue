@@ -36,10 +36,59 @@ func (s *Service) cleanupDeletedAppDistributedImages(ctx context.Context, app mo
 			return err
 		}
 	}
-	return s.scheduleDistributedImagePruneForApp(ctx, app)
+	return s.retireDeletedAppDistributedImages(ctx, app)
 }
 
-func (s *Service) sweepExpiredDistributedImagePins(ctx context.Context) error {
+func (s *Service) retireDeletedAppDistributedImages(ctx context.Context, app model.App) error {
+	images, err := s.Store.ListImages(model.ImageFilter{
+		TenantID: strings.TrimSpace(app.TenantID),
+		AppID:    strings.TrimSpace(app.ID),
+	})
+	if err != nil || len(images) == 0 {
+		return err
+	}
+	protected, err := s.controllerImageCacheProtectedSet(ctx)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, image := range images {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		if controllerKeySetContainsAny(protected.migrationRefs, keys...) ||
+			controllerKeySetContainsAny(protected.liveRefs, keys...) ||
+			controllerKeySetContainsAny(protected.pinnedRefs, keys...) ||
+			controllerKeySetContainsAny(protected.taskRefs, keys...) {
+			continue
+		}
+		if err := s.cancelObsoleteDistributedImageReplicationTasks(ctx, image, "deleted_app"); err != nil {
+			return err
+		}
+		switch strings.TrimSpace(image.LifecycleState) {
+		case "", model.ImageLifecycleAvailable, model.ImageLifecycleImporting, model.ImageLifecycleLost:
+			image.LifecycleState = model.ImageLifecycleDeleting
+			image.RequiredReplicaCount = 1
+			image.MinAvailableReplicaCount = 1
+			if _, err := s.Store.UpsertImage(image); err != nil {
+				return err
+			}
+		case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted:
+		default:
+			continue
+		}
+		if err := s.scheduleDistributedImagePruneAfterMigrationGate(ctx, image); err != nil {
+			return err
+		}
+		if err := s.markDistributedImageReplicasRetentionExcess(ctx, image, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) sweepExpiredDistributedImagePins(ctx context.Context, gates map[string]store.MigrationArtifactRetirementGate) error {
 	if s == nil || s.Store == nil || !s.imageStoreDistributedMode() {
 		return nil
 	}
@@ -56,10 +105,8 @@ func (s *Service) sweepExpiredDistributedImagePins(ctx context.Context) error {
 			continue
 		}
 		if appID := strings.TrimSpace(pin.AppID); appID != "" {
-			if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(appID); err != nil {
-				return err
-			} else if blocked {
-				_ = s.Store.RecordMigrationArtifactRetirementBlocked(appID, "expired image pin removal blocked: "+reason)
+			if gate, blocked := gates[appID]; blocked {
+				_ = s.Store.RecordMigrationArtifactRetirementBlocked(appID, "expired image pin removal blocked: "+gate.Reason)
 				continue
 			}
 		}
@@ -110,6 +157,10 @@ func (s *Service) scheduleDistributedImagePrune(ctx context.Context, image model
 			return nil
 		}
 	}
+	return s.scheduleDistributedImagePruneAfterMigrationGate(ctx, image)
+}
+
+func (s *Service) scheduleDistributedImagePruneAfterMigrationGate(ctx context.Context, image model.Image) error {
 	pins, err := s.Store.ListImagePins(model.ImagePinFilter{
 		ImageID:       image.ID,
 		PlatformAdmin: true,

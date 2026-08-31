@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/imagecachegraph"
 	"fugue/internal/imagecachekeys"
 	"fugue/internal/imagecacheusage"
 	"fugue/internal/model"
@@ -462,6 +463,7 @@ func (s *Service) computeControllerImageCachePrunePlan(ctx context.Context, node
 		classified = append(classified, s.controllerImageCacheCandidate(manifest, protected, now))
 	}
 	classified = protectControllerImageCacheSharedDigestAliases(classified)
+	classified = imagecachegraph.ProtectManifestGraph(manifests, classified)
 	for _, candidate := range classified {
 		if candidate.Protected {
 			plan.ProtectedManifestCount++
@@ -475,12 +477,7 @@ func (s *Service) computeControllerImageCachePrunePlan(ctx context.Context, node
 		plan.PlannedDeleteBytes += candidate.PlannedDeleteBytes
 		plan.Candidates = append(plan.Candidates, candidate)
 	}
-	sort.SliceStable(plan.Candidates, func(i, j int) bool {
-		if plan.Candidates[i].Reason != plan.Candidates[j].Reason {
-			return plan.Candidates[i].Reason < plan.Candidates[j].Reason
-		}
-		return plan.Candidates[i].PlannedDeleteBytes > plan.Candidates[j].PlannedDeleteBytes
-	})
+	plan.Candidates = imagecachegraph.OrderCandidatesParentsFirst(plan.Candidates)
 	if plan.MaxDeleteBytes > 0 && plan.PlannedDeleteBytes > plan.MaxDeleteBytes {
 		plan.BudgetExhausted = true
 		plan.PlannedDeleteBytes = plan.MaxDeleteBytes
@@ -881,6 +878,7 @@ func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifes
 		Target:              manifest.Target,
 		Digest:              manifest.Digest,
 		ReferencedBlobs:     append([]string(nil), manifest.ReferencedBlobs...),
+		ReferencedManifests: append([]string(nil), manifest.ReferencedManifests...),
 		PlannedDeleteBytes:  firstNonZeroControllerInt64(manifest.TotalBlobBytes, manifest.ManifestSizeBytes),
 		ReferencedBlobCount: len(manifest.ReferencedBlobs),
 		ReferencedBlobBytes: manifest.TotalBlobBytes,
@@ -1043,22 +1041,14 @@ func controllerImageCacheReplicaCandidateMatchesManifest(candidate controllerIma
 }
 
 func controllerImageCachePruneTargets(candidates []model.ImageCachePruneCandidate, limit int) []map[string]string {
-	if limit <= 0 || limit > len(candidates) {
-		limit = len(candidates)
-	}
-	out := make([]map[string]string, 0, limit)
-	for _, candidate := range candidates {
-		if candidate.Protected {
-			continue
-		}
+	selected := imagecachegraph.SelectCandidatesWithGraphClosure(candidates, limit)
+	out := make([]map[string]string, 0, len(selected))
+	for _, candidate := range selected {
 		out = append(out, map[string]string{
 			"repo":   candidate.Repo,
 			"target": candidate.Target,
 			"digest": candidate.Digest,
 		})
-		if len(out) >= limit {
-			break
-		}
 	}
 	return out
 }
@@ -1087,14 +1077,13 @@ func controllerImageCacheAutomaticDeleteUnsafeCandidateReason(candidate model.Im
 		return "protected_candidate"
 	}
 	reason := strings.TrimSpace(candidate.Reason)
-	switch reason {
-	case "deleted_image_generation", "stale_replica", "excess_replica":
+	if imagecachegraph.AutomaticDeleteReasonSafe(reason) {
 		return ""
-	case "":
-		return "empty_candidate_reason"
-	default:
-		return reason
 	}
+	if reason == "" {
+		return "empty_candidate_reason"
+	}
+	return reason
 }
 
 func normalizeControllerImageCachePruneMode(raw string) string {

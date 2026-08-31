@@ -96,7 +96,11 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 	if s == nil || s.Store == nil {
 		return nil
 	}
-	if err := s.sweepExpiredDistributedImagePins(ctx); err != nil {
+	gates, err := s.Store.MigrationArtifactRetirementGates()
+	if err != nil {
+		return fmt.Errorf("snapshot migration artifact retirement gates: %w", err)
+	}
+	if err := s.sweepExpiredDistributedImagePins(ctx, gates); err != nil {
 		return err
 	}
 	apps, err := s.Store.ListAppsMetadata("", true)
@@ -126,7 +130,14 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 		if tenantID := strings.TrimSpace(app.TenantID); tenantID != "" {
 			tenantIDs[tenantID] = struct{}{}
 		}
-		plan, err := s.reconcileDistributedImageRetentionForApp(ctx, app, opsByAppID[app.ID], liveRefs)
+		if gate, blocked := gates[strings.TrimSpace(app.ID)]; blocked {
+			_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image retention blocked: "+gate.Reason)
+			if s.Logger != nil {
+				s.Logger.Printf("preserve old distributed image artifacts for %s: retention is blocked: %s", app.ID, gate.Reason)
+			}
+			continue
+		}
+		plan, err := s.reconcileDistributedImageRetentionForAppAfterMigrationGate(ctx, app, opsByAppID[app.ID], liveRefs)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("reconcile app %s distributed image retention: %w", strings.TrimSpace(app.ID), err))
 			if isContextStopped(ctx, err) {

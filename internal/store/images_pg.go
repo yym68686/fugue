@@ -415,15 +415,21 @@ func (s *Store) pgListImageReplicas(filter model.ImageReplicaFilter) ([]model.Im
 	return out, nil
 }
 
-func (s *Store) pgMarkStaleImageReplicas(cutoff time.Time) (int, error) {
+func (s *Store) pgMarkStaleImageReplicas(now, unleasedCutoff time.Time) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := s.db.ExecContext(ctx, `
 UPDATE fugue_image_replicas
 SET status = $1, updated_at = $2
 WHERE status = $3
-  AND COALESCE(last_verified_at, updated_at) < $4
-`, model.ImageReplicaStatusStale, time.Now().UTC(), model.ImageReplicaStatusPresent, cutoff)
+  AND (
+    (lease_expires_at IS NOT NULL AND lease_expires_at < $4)
+    OR (
+      lease_expires_at IS NULL
+      AND COALESCE(last_verified_at, updated_at) < $5
+    )
+  )
+`, model.ImageReplicaStatusStale, now.UTC(), model.ImageReplicaStatusPresent, now.UTC(), unleasedCutoff.UTC())
 	if err != nil {
 		return 0, mapDBErr(err)
 	}

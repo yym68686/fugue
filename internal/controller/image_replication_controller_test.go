@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"fugue/internal/config"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
@@ -90,6 +92,18 @@ func TestImageTargetReplicaCountTreatsLegacyTwoAsDefaultOne(t *testing.T) {
 	image.RequiredReplicaCount = 3
 	if got := svc.imageTargetReplicaCount(image); got != 3 {
 		t.Fatalf("explicit larger target replicas = %d, want 3", got)
+	}
+}
+
+func TestImageReplicaLeaseTTLUsesInventoryEvidenceHorizon(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{Config: config.ControllerConfig{
+		ImageStoreReplicaLeaseTTL: 30 * time.Minute,
+		ImageCacheInventoryTTL:    2 * time.Hour,
+	}}
+	if got := svc.imageReplicaLeaseTTL(); got != 2*time.Hour {
+		t.Fatalf("replica lease TTL = %s, want inventory evidence horizon 2h", got)
 	}
 }
 

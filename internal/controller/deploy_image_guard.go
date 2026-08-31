@@ -278,23 +278,16 @@ func (s *Service) presentImageLocations(app model.App, refs ...string) ([]model.
 		}
 		locations, err := s.Store.ListImageLocations(model.ImageLocationFilter{
 			TenantID: strings.TrimSpace(app.TenantID),
-			AppID:    strings.TrimSpace(app.ID),
 			ImageRef: ref,
 			Status:   model.ImageLocationStatusPresent,
 		})
 		if err != nil {
 			return nil, err
 		}
-		if len(locations) == 0 {
-			locations, err = s.Store.ListImageLocations(model.ImageLocationFilter{
-				TenantID: strings.TrimSpace(app.TenantID),
-				ImageRef: ref,
-				Status:   model.ImageLocationStatusPresent,
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
+		// Image locations are tenant-scoped physical evidence. app_id is
+		// compatibility attribution and is not part of the location's unique
+		// identity, so filtering by it can hide a fresh location last observed by
+		// another app that uses the same image.
 		for _, location := range locations {
 			appendLocation(location)
 		}

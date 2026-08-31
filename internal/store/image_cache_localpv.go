@@ -280,9 +280,11 @@ func normalizeImageCacheManifest(in model.ImageCacheManifest) model.ImageCacheMa
 		in.ManifestSizeBytes = 0
 		in.TotalBlobBytes = 0
 		in.ReferencedBlobs = nil
+		in.ReferencedManifests = nil
 	} else {
 		in.GraphFailureReason = ""
 		in.ReferencedBlobs = normalizeStringList(in.ReferencedBlobs)
+		in.ReferencedManifests = normalizeStringList(in.ReferencedManifests)
 	}
 	return in
 }

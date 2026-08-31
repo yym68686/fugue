@@ -149,7 +149,7 @@ func TestReconcileDistributedImageIntegrityRepairsLegacyEmptyDigestRows(t *testi
 		t.Fatalf("unexpected repaired replica: %+v", replicas)
 	}
 	if replicas[0].LastVerifiedAt == nil || !replicas[0].LastVerifiedAt.Equal(now) ||
-		replicas[0].LeaseExpiresAt == nil || !replicas[0].LeaseExpiresAt.Equal(now.Add(30*time.Minute)) {
+		replicas[0].LeaseExpiresAt == nil || !replicas[0].LeaseExpiresAt.Equal(now.Add(2*time.Hour)) {
 		t.Fatalf("repaired replica must carry bounded verification evidence: %+v", replicas[0])
 	}
 	locations, err := stateStore.ListImageLocations(model.ImageLocationFilter{AppID: image.AppID, PlatformAdmin: true})

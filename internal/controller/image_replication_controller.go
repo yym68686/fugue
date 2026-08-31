@@ -51,7 +51,7 @@ func (s *Service) reconcileImageReplication(ctx context.Context) error {
 	if verifyInterval <= 0 {
 		verifyInterval = 10 * time.Minute
 	}
-	if _, err := s.Store.MarkStaleImageReplicas(now.Add(-verifyInterval)); err != nil {
+	if _, err := s.Store.MarkStaleImageReplicas(now, now.Add(-verifyInterval)); err != nil {
 		return err
 	}
 	if err := s.completeSatisfiedImageReplicationTasks(ctx); err != nil {
@@ -346,10 +346,17 @@ func legacyDefaultReplicaCount(count, fallback int) bool {
 }
 
 func (s *Service) imageReplicaLeaseTTL() time.Duration {
-	if s == nil || s.Config.ImageStoreReplicaLeaseTTL <= 0 {
-		return 30 * time.Minute
+	ttl := 30 * time.Minute
+	if s != nil && s.Config.ImageStoreReplicaLeaseTTL > 0 {
+		ttl = s.Config.ImageStoreReplicaLeaseTTL
 	}
-	return s.Config.ImageStoreReplicaLeaseTTL
+	// Inventory is the recurring physical witness that renews distributed
+	// replicas. A lease shorter than the accepted inventory evidence window can
+	// expire a healthy replica between reports, so use one coherent horizon.
+	if s != nil && s.Config.ImageCacheInventoryTTL > ttl {
+		ttl = s.Config.ImageCacheInventoryTTL
+	}
+	return ttl
 }
 
 func healthyImageReplicas(replicas []model.ImageReplica, now time.Time) []model.ImageReplica {

@@ -136,6 +136,44 @@ func TestMigrationArtifactsStayProtectedUntilVerifiedCutover(t *testing.T) {
 	}
 }
 
+func TestMigrationArtifactRetirementGatesMatchPerAppDecision(t *testing.T) {
+	t.Parallel()
+
+	s, app, op, target := migrationLedgerFixture(t)
+	gates, err := s.MigrationArtifactRetirementGates()
+	if err != nil {
+		t.Fatalf("snapshot pending migration gates: %v", err)
+	}
+	if gate, ok := gates[app.ID]; !ok || !gate.Blocked || gate.Reason == "" {
+		t.Fatalf("pending migration missing from gate snapshot: %+v", gates)
+	}
+	ready := true
+	physical := 1
+	if _, err := s.RecordAppMigrationLedger(model.AppMigrationLedger{
+		TenantID: op.TenantID, ProjectID: app.ProjectID, AppID: app.ID, OperationID: op.ID,
+		OldRuntimeID: op.SourceRuntimeID, NewRuntimeID: target.ID, OldClusterID: "old", NewClusterID: "new",
+		ImageReplicationStatus: model.AppMigrationEvidenceVerified, RuntimeObjectStatus: model.AppMigrationEvidenceVerified,
+		EndpointRequired: true, EndpointStatus: model.AppMigrationEvidenceReady, EndpointReady: &ready,
+		PhysicalReplicas: &physical, DesiredReplicas: 1, Generation: 1, ObservedGeneration: 1,
+		CutoverStatus: model.AppMigrationCutoverVerified, OldArtifactsProtected: true,
+	}); err != nil {
+		t.Fatalf("record verified migration ledger: %v", err)
+	}
+	if claimed, found, err := s.ClaimNextPendingOperation(); err != nil || !found || claimed.ID != op.ID {
+		t.Fatalf("claim migration: found=%v operation=%+v err=%v", found, claimed, err)
+	}
+	if _, err := s.CompleteAgentOperation(op.ID, target.ID, "", "migrated"); err != nil {
+		t.Fatalf("complete verified migration: %v", err)
+	}
+	gates, err = s.MigrationArtifactRetirementGates()
+	if err != nil {
+		t.Fatalf("snapshot completed migration gates: %v", err)
+	}
+	if gate, blocked := gates[app.ID]; blocked {
+		t.Fatalf("verified completed migration remained blocked: %+v", gate)
+	}
+}
+
 func TestCompletedMigrationRetirementGateAcceptsHistoricalVerifiedEvidence(t *testing.T) {
 	s, app, op, target := migrationLedgerFixture(t)
 	ready := true
