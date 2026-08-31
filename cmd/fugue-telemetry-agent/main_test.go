@@ -20,6 +20,9 @@ func TestBoundTelemetryAgentMemoryCapsRetainedQueueAndBatchRisk(t *testing.T) {
 		cfg.KubernetesLogMaxLinesPerCycle != telemetryAgentKubernetesLogMaxLines {
 		t.Fatalf("telemetry memory bounds were not applied: %+v", cfg)
 	}
+	if cfg.KubernetesLogMaxPods != observability.DefaultKubernetesLogMaxPods {
+		t.Fatalf("telemetry pod coverage drifted below the configured default: %+v", cfg)
+	}
 }
 
 func TestBoundTelemetryAgentMemoryPreservesStricterConfiguration(t *testing.T) {
