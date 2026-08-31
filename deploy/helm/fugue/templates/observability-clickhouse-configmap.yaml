@@ -12,16 +12,7 @@ data:
         <level>information</level>
         <console>true</console>
       </logger>
-      <profiles>
-        <default>
-          <max_memory_usage>805306368</max_memory_usage>
-          <max_bytes_before_external_group_by>268435456</max_bytes_before_external_group_by>
-          <max_bytes_before_external_sort>268435456</max_bytes_before_external_sort>
-          <join_algorithm>auto</join_algorithm>
-        </default>
-      </profiles>
       <max_server_memory_usage>3221225472</max_server_memory_usage>
-      <memory_overcommit_ratio_denominator>2147483648</memory_overcommit_ratio_denominator>
       <query_log>
         <partition_by>toDate(event_date)</partition_by>
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
@@ -87,6 +78,18 @@ data:
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
         <settings>ttl_only_drop_parts = 1</settings>
       </background_schedule_pool_log>
+    </clickhouse>
+  fugue-observability-users.xml: |
+    <clickhouse>
+      <profiles>
+        <default>
+          <max_memory_usage>805306368</max_memory_usage>
+          <max_bytes_before_external_group_by>268435456</max_bytes_before_external_group_by>
+          <max_bytes_before_external_sort>268435456</max_bytes_before_external_sort>
+          <join_algorithm>auto</join_algorithm>
+          <memory_overcommit_ratio_denominator>2147483648</memory_overcommit_ratio_denominator>
+        </default>
+      </profiles>
     </clickhouse>
   init-observability.sql: |
     CREATE DATABASE IF NOT EXISTS fugue_observability;

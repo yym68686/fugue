@@ -1942,6 +1942,8 @@ func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"name: native",
 		"containerPort: 9000",
 		"mountPath: /docker-entrypoint-initdb.d/init-observability.sql",
+		"mountPath: /etc/clickhouse-server/users.d/fugue-observability.xml",
+		"subPath: fugue-observability-users.xml",
 		"checksum/clickhouse-config:",
 	} {
 		if !strings.Contains(deploymentDoc, want) {
