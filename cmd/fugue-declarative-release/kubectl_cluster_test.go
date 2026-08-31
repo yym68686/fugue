@@ -2029,7 +2029,7 @@ func TestGuardianRoleRulesOwnershipTransfersByExactCAS(t *testing.T) {
 		"manager": "fugue-release-guardian-declarative", "operation": "Update", "fieldsType": "FieldsV1",
 		"fieldsV1": managedFieldsTree(t, []string{"/rules"}),
 	}}
-	expected, err := expectedStateAfterOwnershipTransfer(desired, live, fresh, allowed, applyErr)
+	expected, err := expectedStateAfterOwnershipTransfer(desired, live, fresh, allowed, "fugue-release-guardian-declarative", applyErr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2040,6 +2040,10 @@ func TestGuardianRoleRulesOwnershipTransfersByExactCAS(t *testing.T) {
 	reboundObject, err := decodeJSONObject(rebound)
 	if err != nil || stringValue(mapField(reboundObject, "metadata")["resourceVersion"]) != "43" {
 		t.Fatalf("Role rules transfer did not bind fresh RV: object=%v err=%v", reboundObject, err)
+	}
+	sameManagerErr := errors.New(`Apply failed with 1 conflict: conflict with "fugue-release-guardian-declarative" using rbac.authorization.k8s.io/v1: .rules`)
+	if _, err := expectedStateAfterOwnershipTransfer(desired, live, fresh, allowed, "fugue-release-guardian-declarative", sameManagerErr); err != nil {
+		t.Fatalf("same-manager Role rules transfer did not use the structural expected-state path: %v", err)
 	}
 
 	expanded := deepCopyJSONMap(t, live)

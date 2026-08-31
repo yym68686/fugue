@@ -1095,7 +1095,7 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if decodeErr != nil {
 			return decodeErr
 		}
-		expected, transferErr := expectedStateAfterOwnershipTransfer(desired, live, fresh, allowed, applyErr)
+		expected, transferErr := expectedStateAfterOwnershipTransfer(desired, live, fresh, allowed, release.Workload.FieldManager, applyErr)
 		if transferErr != nil {
 			return transferErr
 		}
@@ -1688,7 +1688,7 @@ func nextOwnershipTransferPatch(desired, live map[string]any, allowed []string, 
 	return patch, true, nil
 }
 
-func expectedStateAfterOwnershipTransfer(desired, before, fresh map[string]any, allowed []string, applyErr error) (map[string]any, error) {
+func expectedStateAfterOwnershipTransfer(desired, before, fresh map[string]any, allowed []string, declarativeManager string, applyErr error) (map[string]any, error) {
 	beforeMetadata, freshMetadata := mapField(before, "metadata"), mapField(fresh, "metadata")
 	beforeUID, freshUID := stringValue(beforeMetadata["uid"]), stringValue(freshMetadata["uid"])
 	beforeGeneration, freshGeneration := int64Value(beforeMetadata["generation"]), int64Value(freshMetadata["generation"])
@@ -1707,7 +1707,7 @@ func expectedStateAfterOwnershipTransfer(desired, before, fresh map[string]any, 
 	if err != nil {
 		return nil, err
 	}
-	if roleRulesOwnershipTransferConflicts(desired, conflicts, "") {
+	if roleRulesOwnershipTransferConflicts(desired, conflicts, declarativeManager) {
 		desiredRules, _ := desired["rules"].([]any)
 		expected["rules"] = desiredRules
 		if freshGeneration != beforeGeneration {
