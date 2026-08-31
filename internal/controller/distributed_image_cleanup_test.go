@@ -329,3 +329,75 @@ func TestCleanupDeletedAppDistributedImagesPreservesSharedPinnedImage(t *testing
 		t.Fatalf("active app pin must remain: %+v", pins)
 	}
 }
+
+func TestDistributedImageRetentionSweepReplaysDeletedAppCleanup(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Deleted App Replay Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "deleted-app-replay", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "old-app", "", model.AppSpec{
+		Image: "registry.example/fugue-apps/old-app:current", Replicas: 1, RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		ID: "img_deleted_replay", TenantID: tenant.ID, AppID: app.ID,
+		ImageRef: app.Spec.Image, CanonicalDigest: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		LifecycleState: model.ImageLifecycleLost, RequiredReplicaCount: 1, MinAvailableReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("upsert lost image: %v", err)
+	}
+	if _, err := stateStore.UpsertImagePin(model.ImagePin{
+		ImageID: image.ID, TenantID: tenant.ID, AppID: app.ID, Reason: model.ImagePinReasonCurrentDeploy, MinReplicas: 1,
+	}); err != nil {
+		t.Fatalf("upsert current pin: %v", err)
+	}
+	deleteOp, err := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDelete, AppID: app.ID})
+	if err != nil {
+		t.Fatalf("create delete operation: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil || !found {
+		t.Fatalf("claim delete operation: found=%v err=%v", found, err)
+	}
+	if _, err := stateStore.CompleteManagedOperation(deleteOp.ID, "/tmp/deleted-app.yaml", "deleted"); err != nil {
+		t.Fatalf("complete delete operation: %v", err)
+	}
+
+	svc := &Service{Store: stateStore, Config: config.ControllerConfig{ImageStoreMode: "distributed"}}
+	if err := svc.sweepDistributedImageRetention(context.Background()); err != nil {
+		t.Fatalf("sweep distributed image retention: %v", err)
+	}
+	got, err := stateStore.GetImage(image.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatalf("get replayed image: %v", err)
+	}
+	if got.LifecycleState != model.ImageLifecycleDeleting {
+		t.Fatalf("replayed deleted-app image lifecycle = %q, want deleting", got.LifecycleState)
+	}
+	pins, err := stateStore.ListImagePins(model.ImagePinFilter{ImageID: image.ID, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list replayed pins: %v", err)
+	}
+	if len(pins) != 0 {
+		t.Fatalf("deleted-app replay must remove obsolete pins: %+v", pins)
+	}
+	deletedApps, err := stateStore.ListDeletedAppsMetadata("", true)
+	if err != nil {
+		t.Fatalf("list deleted app metadata: %v", err)
+	}
+	if len(deletedApps) != 1 || deletedApps[0].ID != app.ID {
+		t.Fatalf("deleted app metadata = %+v, want only %s", deletedApps, app.ID)
+	}
+}

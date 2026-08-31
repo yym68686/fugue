@@ -173,6 +173,22 @@ func ProtectManifestGraph(manifests []model.ImageCacheManifest, candidates []mod
 	if len(manifests) == 0 || len(manifests) != len(candidates) {
 		return candidates
 	}
+	missingEvidenceDigests := map[string]struct{}{}
+	for index, manifest := range manifests {
+		if len(manifest.ReferencedManifests) > 0 || !manifestMayReferenceChildManifests(manifest.MediaType) {
+			continue
+		}
+		if key := manifestDigestKey(manifest.Repo, manifest.Digest); key != "" {
+			missingEvidenceDigests[key] = struct{}{}
+		}
+		protectMissingManifestGraphEvidence(&candidates[index])
+	}
+	for index := range candidates {
+		if _, missing := missingEvidenceDigests[manifestDigestKey(candidates[index].Repo, candidates[index].Digest)]; !missing {
+			continue
+		}
+		protectMissingManifestGraphEvidence(&candidates[index])
+	}
 	childrenByDigest := make(map[string][]int, len(manifests))
 	for index, manifest := range manifests {
 		key := manifestDigestKey(manifest.Repo, manifest.Digest)
@@ -198,6 +214,25 @@ func ProtectManifestGraph(manifests []model.ImageCacheManifest, candidates []mod
 		}
 	}
 	return candidates
+}
+
+func protectMissingManifestGraphEvidence(candidate *model.ImageCachePruneCandidate) {
+	if candidate == nil || candidate.Protected {
+		return
+	}
+	candidate.Protected = true
+	candidate.Reason = ""
+	candidate.SkipReason = "manifest_graph_evidence_missing"
+	candidate.SkipDetails = appendUnique(candidate.SkipDetails, "manifest index has no persisted child-manifest evidence")
+}
+
+func manifestMayReferenceChildManifests(mediaType string) bool {
+	switch strings.ToLower(strings.TrimSpace(strings.SplitN(mediaType, ";", 2)[0])) {
+	case "application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json":
+		return true
+	default:
+		return false
+	}
 }
 
 func applyParentDisposition(child *model.ImageCachePruneCandidate, parent model.ImageCachePruneCandidate) bool {

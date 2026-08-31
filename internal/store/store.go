@@ -2089,6 +2089,33 @@ func (s *Store) ListAppsMetadata(tenantID string, platformAdmin bool) ([]model.A
 	return s.listAppsView(tenantID, platformAdmin, false)
 }
 
+// ListDeletedAppsMetadata returns only durable app tombstones. It is kept
+// separate from the normal app views so background cleanup can replay after a
+// restart without exposing deleted applications to serving or user APIs.
+func (s *Store) ListDeletedAppsMetadata(tenantID string, platformAdmin bool) ([]model.App, error) {
+	if s.usingDatabase() {
+		return s.pgListDeletedAppsMetadata(tenantID, platformAdmin)
+	}
+	var apps []model.App
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, candidate := range state.Apps {
+			app := candidate
+			normalizeAppStatusForRead(&app)
+			if !isDeletedApp(app) || (!platformAdmin && app.TenantID != tenantID) {
+				continue
+			}
+			app.Bindings = nil
+			app.BackingServices = nil
+			apps = append(apps, app)
+		}
+		sort.Slice(apps, func(i, j int) bool {
+			return apps[i].CreatedAt.Before(apps[j].CreatedAt)
+		})
+		return nil
+	})
+	return apps, err
+}
+
 func (s *Store) ListAppsMetadataByIDs(appIDs []string) ([]model.App, error) {
 	appIDSet := trimmedStringSet(appIDs)
 	if len(appIDSet) == 0 {

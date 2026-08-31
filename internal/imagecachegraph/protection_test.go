@@ -43,6 +43,46 @@ func TestProtectManifestGraphPropagatesParentDisposition(t *testing.T) {
 	}
 }
 
+func TestProtectManifestGraphQuarantinesIndexWithoutChildEvidence(t *testing.T) {
+	t.Parallel()
+
+	manifests := []model.ImageCacheManifest{
+		{
+			Repo:      "fugue-apps/demo",
+			Target:    "legacy-index",
+			Digest:    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			MediaType: "application/vnd.oci.image.index.v1+json; charset=utf-8",
+		},
+		{
+			Repo:      "fugue-apps/demo",
+			Target:    "ordinary-manifest",
+			Digest:    "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			MediaType: "application/vnd.oci.image.manifest.v1+json",
+		},
+		{
+			Repo:   "fugue-apps/demo",
+			Target: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			Digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		},
+	}
+	candidates := []model.ImageCachePruneCandidate{
+		{Repo: manifests[0].Repo, Target: manifests[0].Target, Digest: manifests[0].Digest, Reason: "missing_control_plane_image"},
+		{Repo: manifests[1].Repo, Target: manifests[1].Target, Digest: manifests[1].Digest, Reason: "deleted_image_generation"},
+		{Repo: manifests[2].Repo, Target: manifests[2].Target, Digest: manifests[2].Digest, Reason: "missing_control_plane_image"},
+	}
+
+	got := ProtectManifestGraph(manifests, candidates)
+	if !got[0].Protected || got[0].Reason != "" || got[0].SkipReason != "manifest_graph_evidence_missing" {
+		t.Fatalf("index without child evidence was not quarantined: %+v", got[0])
+	}
+	if got[1].Protected || got[1].Reason != "deleted_image_generation" {
+		t.Fatalf("ordinary manifest was changed: %+v", got[1])
+	}
+	if !got[2].Protected || got[2].SkipReason != "manifest_graph_evidence_missing" {
+		t.Fatalf("same-digest alias was not quarantined: %+v", got[2])
+	}
+}
+
 func TestOrderCandidatesParentsFirstBeforeApplyingTargetLimit(t *testing.T) {
 	t.Parallel()
 

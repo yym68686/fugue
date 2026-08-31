@@ -2084,6 +2084,50 @@ func (s *Store) pgListAppsMetadata(tenantID string, platformAdmin bool) ([]model
 	return s.pgListAppsView(tenantID, platformAdmin, false)
 }
 
+func (s *Store) pgListDeletedAppsMetadata(tenantID string, platformAdmin bool) ([]model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	query := `
+SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+FROM fugue_apps
+`
+	args := make([]any, 0, 1)
+	if !platformAdmin {
+		query += ` WHERE tenant_id = $1 AND `
+		args = append(args, tenantID)
+	} else {
+		query += ` WHERE `
+	}
+	query += `(lower(trim(COALESCE(status_json->>'phase', ''))) = 'deleted' OR lower(name) LIKE '%-deleted' OR lower(name) LIKE '%-deleted-%')`
+	query += ` ORDER BY created_at ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list deleted apps: %w", err)
+	}
+	defer rows.Close()
+
+	apps := make([]model.App, 0)
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		normalizeAppStatusForRead(&app)
+		if !isDeletedApp(app) {
+			continue
+		}
+		app.Bindings = nil
+		app.BackingServices = nil
+		apps = append(apps, app)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate deleted apps: %w", err)
+	}
+	return apps, nil
+}
+
 func (s *Store) pgListAppsMetadataByIDs(appIDs []string) ([]model.App, error) {
 	return s.pgListAppsViewByIDs("id", appIDs, false)
 }

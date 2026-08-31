@@ -21,6 +21,10 @@ func (s *Service) cleanupDeletedAppDistributedImages(ctx context.Context, app mo
 		_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image cleanup blocked: "+reason)
 		return nil
 	}
+	return s.cleanupDeletedAppDistributedImagesAfterMigrationGate(ctx, app)
+}
+
+func (s *Service) cleanupDeletedAppDistributedImagesAfterMigrationGate(ctx context.Context, app model.App) error {
 	pins, err := s.Store.ListImagePins(model.ImagePinFilter{
 		TenantID: strings.TrimSpace(app.TenantID),
 		AppID:    strings.TrimSpace(app.ID),
