@@ -3701,6 +3701,10 @@ def pod_netns_contexts(limit=30):
         status = payload.get("status") or {}
         config = info.get("config") or {}
         metadata = config.get("metadata") or status.get("metadata") or {}
+        raw_labels = config.get("labels") or config.get("Labels") or {}
+        labels = {}
+        if isinstance(raw_labels, dict):
+            labels = {str(key): str(value) for key, value in raw_labels.items()}
         dns_config = config.get("dns_config") or config.get("dnsConfig") or {}
         servers = [str(item) for item in (dns_config.get("servers") or []) if str(item)]
         searches = [str(item) for item in (dns_config.get("searches") or []) if str(item)]
@@ -3721,6 +3725,7 @@ def pod_netns_contexts(limit=30):
             "namespace": str(metadata.get("namespace") or ""),
             "pod": str(metadata.get("name") or ""),
             "uid": str(metadata.get("uid") or ""),
+            "labels": labels,
             "dns_servers": servers,
             "dns_searches": searches,
             "netns": netns,
@@ -3826,11 +3831,18 @@ def pod_context_evidence(ctx, extra=None):
 def optional_probe_skipped(name, category, observed, expected, evidence=None):
     checks.append(check(name, category, "pass", "optional probe skipped: " + (observed or "target unavailable"), expected, False, evidence=evidence or {}))
 
+def pod_context_probe_eligible(ctx):
+    # Edge-control Pods intentionally have egress policy limited to Fugue API
+    # TLS and DNS; do not use their namespace to probe the Kubernetes Service.
+    labels = ctx.get("labels") or {}
+    return labels.get("app.kubernetes.io/component") != "edge-control"
+
 pod_context_list, pod_context_reason = pod_netns_contexts()
-pod_ctx = pod_context_list[0] if pod_context_list else None
+probe_contexts = [ctx for ctx in pod_context_list if pod_context_probe_eligible(ctx)]
+pod_ctx = probe_contexts[0] if probe_contexts else None
 same_service = None
 same_service_reason = ""
-for candidate_ctx in pod_context_list:
+for candidate_ctx in probe_contexts:
     candidate_service, candidate_reason = first_same_namespace_service(candidate_ctx)
     if candidate_service:
         pod_ctx = candidate_ctx

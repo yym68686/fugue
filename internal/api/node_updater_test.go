@@ -1024,6 +1024,8 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`optional_probe_skipped("pod_dns_to_coredns_pod"`,
 		`optional_probe_skipped("same_namespace_service_dns"`,
 		`pod-netns resolver resolves same-namespace ClusterIP service FQDN`,
+		`def pod_context_probe_eligible(ctx):`,
+		`app.kubernetes.io/component") != "edge-control"`,
 		`missing marker requires corroborating node evidence before hard gating`,
 		`ok_link, link_out = run_capture(["ip", "link", "show"], 3)`,
 		`def direct_k3s_server_url(raw):`,
