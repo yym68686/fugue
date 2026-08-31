@@ -182,6 +182,38 @@ func (s *Store) pgListAppMigrationLedgerArchive(filter model.OperationEvidenceFi
 	return out, nil
 }
 
+func (s *Store) pgLatestAppMigrationLedgerArchive(operationID string) (model.AppMigrationLedger, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT ledger_json, collected_at
+FROM fugue_app_migration_ledgers
+WHERE operation_id = $1
+ORDER BY collected_at DESC, id DESC
+LIMIT 1000
+`, strings.TrimSpace(operationID))
+	if err != nil {
+		return model.AppMigrationLedger{}, false, mapDBErr(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload []byte
+		var collectedAt time.Time
+		if err := rows.Scan(&payload, &collectedAt); err != nil {
+			return model.AppMigrationLedger{}, false, mapDBErr(err)
+		}
+		var ledger model.AppMigrationLedger
+		if err := json.Unmarshal(payload, &ledger); err != nil {
+			continue
+		}
+		return model.NormalizeAppMigrationLedger(ledger, collectedAt), true, nil
+	}
+	if err := rows.Err(); err != nil {
+		return model.AppMigrationLedger{}, false, mapDBErr(err)
+	}
+	return model.AppMigrationLedger{}, false, nil
+}
+
 func (s *Store) pgLatestAppMigrationLedgerArchiveByOperation() (map[string]latestAppMigrationLedgerArchive, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

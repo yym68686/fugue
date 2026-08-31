@@ -126,8 +126,7 @@ func (s *Service) sweepExpiredDistributedImagePins(ctx context.Context, gates ma
 			continue
 		}
 		if appID := strings.TrimSpace(pin.AppID); appID != "" {
-			if gate, blocked := gates[appID]; blocked {
-				_ = s.Store.RecordMigrationArtifactRetirementBlocked(appID, "expired image pin removal blocked: "+gate.Reason)
+			if _, blocked := gates[appID]; blocked {
 				continue
 			}
 		}

@@ -59,7 +59,14 @@ func (s *Service) reconcileDistributedImageRetentionForAppAfterMigrationGate(ctx
 	if err := s.reconcileDistributedImagePinsForApp(ctx, app, images, pins, plan, now); err != nil {
 		return plan, err
 	}
-	if err := s.applyDistributedImageRetentionPlan(ctx, app, images, plan, now); err != nil {
+	var facts *distributedImageRetirementFacts
+	if len(plan.DropImageIDs) > 0 {
+		facts, err = s.distributedImageRetirementFactsForApp(app)
+		if err != nil {
+			return plan, err
+		}
+	}
+	if err := s.applyDistributedImageRetentionPlanWithFacts(ctx, app, images, plan, now, facts); err != nil {
 		return plan, err
 	}
 	return plan, nil
@@ -159,6 +166,46 @@ func (s *Service) reconcileDistributedImagePinsForApp(ctx context.Context, app m
 }
 
 func (s *Service) applyDistributedImageRetentionPlan(ctx context.Context, app model.App, images []model.Image, plan DistributedImageRetentionPlan, now time.Time) error {
+	return s.applyDistributedImageRetentionPlanWithFacts(ctx, app, images, plan, now, nil)
+}
+
+type distributedImageRetirementFacts struct {
+	replicasByImageID        map[string][]model.ImageReplica
+	cancellableTaskByImageID map[string]bool
+}
+
+func (s *Service) distributedImageRetirementFactsForApp(app model.App) (*distributedImageRetirementFacts, error) {
+	facts := &distributedImageRetirementFacts{
+		replicasByImageID:        map[string][]model.ImageReplica{},
+		cancellableTaskByImageID: map[string]bool{},
+	}
+	replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{
+		TenantID: strings.TrimSpace(app.TenantID), AppID: strings.TrimSpace(app.ID), PlatformAdmin: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, replica := range replicas {
+		imageID := strings.TrimSpace(replica.ImageID)
+		facts.replicasByImageID[imageID] = append(facts.replicasByImageID[imageID], replica)
+	}
+	for _, status := range []string{model.ImageReplicationTaskStatusPending, model.ImageReplicationTaskStatusRunning} {
+		tasks, err := s.Store.ListImageReplicationTasks(model.ImageReplicationTaskFilter{
+			TenantID: strings.TrimSpace(app.TenantID), AppID: strings.TrimSpace(app.ID), Status: status, PlatformAdmin: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, task := range tasks {
+			if strings.TrimSpace(task.Priority) != model.ImageReplicationPriorityDeployBlocking {
+				facts.cancellableTaskByImageID[strings.TrimSpace(task.ImageID)] = true
+			}
+		}
+	}
+	return facts, nil
+}
+
+func (s *Service) applyDistributedImageRetentionPlanWithFacts(ctx context.Context, app model.App, images []model.Image, plan DistributedImageRetentionPlan, now time.Time, facts *distributedImageRetirementFacts) error {
 	keep := stringSet(plan.KeepImageIDs)
 	drop := stringSet(plan.DropImageIDs)
 	for _, image := range images {
@@ -174,6 +221,9 @@ func (s *Service) applyDistributedImageRetentionPlan(ctx context.Context, app mo
 			continue
 		}
 		if _, ok := drop[image.ID]; !ok {
+			continue
+		}
+		if distributedImageRetirementSettled(image, facts) {
 			continue
 		}
 		if err := s.cancelObsoleteDistributedImageReplicationTasks(ctx, image, "retention_excess"); err != nil {
@@ -196,6 +246,27 @@ func (s *Service) applyDistributedImageRetentionPlan(ctx context.Context, app mo
 	}
 	_ = app
 	return nil
+}
+
+func distributedImageRetirementSettled(image model.Image, facts *distributedImageRetirementFacts) bool {
+	if facts == nil {
+		return false
+	}
+	switch strings.TrimSpace(image.LifecycleState) {
+	case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted:
+	default:
+		return false
+	}
+	if facts.cancellableTaskByImageID[strings.TrimSpace(image.ID)] {
+		return false
+	}
+	for _, replica := range facts.replicasByImageID[strings.TrimSpace(image.ID)] {
+		switch strings.TrimSpace(replica.Status) {
+		case model.ImageReplicaStatusPresent, model.ImageReplicaStatusPlanned, model.ImageReplicaStatusCopying, model.ImageReplicaStatusVerifying:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) normalizeHistoricalImageReplicaPolicy(image *model.Image) bool {

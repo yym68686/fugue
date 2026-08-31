@@ -81,3 +81,38 @@ func TestPlanDistributedImageRetentionHonorsUserPinAndActiveOperation(t *testing
 		t.Fatalf("unexpected reasons: %+v", reasons)
 	}
 }
+
+func TestDistributedImageRetirementSettledRequiresNoActiveWork(t *testing.T) {
+	t.Parallel()
+
+	image := model.Image{ID: "img_settled", LifecycleState: model.ImageLifecycleDeleting}
+	if !distributedImageRetirementSettled(image, &distributedImageRetirementFacts{
+		replicasByImageID: map[string][]model.ImageReplica{
+			image.ID: {{ImageID: image.ID, Status: model.ImageReplicaStatusStale}},
+		},
+		cancellableTaskByImageID: map[string]bool{},
+	}) {
+		t.Fatal("deleting image with only stale replicas should already be settled")
+	}
+	if distributedImageRetirementSettled(image, &distributedImageRetirementFacts{
+		replicasByImageID: map[string][]model.ImageReplica{
+			image.ID: {{ImageID: image.ID, Status: model.ImageReplicaStatusPresent}},
+		},
+		cancellableTaskByImageID: map[string]bool{},
+	}) {
+		t.Fatal("present replica must keep retirement reconciliation active")
+	}
+	if distributedImageRetirementSettled(image, &distributedImageRetirementFacts{
+		replicasByImageID:        map[string][]model.ImageReplica{},
+		cancellableTaskByImageID: map[string]bool{image.ID: true},
+	}) {
+		t.Fatal("cancellable replication task must keep retirement reconciliation active")
+	}
+	image.LifecycleState = model.ImageLifecycleLost
+	if distributedImageRetirementSettled(image, &distributedImageRetirementFacts{
+		replicasByImageID:        map[string][]model.ImageReplica{},
+		cancellableTaskByImageID: map[string]bool{},
+	}) {
+		t.Fatal("lost image still requires the deleting lifecycle transition")
+	}
+}

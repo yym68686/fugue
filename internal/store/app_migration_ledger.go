@@ -271,6 +271,9 @@ func (s *Store) ListAppMigrationLedgers(filter model.OperationEvidenceFilter) ([
 }
 
 func (s *Store) LatestAppMigrationLedger(operationID string) (model.AppMigrationLedger, bool, error) {
+	if s.usingDatabase() {
+		return s.pgLatestAppMigrationLedgerArchive(operationID)
+	}
 	items, err := s.ListAppMigrationLedgers(model.OperationEvidenceFilter{OperationID: strings.TrimSpace(operationID), PlatformAdmin: true})
 	if err != nil {
 		return model.AppMigrationLedger{}, false, err

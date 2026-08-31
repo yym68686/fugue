@@ -127,6 +127,36 @@ func TestPostgresLatestMigrationLedgerArchiveFailsClosedOnMalformedPayload(t *te
 	}
 }
 
+func TestPostgresLatestMigrationLedgerForOperationUsesBoundedNewestFirstQuery(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock: %v", err)
+	}
+	defer db.Close()
+	collectedAt := time.Now().UTC()
+	ledger := model.AppMigrationLedger{
+		ID: "migration-valid", TenantID: "tenant-archive", AppID: "app-archive", OperationID: "op-archive",
+	}
+	payload, err := json.Marshal(ledger)
+	if err != nil {
+		t.Fatalf("marshal ledger: %v", err)
+	}
+	mock.ExpectQuery(`(?s)FROM fugue_app_migration_ledgers.*WHERE operation_id = \$1.*ORDER BY collected_at DESC, id DESC.*LIMIT 1000`).
+		WithArgs(ledger.OperationID).
+		WillReturnRows(sqlmock.NewRows([]string{"ledger_json", "collected_at"}).
+			AddRow([]byte(`{"schema_version":[]}`), collectedAt.Add(time.Second)).
+			AddRow(payload, collectedAt))
+	s := &Store{db: db, databaseURL: "postgres://test"}
+	got, found, err := s.LatestAppMigrationLedger(ledger.OperationID)
+	if err != nil || !found || got.ID != ledger.ID {
+		t.Fatalf("bounded latest migration ledger: found=%v ledger=%+v err=%v", found, got, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("latest operation ledger SQL mismatch: %v", err)
+	}
+}
+
 func containsAllStoreStrings(value string, needles ...string) bool {
 	for _, needle := range needles {
 		if !strings.Contains(value, needle) {

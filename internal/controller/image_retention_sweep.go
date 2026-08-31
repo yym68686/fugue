@@ -136,7 +136,9 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 			tenantIDs[tenantID] = struct{}{}
 		}
 		if gate, blocked := gates[strings.TrimSpace(app.ID)]; blocked {
-			_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image cleanup blocked: "+gate.Reason)
+			if s.Logger != nil {
+				s.Logger.Printf("preserve deleted app distributed image artifacts for %s: cleanup is blocked: %s", app.ID, gate.Reason)
+			}
 			continue
 		}
 		if err := s.deleteDeletedAppDistributedImagePins(ctx, app); err != nil {
@@ -173,7 +175,6 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 			tenantIDs[tenantID] = struct{}{}
 		}
 		if gate, blocked := gates[strings.TrimSpace(app.ID)]; blocked {
-			_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image retention blocked: "+gate.Reason)
 			if s.Logger != nil {
 				s.Logger.Printf("preserve old distributed image artifacts for %s: retention is blocked: %s", app.ID, gate.Reason)
 			}
