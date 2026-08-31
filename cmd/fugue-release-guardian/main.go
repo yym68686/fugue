@@ -28,6 +28,11 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+const (
+	guardianKubeClientQPS   = 20
+	guardianKubeClientBurst = 40
+)
+
 func main() {
 	if err := run(); err != nil {
 		log.Printf("release-guardian: %v", err)
@@ -48,6 +53,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The guardian reconciles a fixed set of Fugue control objects in parallel.
+	// Keep the client bounded, but above client-go's 5 QPS default so normal
+	// reconciliation does not self-throttle on its own status traffic.
+	config.QPS = guardianKubeClientQPS
+	config.Burst = guardianKubeClientBurst
 	client, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return fmt.Errorf("create Kubernetes client: %w", err)
