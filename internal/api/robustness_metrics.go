@@ -39,13 +39,14 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 			observability.WriteMetricSample(w, "fugue_robustness_dns_query_errors", map[string]string{"node_id": node.ID, "edge_group_id": node.EdgeGroupID, "zone": node.Zone}, float64(node.QueryErrorCount))
 		}
 	}
-	if nodeHealth, err := s.store.ListNodeDeepHealthResults(); err == nil {
+	if nodeHealth, err := s.listNodeDeepHealthResults(now); err == nil {
 		observability.WriteMetricHeader(w, "fugue_node_deep_health_pass", "Whether the latest node deep health report passed.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_node_quarantine_active", "Whether a node is currently quarantined by deep health.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_node_managed_iptables_stale_rule_count", "Suspicious stale Fugue managed iptables rules reported by node deep health.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_node_cluster_membership_present", "Whether the node updater can confirm its Kubernetes Node identity is present.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_node_cluster_rejoin_credential_ready", "Whether the control plane issued a bounded automatic cluster rejoin credential.", "gauge")
 		for _, result := range nodeHealth {
+			fresh := nodeDeepHealthReportFresh(result, now)
 			labels := map[string]string{
 				"node_updater_id": result.NodeUpdaterID,
 				"cluster_node":    result.ClusterNodeName,
@@ -74,6 +75,10 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 			}
 			observability.WriteMetricSample(w, "fugue_node_managed_iptables_stale_rule_count", labels, staleRules)
 			if clusterMembershipObserved {
+				if !fresh {
+					clusterMembershipPresent = 0
+					clusterRejoinCredentialReady = 0
+				}
 				observability.WriteMetricSample(w, "fugue_node_cluster_membership_present", labels, clusterMembershipPresent)
 				observability.WriteMetricSample(w, "fugue_node_cluster_rejoin_credential_ready", labels, clusterRejoinCredentialReady)
 			}

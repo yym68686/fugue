@@ -135,7 +135,7 @@ func (s *Server) buildResilienceInventory(rSubject string) []model.ResilienceInv
 			UpdatedAt: now,
 		})
 	}
-	if health, err := s.store.ListNodeDeepHealthResults(); err == nil {
+	if health, err := s.listNodeDeepHealthResults(now); err == nil {
 		quarantined := 0
 		for _, result := range health {
 			if nodeQuarantineActive(result, now) {
@@ -202,7 +202,7 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 	if err != nil {
 		return nil, err
 	}
-	health, err := s.store.ListNodeDeepHealthResults()
+	health, err := s.listNodeDeepHealthResults(time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +411,7 @@ func (s *Server) activeNodeQuarantineByName() map[string]model.NodeDeepHealthRes
 	if s == nil || s.store == nil {
 		return out
 	}
-	results, err := s.store.ListNodeDeepHealthResults()
+	results, err := s.listNodeDeepHealthResults(time.Now().UTC())
 	if err != nil {
 		return out
 	}
@@ -431,7 +431,7 @@ func (s *Server) activeNodeQuarantineByName() map[string]model.NodeDeepHealthRes
 }
 
 func (s *Server) robustnessNodeDeepHealthChecks() ([]model.RobustnessCheck, error) {
-	results, err := s.store.ListNodeDeepHealthResults()
+	results, err := s.listNodeDeepHealthResults(time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
