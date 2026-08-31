@@ -106,7 +106,14 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 	if err != nil {
 		return err
 	}
-	artifactPruner, err := releaseguardian.NewArtifactPruner(client, targets[0].Namespace, retention.Policy)
+	retentionKubeConfig := rest.CopyConfig(kubeConfig)
+	retentionKubeConfig.QPS = 5
+	retentionKubeConfig.Burst = 10
+	retentionClient, err := kubernetes.NewForConfig(retentionKubeConfig)
+	if err != nil {
+		return fmt.Errorf("create release artifact retention Kubernetes client: %w", err)
+	}
+	artifactPruner, err := releaseguardian.NewArtifactPruner(retentionClient, targets[0].Namespace, retention.Policy)
 	if err != nil {
 		return err
 	}
@@ -254,13 +261,29 @@ func runArtifactPruner(ctx context.Context, pruner *releaseguardian.ArtifactPrun
 }
 
 func enqueueEvent(controller *releaseguardian.Controller, authority *authorityRuntime, keys []releaseguardian.Key, value any) {
-	if metadata, ok := value.(metav1.Object); ok && strings.HasPrefix(metadata.GetName(), "fugue-release-status-") {
-		return
+	if metadata, ok := value.(metav1.Object); ok {
+		if strings.HasPrefix(metadata.GetName(), "fugue-release-status-") || isHistoricalArtifactEvent(metadata) {
+			return
+		}
 	}
 	for _, key := range keys {
 		_ = controller.Enqueue(key)
 	}
 	authority.EnqueueAll()
+}
+
+func isHistoricalArtifactEvent(metadata metav1.Object) bool {
+	manager := metadata.GetLabels()["app.kubernetes.io/managed-by"]
+	name := metadata.GetName()
+	if manager == "fugue-declarative-release" {
+		return strings.HasPrefix(name, "fugue-release-record-")
+	}
+	if manager != "fugue-release-guardian" {
+		return false
+	}
+	return strings.HasPrefix(name, "fugue-guardian-record-") ||
+		strings.HasPrefix(name, "fugue-guardian-execution-") ||
+		strings.HasPrefix(name, "fugue-route-bundle-record-")
 }
 
 func enqueueFreshness(ctx context.Context, controller *releaseguardian.Controller, keys []releaseguardian.Key, interval time.Duration) {

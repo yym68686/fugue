@@ -3,6 +3,9 @@ package main
 import (
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestParseTargetsIsDataDrivenAndGroupScoped(t *testing.T) {
@@ -12,6 +15,26 @@ func TestParseTargetsIsDataDrivenAndGroupScoped(t *testing.T) {
 	}
 	if len(targets) != 2 || targets[0].Key.String() == targets[1].Key.String() {
 		t.Fatalf("targets=%+v", targets)
+	}
+}
+
+func TestHistoricalArtifactEventsDoNotRequeueRuntimeReconciliation(t *testing.T) {
+	for _, fixture := range []struct {
+		name    string
+		manager string
+		want    bool
+	}{
+		{"fugue-route-bundle-record-edge-pool-a-deadbeef", "fugue-release-guardian", true},
+		{"fugue-guardian-record-api-global-deadbeef", "fugue-release-guardian", true},
+		{"fugue-guardian-execution-api-global-12", "fugue-release-guardian", true},
+		{"fugue-release-record-api-deadbeef", "fugue-declarative-release", true},
+		{"fugue-desired-release-api-global", "fugue-release-guardian", false},
+		{"fugue-current-authority-edge-pool-a", "fugue-release-guardian", false},
+	} {
+		object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: fixture.name, Labels: map[string]string{"app.kubernetes.io/managed-by": fixture.manager}}}
+		if got := isHistoricalArtifactEvent(object); got != fixture.want {
+			t.Fatalf("name=%s manager=%s got=%t want=%t", fixture.name, fixture.manager, got, fixture.want)
+		}
 	}
 }
 

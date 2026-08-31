@@ -96,6 +96,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"port":8092,"protocol":"TCP"`,
 		`"resources":["configmaps"],"verbs":["create","delete","get","list","update"]`,
 		`"resources":["configmaps"],"verbs":["create","delete","get","list","update","watch"]`,
+		`"resourceNames":["fugue-authority-transition-activated-edge-group-country-de","fugue-authority-transition-prepared-edge-group-country-de","fugue-authority-transition-activated-edge-group-country-us","fugue-authority-transition-prepared-edge-group-country-us"],"resources":["configmaps"],"verbs":["delete"]`,
 		`"name":"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_AGE","value":"24h"`,
 		`"name":"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_HISTORY","value":"32"`,
 		`"name":"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MAXIMUM_DELETES","value":"512"`,
@@ -116,6 +117,8 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		t.Fatal("Guardian Secret metadata access is not one exact resourceNames-scoped rule")
 	}
 	guardianConfigMapRules := 0
+	guardianGeneralDelete := false
+	guardianTransitionDelete := false
 	for _, item := range set.Items {
 		metadata, _ := item["metadata"].(map[string]any)
 		name, _ := metadata["name"].(string)
@@ -134,14 +137,19 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		for _, rule := range role.Rules {
 			if len(rule.Resources) == 1 && rule.Resources[0] == "configmaps" {
 				guardianConfigMapRules++
-				if len(rule.ResourceNames) != 0 || strings.Join(rule.Verbs, ",") != "create,delete,get,list,update,watch" {
+				switch {
+				case len(rule.ResourceNames) == 0 && strings.Join(rule.Verbs, ",") == "create,delete,get,list,update,watch":
+					guardianGeneralDelete = true
+				case strings.Join(rule.ResourceNames, ",") == "fugue-authority-transition-activated-edge-group-country-de,fugue-authority-transition-prepared-edge-group-country-de,fugue-authority-transition-activated-edge-group-country-us,fugue-authority-transition-prepared-edge-group-country-us" && strings.Join(rule.Verbs, ",") == "delete":
+					guardianTransitionDelete = true
+				default:
 					t.Fatal("Guardian ConfigMap retention permission is not the exact bounded writer rule")
 				}
 			}
 		}
 	}
-	if guardianConfigMapRules != 1 {
-		t.Fatal("Guardian ConfigMap permission is not one exact rule")
+	if guardianConfigMapRules != 2 || !guardianGeneralDelete || !guardianTransitionDelete {
+		t.Fatal("Guardian ConfigMap permissions do not preserve the transition bridge and retention writer")
 	}
 	for _, forbidden := range []string{`"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
 		if strings.Contains(source, forbidden) {
