@@ -91,6 +91,7 @@ WHERE rf.ts >= now64(3) - INTERVAL 30 DAY
   AND rf.ts <= now64(3) - INTERVAL 2 MINUTE
   AND rf.status_code >= 500
   AND rf.platform_error_class IN ('route_unavailable', 'no_healthy', 'bundle_signature', 'invariant')
+  AND rf.request_id != ''
   AND rf.decision_id != ''
   AND rf.bundle_version != ''
   AND rf.route_generation != ''

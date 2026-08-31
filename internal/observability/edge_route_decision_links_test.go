@@ -25,6 +25,7 @@ func TestEdgeRouteDecisionMissingLinkQueryIsBoundedAndOrderIndependent(t *testin
 		"rf.ts >= now64(3) - INTERVAL 30 DAY",
 		"rf.status_code >= 500",
 		"rf.platform_error_class IN ('route_unavailable', 'no_healthy', 'bundle_signature', 'invariant')",
+		"rf.request_id != ''",
 		"LIMIT 100",
 	} {
 		if !strings.Contains(query, want) {
