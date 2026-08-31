@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestParseTargetsIsDataDrivenAndGroupScoped(t *testing.T) {
@@ -11,6 +12,33 @@ func TestParseTargetsIsDataDrivenAndGroupScoped(t *testing.T) {
 	}
 	if len(targets) != 2 || targets[0].Key.String() == targets[1].Key.String() {
 		t.Fatalf("targets=%+v", targets)
+	}
+}
+
+func TestParseArtifactRetentionConfigIsBoundedAndDataDriven(t *testing.T) {
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_AGE", "36h")
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_HISTORY", "48")
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_ARTIFACT_MAXIMUM_DELETES", "256")
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_ARTIFACT_PRUNE_INTERVAL", "2m")
+	config, err := parseArtifactRetentionConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Policy.MinimumAge != 36*time.Hour || config.Policy.MinimumHistory != 48 || config.Policy.MaximumDeletes != 256 || config.Interval != 2*time.Minute {
+		t.Fatalf("config=%+v", config)
+	}
+	for name, value := range map[string]string{
+		"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_AGE":     "30m",
+		"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_HISTORY": "7",
+		"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MAXIMUM_DELETES": "1025",
+		"FUGUE_RELEASE_GUARDIAN_ARTIFACT_PRUNE_INTERVAL":  "10s",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, value)
+			if _, err := parseArtifactRetentionConfig(); err == nil {
+				t.Fatalf("accepted %s=%s", name, value)
+			}
+		})
 	}
 }
 

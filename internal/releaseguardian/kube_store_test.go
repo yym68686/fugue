@@ -95,7 +95,11 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"fugue.io/edge-group-id":"edge-group-country-us"`,
 		`"port":8092,"protocol":"TCP"`,
 		`"resources":["configmaps"],"verbs":["create","delete","get","list","update"]`,
-		`"resourceNames":["fugue-authority-transition-activated-edge-group-country-de","fugue-authority-transition-prepared-edge-group-country-de","fugue-authority-transition-activated-edge-group-country-us","fugue-authority-transition-prepared-edge-group-country-us"],"resources":["configmaps"],"verbs":["delete"]`,
+		`"resources":["configmaps"],"verbs":["create","delete","get","list","update","watch"]`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_AGE","value":"24h"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_HISTORY","value":"32"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_ARTIFACT_MAXIMUM_DELETES","value":"512"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_ARTIFACT_PRUNE_INTERVAL","value":"1m"`,
 		`"resources":["pods"],"verbs":["get","list"]`,
 		`"resourceNames":["fugue-api-route-intent-ca-de","fugue-api-route-intent-ca-us","fugue-api-tls","fugue-edge-control-inventory-writer-de","fugue-edge-control-inventory-writer-us","fugue-edge-control-reader-de","fugue-edge-control-reader-us","fugue-edge-control-recovery-de","fugue-edge-control-recovery-us","fugue-edge-control-route-intent-identity-de","fugue-edge-control-route-intent-identity-us","fugue-edge-control-signing-de","fugue-edge-control-signing-us","fugue-edge-route-intent-identity","fugue-edge-token-vps-591f4447","fugue-edge-token-vps-84c8f0a9","fugue-edge-worker-reader-de","fugue-edge-worker-reader-us","fugue-fugue-config","fugue-fugue-edge-activation-signing-v1","fugue-fugue-platform-component-identity"],"resources":["secrets"],"verbs":["get"]`,
 		`"resources":["events"],"verbs":["get","list","watch"]`,
@@ -111,7 +115,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 	if strings.Count(source, `"resources":["secrets"]`) != 1 {
 		t.Fatal("Guardian Secret metadata access is not one exact resourceNames-scoped rule")
 	}
-	guardianDeleteRules := 0
+	guardianConfigMapRules := 0
 	for _, item := range set.Items {
 		metadata, _ := item["metadata"].(map[string]any)
 		name, _ := metadata["name"].(string)
@@ -128,16 +132,16 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		itemRaw, _ := json.Marshal(item)
 		_ = json.Unmarshal(itemRaw, &role)
 		for _, rule := range role.Rules {
-			if len(rule.Resources) == 1 && rule.Resources[0] == "configmaps" && len(rule.Verbs) == 1 && rule.Verbs[0] == "delete" {
-				guardianDeleteRules++
-				if strings.Join(rule.ResourceNames, ",") != "fugue-authority-transition-activated-edge-group-country-de,fugue-authority-transition-prepared-edge-group-country-de,fugue-authority-transition-activated-edge-group-country-us,fugue-authority-transition-prepared-edge-group-country-us" {
-					t.Fatal("Guardian ConfigMap delete resourceNames changed")
+			if len(rule.Resources) == 1 && rule.Resources[0] == "configmaps" {
+				guardianConfigMapRules++
+				if len(rule.ResourceNames) != 0 || strings.Join(rule.Verbs, ",") != "create,delete,get,list,update,watch" {
+					t.Fatal("Guardian ConfigMap retention permission is not the exact bounded writer rule")
 				}
 			}
 		}
 	}
-	if guardianDeleteRules != 1 {
-		t.Fatal("Guardian ConfigMap delete is not one exact transition-journal resourceNames rule")
+	if guardianConfigMapRules != 1 {
+		t.Fatal("Guardian ConfigMap permission is not one exact rule")
 	}
 	for _, forbidden := range []string{`"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
 		if strings.Contains(source, forbidden) {

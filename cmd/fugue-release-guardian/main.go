@@ -102,6 +102,14 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 	if err != nil {
 		return err
 	}
+	retention, err := parseArtifactRetentionConfig()
+	if err != nil {
+		return err
+	}
+	artifactPruner, err := releaseguardian.NewArtifactPruner(client, targets[0].Namespace, retention.Policy)
+	if err != nil {
+		return err
+	}
 	if value := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE")); value != "" {
 		if err := materializeAuthorityPublicKeys(value); err != nil {
 			return err
@@ -160,8 +168,89 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 			return err
 		}
 	}
+	go runArtifactPruner(ctx, artifactPruner, retention.Interval)
 	go enqueueFreshness(ctx, controller, store.Keys(), 20*time.Second)
 	return controller.Run(ctx, len(store.Keys()))
+}
+
+type artifactRetentionConfig struct {
+	Policy   releaseguardian.ArtifactRetentionPolicy
+	Interval time.Duration
+}
+
+func parseArtifactRetentionConfig() (artifactRetentionConfig, error) {
+	minimumAge, err := parseRetentionDuration("FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_AGE", 24*time.Hour, time.Hour, 7*24*time.Hour)
+	if err != nil {
+		return artifactRetentionConfig{}, err
+	}
+	interval, err := parseRetentionDuration("FUGUE_RELEASE_GUARDIAN_ARTIFACT_PRUNE_INTERVAL", time.Minute, 30*time.Second, time.Hour)
+	if err != nil {
+		return artifactRetentionConfig{}, err
+	}
+	minimumHistory, err := parseRetentionInteger("FUGUE_RELEASE_GUARDIAN_ARTIFACT_MINIMUM_HISTORY", 32, 8, 256)
+	if err != nil {
+		return artifactRetentionConfig{}, err
+	}
+	maximumDeletes, err := parseRetentionInteger("FUGUE_RELEASE_GUARDIAN_ARTIFACT_MAXIMUM_DELETES", 512, 1, 1_024)
+	if err != nil {
+		return artifactRetentionConfig{}, err
+	}
+	config := artifactRetentionConfig{
+		Policy:   releaseguardian.ArtifactRetentionPolicy{MinimumAge: minimumAge, MinimumHistory: minimumHistory, MaximumDeletes: maximumDeletes},
+		Interval: interval,
+	}
+	if config.Policy.Validate() != nil {
+		return artifactRetentionConfig{}, errors.New("release artifact retention policy is invalid")
+	}
+	return config, nil
+}
+
+func parseRetentionDuration(name string, fallback, minimum, maximum time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value < minimum || value > maximum {
+		return 0, fmt.Errorf("%s is invalid", name)
+	}
+	return value, nil
+}
+
+func parseRetentionInteger(name string, fallback, minimum, maximum int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
+		return 0, fmt.Errorf("%s is invalid", name)
+	}
+	return value, nil
+}
+
+func runArtifactPruner(ctx context.Context, pruner *releaseguardian.ArtifactPruner, interval time.Duration) {
+	prune := func() {
+		result, err := pruner.Prune(ctx, time.Now().UTC())
+		if err != nil {
+			log.Printf("release artifact retention: %v", err)
+			return
+		}
+		if result.Deleted > 0 {
+			log.Printf("release artifact retention: deleted=%d remaining=%d candidates=%d", result.Deleted, result.Remaining, result.Candidates)
+		}
+	}
+	prune()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
 }
 
 func enqueueEvent(controller *releaseguardian.Controller, authority *authorityRuntime, keys []releaseguardian.Key, value any) {
