@@ -136,11 +136,25 @@ func TestMarkRuntimeOfflineStaleSyncsManagedOwnedClusterRuntimeStatuses(t *testi
 	if notReadyRuntime.Status != model.RuntimeStatusOffline {
 		t.Fatalf("expected not-ready runtime offline, got %q", notReadyRuntime.Status)
 	}
+	notReadyMachine, err := stateStore.GetMachineByClusterNodeName(notReadyNodeName)
+	if err != nil {
+		t.Fatalf("get not-ready machine: %v", err)
+	}
+	if notReadyMachine.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected not-ready machine offline, got %q", notReadyMachine.Status)
+	}
 	missingRuntime, err = stateStore.GetRuntime(missingRuntime.ID)
 	if err != nil {
 		t.Fatalf("get missing runtime: %v", err)
 	}
 	if missingRuntime.Status != model.RuntimeStatusOffline {
 		t.Fatalf("expected missing runtime offline, got %q", missingRuntime.Status)
+	}
+	missingMachine, err := stateStore.GetMachineByClusterNodeName(missingRuntime.ClusterNodeName)
+	if err != nil {
+		t.Fatalf("get missing machine: %v", err)
+	}
+	if missingMachine.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected missing machine offline, got %q", missingMachine.Status)
 	}
 }

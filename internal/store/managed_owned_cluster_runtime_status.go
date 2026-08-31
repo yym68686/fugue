@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -20,8 +21,22 @@ func (s *Store) SyncManagedOwnedClusterRuntimeStatuses(nodeReadyByName map[strin
 
 		now := time.Now().UTC()
 		for idx := range state.Runtimes {
+			if state.Runtimes[idx].Type != model.RuntimeTypeManagedOwned {
+				continue
+			}
 			if syncManagedOwnedClusterRuntimeStatus(&state.Runtimes[idx], nodeReadyByName, now) {
 				count++
+			}
+			// The machine record is a read-model of the runtime registration. Keep
+			// its serving status aligned even when the runtime status was already
+			// correct (for example after an older controller missed the projection).
+			if machineIndex := findMachineByRuntimeID(state, state.Runtimes[idx].ID); machineIndex >= 0 {
+				state.Machines[machineIndex].Status = state.Runtimes[idx].Status
+				if state.Runtimes[idx].LastSeenAt != nil {
+					lastSeen := state.Runtimes[idx].LastSeenAt.UTC()
+					state.Machines[machineIndex].LastSeenAt = &lastSeen
+				}
+				state.Machines[machineIndex].UpdatedAt = now
 			}
 		}
 		return nil
@@ -66,19 +81,48 @@ FOR UPDATE
 	now := time.Now().UTC()
 	count := 0
 	for _, runtimeObj := range runtimes {
-		if !syncManagedOwnedClusterRuntimeStatus(&runtimeObj, nodeReadyByName, now) {
-			continue
+		runtimeChanged := syncManagedOwnedClusterRuntimeStatus(&runtimeObj, nodeReadyByName, now)
+		if runtimeChanged {
+			if err := s.pgUpdateRuntimeTx(ctx, tx, runtimeObj); err != nil {
+				return 0, err
+			}
+			count++
 		}
-		if err := s.pgUpdateRuntimeTx(ctx, tx, runtimeObj); err != nil {
+		if err := s.pgSyncManagedOwnedMachineStatusTx(ctx, tx, runtimeObj); err != nil {
 			return 0, err
 		}
-		count++
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit sync managed-owned cluster runtimes transaction: %w", err)
 	}
 	return count, nil
+}
+
+func (s *Store) pgSyncManagedOwnedMachineStatusTx(ctx context.Context, tx *sql.Tx, runtimeObj model.Runtime) error {
+	if runtimeObj.ID == "" || runtimeObj.Type != model.RuntimeTypeManagedOwned {
+		return nil
+	}
+	lastSeen := runtimeObj.LastSeenAt
+	if lastSeen == nil {
+		lastSeen = runtimeObj.LastHeartbeatAt
+	}
+	if lastSeen != nil {
+		_, err := tx.ExecContext(ctx, `
+UPDATE fugue_machines
+SET status = $2, last_seen_at = $3, updated_at = $4
+WHERE runtime_id = $1
+	AND (status IS DISTINCT FROM $2 OR last_seen_at IS DISTINCT FROM $3)
+`, runtimeObj.ID, runtimeObj.Status, lastSeen, time.Now().UTC())
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+UPDATE fugue_machines
+SET status = $2, updated_at = $3
+WHERE runtime_id = $1
+	AND status IS DISTINCT FROM $2
+`, runtimeObj.ID, runtimeObj.Status, time.Now().UTC())
+	return err
 }
 
 func syncManagedOwnedClusterRuntimeStatus(runtimeObj *model.Runtime, nodeReadyByName map[string]bool, now time.Time) bool {

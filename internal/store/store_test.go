@@ -1555,6 +1555,13 @@ func TestSyncManagedOwnedClusterRuntimeStatuses(t *testing.T) {
 	if runtimeNotReady.Status != model.RuntimeStatusOffline {
 		t.Fatalf("expected not-ready runtime offline, got %q", runtimeNotReady.Status)
 	}
+	notReadyMachine, err := s.GetMachineByClusterNodeName(notReadyNodeName)
+	if err != nil {
+		t.Fatalf("get not-ready machine: %v", err)
+	}
+	if notReadyMachine.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected not-ready machine offline, got %q", notReadyMachine.Status)
+	}
 
 	changed, err = s.SyncManagedOwnedClusterRuntimeStatuses(map[string]bool{
 		readyNodeName:    false,
@@ -1565,6 +1572,20 @@ func TestSyncManagedOwnedClusterRuntimeStatuses(t *testing.T) {
 	}
 	if changed != 2 {
 		t.Fatalf("expected 2 runtime status changes, got %d", changed)
+	}
+	readyMachine, err := s.GetMachineByClusterNodeName(readyNodeName)
+	if err != nil {
+		t.Fatalf("get ready machine after resync: %v", err)
+	}
+	if readyMachine.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected ready machine offline after resync, got %q", readyMachine.Status)
+	}
+	notReadyMachine, err = s.GetMachineByClusterNodeName(notReadyNodeName)
+	if err != nil {
+		t.Fatalf("get not-ready machine after resync: %v", err)
+	}
+	if notReadyMachine.Status != model.RuntimeStatusActive {
+		t.Fatalf("expected not-ready machine active after resync, got %q", notReadyMachine.Status)
 	}
 }
 
