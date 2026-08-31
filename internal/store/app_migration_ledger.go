@@ -462,11 +462,39 @@ func migrationArtifactRetirementGate(latest model.AppMigrationLedger, operation 
 		}
 		return MigrationArtifactRetirementGate{}
 	}
-	reason := strings.TrimSpace(latest.FailureReason)
+	reason := normalizeMigrationArtifactRetirementReason(latest.FailureReason)
 	if reason == "" {
 		reason = "migration cutover has not been completed"
 	}
 	return MigrationArtifactRetirementGate{Blocked: true, Reason: reason}
+}
+
+func normalizeMigrationArtifactRetirementReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	prefixes := []string{
+		"image cleanup blocked:",
+		"managed image retention blocked:",
+		"distributed image cleanup blocked:",
+		"distributed image retention blocked:",
+		"expired image pin removal blocked:",
+		"distributed image prune blocked:",
+		"manual image deletion blocked:",
+		"image prune blocked:",
+		"manual image pin removal blocked:",
+	}
+	for {
+		trimmed := reason
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(trimmed, prefix) {
+				trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+				break
+			}
+		}
+		if trimmed == reason {
+			return reason
+		}
+		reason = trimmed
+	}
 }
 
 // MigrationArtifactRetirementGates resolves every app's migration gate from a
@@ -573,12 +601,15 @@ func (s *Store) RecordMigrationArtifactRetirementBlocked(appID, reason string) e
 			return nil
 		}
 	}
-	reason = strings.TrimSpace(reason)
+	// A blocked snapshot is already durable evidence. Writing every cleanup
+	// caller's contextual prefix back into the authoritative ledger would turn
+	// periodic diagnostics into an ever-growing failure reason.
+	if latest.CutoverStatus == model.AppMigrationCutoverBlocked {
+		return nil
+	}
+	reason = normalizeMigrationArtifactRetirementReason(reason)
 	if reason == "" {
 		reason = "old migration artifacts remain protected until cutover verification"
-	}
-	if latest.CutoverStatus == model.AppMigrationCutoverBlocked && latest.FailureReason == reason {
-		return nil
 	}
 	latest.ID = ""
 	latest.CutoverStatus = model.AppMigrationCutoverBlocked

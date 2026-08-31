@@ -25,6 +25,13 @@ func (s *Service) cleanupDeletedAppDistributedImages(ctx context.Context, app mo
 }
 
 func (s *Service) cleanupDeletedAppDistributedImagesAfterMigrationGate(ctx context.Context, app model.App) error {
+	if err := s.deleteDeletedAppDistributedImagePins(ctx, app); err != nil {
+		return err
+	}
+	return s.retireDeletedAppDistributedImages(ctx, app)
+}
+
+func (s *Service) deleteDeletedAppDistributedImagePins(ctx context.Context, app model.App) error {
 	pins, err := s.Store.ListImagePins(model.ImagePinFilter{
 		TenantID: strings.TrimSpace(app.TenantID),
 		AppID:    strings.TrimSpace(app.ID),
@@ -40,7 +47,7 @@ func (s *Service) cleanupDeletedAppDistributedImagesAfterMigrationGate(ctx conte
 			return err
 		}
 	}
-	return s.retireDeletedAppDistributedImages(ctx, app)
+	return nil
 }
 
 func (s *Service) retireDeletedAppDistributedImages(ctx context.Context, app model.App) error {
@@ -55,7 +62,17 @@ func (s *Service) retireDeletedAppDistributedImages(ctx context.Context, app mod
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
+	return s.retireDeletedAppDistributedImagesWithProtection(ctx, app, protected, time.Now().UTC())
+}
+
+func (s *Service) retireDeletedAppDistributedImagesWithProtection(ctx context.Context, app model.App, protected controllerImageCacheProtectedSet, now time.Time) error {
+	images, err := s.Store.ListImages(model.ImageFilter{
+		TenantID: strings.TrimSpace(app.TenantID),
+		AppID:    strings.TrimSpace(app.ID),
+	})
+	if err != nil || len(images) == 0 {
+		return err
+	}
 	for _, image := range images {
 		if err := ctx.Err(); err != nil {
 			return err

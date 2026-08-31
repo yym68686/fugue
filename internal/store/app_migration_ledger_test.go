@@ -110,6 +110,17 @@ func TestMigrationArtifactsStayProtectedUntilVerifiedCutover(t *testing.T) {
 	if err != nil || !found || latest.CutoverStatus != model.AppMigrationCutoverBlocked || latest.FailureReason != "target endpoint not ready" {
 		t.Fatalf("expected blocked ledger event, got found=%v ledger=%+v err=%v", found, latest, err)
 	}
+	if err := s.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image retention blocked: target endpoint not ready"); err != nil {
+		t.Fatalf("repeat blocked retirement attempt: %v", err)
+	}
+	latest, found, err = s.LatestAppMigrationLedger(op.ID)
+	if err != nil || !found || latest.FailureReason != "target endpoint not ready" {
+		t.Fatalf("repeat cleanup must not rewrite the blocked authority: found=%v ledger=%+v err=%v", found, latest, err)
+	}
+	blocked, reason, err = s.MigrationArtifactsRetirementBlocked(app.ID)
+	if err != nil || !blocked || reason != "target endpoint not ready" {
+		t.Fatalf("normalized blocked gate mismatch: blocked=%v reason=%q err=%v", blocked, reason, err)
+	}
 	ready := true
 	physical := 1
 	if _, err := s.RecordAppMigrationLedger(model.AppMigrationLedger{

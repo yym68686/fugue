@@ -713,10 +713,18 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 	if err := s.populateControllerImageTaskRefs(&protected, imageByID); err != nil {
 		return protected, err
 	}
-	if err := s.populateControllerImageMinimumReplicaRefs(&protected, images); err != nil {
+	allReplicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{PlatformAdmin: true})
+	if err != nil {
 		return protected, err
 	}
-	if err := s.populateControllerImageReplicaCandidateRefs(&protected, images); err != nil {
+	replicasByImageID := make(map[string][]model.ImageReplica, len(images))
+	for _, replica := range allReplicas {
+		replicasByImageID[strings.TrimSpace(replica.ImageID)] = append(replicasByImageID[strings.TrimSpace(replica.ImageID)], replica)
+	}
+	if err := s.populateControllerImageMinimumReplicaRefs(&protected, images, replicasByImageID); err != nil {
+		return protected, err
+	}
+	if err := s.populateControllerImageReplicaCandidateRefs(&protected, images, replicasByImageID); err != nil {
 		return protected, err
 	}
 	return protected, nil
@@ -772,7 +780,7 @@ func (s *Service) populateControllerImageTaskRefs(protected *controllerImageCach
 	return nil
 }
 
-func (s *Service) populateControllerImageMinimumReplicaRefs(protected *controllerImageCacheProtectedSet, images []model.Image) error {
+func (s *Service) populateControllerImageMinimumReplicaRefs(protected *controllerImageCacheProtectedSet, images []model.Image, replicasByImageID map[string][]model.ImageReplica) error {
 	minReplicas := s.controllerImageCacheMinReplicaCount()
 	if minReplicas <= 0 {
 		return nil
@@ -784,13 +792,11 @@ func (s *Service) populateControllerImageMinimumReplicaRefs(protected *controlle
 		default:
 			continue
 		}
-		replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{
-			ImageID:       image.ID,
-			Status:        model.ImageReplicaStatusPresent,
-			PlatformAdmin: true,
-		})
-		if err != nil {
-			return err
+		replicas := make([]model.ImageReplica, 0, len(replicasByImageID[image.ID]))
+		for _, replica := range replicasByImageID[image.ID] {
+			if strings.TrimSpace(replica.Status) == model.ImageReplicaStatusPresent {
+				replicas = append(replicas, replica)
+			}
 		}
 		healthy := healthyImageReplicas(replicas, now)
 		keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
@@ -838,19 +844,12 @@ func (s *Service) populateControllerImageMinimumReplicaRefs(protected *controlle
 	return nil
 }
 
-func (s *Service) populateControllerImageReplicaCandidateRefs(protected *controllerImageCacheProtectedSet, images []model.Image) error {
+func (s *Service) populateControllerImageReplicaCandidateRefs(protected *controllerImageCacheProtectedSet, images []model.Image, replicasByImageID map[string][]model.ImageReplica) error {
 	if protected == nil {
 		return nil
 	}
 	for _, image := range images {
-		replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{
-			ImageID:       image.ID,
-			TenantID:      image.TenantID,
-			PlatformAdmin: true,
-		})
-		if err != nil {
-			return err
-		}
+		replicas := replicasByImageID[image.ID]
 		keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
 		for _, replica := range replicas {
 			reason := controllerImageCacheReplicaCandidateReason(replica.Status)

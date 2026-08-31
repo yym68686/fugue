@@ -126,6 +126,7 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 	liveRefs := s.liveManagedImageRefSet(ctx, apps)
 	tenantIDs := make(map[string]struct{})
 	var errs []error
+	deletedAppsReadyForRetirement := make([]model.App, 0, len(deletedApps))
 	for _, app := range deletedApps {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, fmt.Errorf("stop deleted app image cleanup sweep: %w", err))
@@ -138,10 +139,28 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 			_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image cleanup blocked: "+gate.Reason)
 			continue
 		}
-		if err := s.cleanupDeletedAppDistributedImagesAfterMigrationGate(ctx, app); err != nil {
-			errs = append(errs, fmt.Errorf("cleanup deleted app %s distributed images: %w", strings.TrimSpace(app.ID), err))
+		if err := s.deleteDeletedAppDistributedImagePins(ctx, app); err != nil {
+			errs = append(errs, fmt.Errorf("remove deleted app %s distributed image pins: %w", strings.TrimSpace(app.ID), err))
 			if isContextStopped(ctx, err) {
 				break
+			}
+			continue
+		}
+		deletedAppsReadyForRetirement = append(deletedAppsReadyForRetirement, app)
+	}
+	if len(deletedAppsReadyForRetirement) > 0 && ctx.Err() == nil {
+		protected, err := s.controllerImageCacheProtectedSet(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("snapshot deleted app distributed image protections: %w", err))
+		} else {
+			now := time.Now().UTC()
+			for _, app := range deletedAppsReadyForRetirement {
+				if err := s.retireDeletedAppDistributedImagesWithProtection(ctx, app, protected, now); err != nil {
+					errs = append(errs, fmt.Errorf("retire deleted app %s distributed images: %w", strings.TrimSpace(app.ID), err))
+					if isContextStopped(ctx, err) {
+						break
+					}
+				}
 			}
 		}
 	}
