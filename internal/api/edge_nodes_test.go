@@ -125,7 +125,9 @@ func TestStandbyHeartbeatCannotOverwriteServingLegacyProjection(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", bytes.NewReader(payload))
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set(edgeServingActiveHeader, servingHeader)
+		if servingHeader != "" {
+			request.Header.Set(edgeServingActiveHeader, servingHeader)
+		}
 		server.Handler().ServeHTTP(recorder, request)
 		return recorder
 	}
@@ -147,6 +149,16 @@ func TestStandbyHeartbeatCannotOverwriteServingLegacyProjection(t *testing.T) {
 	}
 	if !node.Healthy || node.Status != model.EdgeHealthHealthy || node.RouteBundleVersion != "bundle-serving" {
 		t.Fatalf("standby heartbeat overwrote serving projection: %+v", node)
+	}
+	if recorder := heartbeat(model.EdgeSlotA, "", model.EdgeHealthUnhealthy, false, "bundle-standby-legacy"); recorder.Code != http.StatusOK {
+		t.Fatalf("legacy standby heartbeat failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	node, _, err = storeState.GetEdgeNode("edge-shared")
+	if err != nil {
+		t.Fatalf("get projected edge node after legacy standby: %v", err)
+	}
+	if !node.Healthy || node.Status != model.EdgeHealthHealthy || node.RouteBundleVersion != "bundle-serving" {
+		t.Fatalf("legacy standby heartbeat overwrote serving projection: %+v", node)
 	}
 }
 

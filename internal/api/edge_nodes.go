@@ -570,6 +570,23 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	} else if failureClass == model.EdgeInstanceFailureNone && edgeHeartbeatReportsSignatureFailure(req) {
 		failureClass = model.EdgeInstanceFailureSignatureInvalid
 	}
+	legacyProjectionAllowed := servingActive == nil
+	if legacyProjectionAllowed {
+		// A first identity-complete heartbeat still seeds the compatibility row
+		// during the legacy phase. Once this identity exists, omitted authority
+		// headers from an older rolling-upgrade worker cannot overwrite it.
+		instances, _, listErr := s.store.ListEdgeNodeInstances(req.EdgeGroupID)
+		if listErr != nil {
+			s.writeStoreError(w, listErr)
+			return
+		}
+		for _, existing := range instances {
+			if existing.EdgeID == req.EdgeID && existing.Slot == req.Slot && existing.InstanceUID == req.InstanceUID && existing.ReleaseEpoch == req.ReleaseEpoch {
+				legacyProjectionAllowed = false
+				break
+			}
+		}
+	}
 	instance, err := s.store.UpdateEdgeInstanceHeartbeat(model.EdgeNodeInstance{
 		EdgeID:       req.EdgeID,
 		EdgeGroupID:  req.EdgeGroupID,
@@ -587,7 +604,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// the legacy compatibility phase, only its active slot may project instance
 	// health into the flat row consumed by older readers. A missing header keeps
 	// rolling upgrades compatible with workers from the previous release.
-	if activation.Phase != model.EdgeActivationPhaseEnforced && (servingActive == nil || *servingActive) {
+	if activation.Phase != model.EdgeActivationPhaseEnforced && ((servingActive == nil && legacyProjectionAllowed) || (servingActive != nil && *servingActive)) {
 		if _, _, err := s.store.UpdateEdgeHeartbeat(node); err != nil {
 			s.writeStoreError(w, err)
 			return
