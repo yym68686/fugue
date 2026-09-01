@@ -25,7 +25,7 @@ const (
 	rightSizingAutoApplyMinMemIncrease    = int64(128)
 	rightSizingAutoApplyMinCPUIncreaseR   = 0.25
 	rightSizingAutoApplyMinMemIncreaseR   = 0.20
-	rightSizingAutoApplyMinCPUDecrease    = int64(100)
+	rightSizingAutoApplyMinCPUDecrease    = int64(5)
 	rightSizingAutoApplyMinMemDecrease    = int64(256)
 	rightSizingAutoApplyMinCPUDecreaseR   = 0.20
 	rightSizingAutoApplyMinMemDecreaseR   = 0.20
@@ -339,60 +339,52 @@ func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) 
 	if resourceSpecsEqual(&effectiveCurrent, recommended) {
 		return decision
 	}
-	hasIncrease := resourceSpecHasIncrease(effectiveCurrent, *recommended)
-	hasDecrease := resourceSpecHasDecrease(effectiveCurrent, *recommended)
-	if hasIncrease {
-		if materialResourceIncrease(
-			effectiveCurrent.CPUMilliCores,
-			recommended.CPUMilliCores,
-			rightSizingAutoApplyMinCPUIncrease,
-			rightSizingAutoApplyMinCPUIncreaseR,
-		) || materialResourceIncrease(
-			effectiveCurrent.MemoryMebibytes,
-			recommended.MemoryMebibytes,
-			rightSizingAutoApplyMinMemIncrease,
-			rightSizingAutoApplyMinMemIncreaseR,
-		) {
-			decision.allowed = true
-			decision.resources = autoRightSizingUpscaleTarget(effectiveCurrent, *recommended)
-		}
+	materialCPUIncrease := materialResourceIncrease(
+		effectiveCurrent.CPUMilliCores,
+		recommended.CPUMilliCores,
+		rightSizingAutoApplyMinCPUIncrease,
+		rightSizingAutoApplyMinCPUIncreaseR,
+	)
+	materialMemoryIncrease := materialResourceIncrease(
+		effectiveCurrent.MemoryMebibytes,
+		recommended.MemoryMebibytes,
+		rightSizingAutoApplyMinMemIncrease,
+		rightSizingAutoApplyMinMemIncreaseR,
+	)
+	if materialCPUIncrease || materialMemoryIncrease {
+		decision.allowed = true
+		decision.resources = autoRightSizingUpscaleTarget(effectiveCurrent, *recommended)
 		return decision
 	}
-	if hasDecrease {
-		if !materialResourceDecrease(
-			effectiveCurrent.CPUMilliCores,
-			recommended.CPUMilliCores,
-			rightSizingAutoApplyMinCPUDecrease,
-			rightSizingAutoApplyMinCPUDecreaseR,
-		) && !materialResourceDecrease(
-			effectiveCurrent.MemoryMebibytes,
-			recommended.MemoryMebibytes,
-			rightSizingAutoApplyMinMemDecrease,
-			rightSizingAutoApplyMinMemDecreaseR,
-		) {
+	materialCPUDecrease := materialResourceDecrease(
+		effectiveCurrent.CPUMilliCores,
+		recommended.CPUMilliCores,
+		rightSizingAutoApplyMinCPUDecrease,
+		rightSizingAutoApplyMinCPUDecreaseR,
+	)
+	materialMemoryDecrease := materialResourceDecrease(
+		effectiveCurrent.MemoryMebibytes,
+		recommended.MemoryMebibytes,
+		rightSizingAutoApplyMinMemDecrease,
+		rightSizingAutoApplyMinMemDecreaseR,
+	)
+	if materialCPUDecrease || materialMemoryDecrease {
+		target := autoRightSizingDownscaleTarget(
+			effectiveCurrent,
+			*recommended,
+			materialCPUDecrease,
+			materialMemoryDecrease,
+		)
+		if resourceSpecsEqual(&effectiveCurrent, target) {
 			return decision
 		}
 		decision.allowed = true
 		decision.downscale = true
 		decision.requestedByID = rightSizingAutoDownscaleRequestedByID
-		decision.resources = autoRightSizingDownscaleTarget(effectiveCurrent, *recommended)
+		decision.resources = target
 		return decision
 	}
 	return decision
-}
-
-func resourceSpecHasDecrease(current, recommended model.ResourceSpec) bool {
-	return recommended.CPUMilliCores < current.CPUMilliCores ||
-		recommended.MemoryMebibytes < current.MemoryMebibytes ||
-		recommended.CPULimitMilliCores < current.CPULimitMilliCores ||
-		recommended.MemoryLimitMebibytes < current.MemoryLimitMebibytes
-}
-
-func resourceSpecHasIncrease(current, recommended model.ResourceSpec) bool {
-	return recommended.CPUMilliCores > current.CPUMilliCores ||
-		recommended.MemoryMebibytes > current.MemoryMebibytes ||
-		recommended.CPULimitMilliCores > current.CPULimitMilliCores ||
-		recommended.MemoryLimitMebibytes > current.MemoryLimitMebibytes
 }
 
 func materialResourceIncrease(current, recommended, minIncrease int64, minRatio float64) bool {
@@ -426,31 +418,39 @@ func autoRightSizingUpscaleTarget(current, recommended model.ResourceSpec) *mode
 	}
 }
 
-func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec) *model.ResourceSpec {
+func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec, downscaleCPU, downscaleMemory bool) *model.ResourceSpec {
 	defaults := model.DefaultManagedAppResources()
-	target := recommended
-	if recommended.CPUMilliCores < current.CPUMilliCores {
-		floor := roundUpInt64(int64(math.Ceil(float64(current.CPUMilliCores)*rightSizingAutoDownscaleStepRatio)), 5)
-		target.CPUMilliCores = maxInt64(recommended.CPUMilliCores, floor)
-		target.CPUMilliCores = maxInt64(target.CPUMilliCores, defaults.CPUMilliCores)
+	target := current
+	if downscaleCPU && recommended.CPUMilliCores < current.CPUMilliCores {
+		target.CPUMilliCores = gradualCPUDownscaleTarget(current.CPUMilliCores, recommended.CPUMilliCores)
+		if recommended.CPULimitMilliCores < current.CPULimitMilliCores {
+			target.CPULimitMilliCores = gradualCPUDownscaleTarget(current.CPULimitMilliCores, recommended.CPULimitMilliCores)
+		}
 	}
-	if recommended.MemoryMebibytes < current.MemoryMebibytes {
+	if downscaleMemory && recommended.MemoryMebibytes < current.MemoryMebibytes {
 		floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
 		target.MemoryMebibytes = maxInt64(recommended.MemoryMebibytes, floor)
 		target.MemoryMebibytes = maxInt64(target.MemoryMebibytes, defaults.MemoryMebibytes)
-		if target.MemoryLimitMebibytes > 0 {
+		target.MemoryMebibytes = min(target.MemoryMebibytes, current.MemoryMebibytes)
+		if recommended.MemoryLimitMebibytes < current.MemoryLimitMebibytes {
+			target.MemoryLimitMebibytes = recommended.MemoryLimitMebibytes
+		}
+		if target.MemoryLimitMebibytes > 0 && target.MemoryLimitMebibytes < current.MemoryLimitMebibytes {
 			target.MemoryLimitMebibytes = maxInt64(target.MemoryMebibytes+128, target.MemoryMebibytes*2)
+			floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryLimitMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
+			target.MemoryLimitMebibytes = maxInt64(target.MemoryLimitMebibytes, floor)
+			target.MemoryLimitMebibytes = min(target.MemoryLimitMebibytes, current.MemoryLimitMebibytes)
 		}
 	}
-	if recommended.CPULimitMilliCores < current.CPULimitMilliCores {
-		floor := roundUpInt64(int64(math.Ceil(float64(current.CPULimitMilliCores)*rightSizingAutoDownscaleStepRatio)), 5)
-		target.CPULimitMilliCores = maxInt64(recommended.CPULimitMilliCores, floor)
-	}
-	if recommended.MemoryLimitMebibytes < current.MemoryLimitMebibytes && target.MemoryLimitMebibytes > 0 {
-		floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryLimitMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
-		target.MemoryLimitMebibytes = maxInt64(target.MemoryLimitMebibytes, floor)
-	}
 	return &target
+}
+
+func gradualCPUDownscaleTarget(current, recommended int64) int64 {
+	floor := roundUpInt64(int64(math.Ceil(float64(current)*rightSizingAutoDownscaleStepRatio)), 5)
+	if floor >= current {
+		floor = maxInt64(0, current-5)
+	}
+	return min(current, maxInt64(recommended, floor))
 }
 
 func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) {

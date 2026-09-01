@@ -672,6 +672,182 @@ func TestAutoRightSizingMixedDirectionPrioritizesMaterialUpscale(t *testing.T) {
 	}
 }
 
+func TestAutoRightSizingLowCPUDownscaleIsGradual(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		current     *model.ResourceSpec
+		recommended *model.ResourceSpec
+		wantCPU     int64
+	}{
+		{
+			name:    "implicit managed default",
+			current: nil,
+			recommended: &model.ResourceSpec{
+				CPUMilliCores:   25,
+				MemoryMebibytes: 512,
+			},
+			wantCPU: 190,
+		},
+		{
+			name: "below managed default",
+			current: &model.ResourceSpec{
+				CPUMilliCores:   150,
+				MemoryMebibytes: 512,
+			},
+			recommended: &model.ResourceSpec{
+				CPUMilliCores:   25,
+				MemoryMebibytes: 512,
+			},
+			wantCPU: 115,
+		},
+		{
+			name: "low CPU service",
+			current: &model.ResourceSpec{
+				CPUMilliCores:   50,
+				MemoryMebibytes: 512,
+			},
+			recommended: &model.ResourceSpec{
+				CPUMilliCores:   25,
+				MemoryMebibytes: 512,
+			},
+			wantCPU: 40,
+		},
+		{
+			name: "low CPU rounding boundary",
+			current: &model.ResourceSpec{
+				CPUMilliCores:   15,
+				MemoryMebibytes: 128,
+			},
+			recommended: &model.ResourceSpec{
+				CPUMilliCores:   10,
+				MemoryMebibytes: 128,
+			},
+			wantCPU: 10,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			decision := autoRightSizingAppResourceChange(test.current, test.recommended)
+			if !decision.allowed || !decision.downscale || decision.resources == nil {
+				t.Fatalf("expected CPU downscale, got %+v", decision)
+			}
+			if got := decision.resources.CPUMilliCores; got != test.wantCPU {
+				t.Fatalf("expected CPU target %dm, got %dm", test.wantCPU, got)
+			}
+			current := model.DefaultManagedAppResources()
+			if test.current != nil {
+				current = *test.current
+			}
+			if decision.resources.CPUMilliCores >= current.CPUMilliCores {
+				t.Fatalf("downscale must lower CPU from %dm, got %dm", current.CPUMilliCores, decision.resources.CPUMilliCores)
+			}
+			if decision.resources.MemoryMebibytes != current.MemoryMebibytes {
+				t.Fatalf("CPU-only downscale must preserve memory at %dMi, got %dMi", current.MemoryMebibytes, decision.resources.MemoryMebibytes)
+			}
+		})
+	}
+}
+
+func TestAutoRightSizingLowCPUDownscaleKeepsRatioHysteresis(t *testing.T) {
+	t.Parallel()
+
+	current := &model.ResourceSpec{CPUMilliCores: 30, MemoryMebibytes: 128}
+	recommended := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 128}
+	decision := autoRightSizingAppResourceChange(current, recommended)
+	if decision.allowed {
+		t.Fatalf("expected a CPU change below 20%% to remain blocked, got %+v", decision)
+	}
+}
+
+func TestAutoRightSizingDownscaleDimensionsAreIndependent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("CPU-only downscale preserves memory", func(t *testing.T) {
+		t.Parallel()
+
+		current := &model.ResourceSpec{
+			CPUMilliCores:        50,
+			MemoryMebibytes:      288,
+			MemoryLimitMebibytes: 576,
+		}
+		recommended := &model.ResourceSpec{
+			CPUMilliCores:        25,
+			MemoryMebibytes:      256,
+			MemoryLimitMebibytes: 512,
+		}
+		decision := autoRightSizingAppResourceChange(current, recommended)
+		if !decision.allowed || decision.resources == nil {
+			t.Fatalf("expected CPU downscale, got %+v", decision)
+		}
+		if got := decision.resources; got.CPUMilliCores != 40 || got.MemoryMebibytes != 288 || got.MemoryLimitMebibytes != 576 {
+			t.Fatalf("expected only CPU to downscale, got %+v", got)
+		}
+	})
+
+	t.Run("memory-only downscale preserves CPU", func(t *testing.T) {
+		t.Parallel()
+
+		current := &model.ResourceSpec{
+			CPUMilliCores:        30,
+			MemoryMebibytes:      1024,
+			MemoryLimitMebibytes: 2048,
+		}
+		recommended := &model.ResourceSpec{
+			CPUMilliCores:        25,
+			MemoryMebibytes:      512,
+			MemoryLimitMebibytes: 1024,
+		}
+		decision := autoRightSizingAppResourceChange(current, recommended)
+		if !decision.allowed || decision.resources == nil {
+			t.Fatalf("expected memory downscale, got %+v", decision)
+		}
+		if got := decision.resources; got.CPUMilliCores != 30 || got.MemoryMebibytes != 768 || got.MemoryLimitMebibytes != 1536 {
+			t.Fatalf("expected only memory to downscale, got %+v", got)
+		}
+	})
+
+	t.Run("minor memory increase does not block CPU downscale", func(t *testing.T) {
+		t.Parallel()
+
+		current := &model.ResourceSpec{CPUMilliCores: 50, MemoryMebibytes: 256}
+		recommended := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 288}
+		decision := autoRightSizingAppResourceChange(current, recommended)
+		if !decision.allowed || decision.resources == nil {
+			t.Fatalf("expected CPU downscale, got %+v", decision)
+		}
+		if got := decision.resources; got.CPUMilliCores != 40 || got.MemoryMebibytes != 256 {
+			t.Fatalf("expected CPU downscale with memory preserved, got %+v", got)
+		}
+	})
+}
+
+func TestAutoRightSizingDownscaleNeverRaisesResourcesToDefaults(t *testing.T) {
+	t.Parallel()
+
+	current := &model.ResourceSpec{
+		CPUMilliCores:        150,
+		MemoryMebibytes:      400,
+		MemoryLimitMebibytes: 800,
+	}
+	recommended := &model.ResourceSpec{
+		CPUMilliCores:        25,
+		MemoryMebibytes:      64,
+		MemoryLimitMebibytes: 128,
+	}
+	decision := autoRightSizingAppResourceChange(current, recommended)
+	if !decision.allowed || decision.resources == nil {
+		t.Fatalf("expected CPU downscale, got %+v", decision)
+	}
+	if got := decision.resources; got.CPUMilliCores != 115 || got.MemoryMebibytes != 400 || got.MemoryLimitMebibytes != 800 {
+		t.Fatalf("downscale must not raise resources to managed defaults, got %+v", got)
+	}
+}
+
 type rightSizingUsageValue struct {
 	cpuMilli  int64
 	memoryMiB int64
