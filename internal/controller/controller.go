@@ -44,6 +44,7 @@ type Service struct {
 	safeRolloutDrainMetricsQuerier  safeRolloutDrainMetricsQuerier
 	safeRolloutSleep                func(context.Context, time.Duration) error
 	restoreSafeRolloutPreviousSpec  func(context.Context, model.Operation, *safeRolloutState, string) error
+	restoreFailedRightSizingSpec    func(context.Context, model.Operation, model.App, runtime.SchedulingConstraints, error) error
 	serviceURLForApp                func(context.Context, model.App) string
 	syncBillingImageStorage         bool
 	latestGitHubCommit              func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
@@ -1164,6 +1165,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				if safeRollout != nil {
 					if rollbackErr := s.abortSafeZeroDowntimeRollout(ctx, op, safeRollout, err.Error()); rollbackErr != nil {
 						return fmt.Errorf("wait for managed app rollout %s: %w; safe rollout restore failed: %v", app.ID, err, rollbackErr)
+					}
+				} else if isRightSizingDeployOperation(op) && strings.TrimSpace(rolloutResult.SchedulingReason) != "" {
+					if rollbackErr := s.restoreFailedRightSizingRollout(ctx, op, currentApp, currentScheduling, err); rollbackErr != nil {
+						return fmt.Errorf("wait for managed app rollout %s: %w; right-sizing restore failed: %v", app.ID, err, rollbackErr)
 					}
 				}
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)

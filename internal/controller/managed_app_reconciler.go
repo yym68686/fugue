@@ -2828,10 +2828,21 @@ func listOwnedNames(ctx context.Context, appID string, fn func(selector string) 
 }
 
 func backfillManagedAppSource(app *model.App, stored model.App) {
-	if app == nil || app.Source != nil || stored.Source == nil {
+	if app == nil {
 		return
 	}
-	model.SetAppSourceState(app, model.AppOriginSource(stored), model.AppBuildSource(stored))
+	build := model.AppBuildSource(*app)
+	if build == nil {
+		build = model.AppBuildSource(stored)
+	}
+	origin := model.AppOriginSource(stored)
+	if origin == nil {
+		origin = model.AppOriginSource(*app)
+	}
+	if origin == nil && build == nil {
+		return
+	}
+	model.SetAppSourceState(app, origin, build)
 }
 
 func backfillManagedAppBackingServices(app *model.App, stored model.App) {

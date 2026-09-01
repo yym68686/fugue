@@ -687,6 +687,64 @@ func TestManagedAppLiveGuardReturnsRefinedRolloutIdentity(t *testing.T) {
 	}
 }
 
+func TestManagedAppLiveGuardHydratesOriginSourceForResourceRestore(t *testing.T) {
+	current := managedAppLiveGuardTestApp(nil)
+	current.Spec.Resources = &model.ResourceSpec{CPUMilliCores: 145, MemoryMebibytes: 512}
+	current.Spec.RightSizing = &model.AppRightSizingSpec{
+		Mode:        model.AppRightSizingModeAuto,
+		WindowHours: 168,
+		MinSamples:  12,
+	}
+	current.Spec.RolloutIntent = model.AppRolloutIntentOnlineResourceUpdate
+	origin := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "registry.example/live-guard:origin",
+		ResolvedImageRef: "registry.example/live-guard:v1",
+	}
+	build := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "registry.example/live-guard:build",
+		ResolvedImageRef: current.Spec.Image,
+	}
+	model.SetAppSourceState(&current, &origin, &build)
+
+	managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
+	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseReady, ReadyReplicas: 1}
+	svc := &Service{Renderer: runtime.Renderer{}}
+	live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(current), runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected rendered deployment")
+	}
+	managedAppLiveGuardMarkReady(&live, 1)
+	client := managedAppLiveGuardClient(t, managed, live, true, true, nil)
+
+	desired := current
+	desired.Spec = *cloneControllerAppSpec(&current.Spec)
+	desired.Spec.Resources = &model.ResourceSpec{CPUMilliCores: 190, MemoryMebibytes: 512}
+	desired.Spec.RightSizing = &model.AppRightSizingSpec{
+		Mode:        model.AppRightSizingModeRecommend,
+		WindowHours: 168,
+		MinSamples:  12,
+	}
+	desired.Spec.RolloutIntent = ""
+
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(),
+		client,
+		managed.Metadata.Namespace,
+		managed,
+		desired,
+		model.OperationTypeDeploy,
+		runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("resource restore with split origin/build source must remain an online rollout: %v", err)
+	}
+	if prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineResourceUpdate {
+		t.Fatalf("expected online resource restore, got rollout intent %q", prepared.Spec.RolloutIntent)
+	}
+}
+
 func TestApplyManagedAppDesiredStateDoesNotWriteBeforeLiveIdentityProof(t *testing.T) {
 	app := managedAppLiveGuardTestApp(nil)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})

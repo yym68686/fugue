@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
+
+const failedRightSizingRestoreTimeout = time.Minute
 
 func isRightSizingDeployOperation(op model.Operation) bool {
 	if op.Type != model.OperationTypeDeploy ||
@@ -50,6 +53,41 @@ func (s *Service) refuseRightSizingDowntimeIfNeeded(ctx context.Context, op mode
 	s.logOperationAppEvent("blocked", "warning", op, prepared, message, attrs)
 	s.logControllerAppEvent(ctx, "right_sizing_decision", "warning", prepared, message, attrs)
 	return fmt.Errorf("%s", message)
+}
+
+// restoreFailedRightSizingRollout puts the durable last-known-good resource
+// request back into Kubernetes before a scheduling-blocked automatic rollout
+// is marked failed. Without this restore, the pending Deployment template can
+// schedule later and silently become the serving request even though the
+// operation and durable AppSpec both say the change failed.
+func (s *Service) restoreFailedRightSizingRollout(
+	ctx context.Context,
+	op model.Operation,
+	previous model.App,
+	scheduling runtime.SchedulingConstraints,
+	cause error,
+) error {
+	if s.restoreFailedRightSizingSpec != nil {
+		return s.restoreFailedRightSizingSpec(ctx, op, previous, scheduling, cause)
+	}
+	if !s.Config.KubectlApply {
+		return nil
+	}
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failedRightSizingRestoreTimeout)
+	defer cancel()
+	restoreCtx = withManagedAppApplySource(restoreCtx, managedAppApplySourceOperation, op.ID)
+	if _, err := s.applyManagedAppDesiredStateResult(restoreCtx, previous, scheduling); err != nil {
+		return fmt.Errorf("restore previous desired state after right-sizing scheduling failure: %w", err)
+	}
+	if s.Logger != nil {
+		s.Logger.Printf(
+			"restored previous managed app desired state after right-sizing rollout failure app=%s operation=%s cause=%v",
+			previous.ID,
+			op.ID,
+			cause,
+		)
+	}
+	return nil
 }
 
 type rightSizingDowntimeDecision struct {

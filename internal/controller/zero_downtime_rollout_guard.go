@@ -125,6 +125,13 @@ func (s *Service) prepareManagedAppReconcileRolloutWithEvidence(
 	desiredScheduling runtime.SchedulingConstraints,
 ) (model.App, error) {
 	current := runtime.AppFromManagedApp(managed)
+	// ManagedApp is a runtime-fact projection and carries the image/build
+	// source that produced the live workload, but it predates the split between
+	// immutable origin intent and the latest build artifact. Rehydrate that
+	// missing origin dimension from durable intent before classifying the live
+	// transition. Otherwise a resource-only repair after a failed rollout is
+	// misclassified as an unplanned restart and permanently blocked.
+	backfillManagedAppSource(&current, desired)
 	if client != nil {
 		return s.prepareManagedAppRolloutFromLiveState(ctx, client, namespace, managed, current, desired, operationType, desiredScheduling)
 	}
