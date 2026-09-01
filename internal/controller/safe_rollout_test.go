@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
@@ -191,6 +192,79 @@ func TestSafeZeroDowntimeCandidateRevisionFiltersSharedStatefulObjects(t *testin
 		if labels[runtime.FugueLabelAppReleaseID] != "rel_candidate" {
 			t.Fatalf("filtered object has wrong release id: kind=%s labels=%v", objectStringField(object, "kind"), labels)
 		}
+	}
+}
+
+func TestSafeRolloutCandidateRevisionUsesImmutableReleaseIdentity(t *testing.T) {
+	t.Parallel()
+
+	first := runtime.NormalizeAppRevisionRenderOptions(safeRolloutCandidateRevision("apprel_first"))
+	firstAgain := runtime.NormalizeAppRevisionRenderOptions(safeRolloutCandidateRevision("apprel_first"))
+	second := runtime.NormalizeAppRevisionRenderOptions(safeRolloutCandidateRevision("apprel_second"))
+	if first.Suffix == "" || first.Suffix == runtime.AppRevisionRoleCandidate {
+		t.Fatalf("candidate revision suffix must include immutable release identity, got %q", first.Suffix)
+	}
+	if first.Suffix != firstAgain.Suffix {
+		t.Fatalf("candidate revision suffix must be deterministic: %q != %q", first.Suffix, firstAgain.Suffix)
+	}
+	if first.Suffix == second.Suffix {
+		t.Fatalf("different releases must use different candidate resources, got %q", first.Suffix)
+	}
+}
+
+func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo"}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	var mu sync.Mutex
+	deleted := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		deleted = append(deleted, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	svc := &Service{
+		Config: config.ControllerConfig{KubectlApply: true},
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{client: server.Client(), baseURL: server.URL, bearerToken: "test", namespace: namespace}, nil
+		},
+	}
+	revision := safeRolloutCandidateRevision("apprel_retired")
+	retired := model.AppRelease{
+		DeploymentName: runtime.RuntimeAppResourceNameWithOptions(app, runtime.RenderOptions{Revision: revision}),
+		ServiceName:    runtime.RuntimeAppServiceNameWithOptions(app, runtime.RenderOptions{Revision: revision}),
+	}
+	if err := svc.cleanupSafeRolloutRetiredResources(context.Background(), app, retired); err != nil {
+		t.Fatalf("cleanup retired revision: %v", err)
+	}
+	mu.Lock()
+	got := append([]string(nil), deleted...)
+	mu.Unlock()
+	if len(got) != 2 ||
+		got[0] != "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+retired.DeploymentName ||
+		got[1] != "/api/v1/namespaces/"+namespace+"/services/"+retired.ServiceName {
+		t.Fatalf("unexpected retired revision deletes: %v", got)
+	}
+
+	canonical := model.AppRelease{
+		DeploymentName: runtime.RuntimeAppResourceName(app),
+		ServiceName:    runtime.RuntimeAppServiceName(app),
+	}
+	if err := svc.cleanupSafeRolloutRetiredResources(context.Background(), app, canonical); err != nil {
+		t.Fatalf("preserve canonical resources: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 2 {
+		t.Fatalf("canonical stable resources must not be deleted: %v", deleted)
 	}
 }
 

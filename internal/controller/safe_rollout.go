@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
@@ -793,12 +794,53 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusCompleted, "previous stable retired after drain metrics reached zero", retired.ID, map[string]any{
 		"drain_metrics": metrics.Summary,
 	})
+	if err := s.cleanupSafeRolloutRetiredResources(ctx, state.CandidateApp, retired); err != nil {
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_resource_cleanup", model.ReleaseStepStatusSkipped, "retired release resource cleanup failed", retired.ID, map[string]any{"error": err.Error()})
+	} else if s.Config.KubectlApply {
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_resource_cleanup", model.ReleaseStepStatusCompleted, "retired release resources removed", retired.ID, nil)
+	}
 	s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retired", retired.ID, map[string]string{
 		"operation_id":        op.ID,
 		"candidate_release":   state.Candidate.ID,
 		"active_connections":  fmt.Sprintf("%d", metrics.ActiveConnections),
 		"max_active_requests": fmt.Sprintf("%d", metrics.MaxActiveConnections),
 	})
+}
+
+func (s *Service) cleanupSafeRolloutRetiredResources(ctx context.Context, app model.App, retired model.AppRelease) error {
+	if s == nil || !s.Config.KubectlApply {
+		return nil
+	}
+	prepared := s.Renderer.PrepareApp(app)
+	canonicalDeployment := runtime.RuntimeAppResourceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
+	canonicalService := runtime.RuntimeAppServiceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
+	deploymentName := strings.TrimSpace(retired.DeploymentName)
+	serviceName := strings.TrimSpace(retired.ServiceName)
+	if deploymentName == "" || strings.EqualFold(deploymentName, canonicalDeployment) {
+		deploymentName = ""
+	}
+	if serviceName == "" || strings.EqualFold(serviceName, canonicalService) {
+		serviceName = ""
+	}
+	if deploymentName == "" && serviceName == "" {
+		return nil
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize retired release cleanup client: %w", err)
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	if deploymentName != "" {
+		if err := client.deleteDeployment(ctx, namespace, deploymentName); err != nil {
+			return fmt.Errorf("delete retired release deployment %s/%s: %w", namespace, deploymentName, err)
+		}
+	}
+	if serviceName != "" {
+		if err := client.deleteService(ctx, namespace, serviceName); err != nil {
+			return fmt.Errorf("delete retired release service %s/%s: %w", namespace, serviceName, err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) querySafeRolloutDrainMetrics(ctx context.Context, op model.Operation, app model.App, previous model.AppRelease, promotedAt *time.Time) (safeRolloutDrainMetrics, bool) {
@@ -1004,7 +1046,13 @@ func (s *Service) appReleaseService() releaseflow.AppReleaseService {
 }
 
 func safeRolloutCandidateRevision(releaseID string) runtime.AppRevisionRenderOptions {
-	return runtime.AppRevisionRenderOptions{Role: runtime.AppRevisionRoleCandidate, ReleaseID: strings.TrimSpace(releaseID)}
+	releaseID = strings.TrimSpace(releaseID)
+	revision := runtime.AppRevisionRenderOptions{Role: runtime.AppRevisionRoleCandidate, ReleaseID: releaseID}
+	if releaseID != "" {
+		digest := sha256.Sum256([]byte(releaseID))
+		revision.Suffix = fmt.Sprintf("candidate-%x", digest[:6])
+	}
+	return revision
 }
 
 func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op model.Operation, state *safeRolloutState, scheduling runtime.SchedulingConstraints, postgresPlacements map[string][]runtime.SchedulingConstraints) error {

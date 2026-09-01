@@ -50,6 +50,7 @@ type Service struct {
 	newKubeClient                   func(namespace string) (*kubeClient, error)
 	kubeClientMu                    sync.Mutex
 	kubeClients                     map[string]*kubeClient
+	managedRolloutCapacityLocks     sync.Map
 	managedPostgresStorageNoticeMu  sync.Mutex
 	managedPostgresStorageNotices   map[string]struct{}
 	importImageInspectRetryDelay    time.Duration
@@ -1108,6 +1109,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return fmt.Errorf("render manifest for app %s: %w", app.ID, err)
 	}
 	timer.Mark("render_bundle")
+	if s.Config.KubectlApply && app.Spec.Replicas > 0 &&
+		(op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate) {
+		unlockCapacityDomain := s.lockManagedRolloutCapacityDomain(scheduling)
+		defer unlockCapacityDomain()
+		timer.Mark("rollout_capacity_lock")
+	}
 
 	if s.Config.KubectlApply {
 		switch op.Type {
