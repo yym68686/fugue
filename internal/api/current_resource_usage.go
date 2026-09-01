@@ -13,11 +13,19 @@ import (
 const (
 	resourceUsageSampleInterval  = 5 * time.Minute
 	resourceUsageSampleRetention = 168 * time.Hour
+
+	// Resource requests are applied to each replica, so right-sizing samples must
+	// use the same unit. Keep the version in the internal target kind so aggregate
+	// samples written by older releases are never mixed with per-replica samples.
+	rightSizingSampleTargetKindAppV1            = "right_sizing_app_per_replica_v1"
+	rightSizingSampleTargetKindBackingServiceV1 = "right_sizing_backing_service_per_replica_v1"
 )
 
 type currentResourceUsageOverlay struct {
 	apps                     map[string]model.ResourceUsage
 	services                 map[string]model.ResourceUsage
+	rightSizingApps          map[string]model.ResourceUsage
+	rightSizingServices      map[string]model.ResourceUsage
 	appPersistentVolumes     map[string][]persistentVolumeObservation
 	servicePersistentVolumes map[string][]persistentVolumeObservation
 }
@@ -30,6 +38,15 @@ type resourceUsageAccumulator struct {
 	ephemeralStorageBytes int64
 	hasEphemeralStorage   bool
 	persistentVolumes     map[string]persistentVolumeUsage
+}
+
+type rightSizingResourceUsageAccumulator struct {
+	cpuMilliCores         int64
+	hasCPU                bool
+	memoryBytes           int64
+	hasMemory             bool
+	ephemeralStorageBytes int64
+	hasEphemeralStorage   bool
 }
 
 type persistentVolumeUsage struct {
@@ -90,6 +107,8 @@ func (s *Server) currentResourceUsageOverlay(ctx context.Context, apps []model.A
 	overlay := currentResourceUsageOverlay{
 		apps:                     map[string]model.ResourceUsage{},
 		services:                 map[string]model.ResourceUsage{},
+		rightSizingApps:          map[string]model.ResourceUsage{},
+		rightSizingServices:      map[string]model.ResourceUsage{},
 		appPersistentVolumes:     map[string][]persistentVolumeObservation{},
 		servicePersistentVolumes: map[string][]persistentVolumeObservation{},
 	}
@@ -137,6 +156,8 @@ func buildCurrentResourceUsageOverlayWithPolicies(
 	overlay := currentResourceUsageOverlay{
 		apps:                     map[string]model.ResourceUsage{},
 		services:                 map[string]model.ResourceUsage{},
+		rightSizingApps:          map[string]model.ResourceUsage{},
+		rightSizingServices:      map[string]model.ResourceUsage{},
 		appPersistentVolumes:     map[string][]persistentVolumeObservation{},
 		servicePersistentVolumes: map[string][]persistentVolumeObservation{},
 	}
@@ -147,6 +168,7 @@ func buildCurrentResourceUsageOverlayWithPolicies(
 	resolver := newClusterWorkloadResolver(apps, services)
 	claimOwners := persistentVolumeClaimOwners(snapshots, resolver)
 	accumulators := map[string]*resourceUsageAccumulator{}
+	rightSizingAccumulators := map[string]*rightSizingResourceUsageAccumulator{}
 
 	for _, snapshot := range snapshots {
 		if len(snapshot.pods) == 0 || snapshot.summary == nil || len(snapshot.summary.Pods) == 0 {
@@ -179,6 +201,15 @@ func buildCurrentResourceUsageOverlayWithPolicies(
 				accumulators[key] = accumulator
 			}
 			accumulator.addPodUsage(usage, key, claimOwners, policies)
+
+			if strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") {
+				rightSizingAccumulator, ok := rightSizingAccumulators[key]
+				if !ok {
+					rightSizingAccumulator = &rightSizingResourceUsageAccumulator{}
+					rightSizingAccumulators[key] = rightSizingAccumulator
+				}
+				rightSizingAccumulator.addPodUsage(pod, usage)
+			}
 		}
 	}
 
@@ -200,6 +231,22 @@ func buildCurrentResourceUsageOverlayWithPolicies(
 		case model.ClusterNodeWorkloadKindBackingService:
 			overlay.services[parts[1]] = usage
 			overlay.servicePersistentVolumes[parts[1]] = accumulator.persistentVolumeObservations()
+		}
+	}
+	for key, accumulator := range rightSizingAccumulators {
+		usage, ok := accumulator.resourceUsage()
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(key, "\x00", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+			continue
+		}
+		switch parts[0] {
+		case model.ClusterNodeWorkloadKindApp:
+			overlay.rightSizingApps[parts[1]] = usage
+		case model.ClusterNodeWorkloadKindBackingService:
+			overlay.rightSizingServices[parts[1]] = usage
 		}
 	}
 
@@ -265,24 +312,35 @@ func buildResourceUsageSamples(
 	services []model.BackingService,
 	overlay currentResourceUsageOverlay,
 ) []model.ResourceUsageSample {
-	samples := make([]model.ResourceUsageSample, 0, len(overlay.apps)+len(overlay.services))
+	samples := make([]model.ResourceUsageSample, 0, len(overlay.rightSizingApps)+len(overlay.rightSizingServices))
 	for _, app := range apps {
 		id := strings.TrimSpace(app.ID)
-		usage, ok := overlay.apps[id]
-		if !ok || !hasSampledResourceUsage(usage) {
+		usage, ok := overlay.rightSizingApps[id]
+		if !ok || !hasRightSizingResourceUsage(usage) {
 			continue
 		}
-		samples = append(samples, resourceUsageSampleFromUsage(observedAt, model.ClusterNodeWorkloadKindApp, app.TenantID, app.ProjectID, app.ID, app.Name, "", usage))
+		samples = append(samples, resourceUsageSampleFromUsage(observedAt, rightSizingSampleTargetKind(model.ClusterNodeWorkloadKindApp), app.TenantID, app.ProjectID, app.ID, app.Name, "", usage))
 	}
 	for _, service := range services {
 		id := strings.TrimSpace(service.ID)
-		usage, ok := overlay.services[id]
-		if !ok || !hasSampledResourceUsage(usage) {
+		usage, ok := overlay.rightSizingServices[id]
+		if !ok || !hasRightSizingResourceUsage(usage) {
 			continue
 		}
-		samples = append(samples, resourceUsageSampleFromUsage(observedAt, model.ClusterNodeWorkloadKindBackingService, service.TenantID, service.ProjectID, service.ID, service.Name, service.Type, usage))
+		samples = append(samples, resourceUsageSampleFromUsage(observedAt, rightSizingSampleTargetKind(model.ClusterNodeWorkloadKindBackingService), service.TenantID, service.ProjectID, service.ID, service.Name, service.Type, usage))
 	}
 	return samples
+}
+
+func rightSizingSampleTargetKind(targetKind string) string {
+	switch strings.TrimSpace(targetKind) {
+	case model.ClusterNodeWorkloadKindApp:
+		return rightSizingSampleTargetKindAppV1
+	case model.ClusterNodeWorkloadKindBackingService:
+		return rightSizingSampleTargetKindBackingServiceV1
+	default:
+		return strings.TrimSpace(targetKind)
+	}
 }
 
 func resourceUsageSampleFromUsage(observedAt time.Time, targetKind, tenantID, projectID, targetID, targetName, serviceType string, usage model.ResourceUsage) model.ResourceUsageSample {
@@ -303,6 +361,10 @@ func resourceUsageSampleFromUsage(observedAt time.Time, targetKind, tenantID, pr
 
 func hasSampledResourceUsage(usage model.ResourceUsage) bool {
 	return usage.CPUMilliCores != nil || usage.MemoryBytes != nil || usage.EphemeralStorageBytes != nil
+}
+
+func hasRightSizingResourceUsage(usage model.ResourceUsage) bool {
+	return usage.CPUMilliCores != nil || usage.MemoryBytes != nil
 }
 
 func cloneInt64Pointer(value *int64) *int64 {
@@ -445,6 +507,57 @@ func (a *resourceUsageAccumulator) resourceUsage() (model.ResourceUsage, bool) {
 		return model.ResourceUsage{}, false
 	}
 	return usage, true
+}
+
+func (a *rightSizingResourceUsageAccumulator) addPodUsage(pod clusterNodePod, usage kubeNodeSummaryPod) {
+	// One ResourceSpec configures one main container. Maxima preserve a safe
+	// per-replica envelope without weighting an app by its replica count.
+	cpu, memory := rightSizingMainContainerUsage(pod, usage)
+	if value := kubeSummaryCPUMilliUsage(cpu); value != nil && (!a.hasCPU || *value > a.cpuMilliCores) {
+		a.cpuMilliCores = *value
+		a.hasCPU = true
+	}
+	if value := kubeSummaryMemoryUsage(memory); value != nil && (!a.hasMemory || *value > a.memoryBytes) {
+		a.memoryBytes = *value
+		a.hasMemory = true
+	}
+	if value := kubeSummaryFilesystemUsage(usage.EphemeralStorage); value != nil && (!a.hasEphemeralStorage || *value > a.ephemeralStorageBytes) {
+		a.ephemeralStorageBytes = *value
+		a.hasEphemeralStorage = true
+	}
+}
+
+func (a *rightSizingResourceUsageAccumulator) resourceUsage() (model.ResourceUsage, bool) {
+	if a == nil {
+		return model.ResourceUsage{}, false
+	}
+	usage := model.ResourceUsage{}
+	if a.hasCPU {
+		usage.CPUMilliCores = int64Pointer(a.cpuMilliCores)
+	}
+	if a.hasMemory {
+		usage.MemoryBytes = int64Pointer(a.memoryBytes)
+	}
+	if a.hasEphemeralStorage {
+		usage.EphemeralStorageBytes = int64Pointer(a.ephemeralStorageBytes)
+	}
+	return usage, hasRightSizingResourceUsage(usage)
+}
+
+func rightSizingMainContainerUsage(pod clusterNodePod, usage kubeNodeSummaryPod) (kubeNodeSummaryCPU, kubeNodeSummaryMem) {
+	if len(pod.Spec.Containers) == 0 || len(usage.Containers) == 0 {
+		return usage.CPU, usage.Memory
+	}
+	mainContainerName := strings.TrimSpace(pod.Spec.Containers[0].Name)
+	if mainContainerName == "" {
+		return usage.CPU, usage.Memory
+	}
+	for _, container := range usage.Containers {
+		if strings.TrimSpace(container.Name) == mainContainerName {
+			return container.CPU, container.Memory
+		}
+	}
+	return kubeNodeSummaryCPU{}, kubeNodeSummaryMem{}
 }
 
 func (a *resourceUsageAccumulator) persistentVolumeObservations() []persistentVolumeObservation {

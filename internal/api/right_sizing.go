@@ -99,7 +99,7 @@ func (s *Server) appResourceRecommendation(app model.App, windowHours, minSample
 	minSamples = normalizeRightSizingMinSamples(minSamples)
 	since := time.Now().UTC().Add(-time.Duration(windowHours) * time.Hour)
 
-	appSamples, err := s.store.ListResourceUsageSamples(app.TenantID, model.ClusterNodeWorkloadKindApp, app.ID, since)
+	appSamples, err := s.store.ListResourceUsageSamples(app.TenantID, rightSizingSampleTargetKind(model.ClusterNodeWorkloadKindApp), app.ID, since)
 	if err != nil {
 		return model.AppRightSizingRecommendation{}, err
 	}
@@ -124,7 +124,7 @@ func (s *Server) appResourceRecommendation(app model.App, windowHours, minSample
 		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
 			continue
 		}
-		samples, err := s.store.ListResourceUsageSamples(service.TenantID, model.ClusterNodeWorkloadKindBackingService, service.ID, since)
+		samples, err := s.store.ListResourceUsageSamples(service.TenantID, rightSizingSampleTargetKind(model.ClusterNodeWorkloadKindBackingService), service.ID, since)
 		if err != nil {
 			return model.AppRightSizingRecommendation{}, err
 		}

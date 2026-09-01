@@ -95,6 +95,45 @@ func TestBuildRightSizingRecommendationPreservesUnobservedResourceDimensions(t *
 	}
 }
 
+func TestAppResourceRecommendationIgnoresLegacyAggregateSamples(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	now := time.Now().UTC()
+	legacyCPU := int64(800)
+	perReplicaCPUOne := int64(40)
+	perReplicaCPUTwo := int64(50)
+	if err := stateStore.RecordResourceUsageSamples([]model.ResourceUsageSample{
+		{TenantID: "tenant_a", TargetKind: model.ClusterNodeWorkloadKindApp, TargetID: "app_a", ObservedAt: now.Add(-3 * time.Minute), CPUMilliCores: &legacyCPU},
+		{TenantID: "tenant_a", TargetKind: rightSizingSampleTargetKindAppV1, TargetID: "app_a", ObservedAt: now.Add(-2 * time.Minute), CPUMilliCores: &perReplicaCPUOne},
+		{TenantID: "tenant_a", TargetKind: rightSizingSampleTargetKindAppV1, TargetID: "app_a", ObservedAt: now.Add(-time.Minute), CPUMilliCores: &perReplicaCPUTwo},
+	}, time.Time{}); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	recommendation, err := server.appResourceRecommendation(model.App{
+		ID:       "app_a",
+		TenantID: "tenant_a",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Resources: &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 128},
+		},
+	}, 24, 2)
+	if err != nil {
+		t.Fatalf("build recommendation: %v", err)
+	}
+	if recommendation.App.SampleCount != 2 || !recommendation.App.Ready || recommendation.App.Recommended == nil {
+		t.Fatalf("expected two ready per-replica samples, got %+v", recommendation.App)
+	}
+	if got := recommendation.App.Recommended.CPUMilliCores; got != 75 {
+		t.Fatalf("expected legacy aggregate sample to be ignored and CPU recommendation 75m, got %dm", got)
+	}
+}
+
 func TestBuildRightSizingRecommendationAddsPostgresMemoryLimitHeadroom(t *testing.T) {
 	t.Parallel()
 
@@ -646,7 +685,7 @@ func rightSizingUsageSamples(tenantID, targetKind, targetID string, values []rig
 		memory := value.memoryMiB * 1024 * 1024
 		out = append(out, model.ResourceUsageSample{
 			TenantID:      tenantID,
-			TargetKind:    targetKind,
+			TargetKind:    rightSizingSampleTargetKind(targetKind),
 			TargetID:      targetID,
 			ObservedAt:    now.Add(time.Duration(index) * time.Minute),
 			CPUMilliCores: &cpu,
