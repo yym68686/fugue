@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -265,6 +266,79 @@ func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing
 	defer mu.Unlock()
 	if len(deleted) != 2 {
 		t.Fatalf("canonical stable resources must not be deleted: %v", deleted)
+	}
+}
+
+func TestReconcileServingReleaseCanonicalTargetAfterStableAlignment(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:    "registry.example/demo:v2",
+			Ports:    []int{8080},
+			Replicas: 1,
+		},
+	}
+	release, err := stateStore.CreateAppRelease(model.AppRelease{
+		TenantID:         app.TenantID,
+		AppID:            app.ID,
+		Role:             model.AppReleaseRoleStable,
+		Status:           model.AppReleaseStatusServing,
+		ResolvedImageRef: app.Spec.Image,
+		DeploymentName:   "app-demo-candidate-old",
+		ServiceName:      "app-demo-candidate-old",
+		UpstreamURL:      "http://app-demo-candidate-old.tenant-demo.svc.cluster.local:8080",
+	})
+	if err != nil {
+		t.Fatalf("create stable release: %v", err)
+	}
+	if _, err := stateStore.UpsertAppTrafficPolicy(model.AppTrafficPolicy{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		Mode:            model.AppTrafficModeSingle,
+		StableReleaseID: release.ID,
+		StableWeight:    100,
+	}); err != nil {
+		t.Fatalf("create traffic policy: %v", err)
+	}
+
+	deployment := readyKubeDeployment(runtime.RuntimeAppResourceName(app), 1)
+	setKubeDeploymentPrimaryImage(&deployment, app.Name, app.Spec.Image)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/deployments/"):
+			_ = json.NewEncoder(w).Encode(deployment)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/services/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": runtime.RuntimeAppServiceName(app)}})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/endpointslices"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
+				"endpoints": []map[string]any{{"addresses": []string{"10.0.0.4"}, "conditions": map[string]any{"ready": true}}},
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := &kubeClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0)}
+	if err := svc.reconcileServingReleaseCanonicalTargetIfReady(context.Background(), client, runtime.NamespaceForTenant(app.TenantID), app); err != nil {
+		t.Fatalf("reconcile canonical stable target: %v", err)
+	}
+	aligned, err := stateStore.GetAppRelease(app.TenantID, true, release.ID)
+	if err != nil {
+		t.Fatalf("get aligned release: %v", err)
+	}
+	if aligned.DeploymentName != runtime.RuntimeAppResourceName(app) || aligned.ServiceName != runtime.RuntimeAppServiceName(app) ||
+		aligned.Status != model.AppReleaseStatusServing || aligned.Role != model.AppReleaseRoleStable {
+		t.Fatalf("serving release was not aligned to canonical workload: %+v", aligned)
 	}
 }
 

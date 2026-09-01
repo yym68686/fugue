@@ -216,6 +216,8 @@ func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T
 		"message":            "canonical stable alignment is pending",
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	canonicalDeploymentName := runtime.RuntimeAppResourceName(app)
+	canonicalServiceName := runtime.RuntimeAppServiceName(app)
 	release, err := stateStore.CreateAppRelease(model.AppRelease{
 		TenantID:         app.TenantID,
 		AppID:            app.ID,
@@ -250,7 +252,7 @@ func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"metadata": map[string]any{"name": namespace}}}})
 		case "/apis/apps/v1/deployments":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
-				"metadata": map[string]any{"name": release.DeploymentName, "namespace": namespace, "generation": 3},
+				"metadata": map[string]any{"name": canonicalDeploymentName, "namespace": namespace, "generation": 3},
 				"spec": map[string]any{
 					"replicas": 1,
 					"template": map[string]any{"spec": map[string]any{"containers": []map[string]any{{"name": "demo", "image": app.Spec.Image}}}},
@@ -258,10 +260,10 @@ func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T
 				"status": map[string]any{"replicas": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1, "observedGeneration": 3},
 			}}})
 		case "/api/v1/services":
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"metadata": map[string]any{"name": release.ServiceName, "namespace": namespace}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"metadata": map[string]any{"name": canonicalServiceName, "namespace": namespace}}}})
 		case "/api/v1/endpoints":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
-				"metadata": map[string]any{"name": release.ServiceName, "namespace": namespace},
+				"metadata": map[string]any{"name": canonicalServiceName, "namespace": namespace},
 				"subsets":  []map[string]any{{"addresses": []map[string]any{{"ip": "10.0.0.2"}}}},
 			}}})
 		default:

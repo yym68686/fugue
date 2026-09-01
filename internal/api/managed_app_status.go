@@ -1249,8 +1249,10 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	// to the app being observed.
 	serviceRequired := model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec)
 	deploymentRequired := app.Spec.Replicas > 0 || strings.TrimSpace(app.Spec.Image) != ""
-	serviceName := runtime.RuntimeAppServiceName(app)
-	deploymentName := runtime.RuntimeAppResourceName(app)
+	canonicalServiceName := runtime.RuntimeAppServiceName(app)
+	canonicalDeploymentName := runtime.RuntimeAppResourceName(app)
+	serviceName := canonicalServiceName
+	deploymentName := canonicalDeploymentName
 	servingRelease, servingReleaseFound := s.servingReleaseTrafficTarget(app)
 	if servingReleaseFound {
 		if name := strings.TrimSpace(servingRelease.ServiceName); name != "" {
@@ -1258,6 +1260,18 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		}
 		if name := strings.TrimSpace(servingRelease.DeploymentName); name != "" {
 			deploymentName = name
+		}
+		releaseDeployment, releaseDeploymentFound := snapshot.deployments[kubeNamespacedKey(namespace, deploymentName)]
+		releaseDeploymentReady := releaseDeploymentFound && deploymentCurrentCohortComplete(releaseDeployment) &&
+			s.observedRuntimeImageRefsEquivalent(app, servingRelease.ResolvedImageRef, firstDeploymentContainerImage(releaseDeployment))
+		if !releaseDeploymentReady {
+			canonicalDeployment, canonicalDeploymentFound := snapshot.deployments[kubeNamespacedKey(namespace, canonicalDeploymentName)]
+			canonicalDeploymentReady := canonicalDeploymentFound && deploymentCurrentCohortComplete(canonicalDeployment) &&
+				s.observedRuntimeImageRefsEquivalent(app, servingRelease.ResolvedImageRef, firstDeploymentContainerImage(canonicalDeployment))
+			if canonicalDeploymentReady {
+				deploymentName = canonicalDeploymentName
+				serviceName = canonicalServiceName
+			}
 		}
 		evidence.servingReleaseID = strings.TrimSpace(servingRelease.ID)
 		evidence.evidenceSources = append(evidence.evidenceSources, "app_release_traffic_policy")

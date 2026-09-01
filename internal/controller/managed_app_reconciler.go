@@ -369,6 +369,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := s.reconcileManagedAppPlatformEnvDrift(ctx, client, namespace, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
+	if err := s.reconcileServingReleaseCanonicalTargetIfReady(ctx, client, namespace, app); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("align serving release with canonical workload: %w", err))
+	}
 	if err := s.pruneManagedAppStaleObjects(ctx, client, namespace, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("prune stale managed app child objects: %w", err))
 	}
@@ -2469,6 +2472,9 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 	}
 
 	desiredByKind := desiredObjectNamesByKind(desiredObjects)
+	if err := s.preserveActiveAppReleaseResources(app, desiredByKind); err != nil {
+		return err
+	}
 
 	deployments, err := s.listOwnedDeploymentNames(ctx, client, namespace, app.ID)
 	if err != nil {
@@ -2573,6 +2579,41 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 		}
 	}
 
+	return nil
+}
+
+func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind map[string]map[string]struct{}) error {
+	if s == nil || s.Store == nil {
+		return nil
+	}
+	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{
+		TenantID:      app.TenantID,
+		AppID:         app.ID,
+		ActiveOnly:    true,
+		PlatformAdmin: true,
+	})
+	if err != nil {
+		return fmt.Errorf("list active app releases before stale-object pruning: %w", err)
+	}
+	for _, release := range releases {
+		switch strings.TrimSpace(release.Status) {
+		case model.AppReleaseStatusCreating, model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining:
+		default:
+			continue
+		}
+		for kind, name := range map[string]string{
+			"Deployment": strings.TrimSpace(release.DeploymentName),
+			"Service":    strings.TrimSpace(release.ServiceName),
+		} {
+			if name == "" {
+				continue
+			}
+			if desiredByKind[kind] == nil {
+				desiredByKind[kind] = make(map[string]struct{})
+			}
+			desiredByKind[kind][name] = struct{}{}
+		}
+	}
 	return nil
 }
 

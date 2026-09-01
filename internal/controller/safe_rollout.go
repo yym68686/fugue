@@ -843,6 +843,67 @@ func (s *Service) cleanupSafeRolloutRetiredResources(ctx context.Context, app mo
 	return nil
 }
 
+func (s *Service) reconcileServingReleaseCanonicalTargetIfReady(ctx context.Context, client *kubeClient, namespace string, app model.App) error {
+	if s == nil || s.Store == nil || client == nil || app.Spec.Replicas <= 0 {
+		return nil
+	}
+	policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(policy.Mode), model.AppTrafficModeSingle) ||
+		policy.StableWeight != 100 || policy.CandidateWeight != 0 || strings.TrimSpace(policy.StableReleaseID) == "" {
+		return nil
+	}
+	release, err := s.Store.GetAppRelease(app.TenantID, true, policy.StableReleaseID)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(release.Role), model.AppReleaseRoleStable) ||
+		!strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusServing) ||
+		!s.migrationImageRefsEquivalent(app, release.ResolvedImageRef, app.Spec.Image) {
+		return nil
+	}
+	prepared := s.Renderer.PrepareApp(app)
+	canonicalDeployment := runtime.RuntimeAppResourceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
+	canonicalService := runtime.RuntimeAppServiceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
+	if strings.EqualFold(strings.TrimSpace(release.DeploymentName), canonicalDeployment) &&
+		strings.EqualFold(strings.TrimSpace(release.ServiceName), canonicalService) {
+		return nil
+	}
+	deployment, found, err := client.getDeployment(ctx, namespace, canonicalDeployment)
+	if err != nil || !found {
+		return err
+	}
+	if !managedDeploymentStatusReady(deployment, app.Spec.Replicas) ||
+		!s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(deployment), app.Spec.Image) {
+		return nil
+	}
+	if model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec) {
+		serviceFound, err := client.getService(ctx, namespace, canonicalService)
+		if err != nil || !serviceFound {
+			return err
+		}
+		endpointReady, err := migrationEndpointReady(ctx, client, namespace, canonicalService)
+		if err != nil || !endpointReady {
+			return err
+		}
+	}
+	aligned := s.safeRolloutApplyCanonicalStableFields(ctx, app, release, "promoted stable release aligned to canonical workload by reconciler")
+	aligned.Role = model.AppReleaseRoleStable
+	aligned.Status = model.AppReleaseStatusServing
+	if _, err := s.Store.UpdateAppRelease(aligned); err != nil {
+		return err
+	}
+	if s.Logger != nil {
+		s.Logger.Printf("aligned serving release %s to canonical workload %s/%s", aligned.ID, namespace, canonicalDeployment)
+	}
+	return nil
+}
+
 func (s *Service) querySafeRolloutDrainMetrics(ctx context.Context, op model.Operation, app model.App, previous model.AppRelease, promotedAt *time.Time) (safeRolloutDrainMetrics, bool) {
 	if s == nil || s.safeRolloutDrainMetricsQuerier == nil {
 		s.recordSafeRolloutReleaseStep(op, app, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: drain metrics querier is not configured", previous.ID, nil)
