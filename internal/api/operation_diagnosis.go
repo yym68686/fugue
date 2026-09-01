@@ -667,6 +667,15 @@ func (s *Server) diagnosePendingOperation(op model.Operation, app model.App, app
 	}
 	activeOps = diagnosisFilterActiveOperationsByTenant(activeOps, op.TenantID)
 	activeOpsByApp := diagnosisIndexActiveOperationsByApp(activeOps)
+	if model.OperationWaitingForImageReplication(op) {
+		return model.OperationDiagnosis{
+			Category: "deploy-image-replication-pending",
+			Summary:  strings.TrimSpace(op.ResultMessage),
+			Hint:     "The deploy is waiting for the target node image cache to finish replication; it will retry automatically.",
+			AppName:  diagnosisAppName(app, appFound),
+			Service:  diagnosisComposeService(op, app, appFound),
+		}, nil
+	}
 
 	sameAppBlockers := diagnosisClaimTurnBlockers(op, activeOpsByApp[strings.TrimSpace(op.AppID)])
 	if len(sameAppBlockers) > 0 {
@@ -778,6 +787,9 @@ func (s *Server) diagnosePendingOperation(op model.Operation, app model.App, app
 
 func (s *Server) attachOperationControllerLaneDiagnosis(principal model.Principal, op model.Operation, diagnosis *model.OperationDiagnosis) error {
 	if diagnosis == nil {
+		return nil
+	}
+	if diagnosis.Category == "deploy-image-replication-pending" {
 		return nil
 	}
 	lane := model.OperationControllerLaneName(op)

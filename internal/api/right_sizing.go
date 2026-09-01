@@ -332,7 +332,10 @@ func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) 
 	if recommended == nil {
 		return decision
 	}
-	effectiveCurrent := model.DefaultManagedAppResources()
+	// A nil resources block means the renderer emits no requests (zero), not
+	// the historical managed default. Treat it as zero so auto right-sizing
+	// cannot mistake an unset request for a downscale and inflate it silently.
+	effectiveCurrent := model.ResourceSpec{}
 	if current != nil {
 		effectiveCurrent = *current
 	}

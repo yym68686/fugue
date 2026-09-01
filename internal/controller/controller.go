@@ -775,6 +775,10 @@ func (s *Service) dispatchPendingOperationsInLane(ctx context.Context, lane oper
 
 func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Operation, bool, error) {
 	for {
+		now := time.Now().UTC()
+		if s.now != nil {
+			now = s.now().UTC()
+		}
 		activeOps, err := s.Store.ListActiveOperations()
 		if err != nil {
 			return model.Operation{}, false, fmt.Errorf("list active operations: %w", err)
@@ -792,6 +796,9 @@ func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Ope
 				continue
 			}
 			if !pendingOperationMatchesLane(op, lane) {
+				continue
+			}
+			if !pendingOperationRetryReady(op, now) {
 				continue
 			}
 			app, ok := appsByID[op.AppID]

@@ -135,7 +135,15 @@ func TestManagementReplicateFailsWhenLocationReportFails(t *testing.T) {
 
 	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}`
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v2/fugue-apps/demo/manifests/image-test" {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected source request %s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Path == "/v2/fugue-apps/demo/blobs/sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = io.WriteString(w, "{}")
+			return
+		}
+		if r.URL.Path != "/v2/fugue-apps/demo/manifests/image-test" {
 			t.Fatalf("unexpected source request %s %s", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
@@ -152,6 +160,7 @@ func TestManagementReplicateFailsWhenLocationReportFails(t *testing.T) {
 	}))
 	t.Cleanup(reportAPI.Close)
 
+	storeDir := t.TempDir()
 	cache := &imageCache{
 		apiBase:       reportAPI.URL,
 		apiToken:      "token",
@@ -159,9 +168,10 @@ func TestManagementReplicateFailsWhenLocationReportFails(t *testing.T) {
 		registryBase:  "registry.fugue.internal:5000",
 		localBase:     "127.0.0.1:5000",
 		cacheEndpoint: "http://10.0.0.2:5000",
-		manifestDir:   filepath.Join(t.TempDir(), "manifests"),
+		storeDir:      storeDir,
+		manifestDir:   filepath.Join(storeDir, "manifests"),
 		httpClient:    reportAPI.Client(),
-		registry:      registry.New(),
+		registry:      registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
 		copyImageFn:   func(context.Context, string, string) error { return nil },
 	}
 	body := `{"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-test","source_cache_endpoint":"` + source.URL + `"}`
@@ -608,7 +618,7 @@ func TestProxyRegistryPullLimitsConcurrentStreams(t *testing.T) {
 func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 	t.Parallel()
 
-	const blobDigest = "sha256:6a0ac1617861a677b045b7ff88545213ec31c0ff08763195a70a4a5adda577bb"
+	const blobDigest = "sha256:f7c29f8fe34e77a4bc879afe7d1d475c3baa4d20111562eb65a4753a3630f37f"
 	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"` + blobDigest + `","size":11}]}`
 	var peerRange string
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -619,6 +629,9 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 		case "/v2/fugue-apps/demo/manifests/image-test":
 			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 			_, _ = io.WriteString(w, manifest)
+		case "/v2/fugue-apps/demo/blobs/sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = io.WriteString(w, "{}")
 		case "/v2/fugue-apps/demo/blobs/" + blobDigest:
 			peerRange = r.Header.Get("Range")
 			w.Header().Set("Content-Type", "application/octet-stream")
@@ -632,6 +645,7 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 	t.Cleanup(peer.Close)
 
 	copyStarted := make(chan struct{})
+	releaseCopy := make(chan struct{})
 	var copies atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -654,6 +668,7 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 	}))
 	t.Cleanup(api.Close)
 
+	storeDir := t.TempDir()
 	cache := &imageCache{
 		apiBase:        api.URL,
 		apiToken:       "token",
@@ -662,14 +677,16 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 		registryBase:   "registry.fugue.internal:5000",
 		localBase:      "127.0.0.1:5000",
 		cacheEndpoint:  "http://10.0.0.2:5000",
+		storeDir:       storeDir,
 		httpClient:     api.Client(),
-		registry:       registry.New(),
+		registry:       registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
 		hydrateTimeout: 5 * time.Second,
 		sourceTTL:      time.Minute,
 		copyImageFn: func(context.Context, string, string) error {
 			if copies.Add(1) == 1 {
 				close(copyStarted)
 			}
+			<-releaseCopy
 			return nil
 		},
 	}
@@ -689,6 +706,12 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected background hydrate to start")
 	}
+	cache.hydrateMu.Lock()
+	hydrateCall := cache.hydrateCalls["fugue-apps/demo\x00image-test"]
+	cache.hydrateMu.Unlock()
+	if hydrateCall == nil {
+		t.Fatal("expected background hydrate call to remain active")
+	}
 
 	blobReq := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/fugue-apps/demo/blobs/"+blobDigest, nil)
 	blobReq.Header.Set("Range", "bytes=0-10")
@@ -704,6 +727,12 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 	}
 	if peerRange != "bytes=0-10" {
 		t.Fatalf("peer Range = %q", peerRange)
+	}
+	close(releaseCopy)
+	select {
+	case <-hydrateCall.done:
+	case <-time.After(time.Second):
+		t.Fatal("background hydration did not finish")
 	}
 }
 
@@ -1194,6 +1223,22 @@ func TestCopyImageForcesLocalOnlyOnSourceAndDestination(t *testing.T) {
 	}
 	if _, err := destinationCache.checkLocalImageGraph(context.Background(), "fugue-apps/demo", "image-copy", true); err != nil {
 		t.Fatalf("destination image graph incomplete after copy: %v", err)
+	}
+	missingBlobPath, err := imageCacheBlobStorePath(destinationDir, layerDigest)
+	if err != nil {
+		t.Fatalf("destination blob path: %v", err)
+	}
+	if err := os.Remove(missingBlobPath); err != nil {
+		t.Fatalf("remove destination blob: %v", err)
+	}
+	if _, err := destinationCache.checkLocalImageGraph(context.Background(), "fugue-apps/demo", "image-copy", true); err == nil {
+		t.Fatal("expected destination graph with retained manifest and missing blob to be incomplete")
+	}
+	if err := destinationCache.ensureLocalManifest(context.Background(), strings.TrimPrefix(source.URL, "http://"), "fugue-apps/demo", "image-copy"); err != nil {
+		t.Fatalf("repair manifest-only destination graph: %v", err)
+	}
+	if _, err := destinationCache.checkLocalImageGraph(context.Background(), "fugue-apps/demo", "image-copy", true); err != nil {
+		t.Fatalf("destination image graph incomplete after repair: %v", err)
 	}
 }
 

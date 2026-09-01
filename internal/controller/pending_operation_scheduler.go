@@ -4,9 +4,19 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
+
+const deployImageReplicationOperationRetryInterval = 30 * time.Second
+
+func pendingOperationRetryReady(op model.Operation, now time.Time) bool {
+	if !model.OperationWaitingForImageReplication(op) || op.UpdatedAt.IsZero() {
+		return true
+	}
+	return !now.Before(op.UpdatedAt.Add(deployImageReplicationOperationRetryInterval))
+}
 
 func pendingOperationMatchesLane(op model.Operation, lane operationLane) bool {
 	requestedByBackgroundController := operationRequestedByBackgroundController(op.RequestedByID)

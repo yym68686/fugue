@@ -23,6 +23,73 @@ type blockingImporter struct {
 	release chan struct{}
 }
 
+func TestPendingOperationRetryBackoffOnlyDefersImageReplicationWait(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	op := model.Operation{
+		Status:        model.OperationStatusPending,
+		ResultMessage: model.OperationResultDeployImageReplicationPending + ": image is being replicated",
+		UpdatedAt:     now,
+	}
+	if pendingOperationRetryReady(op, now.Add(29*time.Second)) {
+		t.Fatal("expected image replication wait to remain deferred during retry interval")
+	}
+	if !pendingOperationRetryReady(op, now.Add(30*time.Second)) {
+		t.Fatal("expected image replication wait to become retryable after interval")
+	}
+	op.ResultMessage = "operation is pending"
+	if !pendingOperationRetryReady(op, now) {
+		t.Fatal("expected ordinary pending operation to remain immediately claimable")
+	}
+}
+
+func TestImageReplicationRetryDoesNotStarveLaterOperation(t *testing.T) {
+	t.Parallel()
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Retry Fairness Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "retry-fairness", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	firstApp, err := stateStore.CreateApp(tenant.ID, project.ID, "first", "", model.AppSpec{Image: "nginx:latest", Replicas: 1})
+	if err != nil {
+		t.Fatalf("create first app: %v", err)
+	}
+	secondApp, err := stateStore.CreateApp(tenant.ID, project.ID, "second", "", model.AppSpec{Image: "nginx:latest", Replicas: 1})
+	if err != nil {
+		t.Fatalf("create second app: %v", err)
+	}
+	first, err := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDelete, AppID: firstApp.ID})
+	if err != nil {
+		t.Fatalf("create first operation: %v", err)
+	}
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0)}
+	claimed, found, err := svc.claimNextPendingOperationInLane(operationLaneForegroundActivate)
+	if err != nil || !found || claimed.ID != first.ID {
+		t.Fatalf("claim first operation: found=%v op=%s err=%v", found, claimed.ID, err)
+	}
+	if _, err := stateStore.RequeueManagedOperation(first.ID, model.OperationResultDeployImageReplicationPending+": image is being replicated"); err != nil {
+		t.Fatalf("requeue first operation: %v", err)
+	}
+	second, err := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDelete, AppID: secondApp.ID})
+	if err != nil {
+		t.Fatalf("create second operation: %v", err)
+	}
+	claimed, found, err = svc.claimNextPendingOperationInLane(operationLaneForegroundActivate)
+	if err != nil || !found {
+		t.Fatalf("claim later operation: found=%v err=%v", found, err)
+	}
+	if claimed.ID != second.ID {
+		t.Fatalf("expected later operation %s while %s is backed off, got %s", second.ID, first.ID, claimed.ID)
+	}
+}
+
 func (i *blockingImporter) ImportDockerImageSource(context.Context, sourceimport.DockerImageSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
 	return sourceimport.GitHubSourceImportOutput{}, fmt.Errorf("unexpected docker image import")
 }

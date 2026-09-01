@@ -18,7 +18,7 @@ type deployImageTarget struct {
 	ClusterNodeName string
 }
 
-var errDeployImageReplicationPending = errors.New("deploy image replication is pending")
+var errDeployImageReplicationPending = errors.New(model.OperationResultDeployImageReplicationPending)
 
 const imageHydrationMissingRetryAfter = 6 * time.Hour
 

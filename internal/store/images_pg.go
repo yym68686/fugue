@@ -577,6 +577,21 @@ func (s *Store) pgUpsertImageReplicationTask(task model.ImageReplicationTask) (m
 		return model.ImageReplicationTask{}, mapDBErr(err)
 	}
 	defer tx.Rollback()
+	// Serialize the read-then-upsert identity check across controller replicas.
+	// Without this transaction-scoped lock, concurrent schedulers can both see
+	// no active task and insert duplicate replication work.
+	identity := strings.Join([]string{
+		strings.TrimSpace(task.ID),
+		task.ImageID,
+		task.SourceReplicaID,
+		task.TargetNodeID,
+		task.TargetRuntimeID,
+		task.TargetClusterNodeName,
+		task.Priority,
+	}, "\x00")
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, identity); err != nil {
+		return model.ImageReplicationTask{}, mapDBErr(err)
+	}
 	now := time.Now().UTC()
 	existing, err := scanImageReplicationTask(tx.QueryRowContext(ctx, `
 SELECT `+imageReplicationTaskColumns()+`

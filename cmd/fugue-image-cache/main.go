@@ -3159,6 +3159,49 @@ func (c *imageCache) ensureLocalManifest(ctx context.Context, sourceBase, repo, 
 	return c.ensureLocalManifestTree(ctx, sourceBase, repo, target, map[string]struct{}{})
 }
 
+func (c *imageCache) ensureLocalBlobFromSource(ctx context.Context, sourceBase, repo, digest string, expectedSize *int64) error {
+	if c == nil || strings.TrimSpace(c.storeDir) == "" {
+		return errors.New("image cache blob store is unavailable")
+	}
+	digest, err := strictImageCacheDigest(digest)
+	if err != nil {
+		return fmt.Errorf("invalid blob digest %q: %w", digest, err)
+	}
+	if _, err := c.checkLocalImageBlob(ctx, repo, digest, expectedSize, true); err == nil {
+		return nil
+	}
+	sourceBase = trimRegistryBase(sourceBase)
+	if sourceBase == "" {
+		return errors.New("blob source is empty")
+	}
+	endpoint := "http://" + sourceBase + "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/blobs/" + digest
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(imageCacheLocalOnlyHeader, "1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch blob %s from %s: %w", digest, sourceBase, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("fetch blob %s from %s status=%d", digest, sourceBase, resp.StatusCode)
+	}
+	upload, err := c.createBlobUpload(repo, nil)
+	if err != nil {
+		return fmt.Errorf("create local blob upload: %w", err)
+	}
+	if err := c.completeBlobUpload(repo, upload.UUID, digest, resp.Body); err != nil {
+		_ = c.deleteBlobUpload(upload.UUID)
+		return fmt.Errorf("store hydrated blob %s: %w", digest, err)
+	}
+	if _, err := c.checkLocalImageBlob(ctx, repo, digest, expectedSize, true); err != nil {
+		return fmt.Errorf("verify hydrated blob %s: %w", digest, err)
+	}
+	return nil
+}
+
 func (c *imageCache) ensureLocalManifestTree(ctx context.Context, sourceBase, repo, target string, seen map[string]struct{}) error {
 	if c == nil || c.registry == nil {
 		return nil
@@ -3179,11 +3222,14 @@ func (c *imageCache) ensureLocalManifestTree(ctx context.Context, sourceBase, re
 		return err
 	}
 	for _, descriptor := range manifestReferencedTargets(body) {
-		if descriptor.kind != registryTargetManifest {
-			continue
-		}
-		if err := c.ensureLocalManifestTree(ctx, sourceBase, repo, descriptor.target, seen); err != nil {
-			return err
+		if descriptor.kind == registryTargetBlob {
+			if err := c.ensureLocalBlobFromSource(ctx, sourceBase, repo, descriptor.target, nil); err != nil {
+				return err
+			}
+		} else if descriptor.kind == registryTargetManifest {
+			if err := c.ensureLocalManifestTree(ctx, sourceBase, repo, descriptor.target, seen); err != nil {
+				return err
+			}
 		}
 	}
 	manifest := persistedManifest{

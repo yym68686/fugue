@@ -67,6 +67,57 @@ func TestGetOperationDiagnosisExplainsMissingManagedImage(t *testing.T) {
 	}
 }
 
+func TestDiagnosePendingImageReplicationDoesNotReportQueueETA(t *testing.T) {
+	t.Parallel()
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Replication Diagnosis Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "replication-diagnosis", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "replication-app", "", model.AppSpec{Image: "nginx:latest", Replicas: 1})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	spec := app.Spec
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &spec,
+	})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	if _, claimed, err := stateStore.TryClaimPendingOperation(op.ID); err != nil || !claimed {
+		t.Fatalf("claim operation: claimed=%v err=%v", claimed, err)
+	}
+	if _, err := stateStore.RequeueManagedOperation(op.ID, model.OperationResultDeployImageReplicationPending+": image is being replicated"); err != nil {
+		t.Fatalf("requeue operation: %v", err)
+	}
+	op, err = stateStore.GetOperation(op.ID)
+	if err != nil {
+		t.Fatalf("reload operation: %v", err)
+	}
+	server := &Server{store: stateStore}
+	diagnosis, err := server.diagnosePendingOperation(op, model.App{}, false)
+	if err != nil {
+		t.Fatalf("diagnose operation: %v", err)
+	}
+	if diagnosis.Category != "deploy-image-replication-pending" {
+		t.Fatalf("category = %q, want deploy-image-replication-pending", diagnosis.Category)
+	}
+	if diagnosis.ControllerLane != nil {
+		t.Fatalf("expected no queue ETA for replication wait, got %+v", diagnosis.ControllerLane)
+	}
+}
+
 func TestDiagnoseFailedOperationExplainsMissingManifest(t *testing.T) {
 	t.Parallel()
 

@@ -682,15 +682,6 @@ func TestAutoRightSizingLowCPUDownscaleIsGradual(t *testing.T) {
 		wantCPU     int64
 	}{
 		{
-			name:    "implicit managed default",
-			current: nil,
-			recommended: &model.ResourceSpec{
-				CPUMilliCores:   25,
-				MemoryMebibytes: 512,
-			},
-			wantCPU: 190,
-		},
-		{
 			name: "below managed default",
 			current: &model.ResourceSpec{
 				CPUMilliCores:   150,
@@ -739,10 +730,7 @@ func TestAutoRightSizingLowCPUDownscaleIsGradual(t *testing.T) {
 			if got := decision.resources.CPUMilliCores; got != test.wantCPU {
 				t.Fatalf("expected CPU target %dm, got %dm", test.wantCPU, got)
 			}
-			current := model.DefaultManagedAppResources()
-			if test.current != nil {
-				current = *test.current
-			}
+			current := *test.current
 			if decision.resources.CPUMilliCores >= current.CPUMilliCores {
 				t.Fatalf("downscale must lower CPU from %dm, got %dm", current.CPUMilliCores, decision.resources.CPUMilliCores)
 			}
@@ -750,6 +738,18 @@ func TestAutoRightSizingLowCPUDownscaleIsGradual(t *testing.T) {
 				t.Fatalf("CPU-only downscale must preserve memory at %dMi, got %dMi", current.MemoryMebibytes, decision.resources.MemoryMebibytes)
 			}
 		})
+	}
+}
+
+func TestAutoRightSizingNilResourcesAreZeroRequestUpscale(t *testing.T) {
+	t.Parallel()
+	recommended := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 64}
+	decision := autoRightSizingAppResourceChange(nil, recommended)
+	if !decision.allowed || decision.downscale || decision.resources == nil {
+		t.Fatalf("expected nil resources to be an allowed upscale, got %+v", decision)
+	}
+	if decision.resources.CPUMilliCores != 25 || decision.resources.MemoryMebibytes != 64 {
+		t.Fatalf("unexpected upscale target: %+v", decision.resources)
 	}
 }
 
