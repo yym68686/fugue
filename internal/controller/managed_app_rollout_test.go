@@ -522,6 +522,123 @@ func TestDeploymentTemplatePodFailureMessageIgnoresUnschedulableTemplatePod(t *t
 	}
 }
 
+func TestRolloutSchedulingBlockTrackerFailsAfterGracePeriodAndResets(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, 9, 1, 17, 0, 0, 0, time.UTC)
+	tracker := rolloutSchedulingBlockTracker{}
+	message := "pod demo-pending is unschedulable: 0/7 nodes are available: 1 Insufficient cpu"
+
+	if err := tracker.observe(startedAt, message); err != nil {
+		t.Fatalf("first scheduling block observation: %v", err)
+	}
+	if err := tracker.observe(startedAt.Add(managedAppSchedulingBlockGracePeriod-time.Millisecond), message); err != nil {
+		t.Fatalf("scheduling block before grace period: %v", err)
+	}
+	err := tracker.observe(startedAt.Add(managedAppSchedulingBlockGracePeriod), message)
+	if err == nil || !strings.Contains(err.Error(), "rollout scheduling blocked for 30s") || !strings.Contains(err.Error(), "Insufficient cpu") {
+		t.Fatalf("expected actionable scheduling timeout, got %v", err)
+	}
+
+	if err := tracker.observe(startedAt.Add(time.Minute), ""); err != nil {
+		t.Fatalf("reset scheduling block: %v", err)
+	}
+	if err := tracker.observe(startedAt.Add(time.Minute), message); err != nil {
+		t.Fatalf("first scheduling block after reset: %v", err)
+	}
+}
+
+func TestWaitForManagedAppRolloutFailsPersistentUnschedulableSurge(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:    "registry.example/fugue-apps/demo:v2",
+			Replicas: 1,
+		},
+	}
+	app = runtime.Renderer{}.PrepareApp(app)
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	managedAppName := runtime.ManagedAppResourceName(app)
+
+	deployment, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected managed app deployment fixture")
+	}
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	deployment.Status.Replicas = 2
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+	deployment.Status.UnavailableReplicas = 1
+	pendingPod := readyTemplatePod("demo-pending", deployment, kubeResourceRequirements{})
+	pendingPod.Status.Phase = "Pending"
+	pendingPod.Status.Conditions = []kubePodCondition{{
+		Type:    "PodScheduled",
+		Status:  "False",
+		Reason:  "Unschedulable",
+		Message: "0/7 nodes are available: 1 Insufficient cpu, 6 Preemption is not helpful for scheduling.",
+	}}
+
+	managedApp := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managedMetadata := managedApp["metadata"].(map[string]any)
+	managedMetadata["generation"] = 2
+	markManagedAppFixtureApplied(t, managedApp)
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + deploymentName:
+			if err := json.NewEncoder(w).Encode(deployment); err != nil {
+				t.Errorf("encode deployment: %v", err)
+			}
+		case managedAppAPIPath(namespace, managedAppName):
+			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
+				t.Errorf("encode managed app: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/pods":
+			if err := json.NewEncoder(w).Encode(kubePodList{Items: []kubePod{pendingPod}}); err != nil {
+				t.Errorf("encode pods: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	startedAt := time.Date(2026, 9, 1, 17, 0, 0, 0, time.UTC)
+	var observations atomic.Int64
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 5 * time.Second,
+			PollInterval:             time.Millisecond,
+		},
+		Renderer: runtime.Renderer{},
+		Logger:   log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+		now: func() time.Time {
+			return startedAt.Add(time.Duration(observations.Add(1)-1) * managedAppSchedulingBlockGracePeriod)
+		},
+	}
+
+	err := svc.waitForManagedAppRolloutWithScheduling(context.Background(), app, "", runtime.SchedulingConstraints{})
+	if err == nil || !strings.Contains(err.Error(), "rollout scheduling blocked for 30s") || !strings.Contains(err.Error(), "Insufficient cpu") {
+		t.Fatalf("expected persistent surge scheduling failure, got %v", err)
+	}
+}
+
 func TestZeroDowntimeRolloutCapacityBlockMessageReportsInsufficientCPU(t *testing.T) {
 	t.Parallel()
 

@@ -16,9 +16,44 @@ import (
 )
 
 const (
-	managedAppEvictedPodRetention  = 24 * time.Hour
-	managedAppEvictedPodBatchLimit = 8
+	managedAppEvictedPodRetention        = 24 * time.Hour
+	managedAppEvictedPodBatchLimit       = 8
+	managedAppSchedulingBlockGracePeriod = 30 * time.Second
 )
+
+type rolloutSchedulingBlockTracker struct {
+	firstObservedAt time.Time
+}
+
+func (tracker *rolloutSchedulingBlockTracker) observe(now time.Time, message string) error {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		tracker.firstObservedAt = time.Time{}
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if tracker.firstObservedAt.IsZero() || now.Before(tracker.firstObservedAt) {
+		tracker.firstObservedAt = now
+		return nil
+	}
+	if now.Sub(tracker.firstObservedAt) < managedAppSchedulingBlockGracePeriod {
+		return nil
+	}
+	return fmt.Errorf(
+		"rollout scheduling blocked for %s: %s",
+		managedAppSchedulingBlockGracePeriod,
+		message,
+	)
+}
+
+func (s *Service) rolloutObservationTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
 
 func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, operationID string) error {
 	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
@@ -133,6 +168,7 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	lastMessage := ""
+	schedulingBlock := rolloutSchedulingBlockTracker{}
 	waitForNextSignal := func(targets []kubeWatchTarget) error {
 		if err := client.waitForAnyObjectEvent(waitCtx, targets, interval); err != nil {
 			if lastMessage != "" {
@@ -157,6 +193,7 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 			return err
 		}
 		watchTargets := rolloutWatchTargets(namespace, expectedName, deployment, found)
+		blockingMessage := ""
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
 			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppRevisionPodLabelSelector(app, revision))
 			if err != nil {
@@ -174,10 +211,13 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 					}
 					return fmt.Errorf("candidate revision %s/%s rollout failed: %s", namespace, expectedName, failureMessage)
 				}
-				if blockingMessage := deploymentTemplatePodSchedulingBlockMessage(pods, deployment); blockingMessage != "" {
+				if blockingMessage = deploymentTemplatePodSchedulingBlockMessage(pods, deployment); blockingMessage != "" {
 					message = blockingMessage
 				}
 			}
+		}
+		if err := schedulingBlock.observe(s.rolloutObservationTime(), blockingMessage); err != nil {
+			return fmt.Errorf("candidate revision %s/%s rollout failed: %w", namespace, expectedName, err)
 		}
 		if ready {
 			return nil
@@ -223,6 +263,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 		return fmt.Errorf("resolve backing service rollout targets for %s/%s: %w", namespace, name, err)
 	}
 	lastMessage := ""
+	schedulingBlock := rolloutSchedulingBlockTracker{}
 	waitForNextSignal := func(targets []kubeWatchTarget) error {
 		if err := client.waitForAnyObjectEvent(waitCtx, targets, interval); err != nil {
 			if lastMessage != "" {
@@ -268,6 +309,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 		}
 		watchTargets = append(watchTargets, managedAppRolloutWatchTargets(namespace, managedAppName, managed, foundManagedApp)...)
 		managedReady, managedMessage := managedAppRuntimeSchedulingReady(managed, foundManagedApp, app, scheduling, expectedManagedAppSpecHash)
+		blockingMessage := ""
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
 			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppPodLabelSelector(app))
 			if err != nil {
@@ -285,10 +327,13 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 					}
 					return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
 				}
-				if blockingMessage := deploymentTemplatePodSchedulingBlockMessage(pods, deployment); blockingMessage != "" {
+				if blockingMessage = deploymentTemplatePodSchedulingBlockMessage(pods, deployment); blockingMessage != "" {
 					message = blockingMessage
 				}
 			}
+		}
+		if err := schedulingBlock.observe(s.rolloutObservationTime(), blockingMessage); err != nil {
+			return fmt.Errorf("managed app %s/%s rollout failed: %w", namespace, managedAppName, err)
 		}
 		if app.Spec.Replicas > 0 && len(backingServices) > 0 {
 			backingServicesReady, backingServiceMessage, backingServiceWatchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
