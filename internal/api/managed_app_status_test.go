@@ -182,6 +182,113 @@ func TestOverlayManagedAppStatusesPublishesCompleteRuntimeEvidence(t *testing.T)
 	assertManagedAppFullRefreshSequence(t, cached.sequence)
 }
 
+func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("serving release observation")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "nginx:1.28",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	managed := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managed["metadata"].(map[string]any)["generation"] = float64(8)
+	managed["status"] = map[string]any{
+		"phase":              runtime.ManagedAppPhaseError,
+		"desiredReplicas":    1,
+		"readyReplicas":      1,
+		"observedGeneration": 8,
+		"message":            "canonical stable alignment is pending",
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	release, err := stateStore.CreateAppRelease(model.AppRelease{
+		TenantID:         app.TenantID,
+		AppID:            app.ID,
+		Role:             model.AppReleaseRoleStable,
+		ResolvedImageRef: app.Spec.Image,
+		DeploymentName:   runtime.RuntimeAppResourceName(app) + "-candidate-release",
+		ServiceName:      runtime.RuntimeAppServiceName(app) + "-candidate-release",
+		Status:           model.AppReleaseStatusServing,
+	})
+	if err != nil {
+		t.Fatalf("create serving release: %v", err)
+	}
+	if _, err := stateStore.UpsertAppTrafficPolicy(model.AppTrafficPolicy{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		Mode:            model.AppTrafficModeSingle,
+		StableReleaseID: release.ID,
+		StableWeight:    100,
+	}); err != nil {
+		t.Fatalf("create stable traffic policy: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeManagedAppClusterIdentity(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/" + runtime.ManagedAppPlural:
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{managed}})
+		case "/api/v1/namespaces":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"metadata": map[string]any{"name": namespace}}}})
+		case "/apis/apps/v1/deployments":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
+				"metadata": map[string]any{"name": release.DeploymentName, "namespace": namespace, "generation": 3},
+				"spec": map[string]any{
+					"replicas": 1,
+					"template": map[string]any{"spec": map[string]any{"containers": []map[string]any{{"name": "demo", "image": app.Spec.Image}}}},
+				},
+				"status": map[string]any{"replicas": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1, "observedGeneration": 3},
+			}}})
+		case "/api/v1/services":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"metadata": map[string]any{"name": release.ServiceName, "namespace": namespace}}}})
+		case "/api/v1/endpoints":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
+				"metadata": map[string]any{"name": release.ServiceName, "namespace": namespace},
+				"subsets":  []map[string]any{{"addresses": []map[string]any{{"ip": "10.0.0.2"}}}},
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	apiServer := &Server{
+		store: stateStore,
+		log:   log.New(io.Discard, "", 0),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
+		},
+	}
+	observed := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
+	if observed.ObservedStatus == nil || observed.ObservedStatus.Phase != "deployed" || !observed.ObservedStatus.Fresh {
+		t.Fatalf("promoted serving release should be observed as deployed: %+v", observed.ObservedStatus)
+	}
+	if observed.ObservedStatus.ImageRef != app.Spec.Image || !strings.Contains(observed.ObservedStatus.Message, release.ID) {
+		t.Fatalf("serving release identity was not projected: %+v", observed.ObservedStatus)
+	}
+	if !slices.Contains(observed.ObservedStatus.EvidenceSources, "app_release_traffic_policy") {
+		t.Fatalf("serving release evidence source missing: %+v", observed.ObservedStatus.EvidenceSources)
+	}
+}
+
 func TestFetchManagedAppInventorySequenceOmitsUnperformedStages(t *testing.T) {
 	t.Parallel()
 

@@ -170,6 +170,8 @@ type managedAppRuntimeEvidence struct {
 	imageLocationStatus          string
 	imageLocationSource          string
 	imageLocationObservedAt      time.Time
+	servingReleaseID             string
+	servingReleaseReady          bool
 }
 
 type managedAppKubeSnapshot struct {
@@ -972,8 +974,19 @@ func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatu
 	if !complete && strings.TrimSpace(errorMessage) == "" {
 		errorMessage = "live runtime observation is unavailable"
 	}
+	managed := entry.managed
+	if entry.evidence.servingReleaseReady {
+		if managed.Metadata.Generation <= 0 {
+			managed.Metadata.Generation = 1
+		}
+		managed.Status.ObservedGeneration = managed.Metadata.Generation
+		managed.Status.Phase = runtime.ManagedAppPhaseReady
+		managed.Status.DesiredReplicas = app.Spec.Replicas
+		managed.Status.ReadyReplicas = app.Spec.Replicas
+		managed.Status.Message = "stable release " + entry.evidence.servingReleaseID + " is serving the desired image"
+	}
 	observed := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
-		ManagedApp:              entry.managed,
+		ManagedApp:              managed,
 		Found:                   entry.found,
 		Complete:                complete,
 		Fresh:                   fresh && complete,
@@ -1238,6 +1251,17 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	deploymentRequired := app.Spec.Replicas > 0 || strings.TrimSpace(app.Spec.Image) != ""
 	serviceName := runtime.RuntimeAppServiceName(app)
 	deploymentName := runtime.RuntimeAppResourceName(app)
+	servingRelease, servingReleaseFound := s.servingReleaseTrafficTarget(app)
+	if servingReleaseFound {
+		if name := strings.TrimSpace(servingRelease.ServiceName); name != "" {
+			serviceName = name
+		}
+		if name := strings.TrimSpace(servingRelease.DeploymentName); name != "" {
+			deploymentName = name
+		}
+		evidence.servingReleaseID = strings.TrimSpace(servingRelease.ID)
+		evidence.evidenceSources = append(evidence.evidenceSources, "app_release_traffic_policy")
+	}
 	serviceKey := kubeNamespacedKey(namespace, serviceName)
 	deploymentKey := kubeNamespacedKey(namespace, deploymentName)
 
@@ -1264,6 +1288,7 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		evidence.endpointPresent = &endpointPresent
 		evidence.endpointReady = &endpointReady
 	}
+	deploymentImageMatches := false
 	if deploymentRequired {
 		deployment, deploymentExists := snapshot.deployments[deploymentKey]
 		physicalDesired := 0
@@ -1288,6 +1313,9 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 				deployment.Status.ReadyReplicas,
 				deployment.Status.AvailableReplicas,
 			)
+			if servingReleaseFound {
+				deploymentImageMatches = s.observedRuntimeImageRefsEquivalent(app, servingRelease.ResolvedImageRef, firstDeploymentContainerImage(deployment))
+			}
 		}
 		evidence.physicalDesiredReplicas = &physicalDesired
 		evidence.physicalReplicas = &physicalReady
@@ -1297,8 +1325,11 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	}
 
 	imageRef := strings.TrimSpace(app.Spec.Image)
-	if found {
+	if found && !servingReleaseFound {
 		imageRef = strings.TrimSpace(managed.Spec.AppSpec.Image)
+	}
+	if servingReleaseFound {
+		imageRef = strings.TrimSpace(servingRelease.ResolvedImageRef)
 	}
 	if imageRef != "" {
 		evidence.imageRef = imageRef
@@ -1339,6 +1370,12 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 			}
 		}
 	}
+	if servingReleaseFound && deploymentImageMatches &&
+		evidence.physicalDesiredReplicas != nil && *evidence.physicalDesiredReplicas >= app.Spec.Replicas &&
+		evidence.physicalReplicas != nil && *evidence.physicalReplicas >= app.Spec.Replicas &&
+		(!serviceRequired || (boolPointerTrue(evidence.servicePresent) && boolPointerTrue(evidence.endpointReady))) {
+		evidence.servingReleaseReady = true
+	}
 
 	// Record contradictions as explicit invariant evidence. The calculator
 	// decides the observed phase; this list is never inferred from stored
@@ -1353,6 +1390,30 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		}
 	}
 	return evidence, nil
+}
+
+func (s *Server) servingReleaseTrafficTarget(app model.App) (model.AppRelease, bool) {
+	if s == nil || s.store == nil || strings.TrimSpace(app.ID) == "" {
+		return model.AppRelease{}, false
+	}
+	policy, err := s.store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(policy.Mode), model.AppTrafficModeSingle) ||
+		policy.StableWeight != 100 || policy.CandidateWeight != 0 || strings.TrimSpace(policy.StableReleaseID) == "" {
+		return model.AppRelease{}, false
+	}
+	release, err := s.store.GetAppRelease(app.TenantID, true, policy.StableReleaseID)
+	if err != nil || strings.TrimSpace(release.AppID) != strings.TrimSpace(app.ID) ||
+		!strings.EqualFold(strings.TrimSpace(release.Role), model.AppReleaseRoleStable) ||
+		!strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusServing) ||
+		strings.TrimSpace(release.DeploymentName) == "" || strings.TrimSpace(release.ResolvedImageRef) == "" ||
+		!s.observedRuntimeImageRefsEquivalent(app, app.Spec.Image, release.ResolvedImageRef) {
+		return model.AppRelease{}, false
+	}
+	return release, true
+}
+
+func boolPointerTrue(value *bool) bool {
+	return value != nil && *value
 }
 
 func deploymentCurrentCohortComplete(deployment kubeDeploymentRuntimeEvidence) bool {
