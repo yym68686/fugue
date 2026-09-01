@@ -111,8 +111,8 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		t.Fatalf("schema lane is not a repeatable declarative Deployment: %+v", schema)
 	}
 	imageCache := byID["image-cache"]
-	if imageCache.Workload.PreservedUnavailable != 1 {
-		t.Fatalf("image-cache lane did not retire adoption while preserving its single offline node: %+v", imageCache)
+	if imageCache.Workload.PreservedUnavailable != 0 {
+		t.Fatalf("image-cache lane still preserves an unavailable node after the cluster returned to full readiness: %+v", imageCache)
 	}
 	for filename, contract := range map[string]struct {
 		strategy    string
