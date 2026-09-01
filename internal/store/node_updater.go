@@ -9,6 +9,8 @@ import (
 	"fugue/internal/model"
 )
 
+const nodeUpdateTaskInventoryMaxWait = 30 * time.Minute
+
 func (s *Store) EnrollNodeUpdater(secret, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint, updaterVersion, joinScriptVersion string, capabilities []string) (model.NodeUpdater, string, error) {
 	key, machine, runtimeObj, err := s.BootstrapClusterAttachment(secret, nodeName, endpoint, labels, machineName, machineFingerprint)
 	if err != nil {
@@ -364,9 +366,10 @@ func (s *Store) GetNodeUpdateTaskForUpdater(taskID, updaterID string) (model.Nod
 }
 
 func sortNodeUpdateTasksForDelivery(tasks []model.NodeUpdateTask) {
+	now := time.Now().UTC()
 	sort.SliceStable(tasks, func(i, j int) bool {
-		priorityI := nodeUpdateTaskDeliveryPriority(tasks[i])
-		priorityJ := nodeUpdateTaskDeliveryPriority(tasks[j])
+		priorityI := nodeUpdateTaskDeliveryPriority(tasks[i], now)
+		priorityJ := nodeUpdateTaskDeliveryPriority(tasks[j], now)
 		if priorityI != priorityJ {
 			return priorityI < priorityJ
 		}
@@ -377,20 +380,24 @@ func sortNodeUpdateTasksForDelivery(tasks []model.NodeUpdateTask) {
 	})
 }
 
-func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
+func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask, now time.Time) int {
 	if task.Type == model.NodeUpdateTaskTypeUpgradeUpdater {
 		return 0
 	}
+	if nodeUpdateTaskInventoryOverdue(task, now) {
+		return 1
+	}
 	// A deploy-blocking image copy is on the critical path of an app
-	// operation.  It must outrank periodic inventory reports; otherwise a
-	// continuously scheduled inventory stream can starve the copy forever.
+	// operation, so it outranks fresh periodic inventory reports. Overdue
+	// inventory is promoted above it to keep failing copies from hiding
+	// recoverable node-local images indefinitely.
 	if task.Type == model.NodeUpdateTaskTypeReplicateAppImage &&
 		strings.EqualFold(strings.TrimSpace(task.Payload["priority"]), model.ImageReplicationPriorityDeployBlocking) {
-		return 1
+		return 2
 	}
 	switch task.Type {
 	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
-		return 2
+		return 3
 	case model.NodeUpdateTaskTypePruneImageCache,
 		model.NodeUpdateTaskTypeDecommissionLocalPV,
 		model.NodeUpdateTaskTypeRepairManagedIPTables,
@@ -398,10 +405,22 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeReconcileHostZRAM,
 		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy:
-		return 3
-	default:
 		return 4
+	default:
+		return 5
 	}
+}
+
+func nodeUpdateTaskInventoryOverdue(task model.NodeUpdateTask, now time.Time) bool {
+	switch task.Type {
+	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
+	default:
+		return false
+	}
+	if task.CreatedAt.IsZero() || now.IsZero() {
+		return false
+	}
+	return !task.CreatedAt.After(now.Add(-nodeUpdateTaskInventoryMaxWait))
 }
 
 func (s *Store) FailStaleRunningNodeUpdateTasks(updaterID string, staleAfter time.Duration) (int, error) {

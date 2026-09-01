@@ -384,19 +384,21 @@ func (s *Store) pgListPendingNodeUpdateTasks(updaterID string, limit int) ([]mod
 	if limit <= 0 {
 		limit = 10
 	}
+	inventoryOverdueBefore := time.Now().UTC().Add(-nodeUpdateTaskInventoryMaxWait)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
 FROM fugue_node_update_tasks
 WHERE node_updater_id = $1 AND status = $2
 ORDER BY CASE
 	WHEN task_type = 'upgrade-node-updater' THEN 0
-	WHEN task_type = 'replicate-app-image' AND COALESCE(payload_json->>'priority', '') = 'deploy_blocking' THEN 1
-	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') THEN 2
-	WHEN task_type IN ('prune-image-cache', 'decommission-lvm-localpv') THEN 3
-	ELSE 4
+	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') AND created_at <= $3 THEN 1
+	WHEN task_type = 'replicate-app-image' AND COALESCE(payload_json->>'priority', '') = 'deploy_blocking' THEN 2
+	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') THEN 3
+	WHEN task_type IN ('prune-image-cache', 'decommission-lvm-localpv') THEN 4
+	ELSE 5
 END, created_at ASC, id ASC
-LIMIT $3
-`, strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusPending, limit)
+LIMIT $4
+`, strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusPending, inventoryOverdueBefore, limit)
 	if err != nil {
 		return nil, mapDBErr(err)
 	}

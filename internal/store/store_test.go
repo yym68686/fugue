@@ -796,6 +796,89 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeInventoryAndStorageM
 	}
 }
 
+func TestListPendingNodeUpdateTasksPromotesOverdueInventoryAboveDeployBlockingReplication(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Node Updater Inventory Fairness Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := s.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-inventory-fairness",
+		"https://worker-inventory-fairness.example.com",
+		nil,
+		"worker-inventory-fairness",
+		"machine-inventory-fairness",
+		"v2",
+		"join-v2",
+		[]string{
+			"heartbeat",
+			"tasks",
+			model.NodeUpdateTaskTypeReplicateAppImage,
+			model.NodeUpdateTaskTypeReportImageCache,
+		},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	requester := model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "apikey_test",
+		TenantID:  tenant.ID,
+	}
+	report, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeReportImageCache, map[string]string{
+		"reason": "test-inventory",
+	})
+	if err != nil {
+		t.Fatalf("create inventory report task: %v", err)
+	}
+	replicate, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeReplicateAppImage, map[string]string{
+		"priority": model.ImageReplicationPriorityDeployBlocking,
+		"image_id": "image_1",
+	})
+	if err != nil {
+		t.Fatalf("create deploy-blocking replication task: %v", err)
+	}
+
+	fresh, err := s.ListPendingNodeUpdateTasks(updater.ID, 1)
+	if err != nil {
+		t.Fatalf("list fresh pending tasks: %v", err)
+	}
+	if len(fresh) != 1 || fresh[0].ID != replicate.ID {
+		t.Fatalf("expected a deploy-blocking copy to outrank fresh inventory, got %+v", fresh)
+	}
+
+	overdueAt := time.Now().UTC().Add(-nodeUpdateTaskInventoryMaxWait - time.Minute)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		for i := range state.NodeUpdateTasks {
+			if state.NodeUpdateTasks[i].ID == report.ID {
+				state.NodeUpdateTasks[i].CreatedAt = overdueAt
+				state.NodeUpdateTasks[i].UpdatedAt = overdueAt
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age inventory report task: %v", err)
+	}
+
+	overdue, err := s.ListPendingNodeUpdateTasks(updater.ID, 1)
+	if err != nil {
+		t.Fatalf("list overdue pending tasks: %v", err)
+	}
+	if len(overdue) != 1 || overdue[0].ID != report.ID {
+		t.Fatalf("expected overdue inventory to prevent deploy-blocking starvation, got %+v", overdue)
+	}
+}
+
 func TestFailStaleRunningNodeUpdateTasks(t *testing.T) {
 	t.Parallel()
 
