@@ -688,6 +688,34 @@ func TestRolloutIntentForManagedOperationDetectsStatelessRuntimeMigration(t *tes
 	}
 }
 
+func TestRolloutIntentForManagedOperationIgnoresBuildpacksLauncherWrapper(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Source: &model.AppSource{
+			Type:          model.AppSourceTypeUpload,
+			BuildStrategy: model.AppBuildStrategyBuildpacks,
+		},
+		Spec: model.AppSpec{
+			Image:     "registry.example/demo:v1",
+			Command:   []string{"sh", "-lc", "python app.py"},
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_source",
+		},
+	}
+	desired := current
+	desired.Spec.RuntimeID = "runtime_target"
+	desired.Spec.Command = []string{"/cnb/lifecycle/launcher"}
+	desired.Spec.Args = []string{"sh", "-lc", "python app.py"}
+	op := model.Operation{Type: model.OperationTypeMigrate, DesiredSpec: &desired.Spec}
+
+	if !managedMigrateOperationIsStatelessRuntimeOnly(op, current, desired) {
+		t.Fatal("buildpacks launcher wrapper must not invalidate a stateless runtime migration")
+	}
+}
+
 func TestRolloutIntentForManagedOperationRejectsStatefulRuntimeMigration(t *testing.T) {
 	current := model.App{
 		ID:       "app_demo",

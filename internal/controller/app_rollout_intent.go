@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"path"
 	"reflect"
 	"strings"
 
@@ -54,6 +55,8 @@ func managedMigrateOperationIsStatelessRuntimeOnly(op model.Operation, currentAp
 
 	currentSpec, _ := model.StripFugueInjectedAppEnvFromSpec(currentApp.Spec)
 	desiredSpec, _ := model.StripFugueInjectedAppEnvFromSpec(desiredApp.Spec)
+	currentSpec = normalizeMigrationLaunchOverrideSpec(currentApp, currentSpec)
+	desiredSpec = normalizeMigrationLaunchOverrideSpec(desiredApp, desiredSpec)
 	currentSpec.RuntimeID = ""
 	desiredSpec.RuntimeID = ""
 	currentSpec.RolloutIntent = ""
@@ -67,6 +70,23 @@ func managedMigrateOperationIsStatelessRuntimeOnly(op model.Operation, currentAp
 		return false
 	}
 	return reflect.DeepEqual(model.AppBuildSource(currentApp), model.AppBuildSource(desiredApp))
+}
+
+// appWithResolvedLaunchOverride may rewrite a buildpacks command to the
+// lifecycle launcher before migration preflight. That wrapper is execution
+// plumbing, not a user-visible workload change; compare the underlying argv
+// so a stateless runtime move still receives its validated online plan.
+func normalizeMigrationLaunchOverrideSpec(app model.App, spec model.AppSpec) model.AppSpec {
+	if !appHasBuildpacksSource(app) || len(spec.Command) != 1 || len(spec.Args) == 0 {
+		return spec
+	}
+	launcher := path.Clean(strings.TrimSpace(spec.Command[0]))
+	if launcher == "." || launcher == "/" || path.Base(launcher) != "launcher" || path.Base(path.Dir(launcher)) != "lifecycle" {
+		return spec
+	}
+	spec.Command = append([]string(nil), spec.Args...)
+	spec.Args = nil
+	return spec
 }
 
 func rolloutIntentForManagedDesiredState(currentApp, desiredApp model.App) string {
