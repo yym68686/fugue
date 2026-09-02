@@ -26,8 +26,8 @@ type managedPostgresOrphanBackingServiceSummary struct {
 	StorageSize      string `json:"storage_size,omitempty"`
 	Suspended        bool   `json:"suspended"`
 	RuntimePhase     string `json:"runtime_phase,omitempty"`
-	ReadyInstances   int    `json:"ready_instances,omitempty"`
-	DesiredInstances int    `json:"desired_instances,omitempty"`
+	ReadyInstances   *int   `json:"ready_instances,omitempty"`
+	DesiredInstances *int   `json:"desired_instances,omitempty"`
 }
 
 type managedPostgresOrphanSummary struct {
@@ -269,8 +269,10 @@ func (s *Server) handleManagedPostgresOrphanLifecycle(w http.ResponseWriter, r *
 		summary.BackingServices[index].Suspended = suspended
 		if status := managedAppBackingServiceStatus(managed.Status, summary.BackingServices[index].ID); status != nil {
 			summary.BackingServices[index].RuntimePhase = status.Phase
-			summary.BackingServices[index].ReadyInstances = status.ReadyInstances
-			summary.BackingServices[index].DesiredInstances = status.DesiredInstances
+			readyInstances := status.ReadyInstances
+			desiredInstances := status.DesiredInstances
+			summary.BackingServices[index].ReadyInstances = &readyInstances
+			summary.BackingServices[index].DesiredInstances = &desiredInstances
 		}
 	}
 	result := "updated"
@@ -499,8 +501,10 @@ func managedPostgresAdoptionSnapshot(managed runtime.ManagedAppObject) (managedP
 		})
 		if status := managedAppBackingServiceStatus(managed.Status, serviceID); status != nil {
 			serviceSummaries[len(serviceSummaries)-1].RuntimePhase = strings.TrimSpace(status.Phase)
-			serviceSummaries[len(serviceSummaries)-1].ReadyInstances = status.ReadyInstances
-			serviceSummaries[len(serviceSummaries)-1].DesiredInstances = status.DesiredInstances
+			readyInstances := status.ReadyInstances
+			desiredInstances := status.DesiredInstances
+			serviceSummaries[len(serviceSummaries)-1].ReadyInstances = &readyInstances
+			serviceSummaries[len(serviceSummaries)-1].DesiredInstances = &desiredInstances
 		}
 	}
 	boundServiceIDs := make(map[string]struct{}, len(snapshot.Bindings))
