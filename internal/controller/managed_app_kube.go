@@ -283,6 +283,7 @@ func kubeObjectKindKey(obj map[string]any) string {
 }
 
 func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out any) error {
+	normalizeDeploymentStrategyForApply(obj)
 	apiPath, err := runtime.ObjectAPIPath(c.namespace, obj)
 	if err != nil {
 		return err
@@ -831,6 +832,8 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 	if !ok {
 		return nil
 	}
+	normalizeDeploymentStrategyForApply(obj)
+	spec = obj["spec"]
 	apiPath, err := runtime.ObjectAPIPath(c.namespace, obj)
 	if err != nil {
 		return err
@@ -859,6 +862,22 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 	c.writeStats.record("replace_spec_attempted", obj)
 	_, err = c.doRequest(ctx, http.MethodPatch, apiPath, "application/json-patch+json", ops, nil)
 	return err
+}
+
+// normalizeDeploymentStrategyForApply makes a Recreate strategy a complete
+// Kubernetes strategy object. Server-side apply merges omitted fields with the
+// live object, so leaving out rollingUpdate can otherwise produce the invalid
+// combination {type: Recreate, rollingUpdate: {...}} and a 422 response.
+func normalizeDeploymentStrategyForApply(obj map[string]any) {
+	if strings.TrimSpace(objectStringField(obj, "apiVersion")) != "apps/v1" ||
+		strings.TrimSpace(objectStringField(obj, "kind")) != "Deployment" {
+		return
+	}
+	spec := objectMapField(obj, "spec")
+	strategy := objectMapField(spec, "strategy")
+	if strings.EqualFold(strings.TrimSpace(objectStringField(strategy, "type")), "Recreate") {
+		strategy["rollingUpdate"] = nil
+	}
 }
 
 func (c *kubeClient) replaceObjectSpecsByKind(ctx context.Context, objects []map[string]any, apiVersion, kind string) error {

@@ -340,6 +340,49 @@ func TestApplyObjectsAppliesSamePhaseConcurrently(t *testing.T) {
 	}
 }
 
+func TestApplyObjectClearsRollingUpdateWhenApplyingRecreate(t *testing.T) {
+	t.Parallel()
+
+	var payload map[string]any
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPatch || req.URL.Path != "/apis/apps/v1/namespaces/tenant-demo/deployments/app-demo" {
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		if got := req.Header.Get("Content-Type"); got != "application/apply-patch+yaml" {
+			t.Fatalf("expected apply patch content type, got %q", got)
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode apply payload: %v", err)
+		}
+		return okJSONResponse(`{}`), nil
+	})
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	object := map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]any{"name": "app-demo", "namespace": "tenant-demo"},
+		"spec": map[string]any{
+			"replicas": 1,
+			"strategy": map[string]any{"type": "Recreate"},
+		},
+	}
+	if err := client.applyObject(context.Background(), object, nil); err != nil {
+		t.Fatalf("apply Recreate deployment: %v", err)
+	}
+	strategy, ok := payload["spec"].(map[string]any)["strategy"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected strategy in apply payload: %#v", payload)
+	}
+	if value, exists := strategy["rollingUpdate"]; !exists || value != nil {
+		t.Fatalf("Recreate apply must explicitly clear rollingUpdate, got %#v", strategy)
+	}
+}
+
 func TestApplyObjectsAppliesRoleBeforeRoleBinding(t *testing.T) {
 	t.Parallel()
 

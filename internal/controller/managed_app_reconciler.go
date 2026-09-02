@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -328,6 +329,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve postgres placements: %w", err))
 	}
 	childObjects := s.Renderer.BuildManagedAppChildObjectsWithPlacements(app, managed.Spec.Scheduling, postgresPlacements, ownerRef)
+	childObjects = s.preserveManagedAppServingDeploymentTemplate(ctx, client, namespace, app, childObjects)
 	fenceEpoch, err := s.currentAppFenceEpoch(ctx, client, app)
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app fence epoch: %w", err))
@@ -382,6 +384,63 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile workspace replication source: %w", err))
 	}
 	return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, app, postgresPlacements, releaseKey, recoverStoredBaseline)
+}
+
+// preserveManagedAppServingDeploymentTemplate prevents a legacy controller's
+// drain-only fields from causing a pod replacement when the release identity is
+// unchanged. Those fields are deliberately excluded from the release key, so
+// a same-release reconcile must not restart a single-writer workload merely to
+// normalize auxiliary lifecycle metadata. The Deployment strategy and
+// top-level rollout annotations still come from the desired object.
+func (s *Service) preserveManagedAppServingDeploymentTemplate(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	app model.App,
+	objects []map[string]any,
+) []map[string]any {
+	if client == nil || appHasOnlineRolloutIntent(app) || model.AppZeroDowntimeEnabled(app.Spec) {
+		return objects
+	}
+	desired := firstManagedAppDeploymentObject(objects, runtime.RuntimeAppResourceName(app))
+	if desired == nil {
+		return objects
+	}
+	desiredAnnotations := objectStringMapValue(nestedObjectValue(desired, "metadata", "annotations"))
+	desiredKey := strings.TrimSpace(desiredAnnotations[runtime.FugueAnnotationReleaseKey])
+	if desiredKey == "" {
+		return objects
+	}
+	liveRaw, found, err := client.getRawObject(ctx, deploymentAPIPath(namespace, runtime.RuntimeAppResourceName(app)))
+	if err != nil || !found {
+		return objects
+	}
+	liveAnnotations := objectStringMapValue(nestedObjectValue(liveRaw, "metadata", "annotations"))
+	liveKey := strings.TrimSpace(liveAnnotations[runtime.FugueAnnotationReleaseKey])
+	if liveKey == "" || liveKey != desiredKey {
+		return objects
+	}
+	var live, expected kubeDeployment
+	liveData, err := json.Marshal(liveRaw)
+	if err != nil || json.Unmarshal(liveData, &live) != nil {
+		return objects
+	}
+	desiredData, err := json.Marshal(desired)
+	if err != nil || json.Unmarshal(desiredData, &expected) != nil {
+		return objects
+	}
+	if app.Spec.Replicas <= 0 || !managedDeploymentStatusReady(live, app.Spec.Replicas) ||
+		!managedDeploymentAuxiliaryTemplateChanged(live, expected) {
+		return objects
+	}
+	spec := objectMapField(desired, "spec")
+	if spec == nil {
+		return objects
+	}
+	if liveTemplate := nestedObjectValue(liveRaw, "spec", "template"); liveTemplate != nil {
+		spec["template"] = cloneKubeMap(objectMapValue(liveTemplate))
+	}
+	return objects
 }
 
 func (s *Service) syncManagedAppObservedStatus(
@@ -1179,6 +1238,7 @@ func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespa
 	status := managedAppBaseStatus(managed, app)
 	status.Phase = runtime.ManagedAppPhaseError
 	status.Message = strings.TrimSpace(cause.Error())
+	status.ReadyReplicas = managed.Status.ReadyReplicas
 	status.CurrentReleaseKey = strings.TrimSpace(managed.Status.CurrentReleaseKey)
 	status.CurrentReleaseStartedAt = strings.TrimSpace(managed.Status.CurrentReleaseStartedAt)
 	status.CurrentReleaseReadyAt = strings.TrimSpace(managed.Status.CurrentReleaseReadyAt)

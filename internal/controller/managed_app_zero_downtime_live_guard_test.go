@@ -404,6 +404,91 @@ func TestManagedAppLiveGuardRecoversControllerAuthoredPendingDeploySnapshot(t *t
 	}
 }
 
+func TestManagedAppLiveGuardRecoversPromotedServingSnapshotDuringBackgroundReconcile(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("background release recovery")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "live-guard", "", model.AppSpec{
+		Image: "registry.example/live-guard:v1", Ports: []int{8080}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID,
+	}, model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/live-guard:v1", ResolvedImageRef: "registry.example/live-guard:v1"})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	servingSpec := *cloneControllerAppSpec(&app.Spec)
+	servingSpec.Image = "registry.example/live-guard:v2"
+	servingSource := model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/live-guard:v2", ResolvedImageRef: "registry.example/live-guard:v2"}
+	failed, err := stateStore.CreateOperation(model.Operation{
+		TenantID: app.TenantID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &servingSpec,
+		DesiredSource: &servingSource, DesiredOriginSource: &servingSource,
+	})
+	if err != nil {
+		t.Fatalf("create deploy: %v", err)
+	}
+	failed, claimed, err := stateStore.TryClaimPendingOperation(failed.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim deploy: claimed=%v err=%v", claimed, err)
+	}
+	failed, err = stateStore.FailOperation(failed.ID, "status commit interrupted after workload became ready")
+	if err != nil || failed.CompletedAt == nil {
+		t.Fatalf("fail deploy: %+v err=%v", failed, err)
+	}
+
+	svc := &Service{Store: stateStore, Renderer: runtime.Renderer{}}
+	serving := app
+	serving.Spec = servingSpec
+	model.SetAppSourceState(&serving, &servingSource, &servingSource)
+	serving.Spec.RolloutIntent = rolloutIntentForManagedOperation(failed, app, serving)
+	serving = svc.Renderer.PrepareApp(serving)
+	servingKey := svc.Renderer.ManagedAppReleaseKey(serving, runtime.SchedulingConstraints{})
+	desired := app
+	desired.Spec.Image = "registry.example/live-guard:v3"
+	desiredSource := model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/live-guard:v3", ResolvedImageRef: "registry.example/live-guard:v3"}
+	model.SetAppSourceState(&desired, &desiredSource, &desiredSource)
+	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
+	managed.Metadata.Generation = 2
+	servingStartedAt := failed.CreatedAt
+	if failed.StartedAt != nil {
+		servingStartedAt = *failed.StartedAt
+	}
+	managed.Status = runtime.ManagedAppStatus{
+		Phase: runtime.ManagedAppPhaseReady, ReadyReplicas: 1, ObservedGeneration: 2,
+		CurrentReleaseKey: servingKey, CurrentReleaseStartedAt: servingStartedAt.UTC().Format(time.RFC3339Nano),
+		CurrentReleaseReadyAt: failed.CompletedAt.UTC().Format(time.RFC3339Nano),
+	}
+	live, found := svc.expectedManagedAppDeployment(serving, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected serving deployment")
+	}
+	managedAppLiveGuardMarkReady(&live, 1)
+	client := managedAppLiveGuardClient(t, managed, live, true, true, nil)
+	currentSnapshot := runtime.AppFromManagedApp(managed)
+	backfillManagedAppSource(&currentSnapshot, desired)
+	recovered, ok, recoverErr := svc.recoverManagedAppPendingDeploySnapshot(context.Background(), managed, currentSnapshot, servingKey)
+	if recoverErr != nil || !ok {
+		t.Fatalf("expected promoted serving snapshot recovery before reconcile: ok=%v err=%v key=%s current=%s", ok, recoverErr, servingKey, svc.Renderer.ManagedAppReleaseKey(recovered, runtime.SchedulingConstraints{}))
+	}
+
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, desired, "", runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("proven promoted serving release must recover without an active operation: %v", err)
+	}
+	if prepared.Spec.Image != desired.Spec.Image || prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected recovered serving baseline to prepare desired image rollout, got image=%q intent=%q", prepared.Spec.Image, prepared.Spec.RolloutIntent)
+	}
+}
+
 func TestManagedAppLiveGuardRefusesLocalRWOReplacementWithoutExactNodeProof(t *testing.T) {
 	storage := &model.AppPersistentStorageSpec{
 		Mode:             model.AppPersistentStorageModeMovableRWO,
@@ -818,6 +903,97 @@ func TestPatchManagedAppZeroDowntimeBlockedStatusPreservesServingStateAndIsDetec
 	}
 	if !managedAppZeroDowntimeBlockedStatusCurrent(patched, cause) {
 		t.Fatalf("the next reconcile must recognize the same block without another status write: %+v", patched)
+	}
+}
+
+func TestPatchManagedAppErrorStatusPreservesServingReplicaEvidence(t *testing.T) {
+	app := managedAppLiveGuardTestApp(nil)
+	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
+	managed.Status = runtime.ManagedAppStatus{
+		Phase: runtime.ManagedAppPhaseReady, ReadyReplicas: 1,
+		CurrentReleaseKey: "release-current", CurrentReleaseReadyAt: "2026-07-28T00:00:05Z",
+	}
+	cause := errors.New("post-apply bookkeeping failed")
+	var patched runtime.ManagedAppStatus
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPatch || !strings.HasSuffix(req.URL.Path, "/status") {
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		var body struct {
+			Status runtime.ManagedAppStatus `json:"status"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatalf("decode error status: %v", err)
+		}
+		patched = body.Status
+		return okJSONResponse(`{}`), nil
+	})
+	client := &kubeClient{client: &http.Client{Transport: transport}, baseURL: "http://kube.test", namespace: managed.Metadata.Namespace}
+	if err := patchManagedAppErrorStatus(context.Background(), client, managed.Metadata.Namespace, managed, app, cause); !errors.Is(err, cause) {
+		t.Fatalf("expected original error, got %v", err)
+	}
+	if patched.Phase != runtime.ManagedAppPhaseError || patched.ReadyReplicas != 1 || patched.CurrentReleaseKey != managed.Status.CurrentReleaseKey {
+		t.Fatalf("error status must preserve serving evidence while exposing failure: %+v", patched)
+	}
+}
+
+func TestPreserveManagedAppServingDeploymentTemplateForSameReleaseAuxiliaryDrift(t *testing.T) {
+	t.Parallel()
+
+	storage := &model.AppPersistentStorageSpec{
+		Mode:             model.AppPersistentStorageModeMovableRWO,
+		StorageClassName: model.AppStorageClassFugueWorkspaceRWO,
+		Mounts:           []model.AppPersistentStorageMount{{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"}},
+	}
+	app := managedAppLiveGuardTestApp(storage)
+	svc := &Service{Renderer: runtime.Renderer{}}
+	desiredObjects := svc.Renderer.BuildManagedAppChildObjects(app, runtime.SchedulingConstraints{}, nil)
+	desired := firstManagedAppDeploymentObject(desiredObjects, runtime.RuntimeAppResourceName(app))
+	if desired == nil {
+		t.Fatal("expected desired deployment")
+	}
+
+	live := cloneKubeMap(desired)
+	liveSpec := nestedObjectMap(live, "spec")
+	liveSpec["strategy"] = map[string]any{"type": "Recreate", "rollingUpdate": map[string]any{"maxUnavailable": 0, "maxSurge": 1}}
+	liveTemplate := nestedObjectMap(live, "spec", "template")
+	liveTemplateMetadata := nestedObjectMap(liveTemplate, "metadata")
+	desiredAnnotations := objectStringMapValue(nestedObjectValue(desired, "metadata", "annotations"))
+	liveTemplateMetadata["annotations"] = map[string]any{
+		runtime.FugueAnnotationReleaseKey: desiredAnnotations[runtime.FugueAnnotationReleaseKey],
+		"fugue.io/drain-mode":             "connection-aware",
+	}
+	liveTemplateSpec := nestedObjectMap(liveTemplate, "spec")
+	liveTemplateSpec["terminationGracePeriodSeconds"] = 120
+	live["status"] = map[string]any{
+		"replicas": 1, "updatedReplicas": 1, "readyReplicas": 1,
+		"availableReplicas": 1, "observedGeneration": 1,
+	}
+	liveMetadata := nestedObjectMap(live, "metadata")
+	liveMetadata["generation"] = 1
+	liveData, err := json.Marshal(live)
+	if err != nil {
+		t.Fatalf("marshal live deployment: %v", err)
+	}
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet || req.URL.Path != deploymentAPIPath(runtime.NamespaceForTenant(app.TenantID), runtime.RuntimeAppResourceName(app)) {
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		return okJSONResponse(string(liveData)), nil
+	})
+	client := &kubeClient{client: &http.Client{Transport: transport}, baseURL: "http://kube.test", namespace: runtime.NamespaceForTenant(app.TenantID)}
+
+	objects := svc.preserveManagedAppServingDeploymentTemplate(context.Background(), client, runtime.NamespaceForTenant(app.TenantID), app, desiredObjects)
+	prepared := firstManagedAppDeploymentObject(objects, runtime.RuntimeAppResourceName(app))
+	if prepared == nil {
+		t.Fatal("expected prepared deployment")
+	}
+	if got := deploymentStrategyTypeFromObject(prepared); got != "RollingUpdate" {
+		t.Fatalf("desired deployment strategy must remain authoritative, got %q", got)
+	}
+	if !normalizedKubeValueEqual(nestedObjectValue(prepared, "spec", "template"), nestedObjectValue(live, "spec", "template")) {
+		t.Fatalf("same-release auxiliary drift must preserve the serving pod template\nprepared=%#v\nlive=%#v", nestedObjectValue(prepared, "spec", "template"), nestedObjectValue(live, "spec", "template"))
 	}
 }
 

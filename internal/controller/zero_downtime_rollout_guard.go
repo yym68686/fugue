@@ -503,7 +503,8 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	}
 
 	desiredDeployment := s.zeroDowntimeManagedAppDeployment(desired, desiredScheduling)
-	if desired.Spec.Replicas > 0 && model.AppHasClusterService(desired.Spec) && !zeroDowntimeDeploymentStrategyIsSafe(desiredDeployment) {
+	zeroDowntimeRequired := zeroDowntimeRequirementSourceForOperation(current, desired) != ""
+	if zeroDowntimeRequired && desired.Spec.Replicas > 0 && model.AppHasClusterService(desired.Spec) && !zeroDowntimeDeploymentStrategyIsSafe(desiredDeployment) {
 		return model.App{}, fmt.Errorf("rendered serving workload is not an explicit safe RollingUpdate")
 	}
 	expectedDeployment, expectedDeploymentFound := s.expectedManagedAppDeployment(desired, desiredScheduling)
@@ -511,10 +512,17 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		return model.App{}, fmt.Errorf("rendered serving workload has no deployment for live template preflight")
 	}
 	auxiliaryTemplateChanged := expectedDeploymentFound && managedDeploymentAuxiliaryTemplateChanged(deployment, expectedDeployment)
+	// Drain helpers, termination grace, and process namespace are intentionally
+	// excluded from the release key. A stale helper template from a previous
+	// controller version must not turn an otherwise identical serving release
+	// into an online replacement request. Only an explicit online/continuity
+	// rollout may require those auxiliary fields to match before replacing a
+	// workload; the reconciler preserves the live template for the no-op case.
+	guardAuxiliaryTemplateChanged := auxiliaryTemplateChanged && managedAppAuxiliaryTemplateChangeRequiresGuard(desired)
 	desiredReplicas := desired.Spec.Replicas
 	workloadChange := liveKey != desiredKey ||
 		!liveDeploymentStrategyMatchesDesired(deployment, desiredDeployment) ||
-		auxiliaryTemplateChanged ||
+		guardAuxiliaryTemplateChanged ||
 		desiredReplicas != liveReplicas
 	unavailableRecovery := false
 	if desiredReplicas > 0 && workloadChange {
@@ -556,7 +564,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 			managed.Spec.Scheduling,
 			desiredScheduling,
 			liveKey,
-			auxiliaryTemplateChanged,
+			guardAuxiliaryTemplateChanged,
 		); err != nil {
 			return model.App{}, err
 		}
@@ -568,7 +576,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		managed.Spec.Scheduling,
 		desiredScheduling,
 		liveKey,
-		auxiliaryTemplateChanged,
+		guardAuxiliaryTemplateChanged,
 	)
 	if decision.PodTemplateChanged && zeroDowntimeRequiresSameNodePin(desired.Spec) {
 		nodeName, ok := s.currentReadyAppNodeForOnlineRolloutWithClient(ctx, client, current)
@@ -589,6 +597,10 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	return desired, nil
 }
 
+func managedAppAuxiliaryTemplateChangeRequiresGuard(app model.App) bool {
+	return model.AppZeroDowntimeEnabled(app.Spec) || appHasOnlineRolloutIntent(app)
+}
+
 // recoverManagedAppPendingDeploySnapshot closes the narrow crash window where
 // a deploy applied and became Ready, but the operation failed before its
 // desired snapshot was committed to the store. The ManagedApp status normally
@@ -601,12 +613,13 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 // treating the controller-authored, operation-proven release as arbitrary
 // live drift.
 //
-// Recovery is deliberately operation-only and fail-closed. The pending key
-// must match the live Deployment, belong to a completed failed deploy that
-// predates the active deploy, fall inside that operation's time interval, and
-// be reproduced exactly from the operation's full desired spec/source state.
-// Background reconciliation and unverifiable/manual identities never enter
-// this path.
+// Recovery is deliberately fail-closed. The recovery key must match the live
+// Deployment, belong to a completed failed deploy (and, for an active deploy,
+// predate it), fall inside that operation's time interval, and be reproduced
+// exactly from the operation's full desired spec/source state. Background
+// reconciliation may enter this path only for the promoted current release
+// form, and only when the complete failed-operation proof below is available.
+// Unverifiable/manual identities remain fail-closed.
 func (s *Service) recoverManagedAppPendingDeploySnapshot(
 	ctx context.Context,
 	managed runtime.ManagedAppObject,
@@ -635,18 +648,32 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 	apply := managedAppApplySourceFromContext(ctx)
 	if liveKey == "" || recoveryKey != liveKey || recoveryStartedAt == nil ||
 		managed.Status.ObservedGeneration < managed.Metadata.Generation ||
-		apply.Source != managedAppApplySourceOperation || apply.OperationID == "" ||
 		s == nil || s.Store == nil {
 		return model.App{}, false, nil
 	}
 
-	active, err := s.Store.GetOperation(apply.OperationID)
-	if err != nil {
-		return model.App{}, false, fmt.Errorf("read active deploy while recovering pending live release: %w", err)
-	}
-	if active.Type != model.OperationTypeDeploy || active.Status != model.OperationStatusRunning ||
-		active.AppID != current.ID || active.TenantID != current.TenantID {
-		return model.App{}, false, nil
+	var active *model.Operation
+	if apply.Source == managedAppApplySourceOperation {
+		if apply.OperationID == "" {
+			return model.App{}, false, nil
+		}
+		candidate, err := s.Store.GetOperation(apply.OperationID)
+		if err != nil {
+			return model.App{}, false, fmt.Errorf("read active deploy while recovering pending live release: %w", err)
+		}
+		if candidate.Type != model.OperationTypeDeploy || candidate.Status != model.OperationStatusRunning ||
+			candidate.AppID != current.ID || candidate.TenantID != current.TenantID {
+			return model.App{}, false, nil
+		}
+		active = &candidate
+	} else {
+		// Background reconciliation may run after the operation that produced a
+		// serving release has already failed/finished. Only the promoted current
+		// key form is eligible here; a pending key without an active operation is
+		// still ambiguous and remains fail-closed.
+		if pendingKey != "" || !strings.EqualFold(strings.TrimSpace(managed.Status.Phase), runtime.ManagedAppPhaseReady) {
+			return model.App{}, false, nil
+		}
 	}
 
 	operations, err := s.Store.ListOperationsByApp(current.TenantID, true, current.ID)
@@ -657,9 +684,9 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 	var recovered model.App
 	var recoveredAt time.Time
 	for _, candidate := range operations {
-		if candidate.ID == active.ID || candidate.Type != model.OperationTypeDeploy ||
+		if (active != nil && candidate.ID == active.ID) || candidate.Type != model.OperationTypeDeploy ||
 			candidate.Status != model.OperationStatusFailed || candidate.DesiredSpec == nil ||
-			candidate.CompletedAt == nil || !candidate.CompletedAt.Before(active.CreatedAt) {
+			candidate.CompletedAt == nil || (active != nil && !candidate.CompletedAt.Before(active.CreatedAt)) {
 			continue
 		}
 		attemptStartedAt := candidate.CreatedAt
