@@ -120,6 +120,14 @@ func managedPostgresPlacementMutation(
 	expected, desired model.AppPostgresSpec,
 	placement managedPostgresPrimaryPlacement,
 ) store.ManagedPostgresPlacementMutation {
+	// For a managed-shared target, the physical node may also advertise an
+	// owned runtime ID. The mutation witness must carry the logical runtime
+	// being committed so store validation does not reject a valid shared-pool
+	// placement as an impossible runtime mismatch.
+	witnessRuntimeID := strings.TrimSpace(desired.RuntimeID)
+	if witnessRuntimeID == "" {
+		witnessRuntimeID = strings.TrimSpace(placement.RuntimeID)
+	}
 	return store.ManagedPostgresPlacementMutation{
 		Witness: store.ManagedPostgresPlacementWitness{
 			AppID:       strings.TrimSpace(app.ID),
@@ -127,7 +135,7 @@ func managedPostgresPlacementMutation(
 			ProjectID:   strings.TrimSpace(app.ProjectID),
 			ServiceID:   strings.TrimSpace(target.ServiceID),
 			ServiceName: model.NormalizePostgresServiceName(expected.ServiceName, ""),
-			RuntimeID:   strings.TrimSpace(placement.RuntimeID),
+			RuntimeID:   witnessRuntimeID,
 			NodeName:    strings.TrimSpace(placement.NodeName),
 			PrimaryPod:  strings.TrimSpace(placement.PrimaryPod),
 			PodIP:       strings.TrimSpace(placement.PodIP),
