@@ -759,11 +759,14 @@ fugue service resume app-db --wait=false
 		Long: strings.TrimSpace(`
 Inspect or adopt managed Postgres resources retained after their owner app disappeared from the Fugue store.
 
-These platform-administrator commands do not delete persistent storage. Adoption recreates the missing Fugue records so normal service lifecycle commands can manage the retained database again.
+These platform-administrator commands keep orphan resources separate from normal service records. Suspend/resume changes only the retained ManagedApp lifecycle intent. Delete is irreversible: it requires the exact app ID, an active backup artifact belonging to that app, and observed CNPG hibernation before requesting foreground cleanup.
 `),
 		Example: strings.TrimSpace(`
 fugue service postgres orphan ls
+fugue service postgres orphan suspend app_123
+fugue service postgres orphan resume app_123 --wait=false
 fugue service postgres orphan adopt app_123
+fugue service postgres orphan delete app_123 --confirm app_123 --backup-artifact-id backup_artifact_123
 `),
 	},
 	"fugue service postgres orphan ls": {
@@ -787,6 +790,18 @@ The app ID must come from "fugue service postgres orphan ls". This endpoint requ
 fugue service postgres orphan adopt app_123
 fugue service postgres orphan adopt app_123 --json
 `),
+	},
+	"fugue service postgres orphan suspend": {
+		Long:    "Suspend a retained orphan managed Postgres runtime without creating a Fugue store record. This requires a platform-admin or bootstrap key and waits for observed CNPG hibernation by default. Pass --wait=false to return after the intent is accepted.",
+		Example: "fugue service postgres orphan suspend app_123\nfugue service postgres orphan suspend app_123 --wait=false",
+	},
+	"fugue service postgres orphan resume": {
+		Long:    "Resume a retained orphan managed Postgres runtime without creating a Fugue store record. This requires a platform-admin or bootstrap key and waits for an observed active primary by default. Pass --wait=false to return after the intent is accepted.",
+		Example: "fugue service postgres orphan resume app_123\nfugue service postgres orphan resume app_123 --wait=false",
+	},
+	"fugue service postgres orphan delete": {
+		Long:    "Request irreversible foreground cleanup of retained orphan resources. The command requires an exact app ID and an active backup artifact belonging to that app; the runtime must already be observed suspended.",
+		Example: "fugue service postgres orphan delete app_123 --confirm app_123 --backup-artifact-id backup_artifact_123",
 	},
 	"fugue admin": {
 		Example: strings.TrimSpace(`

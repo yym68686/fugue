@@ -215,6 +215,82 @@ func TestRunServicePostgresOrphanAdoptRedactsJSON(t *testing.T) {
 	}
 }
 
+func TestRunServicePostgresOrphanSuspendWithoutWait(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/backing-services/orphans/app_123/suspend" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"orphan":{"app_id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"retained","namespace":"tenant-123","managed_app_name":"app-123","phase":"disabled","backing_services":[{"id":"svc_pg","name":"retained-db","type":"postgres","suspended":true,"runtime_phase":"suspending","ready_instances":1,"desired_instances":1}]},"already_current":false}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"service", "postgres", "orphan", "suspend", "app_123", "--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run orphan suspend: %v stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"app_id=app_123", "already_current=false", "retained-db", "suspending"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected orphan suspend output to contain %q, got %s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunServicePostgresOrphanDeleteRequiresExactConfirmationAndBackup(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/backing-services/orphans/app_123/delete" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode orphan delete request: %v", err)
+		}
+		if body["confirm_app_id"] != "app_123" || body["backup_artifact_id"] != "backup_artifact_123" {
+			t.Fatalf("unexpected orphan delete request: %+v", body)
+		}
+		_, _ = w.Write([]byte(`{"deleted":false,"deletion_requested":true,"app_id":"app_123"}`))
+	}))
+	defer server.Close()
+
+	for _, args := range [][]string{
+		{"service", "postgres", "orphan", "delete", "app_123", "--backup-artifact-id", "backup_artifact_123"},
+		{"service", "postgres", "orphan", "delete", "app_123", "--confirm", "app_123"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if err := runWithStreams(append([]string{"--base-url", server.URL, "--token", "token"}, args...), &stdout, &stderr); err == nil {
+			t.Fatalf("expected unsafe orphan delete arguments %v to fail", args)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("unsafe orphan delete must not call API, got %d requests", requests)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"service", "postgres", "orphan", "delete", "app_123",
+		"--confirm", "app_123",
+		"--backup-artifact-id", "backup_artifact_123",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run confirmed orphan delete: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "deletion_requested=true") {
+		t.Fatalf("expected deletion request output, got %s", stdout.String())
+	}
+}
+
 func TestServiceLifecycleAndOrphanHelp(t *testing.T) {
 	t.Parallel()
 
@@ -226,6 +302,9 @@ func TestServiceLifecycleAndOrphanHelp(t *testing.T) {
 		{args: []string{"service", "resume", "--help"}, want: []string{"retained persistent storage", "--wait=false"}},
 		{args: []string{"service", "postgres", "orphan", "ls", "--help"}, want: []string{"platform-admin or bootstrap key", "orphan ls --json"}},
 		{args: []string{"service", "postgres", "orphan", "adopt", "--help"}, want: []string{"platform-admin or bootstrap key", "JSON output redacts", "orphan adopt app_123"}},
+		{args: []string{"service", "postgres", "orphan", "suspend", "--help"}, want: []string{"platform-admin or bootstrap key", "--wait=false"}},
+		{args: []string{"service", "postgres", "orphan", "resume", "--help"}, want: []string{"platform-admin or bootstrap key", "active primary"}},
+		{args: []string{"service", "postgres", "orphan", "delete", "--help"}, want: []string{"irreversible", "--confirm", "--backup-artifact-id"}},
 	}
 	for _, tc := range cases {
 		var stdout, stderr bytes.Buffer

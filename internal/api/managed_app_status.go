@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -409,6 +410,17 @@ func (c *managedAppStatusCache) setList(entry managedAppStatusListCacheEntry) {
 	c.mu.Unlock()
 }
 
+func (c *managedAppStatusCache) invalidate() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.byApp = make(map[string]managedAppStatusCacheEntry)
+	c.list = managedAppStatusListCacheEntry{}
+	c.listRefreshNotBefore = time.Time{}
+	c.mu.Unlock()
+}
+
 func newManagedAppStatusClient() (*managedAppStatusClient, error) {
 	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
 	port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
@@ -483,6 +495,46 @@ func (c *managedAppStatusClient) getManagedApp(ctx context.Context, app model.Ap
 		return runtime.ManagedAppObject{}, false, err
 	}
 	return managed, true, nil
+}
+
+func managedAppAPIPath(namespace, name string) string {
+	return "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/" + runtime.ManagedAppPlural + "/" + url.PathEscape(strings.TrimSpace(name))
+}
+
+func (c *managedAppStatusClient) patchManagedAppBackingServicesSuspended(ctx context.Context, managed runtime.ManagedAppObject, suspended bool) error {
+	ops := []map[string]any{{"op": "test", "path": "/metadata/resourceVersion", "value": strings.TrimSpace(managed.Metadata.ResourceVersion)}}
+	for index := range managed.Spec.BackingServices {
+		postgres := managed.Spec.BackingServices[index].Spec.Postgres
+		if !strings.EqualFold(strings.TrimSpace(managed.Spec.BackingServices[index].Type), model.BackingServiceTypePostgres) ||
+			!strings.EqualFold(strings.TrimSpace(managed.Spec.BackingServices[index].Provisioner), model.BackingServiceProvisionerManaged) || postgres == nil {
+			continue
+		}
+		if postgres.Suspended == suspended {
+			continue
+		}
+		ops = append(ops, map[string]any{
+			"op":    "add",
+			"path":  fmt.Sprintf("/spec/backingServices/%d/spec/postgres/suspended", index),
+			"value": suspended,
+		})
+	}
+	if len(ops) == 1 {
+		return nil
+	}
+	return c.doRequest(ctx, http.MethodPatch, managedAppAPIPath(managed.Metadata.Namespace, managed.Metadata.Name), "application/json-patch+json", ops, nil)
+}
+
+func (c *managedAppStatusClient) deleteManagedApp(ctx context.Context, managed runtime.ManagedAppObject) error {
+	request := map[string]any{
+		"apiVersion":        "v1",
+		"kind":              "DeleteOptions",
+		"propagationPolicy": "Foreground",
+		"preconditions": map[string]string{
+			"uid":             strings.TrimSpace(managed.Metadata.UID),
+			"resourceVersion": strings.TrimSpace(managed.Metadata.ResourceVersion),
+		},
+	}
+	return c.doRequest(ctx, http.MethodDelete, managedAppAPIPath(managed.Metadata.Namespace, managed.Metadata.Name), "application/json", request, nil)
 }
 
 func validateObservedManagedAppObject(managed runtime.ManagedAppObject) error {
@@ -812,28 +864,43 @@ func kubeAddressCount(value any) int {
 }
 
 func (c *managedAppStatusClient) doJSON(ctx context.Context, apiPath string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+apiPath, nil)
+	return c.doRequest(ctx, http.MethodGet, apiPath, "", nil, out)
+}
+
+func (c *managedAppStatusClient) doRequest(ctx context.Context, method, apiPath, contentType string, body any, out any) error {
+	var payload io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("marshal kubernetes request: %w", err)
+		}
+		payload = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, payload)
 	if err != nil {
 		return fmt.Errorf("create kubernetes request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
 	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(contentType) != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("kubernetes request GET %s: %w", apiPath, err)
+		return fmt.Errorf("kubernetes request %s %s: %w", method, apiPath, err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	responseBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
 		return &kubeStatusError{
 			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("kubernetes request GET %s failed: status=%d body=%s", apiPath, resp.StatusCode, strings.TrimSpace(string(body))),
+			Message:    fmt.Sprintf("kubernetes request %s %s failed: status=%d body=%s", method, apiPath, resp.StatusCode, strings.TrimSpace(string(responseBody))),
 		}
 	}
-	if out != nil && len(body) > 0 {
-		if err := json.Unmarshal(body, out); err != nil {
+	if out != nil && len(responseBody) > 0 {
+		if err := json.Unmarshal(responseBody, out); err != nil {
 			return fmt.Errorf("decode kubernetes response: %w", err)
 		}
 	}

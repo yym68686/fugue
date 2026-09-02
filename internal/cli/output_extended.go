@@ -199,22 +199,25 @@ func writeOrphanManagedAppTable(w io.Writer, orphans []orphanManagedApp) error {
 		return sorted[i].Name < sorted[j].Name
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "APP_ID\tNAME\tTENANT\tPROJECT\tNAMESPACE\tMANAGED_APP\tPHASE\tPOSTGRES\tSUSPENDED\tMESSAGE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "APP_ID\tNAME\tTENANT\tPROJECT\tNAMESPACE\tMANAGED_APP\tPHASE\tPOSTGRES\tSUSPENDED\tRUNTIME\tMESSAGE"); err != nil {
 		return err
 	}
 	for _, orphan := range sorted {
 		serviceNames := make([]string, 0, len(orphan.BackingServices))
 		suspended := 0
+		runtimePhases := make([]string, 0, len(orphan.BackingServices))
 		for _, service := range orphan.BackingServices {
 			serviceNames = append(serviceNames, firstNonEmptyTrimmed(service.Name, service.ID))
+			runtimePhases = append(runtimePhases, firstNonEmptyTrimmed(service.RuntimePhase, "unknown"))
 			if service.Suspended {
 				suspended++
 			}
 		}
 		sort.Strings(serviceNames)
+		sort.Strings(runtimePhases)
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%s\t%s\n",
 			orphan.AppID,
 			orphan.Name,
 			orphan.TenantID,
@@ -225,6 +228,7 @@ func writeOrphanManagedAppTable(w io.Writer, orphans []orphanManagedApp) error {
 			strings.Join(serviceNames, ","),
 			suspended,
 			len(orphan.BackingServices),
+			strings.Join(runtimePhases, ","),
 			formatAppListDetail(orphan.Message),
 		); err != nil {
 			return err

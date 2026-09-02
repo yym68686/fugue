@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,13 +18,16 @@ import (
 )
 
 type managedPostgresOrphanBackingServiceSummary struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	RuntimeID   string `json:"runtime_id,omitempty"`
-	ServiceName string `json:"service_name,omitempty"`
-	StorageSize string `json:"storage_size,omitempty"`
-	Suspended   bool   `json:"suspended"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Type             string `json:"type"`
+	RuntimeID        string `json:"runtime_id,omitempty"`
+	ServiceName      string `json:"service_name,omitempty"`
+	StorageSize      string `json:"storage_size,omitempty"`
+	Suspended        bool   `json:"suspended"`
+	RuntimePhase     string `json:"runtime_phase,omitempty"`
+	ReadyInstances   int    `json:"ready_instances,omitempty"`
+	DesiredInstances int    `json:"desired_instances,omitempty"`
 }
 
 type managedPostgresOrphanSummary struct {
@@ -36,6 +40,11 @@ type managedPostgresOrphanSummary struct {
 	Phase           string                                       `json:"phase"`
 	Message         string                                       `json:"message,omitempty"`
 	BackingServices []managedPostgresOrphanBackingServiceSummary `json:"backing_services"`
+}
+
+type managedPostgresOrphanLifecycleRequest struct {
+	ConfirmAppID     string `json:"confirm_app_id,omitempty"`
+	BackupArtifactID string `json:"backup_artifact_id,omitempty"`
 }
 
 func (s *Server) handleListManagedPostgresOrphans(w http.ResponseWriter, r *http.Request) {
@@ -187,6 +196,227 @@ func (s *Server) handleAdoptManagedPostgresOrphan(w http.ResponseWriter, r *http
 	})
 }
 
+func (s *Server) handleSuspendManagedPostgresOrphan(w http.ResponseWriter, r *http.Request) {
+	s.handleManagedPostgresOrphanLifecycle(w, r, true)
+}
+
+func (s *Server) handleResumeManagedPostgresOrphan(w http.ResponseWriter, r *http.Request) {
+	s.handleManagedPostgresOrphanLifecycle(w, r, false)
+}
+
+func (s *Server) handleManagedPostgresOrphanLifecycle(w http.ResponseWriter, r *http.Request, suspended bool) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform administrator access is required")
+		return
+	}
+	appID := strings.TrimSpace(r.PathValue("app_id"))
+	if appID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "app_id is required")
+		return
+	}
+	managedApps, err := s.managedAppInventory(r.Context(), true)
+	if err != nil {
+		s.appendAudit(principal, orphanLifecycleAuditAction(suspended), "app", appID, "", map[string]string{"result": "inventory_error"})
+		httpx.WriteError(w, http.StatusServiceUnavailable, "managed app inventory is unavailable")
+		return
+	}
+	managed, found := managedApps[appID]
+	if !found {
+		s.appendAudit(principal, orphanLifecycleAuditAction(suspended), "app", appID, "", map[string]string{"result": "not_found"})
+		s.writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	summary, snapshot, valid := managedPostgresOrphanCandidate(managed)
+	if !valid {
+		s.appendAudit(principal, orphanLifecycleAuditAction(suspended), "app", appID, "", map[string]string{"result": "rejected_not_orphaned"})
+		httpx.WriteError(w, http.StatusConflict, "managed app is not an exact, current orphan")
+		return
+	}
+	if _, err := s.store.GetApp(appID); err == nil {
+		httpx.WriteError(w, http.StatusConflict, "managed app has already been adopted")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.writeStoreError(w, err)
+		return
+	}
+	if err := s.verifyManagedPostgresOrphanStorage(r.Context(), managed, snapshot); err != nil {
+		if errors.Is(err, errManagedPostgresOrphanStorageUnavailable) {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "managed PostgreSQL storage evidence is unavailable")
+			return
+		}
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+		return
+	}
+	client, err := s.managedAppStatusClient()
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "managed app Kubernetes client is unavailable")
+		return
+	}
+	defer client.closeIdleConnections()
+	refreshCtx, cancel := s.managedAppStatusRefreshContext(r.Context())
+	defer cancel()
+	if err := client.patchManagedAppBackingServicesSuspended(refreshCtx, managed, suspended); err != nil {
+		if isKubeConflict(err) {
+			httpx.WriteError(w, http.StatusConflict, "managed app changed during orphan lifecycle update; retry after refreshing orphan list")
+			return
+		}
+		httpx.WriteError(w, http.StatusServiceUnavailable, "managed app lifecycle update could not be applied")
+		return
+	}
+	s.managedAppStatusCache.invalidate()
+	for index := range summary.BackingServices {
+		summary.BackingServices[index].Suspended = suspended
+		if status := managedAppBackingServiceStatus(managed.Status, summary.BackingServices[index].ID); status != nil {
+			summary.BackingServices[index].RuntimePhase = status.Phase
+			summary.BackingServices[index].ReadyInstances = status.ReadyInstances
+			summary.BackingServices[index].DesiredInstances = status.DesiredInstances
+		}
+	}
+	result := "updated"
+	statusCode := http.StatusAccepted
+	if allOrphanServicesSuspended(managed, suspended) {
+		result = "already_current"
+		statusCode = http.StatusOK
+	}
+	s.appendAudit(principal, orphanLifecycleAuditAction(suspended), "app", appID, snapshot.TenantID, map[string]string{
+		"result":           result,
+		"managed_app_name": summary.ManagedAppName,
+		"namespace":        summary.Namespace,
+	})
+	httpx.WriteJSON(w, statusCode, map[string]any{
+		"orphan":          summary,
+		"already_current": result == "already_current",
+	})
+}
+
+func (s *Server) handleDeleteManagedPostgresOrphan(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform administrator access is required")
+		return
+	}
+	appID := strings.TrimSpace(r.PathValue("app_id"))
+	if appID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "app_id is required")
+		return
+	}
+	var request managedPostgresOrphanLifecycleRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "request must contain confirm_app_id and backup_artifact_id")
+		return
+	}
+	if strings.TrimSpace(request.ConfirmAppID) != appID {
+		httpx.WriteError(w, http.StatusBadRequest, "confirm_app_id must exactly match app_id")
+		return
+	}
+	if strings.TrimSpace(request.BackupArtifactID) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "backup_artifact_id is required")
+		return
+	}
+	managedApps, err := s.managedAppInventory(r.Context(), true)
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "managed app inventory is unavailable")
+		return
+	}
+	managed, found := managedApps[appID]
+	if !found {
+		s.writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	summary, snapshot, valid := managedPostgresOrphanCandidate(managed)
+	if !valid {
+		httpx.WriteError(w, http.StatusConflict, "managed app is not an exact, current orphan")
+		return
+	}
+	if _, err := s.store.GetApp(appID); err == nil {
+		httpx.WriteError(w, http.StatusConflict, "managed app has already been adopted")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.writeStoreError(w, err)
+		return
+	}
+	artifact, err := s.store.GetBackupArtifact(strings.TrimSpace(request.BackupArtifactID), "", true)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			httpx.WriteError(w, http.StatusConflict, "backup artifact was not found or is not visible to the platform administrator")
+			return
+		}
+		s.writeStoreError(w, err)
+		return
+	}
+	if artifact.Status != model.BackupArtifactStatusActive ||
+		artifact.Kind != model.BackupArtifactKindAppPGDump ||
+		!strings.EqualFold(strings.TrimSpace(artifact.Target.Type), model.BackupTargetAppDatabase) ||
+		(strings.TrimSpace(artifact.AppID) != appID && strings.TrimSpace(artifact.Target.AppID) != appID) {
+		httpx.WriteError(w, http.StatusConflict, "backup artifact must be active and belong to this orphan app")
+		return
+	}
+	if err := s.verifyManagedPostgresOrphanStorage(r.Context(), managed, snapshot); err != nil {
+		if errors.Is(err, errManagedPostgresOrphanStorageUnavailable) {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "managed PostgreSQL storage evidence is unavailable")
+			return
+		}
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err := s.verifyManagedPostgresOrphanSuspended(r.Context(), managed, snapshot); err != nil {
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+		return
+	}
+	client, err := s.managedAppStatusClient()
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "managed app Kubernetes client is unavailable")
+		return
+	}
+	defer client.closeIdleConnections()
+	refreshCtx, cancel := s.managedAppStatusRefreshContext(r.Context())
+	defer cancel()
+	if err := client.deleteManagedApp(refreshCtx, managed); err != nil {
+		if isKubeConflict(err) {
+			httpx.WriteError(w, http.StatusConflict, "managed app changed during orphan deletion; refresh orphan list and retry")
+			return
+		}
+		httpx.WriteError(w, http.StatusServiceUnavailable, "orphan deletion could not be submitted")
+		return
+	}
+	s.managedAppStatusCache.invalidate()
+	s.appendAudit(principal, "backing_service.orphan.delete", "app", appID, snapshot.TenantID, map[string]string{
+		"result":             "accepted",
+		"managed_app_name":   summary.ManagedAppName,
+		"namespace":          summary.Namespace,
+		"backup_artifact_id": artifact.ID,
+	})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"deleted": false, "deletion_requested": true, "app_id": appID})
+}
+
+func orphanLifecycleAuditAction(suspended bool) string {
+	if suspended {
+		return "backing_service.orphan.suspend"
+	}
+	return "backing_service.orphan.resume"
+}
+
+func managedAppBackingServiceStatus(status runtime.ManagedAppStatus, serviceID string) *runtime.ManagedBackingServiceStatus {
+	for index := range status.BackingServices {
+		if strings.TrimSpace(status.BackingServices[index].ServiceID) == strings.TrimSpace(serviceID) {
+			return &status.BackingServices[index]
+		}
+	}
+	return nil
+}
+
+func allOrphanServicesSuspended(managed runtime.ManagedAppObject, suspended bool) bool {
+	for _, service := range managed.Spec.BackingServices {
+		if service.Spec.Postgres != nil && strings.EqualFold(strings.TrimSpace(service.Provisioner), model.BackingServiceProvisionerManaged) && service.Spec.Postgres.Suspended != suspended {
+			return false
+		}
+	}
+	return true
+}
+
 func managedPostgresOrphanCandidate(managed runtime.ManagedAppObject) (managedPostgresOrphanSummary, model.App, bool) {
 	summary, snapshot, valid := managedPostgresAdoptionSnapshot(managed)
 	if !valid || !managedPostgresExplicitlyOrphaned(managed) {
@@ -267,6 +497,11 @@ func managedPostgresAdoptionSnapshot(managed runtime.ManagedAppObject) (managedP
 			StorageSize: strings.TrimSpace(postgres.StorageSize),
 			Suspended:   postgres.Suspended,
 		})
+		if status := managedAppBackingServiceStatus(managed.Status, serviceID); status != nil {
+			serviceSummaries[len(serviceSummaries)-1].RuntimePhase = strings.TrimSpace(status.Phase)
+			serviceSummaries[len(serviceSummaries)-1].ReadyInstances = status.ReadyInstances
+			serviceSummaries[len(serviceSummaries)-1].DesiredInstances = status.DesiredInstances
+		}
 	}
 	boundServiceIDs := make(map[string]struct{}, len(snapshot.Bindings))
 	bindingIDs := make(map[string]struct{}, len(snapshot.Bindings))
@@ -335,6 +570,7 @@ type managedPostgresOrphanKubeMetadata struct {
 	UID               string            `json:"uid,omitempty"`
 	Generation        int64             `json:"generation,omitempty"`
 	DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+	Annotations       map[string]string `json:"annotations,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	OwnerReferences   []struct {
 		UID string `json:"uid,omitempty"`
@@ -343,6 +579,10 @@ type managedPostgresOrphanKubeMetadata struct {
 
 type managedPostgresOrphanCluster struct {
 	Metadata managedPostgresOrphanKubeMetadata `json:"metadata"`
+	Status   struct {
+		ReadyInstances int                           `json:"readyInstances"`
+		Conditions     []runtime.ManagedAppCondition `json:"conditions,omitempty"`
+	} `json:"status"`
 }
 
 type managedPostgresOrphanPVCList struct {
@@ -507,6 +747,49 @@ func (s *Server) verifyManagedPostgresOrphanStorage(ctx context.Context, managed
 		}
 	}
 	return nil
+}
+
+func (s *Server) verifyManagedPostgresOrphanSuspended(ctx context.Context, managed runtime.ManagedAppObject, snapshot model.App) error {
+	for _, service := range snapshot.BackingServices {
+		if service.Spec.Postgres == nil || !service.Spec.Postgres.Suspended {
+			return fmt.Errorf("orphan backing service %s is not requested suspended", strings.TrimSpace(service.ID))
+		}
+	}
+	deployments := runtime.ManagedBackingServiceDeployments(snapshot, managed.Spec.Scheduling)
+	client, err := s.managedAppStatusClient()
+	if err != nil {
+		return fmt.Errorf("managed PostgreSQL runtime evidence unavailable: %w", err)
+	}
+	defer client.closeIdleConnections()
+	refreshCtx, cancel := s.managedAppStatusRefreshContext(ctx)
+	defer cancel()
+	for _, deployment := range deployments {
+		var cluster managedPostgresOrphanCluster
+		path := "/apis/postgresql.cnpg.io/v1/namespaces/" + url.PathEscape(strings.TrimSpace(managed.Metadata.Namespace)) + "/clusters/" + url.PathEscape(strings.TrimSpace(deployment.ResourceName))
+		if err := client.doJSON(refreshCtx, path, &cluster); err != nil {
+			return fmt.Errorf("read retained cluster %s suspension state: %w", deployment.ResourceName, err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno]), runtime.CloudNativePGHibernationOn) || cluster.Status.ReadyInstances != 0 {
+			return fmt.Errorf("retained managed PostgreSQL cluster %s is not observed suspended", deployment.ResourceName)
+		}
+		hibernated := false
+		for _, condition := range cluster.Status.Conditions {
+			if strings.EqualFold(strings.TrimSpace(condition.Type), runtime.CloudNativePGHibernationAnno) &&
+				strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+				hibernated = true
+				break
+			}
+		}
+		if !hibernated {
+			return fmt.Errorf("retained managed PostgreSQL cluster %s has not confirmed hibernation", deployment.ResourceName)
+		}
+	}
+	return nil
+}
+
+func isKubeConflict(err error) bool {
+	var statusErr *kubeStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict
 }
 
 func (s *Server) hydrateAdoptedOrphanBackingServices(app model.App) (model.App, error) {

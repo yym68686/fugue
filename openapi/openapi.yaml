@@ -4976,6 +4976,108 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/orphans/{app_id}/suspend:
+    post:
+      operationId: suspendManagedPostgresOrphan
+      summary: Suspend A Retained Managed Postgres Orphan
+      description: >-
+        Platform-administrator lifecycle intent update for a retained orphan.
+        The request is applied atomically to the ManagedApp spec and the
+        controller performs the CNPG hibernation transition; no Fugue store
+        record is created.
+      tags: [Backing Services]
+      x-fugue-handler: handleSuspendManagedPostgresOrphan
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: app_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Orphan was already requested suspended
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresOrphanLifecycleResponse"
+        '202':
+          description: Suspension intent accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresOrphanLifecycleResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/orphans/{app_id}/resume:
+    post:
+      operationId: resumeManagedPostgresOrphan
+      summary: Resume A Retained Managed Postgres Orphan
+      description: >-
+        Platform-administrator lifecycle intent update for a retained orphan.
+        The request is applied atomically to the ManagedApp spec and the
+        controller performs the CNPG resume transition; no Fugue store record
+        is created.
+      tags: [Backing Services]
+      x-fugue-handler: handleResumeManagedPostgresOrphan
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: app_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Orphan was already requested resumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresOrphanLifecycleResponse"
+        '202':
+          description: Resume intent accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresOrphanLifecycleResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/orphans/{app_id}/delete:
+    post:
+      operationId: deleteManagedPostgresOrphan
+      summary: Delete A Retained Managed Postgres Orphan
+      description: >-
+        Explicit platform-administrator deletion request. The exact app ID,
+        an active backup artifact belonging to the orphan, current
+        zero-workload storage evidence, and observed CNPG suspension are
+        required before a foreground ManagedApp deletion is submitted.
+      tags: [Backing Services]
+      x-fugue-handler: handleDeleteManagedPostgresOrphan
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: app_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManagedPostgresOrphanDeleteRequest"
+      responses:
+        '202':
+          description: Foreground deletion request accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresOrphanDeleteResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backing-services/{id}:
     get:
       operationId: getBackingService
@@ -17009,6 +17111,12 @@ components:
           format: int32
         suspended:
           type: boolean
+        runtime_phase:
+          type: string
+        ready_instances:
+          type: integer
+        desired_instances:
+          type: integer
           readOnly: true
           description: Whether the managed Postgres service is configured to hibernate with its PVCs retained. Change this state only through the backing-service suspend and resume endpoints.
         resources:
@@ -23303,6 +23411,35 @@ components:
             $ref: "#/components/schemas/BackingService"
         already_adopted:
           type: boolean
+    ManagedPostgresOrphanLifecycleResponse:
+      type: object
+      additionalProperties: false
+      required: [orphan, already_current]
+      properties:
+        orphan:
+          $ref: "#/components/schemas/ManagedPostgresOrphanSummary"
+        already_current:
+          type: boolean
+    ManagedPostgresOrphanDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [confirm_app_id, backup_artifact_id]
+      properties:
+        confirm_app_id:
+          type: string
+        backup_artifact_id:
+          type: string
+    ManagedPostgresOrphanDeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, deletion_requested, app_id]
+      properties:
+        deleted:
+          type: boolean
+        deletion_requested:
+          type: boolean
+        app_id:
+          type: string
     BackingServiceMigrateResponse:
       type: object
       additionalProperties: false

@@ -4574,6 +4574,62 @@ func TestManagedAppOrphanWorkloadAtZeroIgnoresAndPrunesTerminalPods(t *testing.T
 	}
 }
 
+func TestReconcileMissingStoreManagedPostgresLifecyclePatchesOnlyHibernationIntent(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID: "app_orphan_lifecycle", TenantID: "tenant_orphan_lifecycle", ProjectID: "project_orphan_lifecycle", Name: "retained",
+		Spec: model.AppSpec{RuntimeID: "runtime_shared", Replicas: 0},
+		BackingServices: []model.BackingService{{
+			ID: "service_orphan_lifecycle", TenantID: "tenant_orphan_lifecycle", ProjectID: "project_orphan_lifecycle",
+			Name: "retained-postgres", Type: model.BackingServiceTypePostgres, Provisioner: model.BackingServiceProvisionerManaged,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{ServiceName: "retained-postgres", RuntimeID: "runtime_shared", Instances: 1, Suspended: true}},
+		}},
+		Bindings: []model.ServiceBinding{{ID: "binding_orphan_lifecycle", TenantID: "tenant_orphan_lifecycle", AppID: "app_orphan_lifecycle", ServiceID: "service_orphan_lifecycle"}},
+	}
+	managedMap := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managed, err := runtime.ManagedAppObjectFromMap(managedMap)
+	if err != nil {
+		t.Fatalf("build managed app: %v", err)
+	}
+	managed.Metadata.UID = "managed-orphan-lifecycle-uid"
+	managed.Metadata.Generation = 2
+	clusterName := runtime.ManagedBackingServiceDeployments(app, managed.Spec.Scheduling)[0].ResourceName
+	var hibernationPatches []map[string]any
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == cloudNativePGClusterAPIPath(runtime.NamespaceForTenant(app.TenantID), clusterName):
+			return okJSONResponse(fmt.Sprintf(`{"metadata":{"name":%q,"uid":"cluster-uid","generation":3,"annotations":{"%s":"off"}},"spec":{"instances":1},"status":{"readyInstances":1}}`, clusterName, runtime.CloudNativePGHibernationAnno)), nil
+		case req.Method == http.MethodPatch && req.URL.Path == cloudNativePGClusterAPIPath(runtime.NamespaceForTenant(app.TenantID), clusterName):
+			var patch map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
+				t.Fatalf("decode hibernation patch: %v", err)
+			}
+			hibernationPatches = append(hibernationPatches, patch)
+			return okJSONResponse(`{}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+	client := &kubeClient{client: &http.Client{Transport: transport}, baseURL: "http://kube.test", bearerToken: "token"}
+	statuses, err := (&Service{}).reconcileMissingStoreManagedPostgresLifecycle(context.Background(), client, runtime.NamespaceForTenant(app.TenantID), managed, app)
+	if err != nil {
+		t.Fatalf("reconcile orphan lifecycle: %v", err)
+	}
+	if len(hibernationPatches) != 1 {
+		t.Fatalf("expected one CNPG hibernation patch, got %+v", hibernationPatches)
+	}
+	metadata := hibernationPatches[0]["metadata"].(map[string]any)
+	annotations := metadata["annotations"].(map[string]any)
+	if len(annotations) != 1 || annotations[runtime.CloudNativePGHibernationAnno] != runtime.CloudNativePGHibernationOn {
+		t.Fatalf("expected hibernation-only annotation patch, got %+v", hibernationPatches[0])
+	}
+	if len(statuses) != 1 || statuses[0].Phase != model.ManagedPostgresRuntimePhaseSuspending {
+		t.Fatalf("expected observed suspending status from pre-patch cluster, got %+v", statuses)
+	}
+}
+
 func TestManagedAppStatusServingCurrentAllowsTerminalCleanupDuringStatusError(t *testing.T) {
 	t.Parallel()
 

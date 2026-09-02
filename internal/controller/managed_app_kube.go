@@ -938,6 +938,29 @@ func (c *kubeClient) patchCloudNativePGManagedRoles(
 	return err
 }
 
+func (c *kubeClient) patchCloudNativePGHibernation(ctx context.Context, namespace, name, value string) error {
+	value = strings.TrimSpace(value)
+	if value != runtime.CloudNativePGHibernationOn && value != runtime.CloudNativePGHibernationOff {
+		return fmt.Errorf("invalid CNPG hibernation value %q", value)
+	}
+	body := map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{runtime.CloudNativePGHibernationAnno: value},
+		},
+	}
+	obj := map[string]any{
+		"apiVersion": runtime.CloudNativePGAPIVersion,
+		"kind":       runtime.CloudNativePGClusterKind,
+		"metadata": map[string]any{
+			"name":      strings.TrimSpace(name),
+			"namespace": strings.TrimSpace(namespace),
+		},
+	}
+	c.writeStats.record("patch_managed_orphan_hibernation_attempted", obj)
+	_, err := c.doRequest(ctx, http.MethodPatch, cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name), "application/merge-patch+json", body, nil)
+	return err
+}
+
 func (c *kubeClient) getDeployment(ctx context.Context, namespace, name string) (kubeDeployment, bool, error) {
 	var deployment kubeDeployment
 	status, err := c.doJSON(ctx, http.MethodGet, deploymentAPIPath(c.effectiveNamespace(namespace), name), nil, &deployment)

@@ -184,6 +184,9 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: spec.appID is empty")
 	} else if storedApp, err := s.Store.GetApp(appID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			if strings.TrimSpace(managed.Metadata.DeletionTimestamp) != "" {
+				return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphan managed app deletion requested")
+			}
 			return s.disableMissingStoreManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: app not found in store; disabled workload and retained storage for audit")
 		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
@@ -876,6 +879,17 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		managedAppOrphanWorkloadZeroVerified(managed.Status) {
 		stillZero, err := s.managedAppOrphanWorkloadAtZero(ctx, client, namespace, app)
 		if err == nil && stillZero {
+			backingServiceStatuses, reconcileErr := s.reconcileMissingStoreManagedPostgresLifecycle(ctx, client, namespace, managed, app)
+			if reconcileErr != nil {
+				return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile orphan managed postgres lifecycle: %w", reconcileErr))
+			}
+			status := managedAppDisabledOrphanStatus(managed, app, reason, backingServiceStatuses)
+			if managedAppStatusEquivalent(managed.Status, status) {
+				return nil
+			}
+			if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
+				return fmt.Errorf("patch disabled orphan managed app status %s/%s: %w", namespace, managedName, err)
+			}
 			return nil
 		}
 		// The proof condition is a cached observation, not a permanent lease.
@@ -920,17 +934,11 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		return nil
 	}
 
-	status := managedAppBaseStatus(managed, app)
-	status.Phase = runtime.ManagedAppPhaseDisabled
-	status.Message = reason
-	status.ReadyReplicas = 0
-	status.Conditions = []runtime.ManagedAppCondition{{
-		Type:               managedAppOrphanWorkloadZeroConditionType,
-		Status:             "True",
-		Reason:             "Verified",
-		Message:            "deployment and matching app pods are at zero",
-		LastTransitionTime: time.Now().UTC().Format(time.RFC3339Nano),
-	}}
+	backingServiceStatuses, err := s.reconcileMissingStoreManagedPostgresLifecycle(ctx, client, namespace, managed, app)
+	if err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile orphan managed postgres lifecycle: %w", err))
+	}
+	status := managedAppDisabledOrphanStatus(managed, app, reason, backingServiceStatuses)
 	if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
 		return fmt.Errorf("patch disabled orphan managed app status %s/%s: %w", namespace, managedName, err)
 	}
@@ -938,6 +946,67 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		s.Logger.Printf("disabled orphan managed app %s/%s: %s", namespace, managedName, reason)
 	}
 	return nil
+}
+
+func managedAppDisabledOrphanStatus(managed runtime.ManagedAppObject, app model.App, reason string, backingServiceStatuses []runtime.ManagedBackingServiceStatus) runtime.ManagedAppStatus {
+	status := managedAppBaseStatus(managed, app)
+	status.Phase = runtime.ManagedAppPhaseDisabled
+	status.Message = strings.TrimSpace(reason)
+	status.ReadyReplicas = 0
+	status.BackingServices = backingServiceStatuses
+	condition := runtime.ManagedAppCondition{
+		Type:               managedAppOrphanWorkloadZeroConditionType,
+		Status:             "True",
+		Reason:             "Verified",
+		Message:            "deployment and matching app pods are at zero",
+		LastTransitionTime: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	for _, previous := range managed.Status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(previous.Type), managedAppOrphanWorkloadZeroConditionType) &&
+			strings.EqualFold(strings.TrimSpace(previous.Status), "True") &&
+			strings.EqualFold(strings.TrimSpace(previous.Reason), "Verified") {
+			condition.LastTransitionTime = strings.TrimSpace(previous.LastTransitionTime)
+			break
+		}
+	}
+	status.Conditions = []runtime.ManagedAppCondition{condition}
+	return status
+}
+
+// reconcileMissingStoreManagedPostgresLifecycle keeps the retained database
+// runtime aligned with the orphan ManagedApp spec without recreating the app
+// workload or its Service. The ManagedApp remains the source of intent; this
+// controller is the only component that writes CNPG lifecycle state.
+func (s *Service) reconcileMissingStoreManagedPostgresLifecycle(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+) ([]runtime.ManagedBackingServiceStatus, error) {
+	deployments := runtime.ManagedBackingServiceDeployments(app, managed.Spec.Scheduling)
+	statuses := make([]runtime.ManagedBackingServiceStatus, 0, len(deployments))
+	for _, deployment := range deployments {
+		cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, deployment.ResourceName)
+		if err != nil {
+			return nil, fmt.Errorf("read retained cluster %s: %w", deployment.ResourceName, err)
+		}
+		if !found {
+			statuses = append(statuses, buildManagedBackingServiceClusterStatus(managed.Status, deployment, kubeCloudNativePGCluster{}, false))
+			continue
+		}
+		desired := runtime.CloudNativePGHibernationOff
+		if deployment.Suspended {
+			desired = runtime.CloudNativePGHibernationOn
+		}
+		if !strings.EqualFold(strings.TrimSpace(cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno]), desired) {
+			if err := client.patchCloudNativePGHibernation(ctx, namespace, deployment.ResourceName, desired); err != nil {
+				return nil, fmt.Errorf("set retained cluster %s hibernation to %s: %w", deployment.ResourceName, desired, err)
+			}
+		}
+		statuses = append(statuses, buildManagedBackingServiceClusterStatus(managed.Status, deployment, cluster, true))
+	}
+	return statuses, nil
 }
 
 func (s *Service) managedAppOrphanWorkloadAtZero(

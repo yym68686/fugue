@@ -684,10 +684,20 @@ func TestManagedPostgresOrphanListAndAdoptAreAdminOnlyAndSecretSafe(t *testing.T
 	managed := retainedManagedPostgresOrphan(tenant.ID, project.ID, databasePassword, databaseURL, repositoryToken)
 	managed.Spec.BackingServices[0].OwnerAppID = ""
 	storageMode := "ready"
+	var lifecyclePatches [][]map[string]any
 	kubeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		exactManagedAppPath := "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/namespaces/" + managed.Metadata.Namespace + "/" + runtime.ManagedAppPlural + "/" + managed.Metadata.Name
 		if r.URL.Path == exactManagedAppPath {
+			if r.Method == http.MethodPatch {
+				var patch []map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+					t.Errorf("decode managed app lifecycle patch: %v", err)
+				}
+				lifecyclePatches = append(lifecyclePatches, patch)
+				_ = json.NewEncoder(w).Encode(managed)
+				return
+			}
 			if err := json.NewEncoder(w).Encode(managed); err != nil {
 				t.Errorf("encode exact managed app: %v", err)
 			}
@@ -816,6 +826,25 @@ func TestManagedPostgresOrphanListAndAdoptAreAdminOnlyAndSecretSafe(t *testing.T
 	mustDecodeJSON(t, list, &listPayload)
 	if len(listPayload.Orphans) != 1 || listPayload.Orphans[0].AppID != managed.Spec.AppID || len(listPayload.Orphans[0].BackingServices) != 1 {
 		t.Fatalf("unexpected orphan summary: %+v", listPayload.Orphans)
+	}
+	forbiddenSuspend := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/orphans/"+managed.Spec.AppID+"/suspend", tenantKey, nil)
+	if forbiddenSuspend.Code != http.StatusForbidden {
+		t.Fatalf("expected tenant orphan suspend status %d, got %d body=%s", http.StatusForbidden, forbiddenSuspend.Code, forbiddenSuspend.Body.String())
+	}
+	alreadyResumed := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/orphans/"+managed.Spec.AppID+"/resume", bootstrapKey, nil)
+	if alreadyResumed.Code != http.StatusOK {
+		t.Fatalf("expected already resumed status %d, got %d body=%s", http.StatusOK, alreadyResumed.Code, alreadyResumed.Body.String())
+	}
+	suspend := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/orphans/"+managed.Spec.AppID+"/suspend", bootstrapKey, nil)
+	if suspend.Code != http.StatusAccepted {
+		t.Fatalf("expected orphan suspend status %d, got %d body=%s", http.StatusAccepted, suspend.Code, suspend.Body.String())
+	}
+	assertResponseOmitsSecrets(t, suspend.Body.String(), databasePassword, databaseURL, repositoryToken)
+	if len(lifecyclePatches) != 1 || len(lifecyclePatches[0]) != 2 || lifecyclePatches[0][0]["op"] != "test" || lifecyclePatches[0][0]["value"] != managed.Metadata.ResourceVersion {
+		t.Fatalf("expected one resource-version-fenced lifecycle patch, got %+v", lifecyclePatches)
+	}
+	if lifecyclePatches[0][1]["path"] != "/spec/backingServices/0/spec/postgres/suspended" || lifecyclePatches[0][1]["value"] != true {
+		t.Fatalf("expected lifecycle patch to contain only suspended field, got %+v", lifecyclePatches[0][1])
 	}
 	for _, test := range []struct {
 		mode       string

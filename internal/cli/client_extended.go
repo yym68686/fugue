@@ -229,13 +229,16 @@ type backingServiceLifecycleResponse struct {
 }
 
 type orphanBackingServiceSummary struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	RuntimeID   string `json:"runtime_id,omitempty"`
-	ServiceName string `json:"service_name,omitempty"`
-	StorageSize string `json:"storage_size,omitempty"`
-	Suspended   bool   `json:"suspended"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Type             string `json:"type"`
+	RuntimeID        string `json:"runtime_id,omitempty"`
+	ServiceName      string `json:"service_name,omitempty"`
+	StorageSize      string `json:"storage_size,omitempty"`
+	Suspended        bool   `json:"suspended"`
+	RuntimePhase     string `json:"runtime_phase,omitempty"`
+	ReadyInstances   int    `json:"ready_instances,omitempty"`
+	DesiredInstances int    `json:"desired_instances,omitempty"`
 }
 
 type orphanManagedApp struct {
@@ -258,6 +261,17 @@ type orphanManagedAppAdoptResponse struct {
 	App             model.App              `json:"app"`
 	BackingServices []model.BackingService `json:"backing_services"`
 	AlreadyAdopted  bool                   `json:"already_adopted"`
+}
+
+type orphanManagedAppLifecycleResponse struct {
+	Orphan         orphanManagedApp `json:"orphan"`
+	AlreadyCurrent bool             `json:"already_current"`
+}
+
+type orphanManagedAppDeleteResponse struct {
+	Deleted           bool   `json:"deleted"`
+	DeletionRequested bool   `json:"deletion_requested"`
+	AppID             string `json:"app_id"`
 }
 
 type createBackingServiceRequest struct {
@@ -1213,6 +1227,35 @@ func (c *Client) AdoptOrphanManagedApp(appID string) (orphanManagedAppAdoptRespo
 	var response orphanManagedAppAdoptResponse
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services/orphans", appID, "adopt"), nil, &response); err != nil {
 		return orphanManagedAppAdoptResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) SuspendOrphanManagedApp(appID string) (orphanManagedAppLifecycleResponse, error) {
+	return c.setOrphanManagedAppSuspended(appID, true)
+}
+
+func (c *Client) ResumeOrphanManagedApp(appID string) (orphanManagedAppLifecycleResponse, error) {
+	return c.setOrphanManagedAppSuspended(appID, false)
+}
+
+func (c *Client) setOrphanManagedAppSuspended(appID string, suspended bool) (orphanManagedAppLifecycleResponse, error) {
+	action := "resume"
+	if suspended {
+		action = "suspend"
+	}
+	var response orphanManagedAppLifecycleResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services/orphans", appID, action), nil, &response); err != nil {
+		return orphanManagedAppLifecycleResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) DeleteOrphanManagedApp(appID, backupArtifactID string) (orphanManagedAppDeleteResponse, error) {
+	var response orphanManagedAppDeleteResponse
+	request := map[string]string{"confirm_app_id": appID, "backup_artifact_id": backupArtifactID}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services/orphans", appID, "delete"), request, &response); err != nil {
+		return orphanManagedAppDeleteResponse{}, err
 	}
 	return response, nil
 }
