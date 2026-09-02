@@ -259,6 +259,78 @@ func TestCalculateAppObservedStatusPreservesServingLKGAfterFailedOperation(t *te
 	}
 }
 
+func TestCalculateAppObservedStatusRestoresInvalidatedLKGWithFreshRuntimeEvidence(t *testing.T) {
+	t.Parallel()
+
+	readyAt := time.Now().UTC().Add(-time.Minute)
+	failure := &model.AppOperationFailure{ID: "op-right-sizing", Type: model.OperationTypeDeploy}
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:     "registry.example/argus-runtime:v1",
+			Ports:     []int{7777},
+			Replicas:  1,
+			RuntimeID: model.DefaultManagedRuntimeID,
+		},
+		Status: model.AppStatus{
+			Phase:                 "unknown",
+			CurrentReplicas:       1,
+			CurrentReleaseReadyAt: &readyAt,
+			LastOperationID:       failure.ID,
+			LastFailedOperation:   failure,
+		},
+	}
+	managed := ManagedAppObject{
+		Spec:     ManagedAppSpec{AppSpec: app.Spec},
+		Metadata: ManagedAppMeta{Generation: 7},
+		Status: ManagedAppStatus{
+			Phase:              ManagedAppPhaseError,
+			ReadyReplicas:      1,
+			ObservedGeneration: 7,
+			Message:            "zero-downtime deploy refused",
+		},
+	}
+	status := CalculateAppObservedStatus(app, AppRuntimeObservation{
+		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
+		ObservedAt: time.Now().UTC(), ClusterID: "cluster-uid",
+		NamespacePresent: boolPointer(true), ServicePresent: boolPointer(true),
+		EndpointPresent: boolPointer(true), EndpointReady: boolPointer(true),
+		PhysicalReplicas: intPointer(1), PhysicalDesiredReplicas: intPointer(1), ImagePresent: boolPointer(true),
+	})
+	if status.Phase != "deployed" || status.Reason != AppObservationReasonManagedAppErrorLKGServing {
+		t.Fatalf("fresh runtime evidence must restore the invalidated serving LKG: %+v", status)
+	}
+}
+
+func TestCalculateAppObservedStatusDoesNotRestoreUnknownWithoutCompletedLKG(t *testing.T) {
+	t.Parallel()
+
+	failure := &model.AppOperationFailure{ID: "op-initial", Type: model.OperationTypeDeploy}
+	app := model.App{
+		Spec: model.AppSpec{Image: "registry.example/runtime:v1", Ports: []int{7777}, Replicas: 1},
+		Status: model.AppStatus{
+			Phase:               "unknown",
+			CurrentReplicas:     1,
+			LastOperationID:     failure.ID,
+			LastFailedOperation: failure,
+		},
+	}
+	managed := ManagedAppObject{
+		Spec:     ManagedAppSpec{AppSpec: app.Spec},
+		Metadata: ManagedAppMeta{Generation: 1},
+		Status:   ManagedAppStatus{Phase: ManagedAppPhaseError, ReadyReplicas: 1, ObservedGeneration: 1},
+	}
+	status := CalculateAppObservedStatus(app, AppRuntimeObservation{
+		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
+		ObservedAt: time.Now().UTC(), ClusterID: "cluster-uid",
+		NamespacePresent: boolPointer(true), ServicePresent: boolPointer(true),
+		EndpointPresent: boolPointer(true), EndpointReady: boolPointer(true),
+		PhysicalReplicas: intPointer(1), PhysicalDesiredReplicas: intPointer(1), ImagePresent: boolPointer(true),
+	})
+	if status.Phase != "failed" || status.Reason != AppObservationReasonManagedAppError {
+		t.Fatalf("unknown status without a completed durable release must remain failed: %+v", status)
+	}
+}
+
 func TestCalculateAppObservedStatusDoesNotPromoteInitialFailureToLKG(t *testing.T) {
 	t.Parallel()
 

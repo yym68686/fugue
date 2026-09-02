@@ -212,11 +212,11 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 }
 
 func appObservedServingLKG(app model.App, observed model.AppObservedStatus) bool {
-	storedPhase := strings.TrimSpace(app.Status.Phase)
+	stored := app.Status
 	if app.StoredStatus != nil {
-		storedPhase = strings.TrimSpace(app.StoredStatus.Phase)
+		stored = *app.StoredStatus
 	}
-	if !strings.EqualFold(storedPhase, "deployed") || app.Spec.Replicas <= 0 ||
+	if !appHasDurableServingLKG(stored, app.Spec.Replicas) || app.Spec.Replicas <= 0 ||
 		!observed.Fresh || observed.DesiredReplicas != app.Spec.Replicas ||
 		observed.Generation <= 0 || observed.ObservedGeneration < observed.Generation ||
 		len(observed.InvariantViolations) > 0 {
@@ -235,6 +235,21 @@ func appObservedServingLKG(app model.App, observed model.AppObservedStatus) bool
 		return false
 	}
 	return true
+}
+
+func appHasDurableServingLKG(status model.AppStatus, desiredReplicas int) bool {
+	if strings.EqualFold(strings.TrimSpace(status.Phase), "deployed") {
+		return true
+	}
+	// A failed operation intentionally invalidates the durable green phase
+	// until the runtime observer proves what is still serving. The retained
+	// ready timestamp and replica count identify an earlier completed release;
+	// they are never sufficient without the fresh physical checks above.
+	return strings.EqualFold(strings.TrimSpace(status.Phase), "unknown") &&
+		desiredReplicas > 0 &&
+		status.CurrentReleaseReadyAt != nil &&
+		status.CurrentReplicas >= desiredReplicas &&
+		model.AppHasCurrentFailedOperation(status)
 }
 
 func cloneBoolPointer(in *bool) *bool {
