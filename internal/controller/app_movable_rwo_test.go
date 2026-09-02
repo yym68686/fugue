@@ -359,6 +359,9 @@ func TestMigrateDesiredSpecPreservesManagedPostgresRuntime(t *testing.T) {
 		Name: "demo",
 		Spec: model.AppSpec{
 			RuntimeID: "runtime_a",
+			Image:     "ghcr.io/example/demo:new",
+			Env:       map[string]string{"RIGHTSIZED": "current"},
+			Resources: &model.ResourceSpec{CPUMilliCores: 65},
 			Postgres: &model.AppPostgresSpec{
 				Database:  "demo",
 				User:      "demo",
@@ -368,6 +371,9 @@ func TestMigrateDesiredSpecPreservesManagedPostgresRuntime(t *testing.T) {
 	}
 	desired := current.Spec
 	desired.RuntimeID = "runtime_b"
+	desired.Image = "ghcr.io/example/demo:stale"
+	desired.Env = map[string]string{"RIGHTSIZED": "stale"}
+	desired.Resources = &model.ResourceSpec{CPUMilliCores: 85}
 	desired.Postgres = &model.AppPostgresSpec{
 		Database:  "demo",
 		User:      "demo",
@@ -383,5 +389,14 @@ func TestMigrateDesiredSpecPreservesManagedPostgresRuntime(t *testing.T) {
 	}
 	if got := prepared.Postgres.RuntimeID; got != "runtime_db_source" {
 		t.Fatalf("expected managed postgres runtime to stay on source until database switchover, got %q", got)
+	}
+	if got := prepared.Image; got != "ghcr.io/example/demo:new" {
+		t.Fatalf("expected latest image to survive queued migration, got %q", got)
+	}
+	if got := prepared.Env["RIGHTSIZED"]; got != "current" {
+		t.Fatalf("expected latest environment to survive queued migration, got %q", got)
+	}
+	if prepared.Resources == nil || prepared.Resources.CPUMilliCores != 65 {
+		t.Fatalf("expected latest right-sized resources to survive queued migration, got %#v", prepared.Resources)
 	}
 }

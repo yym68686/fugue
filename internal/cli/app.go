@@ -455,6 +455,7 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
+					response.App = redactAppForOutput(response.App)
 					return writeJSON(c.stdout, response)
 				}
 				return writeAppMoveImpact(c.stdout, response.Impact)

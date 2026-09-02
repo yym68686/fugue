@@ -747,6 +747,20 @@ func (c *Client) GetOperation(id string) (model.Operation, error) {
 	return response.Operation, nil
 }
 
+func (c *Client) CancelOperation(id, message string) (model.Operation, error) {
+	var response struct {
+		Operation model.Operation `json:"operation"`
+	}
+	req := map[string]string{}
+	if strings.TrimSpace(message) != "" {
+		req["message"] = strings.TrimSpace(message)
+	}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/operations", id, "cancel"), req, &response); err != nil {
+		return model.Operation{}, err
+	}
+	return response.Operation, nil
+}
+
 func (c *Client) GetOperationDiagnosis(id string) (model.OperationDiagnosis, error) {
 	var response struct {
 		Diagnosis model.OperationDiagnosis `json:"diagnosis"`

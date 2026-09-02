@@ -217,9 +217,11 @@ type backingServiceResponse struct {
 }
 
 type backingServiceMigrateResponse struct {
-	BackingService model.BackingService `json:"backing_service"`
-	Operation      *model.Operation     `json:"operation,omitempty"`
-	AlreadyCurrent bool                 `json:"already_current,omitempty"`
+	BackingService  model.BackingService `json:"backing_service"`
+	Operation       *model.Operation     `json:"operation,omitempty"`
+	AlreadyCurrent  bool                 `json:"already_current,omitempty"`
+	DryRun          bool                 `json:"dry_run,omitempty"`
+	TargetRuntimeID string               `json:"target_runtime_id,omitempty"`
 }
 
 type backingServiceLifecycleResponse struct {
@@ -1190,8 +1192,19 @@ func (c *Client) DeleteBackingService(id string) (model.BackingService, error) {
 }
 
 func (c *Client) MigrateBackingService(id, targetRuntimeID string) (backingServiceMigrateResponse, error) {
+	return c.migrateBackingService(id, targetRuntimeID, false)
+}
+
+func (c *Client) MigrateBackingServiceDryRun(id, targetRuntimeID string) (backingServiceMigrateResponse, error) {
+	return c.migrateBackingService(id, targetRuntimeID, true)
+}
+
+func (c *Client) migrateBackingService(id, targetRuntimeID string, dryRun bool) (backingServiceMigrateResponse, error) {
 	var response backingServiceMigrateResponse
-	request := map[string]string{"target_runtime_id": strings.TrimSpace(targetRuntimeID)}
+	request := map[string]any{"target_runtime_id": strings.TrimSpace(targetRuntimeID)}
+	if dryRun {
+		request["dry_run"] = true
+	}
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, "migrate"), request, &response); err != nil {
 		return backingServiceMigrateResponse{}, err
 	}

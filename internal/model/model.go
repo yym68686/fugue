@@ -178,6 +178,7 @@ const (
 	OperationStatusWaitingAgent = "waiting-agent"
 	OperationStatusCompleted    = "completed"
 	OperationStatusFailed       = "failed"
+	OperationStatusCanceled     = "canceled"
 
 	ImageLocationStatusPresent = "present"
 	ImageLocationStatusMissing = "missing"

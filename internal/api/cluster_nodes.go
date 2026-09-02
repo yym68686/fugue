@@ -198,8 +198,9 @@ type clusterNodePod struct {
 }
 
 type clusterNodeContainer struct {
-	Name      string                          `json:"name,omitempty"`
-	Resources clusterNodeResourceRequirements `json:"resources,omitempty"`
+	Name          string                          `json:"name,omitempty"`
+	RestartPolicy string                          `json:"restartPolicy,omitempty"`
+	Resources     clusterNodeResourceRequirements `json:"resources,omitempty"`
 }
 
 type clusterNodeResourceRequirements struct {
@@ -1427,12 +1428,33 @@ func clusterNodePodRequests(pods []clusterNodePod) clusterNodeResourceRequests {
 
 func clusterNodeSinglePodRequests(pod clusterNodePod) clusterNodeResourceRequests {
 	regular := clusterNodeContainerRequests(pod.Spec.Containers)
-	init := clusterNodeMaxContainerRequests(pod.Spec.InitContainers)
+	restartableInit, peakInit := clusterNodeInitContainerRequests(pod.Spec.InitContainers)
 	return clusterNodeResourceRequests{
-		cpuMilliCores:         maxInt64(regular.cpuMilliCores, init.cpuMilliCores),
-		memoryBytes:           maxInt64(regular.memoryBytes, init.memoryBytes),
-		ephemeralStorageBytes: maxInt64(regular.ephemeralStorageBytes, init.ephemeralStorageBytes),
+		cpuMilliCores:         maxInt64(regular.cpuMilliCores+restartableInit.cpuMilliCores, peakInit.cpuMilliCores),
+		memoryBytes:           maxInt64(regular.memoryBytes+restartableInit.memoryBytes, peakInit.memoryBytes),
+		ephemeralStorageBytes: maxInt64(regular.ephemeralStorageBytes+restartableInit.ephemeralStorageBytes, peakInit.ephemeralStorageBytes),
 	}
+}
+
+func clusterNodeInitContainerRequests(containers []clusterNodeContainer) (clusterNodeResourceRequests, clusterNodeResourceRequests) {
+	var restartable, peak clusterNodeResourceRequests
+	for _, container := range containers {
+		current := clusterNodeContainerRequests([]clusterNodeContainer{container})
+		if strings.EqualFold(strings.TrimSpace(container.RestartPolicy), "Always") {
+			restartable.cpuMilliCores += current.cpuMilliCores
+			restartable.memoryBytes += current.memoryBytes
+			restartable.ephemeralStorageBytes += current.ephemeralStorageBytes
+			current = restartable
+		} else {
+			current.cpuMilliCores += restartable.cpuMilliCores
+			current.memoryBytes += restartable.memoryBytes
+			current.ephemeralStorageBytes += restartable.ephemeralStorageBytes
+		}
+		peak.cpuMilliCores = maxInt64(peak.cpuMilliCores, current.cpuMilliCores)
+		peak.memoryBytes = maxInt64(peak.memoryBytes, current.memoryBytes)
+		peak.ephemeralStorageBytes = maxInt64(peak.ephemeralStorageBytes, current.ephemeralStorageBytes)
+	}
+	return restartable, peak
 }
 
 func clusterNodeContainerRequests(containers []clusterNodeContainer) clusterNodeResourceRequests {

@@ -4058,6 +4058,54 @@ func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 	return op, nil
 }
 
+// CancelOperation cancels an operation only while it is still pending. Once a
+// worker has claimed an operation, especially a database migration, callers
+// must observe/recover it rather than pretending that cancellation is safe.
+func (s *Store) CancelOperation(id, message string) (model.Operation, error) {
+	if s.usingDatabase() {
+		op, err := s.pgCancelOperation(id, message)
+		if err != nil {
+			return op, err
+		}
+		if op.Type == model.OperationTypeMigrate {
+			if ledgerErr := s.recordMigrationFailureLedger(op, op.ResultMessage, model.OperationEvidenceSourceAPI); ledgerErr != nil {
+				return op, ledgerErr
+			}
+		}
+		return op, nil
+	}
+	var op model.Operation
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findOperation(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if state.Operations[index].Status != model.OperationStatusPending {
+			return ErrConflict
+		}
+		now := time.Now().UTC()
+		state.Operations[index].Status = model.OperationStatusCanceled
+		state.Operations[index].UpdatedAt = now
+		state.Operations[index].CompletedAt = &now
+		state.Operations[index].ResultMessage = strings.TrimSpace(message)
+		if state.Operations[index].ResultMessage == "" {
+			state.Operations[index].ResultMessage = "operation canceled before execution"
+		}
+		applyCanceledOperationToApp(state, &state.Operations[index])
+		op = state.Operations[index]
+		return nil
+	})
+	if err != nil {
+		return op, err
+	}
+	if op.Type == model.OperationTypeMigrate {
+		if ledgerErr := s.recordMigrationFailureLedger(op, op.ResultMessage, model.OperationEvidenceSourceAPI); ledgerErr != nil {
+			return op, ledgerErr
+		}
+	}
+	return op, nil
+}
+
 // FailAssignedAgentOperation atomically rejects a task that is still waiting
 // for the specific runtime agent that requested the poll. This prevents a
 // stale agent response from failing an operation after another worker has
@@ -5252,6 +5300,24 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 	app.Status.LastFailedOperation = model.AppOperationFailureFromOperation(*op)
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
+}
+
+func applyCanceledOperationToApp(state *model.State, op *model.Operation) {
+	appIndex := findApp(state, op.AppID)
+	if appIndex < 0 || isManagedPostgresServiceOperation(op.Type) || isDeletedApp(state.Apps[appIndex]) {
+		return
+	}
+	app := &state.Apps[appIndex]
+	if phase, ok := fallbackLiveAppPhase(*app); ok {
+		app.Status.Phase = phase
+	} else {
+		app.Status.Phase = "unknown"
+	}
+	app.Status.LastOperationID = op.ID
+	app.Status.LastMessage = strings.TrimSpace(op.ResultMessage)
+	app.Status.LastFailedOperation = nil
+	app.Status.UpdatedAt = time.Now().UTC()
+	app.UpdatedAt = app.Status.UpdatedAt
 }
 
 func deleteProjectsByTenant(projects []model.Project, tenantID string) []model.Project {

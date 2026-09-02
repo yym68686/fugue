@@ -28,6 +28,7 @@ func (c *CLI) newOpsCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newOpsListCommand(),
 		c.newOpsShowCommand(),
+		c.newOpsCancelCommand(),
 		c.newOpsExplainCommand(),
 		c.newOpsEvidenceCommand(),
 		c.newOpsTimelineCommand(),
@@ -35,6 +36,39 @@ func (c *CLI) newOpsCommand() *cobra.Command {
 		c.newOpsWatchCommand(),
 		c.newOpsAuditCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newOpsCancelCommand() *cobra.Command {
+	opts := struct {
+		Confirm bool
+		Message string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "cancel <operation>",
+		Short: "Cancel a pending operation before execution",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !opts.Confirm {
+				return fmt.Errorf("operation cancel changes control-plane state; rerun with --confirm")
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			op, err := client.CancelOperation(args[0], opts.Message)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"operation": redactOperationForOutput(op)})
+			}
+			_, err = fmt.Fprintf(c.stdout, "operation=%s\nstatus=%s\nmessage=%s\n", op.ID, op.Status, op.ResultMessage)
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&opts.Confirm, "confirm", false, "Confirm canceling the pending operation")
+	cmd.Flags().StringVar(&opts.Message, "message", "", "Optional cancellation reason")
 	return cmd
 }
 

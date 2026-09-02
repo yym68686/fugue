@@ -4610,6 +4610,49 @@ func (s *Store) pgFailOperation(id, message string) (model.Operation, error) {
 	return op, nil
 }
 
+func (s *Store) pgCancelOperation(id, message string) (model.Operation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Operation{}, fmt.Errorf("begin cancel operation transaction: %w", err)
+	}
+	defer tx.Rollback()
+	op, err := s.pgGetOperationTx(ctx, tx, id, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	if op.Status != model.OperationStatusPending {
+		return model.Operation{}, ErrConflict
+	}
+	now := time.Now().UTC()
+	op.Status = model.OperationStatusCanceled
+	op.UpdatedAt = now
+	op.CompletedAt = &now
+	op.ResultMessage = strings.TrimSpace(message)
+	if op.ResultMessage == "" {
+		op.ResultMessage = "operation canceled before execution"
+	}
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	applyCanceledOperationToAppModel(&app, &op)
+	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.notifyOperationTx(ctx, tx, op.ID); err != nil {
+		return model.Operation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Operation{}, fmt.Errorf("commit cancel operation transaction: %w", err)
+	}
+	return op, nil
+}
+
 func (s *Store) pgFailAssignedAgentOperation(id, runtimeID, message string) (model.Operation, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -6137,6 +6180,22 @@ func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 	app.Status.LastFailedOperation = model.AppOperationFailureFromOperation(*op)
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
+}
+
+func applyCanceledOperationToAppModel(app *model.App, op *model.Operation) {
+	if app == nil || isManagedPostgresServiceOperation(op.Type) || isDeletedApp(*app) {
+		return
+	}
+	if phase, ok := fallbackLiveAppPhase(*app); ok {
+		app.Status.Phase = phase
+	} else {
+		app.Status.Phase = "unknown"
+	}
+	app.Status.LastOperationID = op.ID
+	app.Status.LastMessage = strings.TrimSpace(op.ResultMessage)
+	app.Status.LastFailedOperation = nil
+	app.Status.UpdatedAt = time.Now().UTC()
+	app.UpdatedAt = app.Status.UpdatedAt
 }
 
 func sqlPlaceholderList(start, count int) string {

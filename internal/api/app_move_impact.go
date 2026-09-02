@@ -17,7 +17,6 @@ func (s *Server) buildAppMoveImpact(app model.App, targetRuntimeID string) model
 		DryRun:          true,
 		Pass:            true,
 		RollbackRef:     "app-move://" + strings.TrimSpace(app.ID) + "/rollback/" + targetRuntimeID,
-		OperationChain:  []string{"quiesce", "snapshot_or_dump", "target_pvc_create", "restore", "permission_verify", "switch", "cleanup"},
 		GeneratedAt:     time.Now().UTC(),
 	}
 	if targetRuntimeID == "" {
@@ -161,7 +160,26 @@ func (s *Server) buildAppMoveImpact(app model.App, targetRuntimeID string) model
 	if !impact.Pass && len(impact.Blockers) == 0 {
 		impact.Blockers = append(impact.Blockers, fmt.Sprintf("app %s cannot move to %s", app.ID, targetRuntimeID))
 	}
+	impact.OperationChain = appMoveOperationChain(impact)
 	return impact
+}
+
+func appMoveOperationChain(impact model.AppMoveImpact) []string {
+	chain := make([]string, 0, 8)
+	for _, database := range impact.Databases {
+		if database.RequiresLocalization {
+			chain = append(chain, "database_localize")
+			break
+		}
+	}
+	for _, volume := range impact.Volumes {
+		if volume.Strategy != "rwo_snapshot_restore" {
+			continue
+		}
+		chain = append(chain, "quiesce", "snapshot_or_dump", "target_pvc_create", "restore", "permission_verify")
+		break
+	}
+	return append(chain, "switch", "cleanup")
 }
 
 // The app-move API does not itself execute a backup/restore.  App-owned CNPG

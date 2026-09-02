@@ -437,6 +437,26 @@ func TestMigrateBackingServiceQueuesManagedPostgresSwitchover(t *testing.T) {
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	dryRunRecorder := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/"+service.ID+"/migrate", apiKey, map[string]any{
+		"target_runtime_id": targetRuntime.ID,
+		"dry_run":           true,
+	})
+	if dryRunRecorder.Code != http.StatusOK {
+		t.Fatalf("expected dry-run status %d, got %d body=%s", http.StatusOK, dryRunRecorder.Code, dryRunRecorder.Body.String())
+	}
+	var dryRunResponse struct {
+		DryRun    bool             `json:"dry_run"`
+		Operation *model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, dryRunRecorder, &dryRunResponse)
+	if !dryRunResponse.DryRun || dryRunResponse.Operation != nil {
+		t.Fatalf("expected dry-run response without operation, got %+v", dryRunResponse)
+	}
+	if operations, listErr := s.ListOperations(tenant.ID, false); listErr != nil {
+		t.Fatalf("list operations after dry-run: %v", listErr)
+	} else if len(operations) != 0 {
+		t.Fatalf("dry-run must not create an operation, got %+v", operations)
+	}
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/"+service.ID+"/migrate", apiKey, map[string]any{
 		"target_runtime_id": targetRuntime.ID,
 	})

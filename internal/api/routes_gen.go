@@ -375,6 +375,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/nodes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetNode)))
 	mux.Handle("GET /v1/operations", s.auth.RequireAPI(http.HandlerFunc(s.handleListOperations)))
 	mux.Handle("GET /v1/operations/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperation)))
+	mux.Handle("POST /v1/operations/{id}/cancel", s.auth.RequireAPI(http.HandlerFunc(s.handleCancelOperation)))
 	mux.Handle("GET /v1/operations/{id}/debug-bundle", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperationDebugBundle)))
 	mux.Handle("GET /v1/operations/{id}/diagnosis", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperationDiagnosis)))
 	mux.Handle("GET /v1/operations/{id}/evidence", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperationEvidence)))

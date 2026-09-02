@@ -6403,6 +6403,8 @@ paths:
               properties:
                 target_runtime_id:
                   type: string
+                dry_run:
+                  type: boolean
       responses:
         '200':
           description: Backing service already targets the requested runtime
@@ -8336,6 +8338,35 @@ paths:
       responses:
         '200':
           description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/operations/{id}/cancel:
+    post:
+      operationId: cancelOperation
+      summary: Cancel Pending Operation
+      tags: [Operations]
+      x-fugue-handler: handleCancelOperation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                message:
+                  type: string
+      responses:
+        '200':
+          description: Pending operation canceled
           content:
             application/json:
               schema:
@@ -23464,6 +23495,10 @@ components:
           $ref: "#/components/schemas/BackingService"
         already_current:
           type: boolean
+        dry_run:
+          type: boolean
+        target_runtime_id:
+          type: string
         operation:
           $ref: "#/components/schemas/Operation"
     AppListResponse:

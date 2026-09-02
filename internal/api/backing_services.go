@@ -113,6 +113,7 @@ func (s *Server) handleMigrateBackingService(w http.ResponseWriter, r *http.Requ
 	}
 	var req struct {
 		TargetRuntimeID string `json:"target_runtime_id"`
+		DryRun          bool   `json:"dry_run"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -123,10 +124,30 @@ func (s *Server) handleMigrateBackingService(w http.ResponseWriter, r *http.Requ
 		s.writeStoreError(w, store.ErrInvalidInput)
 		return
 	}
+	targetRuntime, err := s.store.GetRuntime(targetRuntimeID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	visible, err := s.store.RuntimeVisibleToTenant(targetRuntimeID, service.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !visible {
+		httpx.WriteError(w, http.StatusForbidden, "target runtime is not visible to this tenant")
+		return
+	}
+	if targetRuntime.Type != model.RuntimeTypeManagedOwned && targetRuntime.Type != model.RuntimeTypeManagedShared {
+		httpx.WriteError(w, http.StatusBadRequest, "backing service migration requires a managed target runtime")
+		return
+	}
 	if backingServiceRuntimeID(service) == targetRuntimeID {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
-			"backing_service": cloneBackingService(service),
-			"already_current": true,
+			"backing_service":   cloneBackingService(service),
+			"already_current":   true,
+			"dry_run":           req.DryRun,
+			"target_runtime_id": targetRuntimeID,
 		})
 		return
 	}
@@ -138,6 +159,15 @@ func (s *Server) handleMigrateBackingService(w http.ResponseWriter, r *http.Requ
 	app, err := s.backingServiceSwitchoverApp(service)
 	if err != nil {
 		s.writeStoreError(w, err)
+		return
+	}
+	if req.DryRun {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"backing_service":   cloneBackingService(service),
+			"already_current":   false,
+			"dry_run":           true,
+			"target_runtime_id": targetRuntimeID,
+		})
 		return
 	}
 	op, err := s.store.CreateOperation(model.Operation{

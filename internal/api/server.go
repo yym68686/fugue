@@ -1730,6 +1730,46 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 
+func (s *Server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("project.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.write or project.write scope")
+		return
+	}
+	op, err := s.loadAuthorizedOperation(principal, r.PathValue("id"))
+	if err != nil {
+		s.writeOperationReadError(w, err)
+		return
+	}
+	message := "operation canceled before execution"
+	var req struct {
+		Message string `json:"message"`
+	}
+	if r.Body != nil && r.ContentLength > 0 {
+		if decodeErr := httpx.DecodeJSON(r, &req); decodeErr != nil {
+			httpx.WriteError(w, http.StatusBadRequest, decodeErr.Error())
+			return
+		}
+		if strings.TrimSpace(req.Message) != "" {
+			message = strings.TrimSpace(req.Message)
+		}
+	}
+	canceled, err := s.store.CancelOperation(op.ID, message)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			httpx.WriteError(w, http.StatusConflict, "operation is already running or terminal; only pending operations can be canceled")
+			return
+		}
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "operation.cancel", "operation", canceled.ID, canceled.TenantID, map[string]string{
+		"operation_type": canceled.Type,
+		"reason":         canceled.ResultMessage,
+	})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(canceled)})
+}
+
 const (
 	defaultAuditEventListLimit = 200
 	maxAuditEventListLimit     = 1000

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -580,15 +581,10 @@ func (s *Store) pgUpsertImageReplicationTask(task model.ImageReplicationTask) (m
 	// Serialize the read-then-upsert identity check across controller replicas.
 	// Without this transaction-scoped lock, concurrent schedulers can both see
 	// no active task and insert duplicate replication work.
-	identity := strings.Join([]string{
-		strings.TrimSpace(task.ID),
-		task.ImageID,
-		task.SourceReplicaID,
-		task.TargetNodeID,
-		task.TargetRuntimeID,
-		task.TargetClusterNodeName,
-		task.Priority,
-	}, "\x00")
+	identity, err := imageReplicationTaskAdvisoryLockIdentity(task)
+	if err != nil {
+		return model.ImageReplicationTask{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, identity); err != nil {
 		return model.ImageReplicationTask{}, mapDBErr(err)
 	}
@@ -656,6 +652,25 @@ RETURNING `+imageReplicationTaskColumns(), task.ID, task.ImageID, nullIfEmpty(ta
 		return model.ImageReplicationTask{}, mapDBErr(err)
 	}
 	return inserted, nil
+}
+
+func imageReplicationTaskAdvisoryLockIdentity(task model.ImageReplicationTask) (string, error) {
+	identityParts := []string{
+		task.ImageID,
+		task.SourceReplicaID,
+		task.TargetNodeID,
+		task.TargetRuntimeID,
+		task.TargetClusterNodeName,
+		task.Priority,
+	}
+	if id := strings.TrimSpace(task.ID); id != "" {
+		identityParts = []string{"id", id}
+	}
+	encoded, err := json.Marshal(identityParts)
+	if err != nil {
+		return "", fmt.Errorf("encode image replication task advisory lock identity: %w", err)
+	}
+	return "image-replication-task:" + string(encoded), nil
 }
 
 func (s *Store) pgListImageReplicationTasks(filter model.ImageReplicationTaskFilter) ([]model.ImageReplicationTask, error) {

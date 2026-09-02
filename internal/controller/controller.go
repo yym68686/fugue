@@ -990,15 +990,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			}
 			app.Spec.RuntimeID = op.TargetRuntimeID
 		}
-		buildSource := model.AppBuildSource(app)
-		if op.DesiredSource != nil {
-			buildSource = model.CloneAppSource(op.DesiredSource)
-		}
-		originSource := model.AppOriginSource(app)
-		if op.DesiredOriginSource != nil {
-			originSource = model.CloneAppSource(op.DesiredOriginSource)
-		}
-		model.SetAppSourceState(&app, originSource, buildSource)
+		// A move owns placement only. Rebase it onto the latest stable source so
+		// a queued migration cannot roll back an intervening deploy or build.
+		model.SetAppSourceState(&app, model.AppOriginSource(currentApp), model.AppBuildSource(currentApp))
 	default:
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}
@@ -1307,10 +1301,11 @@ func (s *Service) recordOperationControllerTiming(operationID string, segments [
 }
 
 func migrateDesiredSpecForManagedOperation(currentApp model.App, desired model.AppSpec) model.AppSpec {
-	if database := store.OwnedManagedPostgresSpec(currentApp); database != nil {
-		desired.Postgres = cloneControllerPostgresSpec(database)
-	}
-	return desired
+	// A move request only owns RuntimeID. All other desired state may have
+	// legitimately advanced while the operation waited behind another lane.
+	rebased := *cloneControllerAppSpec(&currentApp.Spec)
+	rebased.RuntimeID = strings.TrimSpace(desired.RuntimeID)
+	return rebased
 }
 
 func (s *Service) managedSchedulingConstraints(runtimeID string) (runtime.SchedulingConstraints, error) {

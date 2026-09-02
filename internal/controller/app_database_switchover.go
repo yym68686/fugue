@@ -1076,7 +1076,9 @@ func (s *Service) applyManagedDesiredAppState(
 	if err != nil {
 		return runtime.Bundle{}, fmt.Errorf("render managed app manifest for app %s: %w", app.ID, err)
 	}
-	applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, operationID)
+	applyCtx := withForceExistingCloudNativePGWrites(
+		withManagedAppApplySource(ctx, managedAppApplySourceOperation, operationID),
+	)
 	if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
 		return runtime.Bundle{}, fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 	}

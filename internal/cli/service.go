@@ -264,6 +264,7 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 		RuntimeName string
 		RuntimeID   string
 		Wait        bool
+		DryRun      bool
 	}{Wait: true}
 	cmd := &cobra.Command{
 		Use:     "move <service>",
@@ -292,6 +293,24 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 			service, err = client.GetBackingService(service.ID)
 			if err != nil {
 				return err
+			}
+			if opts.DryRun {
+				response, err := client.MigrateBackingServiceDryRun(service.ID, runtimeID)
+				if err != nil {
+					return err
+				}
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, map[string]any{
+						"backing_service":   redactBackingServiceForOutput(response.BackingService),
+						"already_current":   response.AlreadyCurrent,
+						"dry_run":           true,
+						"target_runtime_id": response.TargetRuntimeID,
+					})
+				}
+				if _, err := fmt.Fprintf(c.stdout, "dry_run=true\ntarget_runtime_id=%s\nalready_current=%t\n", runtimeID, response.AlreadyCurrent); err != nil {
+					return err
+				}
+				return c.renderBackingServiceDetail(client, redactBackingServiceForOutput(response.BackingService))
 			}
 			response, err := client.MigrateBackingService(service.ID, runtimeID)
 			if err != nil {
@@ -328,6 +347,7 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.RuntimeName, "to", "", "Target runtime name")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Target runtime ID")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for backing service switchover completion")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Validate the move without creating an operation")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	return cmd
 }
