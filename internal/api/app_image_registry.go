@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/appimages"
+
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -61,7 +63,7 @@ func newRemoteAppImageRegistry() appImageRegistry {
 }
 
 func (r *remoteAppImageRegistry) InspectImage(ctx context.Context, imageRef string) (appImageRegistryInspectResult, error) {
-	normalized := strings.TrimSpace(imageRef)
+	normalized := appimages.SanitizeImageRef(imageRef)
 	if normalized == "" {
 		return appImageRegistryInspectResult{}, fmt.Errorf("image_ref is required")
 	}
@@ -103,7 +105,7 @@ func (r *remoteAppImageRegistry) InspectImage(ctx context.Context, imageRef stri
 }
 
 func (r *remoteAppImageRegistry) DeleteImage(ctx context.Context, imageRef string) (appImageRegistryDeleteResult, error) {
-	normalized := strings.TrimSpace(imageRef)
+	normalized := appimages.SanitizeImageRef(imageRef)
 	if normalized == "" {
 		return appImageRegistryDeleteResult{}, fmt.Errorf("image_ref is required")
 	}
@@ -283,7 +285,8 @@ func addAppImageBlobSize(blobSizes map[string]int64, digest string, sizeBytes in
 }
 
 func parseAppImageRegistryReference(imageRef string) (name.Reference, error) {
-	ref, err := name.ParseReference(strings.TrimSpace(imageRef), appImageRegistryNameOptions(imageRef)...)
+	imageRef = appimages.SanitizeImageRef(imageRef)
+	ref, err := name.ParseReference(imageRef, appImageRegistryNameOptions(imageRef)...)
 	if err != nil {
 		return nil, fmt.Errorf("parse image_ref: %w", err)
 	}

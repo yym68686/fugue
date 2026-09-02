@@ -220,6 +220,18 @@ func (s *Store) ListImageLocations(filter model.ImageLocationFilter) ([]model.Im
 }
 
 func normalizeImageLocation(location model.ImageLocation) model.ImageLocation {
+	location.ID = stripImageNUL(location.ID)
+	location.TenantID = stripImageNUL(location.TenantID)
+	location.AppID = stripImageNUL(location.AppID)
+	location.ImageRef = stripImageNUL(location.ImageRef)
+	location.Digest = stripImageNUL(location.Digest)
+	location.SourceOperationID = stripImageNUL(location.SourceOperationID)
+	location.NodeID = stripImageNUL(location.NodeID)
+	location.RuntimeID = stripImageNUL(location.RuntimeID)
+	location.ClusterNodeName = stripImageNUL(location.ClusterNodeName)
+	location.CacheEndpoint = stripImageNUL(location.CacheEndpoint)
+	location.Status = stripImageNUL(location.Status)
+	location.LastError = stripImageNUL(location.LastError)
 	location.TenantID = strings.TrimSpace(location.TenantID)
 	location.AppID = strings.TrimSpace(location.AppID)
 	location.ImageRef = strings.TrimSpace(location.ImageRef)

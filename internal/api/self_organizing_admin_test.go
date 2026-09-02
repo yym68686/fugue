@@ -121,6 +121,28 @@ func TestRegistryReachabilityCheckFallsBackToReadyNodeLocalImageCache(t *testing
 	}
 }
 
+func TestDistributedRegistryCompatibilityDoesNotProbeLogicalHostname(t *testing.T) {
+	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apis/apps/v1/namespaces/fugue-system/daemonsets" {
+			t.Fatalf("unexpected kubernetes path %q", r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"fugue-fugue-image-cache","labels":{"app.kubernetes.io/component":"image-cache","app.kubernetes.io/instance":"fugue"}},"status":{"desiredNumberScheduled":2,"numberReady":2,"numberAvailable":2,"updatedNumberScheduled":2}}]}`))
+	}))
+	defer kube.Close()
+	server := &Server{
+		imageStoreMode: "distributed", registryPushBase: "registry.fugue.internal:5000", registryPullBase: "registry.fugue.internal:5000",
+		clusterJoinRegistryEndpoint: "http://127.0.0.1:5000", controlPlaneNamespace: "fugue-system", controlPlaneReleaseInstance: "fugue",
+		newClusterNodeClient: func() (*clusterNodeClient, error) {
+			return &clusterNodeClient{client: kube.Client(), baseURL: kube.URL}, nil
+		},
+	}
+	pass, message := server.registryReachabilityCheck(context.Background())
+	if !pass || !strings.Contains(message, "node-local registry mirrors") || strings.Contains(message, "legacy push endpoint unavailable") {
+		t.Fatalf("unexpected distributed registry compatibility result: pass=%t message=%q", pass, message)
+	}
+}
+
 func TestImageCacheDaemonSetAvailabilityHonorsConfiguredMinimum(t *testing.T) {
 	tests := []struct {
 		name            string

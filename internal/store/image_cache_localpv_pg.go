@@ -642,7 +642,7 @@ func scanImageCacheManifest(scanner sqlScanner) (model.ImageCacheManifest, error
 	if createdAtObserved.Valid {
 		out.CreatedAtObserved = &createdAtObserved.Time
 	}
-	return out, nil
+	return normalizeImageCacheManifest(out), nil
 }
 
 func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, error) {

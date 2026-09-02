@@ -2274,8 +2274,10 @@ func (c *imageCache) persistManifest(repo, target, contentType string, body []by
 	if c == nil || strings.TrimSpace(c.manifestDir) == "" {
 		return nil
 	}
-	repo = strings.Trim(strings.TrimSpace(repo), "/")
-	target = strings.TrimSpace(target)
+	repo = strings.Trim(strings.TrimSpace(strings.ReplaceAll(repo, "\x00", "")), "/")
+	target = strings.TrimSpace(strings.ReplaceAll(target, "\x00", ""))
+	contentType = strings.TrimSpace(strings.ReplaceAll(contentType, "\x00", ""))
+	body = bytes.ReplaceAll(body, []byte{0}, nil)
 	if repo == "" || target == "" || len(body) == 0 {
 		return nil
 	}
@@ -2285,7 +2287,7 @@ func (c *imageCache) persistManifest(repo, target, contentType string, body []by
 	raw, err := json.Marshal(persistedManifest{
 		Repo:        repo,
 		Target:      target,
-		ContentType: strings.TrimSpace(contentType),
+		ContentType: contentType,
 		Body:        append([]byte(nil), body...),
 	})
 	if err != nil {
@@ -2456,6 +2458,10 @@ func (c *imageCache) loadPersistedManifests() error {
 		if err := json.Unmarshal(raw, &manifest); err != nil {
 			return fmt.Errorf("decode %s: %w", entry.Name(), err)
 		}
+		manifest.Repo = strings.Trim(strings.TrimSpace(strings.ReplaceAll(manifest.Repo, "\x00", "")), "/")
+		manifest.Target = strings.TrimSpace(strings.ReplaceAll(manifest.Target, "\x00", ""))
+		manifest.ContentType = strings.TrimSpace(strings.ReplaceAll(manifest.ContentType, "\x00", ""))
+		manifest.Body = bytes.ReplaceAll(manifest.Body, []byte{0}, nil)
 		manifest.path = filepath.Join(c.manifestDir, entry.Name())
 		if strings.TrimSpace(manifest.Repo) == "" || strings.TrimSpace(manifest.Target) == "" || len(manifest.Body) == 0 {
 			continue

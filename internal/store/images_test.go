@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,5 +214,30 @@ func TestImageStoreReplicaPinAndTaskSemantics(t *testing.T) {
 	}
 	if !foundDeployBlocking {
 		t.Fatalf("expected status-only task filter to include deploy-blocking task, got %+v", pendingTasks)
+	}
+}
+
+func TestImageMetadataStripsNULBytesBeforePersistence(t *testing.T) {
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	image, err := s.UpsertImage(model.Image{
+		TenantID: "tenant\x00", AppID: "app\x00", ImageRef: " registry.fugue.internal:5000/fugue-apps/demo:tag\x00 ",
+		CanonicalDigest: "sha256:" + "a" + strings.Repeat("a", 63) + "\x00", MediaType: "application/vnd.oci.image.manifest.v1+json\x00",
+		ManifestJSON: "{\"config\":null}\x00", LifecycleState: model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	if strings.ContainsAny(image.ImageRef+image.CanonicalDigest+image.MediaType+image.ManifestJSON, "\x00") {
+		t.Fatalf("persisted image metadata still contains NUL: %+v", image)
+	}
+	got, err := s.GetImage(image.ID, "", true)
+	if err != nil {
+		t.Fatalf("get image: %v", err)
+	}
+	if strings.ContainsAny(got.ImageRef+got.CanonicalDigest+got.MediaType+got.ManifestJSON, "\x00") {
+		t.Fatalf("read image metadata still contains NUL: %+v", got)
 	}
 }

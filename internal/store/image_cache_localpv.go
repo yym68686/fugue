@@ -265,6 +265,15 @@ func normalizeImageCacheNodeInventoryFilter(filter model.ImageCacheNodeInventory
 }
 
 func normalizeImageCacheManifest(in model.ImageCacheManifest) model.ImageCacheManifest {
+	in.ID = stripImageNUL(in.ID)
+	in.NodeID = stripImageNUL(in.NodeID)
+	in.ClusterNodeName = stripImageNUL(in.ClusterNodeName)
+	in.RuntimeID = stripImageNUL(in.RuntimeID)
+	in.ImageRef = stripImageNUL(in.ImageRef)
+	in.Repo = stripImageNUL(in.Repo)
+	in.Target = stripImageNUL(in.Target)
+	in.Digest = stripImageNUL(in.Digest)
+	in.MediaType = stripImageNUL(in.MediaType)
 	in.ID = strings.TrimSpace(in.ID)
 	in.NodeID = strings.TrimSpace(in.NodeID)
 	in.ClusterNodeName = strings.TrimSpace(in.ClusterNodeName)

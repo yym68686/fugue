@@ -15,6 +15,10 @@ import (
 
 const bytesPerGiB int64 = 1 << 30
 
+func SanitizeImageRef(value string) string {
+	return strings.TrimSpace(strings.ReplaceAll(value, "\x00", ""))
+}
+
 type InspectFunc func(ctx context.Context, imageRef string) (bool, map[string]int64, error)
 
 type managedImageCandidate struct {
@@ -73,15 +77,17 @@ func ManagedImageRefForSource(
 	registryPushBase string,
 	registryPullBase string,
 ) string {
+	runtimeImageRef = SanitizeImageRef(runtimeImageRef)
 	return managedImageRefForSource(app, source, runtimeImageRef, registryPushBase, registryPullBase)
 }
 
 func ManagedRegistryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase string) string {
+	runtimeImageRef = SanitizeImageRef(runtimeImageRef)
 	return registryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase)
 }
 
 func RuntimeImageRefFromManagedRef(imageRef, registryPushBase, registryPullBase string) string {
-	imageRef = strings.TrimSpace(imageRef)
+	imageRef = SanitizeImageRef(imageRef)
 	pushBase := strings.Trim(strings.TrimSpace(registryPushBase), "/")
 	pullBase := strings.Trim(strings.TrimSpace(registryPullBase), "/")
 	if imageRef == "" {
@@ -98,7 +104,7 @@ func RuntimeImageRefFromManagedRef(imageRef, registryPushBase, registryPullBase 
 }
 
 func NormalizeRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase string) string {
-	runtimeImageRef = strings.TrimSpace(runtimeImageRef)
+	runtimeImageRef = SanitizeImageRef(runtimeImageRef)
 	if runtimeImageRef == "" {
 		return ""
 	}
@@ -118,7 +124,7 @@ func NormalizeRuntimeImageRefForSource(
 	registryPushBase string,
 	registryPullBase string,
 ) string {
-	runtimeImageRef = strings.TrimSpace(runtimeImageRef)
+	runtimeImageRef = SanitizeImageRef(runtimeImageRef)
 	if runtimeImageRef == "" {
 		return ""
 	}
@@ -464,7 +470,7 @@ func shortImageCommit(value string) string {
 }
 
 func registryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase string) string {
-	runtimeImageRef = strings.TrimSpace(runtimeImageRef)
+	runtimeImageRef = SanitizeImageRef(runtimeImageRef)
 	if runtimeImageRef == "" {
 		return ""
 	}
@@ -486,7 +492,7 @@ func registryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryP
 }
 
 func managedImageRefFromFugueAppsPath(imageRef, registryPushBase string) string {
-	imageRef = strings.TrimSpace(imageRef)
+	imageRef = SanitizeImageRef(imageRef)
 	pushBase := strings.Trim(strings.TrimSpace(registryPushBase), "/")
 	if imageRef == "" || pushBase == "" {
 		return ""

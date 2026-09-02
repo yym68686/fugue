@@ -41,7 +41,7 @@ func NewRemoteInspector() *RemoteInspector {
 }
 
 func (r *RemoteInspector) InspectImage(ctx context.Context, imageRef string) (bool, map[string]int64, error) {
-	normalized := strings.TrimSpace(imageRef)
+	normalized := SanitizeImageRef(imageRef)
 	if normalized == "" {
 		return false, nil, fmt.Errorf("image_ref is required")
 	}
@@ -188,7 +188,8 @@ func addBlobSize(blobSizes map[string]int64, digest string, sizeBytes int64) {
 }
 
 func parseReference(imageRef string) (name.Reference, error) {
-	ref, err := name.ParseReference(strings.TrimSpace(imageRef), nameOptions(imageRef)...)
+	imageRef = SanitizeImageRef(imageRef)
+	ref, err := name.ParseReference(imageRef, nameOptions(imageRef)...)
 	if err != nil {
 		return nil, fmt.Errorf("parse image_ref: %w", err)
 	}

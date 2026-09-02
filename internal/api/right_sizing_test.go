@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -669,6 +671,96 @@ func TestAutoRightSizingMixedDirectionPrioritizesMaterialUpscale(t *testing.T) {
 	}
 	if got := decision.resources.MemoryLimitMebibytes; got != current.MemoryLimitMebibytes {
 		t.Fatalf("expected memory limit to remain at %dMi, got %dMi", current.MemoryLimitMebibytes, got)
+	}
+}
+
+func TestAutoRightSizingAdmissionBlocksUnsupportedRWO(t *testing.T) {
+	desired := model.AppSpec{
+		Ports:     []int{8080},
+		Replicas:  1,
+		Workspace: &model.AppWorkspaceSpec{StorageClassName: model.AppStorageClassFugueWorkspaceRWO},
+	}
+	reason, err := (&Server{}).autoRightSizingAdmission(model.App{}, desired)
+	if err != nil {
+		t.Fatalf("RWO admission: %v", err)
+	}
+	if !strings.Contains(reason, "does not support same-node online dual mount") {
+		t.Fatalf("expected unsupported RWO reason, got %q", reason)
+	}
+}
+
+func TestAutoRightSizingAdmissionAllowsSharedRWX(t *testing.T) {
+	desired := model.AppSpec{
+		Ports:    []int{8080},
+		Replicas: 1,
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mode:             model.AppPersistentStorageModeSharedProjectRWX,
+			StorageClassName: model.AppStorageClassFugueWorkspaceRWO,
+			Mounts:           []model.AppPersistentStorageMount{{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"}},
+		},
+	}
+	reason, err := (&Server{}).autoRightSizingAdmission(model.App{}, desired)
+	if err != nil || reason != "" {
+		t.Fatalf("expected shared RWX admission to pass, reason=%q err=%v", reason, err)
+	}
+}
+
+func TestAutoRightSizingAdmissionBlocksInsufficientCapacity(t *testing.T) {
+	server := &Server{
+		clusterNodeInventoryCache: newExpiringResponseCache[[]clusterNodeSnapshot](time.Minute),
+		newClusterNodeClient: func() (*clusterNodeClient, error) {
+			return nil, errors.New("cached inventory should be used")
+		},
+	}
+	freeCPU, freeMemory := int64(100), int64(128*1024*1024)
+	server.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, []clusterNodeSnapshot{{
+		node: model.ClusterNode{
+			Status: "ready",
+			CPU:    &model.ClusterNodeCPUStats{SchedulableFreeMilliCores: &freeCPU},
+			Memory: &model.ClusterNodeMemoryStats{SchedulableFreeBytes: &freeMemory},
+		},
+	}})
+	desired := model.AppSpec{
+		Ports: []int{8080}, Replicas: 1,
+		Resources: &model.ResourceSpec{CPUMilliCores: 250, MemoryMebibytes: 256},
+	}
+	reason, err := server.autoRightSizingAdmission(model.App{}, desired)
+	if err == nil || reason != "" || !strings.Contains(err.Error(), "no ready cluster node has capacity") {
+		t.Fatalf("expected capacity rejection, reason=%q err=%v", reason, err)
+	}
+}
+
+func TestAutoRightSizingFailureBackoffMatchesTargetResources(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, _ := stateStore.CreateTenant("right-sizing backoff")
+	project, _ := stateStore.CreateProject(tenant.ID, "apps", "")
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{Image: "demo", Replicas: 1, Resources: &model.ResourceSpec{CPUMilliCores: 100}})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	desired := app.Spec
+	desired.Resources = &model.ResourceSpec{CPUMilliCores: 250, MemoryMebibytes: 256}
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem, RequestedByID: model.OperationRequestedByRightSizing,
+		DesiredSpec: &desired,
+	})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil || !found {
+		t.Fatalf("claim operation: found=%t err=%v", found, err)
+	}
+	if _, err := stateStore.FailOperation(op.ID, "insufficient capacity"); err != nil {
+		t.Fatalf("fail operation: %v", err)
+	}
+	server := &Server{store: stateStore}
+	blocked, err := server.appHasRecentAutoRightSizingFailure(app, desired, time.Now().Add(-rightSizingAutoFailureBackoff))
+	if err != nil || !blocked {
+		t.Fatalf("expected matching failure backoff, blocked=%t err=%v", blocked, err)
 	}
 }
 

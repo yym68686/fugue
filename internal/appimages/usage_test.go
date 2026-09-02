@@ -86,6 +86,17 @@ func TestExcessManagedImageRefsDeletesOldestExistingStaleImagesBeyondLimit(t *te
 	}
 }
 
+func TestImageReferenceNormalizationStripsNULBytes(t *testing.T) {
+	got := NormalizeRuntimeImageRef(
+		"registry.fugue.internal:5000/fugue-apps/demo:tag\x00",
+		"registry.fugue.internal:5000",
+		"registry.fugue.internal:5000",
+	)
+	if got != "registry.fugue.internal:5000/fugue-apps/demo:tag" {
+		t.Fatalf("normalized image ref = %q", got)
+	}
+}
+
 func TestExcessManagedImageRefsStopsWhenContextCanceled(t *testing.T) {
 	t.Parallel()
 

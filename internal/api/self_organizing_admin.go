@@ -629,6 +629,17 @@ func (s *Server) registryReachabilityCheck(ctx context.Context) (bool, string) {
 	if strings.TrimSpace(s.registryPullBase) == "" || strings.TrimSpace(s.clusterJoinRegistryEndpoint) == "" {
 		return false, "registry pull base or join endpoint is not configured"
 	}
+	// In distributed mode registry.fugue.internal is a logical compatibility
+	// name resolved by each node's containerd mirror. It is not a central DNS
+	// endpoint, so probing it from the API pod reports a false outage.
+	if strings.EqualFold(strings.TrimSpace(s.imageStoreMode), "distributed") &&
+		registryEndpointIsNodeLocalImageCache(s.clusterJoinRegistryEndpoint, s.registryPullBase) {
+		if cacheOK, cacheMessage := s.nodeLocalImageCacheReachabilityCheck(ctx); cacheOK {
+			return true, fmt.Sprintf("%s served through node-local registry mirrors; %s", s.registryPullBase, cacheMessage)
+		} else if strings.TrimSpace(cacheMessage) != "" {
+			return false, fmt.Sprintf("%s node-local registry mirrors unavailable: %s", s.registryPullBase, cacheMessage)
+		}
+	}
 	healthURL := dependencyHealthURL(s.registryPushBase, "/v2/")
 	if healthURL == "" {
 		return false, "registry push endpoint is not configured"

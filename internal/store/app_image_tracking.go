@@ -326,6 +326,14 @@ func imageTrackingSourceMetadataComplete(source *model.AppSource) bool {
 }
 
 func normalizeAppImageTracking(tracking model.AppImageTracking) model.AppImageTracking {
+	tracking.ID = stripImageNUL(tracking.ID)
+	tracking.TenantID = stripImageNUL(tracking.TenantID)
+	tracking.AppID = stripImageNUL(tracking.AppID)
+	tracking.ImageRef = stripImageNUL(tracking.ImageRef)
+	tracking.LastOperationID = stripImageNUL(tracking.LastOperationID)
+	tracking.LastDeliveryID = stripImageNUL(tracking.LastDeliveryID)
+	tracking.LastEvent = stripImageNUL(tracking.LastEvent)
+	tracking.LastError = stripImageNUL(tracking.LastError)
 	tracking.ID = strings.TrimSpace(tracking.ID)
 	tracking.TenantID = strings.TrimSpace(tracking.TenantID)
 	tracking.AppID = strings.TrimSpace(tracking.AppID)
@@ -348,6 +356,24 @@ func normalizeAppImageTrackingFilter(filter model.AppImageTrackingFilter) model.
 }
 
 func normalizeAppImageTrackingCheck(check model.AppImageTrackingCheck) model.AppImageTrackingCheck {
+	check.ID = stripImageNUL(check.ID)
+	check.TenantID = stripImageNUL(check.TenantID)
+	check.AppID = stripImageNUL(check.AppID)
+	check.TrackingID = stripImageNUL(check.TrackingID)
+	check.ImageRef = stripImageNUL(check.ImageRef)
+	check.ObservedDigest = stripImageNUL(check.ObservedDigest)
+	check.CurrentAppDigest = stripImageNUL(check.CurrentAppDigest)
+	check.LastQueuedDigest = stripImageNUL(check.LastQueuedDigest)
+	check.LastDeployedDigest = stripImageNUL(check.LastDeployedDigest)
+	check.Decision = stripImageNUL(check.Decision)
+	check.SkipReason = stripImageNUL(check.SkipReason)
+	check.OperationID = stripImageNUL(check.OperationID)
+	check.ActiveOperationID = stripImageNUL(check.ActiveOperationID)
+	check.ResolverError = stripImageNUL(check.ResolverError)
+	check.DeliveryID = stripImageNUL(check.DeliveryID)
+	check.Event = stripImageNUL(check.Event)
+	check.ControllerPod = stripImageNUL(check.ControllerPod)
+	check.ControllerLeaderIdentity = stripImageNUL(check.ControllerLeaderIdentity)
 	check.ID = strings.TrimSpace(check.ID)
 	check.TenantID = strings.TrimSpace(check.TenantID)
 	check.AppID = strings.TrimSpace(check.AppID)

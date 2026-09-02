@@ -810,6 +810,7 @@ func scanImage(scanner sqlScanner) (model.Image, error) {
 		return model.Image{}, err
 	}
 	image.TenantID = tenantID.String
+	sanitizeImageMetadata(&image)
 	return image, nil
 }
 
@@ -828,7 +829,7 @@ func scanImageAlias(scanner sqlScanner) (model.ImageAlias, error) {
 		return model.ImageAlias{}, err
 	}
 	alias.TenantID = tenantID.String
-	return alias, nil
+	return normalizeImageAlias(alias), nil
 }
 
 func scanImageReplica(scanner sqlScanner) (model.ImageReplica, error) {
@@ -864,7 +865,7 @@ func scanImageReplica(scanner sqlScanner) (model.ImageReplica, error) {
 	if leaseExpiresAt.Valid {
 		replica.LeaseExpiresAt = &leaseExpiresAt.Time
 	}
-	return replica, nil
+	return normalizeImageReplica(replica), nil
 }
 
 func scanImagePin(scanner sqlScanner) (model.ImagePin, error) {
@@ -889,7 +890,7 @@ func scanImagePin(scanner sqlScanner) (model.ImagePin, error) {
 	if expiresAt.Valid {
 		pin.ExpiresAt = &expiresAt.Time
 	}
-	return pin, nil
+	return normalizeImagePin(pin), nil
 }
 
 func scanImageReplicationTask(scanner sqlScanner) (model.ImageReplicationTask, error) {
@@ -924,5 +925,5 @@ func scanImageReplicationTask(scanner sqlScanner) (model.ImageReplicationTask, e
 	if completedAt.Valid {
 		task.CompletedAt = &completedAt.Time
 	}
-	return task, nil
+	return normalizeImageReplicationTask(task), nil
 }

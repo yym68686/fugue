@@ -16,7 +16,7 @@ type DeleteResult struct {
 }
 
 func DeleteRemoteImage(ctx context.Context, imageRef string) (DeleteResult, error) {
-	normalized := strings.TrimSpace(imageRef)
+	normalized := SanitizeImageRef(imageRef)
 	if normalized == "" {
 		return DeleteResult{}, fmt.Errorf("image_ref is required")
 	}

@@ -302,6 +302,44 @@ func TestInactiveWorkerLoadsCandidateWithoutChangingActiveWorkerOrAuthority(t *t
 	}
 }
 
+func TestInactiveWorkerTreatsEmptyCandidateAsHealthyLKG(t *testing.T) {
+	const groupID = "edge-group-country-us"
+	const keyID = "edge-us-key-v1"
+	key := []byte("0123456789abcdef0123456789abcdef")
+	root := t.TempDir()
+	tokenFile := filepath.Join(root, "reader-token")
+	if err := os.WriteFile(tokenFile, []byte("reader-token-0123456789-abcdef-0123456789\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyringFile := filepath.Join(root, "keyring.json")
+	writeEdgeVerifierKeyring(t, keyringFile, groupID, keyID, key)
+	activationFile := writeInventoryActivationFixture(t, time.Now().UTC(), groupID, model.EdgeSlotA, strings.Repeat("1", 40))
+	current := signedEdgeControlTestBundle(groupID, "generation-current", 1, 0, keyID, key)
+	routeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != edgeControlCandidateBundlePath {
+			t.Fatalf("unexpected route path %q", request.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer routeServer.Close()
+
+	service := NewServiceWithRouteBundleSource(config.EdgeConfig{
+		APIURL: "http://127.0.0.1:1", EdgeToken: "heartbeat-token", EdgeID: "edge-us-b", EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB,
+		CachePath: filepath.Join(root, "cache.json"), HTTPTimeout: time.Second,
+	}, RouteBundleSourceConfig{
+		URL: routeServer.URL + edgeControlBundlePath, CandidateURL: routeServer.URL + edgeControlCandidateBundlePath,
+		TokenFile: tokenFile, VerifierKeyringFile: keyringFile, ActivationStateFile: activationFile,
+	}, log.New(io.Discard, "", 0))
+	service.recordSyncSuccess(current, strconv.Quote(current.Version), time.Now().UTC(), false)
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("empty candidate should retain LKG: %v", err)
+	}
+	status := service.Status()
+	if !status.Healthy || status.StaleCache || status.LastError != "" || status.ServingGeneration != current.Generation {
+		t.Fatalf("empty candidate degraded cached worker: %+v", status)
+	}
+}
+
 func TestCandidateRouteSourceRejectsActivationChangeAndCrossSlotRecord(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now().UTC()

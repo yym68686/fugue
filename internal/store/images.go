@@ -484,6 +484,7 @@ func (s *Store) ListImageReplicationTasks(filter model.ImageReplicationTaskFilte
 }
 
 func normalizeImage(image model.Image) model.Image {
+	sanitizeImageMetadata(&image)
 	rawLifecycle := strings.TrimSpace(image.LifecycleState)
 	image.TenantID = strings.TrimSpace(image.TenantID)
 	image.AppID = strings.TrimSpace(image.AppID)
@@ -521,6 +522,25 @@ func normalizeImage(image model.Image) model.Image {
 	return image
 }
 
+func sanitizeImageMetadata(image *model.Image) {
+	if image == nil {
+		return
+	}
+	image.ID = stripImageNUL(image.ID)
+	image.TenantID = stripImageNUL(image.TenantID)
+	image.AppID = stripImageNUL(image.AppID)
+	image.ImageRef = stripImageNUL(image.ImageRef)
+	image.CanonicalDigest = stripImageNUL(image.CanonicalDigest)
+	image.MediaType = stripImageNUL(image.MediaType)
+	image.ManifestJSON = stripImageNUL(image.ManifestJSON)
+	image.SourceOperationID = stripImageNUL(image.SourceOperationID)
+	image.LifecycleState = stripImageNUL(image.LifecycleState)
+}
+
+func stripImageNUL(value string) string {
+	return strings.ReplaceAll(value, "\x00", "")
+}
+
 func normalizeImageFilter(filter model.ImageFilter) model.ImageFilter {
 	filter.TenantID = strings.TrimSpace(filter.TenantID)
 	filter.AppID = strings.TrimSpace(filter.AppID)
@@ -555,6 +575,11 @@ func normalizeImageLifecycleStateFilter(raw string) string {
 }
 
 func normalizeImageAlias(alias model.ImageAlias) model.ImageAlias {
+	alias.ID = stripImageNUL(alias.ID)
+	alias.ImageID = stripImageNUL(alias.ImageID)
+	alias.TenantID = stripImageNUL(alias.TenantID)
+	alias.AliasRef = stripImageNUL(alias.AliasRef)
+	alias.Digest = stripImageNUL(alias.Digest)
 	alias.ImageID = strings.TrimSpace(alias.ImageID)
 	alias.TenantID = strings.TrimSpace(alias.TenantID)
 	alias.AliasRef = strings.TrimSpace(alias.AliasRef)
@@ -571,6 +596,19 @@ func normalizeImageAliasFilter(filter model.ImageAliasFilter) model.ImageAliasFi
 }
 
 func normalizeImageReplica(replica model.ImageReplica) model.ImageReplica {
+	replica.ID = stripImageNUL(replica.ID)
+	replica.ImageID = stripImageNUL(replica.ImageID)
+	replica.TenantID = stripImageNUL(replica.TenantID)
+	replica.AppID = stripImageNUL(replica.AppID)
+	replica.Digest = stripImageNUL(replica.Digest)
+	replica.NodeID = stripImageNUL(replica.NodeID)
+	replica.RuntimeID = stripImageNUL(replica.RuntimeID)
+	replica.ClusterNodeName = stripImageNUL(replica.ClusterNodeName)
+	replica.CacheEndpoint = stripImageNUL(replica.CacheEndpoint)
+	replica.FailureDomain = stripImageNUL(replica.FailureDomain)
+	replica.Status = stripImageNUL(replica.Status)
+	replica.SourceReplicaID = stripImageNUL(replica.SourceReplicaID)
+	replica.LastError = stripImageNUL(replica.LastError)
 	replica.ImageID = strings.TrimSpace(replica.ImageID)
 	replica.TenantID = strings.TrimSpace(replica.TenantID)
 	replica.AppID = strings.TrimSpace(replica.AppID)
@@ -637,6 +675,12 @@ func normalizeImageReplicaStatusFilter(raw string) string {
 }
 
 func normalizeImagePin(pin model.ImagePin) model.ImagePin {
+	pin.ID = stripImageNUL(pin.ID)
+	pin.ImageID = stripImageNUL(pin.ImageID)
+	pin.TenantID = stripImageNUL(pin.TenantID)
+	pin.AppID = stripImageNUL(pin.AppID)
+	pin.OperationID = stripImageNUL(pin.OperationID)
+	pin.Reason = stripImageNUL(pin.Reason)
 	pin.ImageID = strings.TrimSpace(pin.ImageID)
 	pin.TenantID = strings.TrimSpace(pin.TenantID)
 	pin.AppID = strings.TrimSpace(pin.AppID)
@@ -687,6 +731,18 @@ func normalizeImagePinReasonFilter(raw string) string {
 }
 
 func normalizeImageReplicationTask(task model.ImageReplicationTask) model.ImageReplicationTask {
+	task.ID = stripImageNUL(task.ID)
+	task.ImageID = stripImageNUL(task.ImageID)
+	task.TenantID = stripImageNUL(task.TenantID)
+	task.AppID = stripImageNUL(task.AppID)
+	task.SourceReplicaID = stripImageNUL(task.SourceReplicaID)
+	task.SourceCacheEndpoint = stripImageNUL(task.SourceCacheEndpoint)
+	task.TargetNodeID = stripImageNUL(task.TargetNodeID)
+	task.TargetRuntimeID = stripImageNUL(task.TargetRuntimeID)
+	task.TargetClusterNodeName = stripImageNUL(task.TargetClusterNodeName)
+	task.Priority = stripImageNUL(task.Priority)
+	task.Status = stripImageNUL(task.Status)
+	task.LastError = stripImageNUL(task.LastError)
 	task.ImageID = strings.TrimSpace(task.ImageID)
 	task.TenantID = strings.TrimSpace(task.TenantID)
 	task.AppID = strings.TrimSpace(task.AppID)

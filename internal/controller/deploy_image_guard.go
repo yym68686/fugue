@@ -21,6 +21,7 @@ type deployImageTarget struct {
 var errDeployImageReplicationPending = errors.New(model.OperationResultDeployImageReplicationPending)
 
 const imageHydrationMissingRetryAfter = 6 * time.Hour
+const imageRebuildFailureBackoff = 6 * time.Hour
 
 func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation, app model.App, scheduling runtimepkg.SchedulingConstraints) error {
 	if s == nil || app.Spec.Replicas <= 0 {
@@ -504,6 +505,18 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 	if strings.TrimSpace(op.ID) == "" {
 		return fmt.Errorf("deploy blocked because %s %s is missing and needs rebuild", label, imageRef)
 	}
+	if retryAt, blocked, err := s.imageRebuildRetryAt(app); err != nil {
+		return fmt.Errorf("check image rebuild retry backoff: %w", err)
+	} else if blocked {
+		message := fmt.Sprintf("%s %s is missing; image rebuild deferred until %s after a recent failed rebuild", label, imageRef, retryAt.Format(time.RFC3339))
+		if _, err := s.Store.FailOperation(op.ID, message); err != nil {
+			return fmt.Errorf("mark deploy operation waiting for image rebuild backoff: %w", err)
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("image rebuild suppressed by failure backoff app=%s missing_%s=%s retry_at=%s", app.ID, strings.ReplaceAll(label, " ", "_"), imageRef, retryAt.Format(time.RFC3339))
+		}
+		return errOperationNoLongerActive
+	}
 	if _, err := s.Store.FailOperation(op.ID, fmt.Sprintf("%s %s is missing; queued image rebuild", label, imageRef)); err != nil {
 		return fmt.Errorf("mark deploy operation waiting for rebuild: %w", err)
 	}
@@ -536,6 +549,32 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 	}
 	_ = ctx
 	return errOperationNoLongerActive
+}
+
+func (s *Service) imageRebuildRetryAt(app model.App) (time.Time, bool, error) {
+	ops, err := s.Store.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	now := time.Now().UTC()
+	if s != nil && s.now != nil {
+		now = s.now().UTC()
+	}
+	for _, candidate := range ops {
+		if candidate.Type != model.OperationTypeImport || candidate.Status != model.OperationStatusFailed ||
+			candidate.RequestedByType != model.ActorTypeSystem || candidate.RequestedByID != model.OperationRequestedByImageRebuild {
+			continue
+		}
+		failedAt := candidate.CompletedAt
+		if failedAt == nil {
+			failedAt = &candidate.UpdatedAt
+		}
+		retryAt := failedAt.UTC().Add(imageRebuildFailureBackoff)
+		if retryAt.After(now) {
+			return retryAt, true, nil
+		}
+	}
+	return time.Time{}, false, nil
 }
 
 type deployImageInventoryEvidence struct {

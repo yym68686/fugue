@@ -121,7 +121,7 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 }
 
 func normalizeContainerImageRef(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
+	trimmed := strings.TrimSpace(strings.ReplaceAll(raw, "\x00", ""))
 	if trimmed == "" {
 		return "", fmt.Errorf("image_ref is required")
 	}

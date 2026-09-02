@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +18,7 @@ import (
 
 const (
 	rightSizingAutoApplyInterval  = time.Hour
+	rightSizingAutoFailureBackoff = 6 * time.Hour
 	defaultRightSizingWindowHours = 168
 	defaultRightSizingMinSamples  = 12
 	maxRightSizingWindowHours     = 168
@@ -263,6 +267,31 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 		}
 	}
 	spec.Resources = cloneResourceSpec(decision.resources)
+	if reason, err := s.autoRightSizingAdmission(app, spec); err != nil {
+		s.logRightSizingDecision(app, "capacity_check_failed", "right-sizing auto apply skipped because rollout capacity could not be verified", map[string]any{
+			"requested_by": decision.requestedByID,
+			"target":       rightSizingResourceSummary(spec.Resources),
+			"error":        err.Error(),
+		})
+		return recommendation, nil, true, nil
+	} else if reason != "" {
+		s.logRightSizingDecision(app, "rollout_policy_blocked", "right-sizing auto apply skipped because the serving rollout policy is incompatible", map[string]any{
+			"requested_by": decision.requestedByID,
+			"target":       rightSizingResourceSummary(spec.Resources),
+			"reason":       reason,
+		})
+		return recommendation, nil, true, nil
+	}
+	if blocked, err := s.appHasRecentAutoRightSizingFailure(app, spec, time.Now().UTC().Add(-rightSizingAutoFailureBackoff)); err != nil {
+		return recommendation, nil, false, err
+	} else if blocked {
+		s.logRightSizingDecision(app, "failure_backoff", "right-sizing auto apply skipped because the same target failed recently", map[string]any{
+			"requested_by":  decision.requestedByID,
+			"target":        rightSizingResourceSummary(spec.Resources),
+			"backoff_hours": rightSizingAutoFailureBackoff.Hours(),
+		})
+		return recommendation, nil, true, nil
+	}
 	if err := s.validateAutoscalingTenantEnvelope(app, spec); err != nil {
 		s.logRightSizingDecision(app, "billing_cap_blocked", "right-sizing auto apply skipped because tenant billing/resource envelope would be exceeded", map[string]any{
 			"requested_by": decision.requestedByID,
@@ -316,6 +345,105 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 		})
 	}
 	return recommendation, &op, false, nil
+}
+
+// autoRightSizingAdmission keeps known rollout incompatibilities out of the
+// operation queue. The controller has the final authority, but an automatic
+// resize should never enqueue an operation that cannot satisfy its serving
+// contract or fit a surge pod on the current cluster.
+func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec) (string, error) {
+	if !model.AppZeroDowntimeRequired(desired) {
+		return "", nil
+	}
+	if desired.Workspace != nil && !model.AppWorkspaceSpecSupportsSameNodeOnlineRollout(desired.Workspace) {
+		return model.AppStorageClassSameNodeOnlineMountUnsupportedSummary(desired.Workspace.StorageClassName), nil
+	}
+	if desired.PersistentStorage != nil && len(desired.PersistentStorage.Mounts) > 0 &&
+		!model.AppPersistentStorageSpecUsesSharedProjectRWX(desired.PersistentStorage) &&
+		!model.AppPersistentStorageSpecSupportsSameNodeOnlineRollout(desired.PersistentStorage) {
+		return model.AppStorageClassSameNodeOnlineMountUnsupportedSummary(desired.PersistentStorage.StorageClassName), nil
+	}
+	if s == nil || !s.shouldWarmClusterNodeInventory() {
+		return "", nil
+	}
+	if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) == "" && strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT")) == "" {
+		if _, ok := s.clusterNodeInventoryCache.getEntry(clusterNodeInventoryCacheKey); !ok {
+			return "", nil
+		}
+	}
+	snapshots, err := s.loadClusterNodeInventory(context.Background())
+	if err != nil {
+		return "", err
+	}
+	resources := desired.Resources
+	if resources == nil {
+		resources = &model.ResourceSpec{}
+	}
+	targetRuntimeID := strings.TrimSpace(desired.RuntimeID)
+	targetNodeName := ""
+	if targetRuntimeID != "" && s.store != nil {
+		runtimeObj, runtimeErr := s.store.GetRuntime(targetRuntimeID)
+		if runtimeErr != nil {
+			if !errors.Is(runtimeErr, store.ErrNotFound) {
+				return "", fmt.Errorf("load target runtime %s: %w", targetRuntimeID, runtimeErr)
+			}
+		} else {
+			targetNodeName = strings.TrimSpace(runtimeObj.ClusterNodeName)
+		}
+	}
+	requiredCPU := maxInt64(0, resources.CPUMilliCores)
+	requiredMemory := maxInt64(0, resources.MemoryMebibytes) * 1024 * 1024
+	for _, snapshot := range snapshots {
+		if !rightSizingCapacitySnapshotMatchesRuntime(snapshot, targetRuntimeID, targetNodeName) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(snapshot.node.Status), "ready") || snapshot.node.CPU == nil || snapshot.node.Memory == nil {
+			continue
+		}
+		if snapshot.node.CPU.SchedulableFreeMilliCores == nil || snapshot.node.Memory.SchedulableFreeBytes == nil {
+			continue
+		}
+		if *snapshot.node.CPU.SchedulableFreeMilliCores >= requiredCPU && *snapshot.node.Memory.SchedulableFreeBytes >= requiredMemory {
+			return "", nil
+		}
+	}
+	return "", fmt.Errorf("no ready cluster node has capacity for the right-sizing surge pod (%dm CPU, %dMi memory)", requiredCPU, requiredMemory/(1024*1024))
+}
+
+func rightSizingCapacitySnapshotMatchesRuntime(snapshot clusterNodeSnapshot, targetRuntimeID, targetNodeName string) bool {
+	if targetNodeName != "" {
+		return strings.EqualFold(strings.TrimSpace(snapshot.node.Name), targetNodeName)
+	}
+	if targetRuntimeID == "" || strings.EqualFold(targetRuntimeID, tenantSharedRuntimeID) {
+		return sharedClusterSnapshotCandidate(snapshot)
+	}
+	return strings.EqualFold(strings.TrimSpace(snapshot.runtimeID), targetRuntimeID) ||
+		strings.EqualFold(strings.TrimSpace(snapshot.node.RuntimeID), targetRuntimeID)
+}
+
+func (s *Server) appHasRecentAutoRightSizingFailure(app model.App, desired model.AppSpec, since time.Time) (bool, error) {
+	ops, err := s.store.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, op := range ops {
+		if op.Type != model.OperationTypeDeploy || op.Status != model.OperationStatusFailed ||
+			op.RequestedByType != model.ActorTypeSystem ||
+			(op.RequestedByID != model.OperationRequestedByRightSizing && op.RequestedByID != model.OperationRequestedByRightSizingDownscale) {
+			continue
+		}
+		at := op.CompletedAt
+		if at == nil {
+			at = &op.UpdatedAt
+		}
+		if at == nil || at.Before(since) || op.DesiredSpec == nil || op.DesiredSpec.Resources == nil {
+			continue
+		}
+		if resourceSpecsEqual(op.DesiredSpec.Resources, desired.Resources) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type autoRightSizingAppResourceDecision struct {

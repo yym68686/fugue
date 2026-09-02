@@ -384,7 +384,7 @@ func scanAppImageTracking(scanner sqlScanner) (model.AppImageTracking, error) {
 	if lastTriggeredAt.Valid {
 		tracking.LastTriggeredAt = &lastTriggeredAt.Time
 	}
-	return tracking, nil
+	return normalizeAppImageTracking(tracking), nil
 }
 
 func scanAppImageTrackingCheckRows(rows *sql.Rows) ([]model.AppImageTrackingCheck, error) {
@@ -428,5 +428,5 @@ func scanAppImageTrackingCheck(scanner sqlScanner) (model.AppImageTrackingCheck,
 	); err != nil {
 		return model.AppImageTrackingCheck{}, err
 	}
-	return check, nil
+	return normalizeAppImageTrackingCheck(check), nil
 }

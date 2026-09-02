@@ -162,7 +162,7 @@ RETURNING id, tenant_id, app_id, image_ref, digest, source_operation_id, node_id
 	if err != nil {
 		return model.ImageLocation{}, mapDBErr(err)
 	}
-	return location, nil
+	return normalizeImageLocation(location), nil
 }
 
 func (s *Store) pgListImageLocations(filter model.ImageLocationFilter) ([]model.ImageLocation, error) {

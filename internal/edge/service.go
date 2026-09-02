@@ -741,6 +741,21 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		}
 		result = "not_modified"
 		return nil
+	case http.StatusNoContent:
+		// Edge-control deliberately returns 204 while a candidate slot is
+		// empty. This is a normal steady state for an inactive B slot; retain
+		// the last verified bundle and keep serving it instead of turning the
+		// slot unhealthy. A 204 from the active route is still an error because
+		// the active slot must always publish a bundle.
+		if !routeSelection.candidate {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			err = statusError{StatusCode: resp.StatusCode, Body: s.redact(strings.TrimSpace(string(body)))}
+			s.recordSyncError(err)
+			return err
+		}
+		s.recordNoCandidate(now)
+		result = "not_modified"
+		return nil
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		var err error = statusError{
@@ -3904,6 +3919,22 @@ func (s *Service) recordNotModified(now time.Time) {
 		err := fmt.Errorf("edge routes returned 304 without a cached bundle")
 		s.snapshot.LastSyncAt = &now
 		s.snapshot.LastError = err.Error()
+		s.snapshot.Status = "unhealthy"
+		s.snapshot.Healthy = false
+		return
+	}
+	bundle := *s.bundle
+	s.snapshot = s.statusForBundleLocked(bundle, now, &now, false)
+}
+
+func (s *Service) recordNoCandidate(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bundle == nil {
+		// An empty candidate before the first successful sync is benign, but it
+		// must not make the slot ready because there is no LKG to serve yet.
+		s.snapshot.LastSyncAt = &now
+		s.snapshot.LastError = ""
 		s.snapshot.Status = "unhealthy"
 		s.snapshot.Healthy = false
 		return

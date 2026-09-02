@@ -241,6 +241,63 @@ func TestHandleClaimedOperationFailsDeployWhenManagedImageIsMissingFromRegistry(
 	}
 }
 
+func TestMissingImageRebuildUsesFailureBackoff(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, _ := stateStore.CreateTenant("rebuild backoff")
+	project, _ := stateStore.CreateProject(tenant.ID, "apps", "")
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image: "registry.fugue.internal:5000/fugue-apps/demo:old", Ports: []int{8080}, Replicas: 1, RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://github.com/example/demo", BuildStrategy: model.AppBuildStrategyDockerfile}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	failedRebuild, err := stateStore.CreateOperation(model.Operation{
+		TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeImport,
+		RequestedByType: model.ActorTypeSystem, RequestedByID: model.OperationRequestedByImageRebuild,
+		DesiredSpec: &app.Spec, DesiredSource: model.AppBuildSource(app),
+	})
+	if err != nil {
+		t.Fatalf("create failed rebuild: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil || !found {
+		t.Fatalf("claim rebuild: found=%t err=%v", found, err)
+	}
+	if _, err := stateStore.FailOperation(failedRebuild.ID, "builder failed"); err != nil {
+		t.Fatalf("fail rebuild: %v", err)
+	}
+	deploy, err := stateStore.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: &app.Spec})
+	if err != nil {
+		t.Fatalf("create deploy: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil || !found {
+		t.Fatalf("claim deploy: found=%t err=%v", found, err)
+	}
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0), now: time.Now}
+	if err := svc.handleMissingDeployImage(context.Background(), deploy, app, deployImageTarget{}, app.Spec.Image, "managed image"); !errors.Is(err, errOperationNoLongerActive) {
+		t.Fatalf("expected deferred deploy completion, got %v", err)
+	}
+	ops, err := stateStore.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	rebuilds := 0
+	for _, op := range ops {
+		if op.RequestedByID == model.OperationRequestedByImageRebuild {
+			rebuilds++
+		}
+	}
+	if rebuilds != 1 {
+		t.Fatalf("failure backoff queued another rebuild: %+v", ops)
+	}
+	failedDeploy, err := stateStore.GetOperation(deploy.ID)
+	if err != nil || !strings.Contains(failedDeploy.ErrorMessage, "image rebuild deferred until") {
+		t.Fatalf("expected explicit rebuild backoff on deploy, op=%+v err=%v", failedDeploy, err)
+	}
+}
+
 func TestHandleClaimedOperationFailsDeployWhenRuntimeImageIsMissingFromRegistry(t *testing.T) {
 	t.Parallel()
 
