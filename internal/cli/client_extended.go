@@ -237,8 +237,8 @@ type orphanBackingServiceSummary struct {
 	StorageSize      string `json:"storage_size,omitempty"`
 	Suspended        bool   `json:"suspended"`
 	RuntimePhase     string `json:"runtime_phase,omitempty"`
-	ReadyInstances   int    `json:"ready_instances,omitempty"`
-	DesiredInstances int    `json:"desired_instances,omitempty"`
+	ReadyInstances   int    `json:"ready_instances"`
+	DesiredInstances int    `json:"desired_instances"`
 }
 
 type orphanManagedApp struct {

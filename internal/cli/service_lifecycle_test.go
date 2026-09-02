@@ -148,7 +148,7 @@ func TestRunServicePostgresOrphanList(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/backing-services/orphans" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"orphans":[{"app_id":"app_b","tenant_id":"tenant_b","project_id":"project_b","name":"river","namespace":"tenant-b","managed_app_name":"river","phase":"disabled","message":"retained for audit","backing_services":[{"id":"svc_b","name":"river-postgres","type":"postgres","runtime_id":"runtime_us","service_name":"river-postgres","storage_size":"20Gi","suspended":false}]},{"app_id":"app_a","tenant_id":"tenant_a","project_id":"project_a","name":"ember","namespace":"tenant-a","managed_app_name":"ember","phase":"disabled","backing_services":[{"id":"svc_a","name":"ember-postgres","type":"postgres","runtime_id":"runtime_us","service_name":"ember-postgres","storage_size":"1Gi","suspended":true}]}]}`))
+		_, _ = w.Write([]byte(`{"orphans":[{"app_id":"app_b","tenant_id":"tenant_b","project_id":"project_b","name":"river","namespace":"tenant-b","managed_app_name":"river","phase":"disabled","message":"retained for audit","backing_services":[{"id":"svc_b","name":"river-postgres","type":"postgres","runtime_id":"runtime_us","service_name":"river-postgres","storage_size":"20Gi","suspended":false,"runtime_phase":"active","ready_instances":1,"desired_instances":1}]},{"app_id":"app_a","tenant_id":"tenant_a","project_id":"project_a","name":"ember","namespace":"tenant-a","managed_app_name":"ember","phase":"disabled","backing_services":[{"id":"svc_a","name":"ember-postgres","type":"postgres","runtime_id":"runtime_us","service_name":"ember-postgres","storage_size":"1Gi","suspended":true,"runtime_phase":"suspended","ready_instances":0,"desired_instances":1}]}]}`))
 	}))
 	defer server.Close()
 
@@ -169,6 +169,22 @@ func TestRunServicePostgresOrphanList(t *testing.T) {
 	}
 	if strings.Index(out, "app_a") > strings.Index(out, "app_b") {
 		t.Fatalf("expected orphan rows sorted by name, got %s", out)
+	}
+}
+
+func TestRunServicePostgresOrphanListJSONPreservesObservedZeroInstances(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"orphans":[{"app_id":"app_a","tenant_id":"tenant_a","project_id":"project_a","name":"ember","namespace":"tenant-a","managed_app_name":"ember","phase":"Disabled","backing_services":[{"id":"svc_a","name":"ember-postgres","type":"postgres","suspended":true,"runtime_phase":"suspended","ready_instances":0,"desired_instances":1}]}]}`))
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "--json", "service", "postgres", "orphan", "ls"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run orphan JSON list: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"ready_instances": 0`) {
+		t.Fatalf("expected observed zero ready instances to survive CLI JSON encoding, got %s", stdout.String())
 	}
 }
 
