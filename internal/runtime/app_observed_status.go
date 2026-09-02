@@ -15,6 +15,7 @@ const (
 	AppObservationReasonManagedAppDisabled          = "managed_app_disabled"
 	AppObservationReasonManagedAppDeleting          = "managed_app_deleting"
 	AppObservationReasonManagedAppError             = "managed_app_error"
+	AppObservationReasonManagedAppErrorLKGServing   = "managed_app_error_lkg_serving"
 	AppObservationReasonManagedAppStatusEmpty       = "managed_app_status_empty"
 	AppObservationReasonManagedAppNotFound          = "managed_app_not_found"
 	AppObservationReasonGenerationNotObserved       = "generation_not_observed"
@@ -188,6 +189,16 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		status.Reason = AppObservationReasonManagedAppStatusEmpty
 		status.Message = firstObservedStatusMessage(status.Message, "managed app status is empty")
 	}
+	// A failed preflight or automatic maintenance operation can leave the
+	// previous release serving while the ManagedApp status records the failed
+	// attempt. Preserve that LKG for runtime consumers only when the durable
+	// status was deployed and this observation independently proves that the
+	// current cohort is still healthy. The failure reason/message remains
+	// visible in the observed contract and durable last-failure history.
+	if status.Phase == "failed" && appObservedServingLKG(app, status) {
+		status.Phase = "deployed"
+		status.Reason = AppObservationReasonManagedAppErrorLKGServing
+	}
 	// A ready ManagedApp is publishable only when the independent physical,
 	// image, namespace, and endpoint evidence also passes. Preserve explicit
 	// controller error/progress phases for diagnosis while still making a
@@ -198,6 +209,32 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		status.Message = firstObservedStatusMessage(status.Message, strings.Join(status.InvariantViolations, "; "))
 	}
 	return status
+}
+
+func appObservedServingLKG(app model.App, observed model.AppObservedStatus) bool {
+	storedPhase := strings.TrimSpace(app.Status.Phase)
+	if app.StoredStatus != nil {
+		storedPhase = strings.TrimSpace(app.StoredStatus.Phase)
+	}
+	if !strings.EqualFold(storedPhase, "deployed") || app.Spec.Replicas <= 0 ||
+		!observed.Fresh || observed.DesiredReplicas != app.Spec.Replicas ||
+		observed.Generation <= 0 || observed.ObservedGeneration < observed.Generation ||
+		len(observed.InvariantViolations) > 0 {
+		return false
+	}
+	if !boolPointerIsTrue(observed.RuntimeObjectPresent) ||
+		!boolPointerIsTrue(observed.NamespacePresent) ||
+		!boolPointerIsTrue(observed.ImagePresent) ||
+		!intPointerAtLeast(observed.ReadyReplicas, app.Spec.Replicas) ||
+		!intPointerAtLeast(observed.PhysicalReplicas, app.Spec.Replicas) ||
+		!intPointerAtLeast(observed.PhysicalDesired, app.Spec.Replicas) {
+		return false
+	}
+	if model.AppHasClusterService(app.Spec) &&
+		(!boolPointerIsTrue(observed.ServicePresent) || !boolPointerIsTrue(observed.EndpointPresent) || !boolPointerIsTrue(observed.EndpointReady)) {
+		return false
+	}
+	return true
 }
 
 func cloneBoolPointer(in *bool) *bool {
@@ -282,6 +319,14 @@ func observedStatusInvariantViolations(status model.AppObservedStatus, app model
 
 func boolPointerIsFalse(value *bool) bool {
 	return value != nil && !*value
+}
+
+func boolPointerIsTrue(value *bool) bool {
+	return value != nil && *value
+}
+
+func intPointerAtLeast(value *int, minimum int) bool {
+	return value != nil && *value >= minimum
 }
 
 // ApplyAppObservedStatus keeps the durable status available to API consumers

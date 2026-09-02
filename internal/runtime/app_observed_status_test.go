@@ -214,6 +214,99 @@ func TestCalculateAppObservedStatusUsesObservedRuntimeIdentity(t *testing.T) {
 	}
 }
 
+func TestCalculateAppObservedStatusPreservesServingLKGAfterFailedOperation(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:     "registry.example/argus-runtime:v1",
+			Ports:     []int{7777},
+			Replicas:  1,
+			RuntimeID: model.DefaultManagedRuntimeID,
+		},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	managed := ManagedAppObject{
+		Spec:     ManagedAppSpec{AppSpec: app.Spec},
+		Metadata: ManagedAppMeta{Generation: 7},
+		Status: ManagedAppStatus{
+			Phase:              ManagedAppPhaseError,
+			ReadyReplicas:      1,
+			ObservedGeneration: 7,
+			Message:            "zero-downtime deploy refused",
+		},
+	}
+	status := CalculateAppObservedStatus(app, AppRuntimeObservation{
+		ManagedApp:              managed,
+		Found:                   true,
+		Complete:                true,
+		Fresh:                   true,
+		ObservedAt:              time.Now().UTC(),
+		ClusterID:               "cluster-uid",
+		NamespacePresent:        boolPointer(true),
+		ServicePresent:          boolPointer(true),
+		EndpointPresent:         boolPointer(true),
+		EndpointReady:           boolPointer(true),
+		PhysicalReplicas:        intPointer(1),
+		PhysicalDesiredReplicas: intPointer(1),
+		ImagePresent:            boolPointer(true),
+	})
+	if status.Phase != "deployed" || status.Reason != AppObservationReasonManagedAppErrorLKGServing {
+		t.Fatalf("healthy serving LKG must remain deployed while exposing the error reason: %+v", status)
+	}
+	if status.Message != "zero-downtime deploy refused" {
+		t.Fatalf("failed operation message must remain visible: %+v", status)
+	}
+}
+
+func TestCalculateAppObservedStatusDoesNotPromoteInitialFailureToLKG(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec:   model.AppSpec{Image: "registry.example/runtime:v1", Ports: []int{7777}, Replicas: 1},
+		Status: model.AppStatus{Phase: "failed"},
+	}
+	managed := ManagedAppObject{
+		Spec:     ManagedAppSpec{AppSpec: app.Spec},
+		Metadata: ManagedAppMeta{Generation: 1},
+		Status:   ManagedAppStatus{Phase: ManagedAppPhaseError, ReadyReplicas: 1, ObservedGeneration: 1},
+	}
+	status := CalculateAppObservedStatus(app, AppRuntimeObservation{
+		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
+		ObservedAt: time.Now().UTC(), ClusterID: "cluster-uid",
+		NamespacePresent: boolPointer(true), ServicePresent: boolPointer(true),
+		EndpointPresent: boolPointer(true), EndpointReady: boolPointer(true),
+		PhysicalReplicas: intPointer(1), PhysicalDesiredReplicas: intPointer(1), ImagePresent: boolPointer(true),
+	})
+	if status.Phase != "failed" || status.Reason != AppObservationReasonManagedAppError {
+		t.Fatalf("a runtime without a durable deployed LKG must remain failed, got %+v", status)
+	}
+}
+
+func TestCalculateAppObservedStatusDoesNotPreserveLKGWithoutEndpointEvidence(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec:   model.AppSpec{Image: "registry.example/argus-runtime:v1", Ports: []int{7777}, Replicas: 1},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	managed := ManagedAppObject{
+		Spec:     ManagedAppSpec{AppSpec: app.Spec},
+		Metadata: ManagedAppMeta{Generation: 7},
+		Status:   ManagedAppStatus{Phase: ManagedAppPhaseError, ReadyReplicas: 1, ObservedGeneration: 7},
+	}
+	status := CalculateAppObservedStatus(app, AppRuntimeObservation{
+		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
+		ObservedAt: time.Now().UTC(), ClusterID: "cluster-uid",
+		NamespacePresent: boolPointer(true), ServicePresent: boolPointer(true),
+		EndpointPresent: boolPointer(false), EndpointReady: boolPointer(false),
+		PhysicalReplicas: intPointer(1), PhysicalDesiredReplicas: intPointer(1), ImagePresent: boolPointer(true),
+	})
+	if status.Phase != "failed" {
+		t.Fatalf("missing endpoint evidence must remain failed closed, got %+v", status)
+	}
+}
+
 func TestApplyAppObservedStatusPreservesStoredStateAndClearsUnknownReplicaClaim(t *testing.T) {
 	storedUpdatedAt := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	observedAt := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
