@@ -136,7 +136,11 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("primary convergence", fmt.Errorf("wait for managed postgres switchover to %s: %w", targetPrimary, err))
 	}
-	if strings.TrimSpace(placementBefore.RuntimeID) != targetRuntimeID {
+	placementOnTarget, err := s.managedPostgresPlacementMatchesRuntime(ctx, client, placementBefore, targetRuntimeID)
+	if err != nil {
+		return recoverableManagedPostgresTransitionError("placement witness", err)
+	}
+	if !placementOnTarget {
 		return recoverableManagedPostgresTransitionError("placement witness", fmt.Errorf(
 			"managed postgres SQL-ready primary %s is on runtime %s, want %s",
 			placementBefore.PrimaryPod, placementBefore.RuntimeID, targetRuntimeID,
@@ -161,8 +165,11 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("final convergence", fmt.Errorf("wait for managed postgres to settle after switchover: %w", err))
 	}
-	if strings.TrimSpace(placementAfter.RuntimeID) != targetRuntimeID ||
-		!managedPostgresPrimaryPlacementsEqual(placementBefore, placementAfter) {
+	placementOnTarget, err = s.managedPostgresPlacementMatchesRuntime(ctx, client, placementAfter, targetRuntimeID)
+	if err != nil {
+		return recoverableManagedPostgresTransitionError("placement witness", err)
+	}
+	if !placementOnTarget || !managedPostgresPrimaryPlacementsEqual(placementBefore, placementAfter) {
 		return recoverableManagedPostgresTransitionError("placement witness", fmt.Errorf(
 			"managed postgres SQL-ready placement changed during finalization: before=%+v after=%+v",
 			placementBefore, placementAfter,
@@ -274,7 +281,11 @@ func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("primary convergence", fmt.Errorf("wait for managed postgres service %s switchover to %s: %w", target.ServiceID, targetPrimary, err))
 	}
-	if strings.TrimSpace(placementBefore.RuntimeID) != targetRuntimeID {
+	placementOnTarget, err := s.managedPostgresPlacementMatchesRuntime(ctx, client, placementBefore, targetRuntimeID)
+	if err != nil {
+		return recoverableManagedPostgresTransitionError("placement witness", err)
+	}
+	if !placementOnTarget {
 		return recoverableManagedPostgresTransitionError("placement witness", fmt.Errorf(
 			"managed postgres service %s SQL-ready primary %s is on runtime %s, want %s",
 			target.ServiceID, placementBefore.PrimaryPod, placementBefore.RuntimeID, targetRuntimeID,
@@ -293,8 +304,11 @@ func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("final convergence", fmt.Errorf("wait for managed postgres service %s to settle after switchover: %w", target.ServiceID, err))
 	}
-	if strings.TrimSpace(placementAfter.RuntimeID) != targetRuntimeID ||
-		!managedPostgresPrimaryPlacementsEqual(placementBefore, placementAfter) {
+	placementOnTarget, err = s.managedPostgresPlacementMatchesRuntime(ctx, client, placementAfter, targetRuntimeID)
+	if err != nil {
+		return recoverableManagedPostgresTransitionError("placement witness", err)
+	}
+	if !placementOnTarget || !managedPostgresPrimaryPlacementsEqual(placementBefore, placementAfter) {
 		return recoverableManagedPostgresTransitionError("placement witness", fmt.Errorf(
 			"managed postgres service %s SQL-ready placement changed during finalization: before=%+v after=%+v",
 			target.ServiceID, placementBefore, placementAfter,
@@ -2617,11 +2631,11 @@ func (s *Service) selectManagedPostgresSwitchoverTarget(
 		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") {
 			continue
 		}
-		runtimeID, err := s.runtimeIDForNode(ctx, client, strings.TrimSpace(pod.Spec.NodeName))
+		matchesRuntime, err := s.managedPostgresNodeMatchesRuntime(ctx, client, strings.TrimSpace(pod.Spec.NodeName), targetRuntimeID)
 		if err != nil {
 			return "", err
 		}
-		if strings.TrimSpace(runtimeID) != targetRuntimeID {
+		if !matchesRuntime {
 			continue
 		}
 		matches, err := s.managedPostgresPodMatchesStorageTarget(ctx, client, namespace, pod, storageTarget)
@@ -2802,11 +2816,52 @@ func (s *Service) managedPostgresPrimaryMatchesTarget(
 	if targetNodeName != "" {
 		return currentPrimary, strings.TrimSpace(pod.Spec.NodeName) == strings.TrimSpace(targetNodeName), nil
 	}
-	runtimeID, err := s.runtimeIDForNode(ctx, client, strings.TrimSpace(pod.Spec.NodeName))
+	matchesRuntime, err := s.managedPostgresNodeMatchesRuntime(ctx, client, strings.TrimSpace(pod.Spec.NodeName), targetRuntimeID)
 	if err != nil {
 		return currentPrimary, false, err
 	}
-	return currentPrimary, strings.TrimSpace(runtimeID) == strings.TrimSpace(targetRuntimeID), nil
+	return currentPrimary, matchesRuntime, nil
+}
+
+// managedPostgresNodeMatchesRuntime treats a managed-shared runtime as a
+// placement selector rather than an exclusive node runtime ID. Shared-pool
+// nodes may carry an explicit owned/runtime label for other control-plane
+// purposes while still being valid members of the requested shared location.
+func (s *Service) managedPostgresNodeMatchesRuntime(
+	ctx context.Context,
+	client *kubeClient,
+	nodeName, targetRuntimeID string,
+) (bool, error) {
+	nodeName = strings.TrimSpace(nodeName)
+	targetRuntimeID = strings.TrimSpace(targetRuntimeID)
+	if nodeName == "" || targetRuntimeID == "" {
+		return false, nil
+	}
+	targetRuntime, err := s.Store.GetRuntime(targetRuntimeID)
+	if err != nil {
+		return false, fmt.Errorf("load postgres target runtime %s: %w", targetRuntimeID, err)
+	}
+	if targetRuntime.Type == model.RuntimeTypeManagedShared {
+		_, found, err := managedSharedNodeMatchingSelector(ctx, client, nodeName, runtime.ManagedSharedNodeSelector(targetRuntime))
+		return found, err
+	}
+	runtimeID, err := s.runtimeIDForNode(ctx, client, nodeName)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(runtimeID) == targetRuntimeID, nil
+}
+
+func (s *Service) managedPostgresPlacementMatchesRuntime(
+	ctx context.Context,
+	client *kubeClient,
+	placement managedPostgresPrimaryPlacement,
+	targetRuntimeID string,
+) (bool, error) {
+	if strings.TrimSpace(placement.NodeName) == "" {
+		return false, nil
+	}
+	return s.managedPostgresNodeMatchesRuntime(ctx, client, placement.NodeName, targetRuntimeID)
 }
 
 func max(left, right int) int {

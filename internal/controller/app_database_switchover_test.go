@@ -1533,6 +1533,7 @@ func TestSelectManagedPostgresSwitchoverTargetMatchesManagedSharedLocationNode(t
 				"metadata": map[string]any{
 					"name": standbyNode,
 					"labels": map[string]any{
+						runtimepkg.RuntimeIDLabelKey:           "runtime_owned-instance-us",
 						runtimepkg.SharedPoolLabelKey:          runtimepkg.SharedPoolLabelValue,
 						runtimepkg.LocationCountryCodeLabelKey: "us",
 						kubeHostnameLabelKey:                   standbyNode,
