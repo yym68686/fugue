@@ -199,7 +199,7 @@ func writeOrphanManagedAppTable(w io.Writer, orphans []orphanManagedApp) error {
 		return sorted[i].Name < sorted[j].Name
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "APP_ID\tNAME\tTENANT\tPROJECT\tNAMESPACE\tMANAGED_APP\tPHASE\tPOSTGRES\tSUSPENDED\tRUNTIME\tMESSAGE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "APP_ID\tNAME\tTENANT\tPROJECT\tNAMESPACE\tMANAGED_APP\tPHASE\tACTIONABLE\tVALIDATION\tPOSTGRES\tSUSPENDED\tRUNTIME\tMESSAGE"); err != nil {
 		return err
 	}
 	for _, orphan := range sorted {
@@ -217,7 +217,7 @@ func writeOrphanManagedAppTable(w io.Writer, orphans []orphanManagedApp) error {
 		sort.Strings(runtimePhases)
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%t\t%s\t%s\t%d/%d\t%s\t%s\n",
 			orphan.AppID,
 			orphan.Name,
 			orphan.TenantID,
@@ -225,6 +225,8 @@ func writeOrphanManagedAppTable(w io.Writer, orphans []orphanManagedApp) error {
 			orphan.Namespace,
 			orphan.ManagedAppName,
 			orphan.Phase,
+			orphan.Actionable,
+			orphan.ValidationStatus,
 			strings.Join(serviceNames, ","),
 			suspended,
 			len(orphan.BackingServices),

@@ -774,12 +774,24 @@ func TestManagedPostgresOrphanListAndAdoptAreAdminOnlyAndSecretSafe(t *testing.T
 			if storageMode == "deleting" {
 				deletionTimestamp = time.Now().UTC().Format(time.RFC3339)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{
-				"name":              clusterName,
-				"uid":               "cnpg-cluster-orphan-api-test-uid",
-				"deletionTimestamp": deletionTimestamp,
-				"ownerReferences":   []map[string]any{{"uid": managed.Metadata.UID}},
-			}})
+			ownerUID := managed.Metadata.UID
+			if storageMode == "foreign-owner" {
+				ownerUID = "different-managed-app-uid"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name":              clusterName,
+					"uid":               "cnpg-cluster-orphan-api-test-uid",
+					"deletionTimestamp": deletionTimestamp,
+					"annotations":       map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOff},
+					"ownerReferences":   []map[string]any{{"uid": ownerUID}},
+				},
+				"spec": map[string]any{"instances": 1},
+				"status": map[string]any{
+					"readyInstances": 1,
+					"currentPrimary": "orphan-postgres-1",
+				},
+			})
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/persistentvolumeclaims") {
@@ -827,6 +839,25 @@ func TestManagedPostgresOrphanListAndAdoptAreAdminOnlyAndSecretSafe(t *testing.T
 	if len(listPayload.Orphans) != 1 || listPayload.Orphans[0].AppID != managed.Spec.AppID || len(listPayload.Orphans[0].BackingServices) != 1 {
 		t.Fatalf("unexpected orphan summary: %+v", listPayload.Orphans)
 	}
+	if !listPayload.Orphans[0].Actionable || listPayload.Orphans[0].ValidationStatus != managedPostgresOrphanValidationReady {
+		t.Fatalf("expected storage-verified actionable orphan, got %+v", listPayload.Orphans[0])
+	}
+	if service := listPayload.Orphans[0].BackingServices[0]; service.RuntimePhase != model.ManagedPostgresRuntimePhaseActive || service.ReadyInstances == nil || *service.ReadyInstances != 1 {
+		t.Fatalf("expected live CNPG runtime observation, got %+v", service)
+	}
+	storageMode = "foreign-owner"
+	conflictList := performJSONRequest(t, server, http.MethodGet, "/v1/backing-services/orphans", bootstrapKey, nil)
+	if conflictList.Code != http.StatusOK {
+		t.Fatalf("expected ownership-conflict list status %d, got %d body=%s", http.StatusOK, conflictList.Code, conflictList.Body.String())
+	}
+	var conflictPayload struct {
+		Orphans []managedPostgresOrphanSummary `json:"orphans"`
+	}
+	mustDecodeJSON(t, conflictList, &conflictPayload)
+	if len(conflictPayload.Orphans) != 1 || conflictPayload.Orphans[0].Actionable || conflictPayload.Orphans[0].ValidationStatus != managedPostgresOrphanValidationConflict || !strings.Contains(conflictPayload.Orphans[0].ValidationMessage, "not owned") {
+		t.Fatalf("expected visible non-actionable ownership conflict, got %+v", conflictPayload.Orphans)
+	}
+	storageMode = "ready"
 	forbiddenSuspend := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/orphans/"+managed.Spec.AppID+"/suspend", tenantKey, nil)
 	if forbiddenSuspend.Code != http.StatusForbidden {
 		t.Fatalf("expected tenant orphan suspend status %d, got %d body=%s", http.StatusForbidden, forbiddenSuspend.Code, forbiddenSuspend.Body.String())
@@ -990,6 +1021,23 @@ func TestManagedPostgresOrphanCandidateRequiresCanonicalResourceIdentity(t *test
 				t.Fatalf("unsafe managed app must not be adoptable: %+v", managed.Metadata)
 			}
 		})
+	}
+}
+
+func TestManagedPostgresOrphanListCandidatePreservesReconciliationTransitions(t *testing.T) {
+	t.Parallel()
+
+	managed := retainedManagedPostgresOrphan("tenant_reconciling", "project_reconciling", "password", "dsn", "token")
+	managed.Metadata.Generation++
+	if summary, _, exact, listed := managedPostgresOrphanListCandidate(managed); !listed || exact || summary.AppID != managed.Spec.AppID {
+		t.Fatalf("stale observed generation must remain listed but non-actionable: listed=%t exact=%t summary=%+v", listed, exact, summary)
+	}
+	managed.Status.Phase = runtime.ManagedAppPhaseProgressing
+	managed.Status.Message = "orphaned managed app shutdown in progress; store app is missing"
+	managed.Status.Conditions[0].Status = "False"
+	managed.Status.Conditions[0].Reason = "ShuttingDown"
+	if summary, _, exact, listed := managedPostgresOrphanListCandidate(managed); !listed || exact || summary.AppID != managed.Spec.AppID {
+		t.Fatalf("orphan shutdown transition must remain listed but non-actionable: listed=%t exact=%t summary=%+v", listed, exact, summary)
 	}
 }
 

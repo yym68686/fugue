@@ -242,15 +242,18 @@ type orphanBackingServiceSummary struct {
 }
 
 type orphanManagedApp struct {
-	AppID           string                        `json:"app_id"`
-	TenantID        string                        `json:"tenant_id"`
-	ProjectID       string                        `json:"project_id"`
-	Name            string                        `json:"name"`
-	Namespace       string                        `json:"namespace"`
-	ManagedAppName  string                        `json:"managed_app_name"`
-	Phase           string                        `json:"phase"`
-	Message         string                        `json:"message,omitempty"`
-	BackingServices []orphanBackingServiceSummary `json:"backing_services"`
+	AppID             string                        `json:"app_id"`
+	TenantID          string                        `json:"tenant_id"`
+	ProjectID         string                        `json:"project_id"`
+	Name              string                        `json:"name"`
+	Namespace         string                        `json:"namespace"`
+	ManagedAppName    string                        `json:"managed_app_name"`
+	Phase             string                        `json:"phase"`
+	Message           string                        `json:"message,omitempty"`
+	Actionable        bool                          `json:"actionable"`
+	ValidationStatus  string                        `json:"validation_status"`
+	ValidationMessage string                        `json:"validation_message,omitempty"`
+	BackingServices   []orphanBackingServiceSummary `json:"backing_services"`
 }
 
 type orphanManagedAppListResponse struct {

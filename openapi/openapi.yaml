@@ -23364,10 +23364,18 @@ components:
           type: string
         suspended:
           type: boolean
+        runtime_phase:
+          type: string
+        ready_instances:
+          type: integer
+          minimum: 0
+        desired_instances:
+          type: integer
+          minimum: 0
     ManagedPostgresOrphanSummary:
       type: object
       additionalProperties: false
-      required: [app_id, tenant_id, project_id, name, namespace, managed_app_name, phase, backing_services]
+      required: [app_id, tenant_id, project_id, name, namespace, managed_app_name, phase, actionable, validation_status, backing_services]
       properties:
         app_id:
           type: string
@@ -23384,6 +23392,13 @@ components:
         phase:
           type: string
         message:
+          type: string
+        actionable:
+          type: boolean
+        validation_status:
+          type: string
+          enum: [ready, reconciling, conflict, unavailable]
+        validation_message:
           type: string
         backing_services:
           type: array

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,6 +128,12 @@ type kubeCloudNativePGCluster struct {
 		Annotations       map[string]string `json:"annotations,omitempty"`
 		Labels            map[string]string `json:"labels,omitempty"`
 		CreationTimestamp string            `json:"creationTimestamp,omitempty"`
+		OwnerReferences   []struct {
+			APIVersion string `json:"apiVersion,omitempty"`
+			Kind       string `json:"kind,omitempty"`
+			Name       string `json:"name,omitempty"`
+			UID        string `json:"uid,omitempty"`
+		} `json:"ownerReferences,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		Instances int            `json:"instances,omitempty"`
@@ -938,14 +945,21 @@ func (c *kubeClient) patchCloudNativePGManagedRoles(
 	return err
 }
 
-func (c *kubeClient) patchCloudNativePGHibernation(ctx context.Context, namespace, name, value string) error {
+func (c *kubeClient) patchCloudNativePGHibernation(ctx context.Context, namespace, name, value, expectedUID, expectedResourceVersion string) error {
 	value = strings.TrimSpace(value)
 	if value != runtime.CloudNativePGHibernationOn && value != runtime.CloudNativePGHibernationOff {
 		return fmt.Errorf("invalid CNPG hibernation value %q", value)
 	}
+	expectedUID = strings.TrimSpace(expectedUID)
+	expectedResourceVersion = strings.TrimSpace(expectedResourceVersion)
+	if expectedUID == "" || expectedResourceVersion == "" {
+		return errors.New("CNPG hibernation patch requires exact UID and resource version")
+	}
 	body := map[string]any{
 		"metadata": map[string]any{
-			"annotations": map[string]string{runtime.CloudNativePGHibernationAnno: value},
+			"uid":             expectedUID,
+			"resourceVersion": expectedResourceVersion,
+			"annotations":     map[string]string{runtime.CloudNativePGHibernationAnno: value},
 		},
 	}
 	obj := map[string]any{

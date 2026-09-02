@@ -4596,10 +4596,20 @@ func TestReconcileMissingStoreManagedPostgresLifecyclePatchesOnlyHibernationInte
 	managed.Metadata.Generation = 2
 	clusterName := runtime.ManagedBackingServiceDeployments(app, managed.Spec.Scheduling)[0].ResourceName
 	var hibernationPatches []map[string]any
+	clusterGets := 0
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == cloudNativePGClusterAPIPath(runtime.NamespaceForTenant(app.TenantID), clusterName):
-			return okJSONResponse(fmt.Sprintf(`{"metadata":{"name":%q,"uid":"cluster-uid","generation":3,"annotations":{"%s":"off"}},"spec":{"instances":1},"status":{"readyInstances":1}}`, clusterName, runtime.CloudNativePGHibernationAnno)), nil
+			clusterGets++
+			if clusterGets == 1 {
+				return okJSONResponse(fmt.Sprintf(`{"metadata":{"name":%q,"uid":"cluster-uid","resourceVersion":"42","generation":3,"annotations":{"%s":"off"},"ownerReferences":[{"apiVersion":"fugue.pro/v1alpha1","kind":"ManagedApp","name":%q,"uid":%q}]},"spec":{"instances":1},"status":{"readyInstances":1}}`, clusterName, runtime.CloudNativePGHibernationAnno, managed.Metadata.Name, managed.Metadata.UID)), nil
+			}
+			if clusterGets == 2 {
+				return okJSONResponse(fmt.Sprintf(`{"metadata":{"name":%q,"uid":"cluster-uid","resourceVersion":"43","generation":3,"annotations":{"%s":"on"},"ownerReferences":[{"apiVersion":"fugue.pro/v1alpha1","kind":"ManagedApp","name":%q,"uid":%q}]},"spec":{"instances":1},"status":{"readyInstances":1}}`, clusterName, runtime.CloudNativePGHibernationAnno, managed.Metadata.Name, managed.Metadata.UID)), nil
+			}
+			return okJSONResponse(fmt.Sprintf(`{"metadata":{"name":%q,"uid":"cluster-uid","resourceVersion":"43","generation":3,"annotations":{"%s":"on"},"ownerReferences":[{"apiVersion":"fugue.pro/v1alpha1","kind":"ManagedApp","name":%q,"uid":%q}]},"spec":{"instances":1},"status":{"readyInstances":0,"conditions":[{"type":"%s","status":"True"}]}}`, clusterName, runtime.CloudNativePGHibernationAnno, managed.Metadata.Name, managed.Metadata.UID, runtime.CloudNativePGHibernationAnno)), nil
+		case req.Method == http.MethodGet && req.URL.Path == cloudNativePGClusterCollectionAPIPath(runtime.NamespaceForTenant(app.TenantID)) && req.URL.Query().Get("watch") == "true":
+			return okJSONResponse(`{"type":"MODIFIED","object":{}}`), nil
 		case req.Method == http.MethodPatch && req.URL.Path == cloudNativePGClusterAPIPath(runtime.NamespaceForTenant(app.TenantID), clusterName):
 			var patch map[string]any
 			if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
@@ -4621,12 +4631,65 @@ func TestReconcileMissingStoreManagedPostgresLifecyclePatchesOnlyHibernationInte
 		t.Fatalf("expected one CNPG hibernation patch, got %+v", hibernationPatches)
 	}
 	metadata := hibernationPatches[0]["metadata"].(map[string]any)
+	if metadata["uid"] != "cluster-uid" || metadata["resourceVersion"] != "42" {
+		t.Fatalf("expected UID/resourceVersion-fenced hibernation patch, got %+v", metadata)
+	}
 	annotations := metadata["annotations"].(map[string]any)
 	if len(annotations) != 1 || annotations[runtime.CloudNativePGHibernationAnno] != runtime.CloudNativePGHibernationOn {
 		t.Fatalf("expected hibernation-only annotation patch, got %+v", hibernationPatches[0])
 	}
-	if len(statuses) != 1 || statuses[0].Phase != model.ManagedPostgresRuntimePhaseSuspending {
-		t.Fatalf("expected observed suspending status from pre-patch cluster, got %+v", statuses)
+	if clusterGets != 3 {
+		t.Fatalf("expected pre- and post-patch CNPG reads, got %d", clusterGets)
+	}
+	if len(statuses) != 1 || statuses[0].Phase != model.ManagedPostgresRuntimePhaseSuspended || statuses[0].ReadyInstances != 0 {
+		t.Fatalf("expected observed suspended zero-ready status from post-patch cluster, got %+v", statuses)
+	}
+}
+
+func TestReconcileMissingStoreManagedPostgresLifecycleSkipsNonOwnerCluster(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID: "app_non_owner", TenantID: "tenant_non_owner", ProjectID: "project_non_owner", Name: "retained",
+		Spec: model.AppSpec{RuntimeID: "runtime_shared", Replicas: 0},
+		BackingServices: []model.BackingService{{
+			ID: "service_non_owner", TenantID: "tenant_non_owner", ProjectID: "project_non_owner",
+			Name: "retained-postgres", Type: model.BackingServiceTypePostgres, Provisioner: model.BackingServiceProvisionerManaged,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{ServiceName: "retained-postgres", RuntimeID: "runtime_shared", Instances: 1, Suspended: true}},
+		}},
+		Bindings: []model.ServiceBinding{{ID: "binding_non_owner", TenantID: "tenant_non_owner", AppID: "app_non_owner", ServiceID: "service_non_owner"}},
+	}
+	managedMap := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managed, err := runtime.ManagedAppObjectFromMap(managedMap)
+	if err != nil {
+		t.Fatalf("build managed app: %v", err)
+	}
+	managed.Metadata.Name = runtime.ManagedAppResourceName(app)
+	managed.Metadata.UID = "managed-non-owner-uid"
+	clusterName := runtime.ManagedBackingServiceDeployments(app, managed.Spec.Scheduling)[0].ResourceName
+	patches := 0
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == cloudNativePGClusterAPIPath(runtime.NamespaceForTenant(app.TenantID), clusterName):
+			return okJSONResponse(fmt.Sprintf(`{"metadata":{"name":%q,"uid":"cluster-uid","resourceVersion":"42","generation":3,"annotations":{"%s":"off"},"ownerReferences":[{"apiVersion":"fugue.pro/v1alpha1","kind":"ManagedApp","name":"other-app","uid":"other-managed-uid"}]},"spec":{"instances":1},"status":{"readyInstances":1}}`, clusterName, runtime.CloudNativePGHibernationAnno)), nil
+		case req.Method == http.MethodPatch && req.URL.Path == cloudNativePGClusterAPIPath(runtime.NamespaceForTenant(app.TenantID), clusterName):
+			patches++
+			return okJSONResponse(`{}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+	client := &kubeClient{client: &http.Client{Transport: transport}, baseURL: "http://kube.test", bearerToken: "token"}
+	statuses, err := (&Service{}).reconcileMissingStoreManagedPostgresLifecycle(context.Background(), client, runtime.NamespaceForTenant(app.TenantID), managed, app)
+	if err != nil {
+		t.Fatalf("reconcile non-owner orphan lifecycle: %v", err)
+	}
+	if patches != 0 {
+		t.Fatalf("non-owner cluster must never be patched, got %d patches", patches)
+	}
+	if len(statuses) != 1 || statuses[0].Phase != model.ManagedPostgresRuntimePhaseError || !strings.Contains(statuses[0].Message, "ownership conflict") {
+		t.Fatalf("expected ownership-conflict status, got %+v", statuses)
 	}
 }
 

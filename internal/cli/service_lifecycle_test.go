@@ -148,7 +148,7 @@ func TestRunServicePostgresOrphanList(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/backing-services/orphans" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"orphans":[{"app_id":"app_b","tenant_id":"tenant_b","project_id":"project_b","name":"river","namespace":"tenant-b","managed_app_name":"river","phase":"disabled","message":"retained for audit","backing_services":[{"id":"svc_b","name":"river-postgres","type":"postgres","runtime_id":"runtime_us","service_name":"river-postgres","storage_size":"20Gi","suspended":false,"runtime_phase":"active","ready_instances":1,"desired_instances":1}]},{"app_id":"app_a","tenant_id":"tenant_a","project_id":"project_a","name":"ember","namespace":"tenant-a","managed_app_name":"ember","phase":"disabled","backing_services":[{"id":"svc_a","name":"ember-postgres","type":"postgres","runtime_id":"runtime_us","service_name":"ember-postgres","storage_size":"1Gi","suspended":true,"runtime_phase":"suspended","ready_instances":0,"desired_instances":1}]}]}`))
+		_, _ = w.Write([]byte(`{"orphans":[{"app_id":"app_b","tenant_id":"tenant_b","project_id":"project_b","name":"river","namespace":"tenant-b","managed_app_name":"river","phase":"disabled","message":"retained for audit","actionable":false,"validation_status":"conflict","validation_message":"ownership conflict","backing_services":[{"id":"svc_b","name":"river-postgres","type":"postgres","runtime_id":"runtime_us","service_name":"river-postgres","storage_size":"20Gi","suspended":false,"runtime_phase":"error","ready_instances":1,"desired_instances":1}]},{"app_id":"app_a","tenant_id":"tenant_a","project_id":"project_a","name":"ember","namespace":"tenant-a","managed_app_name":"ember","phase":"disabled","actionable":true,"validation_status":"ready","backing_services":[{"id":"svc_a","name":"ember-postgres","type":"postgres","runtime_id":"runtime_us","service_name":"ember-postgres","storage_size":"1Gi","suspended":true,"runtime_phase":"suspended","ready_instances":0,"desired_instances":1}]}]}`))
 	}))
 	defer server.Close()
 
@@ -162,7 +162,7 @@ func TestRunServicePostgresOrphanList(t *testing.T) {
 		t.Fatalf("run orphan ls: %v stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"APP_ID", "MANAGED_APP", "app_a", "ember-postgres", "1/1", "app_b", "river-postgres", "0/1", "retained for audit"} {
+	for _, want := range []string{"APP_ID", "MANAGED_APP", "ACTIONABLE", "VALIDATION", "app_a", "ember-postgres", "true", "ready", "1/1", "app_b", "river-postgres", "false", "conflict", "0/1", "retained for audit"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected orphan table to contain %q, got %s", want, out)
 		}
@@ -255,6 +255,41 @@ func TestRunServicePostgresOrphanSuspendWithoutWait(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected orphan suspend output to contain %q, got %s", want, stdout.String())
 		}
+	}
+}
+
+func TestRunServicePostgresOrphanSuspendAlreadyCurrentStillWaits(t *testing.T) {
+	t.Parallel()
+
+	listRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/backing-services/orphans/app_123/suspend":
+			_, _ = w.Write([]byte(`{"orphan":{"app_id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"retained","namespace":"tenant-123","managed_app_name":"app-123","phase":"disabled","backing_services":[{"id":"svc_pg","name":"retained-db","type":"postgres","suspended":true,"runtime_phase":"suspending","ready_instances":1,"desired_instances":1}]},"already_current":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backing-services/orphans":
+			listRequests++
+			_, _ = w.Write([]byte(`{"orphans":[{"app_id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"retained","namespace":"tenant-123","managed_app_name":"app-123","phase":"disabled","actionable":true,"validation_status":"ready","backing_services":[{"id":"svc_pg","name":"retained-db","type":"postgres","suspended":true,"runtime_phase":"suspended","ready_instances":0,"desired_instances":1}]}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--json",
+		"service", "postgres", "orphan", "suspend", "app_123",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run already-current orphan suspend: %v stderr=%s", err, stderr.String())
+	}
+	if listRequests != 1 {
+		t.Fatalf("--wait must observe runtime even when intent is already current, got %d list requests", listRequests)
+	}
+	if !strings.Contains(stdout.String(), `"runtime_phase": "suspended"`) || !strings.Contains(stdout.String(), `"ready_instances": 0`) {
+		t.Fatalf("expected converged runtime in output, got %s", stdout.String())
 	}
 }
 

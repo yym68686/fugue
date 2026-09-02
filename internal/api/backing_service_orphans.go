@@ -31,16 +31,26 @@ type managedPostgresOrphanBackingServiceSummary struct {
 }
 
 type managedPostgresOrphanSummary struct {
-	AppID           string                                       `json:"app_id"`
-	TenantID        string                                       `json:"tenant_id"`
-	ProjectID       string                                       `json:"project_id"`
-	Name            string                                       `json:"name"`
-	Namespace       string                                       `json:"namespace"`
-	ManagedAppName  string                                       `json:"managed_app_name"`
-	Phase           string                                       `json:"phase"`
-	Message         string                                       `json:"message,omitempty"`
-	BackingServices []managedPostgresOrphanBackingServiceSummary `json:"backing_services"`
+	AppID             string                                       `json:"app_id"`
+	TenantID          string                                       `json:"tenant_id"`
+	ProjectID         string                                       `json:"project_id"`
+	Name              string                                       `json:"name"`
+	Namespace         string                                       `json:"namespace"`
+	ManagedAppName    string                                       `json:"managed_app_name"`
+	Phase             string                                       `json:"phase"`
+	Message           string                                       `json:"message,omitempty"`
+	Actionable        bool                                         `json:"actionable"`
+	ValidationStatus  string                                       `json:"validation_status"`
+	ValidationMessage string                                       `json:"validation_message,omitempty"`
+	BackingServices   []managedPostgresOrphanBackingServiceSummary `json:"backing_services"`
 }
+
+const (
+	managedPostgresOrphanValidationReady       = "ready"
+	managedPostgresOrphanValidationReconciling = "reconciling"
+	managedPostgresOrphanValidationConflict    = "conflict"
+	managedPostgresOrphanValidationUnavailable = "unavailable"
+)
 
 type managedPostgresOrphanLifecycleRequest struct {
 	ConfirmAppID     string `json:"confirm_app_id,omitempty"`
@@ -54,7 +64,7 @@ func (s *Server) handleListManagedPostgresOrphans(w http.ResponseWriter, r *http
 		return
 	}
 
-	managedApps, err := s.managedAppInventory(r.Context(), false)
+	managedApps, err := s.managedAppInventory(r.Context(), true)
 	if err != nil {
 		s.appendAudit(principal, "backing_service.orphan.list", "managed_postgres_orphans", "", "", map[string]string{"result": "inventory_error"})
 		httpx.WriteError(w, http.StatusServiceUnavailable, "managed app inventory is unavailable")
@@ -62,7 +72,7 @@ func (s *Server) handleListManagedPostgresOrphans(w http.ResponseWriter, r *http
 	}
 	orphans := make([]managedPostgresOrphanSummary, 0)
 	for _, managed := range managedApps {
-		summary, _, eligible := managedPostgresOrphanCandidate(managed)
+		summary, snapshot, exact, eligible := managedPostgresOrphanListCandidate(managed)
 		if !eligible {
 			continue
 		}
@@ -71,6 +81,27 @@ func (s *Server) handleListManagedPostgresOrphans(w http.ResponseWriter, r *http
 		case err == nil:
 			continue
 		case errors.Is(err, store.ErrNotFound):
+			if !exact {
+				summary.Actionable = false
+				summary.ValidationStatus = managedPostgresOrphanValidationReconciling
+				summary.ValidationMessage = "managed app orphan state is being reconciled; lifecycle changes remain blocked until the current generation is observed"
+				orphans = append(orphans, summary)
+				continue
+			}
+			observations, validationErr := s.inspectManagedPostgresOrphanStorage(r.Context(), managed, snapshot)
+			applyManagedPostgresOrphanRuntimeObservations(&summary, observations)
+			summary.Actionable = false
+			switch {
+			case validationErr == nil:
+				summary.Actionable = true
+				summary.ValidationStatus = managedPostgresOrphanValidationReady
+			case errors.Is(validationErr, errManagedPostgresOrphanStorageUnavailable):
+				summary.ValidationStatus = managedPostgresOrphanValidationUnavailable
+				summary.ValidationMessage = "managed PostgreSQL storage evidence is unavailable"
+			default:
+				summary.ValidationStatus = managedPostgresOrphanValidationConflict
+				summary.ValidationMessage = validationErr.Error()
+			}
 			orphans = append(orphans, summary)
 		default:
 			s.appendAudit(principal, "backing_service.orphan.list", "managed_postgres_orphans", "", "", map[string]string{"result": "store_error"})
@@ -427,14 +458,40 @@ func managedPostgresOrphanCandidate(managed runtime.ManagedAppObject) (managedPo
 	return summary, snapshot, true
 }
 
+func managedPostgresOrphanListCandidate(managed runtime.ManagedAppObject) (managedPostgresOrphanSummary, model.App, bool, bool) {
+	summary, snapshot, valid := managedPostgresAdoptionSnapshot(managed)
+	if !valid {
+		return managedPostgresOrphanSummary{}, snapshot, false, false
+	}
+	if managedPostgresExplicitlyOrphaned(managed) {
+		return summary, snapshot, true, true
+	}
+	if managedPostgresOrphanMarkerPresent(managed) || managedPostgresOrphanShutdownInProgress(managed) {
+		return summary, snapshot, false, true
+	}
+	return managedPostgresOrphanSummary{}, snapshot, false, false
+}
+
 func managedPostgresExplicitlyOrphaned(managed runtime.ManagedAppObject) bool {
+	return managedPostgresOrphanMarkerPresent(managed) &&
+		managed.Status.ObservedGeneration == managed.Metadata.Generation
+}
+
+func managedPostgresOrphanMarkerPresent(managed runtime.ManagedAppObject) bool {
 	message := strings.ToLower(strings.TrimSpace(managed.Status.Message))
 	return strings.EqualFold(strings.TrimSpace(managed.Status.Phase), runtime.ManagedAppPhaseDisabled) &&
 		strings.Contains(message, "orphaned managed app: app not found in store") &&
 		strings.Contains(message, "retained storage") &&
 		managed.Metadata.Generation > 0 &&
-		managed.Status.ObservedGeneration == managed.Metadata.Generation &&
 		managedPostgresOrphanWorkloadZeroVerified(managed.Status.Conditions)
+}
+
+func managedPostgresOrphanShutdownInProgress(managed runtime.ManagedAppObject) bool {
+	message := strings.ToLower(strings.TrimSpace(managed.Status.Message))
+	return strings.EqualFold(strings.TrimSpace(managed.Status.Phase), runtime.ManagedAppPhaseProgressing) &&
+		strings.Contains(message, "orphaned managed app shutdown in progress") &&
+		strings.Contains(message, "store app is missing") &&
+		managed.Metadata.Generation > 0
 }
 
 func managedPostgresOrphanWorkloadZeroVerified(conditions []runtime.ManagedAppCondition) bool {
@@ -541,15 +598,17 @@ func managedPostgresAdoptionSnapshot(managed runtime.ManagedAppObject) (managedP
 	}
 	sort.Slice(serviceSummaries, func(i, j int) bool { return serviceSummaries[i].ID < serviceSummaries[j].ID })
 	return managedPostgresOrphanSummary{
-		AppID:           snapshot.ID,
-		TenantID:        snapshot.TenantID,
-		ProjectID:       snapshot.ProjectID,
-		Name:            snapshot.Name,
-		Namespace:       strings.TrimSpace(managed.Metadata.Namespace),
-		ManagedAppName:  strings.TrimSpace(managed.Metadata.Name),
-		Phase:           strings.TrimSpace(managed.Status.Phase),
-		Message:         message,
-		BackingServices: serviceSummaries,
+		AppID:            snapshot.ID,
+		TenantID:         snapshot.TenantID,
+		ProjectID:        snapshot.ProjectID,
+		Name:             snapshot.Name,
+		Namespace:        strings.TrimSpace(managed.Metadata.Namespace),
+		ManagedAppName:   strings.TrimSpace(managed.Metadata.Name),
+		Phase:            strings.TrimSpace(managed.Status.Phase),
+		Message:          message,
+		Actionable:       true,
+		ValidationStatus: managedPostgresOrphanValidationReady,
+		BackingServices:  serviceSummaries,
 	}, snapshot, true
 }
 
@@ -583,8 +642,12 @@ type managedPostgresOrphanKubeMetadata struct {
 
 type managedPostgresOrphanCluster struct {
 	Metadata managedPostgresOrphanKubeMetadata `json:"metadata"`
-	Status   struct {
+	Spec     struct {
+		Instances int `json:"instances,omitempty"`
+	} `json:"spec,omitempty"`
+	Status struct {
 		ReadyInstances int                           `json:"readyInstances"`
+		CurrentPrimary string                        `json:"currentPrimary,omitempty"`
 		Conditions     []runtime.ManagedAppCondition `json:"conditions,omitempty"`
 	} `json:"status"`
 }
@@ -620,6 +683,15 @@ type managedPostgresOrphanPodList struct {
 }
 
 func (s *Server) verifyManagedPostgresOrphanStorage(ctx context.Context, managed runtime.ManagedAppObject, snapshot model.App) error {
+	return s.verifyManagedPostgresOrphanStorageWithObservations(ctx, managed, snapshot, nil)
+}
+
+func (s *Server) verifyManagedPostgresOrphanStorageWithObservations(
+	ctx context.Context,
+	managed runtime.ManagedAppObject,
+	snapshot model.App,
+	observations map[string]managedPostgresOrphanCluster,
+) error {
 	deployments := runtime.ManagedBackingServiceDeployments(snapshot, managed.Spec.Scheduling)
 	if len(deployments) == 0 || len(deployments) != len(snapshot.BackingServices) {
 		return errors.New("retained managed PostgreSQL snapshot does not map exactly to runtime clusters")
@@ -749,8 +821,78 @@ func (s *Server) verifyManagedPostgresOrphanStorage(ctx context.Context, managed
 		if !boundPVCFound {
 			return fmt.Errorf("retained managed PostgreSQL cluster %s has no non-deleting bound persistent volume claim", clusterName)
 		}
+		if observations != nil {
+			observations[deployment.ServiceID] = cluster
+		}
 	}
 	return nil
+}
+
+func (s *Server) inspectManagedPostgresOrphanStorage(
+	ctx context.Context,
+	managed runtime.ManagedAppObject,
+	snapshot model.App,
+) (map[string]managedPostgresOrphanCluster, error) {
+	deployments := runtime.ManagedBackingServiceDeployments(snapshot, managed.Spec.Scheduling)
+	observations := make(map[string]managedPostgresOrphanCluster, len(deployments))
+	if err := s.verifyManagedPostgresOrphanStorageWithObservations(ctx, managed, snapshot, observations); err != nil {
+		return observations, err
+	}
+	return observations, nil
+}
+
+func applyManagedPostgresOrphanRuntimeObservations(
+	summary *managedPostgresOrphanSummary,
+	observations map[string]managedPostgresOrphanCluster,
+) {
+	if summary == nil {
+		return
+	}
+	for index := range summary.BackingServices {
+		service := &summary.BackingServices[index]
+		cluster, ok := observations[service.ID]
+		if !ok {
+			continue
+		}
+		readyInstances := cluster.Status.ReadyInstances
+		desiredInstances := cluster.Spec.Instances
+		if desiredInstances <= 0 && service.DesiredInstances != nil {
+			desiredInstances = *service.DesiredInstances
+		}
+		if desiredInstances <= 0 {
+			desiredInstances = 1
+		}
+		service.ReadyInstances = &readyInstances
+		service.DesiredInstances = &desiredInstances
+		if service.Suspended {
+			if managedPostgresOrphanClusterHibernated(cluster) {
+				service.RuntimePhase = model.ManagedPostgresRuntimePhaseSuspended
+			} else {
+				service.RuntimePhase = model.ManagedPostgresRuntimePhaseSuspending
+			}
+			continue
+		}
+		if !managedPostgresOrphanClusterHibernated(cluster) &&
+			!strings.EqualFold(strings.TrimSpace(cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno]), runtime.CloudNativePGHibernationOn) &&
+			readyInstances >= desiredInstances && strings.TrimSpace(cluster.Status.CurrentPrimary) != "" {
+			service.RuntimePhase = model.ManagedPostgresRuntimePhaseActive
+		} else {
+			service.RuntimePhase = model.ManagedPostgresRuntimePhaseResuming
+		}
+	}
+}
+
+func managedPostgresOrphanClusterHibernated(cluster managedPostgresOrphanCluster) bool {
+	if !strings.EqualFold(strings.TrimSpace(cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno]), runtime.CloudNativePGHibernationOn) || cluster.Status.ReadyInstances != 0 {
+		return false
+	}
+	for _, condition := range cluster.Status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), runtime.CloudNativePGHibernationAnno) &&
+			strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) verifyManagedPostgresOrphanSuspended(ctx context.Context, managed runtime.ManagedAppObject, snapshot model.App) error {

@@ -153,7 +153,7 @@ func (c *CLI) newServicePostgresOrphanLifecycleCommand(action string, suspended 
 			if err != nil {
 				return err
 			}
-			if opts.Wait && !response.AlreadyCurrent {
+			if opts.Wait {
 				response.Orphan, err = c.waitForOrphanLifecycle(client, strings.TrimSpace(args[0]), suspended)
 				if err != nil {
 					return err
@@ -194,6 +194,9 @@ func (c *CLI) waitForOrphanLifecycle(client *Client, appID string, suspended boo
 						break
 					}
 					if suspended && service.RuntimePhase != model.ManagedPostgresRuntimePhaseSuspended {
+						allConverged = false
+					}
+					if suspended && service.ReadyInstances != 0 {
 						allConverged = false
 					}
 					if !suspended && service.RuntimePhase != model.ManagedPostgresRuntimePhaseActive {

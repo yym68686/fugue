@@ -995,18 +995,93 @@ func (s *Service) reconcileMissingStoreManagedPostgresLifecycle(
 			statuses = append(statuses, buildManagedBackingServiceClusterStatus(managed.Status, deployment, kubeCloudNativePGCluster{}, false))
 			continue
 		}
+		if !cloudNativePGClusterOwnedByManagedApp(cluster, managed) {
+			status := buildManagedBackingServiceClusterStatus(managed.Status, deployment, cluster, true)
+			status.Phase = model.ManagedPostgresRuntimePhaseError
+			status.Message = fmt.Sprintf(
+				"retained cluster %s ownership conflict: expected ManagedApp %s uid %s",
+				deployment.ResourceName,
+				strings.TrimSpace(managed.Metadata.Name),
+				strings.TrimSpace(managed.Metadata.UID),
+			)
+			statuses = append(statuses, status)
+			continue
+		}
 		desired := runtime.CloudNativePGHibernationOff
 		if deployment.Suspended {
 			desired = runtime.CloudNativePGHibernationOn
 		}
 		if !strings.EqualFold(strings.TrimSpace(cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno]), desired) {
-			if err := client.patchCloudNativePGHibernation(ctx, namespace, deployment.ResourceName, desired); err != nil {
+			if err := client.patchCloudNativePGHibernation(
+				ctx,
+				namespace,
+				deployment.ResourceName,
+				desired,
+				cluster.Metadata.UID,
+				cluster.Metadata.ResourceVersion,
+			); err != nil {
 				return nil, fmt.Errorf("set retained cluster %s hibernation to %s: %w", deployment.ResourceName, desired, err)
 			}
+			cluster, found, err = client.getCloudNativePGCluster(ctx, namespace, deployment.ResourceName)
+			if err != nil {
+				return nil, fmt.Errorf("re-read retained cluster %s after hibernation update: %w", deployment.ResourceName, err)
+			}
+			if !found {
+				return nil, fmt.Errorf("retained cluster %s disappeared after hibernation update", deployment.ResourceName)
+			}
+			if !cloudNativePGClusterOwnedByManagedApp(cluster, managed) {
+				return nil, fmt.Errorf("retained cluster %s ownership changed during hibernation update", deployment.ResourceName)
+			}
+			cluster = waitForRetainedManagedPostgresClusterStatus(ctx, client, namespace, deployment, cluster)
 		}
 		statuses = append(statuses, buildManagedBackingServiceClusterStatus(managed.Status, deployment, cluster, true))
 	}
 	return statuses, nil
+}
+
+func waitForRetainedManagedPostgresClusterStatus(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	deployment runtime.ManagedBackingServiceDeployment,
+	cluster kubeCloudNativePGCluster,
+) kubeCloudNativePGCluster {
+	if managedBackingServiceClusterDeploymentReady(deployment, cluster, true) {
+		return cluster
+	}
+	watchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	for {
+		targets := cloudNativePGClusterRolloutWatchTargets(namespace, deployment.ResourceName, cluster, true)
+		if err := client.waitForAnyObjectEvent(watchCtx, targets, 5*time.Second); err != nil {
+			return cluster
+		}
+		refreshed, found, err := client.getCloudNativePGCluster(watchCtx, namespace, deployment.ResourceName)
+		if err != nil || !found || strings.TrimSpace(refreshed.Metadata.UID) != strings.TrimSpace(cluster.Metadata.UID) {
+			return cluster
+		}
+		cluster = refreshed
+		if managedBackingServiceClusterDeploymentReady(deployment, cluster, true) {
+			return cluster
+		}
+	}
+}
+
+func cloudNativePGClusterOwnedByManagedApp(cluster kubeCloudNativePGCluster, managed runtime.ManagedAppObject) bool {
+	managedUID := strings.TrimSpace(managed.Metadata.UID)
+	managedName := strings.TrimSpace(managed.Metadata.Name)
+	if managedUID == "" || managedName == "" {
+		return false
+	}
+	for _, owner := range cluster.Metadata.OwnerReferences {
+		if strings.TrimSpace(owner.UID) == managedUID &&
+			strings.TrimSpace(owner.Name) == managedName &&
+			strings.EqualFold(strings.TrimSpace(owner.Kind), runtime.ManagedAppKind) &&
+			strings.EqualFold(strings.TrimSpace(owner.APIVersion), runtime.ManagedAppAPIVersion) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) managedAppOrphanWorkloadAtZero(
