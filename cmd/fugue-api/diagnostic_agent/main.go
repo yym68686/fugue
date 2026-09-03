@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"debug/elf"
+	"debug/gosym"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -35,43 +37,75 @@ type options struct {
 }
 
 type report struct {
-	Schema              string           `json:"schema"`
-	Kind                string           `json:"kind"`
-	StartedAt           time.Time        `json:"started_at"`
-	FinishedAt          time.Time        `json:"finished_at"`
-	DurationSeconds     int              `json:"duration_seconds"`
-	Frequency           int              `json:"frequency"`
-	TargetPID           int              `json:"target_pid"`
-	TargetPIDs          []int            `json:"target_pids"`
-	TargetContainerID   string           `json:"target_container_id"`
-	TargetProcess       string           `json:"target_process,omitempty"`
-	TargetProcesses     []string         `json:"target_processes,omitempty"`
-	TargetCgroup        string           `json:"target_cgroup,omitempty"`
-	ProcessBefore       processSnapshot  `json:"process_before"`
-	ProcessAfter        processSnapshot  `json:"process_after"`
-	CgroupBefore        cgroupSnapshot   `json:"cgroup_before"`
-	CgroupAfter         cgroupSnapshot   `json:"cgroup_after"`
-	CPUUsage            cpuUsage         `json:"cpu_usage"`
-	Samples             int              `json:"samples"`
-	UserSamples         int              `json:"user_samples"`
-	KernelSamples       int              `json:"kernel_samples"`
-	LostSamples         int              `json:"lost_samples"`
-	LeafFunctions       []functionSample `json:"leaf_functions"`
-	CumulativeFunctions []functionSample `json:"cumulative_functions"`
-	PerfReport          string           `json:"perf_report,omitempty"`
-	RawScript           string           `json:"raw_script,omitempty"`
-	Warnings            []string         `json:"warnings,omitempty"`
+	Schema                  string           `json:"schema"`
+	Kind                    string           `json:"kind"`
+	StartedAt               time.Time        `json:"started_at"`
+	FinishedAt              time.Time        `json:"finished_at"`
+	DurationSeconds         int              `json:"duration_seconds"`
+	Frequency               int              `json:"frequency"`
+	TargetPID               int              `json:"target_pid"`
+	TargetPIDs              []int            `json:"target_pids"`
+	TargetContainerID       string           `json:"target_container_id"`
+	TargetProcess           string           `json:"target_process,omitempty"`
+	TargetProcesses         []string         `json:"target_processes,omitempty"`
+	TargetCgroup            string           `json:"target_cgroup,omitempty"`
+	ProcessBefore           processSnapshot  `json:"process_before"`
+	ProcessAfter            processSnapshot  `json:"process_after"`
+	CgroupBefore            cgroupSnapshot   `json:"cgroup_before"`
+	CgroupAfter             cgroupSnapshot   `json:"cgroup_after"`
+	CPUUsage                cpuUsage         `json:"cpu_usage"`
+	Samples                 int              `json:"samples"`
+	UserSamples             int              `json:"user_samples"`
+	KernelSamples           int              `json:"kernel_samples"`
+	OtherSamples            int              `json:"other_samples"`
+	ResolvedUserSamples     int              `json:"resolved_user_samples"`
+	UnresolvedUserSamples   int              `json:"unresolved_user_samples"`
+	ResolvedKernelSamples   int              `json:"resolved_kernel_samples"`
+	UnresolvedKernelSamples int              `json:"unresolved_kernel_samples"`
+	StackSamples            int              `json:"stack_samples"`
+	StackUserSamples        int              `json:"stack_user_samples"`
+	StackKernelSamples      int              `json:"stack_kernel_samples"`
+	LostSamples             int              `json:"lost_samples"`
+	LeafFunctions           []functionSample `json:"leaf_functions"`
+	CumulativeFunctions     []functionSample `json:"cumulative_functions"`
+	PerfReport              string           `json:"perf_report,omitempty"`
+	RawScript               string           `json:"raw_script,omitempty"`
+	Warnings                []string         `json:"warnings,omitempty"`
 }
 
 type functionSample struct {
-	Function string `json:"function"`
-	Samples  int    `json:"samples"`
+	Function string  `json:"function"`
+	Samples  int     `json:"samples"`
+	Percent  float64 `json:"percent,omitempty"`
+	PID      int     `json:"pid,omitempty"`
+	Command  string  `json:"command,omitempty"`
+	Mode     string  `json:"mode,omitempty"`
+	DSO      string  `json:"dso,omitempty"`
+	Source   string  `json:"source,omitempty"`
+}
+
+type perfReportEntry struct {
+	Samples       int
+	SystemPercent float64
+	UserPercent   float64
+	PID           int
+	Command       string
+	DSO           string
+	Symbol        string
+	Mode          string
+	Address       uint64
+}
+
+type goSymbolizer struct {
+	table    *gosym.Table
+	loadBase uint64
 }
 
 type processSnapshot struct {
-	RSSBytes uint64 `json:"rss_bytes"`
-	Threads  uint64 `json:"threads"`
-	OpenFDs  uint64 `json:"open_fds"`
+	RSSBytes         uint64 `json:"rss_bytes"`
+	Threads          uint64 `json:"threads"`
+	OpenFDs          uint64 `json:"open_fds"`
+	OpenFDsAvailable bool   `json:"open_fds_available"`
 }
 
 type cgroupSnapshot struct {
@@ -160,33 +194,43 @@ func run(opts options) error {
 	cgroupAfter, cgroupErr := readCgroupSnapshot(cgroupRoot)
 
 	targetRoot := filepath.Join("/host/proc", strconv.Itoa(pids[0]), "root")
-	rawScript, err := runCommand(context.Background(), "perf", "script", "--symfs", targetRoot, "-i", dataPath, "-F", "ip,sym,dso")
-	if err != nil {
-		return fmt.Errorf("perf script failed: %w", err)
+	warnings := make([]string, 0, 6)
+	rawScript, scriptErr := runCommand(context.Background(), "perf", "script", "--symfs", targetRoot, "-i", dataPath, "-F", "ip,sym,dso")
+	_, cumulativeFunctions, stackSamples, stackUserSamples, stackKernelSamples := sampledFunctions(rawScript)
+	if scriptErr != nil {
+		warnings = append(warnings, "call-stack export unavailable: "+scriptErr.Error())
+		rawScript = nil
+		cumulativeFunctions = nil
+		stackSamples = 0
+		stackUserSamples = 0
+		stackKernelSamples = 0
 	}
 
-	functions, cumulativeFunctions, samples, userSamples, kernelSamples := sampledFunctions(rawScript)
-	warnings := make([]string, 0, 3)
-	if userSamples == 0 {
-		warnings = append(warnings, "no user-space samples were captured")
+	machineReport, machineErr := runPerfMachineReport(dataPath, targetRoot)
+	if machineErr != nil && !isEmptyPerfData(machineReport) {
+		return fmt.Errorf("perf machine report failed: %w: %s", machineErr, strings.TrimSpace(string(machineReport)))
 	}
-	leafAddresses, cumulativeAddresses := sampledAddressCounts(rawScript)
-	if len(leafAddresses) > 0 {
-		executable := filepath.Join("/host/proc", strconv.Itoa(pids[0]), "exe")
-		if allUnknownFunctions(functions) {
-			symbols, symbolWarnings := symbolizeAddresses(leafAddresses, executable)
-			warnings = append(warnings, symbolWarnings...)
-			if len(symbols) > 0 && !allUnknownFunctions(symbols) {
-				functions = symbols
-			}
-		}
-		if allUnknownFunctions(cumulativeFunctions) {
-			symbols, symbolWarnings := symbolizeAddresses(cumulativeAddresses, executable)
-			warnings = append(warnings, symbolWarnings...)
-			if len(symbols) > 0 && !allUnknownFunctions(symbols) {
-				cumulativeFunctions = symbols
-			}
-		}
+	entries, expectedSamples, err := parsePerfMachineReport(machineReport)
+	if err != nil {
+		return fmt.Errorf("parse perf machine report: %w", err)
+	}
+	functions, samples, userSamples, kernelSamples, otherSamples, resolvedUserSamples, resolvedKernelSamples := summarizePerfEntries(entries, pids)
+	if expectedSamples >= 0 && samples != expectedSamples {
+		return fmt.Errorf("perf machine report sample mismatch: header=%d rows=%d", expectedSamples, samples)
+	}
+	if samples == 0 {
+		warnings = append(warnings, "no CPU samples were captured during the diagnostic window")
+	} else if userSamples == 0 {
+		warnings = append(warnings, "no user-space CPU samples were captured")
+	}
+	if stackSamples < samples {
+		warnings = append(warnings, fmt.Sprintf("call stacks available for %d of %d samples; the leaf profile remains complete", stackSamples, samples))
+	}
+	if resolvedUserSamples < userSamples {
+		warnings = append(warnings, fmt.Sprintf("symbols resolved for %d of %d user-space samples", resolvedUserSamples, userSamples))
+	}
+	if resolvedKernelSamples < kernelSamples {
+		warnings = append(warnings, fmt.Sprintf("symbols resolved for %d of %d kernel-space samples", resolvedKernelSamples, kernelSamples))
 	}
 	perfReport, reportErr := runCommand(context.Background(), "perf", "report", "--stdio", "--no-children", "--symfs", targetRoot, "--sort", "comm,dso,symbol", "-i", dataPath)
 	if reportErr != nil {
@@ -208,32 +252,40 @@ func run(opts options) error {
 	}
 
 	value := report{
-		Schema:              "fugue.diagnostic.cpu_profile.v1",
-		Kind:                opts.kind,
-		StartedAt:           started,
-		FinishedAt:          finished,
-		DurationSeconds:     opts.duration,
-		Frequency:           opts.frequency,
-		TargetPID:           pids[0],
-		TargetPIDs:          pids,
-		TargetContainerID:   opts.containerID,
-		TargetProcess:       processNames[0],
-		TargetProcesses:     processNames,
-		TargetCgroup:        cgroupPath,
-		ProcessBefore:       processBefore,
-		ProcessAfter:        processAfter,
-		CgroupBefore:        cgroupBefore,
-		CgroupAfter:         cgroupAfter,
-		CPUUsage:            cpuUsageDelta(cgroupBefore, cgroupAfter, finished.Sub(started)),
-		Samples:             samples,
-		UserSamples:         userSamples,
-		KernelSamples:       kernelSamples,
-		LostSamples:         parseLostSamples(perfReport),
-		LeafFunctions:       functions,
-		CumulativeFunctions: cumulativeFunctions,
-		PerfReport:          string(perfReport),
-		RawScript:           string(rawScript),
-		Warnings:            warnings,
+		Schema:                  "fugue.diagnostic.cpu_profile.v1",
+		Kind:                    opts.kind,
+		StartedAt:               started,
+		FinishedAt:              finished,
+		DurationSeconds:         opts.duration,
+		Frequency:               opts.frequency,
+		TargetPID:               pids[0],
+		TargetPIDs:              pids,
+		TargetContainerID:       opts.containerID,
+		TargetProcess:           processNames[0],
+		TargetProcesses:         processNames,
+		TargetCgroup:            cgroupPath,
+		ProcessBefore:           processBefore,
+		ProcessAfter:            processAfter,
+		CgroupBefore:            cgroupBefore,
+		CgroupAfter:             cgroupAfter,
+		CPUUsage:                cpuUsageDelta(cgroupBefore, cgroupAfter, finished.Sub(started)),
+		Samples:                 samples,
+		UserSamples:             userSamples,
+		KernelSamples:           kernelSamples,
+		OtherSamples:            otherSamples,
+		ResolvedUserSamples:     resolvedUserSamples,
+		UnresolvedUserSamples:   userSamples - resolvedUserSamples,
+		ResolvedKernelSamples:   resolvedKernelSamples,
+		UnresolvedKernelSamples: kernelSamples - resolvedKernelSamples,
+		StackSamples:            stackSamples,
+		StackUserSamples:        stackUserSamples,
+		StackKernelSamples:      stackKernelSamples,
+		LostSamples:             parseLostSamples(perfReport),
+		LeafFunctions:           functions,
+		CumulativeFunctions:     cumulativeFunctions,
+		PerfReport:              string(perfReport),
+		RawScript:               string(rawScript),
+		Warnings:                warnings,
 	}
 	return json.NewEncoder(os.Stdout).Encode(value)
 }
@@ -311,6 +363,7 @@ func cgroupV2Path(data []byte) string {
 func readProcessSnapshot(pids []int) (processSnapshot, error) {
 	var snapshot processSnapshot
 	read := 0
+	fdRead := 0
 	for _, pid := range pids {
 		root := filepath.Join("/host/proc", strconv.Itoa(pid))
 		status, err := os.ReadFile(filepath.Join(root, "status"))
@@ -323,11 +376,13 @@ func readProcessSnapshot(pids []int) (processSnapshot, error) {
 		snapshot.Threads += values["Threads"]
 		if fdEntries, err := os.ReadDir(filepath.Join(root, "fd")); err == nil {
 			snapshot.OpenFDs += uint64(len(fdEntries))
+			fdRead++
 		}
 	}
 	if read == 0 {
 		return processSnapshot{}, errors.New("target processes are no longer available")
 	}
+	snapshot.OpenFDsAvailable = fdRead == read
 	return snapshot, nil
 }
 
@@ -501,69 +556,309 @@ func sortedFunctionSamples(counts map[string]int) []functionSample {
 	return functions
 }
 
-func allUnknownFunctions(functions []functionSample) bool {
-	if len(functions) == 0 {
-		return true
-	}
-	for _, function := range functions {
-		name := strings.TrimSpace(strings.ToLower(function.Function))
-		if name != "?" && !strings.Contains(name, "unknown") {
-			return false
-		}
-	}
-	return true
+const perfFieldSeparator = "\x1f"
+
+func runPerfMachineReport(dataPath, targetRoot string) ([]byte, error) {
+	return runCommand(
+		context.Background(),
+		"perf", "report",
+		"--stdio", "--stdio-color", "never", "--no-children", "--call-graph", "none",
+		"--percent-limit", "0", "--field-separator", perfFieldSeparator,
+		"--fields", "overhead,sample,overhead_sys,overhead_us,pid,comm,dso,symbol",
+		"--sort", "pid,comm,dso,symbol", "--symfs", targetRoot, "-i", dataPath,
+	)
 }
 
-func sampledAddressCounts(raw []byte) (map[string]int, map[string]int) {
+func isEmptyPerfData(output []byte) bool {
+	return bytes.Contains(bytes.ToLower(output), []byte("data has no samples"))
+}
+
+func parsePerfMachineReport(raw []byte) ([]perfReportEntry, int, error) {
+	entries := make([]perfReportEntry, 0, 64)
+	expectedSamples := parsePerfSampleTotal(raw)
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	leaf := make(map[string]int)
-	cumulative := make(map[string]int)
-	needLeaf := true
+	scanner.Buffer(make([]byte, 4096), 4<<20)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			needLeaf = true
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, perfFieldSeparator) {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) == 0 || !isHexAddress(fields[0]) {
+		fields := strings.Split(line, perfFieldSeparator)
+		if len(fields) < 8 {
 			continue
 		}
-		address := fields[0]
-		cumulative[address]++
-		if needLeaf {
-			leaf[address]++
+		samples, err := strconv.Atoi(strings.TrimSpace(fields[1]))
+		if err != nil || samples <= 0 {
+			continue
 		}
-		needLeaf = false
+		systemPercent, err := parsePerfPercent(fields[2])
+		if err != nil {
+			return nil, expectedSamples, fmt.Errorf("invalid system overhead %q", strings.TrimSpace(fields[2]))
+		}
+		userPercent, err := parsePerfPercent(fields[3])
+		if err != nil {
+			return nil, expectedSamples, fmt.Errorf("invalid user overhead %q", strings.TrimSpace(fields[3]))
+		}
+		mode, symbol, address := parsePerfSymbol(fields[7])
+		if mode == "other" {
+			switch {
+			case userPercent > 0 && systemPercent == 0:
+				mode = "user"
+			case systemPercent > 0 && userPercent == 0:
+				mode = "kernel"
+			}
+		}
+		entries = append(entries, perfReportEntry{
+			Samples:       samples,
+			SystemPercent: systemPercent,
+			UserPercent:   userPercent,
+			PID:           parsePerfPID(fields[4]),
+			Command:       strings.TrimSpace(fields[5]),
+			DSO:           strings.TrimSpace(fields[6]),
+			Symbol:        symbol,
+			Mode:          mode,
+			Address:       address,
+		})
 	}
-	return leaf, cumulative
+	if err := scanner.Err(); err != nil {
+		return nil, expectedSamples, err
+	}
+	if expectedSamples > 0 && len(entries) == 0 {
+		return nil, expectedSamples, errors.New("report contains samples but no parseable histogram rows")
+	}
+	return entries, expectedSamples, nil
 }
 
-func symbolizeAddresses(addresses map[string]int, executable string) ([]functionSample, []string) {
-	keys := make([]string, 0, len(addresses))
-	for address := range addresses {
-		keys = append(keys, address)
-	}
-	sort.Strings(keys)
-	input := bytes.Buffer{}
-	for _, address := range keys {
-		fmt.Fprintf(&input, "0x%s\n", address)
-	}
-	output, err := runCommandWithInput(context.Background(), input.Bytes(), "go", "tool", "addr2line", executable)
-	if err != nil {
-		return nil, []string{"optional Go symbolization unavailable: " + err.Error()}
-	}
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	counts := make(map[string]int)
-	for index, address := range keys {
-		function := "<unknown>"
-		lineIndex := index * 2
-		if lineIndex < len(lines) && strings.TrimSpace(lines[lineIndex]) != "" {
-			function = strings.TrimSpace(lines[lineIndex])
+func parsePerfSampleTotal(raw []byte) int {
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "# Samples:") {
+			continue
 		}
-		counts[function] += addresses[address]
+		fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "# Samples:")))
+		if len(fields) == 0 {
+			break
+		}
+		value, err := strconv.Atoi(fields[0])
+		if err == nil && value >= 0 {
+			return value
+		}
 	}
-	return sortedFunctionSamples(counts), nil
+	return -1
+}
+
+func parsePerfPercent(value string) (float64, error) {
+	return strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "%")), 64)
+}
+
+func parsePerfPID(value string) int {
+	value = strings.TrimSpace(value)
+	for _, separator := range []string{"/", ":"} {
+		if index := strings.Index(value, separator); index >= 0 {
+			value = value[:index]
+		}
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(value))
+	return pid
+}
+
+func parsePerfSymbol(value string) (string, string, uint64) {
+	value = strings.TrimSpace(value)
+	mode := "other"
+	if len(value) >= 3 && value[0] == '[' && value[2] == ']' {
+		switch value[1] {
+		case '.':
+			mode = "user"
+		case 'k':
+			mode = "kernel"
+		}
+		value = strings.TrimSpace(value[3:])
+	}
+	addressValue := strings.TrimPrefix(value, "0x")
+	address, err := strconv.ParseUint(addressValue, 16, 64)
+	if err != nil || !strings.HasPrefix(value, "0x") {
+		address = 0
+	}
+	if value == "" {
+		value = "[unknown]"
+	}
+	return mode, value, address
+}
+
+type functionSampleKey struct {
+	Function string
+	PID      int
+	Command  string
+	Mode     string
+	DSO      string
+	Source   string
+}
+
+type processGoSymbolizer struct {
+	DSO      string
+	Resolver *goSymbolizer
+}
+
+func summarizePerfEntries(entries []perfReportEntry, targetPIDs []int) ([]functionSample, int, int, int, int, int, int) {
+	symbolizers := loadProcessGoSymbolizers(targetPIDs)
+	counts := make(map[functionSampleKey]int)
+	total := 0
+	user := 0
+	kernel := 0
+	other := 0
+	resolvedUser := 0
+	resolvedKernel := 0
+	for _, entry := range entries {
+		total += entry.Samples
+		switch entry.Mode {
+		case "user":
+			user += entry.Samples
+		case "kernel":
+			kernel += entry.Samples
+		default:
+			other += entry.Samples
+		}
+
+		function := entry.Symbol
+		source := ""
+		resolved := entry.Address == 0 && !isUnknownSymbol(function)
+		if entry.Mode == "user" && entry.Address != 0 {
+			if symbolizer := matchingGoSymbolizer(symbolizers, entry); symbolizer != nil {
+				if name, file, line, ok := symbolizer.ResolveDSOOffset(entry.Address); ok {
+					function = name
+					if file != "" && line > 0 {
+						source = file + ":" + strconv.Itoa(line)
+					}
+					resolved = true
+				}
+			}
+		}
+		if entry.Mode == "user" && resolved {
+			resolvedUser += entry.Samples
+		}
+		if entry.Mode == "kernel" && resolved {
+			resolvedKernel += entry.Samples
+		}
+		key := functionSampleKey{Function: function, PID: entry.PID, Command: entry.Command, Mode: entry.Mode, DSO: entry.DSO, Source: source}
+		counts[key] += entry.Samples
+	}
+
+	functions := make([]functionSample, 0, len(counts))
+	for key, samples := range counts {
+		percent := 0.0
+		if total > 0 {
+			percent = float64(samples) / float64(total) * 100
+		}
+		functions = append(functions, functionSample{
+			Function: key.Function,
+			Samples:  samples,
+			Percent:  percent,
+			PID:      key.PID,
+			Command:  key.Command,
+			Mode:     key.Mode,
+			DSO:      key.DSO,
+			Source:   key.Source,
+		})
+	}
+	sort.Slice(functions, func(i, j int) bool {
+		if functions[i].Samples != functions[j].Samples {
+			return functions[i].Samples > functions[j].Samples
+		}
+		if functions[i].Function != functions[j].Function {
+			return functions[i].Function < functions[j].Function
+		}
+		return functions[i].DSO < functions[j].DSO
+	})
+	if len(functions) > 100 {
+		functions = functions[:100]
+	}
+	return functions, total, user, kernel, other, resolvedUser, resolvedKernel
+}
+
+func isUnknownSymbol(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "" || value == "?" || strings.Contains(value, "unknown")
+}
+
+func loadProcessGoSymbolizers(pids []int) map[int]processGoSymbolizer {
+	result := make(map[int]processGoSymbolizer)
+	for _, pid := range pids {
+		executableLink, err := os.Readlink(filepath.Join("/host/proc", strconv.Itoa(pid), "exe"))
+		if err != nil || !filepath.IsAbs(executableLink) {
+			continue
+		}
+		executableLink = strings.TrimSuffix(executableLink, " (deleted)")
+		executable := filepath.Join("/host/proc", strconv.Itoa(pid), "root", strings.TrimPrefix(filepath.Clean(executableLink), "/"))
+		resolver, err := newGoSymbolizer(executable)
+		if err != nil {
+			continue
+		}
+		result[pid] = processGoSymbolizer{DSO: filepath.Base(executableLink), Resolver: resolver}
+	}
+	return result
+}
+
+func matchingGoSymbolizer(symbolizers map[int]processGoSymbolizer, entry perfReportEntry) *goSymbolizer {
+	candidate, ok := symbolizers[entry.PID]
+	if !ok && len(symbolizers) == 1 {
+		for _, value := range symbolizers {
+			candidate = value
+			ok = true
+		}
+	}
+	if !ok || candidate.Resolver == nil || filepath.Base(strings.TrimSpace(entry.DSO)) != candidate.DSO {
+		return nil
+	}
+	return candidate.Resolver
+}
+
+func newGoSymbolizer(path string) (*goSymbolizer, error) {
+	file, err := elf.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	text := file.Section(".text")
+	pcln := file.Section(".gopclntab")
+	if text == nil || pcln == nil {
+		return nil, errors.New("ELF does not contain Go line tables")
+	}
+	pclnData, err := pcln.Data()
+	if err != nil {
+		return nil, err
+	}
+	var symtabData []byte
+	if symtab := file.Section(".gosymtab"); symtab != nil {
+		symtabData, _ = symtab.Data()
+	}
+	table, err := gosym.NewTable(symtabData, gosym.NewLineTable(pclnData, text.Addr))
+	if err != nil {
+		return nil, err
+	}
+	loadBase := text.Addr
+	for _, program := range file.Progs {
+		if program.Type == elf.PT_LOAD && program.Vaddr < loadBase {
+			loadBase = program.Vaddr
+		}
+	}
+	return &goSymbolizer{table: table, loadBase: loadBase}, nil
+}
+
+func (s *goSymbolizer) ResolveDSOOffset(offset uint64) (string, string, int, bool) {
+	if s == nil || s.table == nil {
+		return "", "", 0, false
+	}
+	candidates := []uint64{offset + s.loadBase}
+	if s.loadBase != 0 {
+		candidates = append(candidates, offset)
+	}
+	for _, pc := range candidates {
+		file, line, function := s.table.PCToLine(pc)
+		if function != nil && function.Name != "" {
+			return function.Name, file, line, true
+		}
+	}
+	return "", "", 0, false
 }
 
 func parseLostSamples(perfReport []byte) int {
