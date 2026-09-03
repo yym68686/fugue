@@ -125,6 +125,7 @@ type Server struct {
 	newLogsClient                          func(namespace string) (appLogsClient, error)
 	newFilesystemPodLister                 func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner                   filesystemPodExecRunner
+	diagnosticSessionBackend               diagnosticSessionBackend
 	appProxyTransport                      http.RoundTripper
 	edgeDNSAuthorityHTTPClient             *http.Client
 	appRequestHTTPClient                   *http.Client

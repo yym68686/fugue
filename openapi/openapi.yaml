@@ -6739,6 +6739,109 @@ paths:
                 $ref: "#/components/schemas/AppRuntimePodInventoryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/diagnostics/sessions:
+    post:
+      operationId: startAppDiagnosticSession
+      summary: Start App Diagnostic Session
+      description: Starts a bounded, temporary, app-scoped diagnostic probe without modifying the app workload.
+      tags: [Apps]
+      x-fugue-handler: handleStartAppDiagnosticSession
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppDiagnosticSessionStartRequest"
+      responses:
+        '202':
+          description: Diagnostic session accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDiagnosticSessionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      operationId: listAppDiagnosticSessions
+      summary: List App Diagnostic Sessions
+      tags: [Apps]
+      x-fugue-handler: handleListAppDiagnosticSessions
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Diagnostic sessions for the app.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDiagnosticSessionListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/diagnostics/sessions/{session_id}:
+    get:
+      operationId: getAppDiagnosticSession
+      summary: Get App Diagnostic Session
+      tags: [Apps]
+      x-fugue-handler: handleGetAppDiagnosticSession
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/DiagnosticSessionIdPathParam"
+      responses:
+        '200':
+          description: Current diagnostic session state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDiagnosticSessionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: cancelAppDiagnosticSession
+      summary: Cancel App Diagnostic Session
+      tags: [Apps]
+      x-fugue-handler: handleCancelAppDiagnosticSession
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/DiagnosticSessionIdPathParam"
+      responses:
+        '200':
+          description: Diagnostic session cancellation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDiagnosticSessionCancelResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/diagnostics/sessions/{session_id}/report:
+    get:
+      operationId: getAppDiagnosticReport
+      summary: Get App Diagnostic Report
+      tags: [Apps]
+      x-fugue-handler: handleGetAppDiagnosticReport
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/DiagnosticSessionIdPathParam"
+      responses:
+        '200':
+          description: Completed diagnostic report and session metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDiagnosticReportResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/observability/metrics/summary:
     get:
       operationId: getAppObservabilityMetricsSummary
@@ -11084,6 +11187,13 @@ components:
       required: true
       schema:
         type: string
+    DiagnosticSessionIdPathParam:
+      in: path
+      name: session_id
+      required: true
+      schema:
+        type: string
+        pattern: '^diagnostic-[a-z0-9-]+$'
     TenantIdPathParam:
       in: path
       name: tenant_id
@@ -24717,6 +24827,106 @@ components:
           type: array
           items:
             type: string
+    AppDiagnosticSessionStartRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [cpu-profile]
+          default: cpu-profile
+        duration_seconds:
+          type: integer
+          format: int32
+          minimum: 5
+          maximum: 120
+          default: 60
+        frequency_hz:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 99
+          default: 19
+        pod:
+          type: string
+        container:
+          type: string
+    AppDiagnosticSession:
+      type: object
+      additionalProperties: false
+      required: [id, app_id, kind, status, target_pod, target_container, target_node, duration_seconds, frequency_hz, created_at]
+      properties:
+        id:
+          type: string
+        app_id:
+          type: string
+        kind:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed]
+        target_pod:
+          type: string
+        target_container:
+          type: string
+        target_node:
+          type: string
+        duration_seconds:
+          type: integer
+          format: int32
+        frequency_hz:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        failure_reason:
+          type: string
+    AppDiagnosticSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [session]
+      properties:
+        session:
+          $ref: "#/components/schemas/AppDiagnosticSession"
+    AppDiagnosticSessionListResponse:
+      type: object
+      additionalProperties: false
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDiagnosticSession"
+    AppDiagnosticSessionCancelResponse:
+      type: object
+      additionalProperties: false
+      required: [session, canceled]
+      properties:
+        session:
+          $ref: "#/components/schemas/AppDiagnosticSession"
+        canceled:
+          type: boolean
+    AppDiagnosticReportResponse:
+      type: object
+      additionalProperties: false
+      required: [session, report]
+      properties:
+        session:
+          $ref: "#/components/schemas/AppDiagnosticSession"
+        report:
+          type: object
+          additionalProperties: true
+          description: Versioned report emitted by the selected digest-addressed diagnostic probe.
     AppObservabilityMetricsSummaryResponse:
       type: object
       additionalProperties: false

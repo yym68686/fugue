@@ -9,10 +9,12 @@ COPY assets ./assets
 COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-api ./cmd/fugue-api
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-api ./cmd/fugue-api \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-diagnostic-agent ./cmd/fugue-api/diagnostic_agent
 
 FROM --platform=$TARGETPLATFORM golang:1.25-alpine
-RUN apk add --no-cache bash ca-certificates git kubectl postgresql-client
+RUN apk add --no-cache bash ca-certificates git kubectl perf postgresql-client
 WORKDIR /app
 COPY --from=build /out/fugue-api /usr/local/bin/fugue-api
+COPY --from=build /out/fugue-diagnostic-agent /usr/local/bin/fugue-diagnostic-agent
 ENTRYPOINT ["/usr/local/bin/fugue-api"]

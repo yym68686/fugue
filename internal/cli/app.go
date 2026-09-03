@@ -82,6 +82,7 @@ in more than one visible project or tenant.
 		hideCompatCommand(c.newAppSyncCommand(), "fugue app source show or fugue app build"),
 		c.newAppLogsCommand(),
 		c.newAppObservabilityCommand(),
+		c.newAppDiagnosticsCommand(),
 		c.newAppRequestCommand(),
 		c.newAppRequestsCommand(),
 		c.newAppTracesCommand(),

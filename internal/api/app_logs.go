@@ -98,6 +98,7 @@ type kubeContainerStatus struct {
 	Name         string           `json:"name"`
 	Image        string           `json:"image,omitempty"`
 	ImageID      string           `json:"imageID,omitempty"`
+	ContainerID  string           `json:"containerID,omitempty"`
 	Ready        bool             `json:"ready"`
 	RestartCount int32            `json:"restartCount,omitempty"`
 	State        kubeRuntimeState `json:"state,omitempty"`
