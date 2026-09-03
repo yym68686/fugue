@@ -716,6 +716,92 @@ func TestRolloutIntentForManagedOperationIgnoresBuildpacksLauncherWrapper(t *tes
 	}
 }
 
+func TestRolloutIntentForManagedOperationDetectsBuildpacksImageUpdateWithLauncherWrapper(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Source: &model.AppSource{
+			Type:          model.AppSourceTypeUpload,
+			BuildStrategy: model.AppBuildStrategyBuildpacks,
+		},
+		Spec: model.AppSpec{
+			Image:     "registry.example/demo:v1",
+			Command:   []string{"sh", "-lc", "python app.py"},
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_source",
+		},
+	}
+	desired := current
+	desired.Spec.Image = "registry.example/demo:v2"
+	desired.Spec.Command = []string{"/cnb/lifecycle/launcher"}
+	desired.Spec.Args = []string{"sh", "-lc", "python app.py"}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected buildpacks image update intent, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedImageRebuildAllowsStatelessRuntimeHandoff(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_source",
+		},
+	}
+	desired := current
+	desired.Spec.Image = "registry.example/demo:v2"
+	desired.Spec.RuntimeID = "runtime_target"
+	op := model.Operation{
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByImageRebuild,
+		DesiredSpec:     &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected online image rollout intent for stateless rebuild handoff, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedImageRebuildRejectsStatefulRuntimeHandoff(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_source",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:   model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"}},
+			},
+		},
+	}
+	desired := current
+	desired.Spec.Image = "registry.example/demo:v2"
+	desired.Spec.RuntimeID = "runtime_target"
+	op := model.Operation{
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByImageRebuild,
+		DesiredSpec:     &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected no online rollout intent for stateful rebuild handoff, got %q", got)
+	}
+}
+
 func TestRolloutIntentForManagedOperationRejectsStatefulRuntimeMigration(t *testing.T) {
 	current := model.App{
 		ID:       "app_demo",

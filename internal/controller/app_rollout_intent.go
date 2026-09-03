@@ -9,6 +9,12 @@ import (
 )
 
 func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp model.App) string {
+	// Command resolution may wrap buildpacks processes with a lifecycle
+	// launcher before this classifier runs. Compare the underlying user argv so
+	// that execution plumbing does not turn an image/config update into an
+	// unplanned restart.
+	currentApp.Spec = normalizeBuildpacksLaunchOverrideSpec(currentApp, currentApp.Spec)
+	desiredApp.Spec = normalizeBuildpacksLaunchOverrideSpec(desiredApp, desiredApp.Spec)
 	if !appSupportsOnlineRolloutIntent(desiredApp) {
 		return ""
 	}
@@ -55,8 +61,8 @@ func managedMigrateOperationIsStatelessRuntimeOnly(op model.Operation, currentAp
 
 	currentSpec, _ := model.StripFugueInjectedAppEnvFromSpec(currentApp.Spec)
 	desiredSpec, _ := model.StripFugueInjectedAppEnvFromSpec(desiredApp.Spec)
-	currentSpec = normalizeMigrationLaunchOverrideSpec(currentApp, currentSpec)
-	desiredSpec = normalizeMigrationLaunchOverrideSpec(desiredApp, desiredSpec)
+	currentSpec = normalizeBuildpacksLaunchOverrideSpec(currentApp, currentSpec)
+	desiredSpec = normalizeBuildpacksLaunchOverrideSpec(desiredApp, desiredSpec)
 	currentSpec.RuntimeID = ""
 	desiredSpec.RuntimeID = ""
 	currentSpec.RolloutIntent = ""
@@ -76,7 +82,7 @@ func managedMigrateOperationIsStatelessRuntimeOnly(op model.Operation, currentAp
 // lifecycle launcher before migration preflight. That wrapper is execution
 // plumbing, not a user-visible workload change; compare the underlying argv
 // so a stateless runtime move still receives its validated online plan.
-func normalizeMigrationLaunchOverrideSpec(app model.App, spec model.AppSpec) model.AppSpec {
+func normalizeBuildpacksLaunchOverrideSpec(app model.App, spec model.AppSpec) model.AppSpec {
 	if !appHasBuildpacksSource(app) || len(spec.Command) != 1 || len(spec.Args) == 0 {
 		return spec
 	}
@@ -215,7 +221,37 @@ func managedDeployOperationIsImageOnly(op model.Operation, currentApp, desiredAp
 
 	currentSpec := comparableImageOnlySpec(currentApp.Spec)
 	desiredSpec := comparableImageOnlySpec(desiredApp.Spec)
+	// A migration can queue an automatic image rebuild when the target runtime
+	// does not yet have the source image. The rebuild deploy intentionally
+	// carries that target runtime, so it is an image update plus a stateless
+	// handoff rather than a generic runtime edit. Keep this exception scoped to
+	// the controller-owned rebuild path and fail closed for every state-bearing
+	// workload.
+	if managedImageRebuildRuntimeHandoff(op, currentApp, desiredApp) {
+		currentSpec.RuntimeID = ""
+		desiredSpec.RuntimeID = ""
+	}
 	return reflect.DeepEqual(currentSpec, desiredSpec)
+}
+
+func managedImageRebuildRuntimeHandoff(op model.Operation, currentApp, desiredApp model.App) bool {
+	if op.RequestedByType != model.ActorTypeSystem ||
+		op.RequestedByID != model.OperationRequestedByImageRebuild ||
+		strings.TrimSpace(currentApp.Spec.RuntimeID) == "" ||
+		strings.TrimSpace(desiredApp.Spec.RuntimeID) == "" ||
+		strings.TrimSpace(currentApp.Spec.RuntimeID) == strings.TrimSpace(desiredApp.Spec.RuntimeID) {
+		return false
+	}
+	return currentApp.Spec.Workspace == nil &&
+		currentApp.Spec.PersistentStorage == nil &&
+		currentApp.Spec.VolumeReplication == nil &&
+		currentApp.Spec.Postgres == nil &&
+		currentApp.Spec.Data == nil &&
+		desiredApp.Spec.Workspace == nil &&
+		desiredApp.Spec.PersistentStorage == nil &&
+		desiredApp.Spec.VolumeReplication == nil &&
+		desiredApp.Spec.Postgres == nil &&
+		desiredApp.Spec.Data == nil
 }
 
 func comparableImageOnlySpec(spec model.AppSpec) model.AppSpec {
