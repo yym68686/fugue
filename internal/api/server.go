@@ -1477,6 +1477,13 @@ func (s *Server) handleDisableApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if app.Spec.Replicas == 0 && app.Status.CurrentReplicas == 0 {
+		// Refresh the live observation before answering idempotently. The
+		// durable status can say zero while a stale ManagedApp/Deployment (and
+		// its Pod) is still serving; in that case queue scale-to-zero so the
+		// controller can converge the physical state.
+		app = s.overlayManagedAppStatus(r.Context(), app)
+	}
+	if appDisableConverged(app, time.Now().UTC()) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"app":              sanitizeAppForAPI(app),
 			"already_disabled": true,

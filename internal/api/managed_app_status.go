@@ -44,6 +44,35 @@ func appObservedStatusFresh(observed *model.AppObservedStatus, now time.Time) bo
 	return appObservationTimestampFresh(observed.ObservedAt, now)
 }
 
+// appDisableConverged is the publication gate for the disable idempotency
+// response. Durable app status is only a control-plane projection and can lag
+// a workload that still exists in Kubernetes, so a zero desired/current count
+// is not enough to claim that disable completed. Require a fresh, cluster-
+// identified observation with explicit zero counts for both the controller's
+// desired replicas and the physical serving cohort. Missing evidence fails
+// closed and lets the normal scale-to-zero reconcile repair the state.
+func appDisableConverged(app model.App, now time.Time) bool {
+	if app.Spec.Replicas != 0 || app.Status.CurrentReplicas != 0 {
+		return false
+	}
+	observed := app.ObservedStatus
+	if observed == nil ||
+		!appObservedStatusFresh(observed, now) ||
+		!strings.EqualFold(strings.TrimSpace(observed.Phase), "disabled") ||
+		observed.DesiredReplicas != 0 ||
+		strings.TrimSpace(observed.ClusterID) == "" ||
+		strings.TrimSpace(observed.EvidenceSource) == "" ||
+		observed.RuntimeObjectPresent == nil || !*observed.RuntimeObjectPresent ||
+		observed.NamespacePresent == nil || !*observed.NamespacePresent ||
+		observed.ReadyReplicas == nil || *observed.ReadyReplicas != 0 ||
+		observed.PhysicalReplicas == nil || *observed.PhysicalReplicas != 0 ||
+		observed.PhysicalDesired == nil || *observed.PhysicalDesired != 0 ||
+		len(observed.InvariantViolations) > 0 {
+		return false
+	}
+	return true
+}
+
 func appObservationTimestampFresh(observedAt, now time.Time) bool {
 	if observedAt.IsZero() {
 		return false
