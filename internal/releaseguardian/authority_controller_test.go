@@ -282,24 +282,81 @@ func TestAuthorityControllerDoesNotRevertSharedDependencyFailure(t *testing.T) {
 	}
 }
 
-func TestRestoredBundleGenerationRequiresSameMonotonicLKG(t *testing.T) {
+func TestRestoredBundleGenerationAllowsNewerSignedConfiguration(t *testing.T) {
 	previous := "route-generation.p11377.r127"
 	if !restoredBundleGenerationMatches("route-generation.p11486.r131", previous) {
 		t.Fatal("monotonically refreshed exact LKG was rejected")
+	}
+	if !restoredBundleGenerationMatches("new-route-generation.p11486.r127", previous) {
+		t.Fatal("newer signed configuration for the same LKG code was rejected")
 	}
 	if !restoredBundleGenerationMatches(previous, previous) {
 		t.Fatal("unchanged exact LKG was rejected")
 	}
 	for name, value := range map[string]string{
-		"wrong base":        "other-generation.p11486.r131",
-		"stale publication": "route-generation.p11376.r131", "stale recovery": "route-generation.p11486.r127",
-		"malformed": "route-generation",
+		"changed same publication": "other-generation.p11377.r131",
+		"stale publication":        "route-generation.p11376.r131", "stale recovery": "route-generation.p11486.r127",
+		"older changed recovery": "other-generation.p11486.r126", "malformed": "route-generation",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if restoredBundleGenerationMatches(value, previous) {
 				t.Fatal("invalid restored LKG generation was accepted")
 			}
 		})
+	}
+}
+
+func TestAuthorityControllerRetiresPreparedJournalAfterCommittedCurrentCAS(t *testing.T) {
+	beginCount, deleted := 0, 0
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{beginCount: &beginCount})
+	candidate, candidateUID, candidateRV, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := candidate
+	verified.State, verified.Generation, verified.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, fixture.result.ResultDigest
+	if _, _, err := fixture.store.PutCandidate(context.Background(), verified, candidateUID, candidateRV); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := (AuthorityTransitionJournal{GroupID: fixture.group, Phase: AuthorityTransitionPrepared,
+		CurrentUID: "current-failure", CurrentRV: "80", Before: fixture.current, Candidate: verified,
+		CanaryResultDigest: fixture.result.ResultDigest, PreviousNodes: append([]AuthorityBaselineNodeWitness(nil), fixture.baseline.Nodes...),
+		CreatedAt: time.Unix(5_000, 0).UTC().Format(time.RFC3339Nano)}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: fixture.group,
+		CurrentRecordDigest: verified.RecordDigest, CurrentWorkerSlot: verified.WorkerSlot,
+		CurrentFrontGeneration: 100, CurrentBundleGeneration: verified.ServingGeneration + ".p8.r0",
+		CurrentWorkerSourceSHA: verified.WorkerSourceSHA, CurrentWorkerImageDigest: verified.WorkerImageDigest,
+		PreviousRecordDigest: fixture.current.CurrentRecordDigest, PreviousWorkerSlot: fixture.current.CurrentWorkerSlot,
+		PreviousFrontGeneration: 99, PreviousBundleGeneration: fixture.current.CurrentBundleGeneration,
+		PreviousWorkerSourceSHA: fixture.current.CurrentWorkerSourceSHA, PreviousWorkerImageDigest: fixture.current.CurrentWorkerImageDigest,
+		AuthorityEpoch: fixture.current.AuthorityEpoch + 20, BaselineReceiptDigest: fixture.current.BaselineReceiptDigest}
+	changed := committed
+	changed.PreviousBundleGeneration = "unrelated-bundle.p98.r1"
+	if preparedJournalMatchesCommittedAuthority(changed, journal) {
+		t.Fatal("prepared journal with unrelated predecessor was accepted")
+	}
+	changed = committed
+	changed.CurrentFrontGeneration++
+	if preparedJournalMatchesCommittedAuthority(changed, journal) {
+		t.Fatal("prepared journal with non-adjacent current generation was accepted")
+	}
+	object, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), currentAuthorityName(fixture.group), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.Data["authority.json"] = mustCanonicalJSON(t, committed)
+	if _, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline,
+		journal: &journal, deleteCount: &deleted}
+	if receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group); err != nil || changed ||
+		receipt.ReceiptDigest != "" || deleted != 1 || beginCount != 0 || journal.JournalDigest != "" {
+		t.Fatalf("committed prepared journal was not retired: receipt=%+v changed=%v deleted=%d begins=%d journal=%+v err=%v",
+			receipt, changed, deleted, beginCount, journal, err)
 	}
 }
 

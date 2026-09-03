@@ -209,6 +209,7 @@ type frontAuthorityPreflight struct {
 	workers            map[string]corev1.Pod
 	states             map[string]edgegroupfront.ActivationState
 	previousGeneration uint64
+	targetBundle       string
 	alreadyAtNew       bool
 }
 
@@ -234,6 +235,7 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 	states := make(map[string]edgegroupfront.ActivationState, len(workers))
 	alreadyAtNew := true
 	previousGeneration := uint64(0)
+	targetBundle := ""
 	for node, worker := range workers {
 		state, readErr := activator.readActivation(ctx, worker.Name)
 		if readErr != nil || state.GroupID != target.GroupID {
@@ -245,10 +247,21 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 			return frontAuthorityPreflight{}, errors.New("Front readiness does not match activation prewrite state")
 		}
 		if state.ActiveSlot == string(target.TargetSlot) {
+			bundleMatches := state.BundleGeneration == target.FrontBundleGeneration
+			if !bundleMatches && operation == edgegroupfront.ActivationOperationRollback &&
+				state.Authority == edgegroupfront.ActivationAuthority && state.Operation == edgegroupfront.ActivationOperationRollback &&
+				authorityBundleAtOrAfter(state.BundleGeneration, target.FrontBundleGeneration) {
+				bundleMatches = true
+			}
 			if !frontTargetGenerationMatches(state, target.PreviousFrontGeneration, operation) || state.PreviousSlot != string(target.PreviousSlot) ||
-				state.BundleGeneration != target.FrontBundleGeneration || state.WorkerSourceCommit != target.WorkerSourceSHA ||
+				!bundleMatches || state.WorkerSourceCommit != target.WorkerSourceSHA ||
 				state.WorkerImageDigest != target.WorkerImageDigest || state.Operation != operation {
 				return frontAuthorityPreflight{}, errors.New("Front activation replay state is not target-bound")
+			}
+			if targetBundle == "" {
+				targetBundle = state.BundleGeneration
+			} else if targetBundle != state.BundleGeneration {
+				return frontAuthorityPreflight{}, errors.New("Front activation replay bundles are mixed")
 			}
 			candidatePrevious := state.Generation - 1
 			if previousGeneration == 0 {
@@ -271,7 +284,20 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 		}
 		states[node] = state
 	}
-	return frontAuthorityPreflight{workers: workers, states: states, previousGeneration: previousGeneration, alreadyAtNew: alreadyAtNew}, nil
+	return frontAuthorityPreflight{workers: workers, states: states, previousGeneration: previousGeneration,
+		targetBundle: targetBundle, alreadyAtNew: alreadyAtNew}, nil
+}
+
+func authorityBundleAtOrAfter(observed, committed string) bool {
+	observedServing, observedPublication, observedRecovery, observedErr := splitPromotedBundleVersion(observed)
+	committedServing, committedPublication, committedRecovery, committedErr := splitPromotedBundleVersion(committed)
+	if observedErr != nil || committedErr != nil || observedPublication < committedPublication {
+		return false
+	}
+	if observedPublication == committedPublication {
+		return observedServing == committedServing && observedRecovery >= committedRecovery
+	}
+	return observedRecovery >= committedRecovery
 }
 
 // observeFrontsForPreflight admits only a bounded recovery witness when the
@@ -359,6 +385,9 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 		return nil, errors.New("Front authority operation is invalid")
 	}
 	workers, states := preflight.workers, preflight.states
+	if preflight.targetBundle != "" {
+		target.FrontBundleGeneration = preflight.targetBundle
+	}
 	previousGeneration := preflight.previousGeneration
 	if previousGeneration == 0 {
 		return nil, errors.New("Front authority predecessor generation is unavailable")

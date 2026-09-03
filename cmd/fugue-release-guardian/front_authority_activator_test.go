@@ -136,6 +136,29 @@ func TestFrontRestoreGenerationAcceptsOnlyExactRetryChain(t *testing.T) {
 	}
 }
 
+func TestRollbackReplayBundleAcceptsOnlyMonotonicSignedPublication(t *testing.T) {
+	committed := "edgegroupbundle_old.p41138.r175"
+	for _, observed := range []string{
+		committed,
+		"edgegroupbundle_old.p41139.r176",
+		"edgegroupbundle_new.p41672.r175",
+	} {
+		if !authorityBundleAtOrAfter(observed, committed) {
+			t.Fatalf("valid rollback replay bundle %q was rejected", observed)
+		}
+	}
+	for _, observed := range []string{
+		"edgegroupbundle_new.p41138.r176",
+		"edgegroupbundle_new.p41672.r174",
+		"edgegroupbundle_old.p41137.r176",
+		"edgegroupbundle_new",
+	} {
+		if authorityBundleAtOrAfter(observed, committed) {
+			t.Fatalf("invalid rollback replay bundle %q was accepted", observed)
+		}
+	}
+}
+
 func TestObservedFrontFromActivationPreservesRecoveryWitness(t *testing.T) {
 	state := edgegroupfront.ActivationState{GroupID: "edge-group-country-de", Generation: 136, ActiveSlot: "b",
 		BundleGeneration: "bundle.p42.r7", WorkerSourceCommit: strings.Repeat("1", 40),

@@ -136,8 +136,10 @@ func (controller *AuthorityController) resumeTransition(ctx context.Context, cur
 		return AuthorityTransitionReceipt{}, false, errors.New("authority transition journal cannot be resumed")
 	}
 	if current.CurrentRecordDigest == journal.Candidate.RecordDigest && current.CurrentWorkerSlot == journal.Candidate.WorkerSlot {
-		if journal.Phase != AuthorityTransitionActivated || journal.Activation == nil ||
-			current.CurrentFrontGeneration != journal.Activation.TargetGeneration || current.CurrentBundleGeneration != journal.Activation.TargetBundleGeneration {
+		activatedCommit := journal.Phase == AuthorityTransitionActivated && journal.Activation != nil &&
+			current.CurrentFrontGeneration == journal.Activation.TargetGeneration && current.CurrentBundleGeneration == journal.Activation.TargetBundleGeneration
+		preparedCommit := journal.Phase == AuthorityTransitionPrepared && preparedJournalMatchesCommittedAuthority(current, journal)
+		if !activatedCommit && !preparedCommit {
 			return AuthorityTransitionReceipt{}, false, errors.New("completed authority transition does not match its journal")
 		}
 		if err := controller.finalizeTransitionJournal(ctx, journal); err != nil {
@@ -167,6 +169,23 @@ func (controller *AuthorityController) resumeTransition(ctx context.Context, cur
 	// Front state observation settle any zero/partial/full external mutation.
 	receipt, err := controller.verifyAndSwitch(ctx, journal.GroupID, journal.CanaryResultDigest, &journal)
 	return receipt, err == nil, err
+}
+
+// CurrentAuthority is the traffic grant. A process crash after its CAS may
+// leave the immutable journal in prepared phase even though the exact
+// candidate and predecessor pair committed. Retire only that exact pair; a
+// partial or unrelated authority remains fail-closed.
+func preparedJournalMatchesCommittedAuthority(current CurrentAuthority, journal AuthorityTransitionJournal) bool {
+	candidate := journal.Candidate
+	before := journal.Before
+	currentFamily, _, _, currentOK := splitAuthorityBundleGeneration(current.CurrentBundleGeneration)
+	return currentOK && currentFamily == candidate.ServingGeneration &&
+		current.CurrentRecordDigest == candidate.RecordDigest && current.CurrentWorkerSlot == candidate.WorkerSlot &&
+		current.CurrentWorkerSourceSHA == candidate.WorkerSourceSHA && current.CurrentWorkerImageDigest == candidate.WorkerImageDigest &&
+		current.CurrentFrontGeneration == current.PreviousFrontGeneration+1 && current.AuthorityEpoch > before.AuthorityEpoch &&
+		current.PreviousRecordDigest == before.CurrentRecordDigest && current.PreviousWorkerSlot == before.CurrentWorkerSlot &&
+		current.PreviousWorkerSourceSHA == before.CurrentWorkerSourceSHA && current.PreviousWorkerImageDigest == before.CurrentWorkerImageDigest &&
+		current.PreviousBundleGeneration == before.CurrentBundleGeneration && current.PreviousFrontGeneration >= before.CurrentFrontGeneration
 }
 
 type AuthorityController struct {
@@ -552,7 +571,15 @@ func restoredBundleGenerationMatches(observed, previous string) bool {
 	}
 	observedBase, observedPublication, observedRecovery, observedOK := splitAuthorityBundleGeneration(observed)
 	previousBase, previousPublication, previousRecovery, previousOK := splitAuthorityBundleGeneration(previous)
-	return observedOK && previousOK && observedBase == previousBase && observedPublication > previousPublication && observedRecovery > previousRecovery
+	if !observedOK || !previousOK || observedPublication <= previousPublication {
+		return false
+	}
+	if observedBase == previousBase {
+		return observedRecovery > previousRecovery
+	}
+	// Configuration publication is independent of the code authority. A
+	// restored slot may already serve a newer signed configuration family.
+	return observedRecovery >= previousRecovery
 }
 
 func splitAuthorityBundleGeneration(value string) (string, uint64, uint64, bool) {
