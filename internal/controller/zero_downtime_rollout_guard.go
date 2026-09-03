@@ -764,7 +764,23 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 		snapshot = s.appWithResolvedLaunchOverride(ctx, snapshot)
 		snapshot.Spec.RolloutIntent = rolloutIntentForManagedOperation(candidate, current, snapshot)
 		snapshot = s.Renderer.PrepareApp(snapshot)
-		candidateKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(snapshot, managed.Spec.Scheduling))
+		candidateScheduling := managed.Spec.Scheduling
+		// A failed deploy created by a runtime move is rendered with the
+		// operation target's scheduling constraints. The ManagedApp status may
+		// already have been restored to the durable source scheduling, so using
+		// it here would make an otherwise exact candidate proof impossible. Read
+		// the target runtime constraints from the operation snapshot; retain the
+		// managed scheduling only for same-runtime/legacy operations where no
+		// separate target proof is needed.
+		if targetRuntimeID := strings.TrimSpace(snapshot.Spec.RuntimeID); targetRuntimeID != "" &&
+			targetRuntimeID != strings.TrimSpace(current.Spec.RuntimeID) {
+			if targetScheduling, schedulingErr := s.managedSchedulingConstraints(targetRuntimeID); schedulingErr == nil {
+				candidateScheduling = targetScheduling
+			} else if s.Logger != nil {
+				s.Logger.Printf("skip failed pending release recovery for app %s operation %s: resolve target runtime scheduling %s: %v", current.ID, candidate.ID, targetRuntimeID, schedulingErr)
+			}
+		}
+		candidateKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(snapshot, candidateScheduling))
 		if candidateKey != liveKey {
 			continue
 		}

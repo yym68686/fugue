@@ -552,6 +552,82 @@ func TestManagedAppLiveGuardRecoversPromotedServingSnapshotDuringBackgroundRecon
 	}
 }
 
+func TestManagedAppLiveGuardRecoversFailedRuntimeMoveUsingTargetScheduling(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("runtime move release recovery")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "source", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "target", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "runtime-move", "", model.AppSpec{
+		Image: "registry.example/runtime-move:v1", Ports: []int{8080}, Replicas: 1, RuntimeID: sourceRuntime.ID,
+	}, model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/runtime-move:v1", ResolvedImageRef: "registry.example/runtime-move:v1"})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	failedSpec := *cloneControllerAppSpec(&app.Spec)
+	failedSpec.Image = "registry.example/runtime-move:v2"
+	failedSpec.RuntimeID = targetRuntime.ID
+	failedSource := model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: failedSpec.Image, ResolvedImageRef: failedSpec.Image}
+	failed, err := stateStore.CreateOperation(model.Operation{
+		TenantID: app.TenantID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &failedSpec,
+		DesiredSource: &failedSource, DesiredOriginSource: &failedSource,
+	})
+	if err != nil {
+		t.Fatalf("create failed deploy: %v", err)
+	}
+	failed, claimed, err := stateStore.TryClaimPendingOperation(failed.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim failed deploy: claimed=%v err=%v", claimed, err)
+	}
+	failed, err = stateStore.FailOperation(failed.ID, "status publish interrupted after runtime move became ready")
+	if err != nil || failed.CompletedAt == nil {
+		t.Fatalf("fail deploy: %+v err=%v", failed, err)
+	}
+
+	svc := &Service{Store: stateStore, Renderer: runtime.Renderer{}}
+	serving := app
+	serving.Spec = failedSpec
+	model.SetAppSourceState(&serving, &failedSource, &failedSource)
+	serving.Spec.RolloutIntent = rolloutIntentForManagedOperation(failed, app, serving)
+	serving = svc.Renderer.PrepareApp(serving)
+	targetScheduling := runtime.SchedulingForRuntime(targetRuntime)
+	servingKey := svc.Renderer.ManagedAppReleaseKey(serving, targetScheduling)
+	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingForRuntime(sourceRuntime))
+	managed.Metadata.Generation = 2
+	startedAt := failed.CreatedAt
+	if failed.StartedAt != nil {
+		startedAt = *failed.StartedAt
+	}
+	managed.Status = runtime.ManagedAppStatus{
+		Phase: runtime.ManagedAppPhaseError, ObservedGeneration: 2,
+		PendingReleaseKey: servingKey, PendingReleaseStartedAt: startedAt.UTC().Format(time.RFC3339Nano),
+	}
+
+	recovered, ok, recoverErr := svc.recoverManagedAppPendingDeploySnapshot(context.Background(), managed, app, servingKey)
+	if recoverErr != nil || !ok {
+		t.Fatalf("failed runtime-move release must recover with target scheduling: ok=%v err=%v", ok, recoverErr)
+	}
+	if recovered.Spec.RuntimeID != targetRuntime.ID || recovered.Spec.Image != failedSpec.Image {
+		t.Fatalf("unexpected recovered target snapshot: runtime=%q image=%q", recovered.Spec.RuntimeID, recovered.Spec.Image)
+	}
+}
+
 func TestManagedAppLiveGuardRefusesLocalRWOReplacementWithoutExactNodeProof(t *testing.T) {
 	storage := &model.AppPersistentStorageSpec{
 		Mode:             model.AppPersistentStorageModeMovableRWO,
