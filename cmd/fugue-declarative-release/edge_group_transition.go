@@ -1126,7 +1126,7 @@ func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.
 	if err != nil || object == nil {
 		return nil, err
 	}
-	witness, err := edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "", runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest)
+	witness, err := edgeServingAuthorityWitnessFromCurrentWithRecoveryAuthorities(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "", runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest, runtime.release.SupersedesFailedConfigSHA)
 	if err != nil || witness == nil {
 		return witness, err
 	}
@@ -1200,6 +1200,11 @@ func edgeServingAuthorityWitnessFromCurrentWithDegradedRecovery(before edgeGroup
 // the failed candidate. The LKG source/image and bundle family are explicit
 // inputs, so this cannot turn arbitrary Front drift into a serving witness.
 func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string, allowDegradedRecovery bool, expectedLKGSourceSHA, expectedLKGImageDigest string) (*edgeServingAuthorityWitness, error) {
+	return edgeServingAuthorityWitnessFromCurrentWithRecoveryAuthorities(before, current, groupID, uid, resourceVersion, allowDegradedRecovery,
+		expectedLKGSourceSHA, expectedLKGImageDigest, "")
+}
+
+func edgeServingAuthorityWitnessFromCurrentWithRecoveryAuthorities(before edgeGroupState, current releaseguardian.CurrentAuthority, groupID, uid, resourceVersion string, allowDegradedRecovery bool, expectedLKGSourceSHA, expectedLKGImageDigest, supersededSourceSHA string) (*edgeServingAuthorityWitness, error) {
 	if current.Validate() != nil || current.GroupID != groupID {
 		return nil, errors.New("Guardian current authority payload is invalid")
 	}
@@ -1215,6 +1220,9 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 			return nil, errors.New("edge activation evidence disagrees with serving slot")
 		}
 		if before.ActiveSlot != string(current.CurrentWorkerSlot) {
+			if allowDegradedRecovery && edgeGroupStateMatchesSupersededPreviousAuthority(before, current, health, supersededSourceSHA, time.Now().UTC()) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
 				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 			}
@@ -1228,6 +1236,9 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 			return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 		}
 		if !edgeFrontHealthMatchesServingAuthority(health, current) {
+			if allowDegradedRecovery && edgeGroupStateMatchesSupersededPreviousAuthority(before, current, health, supersededSourceSHA, time.Now().UTC()) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
 				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 			}
@@ -1244,6 +1255,9 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 	}
 	if before.ActiveSlot != string(current.CurrentWorkerSlot) {
 		for _, health := range before.FrontHealth {
+			if allowDegradedRecovery && edgeGroupStateMatchesSupersededPreviousAuthority(before, current, health, supersededSourceSHA, time.Now().UTC()) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
 				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 			}
@@ -1278,6 +1292,9 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 	}
 	for _, health := range before.FrontHealth {
 		if !edgeFrontHealthMatchesServingAuthority(health, current) {
+			if allowDegradedRecovery && edgeGroupStateMatchesSupersededPreviousAuthority(before, current, health, supersededSourceSHA, time.Now().UTC()) {
+				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
+			}
 			if allowDegradedRecovery && edgeFrontHealthMatchesExpectedLKG(health, current, expectedLKGSourceSHA, expectedLKGImageDigest) {
 				return edgeServingAuthorityWitnessFromFrontHealth(current, uid, resourceVersion, health), nil
 			}
@@ -1293,6 +1310,39 @@ func edgeServingAuthorityWitnessFromCurrentWithExpectedLKG(before edgeGroupState
 		BundleVersion: current.CurrentBundleGeneration, WorkerSlot: string(current.CurrentWorkerSlot),
 		WorkerSourceSHA: current.CurrentWorkerSourceSHA, WorkerImageDigest: current.CurrentWorkerImageDigest,
 	}, nil
+}
+
+// A superseding repair may observe Front briefly serving Guardian's previous
+// authority while the current pointer already reflects the compensating LKG.
+// Admit that state only with exact, live Worker cohort proof.
+func edgeGroupStateMatchesSupersededPreviousAuthority(before edgeGroupState, current releaseguardian.CurrentAuthority, health edgeFrontHealth, supersededSourceSHA string, now time.Time) bool {
+	if !edgeSourceSHAPattern.MatchString(supersededSourceSHA) || current.PreviousWorkerSlot.Validate() != nil ||
+		current.PreviousWorkerSlot == current.CurrentWorkerSlot || current.PreviousWorkerSourceSHA != supersededSourceSHA ||
+		!edgePromotionDigestPattern.MatchString(current.PreviousWorkerImageDigest) || current.PreviousBundleGeneration == "" ||
+		!health.ActivationPresent || before.ActiveSlot != health.ActiveSlot || health.ActiveSlot != string(current.PreviousWorkerSlot) ||
+		health.RouteAuthority != edgeActivationAuthority || health.Generation < current.PreviousFrontGeneration ||
+		health.WorkerSourceCommit != current.PreviousWorkerSourceSHA || health.WorkerImageDigest != current.PreviousWorkerImageDigest {
+		return false
+	}
+	previousFamily, _, _, previousOK := parseEdgePublicationVersion(current.PreviousBundleGeneration)
+	healthFamily, _, _, healthOK := parseEdgePublicationVersion(health.BundleGeneration)
+	if !previousOK || !healthOK || previousFamily != healthFamily {
+		return false
+	}
+	workers := edgeWorkerPods(before, health.ActiveSlot)
+	if len(workers) == 0 || len(workers) != len(before.Front) || !sameEdgeNodes(workers, before.Front) {
+		return false
+	}
+	for _, worker := range workers {
+		digest, err := immutableDigestFromRef(worker.ImageRef)
+		workerFamily, workerPublication, _, workerOK := parseEdgePublicationVersion(worker.BundleGeneration)
+		if err != nil || !worker.Ready || worker.RestartCount != 0 || worker.SourceCommit != supersededSourceSHA ||
+			digest != current.PreviousWorkerImageDigest || !edgePodHasGroupAuthority(worker) || !edgePodHasActiveInventoryAt(worker, now) ||
+			!workerOK || workerFamily != healthFamily || worker.ServingGeneration != workerFamily || worker.PublicationSequence != workerPublication {
+			return false
+		}
+	}
+	return true
 }
 
 // edgeGroupStateMatchesExplicitServingDrift admits a reviewed superseding

@@ -651,6 +651,46 @@ func TestServingAuthorityWitnessAllowsProductionCommittedAuthorityRollback(t *te
 	}
 }
 
+func TestServingAuthorityWitnessAllowsSupersededPreviousAuthorityWithWorkerProof(t *testing.T) {
+	now := time.Now().UTC()
+	lkgSource, lkgImage := strings.Repeat("4", 40), "sha256:"+strings.Repeat("5", 64)
+	failedSource, failedImage := strings.Repeat("2", 40), "sha256:"+strings.Repeat("3", 64)
+	current := releaseguardian.CurrentAuthority{
+		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: "edge-group-country-us", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
+		CurrentWorkerSlot: releaseguardian.AuthoritySlotB, CurrentFrontGeneration: 201,
+		CurrentBundleGeneration: "edgegroupbundle_lkg.p310.r7", CurrentWorkerSourceSHA: lkgSource,
+		CurrentWorkerImageDigest: lkgImage, PreviousRecordDigest: "sha256:" + strings.Repeat("6", 64),
+		PreviousWorkerSlot: releaseguardian.AuthoritySlotA, PreviousFrontGeneration: 199,
+		PreviousBundleGeneration: "edgegroupbundle_failed.p309.r7", PreviousWorkerSourceSHA: failedSource,
+		PreviousWorkerImageDigest: failedImage, AuthorityEpoch: 312,
+	}
+	health := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 200,
+		BundleGeneration: "edgegroupbundle_failed.p311.r7", WorkerSourceCommit: failedSource,
+		WorkerImageDigest: failedImage, RouteAuthority: edgeActivationAuthority}
+	worker := edgeGroupPod{Name: "worker-a", NodeName: "edge-node-us", Ready: true, SourceCommit: failedSource,
+		ImageRef: "ghcr.io/example/fugue-edge@" + failedImage, RouteBundleSource: edgeGroupAuthoritySource,
+		BundleGeneration: "edgegroupbundle_failed.p312.r7", ServingGeneration: "edgegroupbundle_failed",
+		PublicationSequence: 312, InventoryProducerActive: true, InventoryHeartbeatGeneration: 401,
+		InventoryHeartbeatAt: now}
+	state := edgeGroupState{ActiveSlot: "a", FrontHealth: map[string]edgeFrontHealth{"edge-node-us": health},
+		Front:   map[string]edgeGroupPod{"edge-node-us": {Name: "front", NodeName: "edge-node-us"}},
+		WorkerA: map[string]edgeGroupPod{"edge-node-us": worker}}
+
+	witness, err := edgeServingAuthorityWitnessFromCurrentWithRecoveryAuthorities(state, current, current.GroupID,
+		"authority-uid", "77188752", true, lkgSource, lkgImage, failedSource)
+	if err != nil || witness == nil || witness.WorkerSlot != "a" || witness.WorkerSourceSHA != failedSource || witness.WorkerImageDigest != failedImage {
+		t.Fatalf("superseded previous authority witness was rejected: witness=%+v err=%v", witness, err)
+	}
+
+	worker.InventoryHeartbeatAt = now.Add(-edgeInventoryHeartbeatMaxAge - time.Second)
+	state.WorkerA["edge-node-us"] = worker
+	if witness, err := edgeServingAuthorityWitnessFromCurrentWithRecoveryAuthorities(state, current, current.GroupID,
+		"authority-uid", "77188752", true, lkgSource, lkgImage, failedSource); err == nil || witness != nil {
+		t.Fatalf("superseded authority with stale Worker proof was accepted: witness=%+v err=%v", witness, err)
+	}
+}
+
 func TestServingAuthorityWitnessUsesWorkerActivationEvidenceWhenFrontMetadataLags(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
