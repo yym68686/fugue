@@ -564,8 +564,8 @@ func runPerfMachineReport(dataPath, targetRoot string) ([]byte, error) {
 		"perf", "report",
 		"--stdio", "--stdio-color", "never", "--no-children", "--call-graph", "none",
 		"--percent-limit", "0", "--field-separator", perfFieldSeparator,
-		"--fields", "overhead,sample,overhead_sys,overhead_us,pid,comm,dso,symbol",
-		"--sort", "pid,comm,dso,symbol", "--symfs", targetRoot, "-i", dataPath,
+		"--fields", "overhead,sample,overhead_sys,overhead_us,tgid,comm,dso,symbol",
+		"--sort", "tgid,comm,dso,symbol", "--symfs", targetRoot, "-i", dataPath,
 	)
 }
 
@@ -691,7 +691,11 @@ type functionSampleKey struct {
 	Command  string
 	Mode     string
 	DSO      string
-	Source   string
+}
+
+type functionSampleAggregate struct {
+	Samples int
+	Sources map[string]int
 }
 
 type processGoSymbolizer struct {
@@ -701,7 +705,7 @@ type processGoSymbolizer struct {
 
 func summarizePerfEntries(entries []perfReportEntry, targetPIDs []int) ([]functionSample, int, int, int, int, int, int) {
 	symbolizers := loadProcessGoSymbolizers(targetPIDs)
-	counts := make(map[functionSampleKey]int)
+	counts := make(map[functionSampleKey]*functionSampleAggregate)
 	total := 0
 	user := 0
 	kernel := 0
@@ -739,25 +743,33 @@ func summarizePerfEntries(entries []perfReportEntry, targetPIDs []int) ([]functi
 		if entry.Mode == "kernel" && resolved {
 			resolvedKernel += entry.Samples
 		}
-		key := functionSampleKey{Function: function, PID: entry.PID, Command: entry.Command, Mode: entry.Mode, DSO: entry.DSO, Source: source}
-		counts[key] += entry.Samples
+		key := functionSampleKey{Function: function, PID: entry.PID, Command: entry.Command, Mode: entry.Mode, DSO: entry.DSO}
+		aggregate := counts[key]
+		if aggregate == nil {
+			aggregate = &functionSampleAggregate{Sources: make(map[string]int)}
+			counts[key] = aggregate
+		}
+		aggregate.Samples += entry.Samples
+		if source != "" {
+			aggregate.Sources[source] += entry.Samples
+		}
 	}
 
 	functions := make([]functionSample, 0, len(counts))
-	for key, samples := range counts {
+	for key, aggregate := range counts {
 		percent := 0.0
 		if total > 0 {
-			percent = float64(samples) / float64(total) * 100
+			percent = float64(aggregate.Samples) / float64(total) * 100
 		}
 		functions = append(functions, functionSample{
 			Function: key.Function,
-			Samples:  samples,
+			Samples:  aggregate.Samples,
 			Percent:  percent,
 			PID:      key.PID,
 			Command:  key.Command,
 			Mode:     key.Mode,
 			DSO:      key.DSO,
-			Source:   key.Source,
+			Source:   mostFrequentSource(aggregate.Sources),
 		})
 	}
 	sort.Slice(functions, func(i, j int) bool {
@@ -773,6 +785,18 @@ func summarizePerfEntries(entries []perfReportEntry, targetPIDs []int) ([]functi
 		functions = functions[:100]
 	}
 	return functions, total, user, kernel, other, resolvedUser, resolvedKernel
+}
+
+func mostFrequentSource(counts map[string]int) string {
+	selected := ""
+	selectedCount := 0
+	for source, count := range counts {
+		if count > selectedCount || count == selectedCount && source < selected {
+			selected = source
+			selectedCount = count
+		}
+	}
+	return selected
 }
 
 func isUnknownSymbol(value string) bool {
