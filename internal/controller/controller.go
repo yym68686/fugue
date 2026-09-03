@@ -1174,6 +1174,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 					scheduling,
 					postgresPlacements,
 				)
+				backingServiceDeployments = managedPostgresStorageConvergenceDeployments(
+					currentApp,
+					backingServiceDeployments,
+				)
 				if err := s.waitForManagedPostgresStorageConvergenceForDeployments(
 					ctx,
 					op.ID,

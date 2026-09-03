@@ -1285,6 +1285,51 @@ func TestManagedDeployStorageConvergenceRejectsPVCResizeError(t *testing.T) {
 	}
 }
 
+func TestManagedDeployStorageConvergenceOnlyWaitsForChangedStorage(t *testing.T) {
+	readyAt := time.Now().UTC().Add(-time.Hour)
+	current := model.App{
+		ID:       "app_storage_wait",
+		TenantID: "tenant_storage_wait",
+		Name:     "storage-wait",
+		Spec: model.AppSpec{
+			Image: "registry.example/storage-wait:v1", Ports: []int{8080}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID,
+		},
+		Status: model.AppStatus{
+			CurrentRuntimeID: "runtime_managed_shared", CurrentReplicas: 1, CurrentReleaseReadyAt: &readyAt,
+		},
+		Bindings: []model.ServiceBinding{{
+			ID: "binding-db", TenantID: "tenant_storage_wait", AppID: "app_storage_wait", ServiceID: "service-db", Alias: "postgres",
+		}},
+		BackingServices: []model.BackingService{{
+			ID: "service-db", TenantID: "tenant_storage_wait", OwnerAppID: "app_storage_wait", Name: "database",
+			Type: model.BackingServiceTypePostgres, Provisioner: model.BackingServiceProvisionerManaged,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+				Database: "app", User: "app", Password: "secret", ServiceName: "storage-wait-postgres",
+				StorageClassName: "fugue-postgres-rwo", StorageSize: "1Gi", Instances: 2,
+			}},
+		}},
+	}
+
+	unchanged := runtimepkg.ManagedBackingServiceDeployments(current, runtimepkg.SchedulingConstraints{})
+	if got := managedPostgresStorageConvergenceDeployments(current, unchanged); len(got) != 0 {
+		t.Fatalf("unchanged storage on an existing serving app must not block an unrelated deploy: %+v", got)
+	}
+
+	resized := current
+	resized.BackingServices = cloneControllerBackingServices(current.BackingServices)
+	resized.BackingServices[0].Spec.Postgres.StorageSize = "2Gi"
+	changed := runtimepkg.ManagedBackingServiceDeployments(resized, runtimepkg.SchedulingConstraints{})
+	if got := managedPostgresStorageConvergenceDeployments(current, changed); len(got) != 1 || got[0].StorageSize != "2Gi" {
+		t.Fatalf("changed storage must retain the convergence barrier: %+v", got)
+	}
+
+	initial := current
+	initial.Status = model.AppStatus{}
+	if got := managedPostgresStorageConvergenceDeployments(initial, unchanged); len(got) != 1 {
+		t.Fatalf("initial deployment must retain the database storage convergence barrier: %+v", got)
+	}
+}
+
 func TestLocalPVExpansionCapacityDoesNotReserveAlreadyRequestedGrowthTwice(t *testing.T) {
 	t.Parallel()
 

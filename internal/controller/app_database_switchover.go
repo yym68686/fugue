@@ -2394,6 +2394,48 @@ func (s *Service) waitForManagedPostgresStorageConvergenceForDeployments(
 	return nil
 }
 
+// managedPostgresStorageConvergenceDeployments limits the post-deploy storage
+// barrier to databases whose storage target was introduced or changed by this
+// operation. A normal app image/config deploy must not wait for an unrelated,
+// already-degraded PostgreSQL replica to become Ready when its PVC target is
+// unchanged. Initial app deployment remains strict because there is no prior
+// serving release proving that the database storage already existed.
+func managedPostgresStorageConvergenceDeployments(
+	current model.App,
+	desired []runtime.ManagedBackingServiceDeployment,
+) []runtime.ManagedBackingServiceDeployment {
+	if len(desired) == 0 || !managedAppHasLiveServiceToProtect(current) {
+		return desired
+	}
+
+	currentByName := make(map[string]managedPostgresStorageTarget)
+	for _, deployment := range runtime.ManagedBackingServiceDeployments(current, runtime.SchedulingConstraints{}) {
+		if deployment.ResourceKind != runtime.CloudNativePGClusterKind || deployment.Suspended {
+			continue
+		}
+		currentByName[strings.TrimSpace(deployment.ResourceName)] = managedPostgresStorageTarget{
+			StorageClassName: strings.TrimSpace(deployment.StorageClassName),
+			StorageSize:      strings.TrimSpace(deployment.StorageSize),
+		}
+	}
+
+	out := make([]runtime.ManagedBackingServiceDeployment, 0, len(desired))
+	for _, deployment := range desired {
+		if deployment.ResourceKind != runtime.CloudNativePGClusterKind || deployment.Suspended {
+			continue
+		}
+		target := managedPostgresStorageTarget{
+			StorageClassName: strings.TrimSpace(deployment.StorageClassName),
+			StorageSize:      strings.TrimSpace(deployment.StorageSize),
+		}
+		previous, found := currentByName[strings.TrimSpace(deployment.ResourceName)]
+		if !found || previous != target {
+			out = append(out, deployment)
+		}
+	}
+	return out
+}
+
 func inspectManagedPostgresStorageExpansion(
 	ctx context.Context,
 	client *kubeClient,
