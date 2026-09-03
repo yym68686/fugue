@@ -360,6 +360,52 @@ func TestAuthorityControllerRetiresPreparedJournalAfterCommittedCurrentCAS(t *te
 	}
 }
 
+func TestAuthorityControllerDoesNotReplayRevertedVerifiedCandidate(t *testing.T) {
+	beginCount, deleted := 0, 0
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{beginCount: &beginCount})
+	candidate, candidateUID, candidateRV, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := candidate
+	verified.State, verified.Generation, verified.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, fixture.result.ResultDigest
+	if _, _, err := fixture.store.PutCandidate(context.Background(), verified, candidateUID, candidateRV); err != nil {
+		t.Fatal(err)
+	}
+	reverted := fixture.current
+	reverted.PreviousRecordDigest, reverted.PreviousWorkerSlot = verified.RecordDigest, verified.WorkerSlot
+	reverted.PreviousFrontGeneration = reverted.CurrentFrontGeneration - 1
+	reverted.PreviousBundleGeneration = verified.ServingGeneration + ".p8.r0"
+	reverted.PreviousWorkerSourceSHA, reverted.PreviousWorkerImageDigest = verified.WorkerSourceSHA, verified.WorkerImageDigest
+	object, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), currentAuthorityName(fixture.group), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.Data["authority.json"] = mustCanonicalJSON(t, reverted)
+	if _, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group); err != nil || changed ||
+		receipt.ReceiptDigest != "" || beginCount != 0 {
+		t.Fatalf("reverted verified candidate was replayed: receipt=%+v changed=%v begins=%d err=%v", receipt, changed, beginCount, err)
+	}
+
+	journal, err := (AuthorityTransitionJournal{GroupID: fixture.group, Phase: AuthorityTransitionPrepared,
+		CurrentUID: "current-failure", CurrentRV: "80", Before: reverted, Candidate: verified,
+		CanaryResultDigest: fixture.result.ResultDigest, PreviousNodes: append([]AuthorityBaselineNodeWitness(nil), fixture.baseline.Nodes...),
+		CreatedAt: time.Unix(5_000, 0).UTC().Format(time.RFC3339Nano)}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline,
+		journal: &journal, deleteCount: &deleted}
+	if receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group); err != nil || changed ||
+		receipt.ReceiptDigest != "" || deleted != 1 || beginCount != 0 || journal.JournalDigest != "" {
+		t.Fatalf("reverted candidate journal was not retired: receipt=%+v changed=%v deleted=%d begins=%d journal=%+v err=%v",
+			receipt, changed, deleted, beginCount, journal, err)
+	}
+}
+
 func TestAuthorityControllerWaitsForBoundCandidateCanary(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

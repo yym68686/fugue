@@ -74,6 +74,17 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 		}
 		return AuthorityTransitionReceipt{}, false, nil
 	}
+	if candidateMatchesPreviousAuthority(current, candidate) {
+		if !journalExists {
+			return AuthorityTransitionReceipt{}, false, nil
+		}
+		if journal.Phase == AuthorityTransitionPrepared && journal.Before == current && journal.Candidate == candidate {
+			if err := controller.finalizeTransitionJournal(ctx, journal); err != nil {
+				return AuthorityTransitionReceipt{}, false, err
+			}
+			return AuthorityTransitionReceipt{}, false, nil
+		}
+	}
 	if journalExists {
 		receipt, changed, resumeErr := controller.resumeTransition(ctx, current, journal)
 		if resumeErr != nil && controller.isPrewriteCASChanged(groupID, resumeErr) {
@@ -115,6 +126,16 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 		return AuthorityTransitionReceipt{}, false, nil
 	}
 	return receipt, err == nil, err
+}
+
+// A verified candidate remains immutable after rollback, but it must not be
+// replayed immediately: CurrentAuthority.previous is the durable statement
+// that this exact code authority was just removed from traffic.
+func candidateMatchesPreviousAuthority(current CurrentAuthority, candidate CandidateAuthority) bool {
+	previousFamily, _, _, previousOK := splitAuthorityBundleGeneration(current.PreviousBundleGeneration)
+	return previousOK && previousFamily == candidate.ServingGeneration &&
+		current.PreviousRecordDigest == candidate.RecordDigest && current.PreviousWorkerSlot == candidate.WorkerSlot &&
+		current.PreviousWorkerSourceSHA == candidate.WorkerSourceSHA && current.PreviousWorkerImageDigest == candidate.WorkerImageDigest
 }
 
 func (controller *AuthorityController) isPrewriteCASChanged(groupID string, err error) bool {
