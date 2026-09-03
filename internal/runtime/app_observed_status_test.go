@@ -214,6 +214,22 @@ func TestCalculateAppObservedStatusUsesObservedRuntimeIdentity(t *testing.T) {
 	}
 }
 
+func TestCalculateAppObservedStatusUsesProvenCurrentRuntimeIdentity(t *testing.T) {
+	app := model.App{Spec: model.AppSpec{RuntimeID: "runtime-source", Replicas: 1}}
+	managed := ManagedAppObject{
+		Spec:     ManagedAppSpec{AppSpec: model.AppSpec{RuntimeID: "runtime-target"}},
+		Metadata: ManagedAppMeta{Generation: 2},
+		Status:   ManagedAppStatus{Phase: ManagedAppPhaseError, ReadyReplicas: 1, ObservedGeneration: 2},
+	}
+	status := CalculateAppObservedStatus(app, AppRuntimeObservation{
+		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
+		ObservedAt: time.Now().UTC(), ClusterID: "cluster-target", CurrentRuntimeID: "runtime-source",
+	})
+	if status.RuntimeID != "runtime-source" {
+		t.Fatalf("proven current runtime identity must override an incomplete target rollout: %+v", status)
+	}
+}
+
 func TestCalculateAppObservedStatusPreservesServingLKGAfterFailedOperation(t *testing.T) {
 	t.Parallel()
 

@@ -10,7 +10,7 @@ import (
 	"fugue/internal/runtime"
 )
 
-const failedRightSizingRestoreTimeout = time.Minute
+const failedManagedAppRestoreTimeout = time.Minute
 
 func isRightSizingDeployOperation(op model.Operation) bool {
 	if op.Type != model.OperationTypeDeploy ||
@@ -55,33 +55,44 @@ func (s *Service) refuseRightSizingDowntimeIfNeeded(ctx context.Context, op mode
 	return fmt.Errorf("%s", message)
 }
 
-// restoreFailedRightSizingRollout puts the durable last-known-good resource
-// request back into Kubernetes before a scheduling-blocked automatic rollout
-// is marked failed. Without this restore, the pending Deployment template can
-// schedule later and silently become the serving request even though the
-// operation and durable AppSpec both say the change failed.
-func (s *Service) restoreFailedRightSizingRollout(
+func failedManagedAppRolloutNeedsRestore(op model.Operation, previous model.App) bool {
+	if previous.Spec.Replicas <= 0 || !model.AppHasClusterService(previous.Spec) {
+		return false
+	}
+	return op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate
+}
+
+// restoreFailedManagedAppRollout puts the durable last-known-good release back
+// into Kubernetes before a failed deploy or migration is marked terminal.
+// Without this restore, a pending Deployment template can become serving later
+// even though the operation failed and the durable AppSpec was not committed.
+func (s *Service) restoreFailedManagedAppRollout(
 	ctx context.Context,
 	op model.Operation,
 	previous model.App,
 	scheduling runtime.SchedulingConstraints,
 	cause error,
 ) error {
-	if s.restoreFailedRightSizingSpec != nil {
-		return s.restoreFailedRightSizingSpec(ctx, op, previous, scheduling, cause)
+	if s.restoreFailedManagedAppSpec != nil {
+		return s.restoreFailedManagedAppSpec(ctx, op, previous, scheduling, cause)
 	}
-	if !s.Config.KubectlApply {
+	if !s.Config.KubectlApply || !failedManagedAppRolloutNeedsRestore(op, previous) {
 		return nil
 	}
-	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failedRightSizingRestoreTimeout)
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failedManagedAppRestoreTimeout)
 	defer cancel()
 	restoreCtx = withManagedAppApplySource(restoreCtx, managedAppApplySourceOperation, op.ID)
-	if _, err := s.applyManagedAppDesiredStateResult(restoreCtx, previous, scheduling); err != nil {
-		return fmt.Errorf("restore previous desired state after right-sizing scheduling failure: %w", err)
+	appliedPrevious, err := s.applyManagedAppDesiredStateResult(restoreCtx, previous, scheduling)
+	if err != nil {
+		return fmt.Errorf("restore previous desired state after managed app rollout failure: %w", err)
+	}
+	result := s.waitForManagedAppRolloutResultWithScheduling(restoreCtx, appliedPrevious, op.ID, scheduling)
+	if err := result.Error(); err != nil {
+		return fmt.Errorf("wait for previous desired state after managed app rollout failure: %w", err)
 	}
 	if s.Logger != nil {
 		s.Logger.Printf(
-			"restored previous managed app desired state after right-sizing rollout failure app=%s operation=%s cause=%v",
+			"restored previous managed app desired state after rollout failure app=%s operation=%s cause=%v",
 			previous.ID,
 			op.ID,
 			cause,

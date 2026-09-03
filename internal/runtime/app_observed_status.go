@@ -49,6 +49,7 @@ type AppRuntimeObservation struct {
 	PhysicalDesiredReplicas *int
 	ImagePresent            *bool
 	ImageRef                string
+	CurrentRuntimeID        string
 	InvariantViolations     []string
 	ErrorMessage            string
 }
@@ -136,6 +137,9 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 	// observed state and make cluster evidence look authoritative for the wrong
 	// runtime.
 	if runtimeID := strings.TrimSpace(managed.Spec.AppSpec.RuntimeID); runtimeID != "" {
+		status.RuntimeID = runtimeID
+	}
+	if runtimeID := strings.TrimSpace(evidence.CurrentRuntimeID); runtimeID != "" {
 		status.RuntimeID = runtimeID
 	}
 	status.Generation = managed.Metadata.Generation

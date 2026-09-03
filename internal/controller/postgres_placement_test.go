@@ -27,6 +27,81 @@ func TestManagedPostgresPlacementRequestUsesRuntimeTarget(t *testing.T) {
 	}
 }
 
+func TestKubePodRequestsMatchesRestartableInitSchedulingSemantics(t *testing.T) {
+	t.Parallel()
+
+	always := "Always"
+	pod := kubePod{}
+	pod.Spec.Containers = []kubeContainerSpec{
+		{Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "100m", "memory": "100Mi", "ephemeral-storage": "20Mi",
+		}}},
+		{Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "50m", "memory": "50Mi", "ephemeral-storage": "10Mi",
+		}}},
+	}
+	pod.Spec.InitContainers = []kubeContainerSpec{
+		{RestartPolicy: &always, Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "25m", "memory": "32Mi", "ephemeral-storage": "5Mi",
+		}}},
+		{Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "300m", "memory": "768Mi", "ephemeral-storage": "40Mi",
+		}}},
+		{RestartPolicy: &always, Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "10m", "memory": "16Mi", "ephemeral-storage": "2Mi",
+		}}},
+		{Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "50m", "memory": "64Mi", "ephemeral-storage": "100Mi",
+		}}},
+	}
+
+	request := kubePodRequests(pod)
+	if request.cpuMilli != 325 {
+		t.Fatalf("expected init-stage CPU peak of 325m, got %dm", request.cpuMilli)
+	}
+	if request.memoryBytes != 800*1024*1024 {
+		t.Fatalf("expected init-stage memory peak of 800Mi, got %d", request.memoryBytes)
+	}
+	if request.ephemeralBytes != 107*1024*1024 {
+		t.Fatalf("expected later init-stage ephemeral peak of 107Mi, got %d", request.ephemeralBytes)
+	}
+
+	deployment := kubeDeployment{}
+	deployment.Spec.Template.Spec.Containers = pod.Spec.Containers
+	deployment.Spec.Template.Spec.InitContainers = pod.Spec.InitContainers
+	if got := deploymentTemplateRequests(deployment); got != request {
+		t.Fatalf("deployment and live Pod accounting diverged: deployment=%+v pod=%+v", got, request)
+	}
+}
+
+func TestManagedReadyAppNodesByNodeKeepsOnlyServingPods(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{ID: "app_demo", Name: "demo", Spec: model.AppSpec{Replicas: 1}}
+	ready := kubePod{}
+	ready.Metadata.Name = "app-demo-abc"
+	ready.Spec.NodeName = "node-a"
+	ready.Status.Phase = "Running"
+	ready.Status.Conditions = []kubePodCondition{{Type: "Ready", Status: "True"}}
+	pending := ready
+	pending.Metadata.Name = "app-demo-pending"
+	pending.Spec.NodeName = "node-b"
+	pending.Status.Phase = "Pending"
+	deleted := ready
+	deleted.Metadata.Name = "app-demo-deleted"
+	deleted.Metadata.DeletionTimestamp = "2026-09-03T00:00:00Z"
+	other := ready
+	other.Metadata.Name = "other-app-abc"
+
+	got := managedReadyAppNodesByNode(app, []kubePod{ready, pending, deleted, other})
+	if len(got) != 1 {
+		t.Fatalf("expected one serving app node, got %#v", got)
+	}
+	if _, ok := got["node-a"]; !ok {
+		t.Fatalf("expected node-a serving app pin, got %#v", got)
+	}
+}
+
 func TestManagedPostgresPlacementsCanonicalizesMixedCaseServiceName(t *testing.T) {
 	t.Parallel()
 

@@ -525,23 +525,34 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		guardAuxiliaryTemplateChanged ||
 		desiredReplicas != liveReplicas
 	unavailableRecovery := false
+	readyDesiredCohortRecovery := false
 	if desiredReplicas > 0 && workloadChange {
 		readyEndpoint, err := liveManagedAppHasReadyEndpoint(ctx, client, namespace, current)
 		if err != nil {
 			return model.App{}, err
 		}
 		deploymentReady := managedDeploymentStatusReady(deployment, liveReplicas)
-		unavailableRecovery = managedAppAllowsUnavailableRecovery(
-			deployment,
-			current.Spec,
-			desired.Spec,
-			readyEndpoint,
-		)
-		if !deploymentReady && !unavailableRecovery {
-			return model.App{}, fmt.Errorf("live deployment is not fully ready before an online replacement")
+		if !deploymentReady && liveKey != desiredKey && readyEndpoint && model.AppHasClusterService(desired.Spec) {
+			readyDesiredCohortRecovery, err = s.managedAppReadyReleaseCohort(
+				ctx, client, namespace, desired, desiredScheduling, desiredReplicas,
+			)
+			if err != nil {
+				return model.App{}, err
+			}
 		}
-		if !readyEndpoint && !unavailableRecovery {
-			return model.App{}, fmt.Errorf("live service has no ready endpoint before an online replacement")
+		if !readyDesiredCohortRecovery {
+			unavailableRecovery = managedAppAllowsUnavailableRecovery(
+				deployment,
+				current.Spec,
+				desired.Spec,
+				readyEndpoint,
+			)
+			if !deploymentReady && !unavailableRecovery {
+				return model.App{}, fmt.Errorf("live deployment is not fully ready before an online replacement")
+			}
+			if !readyEndpoint && !unavailableRecovery {
+				return model.App{}, fmt.Errorf("live service has no ready endpoint before an online replacement")
+			}
 		}
 	}
 	if desiredReplicas > 0 && model.AppHasClusterService(current.Spec) && !model.AppHasClusterService(desired.Spec) {
@@ -553,6 +564,9 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		} else if ready {
 			return model.App{}, fmt.Errorf("requested reconciliation would remove a live cluster service")
 		}
+	}
+	if readyDesiredCohortRecovery {
+		return desired, nil
 	}
 
 	if !unavailableRecovery {
@@ -595,6 +609,38 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		}
 	}
 	return desired, nil
+}
+
+func (s *Service) managedAppReadyReleaseCohort(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	desired model.App,
+	scheduling runtime.SchedulingConstraints,
+	desiredReplicas int,
+) (bool, error) {
+	if client == nil || desiredReplicas <= 0 {
+		return false, nil
+	}
+	releaseKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), scheduling))
+	if releaseKey == "" {
+		return false, nil
+	}
+	pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(desired))
+	if err != nil {
+		return false, fmt.Errorf("list app pods while proving previous ready release: %w", err)
+	}
+	ready := 0
+	for _, pod := range pods {
+		if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" ||
+			!strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") ||
+			!kubePodReady(pod) ||
+			strings.TrimSpace(pod.Metadata.Annotations[runtime.FugueAnnotationReleaseKey]) != releaseKey {
+			continue
+		}
+		ready++
+	}
+	return ready >= desiredReplicas, nil
 }
 
 func managedAppAuxiliaryTemplateChangeRequiresGuard(app model.App) bool {

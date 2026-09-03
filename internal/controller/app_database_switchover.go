@@ -1627,6 +1627,7 @@ func (s *Service) waitForManagedPostgresReplicaOnRuntime(
 	defer ticker.Stop()
 
 	lastMessage := ""
+	schedulingBlockTracker := rolloutSchedulingBlockTracker{}
 	for {
 		if strings.TrimSpace(operationID) != "" {
 			if err := s.ensureOperationStillActive(operationID); err != nil {
@@ -1657,6 +1658,15 @@ func (s *Service) waitForManagedPostgresReplicaOnRuntime(
 			}
 			lastMessage = fmt.Sprintf("waiting for a standby on runtime %s for cluster %s", targetRuntimeID, clusterName)
 		}
+		if found {
+			message, err := s.managedPostgresPodSchedulingBlockMessage(waitCtx, client, namespace, clusterName)
+			if err != nil {
+				return "", fmt.Errorf("inspect managed postgres scheduling for cluster %s: %w", clusterName, err)
+			}
+			if err := schedulingBlockTracker.observe(s.rolloutObservationTime(), message); err != nil {
+				return "", err
+			}
+		}
 
 		select {
 		case <-waitCtx.Done():
@@ -1686,6 +1696,7 @@ func (s *Service) waitForManagedPostgresReplicaOnNode(
 	defer ticker.Stop()
 
 	lastMessage := ""
+	schedulingBlockTracker := rolloutSchedulingBlockTracker{}
 	for {
 		if strings.TrimSpace(operationID) != "" {
 			if err := s.ensureOperationStillActive(operationID); err != nil {
@@ -1725,6 +1736,15 @@ func (s *Service) waitForManagedPostgresReplicaOnNode(
 				lastMessage = fmt.Sprintf("waiting for a standby on node %s for cluster %s", targetNodeName, clusterName)
 			}
 		}
+		if found {
+			message, err := s.managedPostgresPodSchedulingBlockMessage(waitCtx, client, namespace, clusterName)
+			if err != nil {
+				return "", fmt.Errorf("inspect managed postgres scheduling for cluster %s: %w", clusterName, err)
+			}
+			if err := schedulingBlockTracker.observe(s.rolloutObservationTime(), message); err != nil {
+				return "", err
+			}
+		}
 
 		select {
 		case <-waitCtx.Done():
@@ -1735,6 +1755,34 @@ func (s *Service) waitForManagedPostgresReplicaOnNode(
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Service) managedPostgresPodSchedulingBlockMessage(ctx context.Context, client *kubeClient, namespace, clusterName string) (string, error) {
+	if client == nil || strings.TrimSpace(clusterName) == "" {
+		return "", nil
+	}
+	pods, err := client.listPodsBySelector(ctx, namespace, fmt.Sprintf(managedPostgresPodSelectorTemplate, clusterName))
+	if err != nil {
+		return "", err
+	}
+	for _, pod := range pods {
+		if managedPostgresPodFinished(pod) {
+			continue
+		}
+		for _, condition := range pod.Status.Conditions {
+			if !strings.EqualFold(strings.TrimSpace(condition.Type), "PodScheduled") ||
+				!strings.EqualFold(strings.TrimSpace(condition.Status), "False") ||
+				!strings.EqualFold(strings.TrimSpace(condition.Reason), "Unschedulable") {
+				continue
+			}
+			message := strings.TrimSpace(condition.Message)
+			if message == "" {
+				message = "pod is unschedulable"
+			}
+			return fmt.Sprintf("pod %s is unschedulable: %s", strings.TrimSpace(pod.Metadata.Name), message), nil
+		}
+	}
+	return "", nil
 }
 
 func (s *Service) waitForManagedPostgresReplicationCatchup(

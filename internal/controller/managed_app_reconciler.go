@@ -642,6 +642,12 @@ func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model
 	if !appHasOnlineRolloutIntent(managedSnapshot) {
 		return false
 	}
+	// A buildpacks runtime snapshot stores the lifecycle launcher wrapper while
+	// durable intent stores the user's argv. They are the same workload input;
+	// normalize both before deciding whether the in-flight/serving snapshot is
+	// still the current online rollout.
+	managedSnapshot.Spec = normalizeBuildpacksLaunchOverrideSpec(managedSnapshot, managedSnapshot.Spec)
+	stored.Spec = normalizeBuildpacksLaunchOverrideSpec(stored, stored.Spec)
 	if !managedAppRolloutSnapshotIdentityEqual(managedSnapshot, stored) {
 		return false
 	}

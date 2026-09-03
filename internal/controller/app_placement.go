@@ -105,6 +105,7 @@ func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App,
 	}
 	nodeRequestsByName := managedSharedNodeRequestsByPods(pods)
 	appRequestsByNode := managedAppRequestsByNode(app, pods)
+	readyAppNodesByName := managedReadyAppNodesByNode(app, pods)
 	nodeNames, err := client.listNodeNames(ctx)
 	if err != nil {
 		return "", false, fmt.Errorf("list kubernetes nodes: %w", err)
@@ -124,6 +125,14 @@ func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App,
 		}
 		if !managedSharedNodeSchedulable(node) {
 			continue
+		}
+		// Preserve a healthy app's existing node pin even when the node is
+		// currently over the placement policy budget. Capacity policy governs
+		// new placement; it must not make reconciliation evict a serving app.
+		if len(readyAppNodesByName) == 1 {
+			if _, serving := readyAppNodesByName[nodeName]; serving {
+				return nodeName, true, nil
+			}
 		}
 		requested := nodeRequestsByName[nodeName]
 		if existing := appRequestsByNode[nodeName]; existing != (managedSharedNodeRequests{}) {
@@ -205,6 +214,21 @@ func managedAppRequestsByNode(app model.App, pods []kubePod) map[string]managedS
 		current.memoryBytes += request.memoryBytes
 		current.ephemeralBytes += request.ephemeralBytes
 		out[strings.TrimSpace(pod.Spec.NodeName)] = current
+	}
+	return out
+}
+
+func managedReadyAppNodesByNode(app model.App, pods []kubePod) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, pod := range pods {
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" || managedPostgresPodFinished(pod) || !managedAppPodNameMatchesApp(app, pod.Metadata.Name) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") || !kubePodReady(pod) {
+			continue
+		}
+		out[nodeName] = struct{}{}
 	}
 	return out
 }

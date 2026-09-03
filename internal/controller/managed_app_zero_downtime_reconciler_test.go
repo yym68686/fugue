@@ -72,6 +72,24 @@ func TestManagedAppSnapshotKeepsCurrentMixedZeroDowntimeRestart(t *testing.T) {
 	}
 }
 
+func TestManagedAppSnapshotTreatsBuildpacksLauncherAsExecutionPlumbing(t *testing.T) {
+	t.Parallel()
+
+	stored := zeroDowntimeReconcilerTestApp()
+	stored.Spec.PersistentStorage = nil
+	stored.Spec.Command = []string{"sh", "-lc", "python -m uvicorn app.main:app"}
+	source := &model.AppSource{Type: model.AppSourceTypeUpload, BuildStrategy: model.AppBuildStrategyBuildpacks}
+	model.SetAppSourceState(&stored, source, source)
+	managedSnapshot := stored
+	managedSnapshot.Spec.Command = []string{defaultCNBLauncherPath}
+	managedSnapshot.Spec.Args = append([]string(nil), stored.Spec.Command...)
+	managedSnapshot.Spec.RolloutIntent = model.AppRolloutIntentOnlineRestart
+
+	if !managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored) {
+		t.Fatal("buildpacks launcher wrapper must not supersede the matching serving snapshot")
+	}
+}
+
 func zeroDowntimeReconcilerTestApp() model.App {
 	return model.App{
 		ID:        "app_demo",

@@ -206,6 +206,46 @@ func TestManagedAppLiveGuardUnavailableRecoveryRemainsFailClosedWithoutProof(t *
 	}
 }
 
+func TestManagedAppLiveGuardRestoresProvenReadyPreviousCohort(t *testing.T) {
+	t.Parallel()
+
+	previous := managedAppLiveGuardTestApp(nil)
+	previous.Spec.RuntimeID = "runtime-source"
+	sourceScheduling := runtime.SchedulingConstraints{NodeSelector: map[string]string{runtime.RuntimeIDLabelKey: "runtime-source"}}
+	targetScheduling := runtime.SchedulingConstraints{NodeSelector: map[string]string{runtime.RuntimeIDLabelKey: "runtime-target"}}
+	attempted := previous
+	attempted.Spec.RuntimeID = "runtime-target"
+	managed := managedAppLiveGuardObject(t, attempted, targetScheduling)
+	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseError, ReadyReplicas: 1}
+
+	svc := &Service{Renderer: runtime.Renderer{}}
+	live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(attempted), targetScheduling)
+	if !found {
+		t.Fatal("expected attempted deployment")
+	}
+	managedAppLiveGuardMarkReady(&live, 1)
+	live.Status.Replicas = 2
+	live.Status.UpdatedReplicas = 1
+	live.Status.UnavailableReplicas = 1
+
+	previousDeployment, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(previous), sourceScheduling)
+	if !found {
+		t.Fatal("expected previous deployment")
+	}
+	previousPod := readyTemplatePod("previous-ready", previousDeployment, kubeResourceRequirements{})
+	client := managedAppLiveGuardClientWithPods(t, managed, live, true, true, []kubePod{previousPod}, nil)
+
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, previous, model.OperationTypeMigrate, sourceScheduling,
+	)
+	if err != nil {
+		t.Fatalf("proven ready previous cohort must be restorable: %v", err)
+	}
+	if prepared.Spec.RuntimeID != previous.Spec.RuntimeID {
+		t.Fatalf("expected previous runtime %q, got %q", previous.Spec.RuntimeID, prepared.Spec.RuntimeID)
+	}
+}
+
 func TestManagedAppLiveGuardRefusesUnknownReleaseIdentity(t *testing.T) {
 	app := managedAppLiveGuardTestApp(nil)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
@@ -1056,6 +1096,18 @@ func managedAppLiveGuardClient(
 	readyEndpoint bool,
 	writes *int,
 ) *kubeClient {
+	return managedAppLiveGuardClientWithPods(t, managed, deployment, deploymentFound, readyEndpoint, nil, writes)
+}
+
+func managedAppLiveGuardClientWithPods(
+	t *testing.T,
+	managed runtime.ManagedAppObject,
+	deployment kubeDeployment,
+	deploymentFound bool,
+	readyEndpoint bool,
+	pods []kubePod,
+	writes *int,
+) *kubeClient {
 	t.Helper()
 	namespace := managed.Metadata.Namespace
 	managedName := managed.Metadata.Name
@@ -1084,6 +1136,12 @@ func managedAppLiveGuardClient(
 			data, err := json.Marshal(deployment)
 			if err != nil {
 				t.Fatalf("marshal deployment: %v", err)
+			}
+			return okJSONResponse(string(data)), nil
+		case req.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+			data, err := json.Marshal(kubePodList{Items: pods})
+			if err != nil {
+				t.Fatalf("marshal pods: %v", err)
 			}
 			return okJSONResponse(string(data)), nil
 		case strings.Contains(req.URL.Path, "/endpointslices"):

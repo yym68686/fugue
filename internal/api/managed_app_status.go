@@ -154,6 +154,7 @@ type managedAppRuntimeEvidence struct {
 	physicalDesiredReplicas      *int
 	imagePresent                 *bool
 	imageRef                     string
+	currentRuntimeID             string
 	invariantViolations          []string
 	evidenceSources              []string
 	managedGeneration            int64
@@ -1069,6 +1070,7 @@ func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatu
 		PhysicalDesiredReplicas: entry.evidence.physicalDesiredReplicas,
 		ImagePresent:            entry.evidence.imagePresent,
 		ImageRef:                entry.evidence.imageRef,
+		CurrentRuntimeID:        entry.evidence.currentRuntimeID,
 		InvariantViolations:     entry.evidence.invariantViolations,
 		ErrorMessage:            errorMessage,
 	})
@@ -1291,6 +1293,7 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 			evidence.invariantViolations = append(evidence.invariantViolations, "managed_app_tenant_mismatch")
 		}
 		observedRuntimeID := strings.TrimSpace(managed.Spec.AppSpec.RuntimeID)
+		evidence.currentRuntimeID = observedRuntimeID
 		if observedRuntimeID != "" {
 			expectedRuntimeIDs := map[string]struct{}{}
 			for _, runtimeID := range []string{app.Spec.RuntimeID, app.Status.CurrentRuntimeID} {
@@ -1396,6 +1399,15 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 			)
 			if servingReleaseFound {
 				deploymentImageMatches = s.observedRuntimeImageRefsEquivalent(app, servingRelease.ResolvedImageRef, firstDeploymentContainerImage(deployment))
+			}
+		}
+		if !deploymentExists || !deploymentCurrentCohortComplete(deployment) {
+			storedStatus := app.Status
+			if app.StoredStatus != nil {
+				storedStatus = *app.StoredStatus
+			}
+			if runtimeID := strings.TrimSpace(storedStatus.CurrentRuntimeID); runtimeID != "" {
+				evidence.currentRuntimeID = runtimeID
 			}
 		}
 		evidence.physicalDesiredReplicas = &physicalDesired
@@ -1505,6 +1517,7 @@ func deploymentCurrentCohortComplete(deployment kubeDeploymentRuntimeEvidence) b
 	}
 	desired := *deployment.Spec.Replicas
 	return desired > 0 &&
+		deployment.Status.Replicas <= desired &&
 		deployment.Status.UpdatedReplicas == desired &&
 		deployment.Status.ReadyReplicas >= desired &&
 		deployment.Status.AvailableReplicas >= desired

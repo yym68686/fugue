@@ -392,13 +392,50 @@ func managedSharedNodeRequestsByName(ctx context.Context, client *kubeClient) (m
 }
 
 func kubePodRequests(pod kubePod) managedSharedNodeRequests {
-	regular := kubeContainerRequests(pod.Spec.Containers)
-	init := kubeMaxContainerRequests(pod.Spec.InitContainers)
-	return managedSharedNodeRequests{
-		cpuMilli:       maxInt64(regular.cpuMilli, init.cpuMilli),
-		memoryBytes:    maxInt64(regular.memoryBytes, init.memoryBytes),
-		ephemeralBytes: maxInt64(regular.ephemeralBytes, init.ephemeralBytes),
+	return kubeEffectiveContainerRequests(pod.Spec.Containers, pod.Spec.InitContainers)
+}
+
+// Kubernetes schedules against the larger of the steady-state container sum
+// and every init stage. Restartable init containers remain active in later
+// stages and in steady state, so their requests accumulate through the init
+// sequence.
+func kubeEffectiveContainerRequests(containers, initContainers []kubeContainerSpec) managedSharedNodeRequests {
+	steadyState := kubeContainerRequests(containers)
+	var restartableInitTotal managedSharedNodeRequests
+	var initMaximum managedSharedNodeRequests
+	for _, container := range initContainers {
+		request := kubeContainerRequests([]kubeContainerSpec{container})
+		if strings.EqualFold(strings.TrimSpace(pointerStringValue(container.RestartPolicy)), "Always") {
+			addManagedSharedNodeRequests(&steadyState, request)
+			addManagedSharedNodeRequests(&restartableInitTotal, request)
+			maxManagedSharedNodeRequests(&initMaximum, restartableInitTotal)
+		} else {
+			stage := restartableInitTotal
+			addManagedSharedNodeRequests(&stage, request)
+			maxManagedSharedNodeRequests(&initMaximum, stage)
+		}
 	}
+	maxManagedSharedNodeRequests(&steadyState, initMaximum)
+	return steadyState
+}
+
+func addManagedSharedNodeRequests(target *managedSharedNodeRequests, request managedSharedNodeRequests) {
+	target.cpuMilli += request.cpuMilli
+	target.memoryBytes += request.memoryBytes
+	target.ephemeralBytes += request.ephemeralBytes
+}
+
+func maxManagedSharedNodeRequests(target *managedSharedNodeRequests, request managedSharedNodeRequests) {
+	target.cpuMilli = maxInt64(target.cpuMilli, request.cpuMilli)
+	target.memoryBytes = maxInt64(target.memoryBytes, request.memoryBytes)
+	target.ephemeralBytes = maxInt64(target.ephemeralBytes, request.ephemeralBytes)
+}
+
+func pointerStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func kubeContainerRequests(containers []kubeContainerSpec) managedSharedNodeRequests {
@@ -408,17 +445,6 @@ func kubeContainerRequests(containers []kubeContainerSpec) managedSharedNodeRequ
 		total.cpuMilli += parseKubeResourceMilli(requests["cpu"])
 		total.memoryBytes += parseKubeResourceBytes(requests["memory"])
 		total.ephemeralBytes += parseKubeResourceBytes(requests["ephemeral-storage"])
-	}
-	return total
-}
-
-func kubeMaxContainerRequests(containers []kubeContainerSpec) managedSharedNodeRequests {
-	var total managedSharedNodeRequests
-	for _, container := range containers {
-		requests := container.Resources.Requests
-		total.cpuMilli = maxInt64(total.cpuMilli, parseKubeResourceMilli(requests["cpu"]))
-		total.memoryBytes = maxInt64(total.memoryBytes, parseKubeResourceBytes(requests["memory"]))
-		total.ephemeralBytes = maxInt64(total.ephemeralBytes, parseKubeResourceBytes(requests["ephemeral-storage"]))
 	}
 	return total
 }

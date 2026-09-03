@@ -147,6 +147,60 @@ func TestManagedPostgresPodDatabaseURLHandlesIPv6AndEscapesCredentials(t *testin
 	}
 }
 
+func TestManagedPostgresPodSchedulingBlockMessageReturnsSchedulerReason(t *testing.T) {
+	t.Parallel()
+
+	const namespace = "tenant-demo"
+	const clusterName = "demo-postgres"
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/namespaces/"+namespace+"/pods" {
+			http.NotFound(w, r)
+			return
+		}
+		if got, want := r.URL.Query().Get("labelSelector"), "cnpg.io/cluster=demo-postgres,app.kubernetes.io/managed-by=cloudnative-pg"; got != want {
+			t.Errorf("unexpected Pod selector %q, want %q", got, want)
+			http.Error(w, "unexpected selector", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{
+					"metadata": map[string]any{"name": clusterName + "-1"},
+					"status": map[string]any{
+						"phase":      "Running",
+						"conditions": []map[string]any{{"type": "PodScheduled", "status": "True"}},
+					},
+				},
+				{
+					"metadata": map[string]any{"name": clusterName + "-2-join"},
+					"status": map[string]any{
+						"phase": "Pending",
+						"conditions": []map[string]any{{
+							"type": "PodScheduled", "status": "False", "reason": "Unschedulable",
+							"message": "0/7 nodes are available: 1 Insufficient memory",
+						}},
+					},
+				},
+			},
+		})
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client: kubeServer.Client(), baseURL: kubeServer.URL, bearerToken: "test", namespace: namespace,
+	}
+	message, err := (&Service{}).managedPostgresPodSchedulingBlockMessage(
+		context.Background(), client, namespace, clusterName,
+	)
+	if err != nil {
+		t.Fatalf("inspect Pod scheduling: %v", err)
+	}
+	if !strings.Contains(message, clusterName+"-2-join") || !strings.Contains(message, "Insufficient memory") {
+		t.Fatalf("expected pending Pod and scheduler reason, got %q", message)
+	}
+}
+
 func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) {
 	t.Parallel()
 

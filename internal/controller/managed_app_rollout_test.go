@@ -549,7 +549,7 @@ func TestRolloutSchedulingBlockTrackerFailsAfterGracePeriodAndResets(t *testing.
 	}
 }
 
-func TestRestoreFailedRightSizingRolloutUsesDurablePreviousSpec(t *testing.T) {
+func TestRestoreFailedManagedAppRolloutUsesDurablePreviousSpec(t *testing.T) {
 	t.Parallel()
 
 	previous := model.App{
@@ -563,17 +563,15 @@ func TestRestoreFailedRightSizingRolloutUsesDurablePreviousSpec(t *testing.T) {
 		},
 	}
 	op := model.Operation{
-		ID:              "op_right_sizing",
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: model.ActorTypeSystem,
-		RequestedByID:   model.OperationRequestedByRightSizingDownscale,
-		AppID:           previous.ID,
+		ID:    "op_deploy",
+		Type:  model.OperationTypeDeploy,
+		AppID: previous.ID,
 	}
 	scheduling := runtime.SchedulingConstraints{NodeSelector: map[string]string{"kubernetes.io/hostname": "node-a"}}
 	cause := errors.New("rollout scheduling blocked for 30s: Insufficient cpu")
 	called := false
 	svc := &Service{
-		restoreFailedRightSizingSpec: func(_ context.Context, gotOp model.Operation, gotPrevious model.App, gotScheduling runtime.SchedulingConstraints, gotCause error) error {
+		restoreFailedManagedAppSpec: func(_ context.Context, gotOp model.Operation, gotPrevious model.App, gotScheduling runtime.SchedulingConstraints, gotCause error) error {
 			called = true
 			if gotOp.ID != op.ID || gotPrevious.Spec.Resources == nil || gotPrevious.Spec.Resources.CPUMilliCores != 190 {
 				t.Fatalf("restore did not receive the durable previous snapshot: op=%+v app=%+v", gotOp, gotPrevious)
@@ -584,8 +582,8 @@ func TestRestoreFailedRightSizingRolloutUsesDurablePreviousSpec(t *testing.T) {
 			return nil
 		},
 	}
-	if err := svc.restoreFailedRightSizingRollout(context.Background(), op, previous, scheduling, cause); err != nil {
-		t.Fatalf("restore failed right-sizing rollout: %v", err)
+	if err := svc.restoreFailedManagedAppRollout(context.Background(), op, previous, scheduling, cause); err != nil {
+		t.Fatalf("restore failed managed app rollout: %v", err)
 	}
 	if !called {
 		t.Fatal("expected failed right-sizing rollout restore")

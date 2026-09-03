@@ -565,6 +565,72 @@ func TestManagedAppEvidenceDoesNotCountReadyReplicasFromPreviousRevision(t *test
 	}
 }
 
+func TestManagedAppEvidenceKeepsSourceRuntimeUntilTargetCohortIsReady(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID: "app_runtime_handoff", TenantID: "tenant_runtime_handoff", Name: "demo",
+		Spec: model.AppSpec{Image: "registry.example/demo:v1", Replicas: 1, RuntimeID: "runtime-source"},
+		Status: model.AppStatus{
+			Phase: "deployed", CurrentRuntimeID: "runtime-source", CurrentReplicas: 1,
+		},
+	}
+	managedApp := app
+	managedApp.Spec.RuntimeID = "runtime-target"
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(managedApp, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("decode managed app: %v", err)
+	}
+	managed.Metadata.Generation = 2
+	managed.Status = runtime.ManagedAppStatus{
+		Phase: runtime.ManagedAppPhaseError, DesiredReplicas: 1, ReadyReplicas: 1, ObservedGeneration: 2,
+	}
+	var deployment kubeDeploymentRuntimeEvidence
+	if err := decodeKubeObject(map[string]any{
+		"metadata": map[string]any{
+			"namespace": runtime.NamespaceForTenant(app.TenantID),
+			"name":      runtime.RuntimeAppResourceName(app), "generation": 2,
+		},
+		"spec": map[string]any{
+			"replicas": 1,
+			"template": map[string]any{"spec": map[string]any{"containers": []map[string]any{{"image": app.Spec.Image}}}},
+		},
+		"status": map[string]any{
+			"replicas": 2, "updatedReplicas": 1, "readyReplicas": 1,
+			"availableReplicas": 1, "observedGeneration": 2,
+		},
+	}, &deployment); err != nil {
+		t.Fatalf("decode deployment: %v", err)
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	snapshot := managedAppKubeSnapshot{
+		namespaces: map[string]struct{}{namespace: {}},
+		deployments: map[string]kubeDeploymentRuntimeEvidence{
+			kubeNamespacedKey(namespace, runtime.RuntimeAppResourceName(app)): deployment,
+		},
+	}
+	evidence, err := (&Server{}).buildManagedAppRuntimeEvidence(app, managed, true, snapshot)
+	if err != nil {
+		t.Fatalf("build incomplete handoff evidence: %v", err)
+	}
+	if evidence.currentRuntimeID != "runtime-source" {
+		t.Fatalf("incomplete target cohort must retain source runtime, got %q", evidence.currentRuntimeID)
+	}
+
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+	snapshot.deployments[kubeNamespacedKey(namespace, runtime.RuntimeAppResourceName(app))] = deployment
+	evidence, err = (&Server{}).buildManagedAppRuntimeEvidence(app, managed, true, snapshot)
+	if err != nil {
+		t.Fatalf("build complete handoff evidence: %v", err)
+	}
+	if evidence.currentRuntimeID != "runtime-target" {
+		t.Fatalf("complete target cohort must publish target runtime, got %q", evidence.currentRuntimeID)
+	}
+}
+
 func TestManagedAppEvidenceChecksImageOnlyForCompleteCurrentCohort(t *testing.T) {
 	t.Parallel()
 

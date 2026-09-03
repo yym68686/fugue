@@ -128,13 +128,10 @@ func kubeIntOrStringPositive(value any) bool {
 }
 
 func deploymentTemplateRequests(deployment kubeDeployment) managedSharedNodeRequests {
-	regular := kubeContainerRequests(deployment.Spec.Template.Spec.Containers)
-	init := kubeMaxContainerRequests(deployment.Spec.Template.Spec.InitContainers)
-	return managedSharedNodeRequests{
-		cpuMilli:       maxInt64(regular.cpuMilli, init.cpuMilli),
-		memoryBytes:    maxInt64(regular.memoryBytes, init.memoryBytes),
-		ephemeralBytes: maxInt64(regular.ephemeralBytes, init.ephemeralBytes),
-	}
+	return kubeEffectiveContainerRequests(
+		deployment.Spec.Template.Spec.Containers,
+		deployment.Spec.Template.Spec.InitContainers,
+	)
 }
 
 func nodeEligibleForDeploymentTemplate(node kubeNode, deployment kubeDeployment) bool {
