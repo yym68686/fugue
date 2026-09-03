@@ -714,10 +714,14 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 		active = &candidate
 	} else {
 		// Background reconciliation may run after the operation that produced a
-		// serving release has already failed/finished. Only the promoted current
-		// key form is eligible here; a pending key without an active operation is
-		// still ambiguous and remains fail-closed.
-		if pendingKey != "" || !strings.EqualFold(strings.TrimSpace(managed.Status.Phase), runtime.ManagedAppPhaseReady) {
+		// serving release has already failed/finished. A failed operation can
+		// leave its controller-authored key in PendingReleaseKey even though the
+		// ManagedApp is already in Error. That representation is recoverable only
+		// through the exact failed-operation proof below; all other phases and
+		// unproven pending identities remain fail-closed.
+		phase := strings.TrimSpace(managed.Status.Phase)
+		if (pendingKey != "" && !strings.EqualFold(phase, runtime.ManagedAppPhaseError)) ||
+			(pendingKey == "" && !strings.EqualFold(phase, runtime.ManagedAppPhaseReady)) {
 			return model.App{}, false, nil
 		}
 	}

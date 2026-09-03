@@ -527,6 +527,29 @@ func TestManagedAppLiveGuardRecoversPromotedServingSnapshotDuringBackgroundRecon
 	if prepared.Spec.Image != desired.Spec.Image || prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate {
 		t.Fatalf("expected recovered serving baseline to prepare desired image rollout, got image=%q intent=%q", prepared.Spec.Image, prepared.Spec.RolloutIntent)
 	}
+
+	// A rollout may be marked failed while its unschedulable candidate remains
+	// pending, then become Ready after capacity changes. The status still carries
+	// the failed attempt in PendingReleaseKey and Phase=Error. The exact failed
+	// operation proof must make that late-serving snapshot recoverable so the
+	// durable desired release can replace it without downtime.
+	managed.Status = runtime.ManagedAppStatus{
+		Phase: runtime.ManagedAppPhaseError, ObservedGeneration: 2,
+		PendingReleaseKey: servingKey, PendingReleaseStartedAt: servingStartedAt.UTC().Format(time.RFC3339Nano),
+	}
+	recovered, ok, recoverErr = svc.recoverManagedAppPendingDeploySnapshot(context.Background(), managed, currentSnapshot, servingKey)
+	if recoverErr != nil || !ok {
+		t.Fatalf("expected failed pending serving snapshot recovery: ok=%v err=%v", ok, recoverErr)
+	}
+	prepared, err = svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, desired, "", runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("proven failed pending release must recover without an active operation: %v", err)
+	}
+	if prepared.Spec.Image != desired.Spec.Image || prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected failed pending baseline to prepare desired image rollout, got image=%q intent=%q", prepared.Spec.Image, prepared.Spec.RolloutIntent)
+	}
 }
 
 func TestManagedAppLiveGuardRefusesLocalRWOReplacementWithoutExactNodeProof(t *testing.T) {
