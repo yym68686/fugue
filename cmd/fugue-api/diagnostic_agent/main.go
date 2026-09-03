@@ -149,7 +149,7 @@ func run(opts options) error {
 	dataPath := filepath.Join(opts.outputDir, "perf.data")
 	perfArgs := []string{
 		"record", "-a", "-e", "cpu-clock", "-F", strconv.Itoa(opts.frequency),
-		"--call-graph", "dwarf,8192", "-G", strings.TrimPrefix(cgroupPath, "/"), "-o", dataPath, "--",
+		"--call-graph", "dwarf,8192", "--no-buildid-mmap", "-G", strings.TrimPrefix(cgroupPath, "/"), "-o", dataPath, "--",
 		"sleep", strconv.Itoa(opts.duration),
 	}
 	if output, err := runCommand(context.Background(), "perf", perfArgs...); err != nil {

@@ -106,8 +106,11 @@ func TestBuildDiagnosticJobIsBoundedAndDoesNotMutateTargetWorkload(t *testing.T)
 	if container.SecurityContext == nil || container.SecurityContext.Privileged == nil || *container.SecurityContext.Privileged || container.SecurityContext.ReadOnlyRootFilesystem == nil || !*container.SecurityContext.ReadOnlyRootFilesystem {
 		t.Fatalf("diagnostic security context changed: %+v", container.SecurityContext)
 	}
-	if container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation || len(container.SecurityContext.Capabilities.Drop) != 1 || len(container.SecurityContext.Capabilities.Add) != 2 {
+	if container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation || len(container.SecurityContext.Capabilities.Drop) != 1 || len(container.SecurityContext.Capabilities.Add) != 3 {
 		t.Fatalf("diagnostic capabilities are not narrowly bounded: %+v", container.SecurityContext)
+	}
+	if got := fmt.Sprint(container.SecurityContext.Capabilities.Add); got != "[PERFMON SYS_PTRACE SYS_ADMIN]" {
+		t.Fatalf("unexpected diagnostic capabilities %s", got)
 	}
 	if got := container.Resources.Limits.Cpu().MilliValue(); got != 250 {
 		t.Fatalf("expected 250m CPU limit, got %dm", got)

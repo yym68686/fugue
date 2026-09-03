@@ -415,7 +415,7 @@ func buildDiagnosticJob(app model.App, sessionID, sessionNamespace string, targe
 							AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 							Capabilities: &corev1.Capabilities{
 								Drop: []corev1.Capability{"ALL"},
-								Add:  []corev1.Capability{"PERFMON", "SYS_PTRACE"},
+								Add:  []corev1.Capability{"PERFMON", "SYS_PTRACE", "SYS_ADMIN"},
 							},
 						},
 						Resources: corev1.ResourceRequirements{
