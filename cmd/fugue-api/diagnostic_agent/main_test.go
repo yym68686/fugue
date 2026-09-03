@@ -113,6 +113,25 @@ func TestGoSymbolizerResolvesStrippedExecutableOffset(t *testing.T) {
 	}
 }
 
+func TestKernelSymbolizerResolvesNearestVisibleSymbol(t *testing.T) {
+	resolver, err := parseKernelSymbols(strings.NewReader(strings.Join([]string{
+		"0000000000000000 A hidden",
+		"ffffffff81000100 T start_kernel",
+		"ffffffff81000140 t worker [sample_module]",
+	}, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, dso, ok := resolver.Resolve(0xffffffff81000118)
+	if !ok || name != "start_kernel+0x18" || dso != "[kernel.kallsyms]" {
+		t.Fatalf("unexpected core kernel resolution ok=%t name=%q dso=%q", ok, name, dso)
+	}
+	name, dso, ok = resolver.Resolve(0xffffffff81000145)
+	if !ok || name != "worker+0x5" || dso != "[sample_module]" {
+		t.Fatalf("unexpected module resolution ok=%t name=%q dso=%q", ok, name, dso)
+	}
+}
+
 func TestResolveCgroupRootFallsBackToContainerID(t *testing.T) {
 	root := t.TempDir()
 	containerID := "abcdef1234567890"

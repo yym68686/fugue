@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,6 +100,16 @@ type perfReportEntry struct {
 type goSymbolizer struct {
 	table    *gosym.Table
 	loadBase uint64
+}
+
+type kernelSymbol struct {
+	Address uint64
+	Name    string
+	Module  string
+}
+
+type kernelSymbolizer struct {
+	symbols []kernelSymbol
 }
 
 type processSnapshot struct {
@@ -705,6 +716,7 @@ type processGoSymbolizer struct {
 
 func summarizePerfEntries(entries []perfReportEntry, targetPIDs []int) ([]functionSample, int, int, int, int, int, int) {
 	symbolizers := loadProcessGoSymbolizers(targetPIDs)
+	kernelSymbols, _ := newKernelSymbolizer("/host/proc/kallsyms")
 	counts := make(map[functionSampleKey]*functionSampleAggregate)
 	total := 0
 	user := 0
@@ -735,6 +747,13 @@ func summarizePerfEntries(entries []perfReportEntry, targetPIDs []int) ([]functi
 					}
 					resolved = true
 				}
+			}
+		}
+		if entry.Mode == "kernel" && entry.Address != 0 && kernelSymbols != nil {
+			if name, dso, ok := kernelSymbols.Resolve(entry.Address); ok {
+				function = name
+				entry.DSO = dso
+				resolved = true
 			}
 		}
 		if entry.Mode == "user" && resolved {
@@ -883,6 +902,67 @@ func (s *goSymbolizer) ResolveDSOOffset(offset uint64) (string, string, int, boo
 		}
 	}
 	return "", "", 0, false
+}
+
+func newKernelSymbolizer(path string) (*kernelSymbolizer, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return parseKernelSymbols(file)
+}
+
+func parseKernelSymbols(reader io.Reader) (*kernelSymbolizer, error) {
+	symbols := make([]kernelSymbol, 0, 16384)
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 3 {
+			continue
+		}
+		address, err := strconv.ParseUint(fields[0], 16, 64)
+		if err != nil || address == 0 || len(fields[1]) != 1 || !strings.ContainsRune("tTwW", rune(fields[1][0])) {
+			continue
+		}
+		module := "[kernel.kallsyms]"
+		if len(fields) >= 4 && strings.HasPrefix(fields[3], "[") && strings.HasSuffix(fields[3], "]") {
+			module = fields[3]
+		}
+		symbols = append(symbols, kernelSymbol{Address: address, Name: fields[2], Module: module})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(symbols) == 0 {
+		return nil, errors.New("kernel symbol table contains no visible addresses")
+	}
+	sort.Slice(symbols, func(i, j int) bool {
+		if symbols[i].Address != symbols[j].Address {
+			return symbols[i].Address < symbols[j].Address
+		}
+		return symbols[i].Name < symbols[j].Name
+	})
+	return &kernelSymbolizer{symbols: symbols}, nil
+}
+
+func (s *kernelSymbolizer) Resolve(address uint64) (string, string, bool) {
+	if s == nil || len(s.symbols) == 0 {
+		return "", "", false
+	}
+	index := sort.Search(len(s.symbols), func(index int) bool {
+		return s.symbols[index].Address > address
+	}) - 1
+	if index < 0 {
+		return "", "", false
+	}
+	symbol := s.symbols[index]
+	name := symbol.Name
+	if offset := address - symbol.Address; offset > 0 {
+		name += fmt.Sprintf("+0x%x", offset)
+	}
+	return name, symbol.Module, true
 }
 
 func parseLostSamples(perfReport []byte) int {
