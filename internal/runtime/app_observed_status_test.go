@@ -317,6 +317,55 @@ func TestCalculateAppObservedStatusRestoresInvalidatedLKGWithFreshRuntimeEvidenc
 	}
 }
 
+func TestCalculateAppObservedStatusPreservesServingLKGAfterSuccessfulScale(t *testing.T) {
+	t.Parallel()
+
+	readyAt := time.Now().UTC().Add(-time.Minute)
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:     "registry.example/argus-runtime:v1",
+			Ports:     []int{7777},
+			Replicas:  1,
+			RuntimeID: model.DefaultManagedRuntimeID,
+		},
+		Status: model.AppStatus{
+			Phase:                 "scaled",
+			CurrentReplicas:       1,
+			CurrentReleaseReadyAt: &readyAt,
+			LastOperationID:       "op-scale-success",
+			LastFailedOperation:   &model.AppOperationFailure{ID: "op-old-failure", Type: model.OperationTypeDeploy},
+		},
+	}
+	managed := ManagedAppObject{
+		Spec:     ManagedAppSpec{AppSpec: app.Spec},
+		Metadata: ManagedAppMeta{Generation: 7},
+		Status: ManagedAppStatus{
+			Phase:              ManagedAppPhaseError,
+			ReadyReplicas:      1,
+			ObservedGeneration: 7,
+			Message:            "zero-downtime deploy refused",
+		},
+	}
+	status := CalculateAppObservedStatus(app, AppRuntimeObservation{
+		ManagedApp:              managed,
+		Found:                   true,
+		Complete:                true,
+		Fresh:                   true,
+		ObservedAt:              time.Now().UTC(),
+		ClusterID:               "cluster-uid",
+		NamespacePresent:        boolPointer(true),
+		ServicePresent:          boolPointer(true),
+		EndpointPresent:         boolPointer(true),
+		EndpointReady:           boolPointer(true),
+		PhysicalReplicas:        intPointer(1),
+		PhysicalDesiredReplicas: intPointer(1),
+		ImagePresent:            boolPointer(true),
+	})
+	if status.Phase != "deployed" || status.Reason != AppObservationReasonManagedAppErrorLKGServing {
+		t.Fatalf("successful scaled serving baseline must remain deployed while exposing the error reason: %+v", status)
+	}
+}
+
 func TestCalculateAppObservedStatusDoesNotRestoreUnknownWithoutCompletedLKG(t *testing.T) {
 	t.Parallel()
 

@@ -245,6 +245,13 @@ func appHasDurableServingLKG(status model.AppStatus, desiredReplicas int) bool {
 	if strings.EqualFold(strings.TrimSpace(status.Phase), "deployed") {
 		return true
 	}
+	// A successful scale operation records the durable phase as "scaled" even
+	// when it leaves an already-serving release in place. Its ready timestamp
+	// and replica count are the same serving baseline used by a deployed app;
+	// do not turn a later blocked maintenance reconcile into an outage signal.
+	if strings.EqualFold(strings.TrimSpace(status.Phase), "scaled") {
+		return desiredReplicas > 0 && status.CurrentReleaseReadyAt != nil && status.CurrentReplicas >= desiredReplicas
+	}
 	// A failed operation intentionally invalidates the durable green phase
 	// until the runtime observer proves what is still serving. The retained
 	// ready timestamp and replica count identify an earlier completed release;
