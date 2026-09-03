@@ -481,6 +481,43 @@ func TestCreateAutoscalingDeployOperationRejectsAlreadyCurrentState(t *testing.T
 	}
 }
 
+func TestCreateImageRebuildOperationReusesActiveOperation(t *testing.T) {
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("image rebuild reuse")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image: "registry.example/demo:v1", Ports: []int{8080}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID,
+	}, model.AppSource{Type: model.AppSourceTypeUpload, UploadID: "upload_1", BuildStrategy: model.AppBuildStrategyDockerfile})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	operation := model.Operation{
+		TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeImport,
+		RequestedByType: model.ActorTypeSystem, RequestedByID: model.OperationRequestedByImageRebuild,
+		DesiredSpec: &app.Spec, DesiredSource: model.AppBuildSource(app),
+	}
+	first, result, err := s.CreateImageRebuildOperation(operation)
+	if err != nil || !result.Created {
+		t.Fatalf("create first image rebuild: op=%+v result=%+v err=%v", first, result, err)
+	}
+	second, result, err := s.CreateImageRebuildOperation(operation)
+	if err != nil || result.Created {
+		t.Fatalf("reuse active image rebuild: op=%+v result=%+v err=%v", second, result, err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("expected active image rebuild %q to be reused, got %q", first.ID, second.ID)
+	}
+}
+
 func TestDeployCompletionPreservesIndependentlyUpdatedRightSizingPolicy(t *testing.T) {
 	t.Parallel()
 

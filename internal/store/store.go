@@ -2967,6 +2967,26 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			if !isQueuedImportSourceType(op.DesiredSource.Type) {
 				return ErrInvalidInput
 			}
+			if policy.ReuseActiveImageRebuildForApp || policy.RejectActiveImportForApp {
+				for _, existing := range state.Operations {
+					if existing.TenantID != app.TenantID || existing.AppID != app.ID ||
+						existing.Type != model.OperationTypeImport ||
+						(existing.Status != model.OperationStatusPending && existing.Status != model.OperationStatusRunning && existing.Status != model.OperationStatusWaitingAgent) {
+						continue
+					}
+					if policy.ReuseActiveImageRebuildForApp &&
+						existing.RequestedByType == model.ActorTypeSystem &&
+						existing.RequestedByID == model.OperationRequestedByImageRebuild {
+						op = existing
+						outcome.ReusedExistingOperation = true
+						outcome.ExistingOperationID = existing.ID
+						return nil
+					}
+					if policy.RejectActiveImportForApp {
+						return ErrConflict
+					}
+				}
+			}
 			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
 				return err
 			}

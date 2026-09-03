@@ -3193,6 +3193,31 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 		if !isQueuedImportSourceType(op.DesiredSource.Type) {
 			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
+		if policy.ReuseActiveImageRebuildForApp || policy.RejectActiveImportForApp {
+			existing, err := scanOperation(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+FROM fugue_operations
+WHERE app_id = $1
+  AND tenant_id = $2
+  AND type = $3
+  AND status IN ($4, $5, $6)
+ORDER BY created_at ASC, id ASC
+LIMIT 1
+`, app.ID, app.TenantID, model.OperationTypeImport, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent))
+			switch {
+			case err == nil && policy.ReuseActiveImageRebuildForApp &&
+				existing.RequestedByType == model.ActorTypeSystem &&
+				existing.RequestedByID == model.OperationRequestedByImageRebuild:
+				return existing, operationCreateOutcome{
+					ReusedExistingOperation: true,
+					ExistingOperationID:     existing.ID,
+				}, nil
+			case err == nil && policy.RejectActiveImportForApp:
+				return model.Operation{}, operationCreateOutcome{}, ErrConflict
+			case err != nil && !errors.Is(err, sql.ErrNoRows):
+				return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("query active image rebuild operation for app %s: %w", app.ID, err)
+			}
+		}
 		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}

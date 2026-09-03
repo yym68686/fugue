@@ -22,6 +22,7 @@ var errDeployImageReplicationPending = errors.New(model.OperationResultDeployIma
 
 const imageHydrationMissingRetryAfter = 6 * time.Hour
 const imageRebuildFailureBackoff = 6 * time.Hour
+const imageRebuildDeployFailureBackoff = time.Hour
 
 func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation, app model.App, scheduling runtimepkg.SchedulingConstraints) error {
 	if s == nil || app.Spec.Replicas <= 0 {
@@ -486,8 +487,9 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 	if imageRef == "" {
 		return nil
 	}
+	backgroundReconcile := strings.TrimSpace(op.ID) == ""
 	if existing, ok := s.activeImportOperationForApp(app); ok {
-		if strings.TrimSpace(op.ID) != "" {
+		if !backgroundReconcile {
 			_, _ = s.Store.FailOperation(op.ID, fmt.Sprintf("%s %s is missing; waiting for rebuild operation %s", label, imageRef, existing.ID))
 			return errOperationNoLongerActive
 		}
@@ -502,23 +504,30 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 	if !deployImageSourceCanRebuild(source) {
 		return fmt.Errorf("deploy blocked because %s %s is missing and app has no rebuildable source", label, imageRef)
 	}
-	if strings.TrimSpace(op.ID) == "" {
+	if backgroundReconcile && (s == nil || s.Store == nil) {
 		return fmt.Errorf("deploy blocked because %s %s is missing and needs rebuild", label, imageRef)
 	}
 	if retryAt, blocked, err := s.imageRebuildRetryAt(app); err != nil {
 		return fmt.Errorf("check image rebuild retry backoff: %w", err)
 	} else if blocked {
 		message := fmt.Sprintf("%s %s is missing; image rebuild deferred until %s after a recent failed rebuild", label, imageRef, retryAt.Format(time.RFC3339))
-		if _, err := s.Store.FailOperation(op.ID, message); err != nil {
-			return fmt.Errorf("mark deploy operation waiting for image rebuild backoff: %w", err)
+		if !backgroundReconcile {
+			if _, err := s.Store.FailOperation(op.ID, message); err != nil {
+				return fmt.Errorf("mark deploy operation waiting for image rebuild backoff: %w", err)
+			}
 		}
 		if s.Logger != nil {
 			s.Logger.Printf("image rebuild suppressed by failure backoff app=%s missing_%s=%s retry_at=%s", app.ID, strings.ReplaceAll(label, " ", "_"), imageRef, retryAt.Format(time.RFC3339))
 		}
+		if backgroundReconcile {
+			return fmt.Errorf("deploy blocked because %s", message)
+		}
 		return errOperationNoLongerActive
 	}
-	if _, err := s.Store.FailOperation(op.ID, fmt.Sprintf("%s %s is missing; queued image rebuild", label, imageRef)); err != nil {
-		return fmt.Errorf("mark deploy operation waiting for rebuild: %w", err)
+	if !backgroundReconcile {
+		if _, err := s.Store.FailOperation(op.ID, fmt.Sprintf("%s %s is missing; queued image rebuild", label, imageRef)); err != nil {
+			return fmt.Errorf("mark deploy operation waiting for rebuild: %w", err)
+		}
 	}
 	spec := app.Spec
 	if spec.Replicas <= 0 {
@@ -530,7 +539,7 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 	if originSource == nil {
 		originSource = model.CloneAppSource(buildSource)
 	}
-	rebuildOp, err := s.Store.CreateOperation(model.Operation{
+	rebuildOp, createResult, err := s.Store.CreateImageRebuildOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeImport,
 		RequestedByType:     model.ActorTypeSystem,
@@ -545,9 +554,16 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 		return fmt.Errorf("queue image rebuild for missing %s %s: %w", label, imageRef, err)
 	}
 	if s.Logger != nil {
-		s.Logger.Printf("queued image rebuild operation %s for app=%s missing_%s=%s target_runtime=%s target_node=%s", rebuildOp.ID, app.ID, strings.ReplaceAll(label, " ", "_"), imageRef, target.RuntimeID, target.ClusterNodeName)
+		action := "reused"
+		if createResult.Created {
+			action = "queued"
+		}
+		s.Logger.Printf("%s image rebuild operation %s for app=%s missing_%s=%s target_runtime=%s target_node=%s", action, rebuildOp.ID, app.ID, strings.ReplaceAll(label, " ", "_"), imageRef, target.RuntimeID, target.ClusterNodeName)
 	}
 	_ = ctx
+	if backgroundReconcile {
+		return fmt.Errorf("deploy blocked because %s %s is missing; queued image rebuild operation %s", label, imageRef, rebuildOp.ID)
+	}
 	return errOperationNoLongerActive
 }
 
@@ -561,15 +577,24 @@ func (s *Service) imageRebuildRetryAt(app model.App) (time.Time, bool, error) {
 		now = s.now().UTC()
 	}
 	for _, candidate := range ops {
-		if candidate.Type != model.OperationTypeImport || candidate.Status != model.OperationStatusFailed ||
+		if candidate.Status != model.OperationStatusFailed ||
 			candidate.RequestedByType != model.ActorTypeSystem || candidate.RequestedByID != model.OperationRequestedByImageRebuild {
+			continue
+		}
+		backoff := time.Duration(0)
+		switch candidate.Type {
+		case model.OperationTypeImport:
+			backoff = imageRebuildFailureBackoff
+		case model.OperationTypeDeploy:
+			backoff = imageRebuildDeployFailureBackoff
+		default:
 			continue
 		}
 		failedAt := candidate.CompletedAt
 		if failedAt == nil {
 			failedAt = &candidate.UpdatedAt
 		}
-		retryAt := failedAt.UTC().Add(imageRebuildFailureBackoff)
+		retryAt := failedAt.UTC().Add(backoff)
 		if retryAt.After(now) {
 			return retryAt, true, nil
 		}

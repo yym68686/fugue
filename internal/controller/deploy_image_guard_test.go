@@ -298,6 +298,53 @@ func TestMissingImageRebuildUsesFailureBackoff(t *testing.T) {
 	}
 }
 
+func TestBackgroundReconcileQueuesSingleMissingImageRebuild(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("background rebuild")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image: "registry.fugue.internal:5000/fugue-apps/demo:old", Ports: []int{8080}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID,
+	}, model.AppSource{
+		Type: model.AppSourceTypeUpload, UploadID: "upload_rebuild", BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0)}
+
+	err = svc.handleMissingDeployImage(context.Background(), model.Operation{}, app, deployImageTarget{RuntimeID: app.Spec.RuntimeID}, app.Spec.Image, "managed image")
+	if err == nil || !strings.Contains(err.Error(), "queued image rebuild operation") {
+		t.Fatalf("background reconcile must queue a rebuild, got %v", err)
+	}
+	err = svc.handleMissingDeployImage(context.Background(), model.Operation{}, app, deployImageTarget{RuntimeID: app.Spec.RuntimeID}, app.Spec.Image, "managed image")
+	if err == nil || !strings.Contains(err.Error(), "rebuild operation") || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("repeated background reconcile must reuse the active rebuild, got %v", err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	rebuilds := 0
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeImport && candidate.RequestedByID == model.OperationRequestedByImageRebuild {
+			rebuilds++
+		}
+	}
+	if rebuilds != 1 {
+		t.Fatalf("expected exactly one background image rebuild, got %d: %+v", rebuilds, ops)
+	}
+}
+
 func TestHandleClaimedOperationFailsDeployWhenRuntimeImageIsMissingFromRegistry(t *testing.T) {
 	t.Parallel()
 

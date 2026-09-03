@@ -8,8 +8,10 @@ import (
 )
 
 type operationCreatePolicy struct {
-	RejectActiveDeployForApp bool
-	RejectNoopDeploy         bool
+	RejectActiveDeployForApp      bool
+	RejectNoopDeploy              bool
+	ReuseActiveImageRebuildForApp bool
+	RejectActiveImportForApp      bool
 }
 
 type operationCreateOutcome struct {
@@ -55,6 +57,28 @@ func (s *Store) CreateAutoscalingDeployOperation(op model.Operation) (model.Oper
 	return created, AutoscalingDeployOutcome{
 		Decision:            outcome.Decision,
 		ExistingOperationID: strings.TrimSpace(outcome.ExistingOperationID),
+	}, nil
+}
+
+// CreateImageRebuildOperation atomically reuses an already active controller
+// image rebuild for the same app. Background reconciliation can run on more
+// than one controller replica, so a read-then-create check in the controller
+// would otherwise submit duplicate builder jobs.
+func (s *Store) CreateImageRebuildOperation(op model.Operation) (model.Operation, OperationCreateResult, error) {
+	if op.Type != model.OperationTypeImport ||
+		strings.TrimSpace(op.RequestedByType) != model.ActorTypeSystem ||
+		strings.TrimSpace(op.RequestedByID) != model.OperationRequestedByImageRebuild {
+		return model.Operation{}, OperationCreateResult{}, ErrInvalidInput
+	}
+	created, outcome, err := s.createOperationWithPolicy(op, operationCreatePolicy{
+		ReuseActiveImageRebuildForApp: true,
+		RejectActiveImportForApp:      true,
+	})
+	if err != nil {
+		return model.Operation{}, OperationCreateResult{}, err
+	}
+	return created, OperationCreateResult{
+		Created: strings.TrimSpace(created.ID) != "" && !outcome.ReusedExistingOperation,
 	}, nil
 }
 
