@@ -515,7 +515,7 @@ func TestManagedAppLiveGuardRecoversPromotedServingSnapshotDuringBackgroundRecon
 	backfillManagedAppSource(&currentSnapshot, desired)
 	recovered, ok, recoverErr := svc.recoverManagedAppPendingDeploySnapshot(context.Background(), managed, currentSnapshot, servingKey)
 	if recoverErr != nil || !ok {
-		t.Fatalf("expected promoted serving snapshot recovery before reconcile: ok=%v err=%v key=%s current=%s", ok, recoverErr, servingKey, svc.Renderer.ManagedAppReleaseKey(recovered, runtime.SchedulingConstraints{}))
+		t.Fatalf("expected promoted serving snapshot recovery before reconcile: ok=%v err=%v key=%s current=%s", ok, recoverErr, servingKey, svc.Renderer.ManagedAppReleaseKey(recovered.App, runtime.SchedulingConstraints{}))
 	}
 
 	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
@@ -585,7 +585,9 @@ func TestManagedAppLiveGuardRecoversFailedRuntimeMoveUsingTargetScheduling(t *te
 	failedSpec.RuntimeID = targetRuntime.ID
 	failedSource := model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: failedSpec.Image, ResolvedImageRef: failedSpec.Image}
 	failed, err := stateStore.CreateOperation(model.Operation{
-		TenantID: app.TenantID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &failedSpec,
+		TenantID: app.TenantID, Type: model.OperationTypeDeploy, AppID: app.ID,
+		RequestedByType: model.ActorTypeSystem, RequestedByID: model.OperationRequestedByImageRebuild,
+		DesiredSpec:   &failedSpec,
 		DesiredSource: &failedSource, DesiredOriginSource: &failedSource,
 	})
 	if err != nil {
@@ -623,8 +625,24 @@ func TestManagedAppLiveGuardRecoversFailedRuntimeMoveUsingTargetScheduling(t *te
 	if recoverErr != nil || !ok {
 		t.Fatalf("failed runtime-move release must recover with target scheduling: ok=%v err=%v", ok, recoverErr)
 	}
-	if recovered.Spec.RuntimeID != targetRuntime.ID || recovered.Spec.Image != failedSpec.Image {
-		t.Fatalf("unexpected recovered target snapshot: runtime=%q image=%q", recovered.Spec.RuntimeID, recovered.Spec.Image)
+	if recovered.App.Spec.RuntimeID != targetRuntime.ID || recovered.App.Spec.Image != failedSpec.Image {
+		t.Fatalf("unexpected recovered target snapshot: runtime=%q image=%q", recovered.App.Spec.RuntimeID, recovered.App.Spec.Image)
+	}
+
+	live, found := svc.expectedManagedAppDeployment(serving, targetScheduling)
+	if !found {
+		t.Fatal("expected failed runtime-move deployment")
+	}
+	managedAppLiveGuardMarkReady(&live, 1)
+	client := managedAppLiveGuardClient(t, managed, live, true, true, nil)
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, app, "", runtime.SchedulingForRuntime(sourceRuntime),
+	)
+	if err != nil {
+		t.Fatalf("proven failed runtime-move release must be replaceable by durable desired state: %v", err)
+	}
+	if prepared.Spec.RuntimeID != sourceRuntime.ID || prepared.Spec.Image != app.Spec.Image {
+		t.Fatalf("unexpected durable desired snapshot: runtime=%q image=%q", prepared.Spec.RuntimeID, prepared.Spec.Image)
 	}
 }
 
