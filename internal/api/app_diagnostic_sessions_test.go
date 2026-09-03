@@ -100,7 +100,7 @@ func TestBuildDiagnosticJobIsBoundedAndDoesNotMutateTargetWorkload(t *testing.T)
 		t.Fatalf("expected one fixed diagnostic agent container, got %d", len(pod.Containers))
 	}
 	container := pod.Containers[0]
-	if container.Command[0] != "/usr/local/bin/fugue-diagnostic-agent" || strings.Contains(strings.Join(container.Args, " "), "sh -c") {
+	if container.Command[0] != diagnosticAgentBinary || strings.Contains(strings.Join(container.Args, " "), "sh -c") {
 		t.Fatalf("diagnostic command is not allowlisted: command=%q args=%q", container.Command, container.Args)
 	}
 	if container.SecurityContext == nil || container.SecurityContext.Privileged == nil || *container.SecurityContext.Privileged || container.SecurityContext.ReadOnlyRootFilesystem == nil || !*container.SecurityContext.ReadOnlyRootFilesystem {

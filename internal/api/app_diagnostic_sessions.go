@@ -44,6 +44,8 @@ const (
 	diagnosticMaxActivePerApp                 = 1
 	diagnosticMaxActiveGlobal                 = 4
 	diagnosticMaxReportBytes                  = 8 << 20
+	diagnosticAgentContainerName              = "diagnostic-agent"
+	diagnosticAgentBinary                     = "/usr/local/bin/fugue-diagnostic-agent"
 )
 
 type diagnosticSessionBackend interface {
@@ -234,7 +236,7 @@ func (s *Server) handleGetAppDiagnosticSessionValue(w http.ResponseWriter, r *ht
 			httpx.WriteError(w, http.StatusServiceUnavailable, "diagnostic report pod is unavailable")
 			return
 		}
-		logs, logErr := backend.ReadPodLogs(r.Context(), namespace, pods[0].Metadata.Name, "diagnostic-agent")
+		logs, logErr := backend.ReadPodLogs(r.Context(), namespace, pods[0].Metadata.Name, diagnosticAgentContainerName)
 		if logErr != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, "read diagnostic report: "+logErr.Error())
 			return
@@ -404,7 +406,7 @@ func buildDiagnosticJob(app model.App, sessionID, sessionNamespace string, targe
 						Name:            "diagnostic-agent",
 						Image:           image,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Command:         []string{"/usr/local/bin/fugue-diagnostic-agent"},
+						Command:         []string{diagnosticAgentBinary},
 						Args:            []string{"--kind", req.Kind, "--duration", strconv.Itoa(req.DurationSeconds), "--frequency", strconv.Itoa(req.FrequencyHz), "--container-id", target.ContainerID},
 						SecurityContext: &corev1.SecurityContext{
 							Privileged:               &privileged,
