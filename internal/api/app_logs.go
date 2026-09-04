@@ -62,6 +62,7 @@ type kubePodInfo struct {
 	Metadata struct {
 		Namespace         string            `json:"namespace,omitempty"`
 		Name              string            `json:"name"`
+		UID               string            `json:"uid,omitempty"`
 		CreationTimestamp time.Time         `json:"creationTimestamp"`
 		Labels            map[string]string `json:"labels,omitempty"`
 		Annotations       map[string]string `json:"annotations,omitempty"`

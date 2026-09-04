@@ -6842,6 +6842,102 @@ paths:
                 $ref: "#/components/schemas/AppDiagnosticReportResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/diagnostics/sessions:
+    post:
+      operationId: startPlatformDiagnosticSession
+      summary: Start Platform Diagnostic Session
+      description: Starts a bounded, temporary diagnostic probe for a Fugue platform component or an allowlisted node process. Platform administrator access is required.
+      tags: [Admin]
+      x-fugue-handler: handleStartPlatformDiagnosticSession
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformDiagnosticSessionStartRequest"
+      responses:
+        '202':
+          description: Platform diagnostic session accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDiagnosticSessionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      operationId: listPlatformDiagnosticSessions
+      summary: List Platform Diagnostic Sessions
+      tags: [Admin]
+      x-fugue-handler: handleListPlatformDiagnosticSessions
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Recent platform diagnostic sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDiagnosticSessionListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/diagnostics/sessions/{session_id}:
+    get:
+      operationId: getPlatformDiagnosticSession
+      summary: Get Platform Diagnostic Session
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformDiagnosticSession
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DiagnosticSessionIdPathParam"
+      responses:
+        '200':
+          description: Current platform diagnostic session state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDiagnosticSessionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: cancelPlatformDiagnosticSession
+      summary: Cancel Platform Diagnostic Session
+      tags: [Admin]
+      x-fugue-handler: handleCancelPlatformDiagnosticSession
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DiagnosticSessionIdPathParam"
+      responses:
+        '200':
+          description: Platform diagnostic session cancellation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDiagnosticSessionCancelResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/diagnostics/sessions/{session_id}/report:
+    get:
+      operationId: getPlatformDiagnosticReport
+      summary: Get Platform Diagnostic Report
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformDiagnosticReport
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DiagnosticSessionIdPathParam"
+      responses:
+        '200':
+          description: Completed platform diagnostic report and session metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDiagnosticReportResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/observability/metrics/summary:
     get:
       operationId: getAppObservabilityMetricsSummary
@@ -24946,6 +25042,164 @@ components:
           type: object
           additionalProperties: true
           description: Versioned report emitted by the selected digest-addressed diagnostic probe.
+    PlatformDiagnosticTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [platform_component, node_process]
+        component:
+          type: string
+          description: Fugue component label. Required for platform_component targets.
+        namespace:
+          type: string
+          description: Optional Fugue system namespace; defaults to the control-plane namespace.
+        pod:
+          type: string
+          description: Optional exact Pod name within the trusted component selector.
+        container:
+          type: string
+          description: Required when the selected platform Pod contains multiple containers.
+        node:
+          type: string
+          description: Required for node_process targets.
+        process_name:
+          type: string
+          description: Required allowlisted Fugue or k3s process name for node_process targets.
+    PlatformDiagnosticSessionStartRequest:
+      type: object
+      additionalProperties: false
+      required: [target]
+      properties:
+        target:
+          $ref: "#/components/schemas/PlatformDiagnosticTargetRequest"
+        kind:
+          type: string
+          enum: [cpu-profile, memory-profile, process-snapshot]
+          default: cpu-profile
+        duration_seconds:
+          type: integer
+          format: int32
+          minimum: 5
+          maximum: 360
+          default: 60
+        frequency_hz:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 99
+          default: 19
+        sample_interval_milliseconds:
+          type: integer
+          format: int32
+          minimum: 250
+          maximum: 10000
+          default: 1000
+    PlatformDiagnosticTarget:
+      type: object
+      additionalProperties: false
+      required: [type, node]
+      properties:
+        type:
+          type: string
+          enum: [platform_component, node_process]
+        app_id:
+          type: string
+        component:
+          type: string
+        namespace:
+          type: string
+        pod:
+          type: string
+        pod_uid:
+          type: string
+        container:
+          type: string
+        node:
+          type: string
+        process_name:
+          type: string
+        image_digest:
+          type: string
+    PlatformDiagnosticSession:
+      type: object
+      additionalProperties: false
+      required: [id, kind, status, target, control_path, duration_seconds, frequency_hz, sample_interval_milliseconds, created_at]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [cpu-profile, memory-profile, process-snapshot]
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed]
+        target:
+          $ref: "#/components/schemas/PlatformDiagnosticTarget"
+        control_path:
+          type: string
+          enum: [api, direct-kubernetes]
+        duration_seconds:
+          type: integer
+          format: int32
+        frequency_hz:
+          type: integer
+          format: int32
+        sample_interval_milliseconds:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        failure_reason:
+          type: string
+    PlatformDiagnosticSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [session]
+      properties:
+        session:
+          $ref: "#/components/schemas/PlatformDiagnosticSession"
+    PlatformDiagnosticSessionListResponse:
+      type: object
+      additionalProperties: false
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformDiagnosticSession"
+    PlatformDiagnosticSessionCancelResponse:
+      type: object
+      additionalProperties: false
+      required: [session, canceled]
+      properties:
+        session:
+          $ref: "#/components/schemas/PlatformDiagnosticSession"
+        canceled:
+          type: boolean
+    PlatformDiagnosticReportResponse:
+      type: object
+      additionalProperties: false
+      required: [session, report]
+      properties:
+        session:
+          $ref: "#/components/schemas/PlatformDiagnosticSession"
+        report:
+          type: object
+          additionalProperties: true
+          description: Versioned report emitted by the digest-addressed diagnostic runner.
     AppObservabilityMetricsSummaryResponse:
       type: object
       additionalProperties: false

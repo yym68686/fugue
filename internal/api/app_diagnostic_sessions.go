@@ -14,38 +14,38 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
-	diagnosticManagedByLabel                  = "fugue.pro/live-diagnostics"
-	diagnosticManagedByValue                  = "true"
-	diagnosticAppIDLabel                      = "fugue.pro/diagnostic-app-id"
-	diagnosticSessionIDLabel                  = "fugue.pro/diagnostic-session-id"
-	diagnosticKindLabel                       = "fugue.pro/diagnostic-kind"
-	diagnosticTargetPodAnnotation             = "fugue.pro/diagnostic-target-pod"
-	diagnosticTargetContainerAnnotation       = "fugue.pro/diagnostic-target-container"
-	diagnosticTargetNodeAnnotation            = "fugue.pro/diagnostic-target-node"
-	diagnosticTargetNamespaceAnnotation       = "fugue.pro/diagnostic-target-namespace"
-	diagnosticDurationAnnotation              = "fugue.pro/diagnostic-duration-seconds"
-	diagnosticFrequencyAnnotation             = "fugue.pro/diagnostic-frequency-hz"
+	diagnosticManagedByLabel                  = livediagnostics.ManagedByLabel
+	diagnosticManagedByValue                  = livediagnostics.ManagedByValue
+	diagnosticAppIDLabel                      = livediagnostics.AppIDLabel
+	diagnosticSessionIDLabel                  = livediagnostics.SessionIDLabel
+	diagnosticKindLabel                       = livediagnostics.KindLabel
+	diagnosticTargetPodAnnotation             = livediagnostics.TargetPodAnnotation
+	diagnosticTargetContainerAnnotation       = livediagnostics.TargetContainerAnnotation
+	diagnosticTargetNodeAnnotation            = livediagnostics.TargetNodeAnnotation
+	diagnosticTargetNamespaceAnnotation       = livediagnostics.TargetNamespaceAnnotation
+	diagnosticDurationAnnotation              = livediagnostics.DurationAnnotation
+	diagnosticFrequencyAnnotation             = livediagnostics.FrequencyAnnotation
 	diagnosticDefaultDuration                 = 60
 	diagnosticMinDuration                     = 5
 	diagnosticMaxDuration                     = 120
 	diagnosticDefaultFrequency                = 19
 	diagnosticMaxFrequency                    = 99
-	diagnosticRetentionSeconds          int32 = 3600
+	diagnosticRetentionSeconds          int32 = livediagnostics.RetentionSeconds
 	diagnosticMaxActivePerApp                 = 1
-	diagnosticMaxActiveGlobal                 = 4
+	diagnosticMaxActiveGlobal                 = livediagnostics.MaxActiveGlobal
 	diagnosticMaxReportBytes                  = 8 << 20
-	diagnosticAgentContainerName              = "diagnostic-agent"
-	diagnosticAgentBinary                     = "/usr/local/bin/fugue-diagnostic-agent"
+	diagnosticAgentContainerName              = livediagnostics.DiagnosticAgentContainer
+	diagnosticAgentBinary                     = livediagnostics.DiagnosticAgentBinary
 )
 
 type diagnosticSessionBackend interface {
@@ -56,6 +56,7 @@ type diagnosticSessionBackend interface {
 	ListJobs(context.Context, string, string) ([]batchv1.Job, error)
 	DeleteJob(context.Context, string, string) error
 	ListPods(context.Context, string, string) ([]kubePodInfo, error)
+	GetNode(context.Context, string) (corev1.Node, error)
 	ReadPodLogs(context.Context, string, string, string) (string, error)
 }
 
@@ -93,9 +94,11 @@ type diagnosticStartRequest struct {
 type diagnosticTarget struct {
 	Namespace   string
 	PodName     string
+	PodUID      string
 	Container   string
 	ContainerID string
 	NodeName    string
+	ImageDigest string
 }
 
 func (s *Server) handleStartAppDiagnosticSession(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +147,12 @@ func (s *Server) handleStartAppDiagnosticSession(w http.ResponseWriter, r *http.
 	}
 	sessionID := model.DNS1035Label(model.NewID("diagnostic"), "diagnostic")
 	sessionNamespace := backend.SessionNamespace()
-	created, err := backend.CreateJob(r.Context(), sessionNamespace, buildDiagnosticJob(app, sessionID, sessionNamespace, target, req, runnerImage))
+	job, err := buildDiagnosticJob(app, sessionID, sessionNamespace, target, req, runnerImage)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "build diagnostic session: "+err.Error())
+		return
+	}
+	created, err := backend.CreateJob(r.Context(), sessionNamespace, job)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "create diagnostic session: "+err.Error())
 		return
@@ -350,93 +358,20 @@ func (s *Server) resolveDiagnosticTarget(ctx context.Context, app model.App, req
 		}
 		for _, status := range pod.Status.ContainerStatuses {
 			if status.Name == container && status.Ready && strings.TrimSpace(status.ContainerID) != "" {
-				return diagnosticTarget{Namespace: namespace, PodName: pod.Metadata.Name, Container: container, ContainerID: status.ContainerID, NodeName: pod.Spec.NodeName}, nil
+				return diagnosticTarget{Namespace: namespace, PodName: pod.Metadata.Name, PodUID: pod.Metadata.UID, Container: container, ContainerID: status.ContainerID, NodeName: pod.Spec.NodeName, ImageDigest: firstNonEmptyString(status.ImageID, status.Image)}, nil
 			}
 		}
 	}
 	return diagnosticTarget{}, errors.New("no ready target pod with a running container was found")
 }
 
-func buildDiagnosticJob(app model.App, sessionID, sessionNamespace string, target diagnosticTarget, req diagnosticStartRequest, image string) batchv1.Job {
-	zero := int32(0)
-	activeDeadline := int64(req.DurationSeconds + 45)
-	privileged := false
-	readOnly := true
-	allowPrivilegeEscalation := false
-	runAsUser := int64(0)
-	automount := false
-	hostPathDirectory := corev1.HostPathDirectory
-	return batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sessionID,
-			Namespace: sessionNamespace,
-			Labels: map[string]string{
-				diagnosticManagedByLabel: diagnosticManagedByValue,
-				diagnosticAppIDLabel:     app.ID,
-				diagnosticSessionIDLabel: sessionID,
-				diagnosticKindLabel:      req.Kind,
-			},
-			Annotations: map[string]string{
-				diagnosticTargetPodAnnotation:       target.PodName,
-				diagnosticTargetContainerAnnotation: target.Container,
-				diagnosticTargetNodeAnnotation:      target.NodeName,
-				diagnosticTargetNamespaceAnnotation: target.Namespace,
-				diagnosticDurationAnnotation:        strconv.Itoa(req.DurationSeconds),
-				diagnosticFrequencyAnnotation:       strconv.Itoa(req.FrequencyHz),
-			},
-		},
-		Spec: batchv1.JobSpec{
-			BackoffLimit:            &zero,
-			ActiveDeadlineSeconds:   &activeDeadline,
-			TTLSecondsAfterFinished: ptrInt32Diagnostic(diagnosticRetentionSeconds),
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-					diagnosticManagedByLabel: diagnosticManagedByValue,
-					diagnosticAppIDLabel:     app.ID,
-					diagnosticSessionIDLabel: sessionID,
-				}},
-				Spec: corev1.PodSpec{
-					NodeName:                      target.NodeName,
-					HostPID:                       true,
-					AutomountServiceAccountToken:  &automount,
-					EnableServiceLinks:            &automount,
-					RestartPolicy:                 corev1.RestartPolicyNever,
-					TerminationGracePeriodSeconds: ptrInt64Diagnostic(5),
-					Containers: []corev1.Container{{
-						Name:            "diagnostic-agent",
-						Image:           image,
-						ImagePullPolicy: corev1.PullIfNotPresent,
-						Command:         []string{diagnosticAgentBinary},
-						Args:            []string{"--kind", req.Kind, "--duration", strconv.Itoa(req.DurationSeconds), "--frequency", strconv.Itoa(req.FrequencyHz), "--container-id", target.ContainerID},
-						SecurityContext: &corev1.SecurityContext{
-							Privileged:               &privileged,
-							RunAsUser:                &runAsUser,
-							ReadOnlyRootFilesystem:   &readOnly,
-							AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{"ALL"},
-								Add:  []corev1.Capability{"PERFMON", "SYS_PTRACE", "SYS_ADMIN", "SYSLOG"},
-							},
-						},
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("64Mi")},
-							Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("256Mi")},
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "host-proc", MountPath: "/host/proc", ReadOnly: true},
-							{Name: "host-cgroup", MountPath: "/sys/fs/cgroup", ReadOnly: true},
-							{Name: "scratch", MountPath: "/tmp"},
-						},
-					}},
-					Volumes: []corev1.Volume{
-						{Name: "host-proc", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/proc", Type: &hostPathDirectory}}},
-						{Name: "host-cgroup", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys/fs/cgroup", Type: &hostPathDirectory}}},
-						{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: resourceQuantityPtr("32Mi")}}},
-					},
-				},
-			},
-		},
-	}
+func buildDiagnosticJob(app model.App, sessionID, sessionNamespace string, target diagnosticTarget, req diagnosticStartRequest, image string) (batchv1.Job, error) {
+	return livediagnostics.BuildJob(livediagnostics.Target{
+		Type: livediagnostics.TargetApp, AppID: app.ID, Namespace: target.Namespace, Pod: target.PodName, PodUID: target.PodUID,
+		Container: target.Container, ContainerID: target.ContainerID, Node: target.NodeName, ImageDigest: target.ImageDigest,
+	}, sessionID, sessionNamespace, image, "api", livediagnostics.StartRequest{
+		Kind: livediagnostics.ProbeKind(req.Kind), DurationSeconds: req.DurationSeconds, FrequencyHz: req.FrequencyHz,
+	})
 }
 
 func diagnosticSessionFromJob(job batchv1.Job) diagnosticSession {
@@ -539,22 +474,33 @@ func (b *kubeDiagnosticSessionBackend) RunnerImage(ctx context.Context) (string,
 			return "", err
 		}
 	}
-	hostname, err := os.Hostname()
-	if err != nil {
+	deploymentName := strings.TrimSpace(os.Getenv("FUGUE_DIAGNOSTIC_RUNNER_DEPLOYMENT"))
+	if deploymentName == "" {
+		deploymentName = "fugue-fugue-api"
+	}
+	var deployment struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						Name  string `json:"name"`
+						Image string `json:"image"`
+					} `json:"containers"`
+				} `json:"spec"`
+			} `json:"template"`
+		} `json:"spec"`
+	}
+	path := "/apis/apps/v1/namespaces/" + url.PathEscape(namespace) + "/deployments/" + url.PathEscape(deploymentName)
+	if err := b.cluster.doJSON(ctx, http.MethodGet, path, &deployment); err != nil {
 		return "", err
 	}
-	var pod corev1.Pod
-	path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods/" + url.PathEscape(hostname)
-	if err := b.cluster.doJSON(ctx, http.MethodGet, path, &pod); err != nil {
-		return "", err
-	}
-	for _, container := range pod.Spec.Containers {
+	for _, container := range deployment.Spec.Template.Spec.Containers {
 		image := strings.TrimSpace(container.Image)
 		if container.Name == "api" && image != "" && strings.Contains(image, "@sha256:") {
 			return image, nil
 		}
 	}
-	return "", errors.New("current control-plane image is unavailable or not digest-addressed")
+	return "", errors.New("diagnostic runner image is unavailable or not digest-addressed")
 }
 
 func (b *kubeDiagnosticSessionBackend) SessionNamespace() string {
@@ -596,6 +542,12 @@ func (b *kubeDiagnosticSessionBackend) ListPods(ctx context.Context, namespace, 
 	return b.logs.listPodsBySelector(ctx, namespace, selector)
 }
 
+func (b *kubeDiagnosticSessionBackend) GetNode(ctx context.Context, name string) (corev1.Node, error) {
+	var node corev1.Node
+	err := b.cluster.doJSON(ctx, http.MethodGet, "/api/v1/nodes/"+url.PathEscape(strings.TrimSpace(name)), &node)
+	return node, err
+}
+
 func (b *kubeDiagnosticSessionBackend) ReadPodLogs(ctx context.Context, namespace, pod, container string) (string, error) {
 	return b.logs.readPodLogs(ctx, namespace, pod, kubeLogOptions{Container: container})
 }
@@ -605,19 +557,11 @@ func parseDiagnosticInt(value string) int {
 	return result
 }
 
-func ptrInt32Diagnostic(value int32) *int32 { return &value }
-func ptrInt64Diagnostic(value int64) *int64 { return &value }
-
 func timePtrDiagnostic(value *metav1.Time) *time.Time {
 	if value == nil {
 		return nil
 	}
 	result := value.Time.UTC()
-	return &result
-}
-
-func resourceQuantityPtr(value string) *resource.Quantity {
-	result := resource.MustParse(value)
 	return &result
 }
 

@@ -4,9 +4,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"testing"
 )
+
+func TestPprofTopReadsRuntimeHeapProfile(t *testing.T) {
+	profilePath := filepath.Join(t.TempDir(), "heap.pb.gz")
+	file, err := os.Create(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pprof.Lookup("heap").WriteTo(file, 0); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	top, err := pprofTop("inuse_space", "", profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(top, "Showing nodes accounting for") {
+		t.Fatalf("unexpected pprof output: %s", top)
+	}
+}
 
 func TestSampledFunctionsSeparatesLeafAndCumulativeFrames(t *testing.T) {
 	raw := []byte("\n          513920 encoding/json.appendString+0x40 (/app/service)\n          5042a5 service.Proxy+0x35 (/app/service)\n          ffffffff12345678 entry_SYSCALL_64 ([kernel.kallsyms])\n\n          ffffffff87654321 schedule ([kernel.kallsyms])\n          4788b7 runtime.park_m+0x17 (/app/service)\n\n")
@@ -28,6 +51,27 @@ func TestCPUUsageDelta(t *testing.T) {
 	usage := cpuUsageDelta(before, after, 10_000_000_000)
 	if usage.CPUSeconds != 1.5 || usage.AverageMillicores != 150 || usage.ThrottledPeriods != 2 || usage.ThrottledSeconds != 0.03 {
 		t.Fatalf("unexpected CPU usage delta: %+v", usage)
+	}
+}
+
+func TestReadCgroupSnapshotIncludesMemoryBoundaries(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"cpu.stat":       "usage_usec 10\nuser_usec 7\nsystem_usec 3\n",
+		"memory.current": "100\n", "memory.peak": "150\n", "memory.max": "1610612736\n", "memory.high": "max\n",
+		"memory.swap.current": "20\n", "memory.swap.max": "0\n", "pids.current": "4\n",
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := readCgroupSnapshot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.MemoryBytes != 100 || snapshot.MemoryPeak != 150 || snapshot.MemoryLimit != "1610612736" || snapshot.MemoryHigh != "max" || snapshot.SwapBytes != 20 || snapshot.SwapLimit != "0" {
+		t.Fatalf("unexpected memory boundaries: %+v", snapshot)
 	}
 }
 

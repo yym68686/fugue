@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/controller"
+	"fugue/internal/livediagnostics"
 	"fugue/internal/store"
 )
 
@@ -22,6 +23,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := livediagnostics.StartRuntimeEndpoint(ctx, "controller"); err != nil {
+		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
+	}
 
 	service := controller.New(store, cfg, logger)
 	if err := service.StartMetricsServer(ctx, cfg.MetricsBindAddr); err != nil {

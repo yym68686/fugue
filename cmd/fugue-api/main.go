@@ -17,6 +17,7 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/config"
 	"fugue/internal/edgeauthkey"
+	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -111,6 +112,9 @@ func main() {
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := livediagnostics.StartRuntimeEndpoint(ctx, "api"); err != nil {
+		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
+	}
 	server.StartBackgroundWarmers(ctx)
 	go server.StartBackgroundEdgeQualityRollups(ctx)
 	go server.StartBackgroundEdgeDNSArtifacts(ctx)

@@ -11,6 +11,7 @@ import (
 	"fugue/internal/model"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 type fakeDiagnosticSessionBackend struct {
@@ -48,6 +49,10 @@ func (f *fakeDiagnosticSessionBackend) ListPods(context.Context, string, string)
 	return nil, fmt.Errorf("not implemented")
 }
 
+func (f *fakeDiagnosticSessionBackend) GetNode(context.Context, string) (corev1.Node, error) {
+	return corev1.Node{}, fmt.Errorf("not implemented")
+}
+
 func (f *fakeDiagnosticSessionBackend) ReadPodLogs(context.Context, string, string, string) (string, error) {
 	return "", fmt.Errorf("not implemented")
 }
@@ -76,12 +81,16 @@ func TestBuildDiagnosticJobIsBoundedAndDoesNotMutateTargetWorkload(t *testing.T)
 	target := diagnosticTarget{
 		Namespace:   "tenant-runtime",
 		PodName:     "demo-7fcb6d9cc9-a1b2c",
+		PodUID:      "pod-uid-1",
 		Container:   "app",
 		ContainerID: "containerd://abcdef",
 		NodeName:    "runtime-node-1",
 	}
 	req := diagnosticStartRequest{Kind: "cpu-profile", DurationSeconds: 60, FrequencyHz: 19}
-	job := buildDiagnosticJob(app, "diagnostic-123", "fugue-system", target, req, "registry.example/fugue-api@sha256:"+strings.Repeat("a", 64))
+	job, err := buildDiagnosticJob(app, "diagnostic-123", "fugue-system", target, req, "registry.example/fugue-api@sha256:"+strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if job.Namespace != "fugue-system" || job.Namespace == target.Namespace {
 		t.Fatalf("diagnostic job escaped the control-plane namespace: %q", job.Namespace)
@@ -146,6 +155,7 @@ func TestDiagnosticStartCreatesControlPlaneJobForReadyAppContainer(t *testing.T)
 	logs := newFakeAppLogsClient()
 	var pod kubePodInfo
 	pod.Metadata.Name = "demo-7fcb6d9cc9-a1b2c"
+	pod.Metadata.UID = "pod-uid-1"
 	pod.Spec.NodeName = "runtime-node-1"
 	pod.Status.Phase = "Running"
 	pod.Status.ContainerStatuses = []kubeContainerStatus{{Name: container, ContainerID: "containerd://abcdef1234567890", Ready: true}}
@@ -185,9 +195,21 @@ func TestDecodeDiagnosticReportIsStrictlyBounded(t *testing.T) {
 }
 
 func TestCountActiveDiagnosticJobsIgnoresCompletedJobs(t *testing.T) {
-	active := buildDiagnosticJob(model.App{ID: "app-a"}, "diagnostic-active", "fugue-system", diagnosticTarget{}, diagnosticStartRequest{}, "image")
-	other := buildDiagnosticJob(model.App{ID: "app-b"}, "diagnostic-other", "fugue-system", diagnosticTarget{}, diagnosticStartRequest{}, "image")
-	completed := buildDiagnosticJob(model.App{ID: "app-a"}, "diagnostic-completed", "fugue-system", diagnosticTarget{}, diagnosticStartRequest{}, "image")
+	target := diagnosticTarget{Namespace: "tenant-runtime", PodName: "app-1", PodUID: "pod-uid-1", Container: "app", ContainerID: "containerd://abcdef1234567890", NodeName: "node-1"}
+	image := "registry.example/fugue-api@sha256:" + strings.Repeat("a", 64)
+	request := diagnosticStartRequest{Kind: "cpu-profile", DurationSeconds: 60, FrequencyHz: 19}
+	active, err := buildDiagnosticJob(model.App{ID: "app-a"}, "diagnostic-active", "fugue-system", target, request, image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := buildDiagnosticJob(model.App{ID: "app-b"}, "diagnostic-other", "fugue-system", target, request, image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := buildDiagnosticJob(model.App{ID: "app-a"}, "diagnostic-completed", "fugue-system", target, request, image)
+	if err != nil {
+		t.Fatal(err)
+	}
 	completed.Status.Succeeded = 1
 	global, app := countActiveDiagnosticJobs([]batchv1.Job{active, other, completed}, "app-a")
 	if global != 2 || app != 1 {

@@ -11,6 +11,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"fugue/internal/livediagnostics"
 )
 
 const (
@@ -30,11 +34,13 @@ const (
 )
 
 type options struct {
-	kind        string
-	duration    int
-	frequency   int
-	containerID string
-	outputDir   string
+	kind                       string
+	duration                   int
+	frequency                  int
+	containerID                string
+	processName                string
+	outputDir                  string
+	sampleIntervalMilliseconds int
 }
 
 type report struct {
@@ -114,21 +120,62 @@ type kernelSymbolizer struct {
 
 type processSnapshot struct {
 	RSSBytes         uint64 `json:"rss_bytes"`
+	RSSAnonBytes     uint64 `json:"rss_anon_bytes"`
+	RSSFileBytes     uint64 `json:"rss_file_bytes"`
+	VirtualBytes     uint64 `json:"virtual_bytes"`
 	Threads          uint64 `json:"threads"`
 	OpenFDs          uint64 `json:"open_fds"`
 	OpenFDsAvailable bool   `json:"open_fds_available"`
 }
 
 type cgroupSnapshot struct {
-	UsageUsec     uint64 `json:"usage_usec"`
-	UserUsec      uint64 `json:"user_usec"`
-	SystemUsec    uint64 `json:"system_usec"`
-	Periods       uint64 `json:"periods"`
-	Throttled     uint64 `json:"throttled_periods"`
-	ThrottledUsec uint64 `json:"throttled_usec"`
-	MemoryBytes   uint64 `json:"memory_bytes"`
-	MemoryPeak    uint64 `json:"memory_peak_bytes"`
-	PIDs          uint64 `json:"pids"`
+	UsageUsec      uint64            `json:"usage_usec"`
+	UserUsec       uint64            `json:"user_usec"`
+	SystemUsec     uint64            `json:"system_usec"`
+	Periods        uint64            `json:"periods"`
+	Throttled      uint64            `json:"throttled_periods"`
+	ThrottledUsec  uint64            `json:"throttled_usec"`
+	MemoryBytes    uint64            `json:"memory_bytes"`
+	MemoryPeak     uint64            `json:"memory_peak_bytes"`
+	MemoryLimit    string            `json:"memory_limit"`
+	MemoryHigh     string            `json:"memory_high"`
+	SwapBytes      uint64            `json:"swap_bytes"`
+	SwapLimit      string            `json:"swap_limit"`
+	PIDs           uint64            `json:"pids"`
+	MemoryEvents   map[string]uint64 `json:"memory_events,omitempty"`
+	MemoryStat     map[string]uint64 `json:"memory_stat,omitempty"`
+	MemoryPressure string            `json:"memory_pressure,omitempty"`
+}
+
+type memorySample struct {
+	ObservedAt time.Time       `json:"observed_at"`
+	Process    processSnapshot `json:"process"`
+	Cgroup     cgroupSnapshot  `json:"cgroup"`
+}
+
+type memoryReport struct {
+	Schema                     string         `json:"schema"`
+	Kind                       string         `json:"kind"`
+	StartedAt                  time.Time      `json:"started_at"`
+	FinishedAt                 time.Time      `json:"finished_at"`
+	DurationSeconds            int            `json:"duration_seconds"`
+	SampleIntervalMilliseconds int            `json:"sample_interval_milliseconds"`
+	TargetPIDs                 []int          `json:"target_pids"`
+	TargetContainerID          string         `json:"target_container_id,omitempty"`
+	TargetProcessName          string         `json:"target_process_name,omitempty"`
+	TargetProcesses            []string       `json:"target_processes"`
+	TargetCgroup               string         `json:"target_cgroup"`
+	Samples                    []memorySample `json:"samples"`
+	PeakProcessRSSBytes        uint64         `json:"peak_process_rss_bytes"`
+	PeakCgroupMemoryBytes      uint64         `json:"peak_cgroup_memory_bytes"`
+	PeakCgroupRecordedBytes    uint64         `json:"peak_cgroup_recorded_bytes"`
+	OOMEventsDelta             uint64         `json:"oom_events_delta"`
+	OOMKillsDelta              uint64         `json:"oom_kills_delta"`
+	GoRuntimeProfileAvailable  bool           `json:"go_runtime_profile_available"`
+	GoComponent                string         `json:"go_component,omitempty"`
+	GoInuseSpaceTop            string         `json:"go_inuse_space_top,omitempty"`
+	GoAllocSpaceDeltaTop       string         `json:"go_alloc_space_delta_top,omitempty"`
+	Warnings                   []string       `json:"warnings,omitempty"`
 }
 
 type cpuUsage struct {
@@ -147,7 +194,9 @@ func main() {
 	flag.IntVar(&opts.duration, "duration", defaultDurationSeconds, "profile duration in seconds")
 	flag.IntVar(&opts.frequency, "frequency", defaultFrequency, "CPU sampling frequency in Hz")
 	flag.StringVar(&opts.containerID, "container-id", "", "target container ID")
+	flag.StringVar(&opts.processName, "process-name", "", "allowlisted host process name")
 	flag.StringVar(&opts.outputDir, "output-dir", "/tmp/fugue-diagnostic", "temporary output directory")
+	flag.IntVar(&opts.sampleIntervalMilliseconds, "sample-interval-ms", 1000, "memory sampling interval in milliseconds")
 	flag.Parse()
 
 	if err := run(opts); err != nil {
@@ -157,29 +206,50 @@ func main() {
 }
 
 func run(opts options) error {
-	if strings.TrimSpace(opts.kind) != "cpu-profile" {
+	opts.kind = strings.TrimSpace(opts.kind)
+	if opts.kind != string(livediagnostics.ProbeCPUProfile) && opts.kind != string(livediagnostics.ProbeMemoryProfile) && opts.kind != string(livediagnostics.ProbeProcessSample) {
 		return fmt.Errorf("unsupported diagnostic kind %q", opts.kind)
 	}
-	if opts.duration < 5 || opts.duration > maxDurationSeconds {
-		return fmt.Errorf("duration must be between 5 and %d seconds", maxDurationSeconds)
+	maxDuration := maxDurationSeconds
+	if opts.kind != string(livediagnostics.ProbeCPUProfile) {
+		maxDuration = 360
+	}
+	if opts.duration < 5 || opts.duration > maxDuration {
+		return fmt.Errorf("duration must be between 5 and %d seconds", maxDuration)
 	}
 	if opts.frequency < 1 || opts.frequency > maxFrequency {
 		return fmt.Errorf("frequency must be between 1 and %d Hz", maxFrequency)
 	}
-	if strings.TrimSpace(opts.containerID) == "" {
-		return errors.New("container-id is required")
+	containerID := strings.TrimSpace(opts.containerID)
+	processName := strings.TrimSpace(opts.processName)
+	if (containerID == "") == (processName == "") {
+		return errors.New("exactly one of container-id or process-name is required")
+	}
+	if processName != "" {
+		var err error
+		processName, err = livediagnostics.NormalizeNodeProcessName(processName)
+		if err != nil {
+			return err
+		}
+		opts.processName = processName
+	}
+	if opts.sampleIntervalMilliseconds < 250 || opts.sampleIntervalMilliseconds > 10000 {
+		return errors.New("sample-interval-ms must be between 250 and 10000")
 	}
 	if err := os.MkdirAll(opts.outputDir, 0o700); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	pids, processNames, cgroupPath, err := findContainerProcesses(strings.TrimSpace(opts.containerID))
+	pids, processNames, cgroupPath, err := findTargetProcesses(containerID, processName)
 	if err != nil {
 		return err
 	}
-	cgroupRoot, cgroupPath, err := resolveCgroupRoot(cgroupPath, normalizeContainerID(opts.containerID))
+	cgroupRoot, cgroupPath, err := resolveTargetCgroupRoot(cgroupPath, normalizeContainerID(opts.containerID))
 	if err != nil {
 		return err
+	}
+	if opts.kind == string(livediagnostics.ProbeMemoryProfile) || opts.kind == string(livediagnostics.ProbeProcessSample) {
+		return runMemoryProfile(opts, pids, processNames, cgroupRoot, cgroupPath)
 	}
 	processBefore, err := readProcessSnapshot(pids)
 	if err != nil {
@@ -301,6 +371,232 @@ func run(opts options) error {
 	return json.NewEncoder(os.Stdout).Encode(value)
 }
 
+func findTargetProcesses(containerID, processName string) ([]int, []string, string, error) {
+	if containerID != "" {
+		return findContainerProcesses(containerID)
+	}
+	return findHostProcesses(processName)
+}
+
+func findHostProcesses(processName string) ([]int, []string, string, error) {
+	processName, err := livediagnostics.NormalizeNodeProcessName(processName)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	entries, err := os.ReadDir("/host/proc")
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("read host proc: %w", err)
+	}
+	pids := make([]int, 0, 4)
+	names := make([]string, 0, 4)
+	cgroupPath := ""
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "" || entry.Name()[0] < '0' || entry.Name()[0] > '9' {
+			continue
+		}
+		pid, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil || pid <= 1 {
+			continue
+		}
+		executable, linkErr := os.Readlink(filepath.Join("/host/proc", entry.Name(), "exe"))
+		name := filepath.Base(strings.TrimSuffix(executable, " (deleted)"))
+		if linkErr != nil || name != processName {
+			continue
+		}
+		cgroup, readErr := os.ReadFile(filepath.Join("/host/proc", entry.Name(), "cgroup"))
+		if readErr != nil {
+			continue
+		}
+		path := cgroupV2Path(cgroup)
+		if path == "" {
+			continue
+		}
+		if cgroupPath == "" {
+			cgroupPath = path
+		}
+		if path != cgroupPath {
+			continue
+		}
+		pids = append(pids, pid)
+		names = append(names, name)
+	}
+	if len(pids) == 0 {
+		return nil, nil, "", fmt.Errorf("no allowlisted host process %q was found", processName)
+	}
+	sort.Ints(pids)
+	return pids, names, cgroupPath, nil
+}
+
+func resolveTargetCgroupRoot(reportedPath, containerID string) (string, string, error) {
+	if containerID != "" {
+		return resolveCgroupRoot(reportedPath, containerID)
+	}
+	cleanPath := "/" + strings.TrimPrefix(filepath.Clean("/"+reportedPath), "/")
+	root := filepath.Join(hostCgroupRoot, strings.TrimPrefix(cleanPath, "/"))
+	if info, err := os.Stat(filepath.Join(root, "memory.current")); err != nil || info.IsDir() {
+		return "", "", errors.New("host process cgroup is unavailable")
+	}
+	return root, cleanPath, nil
+}
+
+func runMemoryProfile(opts options, pids []int, processNames []string, cgroupRoot, cgroupPath string) error {
+	started := time.Now().UTC()
+	warnings := make([]string, 0, 4)
+	var allocBefore string
+	goComponent := ""
+	if opts.kind == string(livediagnostics.ProbeMemoryProfile) {
+		status, err := fetchRuntimeDiagnosticJSON(pids[0], "/v1/status", 64<<10)
+		if err != nil {
+			warnings = append(warnings, "Go runtime profile endpoint unavailable; continuing with external process and cgroup sampling: "+err.Error())
+		} else {
+			goComponent, _ = status["component"].(string)
+			allocBefore = filepath.Join(opts.outputDir, "allocs-before.pb.gz")
+			if err := fetchRuntimeDiagnosticFile(pids[0], "/v1/profile/allocs", allocBefore, 8<<20); err != nil {
+				warnings = append(warnings, "initial Go allocation profile unavailable: "+err.Error())
+				allocBefore = ""
+			}
+		}
+	}
+	interval := time.Duration(opts.sampleIntervalMilliseconds) * time.Millisecond
+	deadline := started.Add(time.Duration(opts.duration) * time.Second)
+	samples := make([]memorySample, 0, opts.duration*1000/opts.sampleIntervalMilliseconds+2)
+	for {
+		process, processErr := readProcessSnapshot(pids)
+		cgroup, cgroupErr := readCgroupSnapshot(cgroupRoot)
+		if processErr != nil || cgroupErr != nil {
+			if processErr != nil {
+				warnings = append(warnings, "target process ended during memory sampling: "+processErr.Error())
+			}
+			if cgroupErr != nil {
+				warnings = append(warnings, "target cgroup became unavailable during memory sampling: "+cgroupErr.Error())
+			}
+			break
+		}
+		now := time.Now().UTC()
+		samples = append(samples, memorySample{ObservedAt: now, Process: process, Cgroup: cgroup})
+		if !now.Before(deadline) {
+			break
+		}
+		remaining := time.Until(deadline)
+		wait := interval
+		if remaining < wait {
+			wait = remaining
+		}
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+	}
+	finished := time.Now().UTC()
+	report := memoryReport{
+		Schema: "fugue.diagnostic." + strings.ReplaceAll(opts.kind, "-", "_") + ".v1", Kind: opts.kind,
+		StartedAt: started, FinishedAt: finished, DurationSeconds: opts.duration,
+		SampleIntervalMilliseconds: opts.sampleIntervalMilliseconds, TargetPIDs: pids, TargetContainerID: opts.containerID,
+		TargetProcessName: opts.processName, TargetProcesses: processNames, TargetCgroup: cgroupPath, Samples: samples,
+		GoComponent: goComponent, Warnings: warnings,
+	}
+	for _, sample := range samples {
+		if sample.Process.RSSBytes > report.PeakProcessRSSBytes {
+			report.PeakProcessRSSBytes = sample.Process.RSSBytes
+		}
+		if sample.Cgroup.MemoryBytes > report.PeakCgroupMemoryBytes {
+			report.PeakCgroupMemoryBytes = sample.Cgroup.MemoryBytes
+		}
+		if sample.Cgroup.MemoryPeak > report.PeakCgroupRecordedBytes {
+			report.PeakCgroupRecordedBytes = sample.Cgroup.MemoryPeak
+		}
+	}
+	if len(samples) > 0 {
+		first := samples[0].Cgroup.MemoryEvents
+		last := samples[len(samples)-1].Cgroup.MemoryEvents
+		report.OOMEventsDelta = subtractUint64(last["oom"], first["oom"])
+		report.OOMKillsDelta = subtractUint64(last["oom_kill"], first["oom_kill"])
+	}
+	if opts.kind == string(livediagnostics.ProbeMemoryProfile) && goComponent != "" {
+		heapAfter := filepath.Join(opts.outputDir, "heap-after.pb.gz")
+		allocAfter := filepath.Join(opts.outputDir, "allocs-after.pb.gz")
+		if err := fetchRuntimeDiagnosticFile(pids[0], "/v1/profile/heap", heapAfter, 8<<20); err != nil {
+			report.Warnings = append(report.Warnings, "final Go heap profile unavailable: "+err.Error())
+		} else if top, err := pprofTop("inuse_space", "", heapAfter); err != nil {
+			report.Warnings = append(report.Warnings, "Go live heap summary unavailable: "+err.Error())
+		} else {
+			report.GoInuseSpaceTop = top
+			report.GoRuntimeProfileAvailable = true
+		}
+		if allocBefore != "" {
+			if err := fetchRuntimeDiagnosticFile(pids[0], "/v1/profile/allocs", allocAfter, 8<<20); err != nil {
+				report.Warnings = append(report.Warnings, "final Go allocation profile unavailable: "+err.Error())
+			} else if top, err := pprofTop("alloc_space", allocBefore, allocAfter); err != nil {
+				report.Warnings = append(report.Warnings, "Go allocation delta summary unavailable: "+err.Error())
+			} else {
+				report.GoAllocSpaceDeltaTop = top
+			}
+		}
+	}
+	return json.NewEncoder(os.Stdout).Encode(report)
+}
+
+func fetchRuntimeDiagnosticJSON(pid int, endpoint string, maxBytes int64) (map[string]any, error) {
+	var value map[string]any
+	body, err := fetchRuntimeDiagnostic(pid, endpoint, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func fetchRuntimeDiagnosticFile(pid int, endpoint, filename string, maxBytes int64) error {
+	body, err := fetchRuntimeDiagnostic(pid, endpoint, maxBytes)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filename, body, 0o600)
+}
+
+func fetchRuntimeDiagnostic(pid int, endpoint string, maxBytes int64) ([]byte, error) {
+	socket := filepath.Join("/host/proc", strconv.Itoa(pid), "root", strings.TrimPrefix(livediagnostics.RuntimeSocketPath, "/"))
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", socket)
+	}}
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	defer transport.CloseIdleConnections()
+	response, err := client.Get("http://runtime" + endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("runtime endpoint returned %s", response.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, errors.New("runtime diagnostic profile exceeded its byte limit")
+	}
+	return body, nil
+}
+
+func pprofTop(sampleIndex, base, profile string) (string, error) {
+	args := []string{"-top", "-nodecount=40", "-sample_index=" + sampleIndex}
+	if base != "" {
+		args = append(args, "-base", base)
+	}
+	args = append(args, profile)
+	args = append([]string{"tool", "pprof"}, args...)
+	output, err := runCommand(context.Background(), "go", args...)
+	if err != nil {
+		return "", fmt.Errorf("pprof summary failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if len(output) > 128<<10 {
+		output = output[:128<<10]
+	}
+	return string(output), nil
+}
+
 func findContainerProcesses(containerID string) ([]int, []string, string, error) {
 	entries, err := os.ReadDir("/host/proc")
 	if err != nil {
@@ -384,6 +680,9 @@ func readProcessSnapshot(pids []int) (processSnapshot, error) {
 		read++
 		values := parseKeyValueLines(status)
 		snapshot.RSSBytes += values["VmRSS"] * 1024
+		snapshot.RSSAnonBytes += values["RssAnon"] * 1024
+		snapshot.RSSFileBytes += values["RssFile"] * 1024
+		snapshot.VirtualBytes += values["VmSize"] * 1024
 		snapshot.Threads += values["Threads"]
 		if fdEntries, err := os.ReadDir(filepath.Join(root, "fd")); err == nil {
 			snapshot.OpenFDs += uint64(len(fdEntries))
@@ -456,7 +755,26 @@ func readCgroupSnapshot(root string) (cgroupSnapshot, error) {
 	}
 	snapshot.MemoryBytes, _ = readUintFile(filepath.Join(root, "memory.current"))
 	snapshot.MemoryPeak, _ = readUintFile(filepath.Join(root, "memory.peak"))
+	snapshot.MemoryLimit, _ = readStringFile(filepath.Join(root, "memory.max"))
+	snapshot.MemoryHigh, _ = readStringFile(filepath.Join(root, "memory.high"))
+	snapshot.SwapBytes, _ = readUintFile(filepath.Join(root, "memory.swap.current"))
+	snapshot.SwapLimit, _ = readStringFile(filepath.Join(root, "memory.swap.max"))
 	snapshot.PIDs, _ = readUintFile(filepath.Join(root, "pids.current"))
+	if value, err := os.ReadFile(filepath.Join(root, "memory.events")); err == nil {
+		snapshot.MemoryEvents = parseKeyValueLines(value)
+	}
+	if value, err := os.ReadFile(filepath.Join(root, "memory.stat")); err == nil {
+		all := parseKeyValueLines(value)
+		snapshot.MemoryStat = make(map[string]uint64)
+		for _, key := range []string{"anon", "file", "kernel", "kernel_stack", "pagetables", "percpu", "sock", "shmem", "file_mapped", "slab", "pgfault", "pgmajfault", "workingset_refault_anon", "workingset_refault_file"} {
+			if measured, ok := all[key]; ok {
+				snapshot.MemoryStat[key] = measured
+			}
+		}
+	}
+	if value, err := os.ReadFile(filepath.Join(root, "memory.pressure")); err == nil {
+		snapshot.MemoryPressure = strings.TrimSpace(string(value))
+	}
 	return snapshot, nil
 }
 
@@ -481,6 +799,14 @@ func readUintFile(path string) (uint64, error) {
 		return 0, err
 	}
 	return strconv.ParseUint(strings.TrimSpace(string(value)), 10, 64)
+}
+
+func readStringFile(path string) (string, error) {
+	value, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(value)), nil
 }
 
 func cpuUsageDelta(before, after cgroupSnapshot, elapsed time.Duration) cpuUsage {
