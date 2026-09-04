@@ -32,6 +32,9 @@ func TestBuildJobSupportsContainerAndHostTargets(t *testing.T) {
 	if !strings.Contains(args, "--container-id containerd://abcdef1234567890") || !strings.Contains(args, "--kind memory-profile") {
 		t.Fatalf("unexpected container args %q", args)
 	}
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 540 {
+		t.Fatalf("memory profile deadline=%v, want 540", job.Spec.ActiveDeadlineSeconds)
+	}
 	hostTarget := Target{Type: TargetNodeProcess, Node: "node-2", ProcessName: "fugue-agent"}
 	job, err = BuildJob(hostTarget, "diagnostic-456", "fugue-system", image, "direct-kubernetes", StartRequest{Kind: ProbeProcessSample, DurationSeconds: 30})
 	if err != nil {

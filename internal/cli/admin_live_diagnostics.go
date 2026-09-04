@@ -56,7 +56,7 @@ func (c *CLI) newAdminDiagnosticsStartCommand(opts *platformDiagnosticCommandOpt
 		Kind:   livediagnostics.ProbeCPUProfile, DurationSeconds: 60, FrequencyHz: 19, SampleIntervalMilliseconds: 1000,
 	}
 	wait := false
-	waitTimeout := 8 * time.Minute
+	waitTimeout := 11 * time.Minute
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start a platform live diagnostic session",

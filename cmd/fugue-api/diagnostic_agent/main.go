@@ -31,6 +31,7 @@ const (
 	maxFrequency           = 99
 	maxCgroupSearchEntries = 20000
 	hostCgroupRoot         = "/sys/fs/cgroup"
+	pprofAnalysisTimeout   = 90 * time.Second
 )
 
 type options struct {
@@ -596,12 +597,17 @@ func pprofTop(sampleIndex, base, profile string) (string, error) {
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 		return "", fmt.Errorf("create pprof temporary directory: %w", err)
 	}
-	output, err := runCommandWithEnvironment(context.Background(), []string{
+	ctx, cancel := context.WithTimeout(context.Background(), pprofAnalysisTimeout)
+	defer cancel()
+	output, err := runCommandWithEnvironment(ctx, []string{
 		"HOME=" + workingDir,
 		"GOCACHE=" + cacheDir,
 		"GOTMPDIR=" + tmpDir,
 	}, "go", args...)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("pprof summary exceeded %s", pprofAnalysisTimeout)
+		}
 		return "", fmt.Errorf("pprof summary failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	if len(output) > 128<<10 {

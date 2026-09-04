@@ -231,7 +231,11 @@ func BuildJob(target Target, sessionID, sessionNamespace, runnerImage, controlPa
 		args = append(args, "--container-id", target.ContainerID)
 	}
 	zero := int32(0)
-	activeDeadline := int64(probe.DurationSeconds + 45)
+	analysisAllowanceSeconds := 45
+	if probe.Kind == ProbeMemoryProfile {
+		analysisAllowanceSeconds = 240
+	}
+	activeDeadline := int64(probe.DurationSeconds + analysisAllowanceSeconds)
 	privileged := false
 	readOnly := true
 	allowPrivilegeEscalation := false
