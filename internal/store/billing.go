@@ -233,6 +233,18 @@ func normalizeAppSpecResources(spec *model.AppSpec) error {
 	if spec.RightSizing != nil && model.NormalizeAppRightSizingMode(spec.RightSizing.Mode) == "" {
 		return ErrInvalidInput
 	}
+	// Persist a small CPU scheduling guarantee for new or explicitly changed
+	// app specs. Keeping this normalization out of the renderer avoids silently
+	// changing the Pod template of every legacy app during a code release.
+	if spec.Resources == nil {
+		spec.Resources = &model.ResourceSpec{
+			CPUMilliCores: model.DefaultAppCPURequestMilliCores(spec.WorkloadClass),
+		}
+	} else if spec.Resources.CPUMilliCores == 0 && spec.Resources.CPULimitMilliCores == 0 {
+		resources := *spec.Resources
+		resources.CPUMilliCores = model.DefaultAppCPURequestMilliCores(spec.WorkloadClass)
+		spec.Resources = &resources
+	}
 	resources, err := normalizeOptionalWorkloadResources(spec.Resources)
 	if err != nil {
 		return err

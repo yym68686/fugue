@@ -234,9 +234,6 @@ func managedReadyAppNodesByNode(app model.App, pods []kubePod) map[string]struct
 }
 
 func managedSharedNodeCandidateFitsPolicy(candidate managedSharedNodeCandidate, request managedSharedNodeRequests, policy appPlacementPolicy) bool {
-	if candidate.allocatableCPUMilli > 0 && candidate.requestedCPUMilli+request.cpuMilli > resourceCapacityWithRatio(candidate.allocatableCPUMilli, policy.cpuOvercommitRatio) {
-		return false
-	}
 	if candidate.allocatableMemoryBytes > 0 && candidate.requestedMemoryBytes+request.memoryBytes > resourceCapacityWithRatio(candidate.allocatableMemoryBytes, policy.memoryRequestRatio) {
 		return false
 	}

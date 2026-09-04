@@ -25,10 +25,10 @@ const (
 	DefaultTenantFreeManagedMemoryMebibytes  int64 = 512
 	DefaultTenantFreeManagedStorageGibibytes int64 = 20
 
-	DefaultManagedAppCPUMilliCores         int64 = 250
+	DefaultManagedAppCPUMilliCores         int64 = 25
 	DefaultManagedAppMemoryMebibytes       int64 = 512
 	DefaultManagedAppStorageGibibytes      int64 = 0
-	DefaultManagedPostgresCPUMilliCores    int64 = 250
+	DefaultManagedPostgresCPUMilliCores    int64 = 100
 	DefaultManagedPostgresMemoryMebibytes  int64 = 512
 	DefaultManagedPostgresStorageGibibytes int64 = 20
 
@@ -105,6 +105,19 @@ func DefaultManagedAppResources() ResourceSpec {
 	return ResourceSpec{
 		CPUMilliCores:   DefaultManagedAppCPUMilliCores,
 		MemoryMebibytes: DefaultManagedAppMemoryMebibytes,
+	}
+}
+
+// DefaultAppCPURequestMilliCores returns the small guaranteed CPU share used
+// for scheduling and contention. It is intentionally not a capacity forecast.
+func DefaultAppCPURequestMilliCores(workloadClass string) int64 {
+	switch NormalizeWorkloadClass(workloadClass) {
+	case WorkloadClassDemo:
+		return 10
+	case WorkloadClassCritical:
+		return 100
+	default:
+		return DefaultManagedAppCPUMilliCores
 	}
 }
 

@@ -77,3 +77,17 @@ func TestSelectManagedSharedAppNodePreservesReadyNodeAbovePlacementBudget(t *tes
 		t.Fatalf("expected serving node-a to remain pinned, got node=%q found=%t", nodeName, found)
 	}
 }
+
+func TestManagedSharedAppPlacementUsesCPUOnlyAsRankingWeight(t *testing.T) {
+	t.Parallel()
+
+	candidate := managedSharedNodeCandidate{
+		allocatableCPUMilli:    1000,
+		requestedCPUMilli:      5000,
+		allocatableMemoryBytes: 4 * 1024 * 1024 * 1024,
+	}
+	request := managedSharedNodeRequests{cpuMilli: 500, memoryBytes: 512 * 1024 * 1024}
+	if !managedSharedNodeCandidateFitsPolicy(candidate, request, appPlacementPolicy{cpuOvercommitRatio: 1, memoryRequestRatio: 0.9}) {
+		t.Fatal("expected CPU request pressure not to eliminate an otherwise safe placement candidate")
+	}
+}

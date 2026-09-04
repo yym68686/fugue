@@ -1508,7 +1508,7 @@ func TestBuildAppDeploymentOmitsResourcesWhenUnset(t *testing.T) {
 	podSpec := template["spec"].(map[string]any)
 	containers := podSpec["containers"].([]map[string]any)
 	if _, ok := containers[0]["resources"]; ok {
-		t.Fatalf("expected app container resources to be omitted when unset, got %#v", containers[0]["resources"])
+		t.Fatalf("expected legacy app container resources to be omitted when unset, got %#v", containers[0]["resources"])
 	}
 }
 
@@ -1550,7 +1550,7 @@ func TestBuildAppDeploymentIncludesExplicitResources(t *testing.T) {
 		t.Fatalf("expected memory limit 1536Mi, got %#v", got)
 	}
 	if _, ok := requests["cpu"]; ok {
-		t.Fatalf("expected cpu request to remain unset, got %#v", requests["cpu"])
+		t.Fatalf("expected renderer to preserve an explicitly absent CPU request, got %#v", requests["cpu"])
 	}
 	if _, ok := limits["cpu"]; ok {
 		t.Fatalf("expected cpu limit to remain unset, got %#v", limits["cpu"])
@@ -1588,8 +1588,8 @@ func TestBuildAppDeploymentAppliesResourceLimitsByWorkloadClass(t *testing.T) {
 		},
 	})
 	criticalLimits := resourceStringValues(t, criticalResources["limits"])
-	if got := criticalLimits["cpu"]; got != "250m" {
-		t.Fatalf("expected critical cpu limit to match request, got %#v", got)
+	if _, ok := criticalLimits["cpu"]; ok {
+		t.Fatalf("expected critical CPU limit to remain unset, got %#v", criticalLimits["cpu"])
 	}
 	if got := criticalLimits["memory"]; got != "512Mi" {
 		t.Fatalf("expected critical memory limit to match request, got %#v", got)

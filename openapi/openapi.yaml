@@ -13546,7 +13546,7 @@ components:
     ResourceRightSizingPolicy:
       type: object
       additionalProperties: false
-      required: [window_hours, min_samples, cpu_percentile, cpu_multiplier, cpu_floor_millicores, memory_percentile, memory_multiplier, memory_floor_mebibytes]
+      required: [window_hours, min_samples, cpu_percentile, cpu_multiplier, cpu_request_percentile, cpu_request_multiplier, cpu_floor_millicores, memory_percentile, memory_multiplier, memory_floor_mebibytes]
       properties:
         window_hours:
           type: integer
@@ -13557,12 +13557,23 @@ components:
         cpu_percentile:
           type: number
           format: double
+          description: Historical CPU percentile used for capacity planning.
         cpu_multiplier:
           type: number
           format: double
+          description: Multiplier applied to historical CPU usage for capacity planning.
+        cpu_request_percentile:
+          type: number
+          format: double
+          description: Historical CPU percentile used for the Kubernetes request guarantee.
+        cpu_request_multiplier:
+          type: number
+          format: double
+          description: Multiplier applied to the CPU request guarantee percentile.
         cpu_floor_millicores:
           type: integer
           format: int64
+          description: Minimum Kubernetes CPU request guarantee for this workload class.
         memory_percentile:
           type: number
           format: double
@@ -13597,6 +13608,14 @@ components:
           $ref: "#/components/schemas/ResourceSpec"
         recommended:
           $ref: "#/components/schemas/ResourceSpec"
+          description: >-
+            Capacity recommendation derived from historical usage. Its CPU value is a
+            planning target and is not written directly to the Kubernetes CPU request.
+        request_target:
+          $ref: "#/components/schemas/ResourceSpec"
+          description: >-
+            Resource target applied by right-sizing. CPU is a small guaranteed share;
+            memory retains the safety-oriented capacity recommendation.
         policy:
           $ref: "#/components/schemas/ResourceRightSizingPolicy"
         ready:

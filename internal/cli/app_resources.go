@@ -173,7 +173,7 @@ func (c *CLI) newAppResourcesRecommendCommand() *cobra.Command {
 	opts := appResourcesOptions{WindowHours: 168, MinSamples: 12}
 	cmd := &cobra.Command{
 		Use:   "recommend <app>",
-		Short: "Show resource request recommendations",
+		Short: "Show resource capacity and request recommendations",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -202,7 +202,7 @@ func (c *CLI) newAppResourcesApplyCommand() *cobra.Command {
 	opts := appResourcesOptions{WindowHours: 168, MinSamples: 12}
 	cmd := &cobra.Command{
 		Use:   "apply <app>",
-		Short: "Queue a deploy operation with recommended resource requests",
+		Short: "Queue a deploy operation with recommended request targets",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -323,7 +323,7 @@ func writeResourceRecommendationTable(w io.Writer, recommendation model.AppRight
 	rows := []model.ResourceRightSizingRecommendation{recommendation.App}
 	rows = append(rows, recommendation.BackingServices...)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "TARGET\tCLASS\tSAMPLES\tCURRENT\tRECOMMENDED\tREADY\tREASON"); err != nil {
+	if _, err := fmt.Fprintln(tw, "TARGET\tCLASS\tSAMPLES\tCURRENT\tREQUEST TARGET\tCAPACITY\tREADY\tREASON"); err != nil {
 		return err
 	}
 	for _, row := range rows {
@@ -336,12 +336,13 @@ func writeResourceRecommendationTable(w io.Writer, recommendation model.AppRight
 		}
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%d\t%s\t%s\t%t\t%s\n",
+			"%s\t%s\t%d\t%s\t%s\t%s\t%t\t%s\n",
 			target,
 			row.WorkloadClass,
 			row.SampleCount,
 			formatResourceSpec(row.Current),
-			formatResourceSpec(row.Recommended),
+			formatResourceSpec(row.RequestTarget),
+			formatCapacitySpec(row.Recommended),
 			row.Ready,
 			row.Reason,
 		); err != nil {
@@ -349,6 +350,20 @@ func writeResourceRecommendationTable(w io.Writer, recommendation model.AppRight
 		}
 	}
 	return tw.Flush()
+}
+
+func formatCapacitySpec(spec *model.ResourceSpec) string {
+	if spec == nil {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if spec.CPUMilliCores > 0 {
+		parts = append(parts, fmt.Sprintf("%dm CPU", spec.CPUMilliCores))
+	}
+	if spec.MemoryMebibytes > 0 {
+		parts = append(parts, fmt.Sprintf("%dMi RAM", spec.MemoryMebibytes))
+	}
+	return strings.Join(parts, " / ")
 }
 
 func formatResourceSpec(spec *model.ResourceSpec) string {

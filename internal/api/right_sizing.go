@@ -25,9 +25,9 @@ const (
 
 	rightSizingAutoApplyRequestedByID     = model.OperationRequestedByRightSizing
 	rightSizingAutoDownscaleRequestedByID = model.OperationRequestedByRightSizingDownscale
-	rightSizingAutoApplyMinCPUIncrease    = int64(50)
+	rightSizingAutoApplyMinCPUIncrease    = int64(5)
 	rightSizingAutoApplyMinMemIncrease    = int64(128)
-	rightSizingAutoApplyMinCPUIncreaseR   = 0.25
+	rightSizingAutoApplyMinCPUIncreaseR   = 0.20
 	rightSizingAutoApplyMinMemIncreaseR   = 0.20
 	rightSizingAutoApplyMinCPUDecrease    = int64(5)
 	rightSizingAutoApplyMinMemDecrease    = int64(256)
@@ -35,6 +35,7 @@ const (
 	rightSizingAutoApplyMinMemDecreaseR   = 0.20
 	rightSizingAutoDownscaleStepRatio     = 0.75
 	rightSizingAutoDownscaleOOMWindow     = 48 * time.Hour
+	rightSizingRolloutCPUHeadroomRatio    = 0.15
 )
 
 func (s *Server) handleGetAppResourceRecommendation(w http.ResponseWriter, r *http.Request) {
@@ -163,12 +164,12 @@ func (s *Server) applyAppRightSizingRecommendation(
 		return recommendation, nil, false, err
 	}
 	changed := false
-	if recommendation.App.Ready && recommendation.App.Recommended != nil && !resourceSpecsEqual(spec.Resources, recommendation.App.Recommended) {
-		spec.Resources = cloneResourceSpec(recommendation.App.Recommended)
+	if recommendation.App.Ready && recommendation.App.RequestTarget != nil && !resourceSpecsEqual(spec.Resources, recommendation.App.RequestTarget) {
+		spec.Resources = cloneResourceSpec(recommendation.App.RequestTarget)
 		changed = true
 	}
 	for _, serviceRecommendation := range recommendation.BackingServices {
-		if !serviceRecommendation.Ready || serviceRecommendation.Recommended == nil {
+		if !serviceRecommendation.Ready || serviceRecommendation.RequestTarget == nil {
 			continue
 		}
 		service := findBackingServiceByID(app.BackingServices, serviceRecommendation.TargetID)
@@ -176,13 +177,13 @@ func (s *Server) applyAppRightSizingRecommendation(
 			continue
 		}
 		current := service.Spec.Postgres.Resources
-		if resourceSpecsEqual(current, serviceRecommendation.Recommended) {
+		if resourceSpecsEqual(current, serviceRecommendation.RequestTarget) {
 			continue
 		}
 		if spec.Postgres == nil {
 			spec.Postgres = model.CloneAppPostgresSpec(service.Spec.Postgres)
 		}
-		spec.Postgres.Resources = cloneResourceSpec(serviceRecommendation.Recommended)
+		spec.Postgres.Resources = cloneResourceSpec(serviceRecommendation.RequestTarget)
 		changed = true
 	}
 	if !changed {
@@ -224,50 +225,61 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	if err != nil {
 		return recommendation, nil, false, err
 	}
-	decision := autoRightSizingAppResourceChange(spec.Resources, recommendation.App.Recommended)
+	decision := autoRightSizingAppResourceChange(spec.Resources, recommendation.App.RequestTarget)
 	if !recommendation.App.Ready || !decision.allowed {
 		if !recommendation.App.Ready {
 			s.logRightSizingDecision(app, "recommendation_not_ready", "right-sizing auto apply skipped because recommendation is not ready", map[string]any{
-				"sample_count":  recommendation.App.SampleCount,
-				"min_samples":   recommendation.App.Policy.MinSamples,
-				"window_hours":  recommendation.App.WindowHours,
-				"requested_by":  rightSizingAutoApplyRequestedByID,
-				"target_kind":   recommendation.App.TargetKind,
-				"target_id":     recommendation.App.TargetID,
-				"target_name":   recommendation.App.TargetName,
-				"current":       rightSizingResourceSummary(recommendation.App.Current),
-				"recommended":   rightSizingResourceSummary(recommendation.App.Recommended),
-				"last_observed": recommendation.App.LastSampleObservedAt,
+				"sample_count":   recommendation.App.SampleCount,
+				"min_samples":    recommendation.App.Policy.MinSamples,
+				"window_hours":   recommendation.App.WindowHours,
+				"requested_by":   rightSizingAutoApplyRequestedByID,
+				"target_kind":    recommendation.App.TargetKind,
+				"target_id":      recommendation.App.TargetID,
+				"target_name":    recommendation.App.TargetName,
+				"current":        rightSizingResourceSummary(recommendation.App.Current),
+				"capacity":       rightSizingResourceSummary(recommendation.App.Recommended),
+				"request_target": rightSizingResourceSummary(recommendation.App.RequestTarget),
+				"last_observed":  recommendation.App.LastSampleObservedAt,
 			})
 		} else {
 			s.logRightSizingDecision(app, "change_below_threshold", "right-sizing auto apply skipped because recommendation is already current or below threshold", map[string]any{
-				"sample_count": recommendation.App.SampleCount,
-				"min_samples":  recommendation.App.Policy.MinSamples,
-				"window_hours": recommendation.App.WindowHours,
-				"requested_by": rightSizingAutoApplyRequestedByID,
-				"current":      rightSizingResourceSummary(spec.Resources),
-				"recommended":  rightSizingResourceSummary(recommendation.App.Recommended),
+				"sample_count":   recommendation.App.SampleCount,
+				"min_samples":    recommendation.App.Policy.MinSamples,
+				"window_hours":   recommendation.App.WindowHours,
+				"requested_by":   rightSizingAutoApplyRequestedByID,
+				"current":        rightSizingResourceSummary(spec.Resources),
+				"capacity":       rightSizingResourceSummary(recommendation.App.Recommended),
+				"request_target": rightSizingResourceSummary(recommendation.App.RequestTarget),
 			})
 		}
 		return recommendation, nil, true, nil
 	}
 
-	if decision.downscale {
+	if decision.memoryDownscale {
 		hasRecentOOM, err := s.appHasRecentOOMRightSizingOperation(app, time.Now().UTC().Add(-rightSizingAutoDownscaleOOMWindow))
 		if err != nil {
 			return recommendation, nil, false, err
 		}
 		if hasRecentOOM {
-			s.logRightSizingDecision(app, "recent_oom_blocked", "right-sizing auto downscale skipped because a recent OOM right-sizing operation exists", map[string]any{
+			current := model.ResourceSpec{}
+			if spec.Resources != nil {
+				current = *spec.Resources
+			}
+			decision.resources.MemoryMebibytes = current.MemoryMebibytes
+			decision.resources.MemoryLimitMebibytes = current.MemoryLimitMebibytes
+			decision.memoryDownscale = false
+			s.logRightSizingDecision(app, "recent_oom_memory_blocked", "right-sizing preserved memory after a recent OOM event", map[string]any{
 				"requested_by": decision.requestedByID,
 				"current":      rightSizingResourceSummary(spec.Resources),
 				"target":       rightSizingResourceSummary(decision.resources),
 			})
-			return recommendation, nil, true, nil
+			if resourceSpecsEqual(spec.Resources, decision.resources) {
+				return recommendation, nil, true, nil
+			}
 		}
 	}
 	spec.Resources = cloneResourceSpec(decision.resources)
-	if reason, err := s.autoRightSizingAdmission(app, spec); err != nil {
+	if reason, err := s.autoRightSizingAdmission(app, spec, recommendation.App.Recommended); err != nil {
 		s.logRightSizingDecision(app, "capacity_check_failed", "right-sizing auto apply skipped because rollout capacity could not be verified", map[string]any{
 			"requested_by": decision.requestedByID,
 			"target":       rightSizingResourceSummary(spec.Resources),
@@ -350,8 +362,11 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 // autoRightSizingAdmission keeps known rollout incompatibilities out of the
 // operation queue. The controller has the final authority, but an automatic
 // resize should never enqueue an operation that cannot satisfy its serving
-// contract or fit a surge pod on the current cluster.
-func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec) (string, error) {
+// contract, retain memory for a surge pod, or preserve actual CPU headroom.
+// Kubernetes CPU requests remain a small contention guarantee and are not a
+// capacity forecast, so scheduler-request totals are deliberately not used as
+// the CPU admission signal here.
+func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec, capacity *model.ResourceSpec) (string, error) {
 	if !model.AppZeroDowntimeRequired(desired) {
 		return "", nil
 	}
@@ -391,8 +406,13 @@ func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec) 
 			targetNodeName = strings.TrimSpace(runtimeObj.ClusterNodeName)
 		}
 	}
-	requiredCPU := maxInt64(0, resources.CPUMilliCores)
+	requiredCPUCapacity := maxInt64(0, resources.CPUMilliCores)
+	if capacity != nil {
+		requiredCPUCapacity = maxInt64(requiredCPUCapacity, capacity.CPUMilliCores)
+	}
 	requiredMemory := maxInt64(0, resources.MemoryMebibytes) * 1024 * 1024
+	foundReadyNode := false
+	foundCPUHeadroom := false
 	for _, snapshot := range snapshots {
 		if !rightSizingCapacitySnapshotMatchesRuntime(snapshot, targetRuntimeID, targetNodeName) {
 			continue
@@ -400,14 +420,23 @@ func (s *Server) autoRightSizingAdmission(app model.App, desired model.AppSpec) 
 		if !strings.EqualFold(strings.TrimSpace(snapshot.node.Status), "ready") || snapshot.node.CPU == nil || snapshot.node.Memory == nil {
 			continue
 		}
-		if snapshot.node.CPU.SchedulableFreeMilliCores == nil || snapshot.node.Memory.SchedulableFreeBytes == nil {
+		if snapshot.node.CPU.AllocatableMilliCores == nil || snapshot.node.CPU.UsedMilliCores == nil || snapshot.node.Memory.SchedulableFreeBytes == nil {
 			continue
 		}
-		if *snapshot.node.CPU.SchedulableFreeMilliCores >= requiredCPU && *snapshot.node.Memory.SchedulableFreeBytes >= requiredMemory {
+		foundReadyNode = true
+		cpuBudget := int64(math.Floor(float64(*snapshot.node.CPU.AllocatableMilliCores) * (1 - rightSizingRolloutCPUHeadroomRatio)))
+		if *snapshot.node.CPU.UsedMilliCores+requiredCPUCapacity > cpuBudget {
+			continue
+		}
+		foundCPUHeadroom = true
+		if *snapshot.node.Memory.SchedulableFreeBytes >= requiredMemory {
 			return "", nil
 		}
 	}
-	return "", fmt.Errorf("no ready cluster node has capacity for the right-sizing surge pod (%dm CPU, %dMi memory)", requiredCPU, requiredMemory/(1024*1024))
+	if foundReadyNode && !foundCPUHeadroom {
+		return "", fmt.Errorf("no ready cluster node preserves %.0f%% actual CPU headroom for the right-sizing surge capacity (%dm)", rightSizingRolloutCPUHeadroomRatio*100, requiredCPUCapacity)
+	}
+	return "", fmt.Errorf("no ready cluster node has %dMi schedulable memory for the right-sizing surge pod", requiredMemory/(1024*1024))
 }
 
 func rightSizingCapacitySnapshotMatchesRuntime(snapshot clusterNodeSnapshot, targetRuntimeID, targetNodeName string) bool {
@@ -447,10 +476,11 @@ func (s *Server) appHasRecentAutoRightSizingFailure(app model.App, desired model
 }
 
 type autoRightSizingAppResourceDecision struct {
-	allowed       bool
-	downscale     bool
-	requestedByID string
-	resources     *model.ResourceSpec
+	allowed         bool
+	downscale       bool
+	memoryDownscale bool
+	requestedByID   string
+	resources       *model.ResourceSpec
 }
 
 func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) autoRightSizingAppResourceDecision {
@@ -482,11 +512,6 @@ func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) 
 		rightSizingAutoApplyMinMemIncrease,
 		rightSizingAutoApplyMinMemIncreaseR,
 	)
-	if materialCPUIncrease || materialMemoryIncrease {
-		decision.allowed = true
-		decision.resources = autoRightSizingUpscaleTarget(effectiveCurrent, *recommended)
-		return decision
-	}
 	materialCPUDecrease := materialResourceDecrease(
 		effectiveCurrent.CPUMilliCores,
 		recommended.CPUMilliCores,
@@ -499,6 +524,15 @@ func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) 
 		rightSizingAutoApplyMinMemDecrease,
 		rightSizingAutoApplyMinMemDecreaseR,
 	)
+	if materialCPUIncrease || materialMemoryIncrease {
+		decision.allowed = true
+		decision.resources = autoRightSizingUpscaleTarget(effectiveCurrent, *recommended)
+		if materialCPUDecrease {
+			// A memory safety increase must not keep an inflated CPU reservation.
+			decision.resources.CPUMilliCores = recommended.CPUMilliCores
+		}
+		return decision
+	}
 	if materialCPUDecrease || materialMemoryDecrease {
 		target := autoRightSizingDownscaleTarget(
 			effectiveCurrent,
@@ -511,6 +545,7 @@ func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) 
 		}
 		decision.allowed = true
 		decision.downscale = true
+		decision.memoryDownscale = materialMemoryDecrease
 		decision.requestedByID = rightSizingAutoDownscaleRequestedByID
 		decision.resources = target
 		return decision
@@ -553,10 +588,9 @@ func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec, dow
 	defaults := model.DefaultManagedAppResources()
 	target := current
 	if downscaleCPU && recommended.CPUMilliCores < current.CPUMilliCores {
-		target.CPUMilliCores = gradualCPUDownscaleTarget(current.CPUMilliCores, recommended.CPUMilliCores)
-		if recommended.CPULimitMilliCores < current.CPULimitMilliCores {
-			target.CPULimitMilliCores = gradualCPUDownscaleTarget(current.CPULimitMilliCores, recommended.CPULimitMilliCores)
-		}
+		// CPU is compressible. Converge directly to the measured guarantee;
+		// gradual reduction is retained only for memory where OOM risk exists.
+		target.CPUMilliCores = recommended.CPUMilliCores
 	}
 	if downscaleMemory && recommended.MemoryMebibytes < current.MemoryMebibytes {
 		floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
@@ -574,14 +608,6 @@ func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec, dow
 		}
 	}
 	return &target
-}
-
-func gradualCPUDownscaleTarget(current, recommended int64) int64 {
-	floor := roundUpInt64(int64(math.Ceil(float64(current)*rightSizingAutoDownscaleStepRatio)), 5)
-	if floor >= current {
-		floor = maxInt64(0, current-5)
-	}
-	return min(current, maxInt64(recommended, floor))
 }
 
 func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) {
@@ -692,9 +718,12 @@ func buildRightSizingRecommendation(
 		out.Reason = "samples do not include CPU or memory usage"
 		return out
 	}
+	// Capacity is evidence-only: an unobserved dimension stays unknown instead
+	// of being mislabeled with the current Kubernetes request.
 	rec := &model.ResourceSpec{}
+	requestTarget := &model.ResourceSpec{}
 	if current != nil {
-		*rec = *current
+		*requestTarget = *current
 	}
 	if len(cpuValues) > 0 {
 		sort.Slice(cpuValues, func(i, j int) bool { return cpuValues[i] < cpuValues[j] })
@@ -702,11 +731,17 @@ func buildRightSizingRecommendation(
 		out.PeakCPUUsageMilli = &peak
 		value := int64(math.Ceil(float64(percentileInt64(cpuValues, policy.CPUPercentile)) * policy.CPUMultiplier))
 		rec.CPUMilliCores = maxInt64(policy.CPUFloorMilli, roundUpInt64(value, 5))
-		if workloadClass == model.WorkloadClassCritical {
-			rec.CPULimitMilliCores = rec.CPUMilliCores
-		} else {
-			rec.CPULimitMilliCores = 0
+		rec.CPULimitMilliCores = 0
+
+		requestValue := int64(math.Ceil(float64(percentileInt64(cpuValues, policy.CPURequestPercentile)) * policy.CPURequestMultiplier))
+		requestTarget.CPUMilliCores = maxInt64(policy.CPUFloorMilli, roundUpInt64(requestValue, 5))
+		// Preserve explicit CPU limits. The runtime no longer synthesizes a
+		// limit from the request, but right-sizing must not erase user intent.
+		if requestTarget.CPULimitMilliCores > 0 && requestTarget.CPULimitMilliCores < requestTarget.CPUMilliCores {
+			requestTarget.CPULimitMilliCores = requestTarget.CPUMilliCores
 		}
+	} else if requestTarget.CPUMilliCores <= 0 {
+		requestTarget.CPUMilliCores = policy.CPUFloorMilli
 	}
 	if len(memoryValues) > 0 {
 		sort.Slice(memoryValues, func(i, j int) bool { return memoryValues[i] < memoryValues[j] })
@@ -722,24 +757,29 @@ func buildRightSizingRecommendation(
 		} else {
 			rec.MemoryLimitMebibytes = maxInt64(rec.MemoryMebibytes+128, rec.MemoryMebibytes*2)
 		}
+		requestTarget.MemoryMebibytes = rec.MemoryMebibytes
+		requestTarget.MemoryLimitMebibytes = rec.MemoryLimitMebibytes
 	}
 	out.Recommended = rec
+	out.RequestTarget = requestTarget
 	out.Ready = true
-	out.AlreadyCurrent = resourceSpecsEqual(current, rec)
+	out.AlreadyCurrent = resourceSpecsEqual(current, requestTarget)
 	out.Reason = ""
 	return out
 }
 
 func rightSizingPolicy(workloadClass, serviceType string, windowHours, minSamples int) model.ResourceRightSizingPolicy {
 	policy := model.ResourceRightSizingPolicy{
-		WindowHours:      windowHours,
-		MinSamples:       minSamples,
-		CPUPercentile:    0.95,
-		CPUMultiplier:    1.5,
-		CPUFloorMilli:    25,
-		MemoryPercentile: 0.99,
-		MemoryMultiplier: 1.2,
-		MemoryFloorMiB:   64,
+		WindowHours:          windowHours,
+		MinSamples:           minSamples,
+		CPUPercentile:        0.95,
+		CPUMultiplier:        1.5,
+		CPURequestPercentile: 0.50,
+		CPURequestMultiplier: 1.0,
+		CPUFloorMilli:        25,
+		MemoryPercentile:     0.99,
+		MemoryMultiplier:     1.2,
+		MemoryFloorMiB:       64,
 	}
 	switch workloadClass {
 	case model.WorkloadClassDemo:
@@ -750,10 +790,12 @@ func rightSizingPolicy(workloadClass, serviceType string, windowHours, minSample
 		policy.MemoryFloorMiB = 64
 	case model.WorkloadClassCritical:
 		policy.CPUFloorMilli = 100
+		policy.CPURequestPercentile = 0.75
 		policy.MemoryFloorMiB = 128
 	}
 	if serviceType == model.BackingServiceTypePostgres {
 		policy.CPUFloorMilli = 100
+		policy.CPURequestPercentile = 0.75
 		policy.MemoryFloorMiB = 256
 		policy.MemoryMultiplier = 1.5
 	}

@@ -27,6 +27,20 @@ func TestManagedPostgresPlacementRequestUsesRuntimeTarget(t *testing.T) {
 	}
 }
 
+func TestManagedPostgresPlacementUsesCPUOnlyAsRankingWeight(t *testing.T) {
+	t.Parallel()
+
+	candidate := managedSharedNodeCandidate{
+		allocatableCPUMilli:    1000,
+		requestedCPUMilli:      5000,
+		allocatableMemoryBytes: 4 * 1024 * 1024 * 1024,
+	}
+	request := managedSharedNodeRequests{cpuMilli: 500, memoryBytes: 512 * 1024 * 1024}
+	if !candidate.fits(request) {
+		t.Fatal("expected CPU request pressure not to eliminate an otherwise safe postgres placement candidate")
+	}
+}
+
 func TestKubePodRequestsMatchesRestartableInitSchedulingSemantics(t *testing.T) {
 	t.Parallel()
 

@@ -12,7 +12,6 @@ import (
 
 type rolloutCapacityCandidate struct {
 	nodeName               string
-	remainingCPUMilli      int64
 	remainingMemoryBytes   int64
 	remainingEphemeralByte int64
 }
@@ -45,7 +44,10 @@ func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeCl
 		return "", nil
 	}
 	request := deploymentTemplateRequests(deployment)
-	if request == (managedSharedNodeRequests{}) {
+	// CPU is compressible and its request is a contention guarantee, not a
+	// forecast of the surge Pod's peak demand. Kubernetes still enforces that
+	// request; Fugue's preflight only hard-gates non-compressible resources.
+	if request.memoryBytes <= 0 && request.ephemeralBytes <= 0 {
 		return "", nil
 	}
 	pods, found, err := client.listAllPods(ctx)
@@ -71,7 +73,6 @@ func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeCl
 		requested := requestsByNode[nodeName]
 		candidate := rolloutCapacityCandidate{
 			nodeName:               nodeName,
-			remainingCPUMilli:      parseKubeResourceMilli(node.Status.Allocatable["cpu"]) - requested.cpuMilli,
 			remainingMemoryBytes:   parseKubeResourceBytes(node.Status.Allocatable["memory"]) - requested.memoryBytes,
 			remainingEphemeralByte: parseKubeResourceBytes(node.Status.Allocatable["ephemeral-storage"]) - requested.ephemeralBytes,
 		}
@@ -88,11 +89,11 @@ func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeCl
 	sort.SliceStable(candidates, func(i, j int) bool {
 		left := candidates[i]
 		right := candidates[j]
-		if left.remainingCPUMilli != right.remainingCPUMilli {
-			return left.remainingCPUMilli > right.remainingCPUMilli
-		}
 		if left.remainingMemoryBytes != right.remainingMemoryBytes {
 			return left.remainingMemoryBytes > right.remainingMemoryBytes
+		}
+		if left.remainingEphemeralByte != right.remainingEphemeralByte {
+			return left.remainingEphemeralByte > right.remainingEphemeralByte
 		}
 		return left.nodeName < right.nodeName
 	})
@@ -182,9 +183,6 @@ func kubeTaintTolerated(taint kubeTaint, tolerations []runtimepkg.Toleration) bo
 }
 
 func rolloutCapacityCandidateFits(candidate rolloutCapacityCandidate, request managedSharedNodeRequests) bool {
-	if candidate.remainingCPUMilli < request.cpuMilli {
-		return false
-	}
 	if candidate.remainingMemoryBytes < request.memoryBytes {
 		return false
 	}
@@ -195,10 +193,7 @@ func rolloutCapacityCandidateFits(candidate rolloutCapacityCandidate, request ma
 }
 
 func formatRolloutCapacityRequest(request managedSharedNodeRequests) string {
-	parts := []string{
-		fmt.Sprintf("%dm CPU", request.cpuMilli),
-		fmt.Sprintf("%dMi memory", bytesToMiB(request.memoryBytes)),
-	}
+	parts := []string{fmt.Sprintf("%dMi memory", bytesToMiB(request.memoryBytes))}
 	if request.ephemeralBytes > 0 {
 		parts = append(parts, fmt.Sprintf("%dMi ephemeral-storage", bytesToMiB(request.ephemeralBytes)))
 	}
@@ -206,10 +201,7 @@ func formatRolloutCapacityRequest(request managedSharedNodeRequests) string {
 }
 
 func formatRolloutCapacityCandidate(candidate rolloutCapacityCandidate) string {
-	parts := []string{
-		fmt.Sprintf("%dm CPU", candidate.remainingCPUMilli),
-		fmt.Sprintf("%dMi memory", bytesToMiB(candidate.remainingMemoryBytes)),
-	}
+	parts := []string{fmt.Sprintf("%dMi memory", bytesToMiB(candidate.remainingMemoryBytes))}
 	if candidate.remainingEphemeralByte != 0 {
 		parts = append(parts, fmt.Sprintf("%dMi ephemeral-storage", bytesToMiB(candidate.remainingEphemeralByte)))
 	}

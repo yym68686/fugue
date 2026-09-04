@@ -985,8 +985,6 @@ func runtimeResourceRequirementsForClass(spec *model.ResourceSpec, workloadClass
 		requests["cpu"] = cpu
 		if spec.CPULimitMilliCores > 0 {
 			limits["cpu"] = strconv.FormatInt(spec.CPULimitMilliCores, 10) + "m"
-		} else if model.EffectiveWorkloadClass(model.AppSpec{WorkloadClass: workloadClass}) == model.WorkloadClassCritical {
-			limits["cpu"] = cpu
 		}
 	}
 	if spec.MemoryMebibytes > 0 {
@@ -1019,8 +1017,6 @@ func runtimeStaticResourceRequirementsFromSpec(spec *model.ResourceSpec, default
 		requests["cpu"] = cpu
 		if spec.CPULimitMilliCores > 0 {
 			limits["cpu"] = strconv.FormatInt(spec.CPULimitMilliCores, 10) + "m"
-		} else if defaultLimits {
-			limits["cpu"] = cpu
 		}
 	}
 	if spec.MemoryMebibytes > 0 {

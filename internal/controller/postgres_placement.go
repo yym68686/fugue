@@ -318,9 +318,6 @@ type managedSharedNodeRequests struct {
 }
 
 func (candidate managedSharedNodeCandidate) fits(request managedSharedNodeRequests) bool {
-	if candidate.allocatableCPUMilli > 0 && candidate.requestedCPUMilli+request.cpuMilli > resourceCapacityWithRatio(candidate.allocatableCPUMilli, 1.5) {
-		return false
-	}
 	if candidate.allocatableMemoryBytes > 0 && candidate.requestedMemoryBytes+request.memoryBytes > resourceCapacityWithRatio(candidate.allocatableMemoryBytes, 0.9) {
 		return false
 	}

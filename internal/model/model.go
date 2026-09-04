@@ -888,14 +888,16 @@ type ResourceUsageSample struct {
 }
 
 type ResourceRightSizingPolicy struct {
-	WindowHours      int     `json:"window_hours"`
-	MinSamples       int     `json:"min_samples"`
-	CPUPercentile    float64 `json:"cpu_percentile"`
-	CPUMultiplier    float64 `json:"cpu_multiplier"`
-	CPUFloorMilli    int64   `json:"cpu_floor_millicores"`
-	MemoryPercentile float64 `json:"memory_percentile"`
-	MemoryMultiplier float64 `json:"memory_multiplier"`
-	MemoryFloorMiB   int64   `json:"memory_floor_mebibytes"`
+	WindowHours          int     `json:"window_hours"`
+	MinSamples           int     `json:"min_samples"`
+	CPUPercentile        float64 `json:"cpu_percentile"`
+	CPUMultiplier        float64 `json:"cpu_multiplier"`
+	CPURequestPercentile float64 `json:"cpu_request_percentile"`
+	CPURequestMultiplier float64 `json:"cpu_request_multiplier"`
+	CPUFloorMilli        int64   `json:"cpu_floor_millicores"`
+	MemoryPercentile     float64 `json:"memory_percentile"`
+	MemoryMultiplier     float64 `json:"memory_multiplier"`
+	MemoryFloorMiB       int64   `json:"memory_floor_mebibytes"`
 }
 
 type ResourceRightSizingRecommendation struct {
@@ -908,6 +910,7 @@ type ResourceRightSizingRecommendation struct {
 	SampleCount          int                       `json:"sample_count"`
 	Current              *ResourceSpec             `json:"current,omitempty"`
 	Recommended          *ResourceSpec             `json:"recommended,omitempty"`
+	RequestTarget        *ResourceSpec             `json:"request_target,omitempty"`
 	Policy               ResourceRightSizingPolicy `json:"policy"`
 	Ready                bool                      `json:"ready"`
 	AlreadyCurrent       bool                      `json:"already_current"`

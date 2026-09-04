@@ -681,7 +681,7 @@ func TestWaitForManagedAppRolloutFailsPersistentUnschedulableSurge(t *testing.T)
 	}
 }
 
-func TestZeroDowntimeRolloutCapacityBlockMessageReportsInsufficientCPU(t *testing.T) {
+func TestZeroDowntimeRolloutCapacityBlockMessageIgnoresCPURequestPressure(t *testing.T) {
 	t.Parallel()
 
 	app := model.App{
@@ -754,11 +754,66 @@ func TestZeroDowntimeRolloutCapacityBlockMessageReportsInsufficientCPU(t *testin
 	if err != nil {
 		t.Fatalf("capacity preflight: %v", err)
 	}
+	if message != "" {
+		t.Fatalf("expected CPU request pressure not to block rollout preflight, got %q", message)
+	}
+}
+
+func TestZeroDowntimeRolloutCapacityBlockMessageReportsInsufficientMemory(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID: "app_demo", TenantID: "tenant_demo", Name: "demo",
+		Spec: model.AppSpec{
+			Image: "registry.example/fugue-apps/demo:v2", Replicas: 1,
+			Resources: &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 512},
+		},
+	}
+	app = runtime.Renderer{}.PrepareApp(app)
+	deployment, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected managed app deployment fixture")
+	}
+	existingPod := kubePod{}
+	existingPod.Metadata.Name = "demo-old"
+	existingPod.Spec.NodeName = "node-a"
+	existingPod.Spec.Containers = []kubeContainerSpec{{
+		Name:      "demo",
+		Resources: kubeResourceRequirements{Requests: map[string]string{"cpu": "900m", "memory": "800Mi"}},
+	}}
+	existingPod.Status.Phase = "Running"
+
+	node := kubeNode{}
+	node.Metadata.Name = "node-a"
+	node.Status.Conditions = []kubeNodeCondition{{Type: "Ready", Status: "True"}}
+	node.Status.Allocatable = map[string]string{"cpu": "1500m", "memory": "1Gi"}
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(kubePodList{Items: []kubePod{existingPod}})
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(kubeNodeList{Items: []kubeNode{node}})
+		case "/api/v1/nodes/node-a":
+			_ = json.NewEncoder(w).Encode(node)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{client: kubeServer.Client(), baseURL: kubeServer.URL, bearerToken: "test"}
+	message, err := zeroDowntimeRolloutCapacityBlockMessage(context.Background(), client, deployment, 1)
+	if err != nil {
+		t.Fatalf("capacity preflight: %v", err)
+	}
 	if !strings.Contains(message, "zero-downtime rollout blocked") ||
 		!strings.Contains(message, "node-a") ||
-		!strings.Contains(message, "600m CPU") ||
-		!strings.Contains(message, "700m CPU") {
-		t.Fatalf("expected actionable insufficient CPU message, got %q", message)
+		!strings.Contains(message, "224Mi memory") ||
+		!strings.Contains(message, "512Mi memory") ||
+		strings.Contains(message, "CPU") {
+		t.Fatalf("expected actionable memory-only capacity message, got %q", message)
 	}
 }
 
@@ -2373,7 +2428,9 @@ func readyTemplatePod(name string, deployment kubeDeployment, resources kubeReso
 	pod.Metadata.Annotations = deployment.Spec.Template.Metadata.Annotations
 	pod.Spec.TerminationGracePeriodSeconds = deployment.Spec.Template.Spec.TerminationGracePeriodSeconds
 	for _, container := range deployment.Spec.Template.Spec.Containers {
-		container.Resources = resources
+		if len(resources.Requests) > 0 || len(resources.Limits) > 0 {
+			container.Resources = resources
+		}
 		pod.Spec.Containers = append(pod.Spec.Containers, container)
 	}
 	for _, container := range deployment.Spec.Template.Spec.InitContainers {

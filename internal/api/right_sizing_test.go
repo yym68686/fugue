@@ -52,6 +52,15 @@ func TestBuildRightSizingRecommendationUsesUsagePercentilesAndClassPolicy(t *tes
 	if got := recommendation.Recommended.MemoryLimitMebibytes; got != 256 {
 		t.Fatalf("expected service memory limit 256Mi, got %dMi", got)
 	}
+	if recommendation.RequestTarget == nil {
+		t.Fatal("expected Kubernetes request target")
+	}
+	if got := recommendation.RequestTarget.CPUMilliCores; got != 30 {
+		t.Fatalf("expected p50 CPU request target 30m, got %dm", got)
+	}
+	if got := recommendation.RequestTarget.MemoryMebibytes; got != 128 {
+		t.Fatalf("expected memory request target 128Mi, got %dMi", got)
+	}
 }
 
 func TestBuildRightSizingRecommendationPreservesUnobservedResourceDimensions(t *testing.T) {
@@ -89,11 +98,20 @@ func TestBuildRightSizingRecommendationPreservesUnobservedResourceDimensions(t *
 	if got := recommendation.Recommended.CPULimitMilliCores; got != 0 {
 		t.Fatalf("expected service CPU limit to be cleared, got %dm", got)
 	}
-	if got := recommendation.Recommended.MemoryMebibytes; got != 512 {
-		t.Fatalf("expected memory request to be preserved, got %dMi", got)
+	if got := recommendation.Recommended.MemoryMebibytes; got != 0 {
+		t.Fatalf("expected unobserved memory capacity to remain unknown, got %dMi", got)
 	}
-	if got := recommendation.Recommended.MemoryLimitMebibytes; got != 768 {
-		t.Fatalf("expected memory limit to be preserved, got %dMi", got)
+	if got := recommendation.Recommended.MemoryLimitMebibytes; got != 0 {
+		t.Fatalf("expected unobserved memory limit to remain unknown, got %dMi", got)
+	}
+	if recommendation.RequestTarget == nil || recommendation.RequestTarget.CPUMilliCores != 25 {
+		t.Fatalf("expected p50 CPU request target with 25m floor, got %+v", recommendation.RequestTarget)
+	}
+	if recommendation.RequestTarget.CPULimitMilliCores != 500 {
+		t.Fatalf("expected explicit CPU limit to be preserved, got %+v", recommendation.RequestTarget)
+	}
+	if recommendation.RequestTarget.MemoryMebibytes != 512 || recommendation.RequestTarget.MemoryLimitMebibytes != 768 {
+		t.Fatalf("expected request target to preserve unobserved memory settings, got %+v", recommendation.RequestTarget)
 	}
 }
 
@@ -163,6 +181,9 @@ func TestBuildRightSizingRecommendationAddsPostgresMemoryLimitHeadroom(t *testin
 	}
 	if got := recommendation.Recommended.MemoryLimitMebibytes; got != 784 {
 		t.Fatalf("expected postgres memory limit with headroom 784Mi, got %dMi", got)
+	}
+	if recommendation.RequestTarget == nil || recommendation.RequestTarget.CPUMilliCores != 100 {
+		t.Fatalf("expected postgres p75 CPU request target with 100m floor, got %+v", recommendation.RequestTarget)
 	}
 }
 
@@ -238,14 +259,14 @@ func TestApplyAppRightSizingRecommendationQueuesDeployForAppAndPostgres(t *testi
 		t.Fatalf("expected ready app and postgres recommendations, got %+v", recommendation)
 	}
 
-	if got := op.DesiredSpec.Resources; got == nil || got.CPUMilliCores != 75 || got.MemoryMebibytes != 128 || got.MemoryLimitMebibytes != 256 {
+	if got := op.DesiredSpec.Resources; got == nil || got.CPUMilliCores != 30 || got.MemoryMebibytes != 128 || got.MemoryLimitMebibytes != 256 {
 		t.Fatalf("unexpected app desired resources: %+v", got)
 	}
 	if op.DesiredSpec.Postgres == nil || op.DesiredSpec.Postgres.Resources == nil {
 		t.Fatalf("expected postgres desired resources, got %+v", op.DesiredSpec.Postgres)
 	}
 	postgresResources := op.DesiredSpec.Postgres.Resources
-	if postgresResources.CPUMilliCores != 100 || postgresResources.CPULimitMilliCores != 100 {
+	if postgresResources.CPUMilliCores != 100 || postgresResources.CPULimitMilliCores != 0 {
 		t.Fatalf("unexpected postgres CPU recommendation: %+v", postgresResources)
 	}
 	if postgresResources.MemoryMebibytes != 256 || postgresResources.MemoryLimitMebibytes != 384 {
@@ -324,8 +345,8 @@ func TestAutoRightSizingQueuesSafeDownscaleWithoutPostgres(t *testing.T) {
 	if resources == nil {
 		t.Fatal("expected desired app resources")
 	}
-	if resources.CPUMilliCores != 375 || resources.MemoryMebibytes != 512 || resources.MemoryLimitMebibytes != 1024 {
-		t.Fatalf("expected gradual CPU-only downscale with memory floor preserved, got %+v", resources)
+	if resources.CPUMilliCores != 30 || resources.MemoryMebibytes != 512 || resources.MemoryLimitMebibytes != 1024 {
+		t.Fatalf("expected direct CPU guarantee downscale with memory floor preserved, got %+v", resources)
 	}
 	if op.DesiredSpec.Postgres != nil {
 		t.Fatalf("auto right-sizing must not mutate postgres resources, got %+v", op.DesiredSpec.Postgres)
@@ -488,7 +509,7 @@ func TestAutoRightSizingAlreadyCurrentReturnsBenignSkipWithoutOperation(t *testi
 	}
 }
 
-func TestAutoRightSizingSkipsDownscaleAfterRecentOOMRightSizing(t *testing.T) {
+func TestAutoRightSizingRecentOOMPreservesMemoryButAllowsCPURequestDownscale(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -548,15 +569,18 @@ func TestAutoRightSizingSkipsDownscaleAfterRecentOOMRightSizing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply auto recommendation: %v", err)
 	}
-	if !alreadyCurrent || op != nil {
-		t.Fatalf("expected recent OOM right-sizing to block auto downscale, already_current=%v op=%+v", alreadyCurrent, op)
+	if alreadyCurrent || op == nil || op.DesiredSpec == nil || op.DesiredSpec.Resources == nil {
+		t.Fatalf("expected recent OOM to preserve memory while queuing CPU request downscale, already_current=%v op=%+v", alreadyCurrent, op)
+	}
+	if got := op.DesiredSpec.Resources; got.CPUMilliCores != 90 || got.MemoryMebibytes != 2048 || got.MemoryLimitMebibytes != 4096 {
+		t.Fatalf("expected CPU-only request downscale with OOM memory preserved, got %+v", got)
 	}
 	operations, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
 	if err != nil {
 		t.Fatalf("list operations: %v", err)
 	}
-	if len(operations) != 1 {
-		t.Fatalf("expected only the prior OOM operation, got %+v", operations)
+	if len(operations) != 2 {
+		t.Fatalf("expected prior OOM operation and CPU-only downscale, got %+v", operations)
 	}
 }
 
@@ -680,7 +704,7 @@ func TestAutoRightSizingAdmissionBlocksUnsupportedRWO(t *testing.T) {
 		Replicas:  1,
 		Workspace: &model.AppWorkspaceSpec{StorageClassName: model.AppStorageClassFugueWorkspaceRWO},
 	}
-	reason, err := (&Server{}).autoRightSizingAdmission(model.App{}, desired)
+	reason, err := (&Server{}).autoRightSizingAdmission(model.App{}, desired, nil)
 	if err != nil {
 		t.Fatalf("RWO admission: %v", err)
 	}
@@ -699,34 +723,94 @@ func TestAutoRightSizingAdmissionAllowsSharedRWX(t *testing.T) {
 			Mounts:           []model.AppPersistentStorageMount{{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"}},
 		},
 	}
-	reason, err := (&Server{}).autoRightSizingAdmission(model.App{}, desired)
+	reason, err := (&Server{}).autoRightSizingAdmission(model.App{}, desired, nil)
 	if err != nil || reason != "" {
 		t.Fatalf("expected shared RWX admission to pass, reason=%q err=%v", reason, err)
 	}
 }
 
-func TestAutoRightSizingAdmissionBlocksInsufficientCapacity(t *testing.T) {
+func TestAutoRightSizingAdmissionBlocksInsufficientActualCPUHeadroom(t *testing.T) {
 	server := &Server{
 		clusterNodeInventoryCache: newExpiringResponseCache[[]clusterNodeSnapshot](time.Minute),
 		newClusterNodeClient: func() (*clusterNodeClient, error) {
 			return nil, errors.New("cached inventory should be used")
 		},
 	}
-	freeCPU, freeMemory := int64(100), int64(128*1024*1024)
+	allocatableCPU, usedCPU, freeMemory := int64(1000), int64(800), int64(512*1024*1024)
 	server.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, []clusterNodeSnapshot{{
 		node: model.ClusterNode{
 			Status: "ready",
-			CPU:    &model.ClusterNodeCPUStats{SchedulableFreeMilliCores: &freeCPU},
+			CPU: &model.ClusterNodeCPUStats{
+				AllocatableMilliCores: &allocatableCPU,
+				UsedMilliCores:        &usedCPU,
+			},
 			Memory: &model.ClusterNodeMemoryStats{SchedulableFreeBytes: &freeMemory},
 		},
 	}})
 	desired := model.AppSpec{
 		Ports: []int{8080}, Replicas: 1,
-		Resources: &model.ResourceSpec{CPUMilliCores: 250, MemoryMebibytes: 256},
+		Resources: &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 256},
 	}
-	reason, err := server.autoRightSizingAdmission(model.App{}, desired)
-	if err == nil || reason != "" || !strings.Contains(err.Error(), "no ready cluster node has capacity") {
-		t.Fatalf("expected capacity rejection, reason=%q err=%v", reason, err)
+	reason, err := server.autoRightSizingAdmission(model.App{}, desired, &model.ResourceSpec{CPUMilliCores: 200})
+	if err == nil || reason != "" || !strings.Contains(err.Error(), "actual CPU headroom") {
+		t.Fatalf("expected actual CPU headroom rejection, reason=%q err=%v", reason, err)
+	}
+}
+
+func TestAutoRightSizingAdmissionIgnoresCPURequestPressure(t *testing.T) {
+	server := &Server{
+		clusterNodeInventoryCache: newExpiringResponseCache[[]clusterNodeSnapshot](time.Minute),
+		newClusterNodeClient: func() (*clusterNodeClient, error) {
+			return nil, errors.New("cached inventory should be used")
+		},
+	}
+	allocatableCPU, usedCPU, schedulableCPU, freeMemory := int64(1000), int64(100), int64(0), int64(512*1024*1024)
+	server.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, []clusterNodeSnapshot{{
+		node: model.ClusterNode{
+			Status: "ready",
+			CPU: &model.ClusterNodeCPUStats{
+				AllocatableMilliCores:     &allocatableCPU,
+				UsedMilliCores:            &usedCPU,
+				SchedulableFreeMilliCores: &schedulableCPU,
+			},
+			Memory: &model.ClusterNodeMemoryStats{SchedulableFreeBytes: &freeMemory},
+		},
+	}})
+	desired := model.AppSpec{
+		Ports: []int{8080}, Replicas: 1,
+		Resources: &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 256},
+	}
+	reason, err := server.autoRightSizingAdmission(model.App{}, desired, &model.ResourceSpec{CPUMilliCores: 500})
+	if err != nil || reason != "" {
+		t.Fatalf("expected request pressure to be ignored when actual CPU and memory are safe, reason=%q err=%v", reason, err)
+	}
+}
+
+func TestAutoRightSizingAdmissionBlocksInsufficientMemory(t *testing.T) {
+	server := &Server{
+		clusterNodeInventoryCache: newExpiringResponseCache[[]clusterNodeSnapshot](time.Minute),
+		newClusterNodeClient: func() (*clusterNodeClient, error) {
+			return nil, errors.New("cached inventory should be used")
+		},
+	}
+	allocatableCPU, usedCPU, freeMemory := int64(1000), int64(100), int64(128*1024*1024)
+	server.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, []clusterNodeSnapshot{{
+		node: model.ClusterNode{
+			Status: "ready",
+			CPU: &model.ClusterNodeCPUStats{
+				AllocatableMilliCores: &allocatableCPU,
+				UsedMilliCores:        &usedCPU,
+			},
+			Memory: &model.ClusterNodeMemoryStats{SchedulableFreeBytes: &freeMemory},
+		},
+	}})
+	desired := model.AppSpec{
+		Ports: []int{8080}, Replicas: 1,
+		Resources: &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 256},
+	}
+	reason, err := server.autoRightSizingAdmission(model.App{}, desired, &model.ResourceSpec{CPUMilliCores: 200})
+	if err == nil || reason != "" || !strings.Contains(err.Error(), "schedulable memory") {
+		t.Fatalf("expected memory rejection, reason=%q err=%v", reason, err)
 	}
 }
 
@@ -764,7 +848,7 @@ func TestAutoRightSizingFailureBackoffMatchesTargetResources(t *testing.T) {
 	}
 }
 
-func TestAutoRightSizingLowCPUDownscaleIsGradual(t *testing.T) {
+func TestAutoRightSizingCPURequestDownscaleConvergesDirectly(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -783,7 +867,7 @@ func TestAutoRightSizingLowCPUDownscaleIsGradual(t *testing.T) {
 				CPUMilliCores:   25,
 				MemoryMebibytes: 512,
 			},
-			wantCPU: 115,
+			wantCPU: 25,
 		},
 		{
 			name: "low CPU service",
@@ -795,7 +879,7 @@ func TestAutoRightSizingLowCPUDownscaleIsGradual(t *testing.T) {
 				CPUMilliCores:   25,
 				MemoryMebibytes: 512,
 			},
-			wantCPU: 40,
+			wantCPU: 25,
 		},
 		{
 			name: "low CPU rounding boundary",
@@ -845,6 +929,17 @@ func TestAutoRightSizingNilResourcesAreZeroRequestUpscale(t *testing.T) {
 	}
 }
 
+func TestAutoRightSizingSmallCPURequestIncreaseUsesGuaranteeHysteresis(t *testing.T) {
+	t.Parallel()
+
+	current := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 128}
+	recommended := &model.ResourceSpec{CPUMilliCores: 40, MemoryMebibytes: 128}
+	decision := autoRightSizingAppResourceChange(current, recommended)
+	if !decision.allowed || decision.downscale || decision.resources == nil || decision.resources.CPUMilliCores != 40 {
+		t.Fatalf("expected material small CPU guarantee increase to apply, got %+v", decision)
+	}
+}
+
 func TestAutoRightSizingLowCPUDownscaleKeepsRatioHysteresis(t *testing.T) {
 	t.Parallel()
 
@@ -876,7 +971,7 @@ func TestAutoRightSizingDownscaleDimensionsAreIndependent(t *testing.T) {
 		if !decision.allowed || decision.resources == nil {
 			t.Fatalf("expected CPU downscale, got %+v", decision)
 		}
-		if got := decision.resources; got.CPUMilliCores != 40 || got.MemoryMebibytes != 288 || got.MemoryLimitMebibytes != 576 {
+		if got := decision.resources; got.CPUMilliCores != 25 || got.MemoryMebibytes != 288 || got.MemoryLimitMebibytes != 576 {
 			t.Fatalf("expected only CPU to downscale, got %+v", got)
 		}
 	})
@@ -912,7 +1007,7 @@ func TestAutoRightSizingDownscaleDimensionsAreIndependent(t *testing.T) {
 		if !decision.allowed || decision.resources == nil {
 			t.Fatalf("expected CPU downscale, got %+v", decision)
 		}
-		if got := decision.resources; got.CPUMilliCores != 40 || got.MemoryMebibytes != 256 {
+		if got := decision.resources; got.CPUMilliCores != 25 || got.MemoryMebibytes != 256 {
 			t.Fatalf("expected CPU downscale with memory preserved, got %+v", got)
 		}
 	})
@@ -935,7 +1030,7 @@ func TestAutoRightSizingDownscaleNeverRaisesResourcesToDefaults(t *testing.T) {
 	if !decision.allowed || decision.resources == nil {
 		t.Fatalf("expected CPU downscale, got %+v", decision)
 	}
-	if got := decision.resources; got.CPUMilliCores != 115 || got.MemoryMebibytes != 400 || got.MemoryLimitMebibytes != 800 {
+	if got := decision.resources; got.CPUMilliCores != 25 || got.MemoryMebibytes != 400 || got.MemoryLimitMebibytes != 800 {
 		t.Fatalf("downscale must not raise resources to managed defaults, got %+v", got)
 	}
 }

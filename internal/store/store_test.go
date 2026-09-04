@@ -2595,7 +2595,9 @@ func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedPostgresBillingResources()); err != nil {
+	cap := model.DefaultManagedPostgresBillingResources()
+	cap.CPUMilliCores += model.DefaultManagedAppCPUMilliCores
+	if _, err := s.UpdateTenantBilling(tenant.ID, cap); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}
 
@@ -2862,7 +2864,9 @@ func TestCreateDeployOperationGeneratesManagedPostgresPasswordWhenMissing(t *tes
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedPostgresBillingResources()); err != nil {
+	cap := model.DefaultManagedPostgresBillingResources()
+	cap.CPUMilliCores += model.DefaultManagedAppCPUMilliCores
+	if _, err := s.UpdateTenantBilling(tenant.ID, cap); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}
 
@@ -6875,7 +6879,7 @@ func TestBillingRejectsManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
 	}
 }
 
-func TestCreateAppLeavesResourcesUnsetWhenNotSpecified(t *testing.T) {
+func TestCreateAppDefaultsSmallCPURequestGuaranteeWhenNotSpecified(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -6901,8 +6905,38 @@ func TestCreateAppLeavesResourcesUnsetWhenNotSpecified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	if app.Spec.Resources != nil {
-		t.Fatalf("expected app resources to remain unset, got %+v", *app.Spec.Resources)
+	if app.Spec.Resources == nil || app.Spec.Resources.CPUMilliCores != model.DefaultManagedAppCPUMilliCores {
+		t.Fatalf("expected default app CPU request guarantee, got %+v", app.Spec.Resources)
+	}
+	if app.Spec.Resources.CPULimitMilliCores != 0 || app.Spec.Resources.MemoryMebibytes != 0 || app.Spec.Resources.MemoryLimitMebibytes != 0 {
+		t.Fatalf("expected CPU guarantee without implicit CPU or memory limits, got %+v", *app.Spec.Resources)
+	}
+}
+
+func TestCreateCriticalAppDefaultsCriticalCPURequestGuarantee(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Critical App Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "critical", "", model.AppSpec{
+		Image: "ghcr.io/example/critical:latest", Ports: []int{8080}, Replicas: 1,
+		RuntimeID: "runtime_managed_shared", WorkloadClass: model.WorkloadClassCritical,
+	})
+	if err != nil {
+		t.Fatalf("create critical app: %v", err)
+	}
+	if app.Spec.Resources == nil || app.Spec.Resources.CPUMilliCores != 100 || app.Spec.Resources.CPULimitMilliCores != 0 {
+		t.Fatalf("expected 100m critical CPU guarantee without implicit limit, got %+v", app.Spec.Resources)
 	}
 }
 
