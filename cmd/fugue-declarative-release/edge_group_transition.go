@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/edgecontrol"
+	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,22 +34,22 @@ import (
 )
 
 const (
-	edgeActivationStateSchema          = "edge-front-group-activation/v1"
-	edgeActivationReceiptSchema        = "edge-front-group-activation-receipt/v1"
-	edgeActivationAuthority            = "edge-control"
-	edgeActivationInitialize           = "initialize"
-	edgeActivationPromote              = "promote"
-	edgeActivationRollback             = "rollback"
+	edgeActivationStateSchema          = edgegroupfront.ActivationStateSchemaV1
+	edgeActivationReceiptSchema        = edgegroupfront.ActivationReceiptSchemaV1
+	edgeActivationAuthority            = edgegroupfront.ActivationAuthority
+	edgeActivationInitialize           = edgegroupfront.ActivationOperationInit
+	edgeActivationPromote              = edgegroupfront.ActivationOperationPromote
+	edgeActivationRollback             = edgegroupfront.ActivationOperationRollback
 	edgeGroupAuthoritySource           = "edge-control-group-authority/v1"
-	edgeCandidateStagePath             = "/v1/authority/group-worker-candidates"
-	edgeGroupRecoveryPath              = "/v1/recovery/group-publications"
-	edgeCandidateRecoveryPath          = "/v1/recovery/group-worker-candidates"
-	edgeCandidateStageSchema           = "edge-control-group-worker-candidate-request/v1"
-	edgeCandidateReceiptSchema         = "edge-control-group-worker-candidate-receipt/v1"
-	edgeGroupRecoverySchema            = "edge-control-group-recovery-request/v1"
-	edgeGroupRecoveryReceiptSchema     = "edge-control-group-recovery-receipt/v1"
-	edgeCandidateRecoverySchema        = "edge-control-group-candidate-recovery-request/v1"
-	edgeCandidateRecoveryReceiptSchema = "edge-control-group-candidate-recovery-receipt/v1"
+	edgeCandidateStagePath             = edgecontrol.GroupCandidateStagePathV1
+	edgeGroupRecoveryPath              = edgecontrol.GroupRecoveryPathV1
+	edgeCandidateRecoveryPath          = edgecontrol.GroupCandidateRecoveryPathV1
+	edgeCandidateStageSchema           = edgecontrol.GroupCandidateStageRequestSchemaV1
+	edgeCandidateReceiptSchema         = edgecontrol.GroupCandidateStageReceiptSchemaV1
+	edgeGroupRecoverySchema            = edgecontrol.GroupRecoveryRequestSchemaV1
+	edgeGroupRecoveryReceiptSchema     = edgecontrol.GroupRecoveryReceiptSchemaV1
+	edgeCandidateRecoverySchema        = edgecontrol.GroupCandidateRecoveryRequestSchemaV1
+	edgeCandidateRecoveryReceiptSchema = edgecontrol.GroupCandidateRecoveryReceiptSchemaV1
 	edgeCandidateStageAttempts         = 4
 	edgeCandidateStageRetryBase        = 200 * time.Millisecond
 	edgeGroupRecoveryHTTPTimeout       = 60 * time.Second
@@ -64,61 +66,9 @@ var (
 	errEdgeInventoryHeartbeatUnavailable  = errors.New("edge inventory heartbeat is temporarily unavailable")
 )
 
-type edgeServingAuthorityWitness struct {
-	CurrentRecordDigest string `json:"current_record_digest"`
-	AuthorityEpoch      int64  `json:"authority_epoch"`
-	CurrentAuthorityUID string `json:"current_authority_uid"`
-	CurrentAuthorityRV  string `json:"current_authority_resource_version"`
-	FrontGeneration     uint64 `json:"front_generation"`
-	BundleVersion       string `json:"bundle_version"`
-	WorkerSlot          string `json:"worker_slot"`
-	WorkerSourceSHA     string `json:"worker_source_sha"`
-	WorkerImageDigest   string `json:"worker_image_digest"`
-}
-
-type edgeCandidateStageRequest struct {
-	Schema                        string                       `json:"schema"`
-	KeyID                         string                       `json:"key_id"`
-	GroupID                       string                       `json:"edge_group_id"`
-	ExpectedAuthoritySequence     uint64                       `json:"expected_authority_sequence"`
-	ExpectedPublicationSequence   uint64                       `json:"expected_publication_sequence"`
-	ExpectedRecoveryEpoch         uint64                       `json:"expected_recovery_epoch"`
-	ExpectedPublishedBundleDigest string                       `json:"expected_published_bundle_digest"`
-	ExpectedCandidateEpoch        uint64                       `json:"expected_candidate_epoch"`
-	ExpectedCurrentWorkerSlot     string                       `json:"expected_current_worker_slot"`
-	TargetWorkerSlot              string                       `json:"target_worker_slot"`
-	ServingAuthority              *edgeServingAuthorityWitness `json:"serving_authority,omitempty"`
-	AllowDegradedPrevious         bool                         `json:"allow_degraded_previous,omitempty"`
-	StandbyOnly                   bool                         `json:"standby_only,omitempty"`
-	WorkerSourceSHA               string                       `json:"worker_source_sha"`
-	WorkerImageDigest             string                       `json:"worker_image_digest"`
-	ReleaseRecordDigest           string                       `json:"release_record_digest"`
-	IssuedAtUnix                  int64                        `json:"issued_at_unix"`
-	ExpiresAtUnix                 int64                        `json:"expires_at_unix"`
-	Nonce                         string                       `json:"nonce"`
-	Reason                        string                       `json:"reason"`
-	Signature                     string                       `json:"signature"`
-}
-
-type edgeCandidateStageReceipt struct {
-	Schema                       string `json:"schema"`
-	GroupID                      string `json:"edge_group_id"`
-	AuthoritySequence            uint64 `json:"authority_sequence"`
-	CandidateEpoch               uint64 `json:"candidate_epoch"`
-	CandidateRecordDigest        string `json:"candidate_record_digest"`
-	CandidateBundleGeneration    string `json:"candidate_bundle_generation"`
-	ReleaseRecordDigest          string `json:"release_record_digest"`
-	WorkerSourceSHA              string `json:"worker_source_sha"`
-	WorkerImageDigest            string `json:"worker_image_digest"`
-	WorkerSlot                   string `json:"worker_slot"`
-	CurrentWorkerSlot            string `json:"current_worker_slot"`
-	CurrentPublishedBundleDigest string `json:"current_published_bundle_digest"`
-	CurrentPublicationSequence   uint64 `json:"current_publication_sequence"`
-	CurrentRecoveryEpoch         uint64 `json:"current_recovery_epoch"`
-	AllowDegradedPrevious        bool   `json:"allow_degraded_previous,omitempty"`
-	StandbyOnly                  bool   `json:"standby_only,omitempty"`
-	OrdinaryTrafficMutation      bool   `json:"ordinary_traffic_mutation"`
-}
+type edgeServingAuthorityWitness = edgecontrol.GroupServingAuthorityWitness
+type edgeCandidateStageRequest = edgecontrol.GroupCandidateStageRequest
+type edgeCandidateStageReceipt = edgecontrol.GroupCandidateStageReceipt
 
 type edgeControlError struct {
 	Schema string `json:"schema"`
@@ -140,58 +90,10 @@ type edgeCandidateStageStatus struct {
 	LKGState                   string `json:"lkg_state"`
 }
 
-type edgeGroupRecoveryRequest struct {
-	Schema                      string `json:"schema"`
-	KeyID                       string `json:"key_id"`
-	GroupID                     string `json:"edge_group_id"`
-	ExpectedPublicationSequence uint64 `json:"expected_publication_sequence"`
-	ExpectedRecoveryEpoch       uint64 `json:"expected_recovery_epoch"`
-	TargetBundleGeneration      string `json:"target_bundle_generation"`
-	IssuedAtUnix                int64  `json:"issued_at_unix"`
-	ExpiresAtUnix               int64  `json:"expires_at_unix"`
-	Nonce                       string `json:"nonce"`
-	Reason                      string `json:"reason"`
-	Signature                   string `json:"signature"`
-}
-
-type edgeGroupRecoveryReceipt struct {
-	Schema                string `json:"schema"`
-	GroupID               string `json:"edge_group_id"`
-	PublicationSequence   uint64 `json:"publication_sequence"`
-	RecoveryEpoch         uint64 `json:"recovery_epoch"`
-	BundleGeneration      string `json:"bundle_generation"`
-	PublishedBundleDigest string `json:"published_bundle_digest"`
-	Authority             string `json:"authority"`
-	PublicationEnabled    bool   `json:"publication_enabled"`
-}
-
-type edgeCandidateRecoveryRequest struct {
-	Schema                        string `json:"schema"`
-	KeyID                         string `json:"key_id"`
-	GroupID                       string `json:"edge_group_id"`
-	ExpectedAuthoritySequence     uint64 `json:"expected_authority_sequence"`
-	ExpectedPublicationSequence   uint64 `json:"expected_publication_sequence"`
-	ExpectedRecoveryEpoch         uint64 `json:"expected_recovery_epoch"`
-	ExpectedPublishedBundleDigest string `json:"expected_published_bundle_digest"`
-	ExpectedCandidateEpoch        uint64 `json:"expected_candidate_epoch"`
-	ExpectedWorkerSourceSHA       string `json:"expected_worker_source_sha"`
-	IssuedAtUnix                  int64  `json:"issued_at_unix"`
-	ExpiresAtUnix                 int64  `json:"expires_at_unix"`
-	Nonce                         string `json:"nonce"`
-	Reason                        string `json:"reason"`
-	Signature                     string `json:"signature"`
-}
-
-type edgeCandidateRecoveryReceipt struct {
-	Schema                     string `json:"schema"`
-	GroupID                    string `json:"edge_group_id"`
-	FencedCandidateEpoch       uint64 `json:"fenced_candidate_epoch"`
-	FencedWorkerSourceSHA      string `json:"fenced_worker_source_sha"`
-	CurrentPublicationSequence uint64 `json:"current_publication_sequence"`
-	CurrentRecoveryEpoch       uint64 `json:"current_recovery_epoch"`
-	PublishedBundleDigest      string `json:"published_bundle_digest"`
-	CandidateCleared           bool   `json:"candidate_cleared"`
-}
+type edgeGroupRecoveryRequest = edgecontrol.GroupRecoveryRequest
+type edgeGroupRecoveryReceipt = edgecontrol.GroupRecoveryReceipt
+type edgeCandidateRecoveryRequest = edgecontrol.GroupCandidateRecoveryRequest
+type edgeCandidateRecoveryReceipt = edgecontrol.GroupCandidateRecoveryReceipt
 
 type edgeCandidateKeyring struct {
 	Schema     string             `json:"schema"`
@@ -208,43 +110,9 @@ type edgeCandidateKey struct {
 	Revoked       bool   `json:"revoked"`
 }
 
-type edgeActivationRequest struct {
-	GroupID              string
-	ExpectedGeneration   uint64
-	ExpectedSlot         string
-	TargetSlot           string
-	BundleGeneration     string
-	WorkerSourceCommit   string
-	WorkerImageDigest    string
-	Operation            string
-	RollbackOfGeneration uint64
-	Reason               string
-}
-
-type edgeActivationState struct {
-	Schema               string    `json:"schema"`
-	GroupID              string    `json:"edge_group_id"`
-	Generation           uint64    `json:"generation"`
-	ActiveSlot           string    `json:"active_slot"`
-	PreviousSlot         string    `json:"previous_slot,omitempty"`
-	BundleGeneration     string    `json:"bundle_generation"`
-	WorkerSourceCommit   string    `json:"worker_source_commit"`
-	WorkerImageDigest    string    `json:"worker_image_digest"`
-	Authority            string    `json:"authority"`
-	Operation            string    `json:"operation"`
-	RollbackOfGeneration uint64    `json:"rollback_of_generation,omitempty"`
-	Reason               string    `json:"reason"`
-	UpdatedAt            time.Time `json:"updated_at"`
-}
-
-type edgeActivationReceipt struct {
-	Schema         string               `json:"schema"`
-	GroupID        string               `json:"edge_group_id"`
-	PreviousExists bool                 `json:"previous_exists"`
-	Previous       *edgeActivationState `json:"previous,omitempty"`
-	Current        edgeActivationState  `json:"current"`
-	StateDigest    string               `json:"state_digest"`
-}
+type edgeActivationRequest = edgegroupfront.ActivationCASRequest
+type edgeActivationState = edgegroupfront.ActivationState
+type edgeActivationReceipt = edgegroupfront.ActivationReceipt
 
 type edgeGroupPod struct {
 	Name                         string
@@ -496,138 +364,162 @@ func declaredEdgeDaemonSetTarget(manifest []byte, release declarativerelease.Pla
 	return targetIdentityFromDeclaredWorkload(desired, workload)
 }
 
-func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity) error {
+type edgeGroupABPlan struct {
+	before        edgeGroupState
+	frontTarget   declarativerelease.TargetIdentity
+	activeSlot    string
+	activeName    string
+	activeTarget  declarativerelease.TargetIdentity
+	inactiveSlot  string
+	inactiveName  string
+	desiredDigest string
+}
+
+func prepareEdgeGroupAB(runtime edgeGroupTransitionRuntime, ctx context.Context, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity) (edgeGroupABPlan, error) {
 	before, err := runtime.Snapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("capture edge group prewrite state: %w", err)
+		return edgeGroupABPlan{}, fmt.Errorf("capture edge group prewrite state: %w", err)
 	}
 	frontTarget, err := runtime.DeclaredTarget(transition.FrontName)
 	if err != nil {
-		return fmt.Errorf("read declared edge Front target: %w", err)
+		return edgeGroupABPlan{}, fmt.Errorf("read declared edge Front target: %w", err)
 	}
 	activeSlot := before.ActiveSlot
 	activeName := edgeWorkerName(transition, activeSlot)
 	activeTarget, err := runtime.DeclaredTarget(activeName)
 	if err != nil {
-		return fmt.Errorf("read declared active edge Worker target: %w", err)
+		return edgeGroupABPlan{}, fmt.Errorf("read declared active edge Worker target: %w", err)
 	}
-	inactiveSlot := otherEdgeSlot(activeSlot)
-	inactiveName := edgeWorkerName(transition, inactiveSlot)
 	desiredDigest, err := immutableDigestFromRef(target.ImageRef)
+	if err != nil {
+		return edgeGroupABPlan{}, err
+	}
+	return edgeGroupABPlan{
+		before: before, frontTarget: frontTarget, activeSlot: activeSlot, activeName: activeName, activeTarget: activeTarget,
+		inactiveSlot: otherEdgeSlot(activeSlot), inactiveName: edgeWorkerName(transition, otherEdgeSlot(activeSlot)), desiredDigest: desiredDigest,
+	}, nil
+}
+
+func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity) error {
+	plan, err := prepareEdgeGroupAB(runtime, ctx, transition, target)
 	if err != nil {
 		return err
 	}
 	if target.ConfigSHA == release.ExpectedPreviousConfigSHA {
-		if err := restoreEdgeLKGActivation(ctx, runtime, before, transition, target); err != nil {
-			return fmt.Errorf("restore exact edge LKG activation before workloads: %w", err)
-		}
-		if err := runtime.ApplyCandidateResources(ctx, ""); err != nil {
-			return err
-		}
-		for _, name := range []string{inactiveName, edgeWorkerName(transition, activeSlot), transition.FrontName} {
-			declared, targetErr := runtime.DeclaredTarget(name)
-			if targetErr != nil {
-				return targetErr
-			}
-			if _, err := runtime.Roll(ctx, name, declared, name != transition.FrontName, true); err != nil {
-				return fmt.Errorf("restore exact edge LKG workload %s: %w", name, err)
-			}
-		}
-		return nil
+		return executeEdgeGroupLKGRestore(ctx, runtime, transition, target, plan)
 	}
 	if err := runtime.ApplySharedResources(ctx); err != nil {
 		return fmt.Errorf("apply shared edge group resources before candidate staging: %w", err)
 	}
-	stage, err := runtime.StageCandidate(ctx, before, inactiveSlot, target)
+	stage, candidatePods, err := stageEdgeGroupCandidate(ctx, runtime, release, target, plan)
 	if err != nil {
-		return fmt.Errorf("stage inactive Worker candidate: %w", err)
-	}
-	if stage.WorkerSlot != inactiveSlot || stage.CurrentWorkerSlot != activeSlot || stage.WorkerSourceSHA != target.ConfigSHA ||
-		stage.WorkerImageDigest != desiredDigest || stage.AllowDegradedPrevious != (release.SupersedesFailedConfigSHA != "") || stage.StandbyOnly || stage.OrdinaryTrafficMutation {
-		return errors.New("inactive Worker candidate receipt is invalid")
-	}
-	if err := runtime.ApplyCandidateResources(ctx, inactiveSlot); err != nil {
 		return err
 	}
-	// A superseding recovery candidate is intentionally allowed to prove its
-	// immutable bundle before it owns group authority. The current publication
-	// may still be degraded until the old active Worker is recovered below.
-	candidateRequireAuthority := release.SupersedesFailedConfigSHA == ""
-	candidatePods, err := runtime.Roll(ctx, inactiveName, target, candidateRequireAuthority, release.SupersedesFailedConfigSHA != "")
+	frontPods, frontHealth, err := commitEdgeGroupAuthority(ctx, runtime, release, transition, target, plan, stage)
 	if err != nil {
-		return fmt.Errorf("roll inactive edge slot %s: %w", inactiveSlot, err)
+		return err
 	}
-	candidatePods, err = runtime.WaitCandidateWorkerAuthority(ctx, inactiveName, target, stage)
+	serving := edgeGroupState{Front: frontPods, FrontHealth: frontHealth, ActiveSlot: plan.inactiveSlot}
+	if plan.inactiveSlot == "a" {
+		serving.WorkerA, serving.WorkerB = candidatePods, plan.before.WorkerB
+	} else {
+		serving.WorkerA, serving.WorkerB = plan.before.WorkerA, candidatePods
+	}
+	standbyConverged := repairEdgeGroupStandby(ctx, runtime, plan, serving)
+	return verifyEdgeGroupTransition(ctx, runtime, transition, target, plan, standbyConverged)
+}
+
+func executeEdgeGroupLKGRestore(ctx context.Context, runtime edgeGroupTransitionRuntime, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity, plan edgeGroupABPlan) error {
+	if err := restoreEdgeLKGActivation(ctx, runtime, plan.before, transition, target); err != nil {
+		return fmt.Errorf("restore exact edge LKG activation before workloads: %w", err)
+	}
+	if err := runtime.ApplyCandidateResources(ctx, ""); err != nil {
+		return err
+	}
+	for _, name := range []string{plan.inactiveName, plan.activeName, transition.FrontName} {
+		declared, err := runtime.DeclaredTarget(name)
+		if err != nil {
+			return err
+		}
+		if _, err := runtime.Roll(ctx, name, declared, name != transition.FrontName, true); err != nil {
+			return fmt.Errorf("restore exact edge LKG workload %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func stageEdgeGroupCandidate(ctx context.Context, runtime edgeGroupTransitionRuntime, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, plan edgeGroupABPlan) (edgeCandidateStageReceipt, map[string]edgeGroupPod, error) {
+	stage, err := runtime.StageCandidate(ctx, plan.before, plan.inactiveSlot, target)
 	if err != nil {
-		return fmt.Errorf("verify inactive edge Worker candidate authority: %w", err)
+		return edgeCandidateStageReceipt{}, nil, fmt.Errorf("stage inactive Worker candidate: %w", err)
 	}
+	if stage.WorkerSlot != plan.inactiveSlot || stage.CurrentWorkerSlot != plan.activeSlot || stage.WorkerSourceSHA != target.ConfigSHA ||
+		stage.WorkerImageDigest != plan.desiredDigest || stage.AllowDegradedPrevious != (release.SupersedesFailedConfigSHA != "") || stage.StandbyOnly || stage.OrdinaryTrafficMutation {
+		return edgeCandidateStageReceipt{}, nil, errors.New("inactive Worker candidate receipt is invalid")
+	}
+	if err := runtime.ApplyCandidateResources(ctx, plan.inactiveSlot); err != nil {
+		return edgeCandidateStageReceipt{}, nil, err
+	}
+	// A superseding recovery candidate may prove its immutable bundle before it
+	// owns group authority; the current publication can remain degraded here.
+	candidatePods, err := runtime.Roll(ctx, plan.inactiveName, target, release.SupersedesFailedConfigSHA == "", release.SupersedesFailedConfigSHA != "")
+	if err != nil {
+		return edgeCandidateStageReceipt{}, nil, fmt.Errorf("roll inactive edge slot %s: %w", plan.inactiveSlot, err)
+	}
+	candidatePods, err = runtime.WaitCandidateWorkerAuthority(ctx, plan.inactiveName, target, stage)
+	if err != nil {
+		return edgeCandidateStageReceipt{}, nil, fmt.Errorf("verify inactive edge Worker candidate authority: %w", err)
+	}
+	return stage, candidatePods, nil
+}
+
+func commitEdgeGroupAuthority(ctx context.Context, runtime edgeGroupTransitionRuntime, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity, plan edgeGroupABPlan, stage edgeCandidateStageReceipt) (map[string]edgeGroupPod, map[string]edgeFrontHealth, error) {
 	var frontPods map[string]edgeGroupPod
 	frontRecovered := false
-	// The Front process is part of the serving code path. Recover it before
-	// the activation CAS so an old binary cannot reject the new activation
-	// witness while WaitFront is proving the committed slot.
 	authorityCommitted := false
-	if release.SupersedesFailedConfigSHA != "" && edgeFrontNeedsCodeRecovery(before, frontTarget) {
+	if release.SupersedesFailedConfigSHA != "" && edgeFrontNeedsCodeRecovery(plan.before, plan.frontTarget) {
 		frontRecoveryErr := runtime.ApplyCandidateResources(ctx, transition.FrontName)
 		if frontRecoveryErr == nil {
-			frontPods, frontRecoveryErr = runtime.Roll(ctx, transition.FrontName, frontTarget, false, true)
+			frontPods, frontRecoveryErr = runtime.Roll(ctx, transition.FrontName, plan.frontTarget, false, true)
 		}
 		if frontRecoveryErr != nil {
-			// Guardian may commit the candidate while this independent code
-			// maintenance write races another SSA writer. Once the exact
-			// authority is current, the generic workload rollback must not
-			// compensate that committed transaction. Continue through the
-			// post-commit Front convergence path instead.
+			// A concurrently committed Guardian transaction is authoritative. Do
+			// not compensate it because independent Front maintenance raced SSA.
 			if authorityErr := runtime.WaitCurrentAuthority(ctx, stage); authorityErr != nil {
-				return fmt.Errorf("recover Front code before Guardian authority: %v; observe exact committed authority: %w", frontRecoveryErr, authorityErr)
+				return nil, nil, fmt.Errorf("recover Front code before Guardian authority: %v; observe exact committed authority: %w", frontRecoveryErr, authorityErr)
 			}
 			authorityCommitted = true
-			frontPods = nil
 		} else {
 			frontRecovered = true
 		}
 	}
-	// Guardian owns the group-scoped Control promotion, Front CAS, current
-	// pointer, and compensation as one transaction. The executor must not write
-	// either traffic authority before waiting for that transaction: doing so
-	// gives the same release two competing activation generations and makes a
-	// valid Guardian replay look stale.
+	// Guardian alone owns Control promotion, Front CAS, current pointer and
+	// compensation. The executor observes that transaction before changing code.
 	if !authorityCommitted {
-		err = runtime.WaitCurrentAuthority(ctx, stage)
-	}
-	if err != nil {
-		// Leave the independently canaried candidate staged. Guardian may still
-		// be durably finishing its transaction, and rolling the candidate here
-		// would race that commit and manufacture a split authority.
-		return fmt.Errorf("wait Guardian current authority: %w", err)
-	}
-	frontHealth, err := runtime.WaitFront(ctx, inactiveSlot, target.ConfigSHA, desiredDigest)
-	if err != nil {
-		return fmt.Errorf("observe Guardian authority switch: %w", err)
-	}
-	if err := runtime.ApplyCandidateResources(ctx, transition.FrontName); err != nil {
-		return fmt.Errorf("apply Front candidate after Guardian authority switch: %w", err)
-	}
-	// A failed successor may leave the old Front process running but unready
-	// after compensation.  In that explicitly superseding flow, allow the
-	// rollout helper to use immutable snapshot identity and replace that pod;
-	// ordinary promotions retain the strict ready-only read.
-	if !frontRecovered {
-		frontPods, err = runtime.Roll(ctx, transition.FrontName, frontTarget, true, release.SupersedesFailedConfigSHA != "")
-		if err != nil {
-			return fmt.Errorf("roll edge front after Guardian authority switch: %w", err)
+		if err := runtime.WaitCurrentAuthority(ctx, stage); err != nil {
+			return nil, nil, fmt.Errorf("wait Guardian current authority: %w", err)
 		}
 	}
-	if err := runtime.WaitActiveWorkerAuthority(ctx, inactiveName, target); err != nil {
-		return fmt.Errorf("verify active edge worker authority: %w", err)
+	frontHealth, err := runtime.WaitFront(ctx, plan.inactiveSlot, target.ConfigSHA, plan.desiredDigest)
+	if err != nil {
+		return nil, nil, fmt.Errorf("observe Guardian authority switch: %w", err)
 	}
-	previousName, previousTarget := activeName, activeTarget
-	serving := edgeGroupState{Front: frontPods, FrontHealth: frontHealth, ActiveSlot: inactiveSlot}
-	if inactiveSlot == "a" {
-		serving.WorkerA, serving.WorkerB = candidatePods, before.WorkerB
-	} else {
-		serving.WorkerA, serving.WorkerB = before.WorkerA, candidatePods
+	if err := runtime.ApplyCandidateResources(ctx, transition.FrontName); err != nil {
+		return nil, nil, fmt.Errorf("apply Front candidate after Guardian authority switch: %w", err)
 	}
+	if !frontRecovered {
+		frontPods, err = runtime.Roll(ctx, transition.FrontName, plan.frontTarget, true, release.SupersedesFailedConfigSHA != "")
+		if err != nil {
+			return nil, nil, fmt.Errorf("roll edge front after Guardian authority switch: %w", err)
+		}
+	}
+	if err := runtime.WaitActiveWorkerAuthority(ctx, plan.inactiveName, target); err != nil {
+		return nil, nil, fmt.Errorf("verify active edge worker authority: %w", err)
+	}
+	return frontPods, frontHealth, nil
+}
+
+func repairEdgeGroupStandby(ctx context.Context, runtime edgeGroupTransitionRuntime, plan edgeGroupABPlan, serving edgeGroupState) bool {
 	// Front and the active Worker are already committed to the new authority at
 	// this point.  Standby preparation is maintenance-only: a failed sequence,
 	// receipt, or inactive-slot roll must not send the generic executor down its
@@ -637,31 +529,35 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	// from such a stale declaration; preserve the exact runtime that Guardian
 	// recorded as PreviousAuthority. Standby maintenance is allowed only when
 	// the prewrite active cohort already matched the declared immutable target.
-	standbyEligible := edgePodsMatchTarget(edgeWorkerPods(before, activeSlot), previousTarget)
+	standbyEligible := edgePodsMatchTarget(edgeWorkerPods(plan.before, plan.activeSlot), plan.activeTarget)
 	var standby edgeCandidateStageReceipt
 	var standbyErr error
 	if standbyEligible {
-		standby, standbyErr = runtime.StageStandby(ctx, serving, activeSlot, previousTarget)
+		standby, standbyErr = runtime.StageStandby(ctx, serving, plan.activeSlot, plan.activeTarget)
 	}
 	standbyConverged := false
 	if standbyEligible && standbyErr == nil {
-		previousDigest, digestErr := immutableDigestFromRef(previousTarget.ImageRef)
-		receiptValid := digestErr == nil && standby.WorkerSlot == activeSlot && standby.CurrentWorkerSlot == inactiveSlot &&
-			standby.WorkerSourceSHA == previousTarget.ConfigSHA && standby.WorkerImageDigest == previousDigest &&
+		previousDigest, digestErr := immutableDigestFromRef(plan.activeTarget.ImageRef)
+		receiptValid := digestErr == nil && standby.WorkerSlot == plan.activeSlot && standby.CurrentWorkerSlot == plan.inactiveSlot &&
+			standby.WorkerSourceSHA == plan.activeTarget.ConfigSHA && standby.WorkerImageDigest == previousDigest &&
 			!standby.AllowDegradedPrevious && standby.StandbyOnly && !standby.OrdinaryTrafficMutation
-		if receiptValid && runtime.ApplyCandidateResources(ctx, previousName) == nil {
-			_, standbyErr = runtime.Roll(ctx, previousName, previousTarget, true, true)
+		if receiptValid && runtime.ApplyCandidateResources(ctx, plan.activeName) == nil {
+			_, standbyErr = runtime.Roll(ctx, plan.activeName, plan.activeTarget, true, true)
 			standbyConverged = standbyErr == nil
 		}
 	}
+	return standbyConverged
+}
+
+func verifyEdgeGroupTransition(ctx context.Context, runtime edgeGroupTransitionRuntime, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity, plan edgeGroupABPlan, standbyConverged bool) error {
 	final, err := runtime.Snapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("capture final edge group state: %w", err)
 	}
-	if !edgePodsMatchTarget(final.Front, frontTarget) || !edgePodsMatchTarget(edgeWorkerPods(final, inactiveSlot), target) {
+	if !edgePodsMatchTarget(final.Front, plan.frontTarget) || !edgePodsMatchTarget(edgeWorkerPods(final, plan.inactiveSlot), target) {
 		return errors.New("edge group did not converge candidate current authority")
 	}
-	if standbyConverged && !edgePodsMatchTarget(edgeWorkerPods(final, activeSlot), previousTarget) {
+	if standbyConverged && !edgePodsMatchTarget(edgeWorkerPods(final, plan.activeSlot), plan.activeTarget) {
 		return errors.New("edge group did not converge candidate current and previous LKG")
 	}
 	if standbyConverged {
@@ -671,7 +567,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	} else if err := validateActiveEdgeGroupAuthority(final, transition); err != nil {
 		return err
 	}
-	if final.ActiveSlot != inactiveSlot {
+	if final.ActiveSlot != plan.inactiveSlot {
 		return errors.New("edge group activation did not converge to the promoted slot")
 	}
 	return nil

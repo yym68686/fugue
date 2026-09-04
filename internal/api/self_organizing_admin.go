@@ -169,7 +169,7 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups()
+	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups(r.Context())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

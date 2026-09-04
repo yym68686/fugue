@@ -42,6 +42,18 @@ type edgeLiveServingState struct {
 	Reason  string
 }
 
+type edgeLiveServingEvidenceState string
+
+const (
+	edgeLiveServingEvidenceUnknown  edgeLiveServingEvidenceState = "unknown"
+	edgeLiveServingEvidenceObserved edgeLiveServingEvidenceState = "observed"
+)
+
+type edgeLiveServingEvidence struct {
+	State  edgeLiveServingEvidenceState
+	ByNode map[string]edgeLiveServingState
+}
+
 func edgeRoutePathPrefix(app model.App, routeKind string) string {
 	pathPrefix := "/"
 	if routeKind == model.EdgeRouteKindPlatform && app.Route != nil {
@@ -823,17 +835,20 @@ func edgeRoutePublicationGroups(healthyEdgeGroups, expectedNonEmptyEdgeGroups ma
 	return groups
 }
 
-func (s *Server) edgeRouteHealthyEdgeGroups() (map[string]bool, error) {
-	healthy, _, _, _, err := s.edgeRouteGroupInventory()
+func (s *Server) edgeRouteHealthyEdgeGroups(ctx context.Context) (map[string]bool, error) {
+	healthy, _, _, _, err := s.edgeRouteGroupInventory(ctx)
 	return healthy, err
 }
 
-func (s *Server) edgeRouteHealthyEdgeGroupInventory() (map[string]bool, map[string][]string, error) {
-	healthy, healthyNodeIDsByGroup, _, _, err := s.edgeRouteGroupInventory()
+func (s *Server) edgeRouteHealthyEdgeGroupInventory(ctx context.Context) (map[string]bool, map[string][]string, error) {
+	healthy, healthyNodeIDsByGroup, _, _, err := s.edgeRouteGroupInventory(ctx)
 	return healthy, healthyNodeIDsByGroup, err
 }
 
-func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string, map[string]bool, map[string]int, error) {
+func (s *Server) edgeRouteGroupInventory(ctx context.Context) (map[string]bool, map[string][]string, map[string]bool, map[string]int, error) {
+	if ctx == nil {
+		return nil, nil, nil, nil, errors.New("edge route inventory context is nil")
+	}
 	nodes, _, err := s.listRouteInventoryNodes("")
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -845,7 +860,7 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 	expectedNonEmpty := make(map[string]bool)
 	expectedMinTrafficRoutes := make(map[string]int)
 	now := time.Now().UTC()
-	liveServingByNode := s.edgeLiveServingByNode(context.Background(), now)
+	liveServing := s.edgeLiveServingByNode(ctx, now)
 	quarantineByNode := s.activeNodeQuarantineByName()
 	for _, node := range nodes {
 		groupID := strings.TrimSpace(node.EdgeGroupID)
@@ -858,7 +873,7 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 		if node.CaddyRouteCount > expectedMinTrafficRoutes[groupID] && edgeNodeHasRouteState(node) {
 			expectedMinTrafficRoutes[groupID] = node.CaddyRouteCount
 		}
-		if edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
+		if edgeNodeRouteServingCapableWithLive(node, now, liveServing) {
 			healthyBeforeQuarantine[groupID] = true
 			healthyNodeIDsBeforeQuarantine[groupID] = appendUniqueString(healthyNodeIDsBeforeQuarantine[groupID], node.ID)
 			if !edgeNodeQuarantined(node, quarantineByNode) {
@@ -986,13 +1001,13 @@ func edgeNodeQuarantined(node model.EdgeNode, quarantineByNode map[string]model.
 	return false
 }
 
-func (s *Server) edgeLiveServingByNode(ctx context.Context, now time.Time) map[string]edgeLiveServingState {
+func (s *Server) edgeLiveServingByNode(ctx context.Context, now time.Time) edgeLiveServingEvidence {
 	if s == nil {
-		return nil
+		return edgeLiveServingEvidence{State: edgeLiveServingEvidenceUnknown}
 	}
 	namespace := strings.TrimSpace(s.controlPlaneNamespace)
 	if namespace == "" {
-		return nil
+		return edgeLiveServingEvidence{State: edgeLiveServingEvidenceUnknown}
 	}
 	releaseInstance := strings.TrimSpace(s.controlPlaneReleaseInstance)
 	cacheKey := namespace + "/" + releaseInstance
@@ -1031,9 +1046,9 @@ func (s *Server) edgeLiveServingByNode(ctx context.Context, now time.Time) map[s
 		if s.log != nil {
 			s.log.Printf("edge live serving inventory unavailable: %v", err)
 		}
-		return nil
+		return edgeLiveServingEvidence{State: edgeLiveServingEvidenceUnknown}
 	}
-	return states
+	return edgeLiveServingEvidence{State: edgeLiveServingEvidenceObserved, ByNode: states}
 }
 
 func controlPlanePodIsEdge(pod kubePodInfo) bool {
@@ -1076,14 +1091,14 @@ func edgePodLiveServingState(pod kubePodInfo, now time.Time) edgeLiveServingStat
 	return edgeLiveServingState{Serving: true}
 }
 
-func edgeNodeRouteServingCapableWithLive(node model.EdgeNode, now time.Time, liveServingByNode map[string]edgeLiveServingState) bool {
+func edgeNodeRouteServingCapableWithLive(node model.EdgeNode, now time.Time, liveServing edgeLiveServingEvidence) bool {
 	if !edgeNodeRouteServingCapable(node, now) {
 		return false
 	}
-	if len(liveServingByNode) == 0 {
+	if liveServing.State != edgeLiveServingEvidenceObserved {
 		return true
 	}
-	state, ok := liveServingByNode[strings.TrimSpace(node.ID)]
+	state, ok := liveServing.ByNode[strings.TrimSpace(node.ID)]
 	if !ok {
 		return true
 	}

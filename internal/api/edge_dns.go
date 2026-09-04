@@ -223,7 +223,7 @@ func (s *Server) loadEdgeDNSBundleCompileSnapshot(ctx context.Context, zones []s
 	if err != nil {
 		return nil, err
 	}
-	healthyEdgeGroups, healthyEdgeNodeIDsByGroup, err := s.edgeRouteHealthyEdgeGroupInventory()
+	healthyEdgeGroups, healthyEdgeNodeIDsByGroup, err := s.edgeRouteHealthyEdgeGroupInventory(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sort"
@@ -117,7 +118,7 @@ func (s *Server) handleExplainTrafficSafety(w http.ResponseWriter, r *http.Reque
 	}
 	minHealthy := queryIntDefault(r, "min_healthy_edges", 1)
 	eligible, gated := trafficSafetyEdgeGroups(explain)
-	healthyEdgeCount, err := s.trafficSafetyEligibleEdgeNodeCount(hostname)
+	healthyEdgeCount, err := s.trafficSafetyEligibleEdgeNodeCount(r.Context(), hostname)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -158,8 +159,8 @@ func (s *Server) handleExplainTrafficSafety(w http.ResponseWriter, r *http.Reque
 	httpx.WriteJSON(w, http.StatusOK, model.TrafficSafetyExplainResponse{State: state})
 }
 
-func (s *Server) trafficSafetyEligibleEdgeNodeCount(hostname string) (int, error) {
-	_, healthyNodeIDsByGroup, _, _, err := s.edgeRouteGroupInventory()
+func (s *Server) trafficSafetyEligibleEdgeNodeCount(ctx context.Context, hostname string) (int, error) {
+	_, healthyNodeIDsByGroup, _, _, err := s.edgeRouteGroupInventory(ctx)
 	if err != nil {
 		return 0, err
 	}

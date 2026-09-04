@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"testing"
 
 	"fugue/internal/model"
@@ -35,7 +36,7 @@ func TestRouteInventoryConsumesOnlyCentrallyFencedActiveEpoch(t *testing.T) {
 			t.Fatalf("late A heartbeat: %v", err)
 		}
 	}
-	healthy, nodeIDs, _, _, err := server.edgeRouteGroupInventory()
+	healthy, nodeIDs, _, _, err := server.edgeRouteGroupInventory(context.Background())
 	if err != nil {
 		t.Fatalf("route inventory: %v", err)
 	}
@@ -47,7 +48,7 @@ func TestRouteInventoryConsumesOnlyCentrallyFencedActiveEpoch(t *testing.T) {
 	if _, err := storeState.UpdateEdgeInstanceHeartbeat(b); err != nil {
 		t.Fatalf("record active signature failure: %v", err)
 	}
-	healthy, _, _, _, err = server.edgeRouteGroupInventory()
+	healthy, _, _, _, err = server.edgeRouteGroupInventory(context.Background())
 	if err != nil {
 		t.Fatalf("route inventory after active failure: %v", err)
 	}
@@ -74,7 +75,7 @@ func TestRouteInventoryPreservesLegacyAuthorityBeforeActiveEpochCutover(t *testi
 			t.Fatalf("seed instance heartbeat: %v", err)
 		}
 	}
-	healthy, nodeIDs, expected, minimum, err := server.edgeRouteGroupInventory()
+	healthy, nodeIDs, expected, minimum, err := server.edgeRouteGroupInventory(context.Background())
 	if err != nil {
 		t.Fatalf("missing active epoch must be represented as unavailable, not serving error: %v", err)
 	}

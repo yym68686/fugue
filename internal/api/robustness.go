@@ -1500,7 +1500,7 @@ func (s *Server) explainRouteForRobustness(r *http.Request, hostname string) (mo
 	if err != nil {
 		return model.RouteExplainResponse{}, err
 	}
-	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups()
+	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups(r.Context())
 	if err != nil {
 		return model.RouteExplainResponse{}, err
 	}
@@ -1578,7 +1578,7 @@ func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.Robustn
 		hostname := normalizeExternalAppDomain(route.Hostname)
 		healthy, ok := eligibleByHostname[hostname]
 		if !ok {
-			healthy, err = s.trafficSafetyEligibleEdgeNodeCount(hostname)
+			healthy, err = s.trafficSafetyEligibleEdgeNodeCount(r.Context(), hostname)
 			if err != nil {
 				return nil, err
 			}

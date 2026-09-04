@@ -892,24 +892,99 @@ func (s *Service) installSharedCaddyTLSCertificate(hostname string, bundle caddy
 	if hostname == "" {
 		return false, nil
 	}
+	if !validCaddyStorageSegment(hostname) {
+		return false, fmt.Errorf("shared TLS certificate hostname is invalid")
+	}
 	bundle = normalizeCaddyTLSCertificateBundle(bundle)
+	if !validCaddyStorageSegment(bundle.IssuerStorage) {
+		return false, fmt.Errorf("shared TLS certificate issuer storage for %s is invalid", hostname)
+	}
+	if _, err := tls.X509KeyPair([]byte(bundle.CertificatePEM), []byte(bundle.PrivateKeyPEM)); err != nil {
+		return false, fmt.Errorf("shared TLS certificate key pair for %s is invalid: %w", hostname, err)
+	}
+	s.caddyTLSInstallMu.Lock()
+	defer s.caddyTLSInstallMu.Unlock()
 	if current, err := s.readLocalCaddyTLSCertificate(hostname); err == nil && normalizeCaddyTLSCertificateBundle(current) == bundle {
 		return false, nil
 	}
-	hostDir := filepath.Join(s.caddyDataDir(), "certificates", bundle.IssuerStorage, hostname)
-	if err := os.MkdirAll(hostDir, 0o700); err != nil {
+	issuerDir := filepath.Join(s.caddyDataDir(), "certificates", bundle.IssuerStorage)
+	if err := os.MkdirAll(issuerDir, 0o700); err != nil {
 		return false, fmt.Errorf("create Caddy certificate directory for %s: %w", hostname, err)
 	}
-	if err := os.WriteFile(filepath.Join(hostDir, hostname+".crt"), []byte(bundle.CertificatePEM+"\n"), 0o644); err != nil {
-		return false, fmt.Errorf("write Caddy certificate for %s: %w", hostname, err)
+	stagedDir, err := os.MkdirTemp(issuerDir, ".fugue-tls-"+hostname+"-*")
+	if err != nil {
+		return false, fmt.Errorf("stage Caddy certificate directory for %s: %w", hostname, err)
 	}
-	if err := os.WriteFile(filepath.Join(hostDir, hostname+".key"), []byte(bundle.PrivateKeyPEM+"\n"), 0o600); err != nil {
-		return false, fmt.Errorf("write Caddy private key for %s: %w", hostname, err)
+	defer os.RemoveAll(stagedDir) //nolint:errcheck
+	if err := os.Chmod(stagedDir, 0o700); err != nil {
+		return false, fmt.Errorf("secure staged Caddy certificate directory for %s: %w", hostname, err)
 	}
-	if err := os.WriteFile(filepath.Join(hostDir, hostname+".json"), []byte(bundle.MetadataJSON+"\n"), 0o644); err != nil {
-		return false, fmt.Errorf("write Caddy certificate metadata for %s: %w", hostname, err)
+	for _, file := range []struct {
+		name string
+		data string
+		mode os.FileMode
+	}{
+		{name: hostname + ".crt", data: bundle.CertificatePEM + "\n", mode: 0o644},
+		{name: hostname + ".key", data: bundle.PrivateKeyPEM + "\n", mode: 0o600},
+		{name: hostname + ".json", data: bundle.MetadataJSON + "\n", mode: 0o644},
+	} {
+		if err := writeSyncedFile(filepath.Join(stagedDir, file.name), []byte(file.data), file.mode); err != nil {
+			return false, fmt.Errorf("stage Caddy certificate file %s for %s: %w", file.name, hostname, err)
+		}
+	}
+	if err := syncDirectory(stagedDir); err != nil {
+		return false, fmt.Errorf("sync staged Caddy certificate directory for %s: %w", hostname, err)
+	}
+	hostDir := filepath.Join(issuerDir, hostname)
+	if info, err := os.Lstat(hostDir); errors.Is(err, os.ErrNotExist) {
+		if err := os.Rename(stagedDir, hostDir); err != nil {
+			return false, fmt.Errorf("install Caddy certificate directory for %s: %w", hostname, err)
+		}
+	} else if err != nil {
+		return false, fmt.Errorf("inspect Caddy certificate directory for %s: %w", hostname, err)
+	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("Caddy certificate path for %s must be a directory", hostname)
+	} else if err := exchangeDirectories(stagedDir, hostDir); err != nil {
+		return false, fmt.Errorf("atomically replace Caddy certificate directory for %s: %w", hostname, err)
+	}
+	if err := syncDirectory(issuerDir); err != nil {
+		return false, fmt.Errorf("sync Caddy certificate parent directory for %s: %w", hostname, err)
 	}
 	return true, nil
+}
+
+func validCaddyStorageSegment(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && value != "." && value != ".." && !filepath.IsAbs(value) &&
+		filepath.Clean(value) == value && !strings.ContainsAny(value, `/\\`)
+}
+
+func writeSyncedFile(path string, data []byte, mode os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return err
+	}
+	return directory.Close()
 }
 
 func normalizeCaddyTLSCertificateBundle(bundle caddyTLSCertificateBundle) caddyTLSCertificateBundle {

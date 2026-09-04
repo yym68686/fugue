@@ -87,6 +87,7 @@ type Service struct {
 	requestBodyPolicyMu           sync.Mutex
 	requestBodyPolicyGuards       map[string]*edgeRequestBodyPolicyGuard
 	caddyWarmupMu                 sync.Mutex
+	caddyTLSInstallMu             sync.Mutex
 	caddyWarmupCancel             context.CancelFunc
 	caddyWarmupDone               <-chan struct{}
 	caddyWarmupIdentity           string
@@ -95,6 +96,8 @@ type Service struct {
 	mu                    sync.Mutex
 	snapshot              Status
 	bundle                *model.EdgeRouteBundle
+	routeIndex            atomic.Pointer[edgeRouteIndex]
+	routeHealthMode       edgeRouteHealthMode
 	etag                  string
 	routePublication      routePublicationMetadata
 	metrics               telemetry
@@ -921,122 +924,36 @@ func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool, bool)
 	if host == "" {
 		return model.EdgeRouteBinding{}, false, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.bundle == nil {
-		return model.EdgeRouteBinding{}, false, false
-	}
-	localEdgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
-	var fallbackActive model.EdgeRouteBinding
-	var fallbackInactive model.EdgeRouteBinding
-	for _, route := range s.bundle.Routes {
-		if normalizeRouteHost(route.Hostname) != host {
-			continue
-		}
-		if !s.routeAllowedForThisEdge(route) {
-			continue
-		}
-		if routeMatchesCurrentEdgeGroup(route, localEdgeGroupID) {
-			if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
-				return route, true, false
-			}
-			if fallbackInactive.Hostname == "" {
-				fallbackInactive = route
-			}
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
-			if fallbackActive.Hostname == "" {
-				fallbackActive = route
-			}
-			continue
-		}
-		if fallbackInactive.Hostname == "" {
-			fallbackInactive = route
-		}
-	}
-	if fallbackActive.Hostname != "" {
-		return fallbackActive, true, true
-	}
-	if fallbackInactive.Hostname != "" {
-		return fallbackInactive, true, true
-	}
-	return model.EdgeRouteBinding{}, false, false
+	return s.currentRouteIndex().routeForHost(host)
 }
 
 func (s *Service) routeForRequest(host, requestPath string) (model.EdgeRouteBinding, bool, bool) {
-	route, ok, fallback, _ := s.routeForRequestWithBundle(host, requestPath)
+	route, ok, fallback, _, _ := s.routeForRequestWithBundle(host, requestPath)
 	return route, ok, fallback
 }
 
-func (s *Service) routeForRequestWithBundle(host, requestPath string) (model.EdgeRouteBinding, bool, bool, string) {
+func (s *Service) routeForRequestWithBundle(host, requestPath string) (model.EdgeRouteBinding, bool, bool, string, routePublicationMetadata) {
 	host = normalizeRouteHost(host)
-	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
 	if host == "" {
-		return model.EdgeRouteBinding{}, false, false, ""
+		return model.EdgeRouteBinding{}, false, false, "", routePublicationMetadata{}
 	}
+	return s.currentRouteIndex().routeForRequest(host, requestPath)
+}
+
+func (s *Service) currentRouteIndex() *edgeRouteIndex {
+	if index := s.routeIndex.Load(); index != nil {
+		return index
+	}
+	// Production bundle updates publish the index eagerly. The fallback keeps
+	// package-local fixtures and a partially initialized service fail-safe.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.bundle == nil {
-		return model.EdgeRouteBinding{}, false, false, ""
+		return nil
 	}
-	bundleVersion := strings.TrimSpace(s.bundle.Version)
-
-	localEdgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
-	bestPrefixLen := -1
-	var currentActive model.EdgeRouteBinding
-	var fallbackActive model.EdgeRouteBinding
-	var inactive model.EdgeRouteBinding
-	inactiveFallbackHit := false
-	for _, route := range s.bundle.Routes {
-		if normalizeRouteHost(route.Hostname) != host {
-			continue
-		}
-		if !s.routeAllowedForThisEdge(route) {
-			continue
-		}
-		prefix := model.NormalizeAppRoutePathPrefix(route.PathPrefix)
-		if !routePathPrefixMatches(prefix, requestPath) {
-			continue
-		}
-		prefixLen := len(prefix)
-		if prefixLen > bestPrefixLen {
-			bestPrefixLen = prefixLen
-			currentActive = model.EdgeRouteBinding{}
-			fallbackActive = model.EdgeRouteBinding{}
-			inactive = model.EdgeRouteBinding{}
-			inactiveFallbackHit = false
-		}
-		if prefixLen < bestPrefixLen {
-			continue
-		}
-
-		currentEdgeGroup := routeMatchesCurrentEdgeGroup(route, localEdgeGroupID)
-		active := strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive)
-		switch {
-		case currentEdgeGroup && active:
-			if currentActive.Hostname == "" {
-				currentActive = route
-			}
-		case active:
-			if fallbackActive.Hostname == "" {
-				fallbackActive = route
-			}
-		case inactive.Hostname == "":
-			inactive = route
-			inactiveFallbackHit = true
-		}
-	}
-	if currentActive.Hostname != "" {
-		return currentActive, true, false, bundleVersion
-	}
-	if fallbackActive.Hostname != "" {
-		return fallbackActive, true, true, bundleVersion
-	}
-	if inactive.Hostname != "" {
-		return inactive, true, inactiveFallbackHit, bundleVersion
-	}
-	return model.EdgeRouteBinding{}, false, false, bundleVersion
+	index := buildEdgeRouteIndex(*s.bundle, s.Config.EdgeGroupID, s.routePublication)
+	s.routeIndex.CompareAndSwap(nil, index)
+	return s.routeIndex.Load()
 }
 
 func selectWeightedEdgeRouteUpstream(r *http.Request, route model.EdgeRouteBinding, host, traceID, edgeRequestID string) (model.EdgeRouteBinding, model.EdgeRouteUpstream) {
@@ -1176,10 +1093,10 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	defer atomic.AddInt64(&s.activeProxyRequests, -1)
 	startedAt := time.Now()
 	host := normalizeRouteHost(firstNonEmptyHeader(r, "X-Fugue-Edge-Route-Host", r.Host))
-	route, ok, fallbackHit, bundleVersion := s.routeForRequestWithBundle(host, r.URL.Path)
+	route, ok, fallbackHit, bundleVersion, publication := s.routeForRequestWithBundle(host, r.URL.Path)
 	edgeRequestID := edgeRequestIDForProxy(r)
 	traceID := edgeTraceIDForProxy(r)
-	s.writeCandidateRouteAttestationHeaders(w)
+	writeCandidateRouteAttestationHeaders(w, publication)
 	selectedRoute := route
 	selectedUpstream := model.EdgeRouteUpstream{}
 	if ok {
@@ -1359,11 +1276,10 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 // already verified while loading a candidate publication. The identity remains
 // attached after that exact candidate is promoted so the post-activation canary
 // can bind the routed response to the release. No request input can synthesize it.
-func (s *Service) writeCandidateRouteAttestationHeaders(w http.ResponseWriter) {
-	if s == nil || w == nil {
+func writeCandidateRouteAttestationHeaders(w http.ResponseWriter, publication routePublicationMetadata) {
+	if w == nil {
 		return
 	}
-	publication, _ := s.currentRoutePublicationAndBundle()
 	if !edgeRouteDigestPattern.MatchString(publication.CandidateRecord) ||
 		!edgeRouteDigestPattern.MatchString(publication.ReleaseRecord) ||
 		(publication.WorkerSlot != model.EdgeSlotA && publication.WorkerSlot != model.EdgeSlotB) {
@@ -3883,9 +3799,13 @@ func edgeCacheGeneration(bundle model.EdgeRouteBundle) string {
 
 func (s *Service) recordCacheLoaded(cached cacheFile) {
 	bundle := cached.Bundle
+	publication := routePublicationFromCache(cached)
+	index := buildEdgeRouteIndex(bundle, s.Config.EdgeGroupID, publication)
 	s.mu.Lock()
 	s.bundle = &bundle
-	s.routePublication = routePublicationFromCache(cached)
+	s.routeIndex.Store(index)
+	s.routeHealthMode = edgeRouteHealthCurrent
+	s.routePublication = publication
 	s.etag = strings.TrimSpace(cached.ETag)
 	if s.etag == "" {
 		s.etag = quoteETag(bundle.Version)
@@ -3910,8 +3830,11 @@ func (s *Service) recordSyncSuccess(bundle model.EdgeRouteBundle, etag string, n
 }
 
 func (s *Service) recordSyncSuccessWithPublication(bundle model.EdgeRouteBundle, etag string, now time.Time, stale bool, publication routePublicationMetadata) {
+	index := buildEdgeRouteIndex(bundle, s.Config.EdgeGroupID, publication)
 	s.mu.Lock()
 	s.bundle = &bundle
+	s.routeIndex.Store(index)
+	s.routeHealthMode = edgeRouteHealthCurrent
 	s.routePublication = publication
 	s.etag = strings.TrimSpace(etag)
 	s.snapshot = s.statusForBundleLocked(bundle, now, &now, stale)
@@ -3931,6 +3854,7 @@ func (s *Service) recordNotModified(now time.Time) {
 		return
 	}
 	bundle := *s.bundle
+	s.routeHealthMode = edgeRouteHealthCurrent
 	s.snapshot = s.statusForBundleLocked(bundle, now, &now, false)
 }
 
@@ -3944,22 +3868,12 @@ func (s *Service) recordNoCandidate(now time.Time) {
 		s.snapshot.LastError = ""
 		s.snapshot.Status = "unhealthy"
 		s.snapshot.Healthy = false
+		s.routeHealthMode = edgeRouteHealthStandbyWithoutCandidate
 		return
 	}
 	bundle := *s.bundle
-	snapshot := s.statusForBundleAtLocked(bundle, now, &now, false, now)
-	retainedStandby := !bundle.ValidUntil.IsZero() && now.After(bundle.ValidUntil) && now.Sub(bundle.ValidUntil.UTC()) <= edgeEmergencyLKGMaxAge
-	if snapshot.MaxStaleExceeded && retainedStandby && strings.TrimSpace(snapshot.CaddyLastError) == "" {
-		// An empty candidate is the normal steady state after promotion. This
-		// worker is not selected by Front for ordinary traffic, so expiry of its
-		// retained standby LKG is observable degradation, not route unready. A
-		// future promotion still requires an exact, fresh candidate attestation,
-		// and the existing emergency retention bound still applies.
-		snapshot.Status = "degraded"
-		snapshot.Healthy = true
-		snapshot.DegradedReason = "inactive candidate is empty; retaining standby LKG beyond max_stale"
-	}
-	s.snapshot = snapshot
+	s.routeHealthMode = edgeRouteHealthStandbyWithoutCandidate
+	s.snapshot = s.statusForBundleAtLocked(bundle, now, &now, false, now)
 }
 
 func (s *Service) recordSyncError(err error) {
@@ -3967,32 +3881,26 @@ func (s *Service) recordSyncError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	message := s.redact(err.Error())
+	if s.bundle != nil {
+		lastSuccessAt := s.snapshot.LastSuccessAt
+		failureClass := s.snapshot.FailureClass
+		s.routeHealthMode = edgeRouteHealthSyncFailed
+		s.snapshot = s.statusForBundleAtLocked(*s.bundle, now, lastSuccessAt, true, now)
+		s.snapshot.LastError = message
+		if errors.Is(err, bundleauth.ErrInvalidSignature) || errors.Is(err, bundleauth.ErrMissingSignature) {
+			s.snapshot.FailureClass = model.EdgeInstanceFailureSignatureInvalid
+		} else {
+			s.snapshot.FailureClass = failureClass
+		}
+		return
+	}
 	s.snapshot.LastSyncAt = &now
 	s.snapshot.LastError = message
+	s.snapshot.Status = "unhealthy"
+	s.snapshot.Healthy = false
 	if errors.Is(err, bundleauth.ErrInvalidSignature) || errors.Is(err, bundleauth.ErrMissingSignature) {
 		s.snapshot.FailureClass = model.EdgeInstanceFailureSignatureInvalid
 	}
-	if s.bundle != nil {
-		s.snapshot.StaleCache = true
-		s.snapshot.Status = "stale"
-		s.snapshot.Healthy = true
-		if !s.bundle.ValidUntil.IsZero() && now.After(s.bundle.ValidUntil) {
-			s.snapshot.Status = "degraded"
-			s.snapshot.DegradedReason = "route bundle valid_until expired"
-			if s.maxStaleExceeded(s.bundle.ValidUntil, now) {
-				s.snapshot.Status = "unhealthy"
-				s.snapshot.Healthy = false
-				s.snapshot.MaxStaleExceeded = true
-				s.snapshot.DegradedReason = "route bundle valid_until exceeded max_stale"
-			}
-		} else if strings.TrimSpace(s.snapshot.DegradedReason) == "" {
-			s.snapshot.DegradedReason = "route bundle sync failed; serving cache"
-		}
-		s.decorateCaddyStatusLocked(&s.snapshot)
-		return
-	}
-	s.snapshot.Status = "unhealthy"
-	s.snapshot.Healthy = false
 	s.decorateCaddyStatusLocked(&s.snapshot)
 }
 
@@ -4062,8 +3970,21 @@ func (s *Service) recordCaddyApply(bundleVersion string, routeCount int, configS
 	s.snapshot.CaddyLastApplyAt = &now
 	s.snapshot.CaddyLastError = ""
 	if s.snapshot.Status == "caddy-error" {
-		s.snapshot.Status = "ok"
-		s.snapshot.Healthy = s.bundle != nil
+		if s.bundle == nil {
+			s.snapshot.Status = "unhealthy"
+			s.snapshot.Healthy = false
+		} else {
+			lastSyncAt := now
+			if s.snapshot.LastSyncAt != nil {
+				lastSyncAt = *s.snapshot.LastSyncAt
+			}
+			lastSuccessAt := s.snapshot.LastSuccessAt
+			lastError := s.snapshot.LastError
+			failureClass := s.snapshot.FailureClass
+			s.snapshot = s.statusForBundleAtLocked(*s.bundle, lastSyncAt, lastSuccessAt, s.snapshot.StaleCache, now)
+			s.snapshot.LastError = lastError
+			s.snapshot.FailureClass = failureClass
+		}
 	}
 }
 
@@ -4425,30 +4346,19 @@ func (s *Service) statusForBundleAtLocked(bundle model.EdgeRouteBundle, syncAt t
 	previousInventoryAt := s.snapshot.InventoryHeartbeatAt
 	previousInventoryGeneration := s.snapshot.InventoryHeartbeatGeneration
 	previousInventoryError := s.snapshot.InventoryHeartbeatError
-	status := "ok"
-	if stale {
-		status = "stale"
-	}
-	now = now.UTC()
 	validUntil := bundle.ValidUntil
-	degradedReason := ""
-	if !validUntil.IsZero() && now.After(validUntil) {
-		status = "degraded"
-		degradedReason = "route bundle valid_until expired"
-		stale = true
-	}
-	maxStaleExceeded := s.maxStaleExceeded(validUntil, now)
-	healthy := true
-	if maxStaleExceeded {
-		status = "unhealthy"
-		healthy = false
-		degradedReason = "route bundle valid_until exceeded max_stale"
-		stale = true
-	}
+	decision := evaluateEdgeRouteHealth(edgeRouteHealthInput{
+		BundlePresent: true,
+		ValidUntil:    validUntil,
+		Now:           now,
+		MaxStale:      s.Config.MaxStale,
+		Stale:         stale,
+		Mode:          s.routeHealthMode,
+	})
 	generation := edgeCacheGeneration(bundle)
 	out := Status{
-		Status:                       status,
-		Healthy:                      healthy,
+		Status:                       decision.Status,
+		Healthy:                      decision.Ready,
 		EdgeID:                       strings.TrimSpace(s.Config.EdgeID),
 		EdgeGroupID:                  strings.TrimSpace(s.Config.EdgeGroupID),
 		BundleVersion:                bundle.Version,
@@ -4466,9 +4376,9 @@ func (s *Service) statusForBundleAtLocked(bundle model.EdgeRouteBundle, syncAt t
 		TLSAllowlistCount:            len(bundle.TLSAllowlist),
 		LastSyncAt:                   &syncAt,
 		LastSuccessAt:                successAt,
-		DegradedReason:               degradedReason,
-		StaleCache:                   stale,
-		MaxStaleExceeded:             maxStaleExceeded,
+		DegradedReason:               decision.DegradedReason,
+		StaleCache:                   decision.Stale,
+		MaxStaleExceeded:             decision.MaxStaleExceeded,
 		CachePath:                    strings.TrimSpace(s.Config.CachePath),
 	}
 	if !validUntil.IsZero() {
@@ -4480,14 +4390,6 @@ func (s *Service) statusForBundleAtLocked(bundle model.EdgeRouteBundle, syncAt t
 	out.InventoryHeartbeatError = previousInventoryError
 	s.decorateCaddyStatusLocked(&out)
 	return out
-}
-
-func (s *Service) maxStaleExceeded(validUntil, now time.Time) bool {
-	maxStale := s.Config.MaxStale
-	if maxStale <= 0 || validUntil.IsZero() || now.IsZero() || !now.After(validUntil) {
-		return false
-	}
-	return now.Sub(validUntil) > maxStale
 }
 
 func (s *Service) decorateCaddyStatusLocked(out *Status) {
@@ -4993,15 +4895,6 @@ func normalizeRouteHost(host string) string {
 		host = host[:idx]
 	}
 	return strings.Trim(host, "[]")
-}
-
-func routePathPrefixMatches(prefix, requestPath string) bool {
-	prefix = model.NormalizeAppRoutePathPrefix(prefix)
-	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
-	if prefix == "/" {
-		return true
-	}
-	return requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/")
 }
 
 func firstNonEmpty(values ...string) string {

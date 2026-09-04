@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -195,7 +196,7 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 		t.Fatalf("record stale edge node: %v", err)
 	}
 	forceEdgeInstanceHeartbeatTimeForAPITest(t, storePath, stale)
-	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory(context.Background())
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
 	}
@@ -275,7 +276,7 @@ func TestEdgeRouteHealthyGroupsIncludeDegradedServingCache(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record degraded serving heartbeat: %v", err)
 	}
-	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory(context.Background())
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
 	}

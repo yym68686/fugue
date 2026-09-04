@@ -3,11 +3,18 @@ package edge
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2519,6 +2526,7 @@ func TestApplyCaddyConfigDoesNotDowngradeReadyCustomDomainOnWarmupFailure(t *tes
 
 func TestApplyCaddyConfigInstallsSharedCustomDomainCertificate(t *testing.T) {
 	t.Parallel()
+	certPEM, keyPEM := testCaddyTLSKeyPair(t, "www.customer.com")
 
 	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/load" {
@@ -2537,8 +2545,8 @@ func TestApplyCaddyConfigInstallsSharedCustomDomainCertificate(t *testing.T) {
 		}
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"certificate": caddyTLSCertificateBundle{
-				CertificatePEM: "shared-cert-pem",
-				PrivateKeyPEM:  "shared-key-pem",
+				CertificatePEM: certPEM,
+				PrivateKeyPEM:  keyPEM,
 				MetadataJSON:   `{"issuer":"shared"}`,
 				IssuerStorage:  defaultCaddyIssuerStorage,
 			},
@@ -2589,8 +2597,8 @@ func TestApplyCaddyConfigInstallsSharedCustomDomainCertificate(t *testing.T) {
 		Path string
 		Want string
 	}{
-		{Path: filepath.Join(hostDir, "www.customer.com.crt"), Want: "shared-cert-pem\n"},
-		{Path: filepath.Join(hostDir, "www.customer.com.key"), Want: "shared-key-pem\n"},
+		{Path: filepath.Join(hostDir, "www.customer.com.crt"), Want: certPEM + "\n"},
+		{Path: filepath.Join(hostDir, "www.customer.com.key"), Want: keyPEM + "\n"},
 		{Path: filepath.Join(hostDir, "www.customer.com.json"), Want: `{"issuer":"shared"}` + "\n"},
 	} {
 		data, err := os.ReadFile(item.Path)
@@ -2605,6 +2613,7 @@ func TestApplyCaddyConfigInstallsSharedCustomDomainCertificate(t *testing.T) {
 
 func TestSyncSharedCaddyTLSCertificatesSkipsUnchangedInstall(t *testing.T) {
 	t.Parallel()
+	certPEM, keyPEM := testCaddyTLSKeyPair(t, "www.customer.com")
 
 	var apiCalls int
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2614,8 +2623,8 @@ func TestSyncSharedCaddyTLSCertificatesSkipsUnchangedInstall(t *testing.T) {
 		}
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"certificate": caddyTLSCertificateBundle{
-				CertificatePEM: "shared-cert-pem",
-				PrivateKeyPEM:  "shared-key-pem",
+				CertificatePEM: certPEM,
+				PrivateKeyPEM:  keyPEM,
 				MetadataJSON:   `{"issuer":"shared"}`,
 				IssuerStorage:  defaultCaddyIssuerStorage,
 			},
@@ -2643,6 +2652,62 @@ func TestSyncSharedCaddyTLSCertificatesSkipsUnchangedInstall(t *testing.T) {
 	}
 	if installs := strings.Count(logs.String(), "shared TLS certificate installed"); installs != 1 {
 		t.Fatalf("expected unchanged shared TLS certificate to be installed once, got %d logs=%q", installs, logs.String())
+	}
+}
+
+func TestInstallSharedCaddyTLSCertificateAtomicallyReplacesDirectory(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	writeLocalCaddyTLSBundle(t, dataDir, "www.customer.com", "old-cert", "old-key", `{"issuer":"old"}`)
+	certPEM, keyPEM := testCaddyTLSKeyPair(t, "www.customer.com")
+	service := NewService(config.EdgeConfig{CaddyDataDir: dataDir, CaddySharedTLSEnabled: true}, log.New(io.Discard, "", 0))
+	installed, err := service.installSharedCaddyTLSCertificate("www.customer.com", caddyTLSCertificateBundle{
+		CertificatePEM: certPEM,
+		PrivateKeyPEM:  keyPEM,
+		MetadataJSON:   `{"issuer":"new"}`,
+		IssuerStorage:  defaultCaddyIssuerStorage,
+	})
+	if err != nil || !installed {
+		t.Fatalf("atomic shared TLS install: installed=%t err=%v", installed, err)
+	}
+	got, err := service.readLocalCaddyTLSCertificate("www.customer.com")
+	if err != nil {
+		t.Fatalf("read atomically installed shared TLS certificate: %v", err)
+	}
+	if got.CertificatePEM != certPEM || got.PrivateKeyPEM != keyPEM || got.MetadataJSON != `{"issuer":"new"}` {
+		t.Fatalf("atomic shared TLS install exposed mixed content: %+v", got)
+	}
+	matches, err := filepath.Glob(filepath.Join(dataDir, "certificates", defaultCaddyIssuerStorage, ".fugue-tls-www.customer.com-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("atomic shared TLS install left staging directories: matches=%v err=%v", matches, err)
+	}
+}
+
+func TestInstallSharedCaddyTLSCertificateRejectsIssuerPathTraversal(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{CaddyDataDir: t.TempDir(), CaddySharedTLSEnabled: true}, log.New(io.Discard, "", 0))
+	installed, err := service.installSharedCaddyTLSCertificate("www.customer.com", caddyTLSCertificateBundle{
+		CertificatePEM: "cert",
+		PrivateKeyPEM:  "key",
+		MetadataJSON:   `{}`,
+		IssuerStorage:  "../escape",
+	})
+	if err == nil || installed {
+		t.Fatalf("issuer path traversal was accepted: installed=%t err=%v", installed, err)
+	}
+}
+
+func TestInstallSharedCaddyTLSCertificateRejectsHostnamePathTraversal(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{CaddyDataDir: t.TempDir(), CaddySharedTLSEnabled: true}, log.New(io.Discard, "", 0))
+	installed, err := service.installSharedCaddyTLSCertificate("../escape", caddyTLSCertificateBundle{
+		CertificatePEM: "cert", PrivateKeyPEM: "key", MetadataJSON: `{}`, IssuerStorage: defaultCaddyIssuerStorage,
+	})
+	if err == nil || installed {
+		t.Fatalf("hostname path traversal reached Caddy storage: installed=%t err=%v", installed, err)
 	}
 }
 
@@ -4421,6 +4486,39 @@ func writeLocalCaddyTLSBundle(t *testing.T, dataDir, hostname, certPEM, keyPEM, 
 	if err := os.WriteFile(filepath.Join(hostDir, hostname+".json"), []byte(metadataJSON+"\n"), 0o644); err != nil {
 		t.Fatalf("write local caddy metadata: %v", err)
 	}
+}
+
+func testCaddyTLSKeyPair(t *testing.T, hostname string) (string, string) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test Caddy TLS key: %v", err)
+	}
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	if err != nil {
+		t.Fatalf("generate test Caddy TLS serial: %v", err)
+	}
+	now := time.Now().UTC()
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      pkix.Name{CommonName: hostname},
+		DNSNames:     []string{hostname},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("create test Caddy TLS certificate: %v", err)
+	}
+	keyBytes, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("marshal test Caddy TLS key: %v", err)
+	}
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	key := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	return strings.TrimSpace(string(certificate)), strings.TrimSpace(string(key))
 }
 
 func newTestEdgeControlCacheService(t *testing.T, cfg config.EdgeConfig, logger *log.Logger) *Service {

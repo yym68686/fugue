@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -71,12 +73,55 @@ func TestEdgeNodeRouteServingCapableUsesLiveCaddyState(t *testing.T) {
 		RouteBundleVersion: "routegen_a",
 		LastHeartbeatAt:    &now,
 	}
-	live := map[string]edgeLiveServingState{
+	live := edgeLiveServingEvidence{State: edgeLiveServingEvidenceObserved, ByNode: map[string]edgeLiveServingState{
 		"edge-node-a": {Serving: false, Reason: "caddy container restarted recently"},
-	}
+	}}
 
 	if edgeNodeRouteServingCapableWithLive(node, now, live) {
 		t.Fatal("expected live caddy state to make the edge node non-serving")
+	}
+
+	unknown := edgeLiveServingEvidence{State: edgeLiveServingEvidenceUnknown}
+	if !edgeNodeRouteServingCapableWithLive(node, now, unknown) {
+		t.Fatal("expected unknown live evidence to preserve heartbeat-derived serving state")
+	}
+	observedEmpty := edgeLiveServingEvidence{State: edgeLiveServingEvidenceObserved, ByNode: map[string]edgeLiveServingState{}}
+	if !edgeNodeRouteServingCapableWithLive(node, now, observedEmpty) {
+		t.Fatal("expected an observed inventory without this node to preserve heartbeat-derived serving state")
+	}
+}
+
+func TestEdgeLiveServingInventoryPropagatesCancellation(t *testing.T) {
+	t.Parallel()
+
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+		close(requestCanceled)
+	}))
+	defer api.Close()
+
+	server := &Server{
+		controlPlaneNamespace: "fugue-system",
+		edgeLiveServingCache:  newExpiringResponseCache[map[string]edgeLiveServingState](5 * time.Second),
+		newClusterNodeClient: func() (*clusterNodeClient, error) {
+			return &clusterNodeClient{client: api.Client(), baseURL: api.URL}, nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan edgeLiveServingEvidence, 1)
+	go func() { done <- server.edgeLiveServingByNode(ctx, time.Now().UTC()) }()
+	<-requestStarted
+	cancel()
+	if evidence := <-done; evidence.State != edgeLiveServingEvidenceUnknown {
+		t.Fatalf("canceled live inventory returned evidence: %+v", evidence)
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("Kubernetes live inventory request did not observe caller cancellation")
 	}
 }
 
