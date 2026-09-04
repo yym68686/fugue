@@ -11,10 +11,12 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/observability"
+	"fugue/internal/store"
 )
 
 const edgeQualityRollupBuilderInterval = 5 * time.Minute
 const edgeQualityPlatformRollupHostname = "__platform__"
+const edgeQualityRollupSampleChunkSize = 128
 
 var edgeQualityRollupWindows = []struct {
 	Name      string
@@ -52,11 +54,11 @@ func (s *Server) runEdgeQualityRollupBuilder(ctx context.Context, now time.Time)
 	if s.store != nil {
 		acquired, err = s.store.WithAdvisoryLock(ctx, "edge-quality-rollup-builder", func() error {
 			var buildErr error
-			count, buildErr = s.rebuildEdgeQualityRollups(now)
+			count, buildErr = s.rebuildEdgeQualityRollups(ctx, now)
 			return buildErr
 		})
 	} else {
-		count, err = s.rebuildEdgeQualityRollups(now)
+		count, err = s.rebuildEdgeQualityRollups(ctx, now)
 	}
 	duration := time.Since(started)
 	if !acquired {
@@ -89,28 +91,51 @@ func (s *Server) runEdgeQualityRollupBuilder(ctx context.Context, now time.Time)
 	}
 }
 
-func (s *Server) rebuildEdgeQualityRollups(now time.Time) (int, error) {
+func (s *Server) rebuildEdgeQualityRollups(ctx context.Context, now time.Time) (int, error) {
 	if s == nil || s.store == nil {
 		return 0, nil
 	}
 	now = now.UTC()
-	earliest := now.Add(-24 * time.Hour)
-	samples, err := s.store.ListEdgePerformanceSamples("", earliest)
+	session, err := s.store.BeginEdgeQualityRollupBuild(ctx)
 	if err != nil {
 		return 0, err
 	}
-	retention := make(map[string]time.Time, len(edgeQualityRollupWindows))
-	var rollups []model.EdgeQualityRollup
-	for _, window := range edgeQualityRollupWindows {
-		retention[window.Name] = now.Add(-window.Retention)
-		endedAt := now.Truncate(window.Duration)
-		if endedAt.IsZero() {
-			endedAt = now
-		}
-		startedAt := endedAt.Add(-window.Duration)
-		rollups = append(rollups, buildEdgeQualityRollupsForWindow(samples, window.Name, startedAt, endedAt, now)...)
+	defer session.Rollback()
+	watermarks, err := session.Watermarks()
+	if err != nil {
+		return 0, err
 	}
-	if err := s.store.UpsertEdgeQualityRollups(rollups, retention); err != nil {
+	plans, retention, pendingWatermarks, earliest, latest := planEdgeQualityRollupWindows(now, watermarks)
+	if len(plans) == 0 {
+		if len(pendingWatermarks) == 0 {
+			return 0, nil
+		}
+		if err := session.Commit(nil, retention, pendingWatermarks); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+	builder := newEdgeQualityRollupBuildState(plans)
+	session.SetPercentileWindows(builder.percentileWindows())
+	var percentileWeights map[store.EdgeQualityPercentileValueKey]int
+	if session.NeedsPercentileWeights() {
+		percentileWeights = map[store.EdgeQualityPercentileValueKey]int{}
+	}
+	if err := session.ForEachSampleChunk(earliest, latest, edgeQualityRollupSampleChunkSize, func(samples []model.EdgePerformanceSample) error {
+		if percentileWeights != nil {
+			clear(percentileWeights)
+		}
+		builder.addSamples(samples, percentileWeights)
+		return session.AddPercentileWeights(percentileWeights)
+	}); err != nil {
+		return 0, err
+	}
+	percentiles, err := session.Percentiles()
+	if err != nil {
+		return 0, err
+	}
+	rollups := builder.rollups(percentiles, now)
+	if err := session.Commit(rollups, retention, pendingWatermarks); err != nil {
 		return 0, err
 	}
 	return len(rollups), nil
@@ -154,13 +179,10 @@ type edgeQualityRollupKey struct {
 	EdgeID           string
 }
 
-type edgeQualityWeightedValue struct {
-	Value  float64
-	Weight int
-}
-
 type edgeQualityRollupAccumulator struct {
+	Target                       *edgeQualityRollupWindowTarget
 	Key                          edgeQualityRollupKey
+	PercentileBucketKey          string
 	SampleRecords                int
 	RequestCount                 int
 	ErrorCount                   int
@@ -208,56 +230,281 @@ type edgeQualityRollupAccumulator struct {
 	GoroutineCountWeighted       float64
 	MemoryAllocWeighted          float64
 	SaturationSampleCount        int
-	TTFBValues                   []edgeQualityWeightedValue
-	UploadValues                 []edgeQualityWeightedValue
-	MinWindowValues              []edgeQualityWeightedValue
-	MaxReadGapValues             []edgeQualityWeightedValue
-	ResponseEgressValues         []edgeQualityWeightedValue
-	ResponseWriteValues          []edgeQualityWeightedValue
 }
 
-func buildEdgeQualityRollupsForWindow(samples []model.EdgePerformanceSample, window string, startedAt, endedAt, now time.Time) []model.EdgeQualityRollup {
-	accumulators := map[string]*edgeQualityRollupAccumulator{}
+type edgeQualityRollupWindowTarget struct {
+	ID        int64
+	Window    string
+	Duration  time.Duration
+	StartedAt time.Time
+	EndedAt   time.Time
+}
+
+type edgeQualityRollupWindowPlan struct {
+	Duration time.Duration
+	Targets  map[int64]*edgeQualityRollupWindowTarget
+}
+
+type edgeQualityRollupAccumulatorKey struct {
+	TargetID int64
+	Rollup   edgeQualityRollupKey
+}
+
+type edgeQualityRollupBuildState struct {
+	plans        []edgeQualityRollupWindowPlan
+	accumulators map[edgeQualityRollupAccumulatorKey]*edgeQualityRollupAccumulator
+}
+
+func planEdgeQualityRollupWindows(now time.Time, watermarks map[string]time.Time) ([]edgeQualityRollupWindowPlan, map[string]time.Time, map[string]time.Time, time.Time, time.Time) {
+	now = now.UTC()
+	plans := make([]edgeQualityRollupWindowPlan, 0, len(edgeQualityRollupWindows))
+	retention := make(map[string]time.Time, len(edgeQualityRollupWindows))
+	pendingWatermarks := make(map[string]time.Time, len(edgeQualityRollupWindows))
+	var earliest time.Time
+	var latest time.Time
+	var nextTargetID int64
+	for _, window := range edgeQualityRollupWindows {
+		retentionBefore := now.Add(-window.Retention)
+		retention[window.Name] = retentionBefore
+		currentEnd := now.Truncate(window.Duration)
+		if currentEnd.IsZero() {
+			currentEnd = now
+		}
+		watermark := watermarks[window.Name].UTC()
+		if !watermark.IsZero() {
+			watermark = watermark.Truncate(window.Duration)
+		}
+		if !watermark.Before(currentEnd) {
+			continue
+		}
+		pendingWatermarks[window.Name] = currentEnd
+		nextEnd := currentEnd
+		if !watermark.IsZero() {
+			nextEnd = watermark.Add(window.Duration)
+			oldestRetainedEnd := retentionBefore.Truncate(window.Duration)
+			if oldestRetainedEnd.Before(retentionBefore) {
+				oldestRetainedEnd = oldestRetainedEnd.Add(window.Duration)
+			}
+			if nextEnd.Before(oldestRetainedEnd) {
+				nextEnd = oldestRetainedEnd
+			}
+		}
+		plan := edgeQualityRollupWindowPlan{
+			Duration: window.Duration,
+			Targets:  map[int64]*edgeQualityRollupWindowTarget{},
+		}
+		for endedAt := nextEnd; !endedAt.After(currentEnd); endedAt = endedAt.Add(window.Duration) {
+			target := &edgeQualityRollupWindowTarget{
+				ID:        nextTargetID,
+				Window:    window.Name,
+				Duration:  window.Duration,
+				StartedAt: endedAt.Add(-window.Duration),
+				EndedAt:   endedAt,
+			}
+			nextTargetID++
+			plan.Targets[endedAt.UnixNano()] = target
+			if earliest.IsZero() || target.StartedAt.Before(earliest) {
+				earliest = target.StartedAt
+			}
+			if latest.IsZero() || target.EndedAt.After(latest) {
+				latest = target.EndedAt
+			}
+		}
+		if len(plan.Targets) > 0 {
+			plans = append(plans, plan)
+		}
+	}
+	return plans, retention, pendingWatermarks, earliest, latest
+}
+
+func newEdgeQualityRollupBuildState(plans []edgeQualityRollupWindowPlan) *edgeQualityRollupBuildState {
+	return &edgeQualityRollupBuildState{
+		plans:        plans,
+		accumulators: map[edgeQualityRollupAccumulatorKey]*edgeQualityRollupAccumulator{},
+	}
+}
+
+func (b *edgeQualityRollupBuildState) percentileWindows() []store.EdgeQualityPercentileWindow {
+	windows := make([]store.EdgeQualityPercentileWindow, 0)
+	for _, plan := range b.plans {
+		for _, target := range plan.Targets {
+			windows = append(windows, store.EdgeQualityPercentileWindow{
+				ID:        target.ID,
+				Window:    target.Window,
+				StartedAt: target.StartedAt,
+				EndedAt:   target.EndedAt,
+			})
+		}
+	}
+	sort.Slice(windows, func(i, j int) bool { return windows[i].ID < windows[j].ID })
+	return windows
+}
+
+func (b *edgeQualityRollupBuildState) addSamples(samples []model.EdgePerformanceSample, percentileWeights map[store.EdgeQualityPercentileValueKey]int) {
 	for _, sample := range samples {
-		if sample.SampledAt.Before(startedAt) || !sample.SampledAt.Before(endedAt) {
-			continue
-		}
 		hostname := normalizeExternalAppDomain(sample.Hostname)
-		if hostname == "" || strings.TrimSpace(sample.EdgeGroupID) == "" {
+		edgeGroupID := strings.TrimSpace(sample.EdgeGroupID)
+		if hostname == "" || edgeGroupID == "" {
 			continue
 		}
-		for _, scope := range edgeQualityRollupScopesForSample(sample) {
-			for _, rollupHostname := range []string{hostname, edgeQualityPlatformRollupHostname} {
-				edgeIDs := []string{""}
-				if edgeID := strings.TrimSpace(sample.EdgeID); edgeID != "" {
-					edgeIDs = append(edgeIDs, edgeID)
-				}
-				for _, edgeID := range edgeIDs {
-					key := edgeQualityRollupKey{
-						Hostname:         rollupHostname,
-						TrafficClass:     normalizeEdgeTrafficClass(sample.TrafficClass),
-						Method:           strings.ToUpper(strings.TrimSpace(sample.Method)),
-						PathPrefixBucket: edgeQualityPathPrefixBucket(sample.PathPrefix),
-						ClientScopeKind:  scope.Kind,
-						ClientScopeValue: scope.Value,
-						EdgeGroupID:      strings.TrimSpace(sample.EdgeGroupID),
-						EdgeID:           edgeID,
+		trafficClass := normalizeEdgeTrafficClass(sample.TrafficClass)
+		method := strings.ToUpper(strings.TrimSpace(sample.Method))
+		pathPrefixBucket := edgeQualityPathPrefixBucket(sample.PathPrefix)
+		scopes := edgeQualityRollupScopesForSample(sample)
+		hostnames := []string{hostname, edgeQualityPlatformRollupHostname}
+		edgeIDs := []string{""}
+		if edgeID := strings.TrimSpace(sample.EdgeID); edgeID != "" {
+			edgeIDs = append(edgeIDs, edgeID)
+		}
+		for _, plan := range b.plans {
+			endedAt := sample.SampledAt.UTC().Truncate(plan.Duration).Add(plan.Duration)
+			target := plan.Targets[endedAt.UnixNano()]
+			if target == nil || sample.SampledAt.Before(target.StartedAt) || !sample.SampledAt.Before(target.EndedAt) {
+				continue
+			}
+			for _, scope := range scopes {
+				for _, rollupHostname := range hostnames {
+					for _, edgeID := range edgeIDs {
+						key := edgeQualityRollupAccumulatorKey{
+							TargetID: target.ID,
+							Rollup: edgeQualityRollupKey{
+								Hostname:         rollupHostname,
+								TrafficClass:     trafficClass,
+								Method:           method,
+								PathPrefixBucket: pathPrefixBucket,
+								ClientScopeKind:  scope.Kind,
+								ClientScopeValue: scope.Value,
+								EdgeGroupID:      edgeGroupID,
+								EdgeID:           edgeID,
+							},
+						}
+						accumulator := b.accumulators[key]
+						if accumulator == nil {
+							accumulator = &edgeQualityRollupAccumulator{
+								Target:              target,
+								Key:                 key.Rollup,
+								PercentileBucketKey: edgeQualityPercentileBucketKey(target.ID, key.Rollup),
+							}
+							b.accumulators[key] = accumulator
+						}
+						accumulateEdgeQualityRollup(accumulator, sample, percentileWeights)
 					}
-					accumulateEdgeQualityRollup(accumulators, key, sample)
 				}
 			}
 		}
 	}
-	out := make([]model.EdgeQualityRollup, 0, len(accumulators))
-	for _, accumulator := range accumulators {
-		out = append(out, accumulator.rollup(window, startedAt, endedAt, now))
+}
+
+func edgeQualityPercentileBucketKey(targetID int64, key edgeQualityRollupKey) string {
+	return fmt.Sprintf("%d\x00%s", targetID, strings.Join([]string{
+		key.Hostname,
+		key.TrafficClass,
+		key.Method,
+		key.PathPrefixBucket,
+		key.ClientScopeKind,
+		key.ClientScopeValue,
+		key.EdgeGroupID,
+		key.EdgeID,
+	}, "\x00"))
+}
+
+func (b *edgeQualityRollupBuildState) rollups(percentiles map[string]store.EdgeQualityPercentileSet, now time.Time) []model.EdgeQualityRollup {
+	out := make([]model.EdgeQualityRollup, 0, len(b.accumulators))
+	for _, accumulator := range b.accumulators {
+		out = append(out, accumulator.rollup(percentiles[accumulator.PercentileBucketKey], now))
 	}
+	sortEdgeQualityRollupOutput(out)
+	return out
+}
+
+func buildEdgeQualityRollupsForWindow(samples []model.EdgePerformanceSample, window string, startedAt, endedAt, now time.Time) []model.EdgeQualityRollup {
+	target := &edgeQualityRollupWindowTarget{ID: 0, Window: window, Duration: endedAt.Sub(startedAt), StartedAt: startedAt, EndedAt: endedAt}
+	builder := newEdgeQualityRollupBuildState([]edgeQualityRollupWindowPlan{{
+		Duration: target.Duration,
+		Targets:  map[int64]*edgeQualityRollupWindowTarget{endedAt.UnixNano(): target},
+	}})
+	weights := map[store.EdgeQualityPercentileValueKey]int{}
+	builder.addSamples(samples, weights)
+	return builder.rollups(edgeQualityPercentilesFromWeights(weights), now)
+}
+
+func edgeQualityPercentilesFromWeights(weights map[store.EdgeQualityPercentileValueKey]int) map[string]store.EdgeQualityPercentileSet {
+	grouped := map[string]map[store.EdgeQualityPercentileMetric]map[int64]int{}
+	for key, weight := range weights {
+		byMetric := grouped[key.BucketKey]
+		if byMetric == nil {
+			byMetric = map[store.EdgeQualityPercentileMetric]map[int64]int{}
+			grouped[key.BucketKey] = byMetric
+		}
+		values := byMetric[key.Metric]
+		if values == nil {
+			values = map[int64]int{}
+			byMetric[key.Metric] = values
+		}
+		values[key.Value] += weight
+	}
+	results := map[string]store.EdgeQualityPercentileSet{}
+	for bucketKey, byMetric := range grouped {
+		percentileSet := store.EdgeQualityPercentileSet{}
+		for metric, values := range byMetric {
+			percentileSet[metric] = store.EdgeQualityPercentiles{
+				P10: groupedEdgeQualityWeightedQuantile(values, 0.10),
+				P50: groupedEdgeQualityWeightedQuantile(values, 0.50),
+				P95: groupedEdgeQualityWeightedQuantile(values, 0.95),
+				P99: groupedEdgeQualityWeightedQuantile(values, 0.99),
+			}
+		}
+		results[bucketKey] = percentileSet
+	}
+	return results
+}
+
+func groupedEdgeQualityWeightedQuantile(weights map[int64]int, q float64) float64 {
+	values := make([]int64, 0, len(weights))
+	total := 0
+	for value, weight := range weights {
+		if value > 0 && weight > 0 {
+			values = append(values, value)
+			total += weight
+		}
+	}
+	if total <= 0 {
+		return 0
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+	target := int(math.Ceil(q * float64(total)))
+	if target <= 0 {
+		target = 1
+	}
+	seen := 0
+	for _, value := range values {
+		seen += weights[value]
+		if seen >= target {
+			return float64(value)
+		}
+	}
+	return float64(values[len(values)-1])
+}
+
+func sortEdgeQualityRollupOutput(out []model.EdgeQualityRollup) {
 	sort.Slice(out, func(i, j int) bool {
+		if !out[i].WindowStartedAt.Equal(out[j].WindowStartedAt) {
+			return out[i].WindowStartedAt.Before(out[j].WindowStartedAt)
+		}
+		if out[i].Window != out[j].Window {
+			return out[i].Window < out[j].Window
+		}
 		if out[i].Hostname != out[j].Hostname {
 			return out[i].Hostname < out[j].Hostname
 		}
 		if out[i].TrafficClass != out[j].TrafficClass {
 			return out[i].TrafficClass < out[j].TrafficClass
+		}
+		if out[i].Method != out[j].Method {
+			return out[i].Method < out[j].Method
+		}
+		if out[i].PathPrefixBucket != out[j].PathPrefixBucket {
+			return out[i].PathPrefixBucket < out[j].PathPrefixBucket
 		}
 		if out[i].ClientScopeKind != out[j].ClientScopeKind {
 			return out[i].ClientScopeKind < out[j].ClientScopeKind
@@ -270,16 +517,19 @@ func buildEdgeQualityRollupsForWindow(samples []model.EdgePerformanceSample, win
 		}
 		return out[i].EdgeID < out[j].EdgeID
 	})
-	return out
 }
 
-func accumulateEdgeQualityRollup(accumulators map[string]*edgeQualityRollupAccumulator, key edgeQualityRollupKey, sample model.EdgePerformanceSample) {
-	keyString := strings.Join([]string{key.Hostname, key.TrafficClass, key.Method, key.PathPrefixBucket, key.ClientScopeKind, key.ClientScopeValue, key.EdgeGroupID, key.EdgeID}, "\x00")
-	accumulator := accumulators[keyString]
-	if accumulator == nil {
-		accumulator = &edgeQualityRollupAccumulator{Key: key}
-		accumulators[keyString] = accumulator
-	}
+func accumulateEdgeQualityRollup(accumulator *edgeQualityRollupAccumulator, sample model.EdgePerformanceSample, percentileWeights map[store.EdgeQualityPercentileValueKey]int) {
+	requestCount, uploadBPS := accumulateEdgeQualityRollupScalars(accumulator, sample)
+	addEdgeQualityPercentileWeight(percentileWeights, accumulator.PercentileBucketKey, store.EdgeQualityPercentileTTFB, sample.TTFBMS, requestCount)
+	addEdgeQualityPercentileWeight(percentileWeights, accumulator.PercentileBucketKey, store.EdgeQualityPercentileUpload, uploadBPS, requestCount)
+	addEdgeQualityPercentileWeight(percentileWeights, accumulator.PercentileBucketKey, store.EdgeQualityPercentileMinWindow, sample.MinWindowBPS, requestCount)
+	addEdgeQualityPercentileWeight(percentileWeights, accumulator.PercentileBucketKey, store.EdgeQualityPercentileMaxReadGap, sample.MaxReadGapMS, requestCount)
+	addEdgeQualityPercentileWeight(percentileWeights, accumulator.PercentileBucketKey, store.EdgeQualityPercentileResponseEgress, sample.ResponseEgressBPS, requestCount)
+	addEdgeQualityPercentileWeight(percentileWeights, accumulator.PercentileBucketKey, store.EdgeQualityPercentileResponseWrite, sample.ResponseWriteMS, requestCount)
+}
+
+func accumulateEdgeQualityRollupScalars(accumulator *edgeQualityRollupAccumulator, sample model.EdgePerformanceSample) (int, int64) {
 	requestCount := sample.SampleCount
 	if requestCount <= 0 {
 		requestCount = 1
@@ -294,36 +544,31 @@ func accumulateEdgeQualityRollup(accumulators map[string]*edgeQualityRollupAccum
 	accumulator.ClientCancelCount += sample.ClientCancelCount
 	accumulator.UpstreamWeightedMS += float64(sample.UpstreamMS) * float64(requestCount)
 	accumulator.TotalWeightedMS += float64(sample.TotalMS) * float64(requestCount)
-	accumulator.addWeighted(&accumulator.TTFBValues, sample.TTFBMS, requestCount)
 	accumulator.addAverage(sample.OriginDNSMS, requestCount, &accumulator.OriginDNSWeightedMS, &accumulator.OriginDNSSampleCount)
 	accumulator.addAverage(sample.OriginConnectMS, requestCount, &accumulator.OriginConnectWeightedMS, &accumulator.OriginConnectSampleCount)
 	accumulator.addAverage(sample.OriginRequestWriteMS, requestCount, &accumulator.OriginWriteWeightedMS, &accumulator.OriginWriteSampleCount)
 	accumulator.addAverage(sample.OriginResponseWaitMS, requestCount, &accumulator.OriginWaitWeightedMS, &accumulator.OriginWaitSampleCount)
 	accumulator.addAverage(sample.OriginTTFBMS, requestCount, &accumulator.OriginTTFBWeightedMS, &accumulator.OriginTTFBSampleCount)
 	accumulator.addAverage(sample.OriginTotalMS, requestCount, &accumulator.OriginTotalWeightedMS, &accumulator.OriginTotalSampleCount)
-	if uploadBPS := edgeDNSPerformanceUploadBPS(sample); uploadBPS > 0 {
+	uploadBPS := edgeDNSPerformanceUploadBPS(sample)
+	if uploadBPS > 0 {
 		accumulator.UploadWeightedBPS += float64(uploadBPS) * float64(requestCount)
 		accumulator.UploadSampleCount += requestCount
-		accumulator.addWeighted(&accumulator.UploadValues, uploadBPS, requestCount)
 	}
 	if sample.MinWindowBPS > 0 {
 		accumulator.MinWindowWeightedBPS += float64(sample.MinWindowBPS) * float64(requestCount)
 		accumulator.MinWindowSampleCount += requestCount
-		accumulator.addWeighted(&accumulator.MinWindowValues, sample.MinWindowBPS, requestCount)
 	}
 	if sample.MaxReadGapMS > 0 {
 		accumulator.MaxReadGapSampleCount += requestCount
-		accumulator.addWeighted(&accumulator.MaxReadGapValues, sample.MaxReadGapMS, requestCount)
 	}
 	accumulator.addAverage(sample.BodyReadBlockMS, requestCount, &accumulator.BodyReadBlockWeightedMS, &accumulator.BodyReadBlockSampleCount)
 	if sample.ResponseEgressBPS > 0 {
 		accumulator.ResponseEgressWeightedBPS += float64(sample.ResponseEgressBPS) * float64(requestCount)
 		accumulator.ResponseEgressSampleCount += requestCount
-		accumulator.addWeighted(&accumulator.ResponseEgressValues, sample.ResponseEgressBPS, requestCount)
 	}
 	if sample.ResponseWriteMS > 0 {
 		accumulator.ResponseWriteSampleCount += requestCount
-		accumulator.addWeighted(&accumulator.ResponseWriteValues, sample.ResponseWriteMS, requestCount)
 	}
 	if sample.ClientTCPRTTMS > 0 || sample.ClientTCPMinRTTMS > 0 || sample.ClientTCPRTTVarMS > 0 {
 		accumulator.ClientTCPRTTWeighted += sample.ClientTCPRTTMS * float64(requestCount)
@@ -348,6 +593,7 @@ func accumulateEdgeQualityRollup(accumulators map[string]*edgeQualityRollupAccum
 		accumulator.MemoryAllocWeighted += float64(sample.MemoryAllocBytes) * float64(requestCount)
 		accumulator.SaturationSampleCount += requestCount
 	}
+	return requestCount, uploadBPS
 }
 
 func (a *edgeQualityRollupAccumulator) addAverage(value int64, weight int, weighted *float64, count *int) {
@@ -358,22 +604,22 @@ func (a *edgeQualityRollupAccumulator) addAverage(value int64, weight int, weigh
 	*count += weight
 }
 
-func (a *edgeQualityRollupAccumulator) addWeighted(values *[]edgeQualityWeightedValue, value int64, weight int) {
-	if value <= 0 || weight <= 0 {
+func addEdgeQualityPercentileWeight(weights map[store.EdgeQualityPercentileValueKey]int, bucketKey string, metric store.EdgeQualityPercentileMetric, value int64, weight int) {
+	if weights == nil || value <= 0 || weight <= 0 {
 		return
 	}
-	*values = append(*values, edgeQualityWeightedValue{Value: float64(value), Weight: weight})
+	weights[store.EdgeQualityPercentileValueKey{BucketKey: bucketKey, Metric: metric, Value: value}] += weight
 }
 
-func (a *edgeQualityRollupAccumulator) rollup(window string, startedAt, endedAt, now time.Time) model.EdgeQualityRollup {
+func (a *edgeQualityRollupAccumulator) rollup(percentiles store.EdgeQualityPercentileSet, now time.Time) model.EdgeQualityRollup {
 	requestCount := a.RequestCount
 	if requestCount <= 0 {
 		requestCount = a.SampleRecords
 	}
 	rollup := model.EdgeQualityRollup{
-		Window:                    window,
-		WindowStartedAt:           startedAt,
-		WindowEndedAt:             endedAt,
+		Window:                    a.Target.Window,
+		WindowStartedAt:           a.Target.StartedAt,
+		WindowEndedAt:             a.Target.EndedAt,
 		Hostname:                  a.Key.Hostname,
 		TrafficClass:              a.Key.TrafficClass,
 		Method:                    a.Key.Method,
@@ -387,9 +633,9 @@ func (a *edgeQualityRollupAccumulator) rollup(window string, startedAt, endedAt,
 		ErrorCount:                a.ErrorCount,
 		CacheHitCount:             a.CacheHitCount,
 		CacheObservationCount:     a.CacheObservationCount,
-		P50TTFBMS:                 weightedQuantile(a.TTFBValues, 0.50),
-		P95TTFBMS:                 weightedQuantile(a.TTFBValues, 0.95),
-		P99TTFBMS:                 weightedQuantile(a.TTFBValues, 0.99),
+		P50TTFBMS:                 percentiles[store.EdgeQualityPercentileTTFB].P50,
+		P95TTFBMS:                 percentiles[store.EdgeQualityPercentileTTFB].P95,
+		P99TTFBMS:                 percentiles[store.EdgeQualityPercentileTTFB].P99,
 		AvgUpstreamMS:             divideWeighted(a.UpstreamWeightedMS, requestCount),
 		AvgTotalMS:                divideWeighted(a.TotalWeightedMS, requestCount),
 		AvgOriginDNSMS:            divideWeighted(a.OriginDNSWeightedMS, a.OriginDNSSampleCount),
@@ -399,14 +645,14 @@ func (a *edgeQualityRollupAccumulator) rollup(window string, startedAt, endedAt,
 		AvgOriginTTFBMS:           divideWeighted(a.OriginTTFBWeightedMS, a.OriginTTFBSampleCount),
 		AvgOriginTotalMS:          divideWeighted(a.OriginTotalWeightedMS, a.OriginTotalSampleCount),
 		AvgUploadEffectiveBPS:     divideWeighted(a.UploadWeightedBPS, a.UploadSampleCount),
-		P10UploadEffectiveBPS:     weightedQuantile(a.UploadValues, 0.10),
+		P10UploadEffectiveBPS:     percentiles[store.EdgeQualityPercentileUpload].P10,
 		AvgMinWindowBPS:           divideWeighted(a.MinWindowWeightedBPS, a.MinWindowSampleCount),
-		P10MinWindowBPS:           weightedQuantile(a.MinWindowValues, 0.10),
-		P95MaxReadGapMS:           weightedQuantile(a.MaxReadGapValues, 0.95),
+		P10MinWindowBPS:           percentiles[store.EdgeQualityPercentileMinWindow].P10,
+		P95MaxReadGapMS:           percentiles[store.EdgeQualityPercentileMaxReadGap].P95,
 		AvgBodyReadBlockMS:        divideWeighted(a.BodyReadBlockWeightedMS, a.BodyReadBlockSampleCount),
 		AvgResponseEgressBPS:      divideWeighted(a.ResponseEgressWeightedBPS, a.ResponseEgressSampleCount),
-		P10ResponseEgressBPS:      weightedQuantile(a.ResponseEgressValues, 0.10),
-		P95ResponseWriteMS:        weightedQuantile(a.ResponseWriteValues, 0.95),
+		P10ResponseEgressBPS:      percentiles[store.EdgeQualityPercentileResponseEgress].P10,
+		P95ResponseWriteMS:        percentiles[store.EdgeQualityPercentileResponseWrite].P95,
 		AvgClientTCPRTTMS:         divideWeighted(a.ClientTCPRTTWeighted, a.ClientTCPMetricSampleCount),
 		AvgClientTCPMinRTTMS:      divideWeighted(a.ClientTCPMinRTTWeighted, a.ClientTCPMetricSampleCount),
 		AvgClientTCPRTTVarMS:      divideWeighted(a.ClientTCPRTTVarWeighted, a.ClientTCPMetricSampleCount),
@@ -555,45 +801,6 @@ func edgeQualityRollupScopesForSample(sample model.EdgePerformanceSample) []edge
 		scopes = append(scopes, edgeQualityRollupScope{Kind: "asn", Value: asn})
 	}
 	return scopes
-}
-
-func weightedQuantile(values []edgeQualityWeightedValue, q float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	if q <= 0 {
-		q = 0
-	}
-	if q > 1 {
-		q = 1
-	}
-	sort.Slice(values, func(i, j int) bool {
-		return values[i].Value < values[j].Value
-	})
-	total := 0
-	for _, value := range values {
-		if value.Weight > 0 {
-			total += value.Weight
-		}
-	}
-	if total <= 0 {
-		return 0
-	}
-	target := int(math.Ceil(q * float64(total)))
-	if target <= 0 {
-		target = 1
-	}
-	seen := 0
-	for _, value := range values {
-		if value.Weight <= 0 {
-			continue
-		}
-		seen += value.Weight
-		if seen >= target {
-			return value.Value
-		}
-	}
-	return values[len(values)-1].Value
 }
 
 func divideWeighted(sum float64, count int) float64 {

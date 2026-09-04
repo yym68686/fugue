@@ -4515,6 +4515,9 @@ func ensureDefaults(state *model.State) {
 	if state.EdgeQualityRollups == nil {
 		state.EdgeQualityRollups = []model.EdgeQualityRollup{}
 	}
+	if state.EdgeQualityWatermarks == nil {
+		state.EdgeQualityWatermarks = map[string]time.Time{}
+	}
 	if state.StorePromotions == nil {
 		state.StorePromotions = []model.StorePromotion{}
 	}

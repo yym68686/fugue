@@ -20,38 +20,41 @@ func (s *Store) UpsertEdgeQualityRollups(rollups []model.EdgeQualityRollup, rete
 		return s.pgUpsertEdgeQualityRollups(rollups, retentionBefore)
 	}
 	return s.withLockedState(true, func(state *model.State) error {
-		if len(retentionBefore) > 0 {
-			filtered := state.EdgeQualityRollups[:0]
-			for _, rollup := range state.EdgeQualityRollups {
-				before := retentionBefore[strings.TrimSpace(rollup.Window)]
-				if !before.IsZero() && rollup.WindowEndedAt.Before(before) {
-					continue
-				}
-				filtered = append(filtered, rollup)
-			}
-			state.EdgeQualityRollups = filtered
-		}
-		byKey := make(map[string]int, len(state.EdgeQualityRollups))
-		for index, rollup := range state.EdgeQualityRollups {
-			byKey[edgeQualityRollupKey(rollup)] = index
-		}
-		now := time.Now().UTC()
-		for _, rollup := range rollups {
-			normalized := normalizeEdgeQualityRollupForStore(rollup, now)
-			if normalized.Window == "" || normalized.Hostname == "" || normalized.EdgeGroupID == "" {
-				continue
-			}
-			key := edgeQualityRollupKey(normalized)
-			if index, ok := byKey[key]; ok {
-				state.EdgeQualityRollups[index] = normalized
-				continue
-			}
-			state.EdgeQualityRollups = append(state.EdgeQualityRollups, normalized)
-			byKey[key] = len(state.EdgeQualityRollups) - 1
-		}
-		sortEdgeQualityRollups(state.EdgeQualityRollups)
+		applyEdgeQualityRollupsToState(state, rollups, retentionBefore, time.Now().UTC())
 		return nil
 	})
+}
+
+func applyEdgeQualityRollupsToState(state *model.State, rollups []model.EdgeQualityRollup, retentionBefore map[string]time.Time, now time.Time) {
+	if len(retentionBefore) > 0 {
+		filtered := state.EdgeQualityRollups[:0]
+		for _, rollup := range state.EdgeQualityRollups {
+			before := retentionBefore[strings.TrimSpace(rollup.Window)]
+			if !before.IsZero() && rollup.WindowEndedAt.Before(before) {
+				continue
+			}
+			filtered = append(filtered, rollup)
+		}
+		state.EdgeQualityRollups = filtered
+	}
+	byKey := make(map[string]int, len(state.EdgeQualityRollups))
+	for index, rollup := range state.EdgeQualityRollups {
+		byKey[edgeQualityRollupKey(rollup)] = index
+	}
+	for _, rollup := range rollups {
+		normalized := normalizeEdgeQualityRollupForStore(rollup, now)
+		if normalized.Window == "" || normalized.Hostname == "" || normalized.EdgeGroupID == "" {
+			continue
+		}
+		key := edgeQualityRollupKey(normalized)
+		if index, ok := byKey[key]; ok {
+			state.EdgeQualityRollups[index] = normalized
+			continue
+		}
+		state.EdgeQualityRollups = append(state.EdgeQualityRollups, normalized)
+		byKey[key] = len(state.EdgeQualityRollups) - 1
+	}
+	sortEdgeQualityRollups(state.EdgeQualityRollups)
 }
 
 func (s *Store) ListEdgeQualityRollups(hostname, window string, since time.Time) ([]model.EdgeQualityRollup, error) {
@@ -634,7 +637,16 @@ func (s *Store) pgUpsertEdgeQualityRollups(rollups []model.EdgeQualityRollup, re
 		return fmt.Errorf("begin edge quality rollup transaction: %w", err)
 	}
 	defer tx.Rollback()
+	if err := pgApplyEdgeQualityRollups(ctx, tx, rollups, retentionBefore, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit edge quality rollup transaction: %w", err)
+	}
+	return nil
+}
 
+func pgApplyEdgeQualityRollups(ctx context.Context, tx *sql.Tx, rollups []model.EdgeQualityRollup, retentionBefore map[string]time.Time, now time.Time) error {
 	for window, before := range retentionBefore {
 		window = strings.TrimSpace(strings.ToLower(window))
 		if window == "" || before.IsZero() {
@@ -644,7 +656,6 @@ func (s *Store) pgUpsertEdgeQualityRollups(rollups []model.EdgeQualityRollup, re
 			return fmt.Errorf("prune edge quality rollups: %w", err)
 		}
 	}
-	now := time.Now().UTC()
 	for _, rollup := range rollups {
 		normalized := normalizeEdgeQualityRollupForStore(rollup, now)
 		if normalized.Window == "" || normalized.Hostname == "" || normalized.EdgeGroupID == "" {
@@ -717,9 +728,6 @@ func (s *Store) pgUpsertEdgeQualityRollups(rollups []model.EdgeQualityRollup, re
 		); err != nil {
 			return fmt.Errorf("upsert edge quality rollup: %w", err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit edge quality rollup transaction: %w", err)
 	}
 	return nil
 }

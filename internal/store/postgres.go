@@ -1154,6 +1154,17 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_quality_rollups_lookup ON fugue_edge_quality_rollups (hostname, traffic_class, client_scope_kind, client_scope_value, window_ended_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_quality_rollups_edge ON fugue_edge_quality_rollups (edge_group_id, edge_id, window_ended_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_edge_quality_rollup_watermarks (
+		window_name TEXT PRIMARY KEY,
+		window_ended_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`INSERT INTO fugue_edge_quality_rollup_watermarks (window_name, window_ended_at, updated_at)
+	 SELECT window_name, MAX(window_ended_at), NOW()
+	 FROM fugue_edge_quality_rollups
+	 WHERE NOT EXISTS (SELECT 1 FROM fugue_edge_quality_rollup_watermarks)
+	 GROUP BY window_name
+	 ON CONFLICT (window_name) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS fugue_node_deep_health_results (
 		node_updater_id TEXT PRIMARY KEY,
 		cluster_node_name TEXT NOT NULL DEFAULT '',
