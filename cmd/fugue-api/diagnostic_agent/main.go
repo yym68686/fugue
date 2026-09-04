@@ -32,6 +32,7 @@ const (
 	maxCgroupSearchEntries = 20000
 	hostCgroupRoot         = "/sys/fs/cgroup"
 	pprofAnalysisTimeout   = 90 * time.Second
+	pprofBinary            = "/usr/local/bin/fugue-pprof"
 )
 
 type options struct {
@@ -587,23 +588,13 @@ func pprofTop(sampleIndex, base, profile string) (string, error) {
 		args = append(args, "-base", base)
 	}
 	args = append(args, profile)
-	args = append([]string{"tool", "pprof"}, args...)
-	workingDir := filepath.Dir(profile)
-	cacheDir := filepath.Join(workingDir, "go-build")
-	tmpDir := filepath.Join(workingDir, "go-tmp")
-	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-		return "", fmt.Errorf("create pprof build cache: %w", err)
-	}
-	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
-		return "", fmt.Errorf("create pprof temporary directory: %w", err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), pprofAnalysisTimeout)
 	defer cancel()
-	output, err := runCommandWithEnvironment(ctx, []string{
-		"HOME=" + workingDir,
-		"GOCACHE=" + cacheDir,
-		"GOTMPDIR=" + tmpDir,
-	}, "go", args...)
+	executable := strings.TrimSpace(os.Getenv("FUGUE_DIAGNOSTIC_PPROF_BINARY"))
+	if executable == "" {
+		executable = pprofBinary
+	}
+	output, err := runCommand(ctx, executable, args...)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("pprof summary exceeded %s", pprofAnalysisTimeout)
@@ -1342,10 +1333,6 @@ func runCommand(ctx context.Context, name string, args ...string) ([]byte, error
 
 func runCommandWithInput(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
 	return runCommandWithEnvironmentAndInput(ctx, nil, input, name, args...)
-}
-
-func runCommandWithEnvironment(ctx context.Context, environment []string, name string, args ...string) ([]byte, error) {
-	return runCommandWithEnvironmentAndInput(ctx, environment, nil, name, args...)
 }
 
 func runCommandWithEnvironmentAndInput(ctx context.Context, environment []string, input []byte, name string, args ...string) ([]byte, error) {

@@ -10,7 +10,14 @@ import (
 )
 
 func TestPprofTopReadsRuntimeHeapProfile(t *testing.T) {
-	profilePath := filepath.Join(t.TempDir(), "heap.pb.gz")
+	directory := t.TempDir()
+	pprofPath := filepath.Join(directory, "pprof")
+	command := exec.Command("go", "build", "-o", pprofPath, "cmd/pprof")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build standalone pprof: %v: %s", err, output)
+	}
+	t.Setenv("FUGUE_DIAGNOSTIC_PPROF_BINARY", pprofPath)
+	profilePath := filepath.Join(directory, "heap.pb.gz")
 	file, err := os.Create(profilePath)
 	if err != nil {
 		t.Fatal(err)
