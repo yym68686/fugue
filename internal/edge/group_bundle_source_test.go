@@ -325,7 +325,7 @@ func TestInactiveWorkerTreatsEmptyCandidateAsHealthyLKG(t *testing.T) {
 
 	service := NewServiceWithRouteBundleSource(config.EdgeConfig{
 		APIURL: "http://127.0.0.1:1", EdgeToken: "heartbeat-token", EdgeID: "edge-us-b", EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB,
-		CachePath: filepath.Join(root, "cache.json"), HTTPTimeout: time.Second,
+		CachePath: filepath.Join(root, "cache.json"), HTTPTimeout: time.Second, MaxStale: time.Hour,
 	}, RouteBundleSourceConfig{
 		URL: routeServer.URL + edgeControlBundlePath, CandidateURL: routeServer.URL + edgeControlCandidateBundlePath,
 		TokenFile: tokenFile, VerifierKeyringFile: keyringFile, ActivationStateFile: activationFile,
@@ -337,6 +337,86 @@ func TestInactiveWorkerTreatsEmptyCandidateAsHealthyLKG(t *testing.T) {
 	status := service.Status()
 	if !status.Healthy || status.StaleCache || status.LastError != "" || status.ServingGeneration != current.Generation {
 		t.Fatalf("empty candidate degraded cached worker: %+v", status)
+	}
+
+	// A settled inactive slot continues to receive 204 after its immutable
+	// candidate has been cleared. Bundle age remains visible, but it must not
+	// make the standby DaemonSet unready or block the next safe transition.
+	service.recordNoCandidate(current.ValidUntil.Add(service.Config.MaxStale + time.Minute))
+	status = service.Status()
+	if !status.Healthy || !status.StaleCache || !status.MaxStaleExceeded || status.Status != "degraded" ||
+		status.DegradedReason != "inactive candidate is empty; retaining standby LKG beyond max_stale" {
+		t.Fatalf("expired inactive standby was not ready and degraded: %+v", status)
+	}
+	recorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expired inactive standby readiness=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	service.recordNoCandidate(current.ValidUntil.Add(edgeEmergencyLKGMaxAge + time.Minute))
+	status = service.Status()
+	if status.Healthy || status.Status != "unhealthy" {
+		t.Fatalf("inactive standby exceeded emergency retention but remained ready: %+v", status)
+	}
+	recorder = httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("over-retained inactive standby readiness=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	service.Config.CaddyEnabled = true
+	service.mu.Lock()
+	service.metrics.CaddyLastError = "caddy admin unavailable"
+	service.mu.Unlock()
+	service.recordNoCandidate(current.ValidUntil.Add(service.Config.MaxStale + time.Minute))
+	status = service.Status()
+	if status.Healthy || status.Status != "caddy-error" || status.CaddyLastError == "" {
+		t.Fatalf("inactive standby candidate exception masked Caddy failure: %+v", status)
+	}
+}
+
+func TestInactiveWorkerRejectsEmptyCandidateAfterActivationChanges(t *testing.T) {
+	const groupID = "edge-group-country-us"
+	const keyID = "edge-us-key-v1"
+	key := []byte("0123456789abcdef0123456789abcdef")
+	root := t.TempDir()
+	tokenFile := filepath.Join(root, "reader-token")
+	if err := os.WriteFile(tokenFile, []byte("reader-token-0123456789-abcdef-0123456789\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyringFile := filepath.Join(root, "keyring.json")
+	writeEdgeVerifierKeyring(t, keyringFile, groupID, keyID, key)
+	now := time.Now().UTC()
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, strings.Repeat("1", 40))
+	routeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, err := edgegroupfront.ApplyActivationCAS(activationFile, edgegroupfront.ActivationCASRequest{
+			GroupID: groupID, ExpectedGeneration: 1, ExpectedSlot: model.EdgeSlotA, TargetSlot: model.EdgeSlotB,
+			BundleGeneration: "bundle-generation-2", WorkerSourceCommit: strings.Repeat("2", 40),
+			WorkerImageDigest: "sha256:" + strings.Repeat("3", 64), Operation: edgegroupfront.ActivationOperationPromote,
+			Reason: "activate worker while candidate request is running",
+		}, now.Add(time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer routeServer.Close()
+
+	service := NewServiceWithRouteBundleSource(config.EdgeConfig{
+		APIURL: "http://127.0.0.1:1", EdgeToken: "heartbeat-token", EdgeID: "edge-us-b", EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB,
+		CachePath: filepath.Join(root, "cache.json"), HTTPTimeout: time.Second,
+	}, RouteBundleSourceConfig{
+		URL: routeServer.URL + edgeControlBundlePath, CandidateURL: routeServer.URL + edgeControlCandidateBundlePath,
+		TokenFile: tokenFile, VerifierKeyringFile: keyringFile, ActivationStateFile: activationFile,
+	}, log.New(io.Discard, "", 0))
+	current := signedEdgeControlTestBundle(groupID, "generation-current", 1, 0, keyID, key)
+	service.recordSyncSuccess(current, strconv.Quote(current.Version), now, false)
+	if err := service.SyncOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "authority changed") {
+		t.Fatalf("activation race accepted empty inactive candidate: %v", err)
+	}
+	if status := service.Status(); status.LastError == "" {
+		t.Fatalf("activation race was not retained in readiness evidence: %+v", status)
 	}
 }
 

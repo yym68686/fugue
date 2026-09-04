@@ -753,6 +753,13 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			s.recordSyncError(err)
 			return err
 		}
+		// The activation may change after source selection but before the 204
+		// response arrives. Recheck it before applying inactive-slot semantics so
+		// an active worker can never turn an empty candidate response into ready.
+		if err = s.validateRouteBundleSourceSelection(routeSelection); err != nil {
+			s.recordSyncError(err)
+			return err
+		}
 		s.recordNoCandidate(now)
 		result = "not_modified"
 		return nil
@@ -3940,7 +3947,19 @@ func (s *Service) recordNoCandidate(now time.Time) {
 		return
 	}
 	bundle := *s.bundle
-	s.snapshot = s.statusForBundleLocked(bundle, now, &now, false)
+	snapshot := s.statusForBundleAtLocked(bundle, now, &now, false, now)
+	retainedStandby := !bundle.ValidUntil.IsZero() && now.After(bundle.ValidUntil) && now.Sub(bundle.ValidUntil.UTC()) <= edgeEmergencyLKGMaxAge
+	if snapshot.MaxStaleExceeded && retainedStandby && strings.TrimSpace(snapshot.CaddyLastError) == "" {
+		// An empty candidate is the normal steady state after promotion. This
+		// worker is not selected by Front for ordinary traffic, so expiry of its
+		// retained standby LKG is observable degradation, not route unready. A
+		// future promotion still requires an exact, fresh candidate attestation,
+		// and the existing emergency retention bound still applies.
+		snapshot.Status = "degraded"
+		snapshot.Healthy = true
+		snapshot.DegradedReason = "inactive candidate is empty; retaining standby LKG beyond max_stale"
+	}
+	s.snapshot = snapshot
 }
 
 func (s *Service) recordSyncError(err error) {
@@ -4394,6 +4413,10 @@ func edgeProxyObservationResult(observed edgeProxyObservation) string {
 }
 
 func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt time.Time, successAt *time.Time, stale bool) Status {
+	return s.statusForBundleAtLocked(bundle, syncAt, successAt, stale, time.Now().UTC())
+}
+
+func (s *Service) statusForBundleAtLocked(bundle model.EdgeRouteBundle, syncAt time.Time, successAt *time.Time, stale bool, now time.Time) Status {
 	// Inventory producer evidence is updated by its independent heartbeat loop.
 	// Route syncs also rebuild the status snapshot, so carry that evidence across
 	// a sync instead of making the declarative release health window observe a
@@ -4406,14 +4429,14 @@ func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt tim
 	if stale {
 		status = "stale"
 	}
+	now = now.UTC()
 	validUntil := bundle.ValidUntil
 	degradedReason := ""
-	if !validUntil.IsZero() && time.Now().UTC().After(validUntil) {
+	if !validUntil.IsZero() && now.After(validUntil) {
 		status = "degraded"
 		degradedReason = "route bundle valid_until expired"
 		stale = true
 	}
-	now := time.Now().UTC()
 	maxStaleExceeded := s.maxStaleExceeded(validUntil, now)
 	healthy := true
 	if maxStaleExceeded {
