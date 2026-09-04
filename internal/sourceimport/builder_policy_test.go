@@ -279,6 +279,7 @@ func TestBuildBuildpacksJobPinsBuilderAndProbesNodeRuntime(t *testing.T) {
 		defaultPaketoRunImage,
 		defaultPaketoAptBuildpack,
 		defaultPaketoNodeJSBuildpack,
+		"dockerd --host=\"$DOCKER_HOST\" --data-root /var/lib/docker --insecure-registry '10.128.0.2:30500'",
 		"docker run --rm --network none --read-only",
 		"--entrypoint /cnb/lifecycle/launcher",
 		"'node' '--version'",
@@ -289,6 +290,24 @@ func TestBuildBuildpacksJobPinsBuilderAndProbesNodeRuntime(t *testing.T) {
 	}
 	if strings.Contains(command, "builder-jammy-base:latest") {
 		t.Fatalf("Buildpacks command uses a floating builder: %s", command)
+	}
+}
+
+func TestBuildBuildpacksJobDoesNotRelaxDockerDaemonForSecureRegistry(t *testing.T) {
+	t.Parallel()
+
+	jobObject, err := buildBuildpacksJobObject("fugue-system", "build-demo", buildpacksBuildRequest{
+		ImageRef:         "registry.example/tenant/app:v1",
+		DetectedProvider: "nodejs",
+	})
+	if err != nil {
+		t.Fatalf("build buildpacks job object: %v", err)
+	}
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	command := podSpec["containers"].([]map[string]any)[0]["command"].([]string)[2]
+	dockerdLine := strings.SplitN(strings.SplitN(command, "dockerd ", 2)[1], "\n", 2)[0]
+	if strings.Contains(dockerdLine, "--insecure-registry") {
+		t.Fatalf("secure registry unexpectedly relaxed in Docker daemon: %s", dockerdLine)
 	}
 }
 

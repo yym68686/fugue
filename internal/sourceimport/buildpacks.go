@@ -345,6 +345,12 @@ func validatedBuildpacksImageDigest(role, value string) (string, error) {
 
 func buildpacksJobScript(workingDir, imageRef, builderImage, runImage, provider string, includeAptBuildpack bool) string {
 	registryHost := registryHostFromImageRef(imageRef)
+	dockerdInsecureRegistryArg := ""
+	if isInsecureRegistryHost(registryHost) {
+		if authority := registryAuthorityFromImageRef(imageRef); authority != "" {
+			dockerdInsecureRegistryArg = " --insecure-registry " + shellQuoteForOverlay(authority)
+		}
+	}
 	packArgs := []string{
 		"build",
 		shellQuoteForOverlay(imageRef),
@@ -374,7 +380,7 @@ func buildpacksJobScript(workingDir, imageRef, builderImage, runImage, provider 
 apk add --no-cache curl tar >/dev/null
 export DOCKER_HOST=unix:///var/run/docker.sock
 mkdir -p /var/run /workspace/bin
-dockerd --host="$DOCKER_HOST" --data-root /var/lib/docker >/workspace/dockerd.log 2>&1 &
+dockerd --host="$DOCKER_HOST" --data-root /var/lib/docker%s >/workspace/dockerd.log 2>&1 &
 dockerd_pid=$!
 cleanup() {
   kill "$dockerd_pid" >/dev/null 2>&1 || true
@@ -397,7 +403,7 @@ pack_url="https://github.com/buildpacks/pack/releases/download/v%s/${pack_archiv
 curl -fsSL "$pack_url" -o /tmp/pack.tgz
 tar -xzf /tmp/pack.tgz -C /workspace/bin pack
 /workspace/bin/pack %s
-%s`, defaultPackVersion, defaultPackVersion, defaultPackVersion, strings.Join(packArgs, " "), runtimeProbe)
+%s`, dockerdInsecureRegistryArg, defaultPackVersion, defaultPackVersion, defaultPackVersion, strings.Join(packArgs, " "), runtimeProbe)
 }
 
 func buildpacksRuntimeProbeScript(imageRef, provider string) string {

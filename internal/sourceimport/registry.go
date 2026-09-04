@@ -73,14 +73,19 @@ func validImageTag(tag string) bool {
 }
 
 func registryHostFromImageRef(imageRef string) string {
-	host := strings.TrimSpace(imageRef)
-	if idx := strings.Index(host, "/"); idx >= 0 {
-		host = host[:idx]
-	}
+	host := registryAuthorityFromImageRef(imageRef)
 	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
 		host = parsedHost
 	}
 	return strings.Trim(strings.TrimSpace(host), "[]")
+}
+
+func registryAuthorityFromImageRef(imageRef string) string {
+	authority := strings.TrimSpace(imageRef)
+	if idx := strings.Index(authority, "/"); idx >= 0 {
+		authority = authority[:idx]
+	}
+	return strings.TrimSpace(authority)
 }
 
 func isInsecureRegistryHost(host string) bool {
