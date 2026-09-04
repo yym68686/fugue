@@ -441,7 +441,11 @@ func hostProcessMatchesTarget(processName, executable string, cmdline []byte) bo
 		if len(argv) == 0 {
 			return false
 		}
-		executableName = filepath.Base(argv[0])
+		commandFields := strings.Fields(argv[0])
+		if len(commandFields) == 0 {
+			return false
+		}
+		executableName = filepath.Base(commandFields[0])
 	}
 
 	switch processName {
@@ -466,12 +470,11 @@ func splitNullTerminated(value []byte) []string {
 }
 
 func commandLineHasExactArgument(argv []string, expected string) bool {
-	if len(argv) < 2 {
-		return false
-	}
-	for _, arg := range argv[1:] {
-		if arg == expected {
-			return true
+	for _, arg := range argv {
+		for _, field := range strings.Fields(arg) {
+			if field == expected {
+				return true
+			}
 		}
 	}
 	return false

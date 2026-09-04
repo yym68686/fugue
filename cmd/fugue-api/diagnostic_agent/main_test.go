@@ -229,6 +229,7 @@ func TestHostProcessMatchesTargetUsesAllowlistedCommandLineFallback(t *testing.T
 		{name: "cmdline fallback", target: "fugue-mesh-agent", cmdline: []byte("/usr/local/bin/fugue-mesh-agent\x00"), want: true},
 		{name: "different executable", target: "fugue-agent", cmdline: []byte("/usr/local/bin/bash\x00"), want: false},
 		{name: "k3s server", target: "k3s", cmdline: []byte("/var/lib/rancher/k3s/data/hash/bin/k3s\x00server\x00"), want: true},
+		{name: "k3s rewritten process title", target: "k3s", cmdline: []byte("/usr/local/bin/k3s server\x00\x00"), want: true},
 		{name: "k3s server rejects agent", target: "k3s", cmdline: []byte("/var/lib/rancher/k3s/data/hash/bin/k3s\x00agent\x00"), want: false},
 		{name: "k3s agent", target: "k3s-agent", cmdline: []byte("/usr/local/bin/k3s\x00agent\x00"), want: true},
 		{name: "k3s requires subcommand", target: "k3s", executable: "/usr/local/bin/k3s", want: false},
