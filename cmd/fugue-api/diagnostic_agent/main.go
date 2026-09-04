@@ -587,7 +587,20 @@ func pprofTop(sampleIndex, base, profile string) (string, error) {
 	}
 	args = append(args, profile)
 	args = append([]string{"tool", "pprof"}, args...)
-	output, err := runCommand(context.Background(), "go", args...)
+	workingDir := filepath.Dir(profile)
+	cacheDir := filepath.Join(workingDir, "go-build")
+	tmpDir := filepath.Join(workingDir, "go-tmp")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", fmt.Errorf("create pprof build cache: %w", err)
+	}
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		return "", fmt.Errorf("create pprof temporary directory: %w", err)
+	}
+	output, err := runCommandWithEnvironment(context.Background(), []string{
+		"HOME=" + workingDir,
+		"GOCACHE=" + cacheDir,
+		"GOTMPDIR=" + tmpDir,
+	}, "go", args...)
 	if err != nil {
 		return "", fmt.Errorf("pprof summary failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -1318,11 +1331,22 @@ func isHexAddress(value string) bool {
 }
 
 func runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return runCommandWithInput(ctx, nil, name, args...)
+	return runCommandWithEnvironmentAndInput(ctx, nil, nil, name, args...)
 }
 
 func runCommandWithInput(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
+	return runCommandWithEnvironmentAndInput(ctx, nil, input, name, args...)
+}
+
+func runCommandWithEnvironment(ctx context.Context, environment []string, name string, args ...string) ([]byte, error) {
+	return runCommandWithEnvironmentAndInput(ctx, environment, nil, name, args...)
+}
+
+func runCommandWithEnvironmentAndInput(ctx context.Context, environment []string, input []byte, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
+	if len(environment) > 0 {
+		command.Env = append(os.Environ(), environment...)
+	}
 	if input != nil {
 		command.Stdin = bytes.NewReader(input)
 	}
