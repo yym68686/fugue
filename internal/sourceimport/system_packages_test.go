@@ -112,3 +112,55 @@ func TestBuildBuildpacksSystemPackageOverlayFilesSkipsExplicitAptfile(t *testing
 		t.Fatalf("expected no generated overlay files when Aptfile exists, got %d", len(files))
 	}
 }
+
+func TestBuildBuildpacksSystemPackageOverlayFilesAddsNodeRuntimeContract(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "package.json"), []byte(`{"engines":{"node":">=20"}}`), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	files, analysis, err := buildBuildpacksSystemPackageOverlayFilesForProvider(repoDir, ".", "nodejs")
+	if err != nil {
+		t.Fatalf("build Node system package overlay: %v", err)
+	}
+	if got, want := analysis.Packages, []string{"libatomic1"}; !slices.Equal(got, want) {
+		t.Fatalf("unexpected Node runtime packages: got %v want %v", got, want)
+	}
+	if len(files) != 1 || files[0].RelativePath != "Aptfile" || strings.TrimSpace(files[0].Content) != "libatomic1" || !files[0].OnlyIfMissing {
+		t.Fatalf("unexpected Node runtime overlay: %+v", files)
+	}
+}
+
+func TestBuildBuildpacksSystemPackageOverlayFilesExtendsExplicitAptfileForNode(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	original := "# application packages\ngit\n"
+	if err := os.WriteFile(filepath.Join(repoDir, "Aptfile"), []byte(original), 0o644); err != nil {
+		t.Fatalf("write Aptfile: %v", err)
+	}
+
+	files, analysis, err := buildBuildpacksSystemPackageOverlayFilesForProvider(repoDir, ".", "nodejs")
+	if err != nil {
+		t.Fatalf("extend explicit Aptfile: %v", err)
+	}
+	if !analysis.HasExplicitBuildpackApt || len(files) != 1 || files[0].OnlyIfMissing {
+		t.Fatalf("unexpected explicit Aptfile overlay: analysis=%+v files=%+v", analysis, files)
+	}
+	if files[0].Content != original+"libatomic1\n" {
+		t.Fatalf("explicit Aptfile was not preserved while adding the runtime contract: %q", files[0].Content)
+	}
+
+	if err := os.WriteFile(filepath.Join(repoDir, "Aptfile"), []byte("libatomic1=12.3\n"), 0o644); err != nil {
+		t.Fatalf("write complete Aptfile: %v", err)
+	}
+	files, _, err = buildBuildpacksSystemPackageOverlayFilesForProvider(repoDir, ".", "nodejs")
+	if err != nil {
+		t.Fatalf("read complete Aptfile: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("already complete Aptfile was rewritten: %+v", files)
+	}
+}

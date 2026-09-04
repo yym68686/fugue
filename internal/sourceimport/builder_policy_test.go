@@ -260,6 +260,62 @@ func TestBuildBuildpacksJobObjectUsesHostNetworkForPackBuild(t *testing.T) {
 	}
 }
 
+func TestBuildBuildpacksJobPinsBuilderAndProbesNodeRuntime(t *testing.T) {
+	t.Parallel()
+
+	jobObject, err := buildBuildpacksJobObject("fugue-system", "build-demo", buildpacksBuildRequest{
+		ImageRef:            "10.128.0.2:30500/fugue-apps/demo:git-abc123",
+		DetectedProvider:    "nodejs",
+		IncludeAptBuildpack: true,
+		WorkloadProfile:     builderWorkloadProfileLight,
+	})
+	if err != nil {
+		t.Fatalf("build buildpacks job object: %v", err)
+	}
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	command := podSpec["containers"].([]map[string]any)[0]["command"].([]string)[2]
+	for _, expected := range []string{
+		defaultPaketoBuilderImage,
+		defaultPaketoRunImage,
+		defaultPaketoAptBuildpack,
+		defaultPaketoNodeJSBuildpack,
+		"docker run --rm --network none --read-only",
+		"--entrypoint /cnb/lifecycle/launcher",
+		"'node' '--version'",
+	} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("Buildpacks command lacks %q: %s", expected, command)
+		}
+	}
+	if strings.Contains(command, "builder-jammy-base:latest") {
+		t.Fatalf("Buildpacks command uses a floating builder: %s", command)
+	}
+}
+
+func TestBuildBuildpacksJobRejectsFloatingBuilderOverride(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildBuildpacksJobObject("fugue-system", "build-demo", buildpacksBuildRequest{
+		ImageRef:     "registry.example/demo:v1",
+		BuilderImage: "docker.io/paketobuildpacks/builder-jammy-base:latest",
+	})
+	if err == nil || !strings.Contains(err.Error(), "pinned by sha256 digest") {
+		t.Fatalf("floating builder override was accepted: %v", err)
+	}
+}
+
+func TestBuildBuildpacksJobRejectsFloatingRunImageOverride(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildBuildpacksJobObject("fugue-system", "build-demo", buildpacksBuildRequest{
+		ImageRef: "registry.example/demo:v1",
+		RunImage: "docker.io/paketobuildpacks/run-jammy-base:latest",
+	})
+	if err == nil || !strings.Contains(err.Error(), "pinned by sha256 digest") {
+		t.Fatalf("floating run image override was accepted: %v", err)
+	}
+}
+
 func TestBuildBuildpacksJobObjectAddsAptAndLanguageBuildpacksWhenRequested(t *testing.T) {
 	t.Parallel()
 

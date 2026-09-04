@@ -552,6 +552,148 @@ func TestManagedAppLiveGuardRecoversPromotedServingSnapshotDuringBackgroundRecon
 	}
 }
 
+func TestManagedAppLiveGuardReplacesFailedCandidateWhileExactLKGServes(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("failed candidate recovery")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	oldSource := model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/candidate:v1", ResolvedImageRef: "registry.example/candidate:v1"}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "candidate", "", model.AppSpec{
+		Image: "registry.example/candidate:v1", Ports: []int{8080}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID,
+	}, oldSource)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	failedSpec := *cloneControllerAppSpec(&app.Spec)
+	failedSpec.Image = "registry.example/candidate:v2-broken"
+	failedSource := model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: failedSpec.Image, ResolvedImageRef: failedSpec.Image}
+	failed, err := stateStore.CreateOperation(model.Operation{
+		TenantID: app.TenantID, Type: model.OperationTypeDeploy, AppID: app.ID,
+		RequestedByType: model.ActorTypeSystem, RequestedByID: model.OperationRequestedByImageRebuild,
+		DesiredSpec: &failedSpec, DesiredSource: &failedSource, DesiredOriginSource: &failedSource,
+	})
+	if err != nil {
+		t.Fatalf("create failed deploy: %v", err)
+	}
+	failed, claimed, err := stateStore.TryClaimPendingOperation(failed.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim failed deploy: claimed=%v err=%v", claimed, err)
+	}
+	failed, err = stateStore.FailOperation(failed.ID, "candidate runtime dependency was unavailable")
+	if err != nil || failed.CompletedAt == nil {
+		t.Fatalf("fail deploy: %+v err=%v", failed, err)
+	}
+
+	svc := &Service{Store: stateStore, Renderer: runtime.Renderer{}}
+	attempted := app
+	attempted.Spec = failedSpec
+	model.SetAppSourceState(&attempted, &failedSource, &failedSource)
+	attempted.Spec.RolloutIntent = rolloutIntentForManagedOperation(failed, app, attempted)
+	attempted = svc.Renderer.PrepareApp(attempted)
+	attemptedKey := svc.Renderer.ManagedAppReleaseKey(attempted, runtime.SchedulingConstraints{})
+	servingKey := svc.Renderer.ManagedAppReleaseKey(svc.Renderer.PrepareApp(app), runtime.SchedulingConstraints{})
+
+	desired := app
+	desired.Spec.Image = "registry.example/candidate:v3-fixed"
+	fixedSource := model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: desired.Spec.Image, ResolvedImageRef: desired.Spec.Image}
+	model.SetAppSourceState(&desired, &fixedSource, &fixedSource)
+	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
+	managed.Metadata.Generation = 2
+	attemptStartedAt := failed.CreatedAt
+	if failed.StartedAt != nil {
+		attemptStartedAt = *failed.StartedAt
+	}
+	managed.Status = runtime.ManagedAppStatus{
+		Phase: runtime.ManagedAppPhaseError, ReadyReplicas: 0, ObservedGeneration: 2,
+		PendingReleaseKey: attemptedKey, PendingReleaseStartedAt: attemptStartedAt.UTC().Format(time.RFC3339Nano),
+		CurrentReleaseKey: servingKey, CurrentReleaseStartedAt: attemptStartedAt.Add(-time.Minute).UTC().Format(time.RFC3339Nano),
+		CurrentReleaseReadyAt: attemptStartedAt.Add(-30 * time.Second).UTC().Format(time.RFC3339Nano),
+	}
+
+	live, found := svc.expectedManagedAppDeployment(attempted, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected failed candidate deployment")
+	}
+	live.Metadata.Generation = 2
+	live.Status.ObservedGeneration = 2
+	live.Status.Replicas = 2
+	live.Status.UpdatedReplicas = 1
+	live.Status.ReadyReplicas = 1
+	live.Status.AvailableReplicas = 1
+	live.Status.UnavailableReplicas = 1
+	live.Status.Conditions = []runtime.ManagedAppCondition{{
+		Type: "Progressing", Status: "False", Reason: "ProgressDeadlineExceeded", Message: "candidate failed to become ready",
+	}}
+	servingDeployment, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(app), runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected serving LKG deployment")
+	}
+	servingPod := readyTemplatePod("serving-lkg", servingDeployment, kubeResourceRequirements{})
+	client := managedAppLiveGuardClientWithPods(t, managed, live, true, true, []kubePod{servingPod}, nil)
+
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, desired, "", runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("exact serving LKG must permit failed candidate replacement: %v", err)
+	}
+	if prepared.Spec.Image != desired.Spec.Image || prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("unexpected failed candidate recovery: image=%q intent=%q", prepared.Spec.Image, prepared.Spec.RolloutIntent)
+	}
+}
+
+func TestManagedAppFailedCandidateReplacementRemainsFailClosed(t *testing.T) {
+	base := kubeDeployment{}
+	base.Metadata.Generation = 2
+	base.Status.ObservedGeneration = 2
+	base.Status.Replicas = 2
+	base.Status.UpdatedReplicas = 1
+	base.Status.ReadyReplicas = 1
+	base.Status.AvailableReplicas = 1
+	base.Status.UnavailableReplicas = 1
+	base.Status.Conditions = []runtime.ManagedAppCondition{{Type: "Progressing", Status: "False", Reason: "ProgressDeadlineExceeded"}}
+	stateless := model.AppSpec{}
+	tests := []struct {
+		name          string
+		readyEndpoint bool
+		readyLKG      bool
+		mutate        func(*kubeDeployment, *model.AppSpec)
+	}{
+		{name: "no ready endpoint", readyLKG: true},
+		{name: "no exact LKG cohort", readyEndpoint: true},
+		{name: "failure is not terminal", readyEndpoint: true, readyLKG: true, mutate: func(value *kubeDeployment, _ *model.AppSpec) { value.Status.Conditions = nil }},
+		{name: "generation is unobserved", readyEndpoint: true, readyLKG: true, mutate: func(value *kubeDeployment, _ *model.AppSpec) { value.Metadata.Generation++ }},
+		{name: "no failed surge candidate", readyEndpoint: true, readyLKG: true, mutate: func(value *kubeDeployment, _ *model.AppSpec) {
+			value.Status.Replicas = 1
+			value.Status.UnavailableReplicas = 0
+		}},
+		{name: "single writer storage", readyEndpoint: true, readyLKG: true, mutate: func(_ *kubeDeployment, spec *model.AppSpec) {
+			spec.PersistentStorage = &model.AppPersistentStorageSpec{Mode: model.AppPersistentStorageModeMovableRWO, StorageClassName: model.AppStorageClassFugueLocalRWO, Mounts: []model.AppPersistentStorageMount{{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"}}}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deployment := base
+			current := stateless
+			if test.mutate != nil {
+				test.mutate(&deployment, &current)
+			}
+			if managedAppAllowsFailedCandidateReplacement(deployment, current, stateless, test.readyEndpoint, test.readyLKG, 1) {
+				t.Fatal("unsafe failed candidate replacement was allowed")
+			}
+		})
+	}
+}
+
 func TestManagedAppLiveGuardRecoversFailedRuntimeMoveUsingTargetScheduling(t *testing.T) {
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {

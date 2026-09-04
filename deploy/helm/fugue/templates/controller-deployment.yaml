@@ -119,6 +119,10 @@ spec:
               value: {{ include "fugue.registryPullBase" . | quote }}
             - name: FUGUE_BUILDER_REGISTRY_PUSH_BASE
               value: {{ include "fugue.builderRegistryPushBase" . | quote }}
+            - name: FUGUE_BUILDPACKS_BUILDER_IMAGE
+              value: {{ .Values.controller.buildpacksBuilderImage | quote }}
+            - name: FUGUE_BUILDPACKS_RUN_IMAGE
+              value: {{ .Values.controller.buildpacksRunImage | quote }}
             - name: FUGUE_IMAGE_STORE_MODE
               value: {{ include "fugue.imageStoreMode" . | quote }}
             - name: FUGUE_IMAGE_STORE_MIN_REPLICAS

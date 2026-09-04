@@ -11,6 +11,48 @@ import (
 	"testing"
 )
 
+func TestBuildpacksBuilderDefaultsToImmutableDigest(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	controller := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-controller")
+	const expected = "name: FUGUE_BUILDPACKS_BUILDER_IMAGE\n              value: \"docker.io/paketobuildpacks/builder-jammy-base@sha256:029a4f6bf32aec6fe05fd576cbf2ba3e793761690ce2b0aff6f95940bf78cabf\""
+	if !strings.Contains(controller, expected) || strings.Contains(controller, "builder-jammy-base:latest") {
+		t.Fatalf("controller does not use the immutable Buildpacks builder policy:\n%s", controller)
+	}
+}
+
+func TestBuildpacksRunImageDefaultsToImmutableDigest(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	controller := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-controller")
+	const expected = "name: FUGUE_BUILDPACKS_RUN_IMAGE\n              value: \"docker.io/paketobuildpacks/run-jammy-base@sha256:b82178b8ebe68c192a7f71b9eeb8c62366b4139ecf573a1064c0e624644a6bfd\""
+	if !strings.Contains(controller, expected) || strings.Contains(controller, "run-jammy-base:latest") {
+		t.Fatalf("controller does not use the immutable Buildpacks run-image policy:\n%s", controller)
+	}
+}
+
 func TestEdgeActivationSigningProjectionIsDefaultOffAndAPIScoped(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

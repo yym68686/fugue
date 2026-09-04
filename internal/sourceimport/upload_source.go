@@ -453,7 +453,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	systemOverlayFiles, systemPackages, err := buildBuildpacksSystemPackageOverlayFiles(src.RootDir, normalizedSourceDir)
+	systemOverlayFiles, systemPackages, err := buildBuildpacksSystemPackageOverlayFilesForProvider(src.RootDir, normalizedSourceDir, provider)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}

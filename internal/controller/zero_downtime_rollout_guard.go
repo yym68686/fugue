@@ -470,6 +470,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	currentScheduling := managed.Spec.Scheduling
 	currentKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(current), currentScheduling))
 	desiredKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), desiredScheduling))
+	servingLKGKey := strings.TrimSpace(managed.Status.CurrentReleaseKey)
 	var recoveredOperation *model.Operation
 	if liveKey != currentKey && liveKey != desiredKey {
 		recovered, ok, err := s.recoverManagedAppPendingDeploySnapshot(ctx, managed, current, liveKey)
@@ -545,12 +546,26 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 			return model.App{}, err
 		}
 		deploymentReady := managedDeploymentStatusReady(deployment, liveReplicas)
+		failedCandidateRecovery := false
 		if !deploymentReady && liveKey != desiredKey && readyEndpoint && model.AppHasClusterService(desired.Spec) {
 			readyDesiredCohortRecovery, err = s.managedAppReadyReleaseCohort(
 				ctx, client, namespace, desired, desiredScheduling, desiredReplicas,
 			)
 			if err != nil {
 				return model.App{}, err
+			}
+			if !readyDesiredCohortRecovery && recoveredOperation != nil && servingLKGKey != "" &&
+				servingLKGKey != liveKey && servingLKGKey != desiredKey &&
+				strings.TrimSpace(managed.Status.CurrentReleaseReadyAt) != "" {
+				readyLKG, readyErr := s.managedAppReadyReleaseKeyCohort(
+					ctx, client, namespace, desired, servingLKGKey, desiredReplicas,
+				)
+				if readyErr != nil {
+					return model.App{}, readyErr
+				}
+				failedCandidateRecovery = managedAppAllowsFailedCandidateReplacement(
+					deployment, current.Spec, desired.Spec, readyEndpoint, readyLKG, desiredReplicas,
+				)
 			}
 		}
 		if !readyDesiredCohortRecovery {
@@ -560,10 +575,10 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 				desired.Spec,
 				readyEndpoint,
 			)
-			if !deploymentReady && !unavailableRecovery {
+			if !deploymentReady && !unavailableRecovery && !failedCandidateRecovery {
 				return model.App{}, fmt.Errorf("live deployment is not fully ready before an online replacement")
 			}
-			if !readyEndpoint && !unavailableRecovery {
+			if !readyEndpoint && !unavailableRecovery && !failedCandidateRecovery {
 				return model.App{}, fmt.Errorf("live service has no ready endpoint before an online replacement")
 			}
 		}
@@ -636,10 +651,25 @@ func (s *Service) managedAppReadyReleaseCohort(
 		return false, nil
 	}
 	releaseKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), scheduling))
+	return s.managedAppReadyReleaseKeyCohort(ctx, client, namespace, desired, releaseKey, desiredReplicas)
+}
+
+func (s *Service) managedAppReadyReleaseKeyCohort(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	app model.App,
+	releaseKey string,
+	desiredReplicas int,
+) (bool, error) {
+	if client == nil || desiredReplicas <= 0 {
+		return false, nil
+	}
+	releaseKey = strings.TrimSpace(releaseKey)
 	if releaseKey == "" {
 		return false, nil
 	}
-	pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(desired))
+	pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
 	if err != nil {
 		return false, fmt.Errorf("list app pods while proving previous ready release: %w", err)
 	}
@@ -654,6 +684,31 @@ func (s *Service) managedAppReadyReleaseCohort(
 		ready++
 	}
 	return ready >= desiredReplicas, nil
+}
+
+// managedAppAllowsFailedCandidateReplacement handles a distinct online
+// recovery state: a controller-authored candidate owns the Deployment
+// template and has terminally failed, while an exact previous LKG cohort is
+// still Ready behind the Service. The caller proves both release identities
+// and the LKG pod cohort before entering this predicate.
+func managedAppAllowsFailedCandidateReplacement(
+	deployment kubeDeployment,
+	current, desired model.AppSpec,
+	readyEndpoint, readyLKG bool,
+	desiredReplicas int,
+) bool {
+	if desiredReplicas <= 0 || !readyEndpoint || !readyLKG ||
+		deployment.Status.ObservedGeneration < deployment.Metadata.Generation ||
+		deployment.Status.ReadyReplicas < desiredReplicas ||
+		deployment.Status.AvailableReplicas < desiredReplicas ||
+		deployment.Status.Replicas <= desiredReplicas ||
+		deployment.Status.UpdatedReplicas == 0 ||
+		deployment.Status.UnavailableReplicas == 0 ||
+		!hasDeploymentFailureCondition(deployment.Status.Conditions) {
+		return false
+	}
+	return controllerAppSupportsConcurrentStorage(current) &&
+		controllerAppSupportsConcurrentStorage(desired)
 }
 
 func managedAppAuxiliaryTemplateChangeRequiresGuard(app model.App) bool {

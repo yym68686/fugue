@@ -261,6 +261,13 @@ api:
 controller:
   ownership: helm
   replicaCount: 2
+  # Keep source builds reproducible and independently reversible from the
+  # controller binary. Promote a new builder digest only after the language
+  # runtime compatibility matrix passes.
+  buildpacksBuilderImage: docker.io/paketobuildpacks/builder-jammy-base@sha256:029a4f6bf32aec6fe05fd576cbf2ba3e793761690ce2b0aff6f95940bf78cabf
+  # The builder metadata names a mutable run-image tag, so bind the launch
+  # base independently from both the controller and builder releases.
+  buildpacksRunImage: docker.io/paketobuildpacks/run-jammy-base@sha256:b82178b8ebe68c192a7f71b9eeb8c62366b4139ecf573a1064c0e624644a6bfd
   image:
     repository: fugue-controller
     tag: latest

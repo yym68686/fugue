@@ -134,11 +134,43 @@ func analyzeSystemPackagesInDir(appDir string) (systemPackageAnalysis, error) {
 }
 
 func buildBuildpacksSystemPackageOverlayFiles(repoDir, sourceDir string) ([]sourceOverlayFile, systemPackageAnalysis, error) {
+	return buildBuildpacksSystemPackageOverlayFilesForProvider(repoDir, sourceDir, "")
+}
+
+func buildBuildpacksSystemPackageOverlayFilesForProvider(repoDir, sourceDir, provider string) ([]sourceOverlayFile, systemPackageAnalysis, error) {
 	analysis, err := analyzeSystemPackages(repoDir, sourceDir)
 	if err != nil {
 		return nil, analysis, err
 	}
-	if len(analysis.Packages) == 0 || analysis.HasExplicitBuildpackApt {
+	required := requiredBuildpacksRuntimePackages(provider)
+	if analysis.HasExplicitBuildpackApt {
+		if len(required) == 0 {
+			return nil, analysis, nil
+		}
+		appDir := repoDir
+		if normalized, normalizeErr := normalizeRepoSourceDir(repoDir, sourceDir); normalizeErr != nil {
+			return nil, analysis, normalizeErr
+		} else if normalized != "." {
+			appDir = filepath.Join(repoDir, filepath.FromSlash(normalized))
+		}
+		content, readErr := os.ReadFile(filepath.Join(appDir, "Aptfile"))
+		if readErr != nil {
+			return nil, analysis, readErr
+		}
+		merged, changed := appendMissingAptPackages(string(content), required)
+		if !changed {
+			return nil, analysis, nil
+		}
+		return []sourceOverlayFile{{RelativePath: "Aptfile", Content: merged}}, analysis, nil
+	}
+	packageSet := make(map[string]struct{}, len(analysis.Packages)+len(required))
+	for _, value := range append(append([]string(nil), analysis.Packages...), required...) {
+		if value = strings.TrimSpace(value); value != "" {
+			packageSet[value] = struct{}{}
+		}
+	}
+	analysis.Packages = sortedPackages(packageSet)
+	if len(analysis.Packages) == 0 {
 		return nil, analysis, nil
 	}
 	return []sourceOverlayFile{
@@ -148,6 +180,55 @@ func buildBuildpacksSystemPackageOverlayFiles(repoDir, sourceDir string) ([]sour
 			OnlyIfMissing: true,
 		},
 	}, analysis, nil
+}
+
+func requiredBuildpacksRuntimePackages(provider string) []string {
+	switch strings.TrimSpace(strings.ToLower(provider)) {
+	case "nodejs":
+		// Current upstream Node launch binaries may depend on GCC's atomic
+		// runtime even when the application has no native dependencies. Treat it
+		// as part of Fugue's Node runtime contract instead of requiring every
+		// source archive to discover and declare an implementation detail of the
+		// platform-selected toolchain.
+		return []string{"libatomic1"}
+	default:
+		return nil
+	}
+}
+
+func appendMissingAptPackages(content string, required []string) (string, bool) {
+	present := make(map[string]struct{})
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		if line == "" {
+			continue
+		}
+		name := strings.Fields(line)[0]
+		if pivot := strings.IndexByte(name, '='); pivot >= 0 {
+			name = name[:pivot]
+		}
+		present[strings.TrimSpace(name)] = struct{}{}
+	}
+	missing := make(map[string]struct{})
+	for _, value := range required {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := present[value]; !exists {
+			missing[value] = struct{}{}
+		}
+	}
+	packages := sortedPackages(missing)
+	if len(packages) == 0 {
+		return content, false
+	}
+	out := content
+	if out != "" && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	out += buildGeneratedBuildpackAptfile(packages)
+	return out, true
 }
 
 func collectPythonImportsInDir(appDir string) ([]string, error) {

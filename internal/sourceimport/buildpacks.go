@@ -4,19 +4,26 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"fugue/internal/model"
+
+	"github.com/google/go-containerregistry/pkg/name"
 )
 
 const (
 	defaultBuildpacksImage            = "docker.io/library/docker:27-dind"
 	defaultPackVersion                = "0.39.1"
-	defaultPaketoBuilderImage         = "docker.io/paketobuildpacks/builder-jammy-base:latest"
-	defaultPaketoAptBuildpack         = "paketo-buildpacks/apt"
+	defaultPaketoBuilderImage         = "docker.io/paketobuildpacks/builder-jammy-base@sha256:029a4f6bf32aec6fe05fd576cbf2ba3e793761690ce2b0aff6f95940bf78cabf"
+	defaultPaketoRunImage             = "docker.io/paketobuildpacks/run-jammy-base@sha256:b82178b8ebe68c192a7f71b9eeb8c62366b4139ecf573a1064c0e624644a6bfd"
+	defaultPaketoAptBuildpack         = "docker.io/paketobuildpacks/apt@sha256:529f0a5f80e5b61274e84c53fe75b84aaf5296d418619d2dfe2c57a4d0a22d8b"
+	defaultPaketoNodeJSBuildpack      = "docker.io/paketobuildpacks/nodejs@sha256:10c1b42ea079de2a4fae5349b99b9625d4a907d67d58a3135b950529c0024a6c"
 	defaultBuildpacksContainerNetwork = "host"
+	buildpacksBuilderImageEnv         = "FUGUE_BUILDPACKS_BUILDER_IMAGE"
+	buildpacksRunImageEnv             = "FUGUE_BUILDPACKS_RUN_IMAGE"
 )
 
 type GitHubBuildpacksImportRequest struct {
@@ -49,6 +56,8 @@ type buildpacksBuildRequest struct {
 	PlacementNodeSelector map[string]string
 	DetectedProvider      string
 	IncludeAptBuildpack   bool
+	BuilderImage          string
+	RunImage              string
 	PodPolicy             BuilderPodPolicy
 	WorkloadProfile       builderWorkloadProfile
 	Placement             builderJobPlacement
@@ -79,7 +88,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	systemOverlayFiles, systemPackages, err := buildBuildpacksSystemPackageOverlayFiles(repo.RepoDir, normalizedSourceDir)
+	systemOverlayFiles, systemPackages, err := buildBuildpacksSystemPackageOverlayFilesForProvider(repo.RepoDir, normalizedSourceDir, provider)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -220,12 +229,20 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 
 func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequest) (map[string]any, error) {
 	destinationImageRef := effectiveDestinationImageRef(req.ImageRef, req.DestinationImageRef)
+	builderImage, err := configuredPaketoBuilderImage(req.BuilderImage)
+	if err != nil {
+		return nil, err
+	}
+	runImage, err := configuredPaketoRunImage(req.RunImage)
+	if err != nil {
+		return nil, err
+	}
 	workingDir := "/workspace/repo"
 	if strings.TrimSpace(req.SourceDir) != "" && strings.TrimSpace(req.SourceDir) != "." {
 		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
 	}
 
-	script := buildpacksJobScript(workingDir, destinationImageRef, req.DetectedProvider, req.IncludeAptBuildpack)
+	script := buildpacksJobScript(workingDir, destinationImageRef, builderImage, runImage, req.DetectedProvider, req.IncludeAptBuildpack)
 	initContainers := []map[string]any{}
 	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
 		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
@@ -294,7 +311,39 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 	return jobObject, nil
 }
 
-func buildpacksJobScript(workingDir, imageRef, provider string, includeAptBuildpack bool) string {
+func configuredPaketoBuilderImage(override string) (string, error) {
+	value := strings.TrimSpace(override)
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv(buildpacksBuilderImageEnv))
+	}
+	if value == "" {
+		value = defaultPaketoBuilderImage
+	}
+	return validatedBuildpacksImageDigest("builder", value)
+}
+
+func configuredPaketoRunImage(override string) (string, error) {
+	value := strings.TrimSpace(override)
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv(buildpacksRunImageEnv))
+	}
+	if value == "" {
+		value = defaultPaketoRunImage
+	}
+	return validatedBuildpacksImageDigest("run", value)
+}
+
+func validatedBuildpacksImageDigest(role, value string) (string, error) {
+	if !strings.Contains(value, "@sha256:") {
+		return "", fmt.Errorf("Buildpacks %s image must be pinned by sha256 digest", role)
+	}
+	if _, err := name.NewDigest(value, name.StrictValidation); err != nil {
+		return "", fmt.Errorf("Buildpacks %s image is invalid: %w", role, err)
+	}
+	return value, nil
+}
+
+func buildpacksJobScript(workingDir, imageRef, builderImage, runImage, provider string, includeAptBuildpack bool) string {
 	registryHost := registryHostFromImageRef(imageRef)
 	packArgs := []string{
 		"build",
@@ -302,7 +351,9 @@ func buildpacksJobScript(workingDir, imageRef, provider string, includeAptBuildp
 		"--path",
 		shellQuoteForOverlay(workingDir),
 		"--builder",
-		shellQuoteForOverlay(defaultPaketoBuilderImage),
+		shellQuoteForOverlay(builderImage),
+		"--run-image",
+		shellQuoteForOverlay(runImage),
 		"--publish",
 		"--trust-builder",
 	}
@@ -318,6 +369,7 @@ func buildpacksJobScript(workingDir, imageRef, provider string, includeAptBuildp
 		packArgs = append(packArgs, "--insecure-registry", shellQuoteForOverlay(registryHost))
 	}
 	packArgs = append(packArgs, "--network", shellQuoteForOverlay(defaultBuildpacksContainerNetwork))
+	runtimeProbe := buildpacksRuntimeProbeScript(imageRef, provider)
 	return fmt.Sprintf(`set -euo pipefail
 apk add --no-cache curl tar >/dev/null
 export DOCKER_HOST=unix:///var/run/docker.sock
@@ -345,7 +397,25 @@ pack_url="https://github.com/buildpacks/pack/releases/download/v%s/${pack_archiv
 curl -fsSL "$pack_url" -o /tmp/pack.tgz
 tar -xzf /tmp/pack.tgz -C /workspace/bin pack
 /workspace/bin/pack %s
-`, defaultPackVersion, defaultPackVersion, defaultPackVersion, strings.Join(packArgs, " "))
+%s`, defaultPackVersion, defaultPackVersion, defaultPackVersion, strings.Join(packArgs, " "), runtimeProbe)
+}
+
+func buildpacksRuntimeProbeScript(imageRef, provider string) string {
+	var command []string
+	switch strings.TrimSpace(strings.ToLower(provider)) {
+	case "nodejs":
+		command = []string{"node", "--version"}
+	default:
+		return ""
+	}
+	quotedImage := shellQuoteForOverlay(imageRef)
+	quotedCommand := make([]string, len(command))
+	for index, value := range command {
+		quotedCommand[index] = shellQuoteForOverlay(value)
+	}
+	return fmt.Sprintf(`docker pull %s >/dev/null
+timeout 30s docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m --cpus 1 --entrypoint /cnb/lifecycle/launcher %s %s
+`, quotedImage, quotedImage, strings.Join(quotedCommand, " "))
 }
 
 func paketoLanguageBuildpack(provider string) string {
@@ -357,7 +427,7 @@ func paketoLanguageBuildpack(provider string) string {
 	case "java":
 		return "paketo-buildpacks/java"
 	case "nodejs":
-		return "paketo-buildpacks/nodejs"
+		return defaultPaketoNodeJSBuildpack
 	case "php":
 		return "paketo-buildpacks/php"
 	case "python":
