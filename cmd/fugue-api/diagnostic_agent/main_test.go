@@ -214,3 +214,32 @@ func TestHexAddressValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestHostProcessMatchesTargetUsesAllowlistedCommandLineFallback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		target     string
+		executable string
+		cmdline    []byte
+		want       bool
+	}{
+		{name: "exact executable", target: "fugue-agent", executable: "/usr/local/bin/fugue-agent", want: true},
+		{name: "cmdline fallback", target: "fugue-mesh-agent", cmdline: []byte("/usr/local/bin/fugue-mesh-agent\x00"), want: true},
+		{name: "different executable", target: "fugue-agent", cmdline: []byte("/usr/local/bin/bash\x00"), want: false},
+		{name: "k3s server", target: "k3s", cmdline: []byte("/var/lib/rancher/k3s/data/hash/bin/k3s\x00server\x00"), want: true},
+		{name: "k3s server rejects agent", target: "k3s", cmdline: []byte("/var/lib/rancher/k3s/data/hash/bin/k3s\x00agent\x00"), want: false},
+		{name: "k3s agent", target: "k3s-agent", cmdline: []byte("/usr/local/bin/k3s\x00agent\x00"), want: true},
+		{name: "k3s requires subcommand", target: "k3s", executable: "/usr/local/bin/k3s", want: false},
+		{name: "not allowlisted", target: "bash", executable: "/usr/bin/bash", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hostProcessMatchesTarget(tt.target, tt.executable, tt.cmdline); got != tt.want {
+				t.Fatalf("hostProcessMatchesTarget(%q, %q, %q) = %v, want %v", tt.target, tt.executable, tt.cmdline, got, tt.want)
+			}
+		})
+	}
+}

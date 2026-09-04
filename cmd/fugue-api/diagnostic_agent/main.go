@@ -400,12 +400,13 @@ func findHostProcesses(processName string) ([]int, []string, string, error) {
 		if parseErr != nil || pid <= 1 {
 			continue
 		}
-		executable, linkErr := os.Readlink(filepath.Join("/host/proc", entry.Name(), "exe"))
-		name := filepath.Base(strings.TrimSuffix(executable, " (deleted)"))
-		if linkErr != nil || name != processName {
+		processRoot := filepath.Join("/host/proc", entry.Name())
+		executable, _ := os.Readlink(filepath.Join(processRoot, "exe"))
+		cmdline, _ := os.ReadFile(filepath.Join(processRoot, "cmdline"))
+		if !hostProcessMatchesTarget(processName, executable, cmdline) {
 			continue
 		}
-		cgroup, readErr := os.ReadFile(filepath.Join("/host/proc", entry.Name(), "cgroup"))
+		cgroup, readErr := os.ReadFile(filepath.Join(processRoot, "cgroup"))
 		if readErr != nil {
 			continue
 		}
@@ -420,13 +421,60 @@ func findHostProcesses(processName string) ([]int, []string, string, error) {
 			continue
 		}
 		pids = append(pids, pid)
-		names = append(names, name)
+		names = append(names, processName)
 	}
 	if len(pids) == 0 {
 		return nil, nil, "", fmt.Errorf("no allowlisted host process %q was found", processName)
 	}
 	sort.Ints(pids)
 	return pids, names, cgroupPath, nil
+}
+
+func hostProcessMatchesTarget(processName, executable string, cmdline []byte) bool {
+	processName, err := livediagnostics.NormalizeNodeProcessName(processName)
+	if err != nil {
+		return false
+	}
+	argv := splitNullTerminated(cmdline)
+	executableName := filepath.Base(strings.TrimSuffix(strings.TrimSpace(executable), " (deleted)"))
+	if executableName == "." || executableName == "" {
+		if len(argv) == 0 {
+			return false
+		}
+		executableName = filepath.Base(argv[0])
+	}
+
+	switch processName {
+	case "k3s":
+		return executableName == "k3s" && commandLineHasExactArgument(argv, "server")
+	case "k3s-agent":
+		return executableName == "k3s" && commandLineHasExactArgument(argv, "agent")
+	default:
+		return executableName == processName
+	}
+}
+
+func splitNullTerminated(value []byte) []string {
+	parts := bytes.Split(value, []byte{0})
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if arg := strings.TrimSpace(string(part)); arg != "" {
+			result = append(result, arg)
+		}
+	}
+	return result
+}
+
+func commandLineHasExactArgument(argv []string, expected string) bool {
+	if len(argv) < 2 {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if arg == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveTargetCgroupRoot(reportedPath, containerID string) (string, string, error) {
