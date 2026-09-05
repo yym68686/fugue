@@ -1871,3 +1871,24 @@ type ioDiscard struct{}
 func (ioDiscard) Write(p []byte) (int, error) {
 	return len(p), nil
 }
+
+func TestDNSImmutableRecordIndexPreservesExactAndWildcardProtocolOrder(t *testing.T) {
+	bundle := &model.EdgeDNSBundle{Records: []model.EdgeDNSRecord{
+		{Name: "*.example.test", Type: model.EdgeDNSRecordTypeA, Values: []string{"192.0.2.1"}},
+		{Name: "api.example.test", Type: model.EdgeDNSRecordTypeA, Values: []string{"192.0.2.2"}},
+		{Name: "api.example.test", Type: model.EdgeDNSRecordTypeAAAA, Values: []string{"2001:db8::2"}},
+	}}
+	index := buildDNSRecordIndex(bundle.Records)
+	for _, name := range []string{"api.example.test", "other.example.test", "none.test"} {
+		linear, linearOwner := edgeDNSMatchingRecords(bundle, name)
+		indexed, indexedOwner := edgeDNSMatchingRecordsIndexed(bundle, name, index)
+		if linearOwner != indexedOwner || len(linear) != len(indexed) {
+			t.Fatalf("name %q mismatch linear=%+v/%q indexed=%+v/%q", name, linear, linearOwner, indexed, indexedOwner)
+		}
+		for i := range linear {
+			if linear[i].Name != indexed[i].Name || linear[i].Type != indexed[i].Type || strings.Join(linear[i].Values, "\x00") != strings.Join(indexed[i].Values, "\x00") {
+				t.Fatalf("name %q record %d changed: linear=%+v indexed=%+v", name, i, linear[i], indexed[i])
+			}
+		}
+	}
+}

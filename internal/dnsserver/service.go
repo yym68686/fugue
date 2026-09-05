@@ -51,11 +51,12 @@ type Service struct {
 	HTTPClient *http.Client
 	Logger     *log.Logger
 
-	mu       sync.Mutex
-	snapshot Status
-	bundle   *model.EdgeDNSBundle
-	etag     string
-	metrics  telemetry
+	mu          sync.Mutex
+	snapshot    Status
+	bundle      *model.EdgeDNSBundle
+	bundleIndex *dnsRecordIndex
+	etag        string
+	metrics     telemetry
 
 	edgeHealthMu sync.Mutex
 	edgeHealth   map[string]edgeHealthObservation
@@ -174,6 +175,23 @@ type edgeDNSCandidateOrderDecision struct {
 type dnsQueryMetricKey struct {
 	Type  string
 	RCode string
+}
+
+type dnsRecordIndex struct {
+	exact, wildcard map[string][]int
+}
+
+func buildDNSRecordIndex(records []model.EdgeDNSRecord) *dnsRecordIndex {
+	index := &dnsRecordIndex{exact: map[string][]int{}, wildcard: map[string][]int{}}
+	for i, record := range records {
+		name := normalizeName(record.Name)
+		if strings.HasPrefix(name, "*.") {
+			index.wildcard[name] = append(index.wildcard[name], i)
+		} else {
+			index.exact[name] = append(index.exact[name], i)
+		}
+	}
+	return index
 }
 
 type metricSnapshot struct {
@@ -991,6 +1009,7 @@ func (s *Service) setBundle(bundle model.EdgeDNSBundle, etag string, stale bool,
 	bundle.HostedZones = append([]string(nil), bundle.HostedZones...)
 	bundle.Records = append([]model.EdgeDNSRecord(nil), bundle.Records...)
 	s.bundle = &bundle
+	s.bundleIndex = buildDNSRecordIndex(bundle.Records)
 	s.etag = strings.TrimSpace(etag)
 	now := time.Now().UTC()
 	validUntil := bundle.ValidUntil
@@ -1836,7 +1855,7 @@ func (s *Service) edgeDNSRecordsForQuestion(_ context.Context, bundle *model.Edg
 	if s.hasPeerHealthDecisions() {
 		peerHealth = s.peerHealthFilterReason
 	}
-	answers, nameExists, audits := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth, peerHealth)
+	answers, nameExists, audits := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth, peerHealth, s.bundleIndex)
 	s.recordDNSScopeResolution(audits)
 	s.logDNSAnswerAudits(bundle, name, qtype, audits)
 	if qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA {
@@ -2138,11 +2157,11 @@ func (s *Service) probeEdgeTarget(ctx context.Context, hostname, ip string) bool
 }
 
 func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc) ([]miekgdns.RR, bool) {
-	answers, nameExists, _ := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, hint, liveHealth, nil)
+	answers, nameExists, _ := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, hint, liveHealth, nil, nil)
 	return answers, nameExists
 }
 
-func edgeDNSRecordsForQuestionWithAudit(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]miekgdns.RR, bool, []edgeDNSAnswerAudit) {
+func edgeDNSRecordsForQuestionWithAudit(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc, index *dnsRecordIndex) ([]miekgdns.RR, bool, []edgeDNSAnswerAudit) {
 	if bundle == nil {
 		return nil, false, nil
 	}
@@ -2167,7 +2186,7 @@ func edgeDNSRecordsForQuestionWithAudit(bundle *model.EdgeDNSBundle, name string
 	default:
 		return nil, edgeDNSNameExists(bundle, name), nil
 	}
-	matchingRecords, ownerName := edgeDNSMatchingRecords(bundle, name)
+	matchingRecords, ownerName := edgeDNSMatchingRecordsIndexed(bundle, name, index)
 	nameExists := len(matchingRecords) > 0
 	answers := make([]miekgdns.RR, 0)
 	audits := make([]edgeDNSAnswerAudit, 0)
@@ -2193,14 +2212,28 @@ func edgeDNSRecordsForQuestionWithAudit(bundle *model.EdgeDNSBundle, name string
 }
 
 func edgeDNSMatchingRecords(bundle *model.EdgeDNSBundle, name string) ([]model.EdgeDNSRecord, string) {
+	return edgeDNSMatchingRecordsIndexed(bundle, name, nil)
+}
+
+func edgeDNSMatchingRecordsIndexed(bundle *model.EdgeDNSBundle, name string, index *dnsRecordIndex) ([]model.EdgeDNSRecord, string) {
 	if bundle == nil {
 		return nil, normalizeName(name)
 	}
 	name = normalizeName(name)
 	exact := make([]model.EdgeDNSRecord, 0)
-	for _, record := range bundle.Records {
-		if normalizeName(record.Name) == name {
-			exact = append(exact, record)
+	indices := []int(nil)
+	if index != nil {
+		indices = index.exact[name]
+	}
+	if indices != nil {
+		for _, i := range indices {
+			exact = append(exact, bundle.Records[i])
+		}
+	} else {
+		for _, record := range bundle.Records {
+			if normalizeName(record.Name) == name {
+				exact = append(exact, record)
+			}
 		}
 	}
 	if len(exact) > 0 {
@@ -2211,9 +2244,19 @@ func edgeDNSMatchingRecords(bundle *model.EdgeDNSBundle, name string) ([]model.E
 		return nil, name
 	}
 	matches := make([]model.EdgeDNSRecord, 0)
-	for _, record := range bundle.Records {
-		if normalizeName(record.Name) == wildcard {
-			matches = append(matches, record)
+	indices = nil
+	if index != nil {
+		indices = index.wildcard[wildcard]
+	}
+	if indices != nil {
+		for _, i := range indices {
+			matches = append(matches, bundle.Records[i])
+		}
+	} else {
+		for _, record := range bundle.Records {
+			if normalizeName(record.Name) == wildcard {
+				matches = append(matches, record)
+			}
 		}
 	}
 	return matches, name
