@@ -52,7 +52,7 @@ func TestCurrentCodeRouteAcceptsIndependentConfigurationRecord(t *testing.T) {
 	bodyDigest := shaDigest(body)
 	headers := http.Header{"X-Fugue-Candidate-Record-Digest": []string{"sha256:" + strings.Repeat("c", 64)},
 		"X-Fugue-Candidate-Worker-Slot": []string{"a"}}
-	if !authorityCurrentRouteMatches(http.StatusOK, body, headers, nil, bodyDigest, releaseguardian.AuthoritySlotA) {
+	if !authorityCurrentRouteMatches(http.StatusOK, body, headers, nil, bodyDigest, releaseguardian.AuthoritySlotA, true) {
 		t.Fatal("independent signed configuration record was treated as code drift")
 	}
 	for name, mutate := range map[string]func(http.Header){
@@ -62,8 +62,42 @@ func TestCurrentCodeRouteAcceptsIndependentConfigurationRecord(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			changed := headers.Clone()
 			mutate(changed)
-			if authorityCurrentRouteMatches(http.StatusOK, body, changed, nil, bodyDigest, releaseguardian.AuthoritySlotA) {
+			if authorityCurrentRouteMatches(http.StatusOK, body, changed, nil, bodyDigest, releaseguardian.AuthoritySlotA, true) {
 				t.Fatal("invalid code route identity was accepted")
+			}
+		})
+	}
+}
+
+func TestCurrentCodeHealthSurvivesConfigurationOnlyPublication(t *testing.T) {
+	body := []byte("route-ok")
+	bodyDigest := shaDigest(body)
+	// A regular signed publication clears both candidate headers. The exact
+	// Worker and Front witness remains mandatory, including after LKG restore.
+	for _, slot := range []releaseguardian.AuthoritySlot{releaseguardian.AuthoritySlotA, releaseguardian.AuthoritySlotB} {
+		if !authorityCurrentRouteMatches(http.StatusOK, body, http.Header{}, nil, bodyDigest, slot, true) {
+			t.Fatalf("healthy configuration-only route failed: slot=%s", slot)
+		}
+	}
+	for name, sample := range map[string]struct {
+		status         int
+		body           []byte
+		headers        http.Header
+		err            error
+		runtimeHealthy bool
+	}{
+		"missing runtime witness":     {http.StatusOK, body, nil, nil, false},
+		"wrong body":                  {http.StatusOK, []byte("wrong"), nil, nil, true},
+		"failed route":                {http.StatusServiceUnavailable, body, nil, nil, true},
+		"transport failure":           {http.StatusOK, body, nil, errors.New("connection lost"), true},
+		"partial record":              {http.StatusOK, body, http.Header{"X-Fugue-Candidate-Record-Digest": {"sha256:" + strings.Repeat("c", 64)}}, nil, true},
+		"partial slot":                {http.StatusOK, body, http.Header{"X-Fugue-Candidate-Worker-Slot": {"a"}}, nil, true},
+		"invalid record":              {http.StatusOK, body, http.Header{"X-Fugue-Candidate-Record-Digest": {"invalid"}, "X-Fugue-Candidate-Worker-Slot": {"a"}}, nil, true},
+		"attestation without runtime": {http.StatusOK, body, http.Header{"X-Fugue-Candidate-Record-Digest": {"sha256:" + strings.Repeat("c", 64)}, "X-Fugue-Candidate-Worker-Slot": {"a"}}, nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if authorityCurrentRouteMatches(sample.status, sample.body, sample.headers, sample.err, bodyDigest, releaseguardian.AuthoritySlotA, sample.runtimeHealthy) {
+				t.Fatal("unproven current route was accepted")
 			}
 		})
 	}

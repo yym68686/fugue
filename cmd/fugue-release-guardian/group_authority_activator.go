@@ -94,10 +94,10 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 	}
 	probe := canaryProbe{Address: activator.front.config.RouteAddress, Host: activator.front.config.RouteHost, Path: activator.front.config.RoutePath}
 	status, body, headers, currentErr := requestPublicRouteWithHeaders(ctx, probe)
-	currentHealthy := authorityCurrentRouteMatches(status, body, headers, currentErr, activator.front.config.RouteBodyDigest, current.CurrentWorkerSlot)
 	currentRuntimeHealthy, currentRuntimeErr := activator.front.observeAuthorityRuntime(ctx, current.CurrentWorkerSlot,
 		current.CurrentWorkerSourceSHA, current.CurrentWorkerImageDigest, current.CurrentFrontGeneration, current.CurrentBundleGeneration, true)
-	currentHealthy = currentHealthy && currentRuntimeHealthy
+	currentHealthy := authorityCurrentRouteMatches(status, body, headers, currentErr, activator.front.config.RouteBodyDigest,
+		current.CurrentWorkerSlot, currentRuntimeHealthy && currentRuntimeErr == nil)
 	address := activator.config.SlotA
 	if current.PreviousWorkerSlot == releaseguardian.AuthoritySlotB {
 		address = activator.config.SlotB
@@ -124,13 +124,22 @@ func (activator *groupAuthorityActivator) ObserveCurrentAndLKG(ctx context.Conte
 	return currentHealthy, lkgHealthy, shaDigest(evidence), nil
 }
 
-// authorityCurrentRouteMatches checks code routing identity only. The record
-// digest names configuration and may advance independently after code commit.
+// authorityCurrentRouteMatches checks continued serving health after code
+// activation. Ordinary configuration publications clear candidate attestations;
+// their absence is valid only with the exact Worker/Front runtime witness from
+// observeAuthorityRuntime. Partial or contradictory attestations still fail.
+// Candidate promotion separately requires exact route attestations.
 func authorityCurrentRouteMatches(status int, body []byte, headers http.Header, requestErr error, expectedBodyDigest string,
-	slot releaseguardian.AuthoritySlot) bool {
-	return requestErr == nil && status == http.StatusOK && shaDigest(body) == expectedBodyDigest &&
-		exactSHA256Digest(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest"))) &&
-		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) == slot
+	slot releaseguardian.AuthoritySlot, runtimeHealthy bool) bool {
+	if !runtimeHealthy || slot.Validate() != nil || requestErr != nil || status != http.StatusOK || shaDigest(body) != expectedBodyDigest {
+		return false
+	}
+	record := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest"))
+	observedSlot := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))
+	if record == "" && observedSlot == "" {
+		return true
+	}
+	return exactSHA256Digest(record) && releaseguardian.AuthoritySlot(observedSlot) == slot
 }
 
 // recoverableLKGWitness authorizes the existing restore transaction when an
