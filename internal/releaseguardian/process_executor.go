@@ -23,6 +23,18 @@ type ProcessExecutor struct {
 	PodUID string
 }
 
+// ExecutionFailureError carries the stable machine-readable failure code from
+// a Guardian child. Its text is diagnostic only; callers must branch on Code.
+type ExecutionFailureError struct {
+	Code string
+	Err  error
+}
+
+func (e *ExecutionFailureError) Error() string {
+	return "guardian execution failure [" + e.Code + "]: " + e.Err.Error()
+}
+func (e *ExecutionFailureError) Unwrap() error { return e.Err }
+
 var (
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -170,11 +182,14 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		(result.Status == "verified" || result.Status == "compensated" || degradedLKGRestored) {
 		return ExecutionReceipt{}, fmt.Errorf("Guardian %s terminal metadata is unproven: %w", operation, runErr)
 	}
+	if runErr != nil && strings.TrimSpace(result.FailureClass) != "" {
+		return ExecutionReceipt{}, &ExecutionFailureError{Code: strings.TrimSpace(result.FailureClass), Err: runErr}
+	}
 	recordDigest := snapshot.Record.RecordDigest
 	if ((operation == "repair-monitor" || operation == "restore-monitor") && result.Status == "compensated") || degradedLKGRestored {
 		recordDigest = snapshot.Record.LKGRecordDigest
 	}
-	return ExecutionReceipt{Status: result.Status, Reason: guardianTerminalReason(result), RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil
+	return ExecutionReceipt{Status: result.Status, Reason: guardianTerminalReason(result), FailureCode: strings.TrimSpace(result.FailureClass), RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil
 }
 
 func trustedCurrentArtifact(data map[string]string) (string, error) {

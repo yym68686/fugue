@@ -59,6 +59,7 @@ type Store interface {
 type ExecutionReceipt struct {
 	Status        string
 	Reason        string
+	FailureCode   string
 	RecordDigest  string
 	ReceiptDigest string
 }
@@ -176,7 +177,8 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 			receipt, executeErr := controller.executor.Rollback(ctx, snapshot)
 			if executeErr != nil {
 				status.Reason = "LKG restore result is unknown: " + executeErr.Error()
-				if strings.Contains(executeErr.Error(), "LKG monitor record is not the exact predecessor") {
+				var codedFailure *ExecutionFailureError
+				if errors.As(executeErr, &codedFailure) && codedFailure.Code == "lkg_predecessor_mismatch" {
 					if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
 						status.Reason = "LKG monitor ledger is inconsistent and DesiredRelease rollback CAS failed: " + err.Error()
 					} else {
