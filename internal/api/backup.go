@@ -2563,6 +2563,10 @@ func timePtrPtr(value *time.Time) **time.Time {
 }
 
 func (s *Server) scheduleBackupRetry(ctx context.Context, run model.BackupRun) {
+	// NextRetryAt is the durable wake-up contract. The scheduler's bounded
+	// due-run scan is the sole executor after this record is created; do not
+	// create one timer goroutine per failed run.
+	_ = ctx
 	if run.PolicyID == "" || run.RetryCount >= backupRunMaxRetries || run.Trigger == model.BackupRunTriggerManual {
 		return
 	}
@@ -2598,16 +2602,7 @@ func (s *Server) scheduleBackupRetry(ctx context.Context, run model.BackupRun) {
 		}
 		return
 	}
-	go func() {
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			s.executeBackupRun(contextWithoutCancel(ctx), retryRun.ID)
-		}
-	}()
+	_ = retryRun
 }
 
 func backupRetryDelay(retryCount int) time.Duration {
