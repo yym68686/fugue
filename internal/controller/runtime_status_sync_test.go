@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -112,7 +113,7 @@ func TestMarkRuntimeOfflineStaleSyncsManagedOwnedClusterRuntimeStatuses(t *testi
 		},
 	}
 
-	if err := svc.markRuntimeOfflineStale(); err != nil {
+	if err := svc.markRuntimeOfflineStale(context.Background()); err != nil {
 		t.Fatalf("mark runtime offline stale: %v", err)
 	}
 

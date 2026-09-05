@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -73,7 +74,7 @@ func TestQueueAutomaticFailoversCreatesOperationForOfflineRuntime(t *testing.T) 
 	}
 
 	svc := New(stateStore, config.ControllerConfig{}, log.New(io.Discard, "", 0))
-	if err := svc.queueAutomaticFailovers(); err != nil {
+	if err := svc.queueAutomaticFailovers(context.Background()); err != nil {
 		t.Fatalf("queue automatic failovers: %v", err)
 	}
 

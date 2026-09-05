@@ -445,6 +445,17 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if offlineHalf := s.Config.RuntimeOfflineAfter / 2; offlineHalf > 0 && staleSweepInterval > offlineHalf {
 		staleSweepInterval = offlineHalf
 	}
+	// These recovery tasks must keep running when LISTEN is unavailable or a
+	// foreground reconciliation is slow. Each has one bounded worker, and both
+	// stop before this active loop can hand leadership to its successor.
+	stopRuntimeRecovery := func() {}
+	stopUpdaterRecovery := func() {}
+	if eventDriven {
+		stopRuntimeRecovery = s.startPeriodicReconcile(ctx, staleSweepInterval, "runtime recovery", s.reconcileRuntimeFailovers)
+		stopUpdaterRecovery = s.startPeriodicReconcile(ctx, staleSweepInterval, "node updater version", s.reconcileNodeUpdaterVersions)
+	}
+	defer stopRuntimeRecovery()
+	defer stopUpdaterRecovery()
 	staleTicker := time.NewTicker(staleSweepInterval)
 	defer staleTicker.Stop()
 	fallbackTicker := time.NewTicker(s.Config.FallbackPollInterval)
@@ -548,9 +559,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				s.Logger.Printf("host journald policy scheduling error: %v", err)
 			}
 		case <-staleTicker.C:
-			if err := s.markRuntimeOfflineStale(); err != nil {
-				s.Logger.Printf("runtime stale sweep error: %v", err)
-			}
 			if err := s.cleanupZombieBuildJobs(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("zombie build job cleanup error: %v", err)
 			}
@@ -571,10 +579,7 @@ func (s *Service) markActiveLoopRunning(running bool) {
 }
 
 func (s *Service) reconcileOnce(ctx context.Context) error {
-	if err := s.markRuntimeOfflineStale(); err != nil {
-		return err
-	}
-	if err := s.queueAutomaticFailovers(); err != nil {
+	if err := s.reconcileRuntimeFailovers(ctx); err != nil {
 		return err
 	}
 	if err := s.cleanupZombieBuildJobs(ctx); err != nil {
@@ -644,17 +649,20 @@ func (s *Service) reconcileManagedAppEvent(ctx context.Context, operationID stri
 	return nil
 }
 
-func (s *Service) markRuntimeOfflineStale() error {
+func (s *Service) markRuntimeOfflineStale(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := s.Store.MarkRuntimeOfflineStale(s.Config.RuntimeOfflineAfter); err != nil {
 		return fmt.Errorf("mark runtime offline: %w", err)
 	}
-	if err := s.syncManagedOwnedClusterRuntimeStatuses(); err != nil && s.Logger != nil {
+	if err := s.syncManagedOwnedClusterRuntimeStatuses(ctx); err != nil && s.Logger != nil {
 		s.Logger.Printf("managed-owned cluster runtime status sync error: %v", err)
 	}
 	return nil
 }
 
-func (s *Service) syncManagedOwnedClusterRuntimeStatuses() error {
+func (s *Service) syncManagedOwnedClusterRuntimeStatuses(ctx context.Context) error {
 	if !s.Config.KubectlApply {
 		return nil
 	}
@@ -669,12 +677,15 @@ func (s *Service) syncManagedOwnedClusterRuntimeStatuses() error {
 		return fmt.Errorf("new kube client: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	nodeReadyByName, err := client.listNodeReadyStates(ctx)
 	if err != nil {
 		return fmt.Errorf("list node readiness: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if _, err := s.Store.SyncManagedOwnedClusterRuntimeStatuses(nodeReadyByName); err != nil {
 		return fmt.Errorf("sync managed-owned cluster runtime statuses: %w", err)

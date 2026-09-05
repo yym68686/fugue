@@ -265,7 +265,10 @@ func operationInFlight(op model.Operation) bool {
 	}
 }
 
-func (s *Service) queueAutomaticFailovers() error {
+func (s *Service) queueAutomaticFailovers(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	apps, err := s.Store.ListApps("", true)
 	if err != nil {
 		return err
@@ -291,6 +294,9 @@ func (s *Service) queueAutomaticFailovers() error {
 	}
 
 	for _, app := range apps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if app.Spec.Failover == nil || !app.Spec.Failover.Auto {
 			continue
 		}
