@@ -5,8 +5,8 @@ import (
 	"io"
 	"log"
 	"path/filepath"
-	"reflect"
 	"testing"
+	"time"
 
 	"fugue/internal/appimages"
 	"fugue/internal/model"
@@ -14,7 +14,7 @@ import (
 	"fugue/internal/store"
 )
 
-func TestExecuteManagedDeployOperationPrunesManagedImageHistoryBeyondLimit(t *testing.T) {
+func TestExecuteManagedDeployOperationBlocksWhenLiveImageScanIncomplete(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -122,11 +122,9 @@ func TestExecuteManagedDeployOperationPrunesManagedImageHistoryBeyondLimit(t *te
 		t.Fatalf("execute managed deploy operation: %v", err)
 	}
 
-	wantDeletedRefs := []string{
-		pushBase + "/fugue-apps/example-demo:git-old",
-	}
-	gotDeletedRefs := waitForDeletedRefs(t, deletedRefs, len(wantDeletedRefs))
-	if !reflect.DeepEqual(gotDeletedRefs, wantDeletedRefs) {
-		t.Fatalf("expected deleted refs %v, got %v", wantDeletedRefs, gotDeletedRefs)
+	select {
+	case ref := <-deletedRefs:
+		t.Fatalf("deleted %q despite incomplete live reference scan", ref)
+	case <-time.After(150 * time.Millisecond):
 	}
 }

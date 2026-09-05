@@ -1259,7 +1259,7 @@ func TestHandleRedeployAppImageQueuesHistoricalDeploy(t *testing.T) {
 	}
 }
 
-func TestHandleDeleteAppImageDeletesHistoricalRegistryVersion(t *testing.T) {
+func TestHandleDeleteAppImageBlocksWhenLiveReferenceScanIncomplete(t *testing.T) {
 	t.Parallel()
 
 	_, server, apiKey, _, _, app, fakeRegistry, oldImageRef, _, _ := setupAppImagesTestServer(t)
@@ -1275,34 +1275,17 @@ func TestHandleDeleteAppImageDeletesHistoricalRegistryVersion(t *testing.T) {
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/images/delete", apiKey, map[string]any{
 		"image_ref": oldImageRef,
 	})
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
 
-	var response appImageDeleteResponse
-	mustDecodeJSON(t, recorder, &response)
+	if len(fakeRegistry.deleted) != 0 {
+		t.Fatalf("deleted image despite incomplete live reference scan: %#v", fakeRegistry.deleted)
+	}
 
-	if !response.Deleted {
-		t.Fatalf("expected delete response to mark deleted, got %#v", response)
-	}
-	if response.ReclaimedSizeBytes != 60 {
-		t.Fatalf("expected reclaimed size estimate 60, got %#v", response)
-	}
-	if !response.ReclaimRequiresGC {
-		t.Fatalf("expected delete response to report queued protected cleanup, got %#v", response)
-	}
-	if response.ReclaimNote == "" {
-		t.Fatal("expected delete response to explain queued registry GC")
-	}
-	if len(fakeRegistry.deleted) != 1 || fakeRegistry.deleted[0] != oldImageRef {
-		t.Fatalf("expected fake registry delete for %q, got %#v", oldImageRef, fakeRegistry.deleted)
-	}
-	if gcRequests != 1 {
-		t.Fatalf("expected one registry GC request, got %d", gcRequests)
-	}
 }
 
-func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCRequestFails(t *testing.T) {
+func TestHandleDeleteAppImageBlocksBeforeRegistryGCWhenLiveReferenceScanIncomplete(t *testing.T) {
 	t.Parallel()
 
 	_, server, apiKey, _, _, app, fakeRegistry, oldImageRef, _, _ := setupAppImagesTestServer(t)
@@ -1313,7 +1296,7 @@ func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCRequestFails(t *test
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/images/delete", apiKey, map[string]any{
 		"image_ref": oldImageRef,
 	})
-	if recorder.Code != http.StatusBadGateway {
+	if recorder.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadGateway, recorder.Code, recorder.Body.String())
 	}
 
@@ -1324,8 +1307,8 @@ func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCRequestFails(t *test
 	if response.Error == "" {
 		t.Fatalf("expected delete error message, got %#v", response)
 	}
-	if len(fakeRegistry.deleted) != 1 || fakeRegistry.deleted[0] != oldImageRef {
-		t.Fatalf("expected manifest delete to happen before GC failure, got %#v", fakeRegistry.deleted)
+	if len(fakeRegistry.deleted) != 0 {
+		t.Fatalf("deleted manifest before complete scan: %#v", fakeRegistry.deleted)
 	}
 }
 

@@ -39,11 +39,17 @@ func (s *Server) cleanupDeletedAppImages(ctx context.Context, app model.App) err
 		s.registryPullBase,
 	)
 	liveLookupApps := append(append([]model.App(nil), remainingApps...), app)
-	liveRefs := make(map[string]struct{})
-	for _, reference := range s.liveManagedImageReferencesWithLookup(ctx, remainingApps, liveLookupApps) {
-		liveRefs[reference.ImageRef] = struct{}{}
+	liveScan := s.liveManagedImageReferenceScan(ctx, remainingApps, liveLookupApps)
+	if !liveScan.Complete {
+		_ = s.store.RecordMigrationArtifactRetirementBlocked(app.ID, "image cleanup blocked: live reference scan incomplete")
+		if s.log != nil {
+			s.log.Printf("preserve old app artifacts for %s: live reference scan incomplete", app.ID)
+		}
+		return nil
 	}
-	mergeManagedImageRefSets(remainingRefs, liveRefs)
+	for _, reference := range liveScan.References {
+		remainingRefs[reference.ImageRef] = struct{}{}
+	}
 
 	imageRefs := appimages.ManagedImageRefs(
 		app,
@@ -61,7 +67,7 @@ func (s *Server) cleanupDeletedAppImages(ctx context.Context, app model.App) err
 		if _, inUse := remainingRefs[imageRef]; inUse {
 			continue
 		}
-		digestInUse, err := s.managedImageDigestInUse(ctx, imageRef, liveRefs)
+		digestInUse, err := s.managedImageDigestInUse(ctx, imageRef, remainingRefs)
 		if err != nil {
 			errs = append(errs, err)
 			continue

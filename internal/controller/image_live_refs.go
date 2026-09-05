@@ -10,18 +10,27 @@ import (
 	"fugue/internal/sourceimport"
 )
 
+type liveManagedImageReferenceScan struct {
+	Refs     map[string]struct{}
+	Complete bool
+}
+
 func (s *Service) liveManagedImageRefSet(ctx context.Context, apps []model.App) map[string]struct{} {
-	return s.liveManagedImageRefSetWithLookup(ctx, apps, apps)
+	return s.liveManagedImageRefScanWithLookup(ctx, apps, apps).Refs
 }
 
 func (s *Service) liveManagedImageRefSetWithLookup(ctx context.Context, desiredApps, lookupApps []model.App) map[string]struct{} {
-	refs := make(map[string]struct{})
+	return s.liveManagedImageRefScanWithLookup(ctx, desiredApps, lookupApps).Refs
+}
+
+func (s *Service) liveManagedImageRefScanWithLookup(ctx context.Context, desiredApps, lookupApps []model.App) liveManagedImageReferenceScan {
+	out := liveManagedImageReferenceScan{Refs: make(map[string]struct{}), Complete: true}
 	if s == nil || strings.TrimSpace(s.registryPushBase) == "" {
-		return refs
+		return out
 	}
 	for _, app := range desiredApps {
 		for _, ref := range s.desiredManagedImageRefsForApp(app) {
-			refs[ref] = struct{}{}
+			out.Refs[ref] = struct{}{}
 		}
 	}
 
@@ -30,12 +39,14 @@ func (s *Service) liveManagedImageRefSetWithLookup(ctx context.Context, desiredA
 		if s.Logger != nil {
 			s.Logger.Printf("skip Kubernetes live managed image reference scan; preserving desired app refs: %v", err)
 		}
-		return refs
+		out.Complete = false
+		return out
 	}
 
 	for _, resource := range []string{"deployments", "statefulsets", "daemonsets"} {
 		workloads, listErr := client.listWorkloads(ctx, resource)
 		if listErr != nil {
+			out.Complete = false
 			if s.Logger != nil {
 				s.Logger.Printf("skip cluster live managed image reference scan for %s: %v", resource, listErr)
 			}
@@ -43,7 +54,7 @@ func (s *Service) liveManagedImageRefSetWithLookup(ctx context.Context, desiredA
 		}
 		for _, workload := range workloads {
 			for imageRef := range s.liveManagedImageRefsFromWorkload(workload) {
-				refs[imageRef] = struct{}{}
+				out.Refs[imageRef] = struct{}{}
 			}
 		}
 	}
@@ -56,6 +67,7 @@ func (s *Service) liveManagedImageRefSetWithLookup(ctx context.Context, desiredA
 		name := runtime.RuntimeAppResourceName(app)
 		deployment, found, err := client.getRawDeployment(ctx, namespace, name)
 		if err != nil {
+			out.Complete = false
 			if s.Logger != nil {
 				s.Logger.Printf("skip live managed image reference scan for deployment %s/%s: %v", namespace, name, err)
 			}
@@ -65,10 +77,10 @@ func (s *Service) liveManagedImageRefSetWithLookup(ctx context.Context, desiredA
 			continue
 		}
 		for imageRef := range s.liveManagedImageRefsFromDeployment(deployment) {
-			refs[imageRef] = struct{}{}
+			out.Refs[imageRef] = struct{}{}
 		}
 	}
-	return refs
+	return out
 }
 
 func (s *Service) desiredManagedImageRefsForApp(app model.App) []string {

@@ -55,7 +55,14 @@ func (s *Service) sweepManagedAppImageRetention(ctx context.Context) error {
 		opsByAppID[appID] = append(opsByAppID[appID], op)
 	}
 
-	liveRefs := s.liveManagedImageRefSet(ctx, apps)
+	liveScan := s.liveManagedImageRefScanWithLookup(ctx, apps, apps)
+	if !liveScan.Complete {
+		if s.Logger != nil {
+			s.Logger.Printf("skip managed image retention sweep: live reference scan incomplete")
+		}
+		return nil
+	}
+	liveRefs := liveScan.Refs
 	tenantIDs := make(map[string]struct{})
 	var errs []error
 	for _, app := range apps {
@@ -123,7 +130,14 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 		}
 		opsByAppID[appID] = append(opsByAppID[appID], op)
 	}
-	liveRefs := s.liveManagedImageRefSet(ctx, apps)
+	liveScan := s.liveManagedImageRefScanWithLookup(ctx, apps, apps)
+	if !liveScan.Complete {
+		if s.Logger != nil {
+			s.Logger.Printf("skip distributed image retention sweep: live reference scan incomplete")
+		}
+		return nil
+	}
+	liveRefs := liveScan.Refs
 	tenantIDs := make(map[string]struct{})
 	var errs []error
 	deletedAppsReadyForRetirement := make([]model.App, 0, len(deletedApps))

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,7 @@ func TestControllerImageCachePruneProtectsActiveImageDigestBlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record unreferenced active blob: %v", err)
 	}
+	_ = cacheNode
 	svc := &Service{
 		Store: stateStore,
 		Config: config.ControllerConfig{
@@ -81,15 +83,8 @@ func TestControllerImageCachePruneProtectsActiveImageDigestBlob(t *testing.T) {
 		registryPushBase: "registry.push.example",
 		registryPullBase: "registry.pull.example",
 	}
-	protected, err := svc.controllerImageCacheProtectedSet(context.Background())
-	if err != nil {
-		t.Fatalf("compute protected image set: %v", err)
-	}
-	plan, err := svc.computeControllerImageCachePrunePlan(context.Background(), cacheNode, protected, model.ImageCachePruneModeDelete)
-	if err != nil {
-		t.Fatalf("compute prune plan: %v", err)
-	}
-	if plan.CandidateBlobCount != 0 || plan.ProtectedBlobCount != 1 {
-		t.Fatalf("active image digest must be protected from blob prune, got %+v", plan)
+	_, err = svc.controllerImageCacheProtectedSet(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "live image reference scan incomplete") {
+		t.Fatalf("expected incomplete live scan to block protection snapshot, got %v", err)
 	}
 }

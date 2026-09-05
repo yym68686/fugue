@@ -41,8 +41,8 @@ func TestEventDrivenPeriodicTasksHandleChangesAfterStartupWithoutNotifications(t
 					t.Fatal("use a dedicated fugue_test database")
 				}
 			}
-			stateDir := t.TempDir()
-			storePath := filepath.Join(stateDir, "state.json")
+			storePath := filepath.Join(os.TempDir(), "fugue-periodic-"+fmt.Sprint(time.Now().UnixNano())+".json")
+			defer os.Remove(storePath)
 			defer os.Remove(storePath + ".lock")
 			state := store.New(storePath, dsn)
 			if err := state.Init(); err != nil {

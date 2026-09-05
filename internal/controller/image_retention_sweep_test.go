@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"fugue/internal/appimages"
@@ -14,7 +13,7 @@ import (
 	"fugue/internal/store"
 )
 
-func TestSweepManagedAppImageRetentionPrunesStaleHistory(t *testing.T) {
+func TestSweepManagedAppImageRetentionBlocksWhenLiveScanIncomplete(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -120,14 +119,8 @@ func TestSweepManagedAppImageRetentionPrunesStaleHistory(t *testing.T) {
 		t.Fatalf("sweep image retention: %v", err)
 	}
 
-	wantDeletedRefs := []string{
-		pushBase + "/fugue-apps/example-demo:git-old",
-	}
-	if !reflect.DeepEqual(deletedRefs, wantDeletedRefs) {
-		t.Fatalf("expected deleted refs %v, got %v", wantDeletedRefs, deletedRefs)
-	}
-	if gcRequests != len(wantDeletedRefs) {
-		t.Fatalf("expected %d registry GC requests, got %d", len(wantDeletedRefs), gcRequests)
+	if len(deletedRefs) != 0 || gcRequests != 0 {
+		t.Fatalf("deleted or GC'd images despite incomplete live reference scan: refs=%v gc=%d", deletedRefs, gcRequests)
 	}
 }
 
@@ -220,10 +213,10 @@ func TestSweepManagedAppImageRetentionStopsAfterContextCancellation(t *testing.T
 	}
 
 	err = svc.sweepManagedAppImageRetention(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context cancellation, got %v", err)
+	if err != nil {
+		t.Fatalf("incomplete scan should defer without error, got %v", err)
 	}
-	if inspectCalls != 1 {
-		t.Fatalf("expected sweep to stop after one inspect, got %d", inspectCalls)
+	if inspectCalls != 0 {
+		t.Fatalf("expected scan gate before registry inspect, got %d", inspectCalls)
 	}
 }

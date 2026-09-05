@@ -26,43 +26,55 @@ func (s *Server) liveManagedImageRefSet(ctx context.Context, apps []model.App) m
 	return refs
 }
 
+type liveManagedImageReferenceScan struct {
+	References []liveManagedImageReference
+	Complete   bool
+}
+
 func (s *Server) liveManagedImageReferences(ctx context.Context, apps []model.App) []liveManagedImageReference {
-	return s.liveManagedImageReferencesWithLookup(ctx, apps, apps)
+	return s.liveManagedImageReferenceScan(ctx, apps, apps).References
 }
 
 func (s *Server) liveManagedImageReferencesWithLookup(ctx context.Context, desiredApps, lookupApps []model.App) []liveManagedImageReference {
+	return s.liveManagedImageReferenceScan(ctx, desiredApps, lookupApps).References
+}
+
+func (s *Server) liveManagedImageReferenceScan(ctx context.Context, desiredApps, lookupApps []model.App) liveManagedImageReferenceScan {
 	if s == nil || strings.TrimSpace(s.registryPushBase) == "" {
-		return nil
+		return liveManagedImageReferenceScan{Complete: true}
 	}
-	var out []liveManagedImageReference
+	out := liveManagedImageReferenceScan{Complete: true}
 	for _, app := range desiredApps {
-		out = append(out, s.desiredManagedImageReferencesFromApp(app)...)
+		out.References = append(out.References, s.desiredManagedImageReferencesFromApp(app)...)
 	}
 	client, err := s.requireClusterNodeClient()
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("skip Kubernetes live managed image reference scan; preserving desired app refs: %v", err)
 		}
+		out.Complete = false
 		return out
 	}
 	defer client.closeIdleConnections()
 
 	if deployments, err := client.listDeploymentObjects(ctx); err != nil {
+		out.Complete = false
 		if s.log != nil {
 			s.log.Printf("skip cluster live managed image reference scan for deployments: %v", err)
 		}
 	} else {
 		for _, deployment := range deployments {
-			out = append(out, s.liveManagedImageReferencesFromDeployment(deployment)...)
+			out.References = append(out.References, s.liveManagedImageReferencesFromDeployment(deployment)...)
 		}
 	}
 	if statefulSets, err := client.listStatefulSetObjects(ctx); err != nil {
+		out.Complete = false
 		if s.log != nil {
 			s.log.Printf("skip cluster live managed image reference scan for statefulsets: %v", err)
 		}
 	} else {
 		for _, statefulSet := range statefulSets {
-			out = append(out, s.liveManagedImageReferencesFromPodSpec(
+			out.References = append(out.References, s.liveManagedImageReferencesFromPodSpec(
 				"statefulset",
 				statefulSet.Namespace,
 				statefulSet.Name,
@@ -71,12 +83,13 @@ func (s *Server) liveManagedImageReferencesWithLookup(ctx context.Context, desir
 		}
 	}
 	if daemonSets, err := client.listDaemonSetObjects(ctx); err != nil {
+		out.Complete = false
 		if s.log != nil {
 			s.log.Printf("skip cluster live managed image reference scan for daemonsets: %v", err)
 		}
 	} else {
 		for _, daemonSet := range daemonSets {
-			out = append(out, s.liveManagedImageReferencesFromPodSpec(
+			out.References = append(out.References, s.liveManagedImageReferencesFromPodSpec(
 				"daemonset",
 				daemonSet.Namespace,
 				daemonSet.Name,
@@ -95,6 +108,7 @@ func (s *Server) liveManagedImageReferencesWithLookup(ctx context.Context, desir
 		name := runtime.RuntimeAppResourceName(app)
 		deployment, found, err := client.readDeploymentObject(ctx, namespace, name)
 		if err != nil {
+			out.Complete = false
 			if s.log != nil {
 				s.log.Printf("skip live managed image reference scan for deployment %s/%s: %v", namespace, name, err)
 			}
@@ -103,7 +117,7 @@ func (s *Server) liveManagedImageReferencesWithLookup(ctx context.Context, desir
 		if !found {
 			continue
 		}
-		out = append(out, s.liveManagedImageReferencesFromDeployment(deployment)...)
+		out.References = append(out.References, s.liveManagedImageReferencesFromDeployment(deployment)...)
 	}
 	return out
 }

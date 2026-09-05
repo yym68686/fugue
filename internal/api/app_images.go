@@ -1050,7 +1050,11 @@ func (s *Server) managedImageStillReferenced(ctx context.Context, app model.App,
 	if _, ok := otherRefs[imageRef]; ok {
 		return true, "another app or operation desired spec", nil
 	}
-	liveReferences := s.liveManagedImageReferences(ctx, allApps)
+	liveScan := s.liveManagedImageReferenceScan(ctx, allApps, allApps)
+	if !liveScan.Complete {
+		return true, "live image reference scan incomplete", nil
+	}
+	liveReferences := liveScan.References
 	liveRefs := make(map[string]struct{}, len(liveReferences))
 	for _, reference := range liveReferences {
 		liveRefs[reference.ImageRef] = struct{}{}

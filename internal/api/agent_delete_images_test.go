@@ -14,7 +14,7 @@ import (
 	"fugue/internal/store"
 )
 
-func TestAgentCompleteDeleteOperationDeletesAppImages(t *testing.T) {
+func TestAgentCompleteDeleteOperationBlocksWhenLiveReferenceScanIncomplete(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -127,10 +127,10 @@ func TestAgentCompleteDeleteOperationDeletesAppImages(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
-	if len(fakeRegistry.deleted) != 1 || fakeRegistry.deleted[0] != imageRef {
-		t.Fatalf("expected deleted image ref %q, got %#v", imageRef, fakeRegistry.deleted)
+	if len(fakeRegistry.deleted) != 0 {
+		t.Fatalf("deleted image despite incomplete live scan: %#v", fakeRegistry.deleted)
 	}
-	if gcRequests != 1 {
-		t.Fatalf("expected one registry GC request, got %d", gcRequests)
+	if gcRequests != 0 {
+		t.Fatalf("queued registry GC despite incomplete live scan: %d", gcRequests)
 	}
 }

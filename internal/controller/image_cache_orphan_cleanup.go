@@ -681,8 +681,15 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 		}
 	}
 	apps, err := s.Store.ListAppsMetadata("", true)
-	if err == nil {
-		for ref := range s.liveManagedImageRefSet(ctx, apps) {
+	if err != nil {
+		return protected, fmt.Errorf("list apps for live image protection: %w", err)
+	}
+	liveScan := s.liveManagedImageRefScanWithLookup(ctx, apps, apps)
+	if !liveScan.Complete {
+		return protected, errors.New("live image reference scan incomplete")
+	}
+	{
+		for ref := range liveScan.Refs {
 			keys := controllerImageReferenceKeys(ref, "")
 			addControllerImageKeys(protected.liveRefs, keys...)
 			addControllerImageDetails(protected.workloadRefsByRef, keys, ref)
