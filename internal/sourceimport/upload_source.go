@@ -44,6 +44,14 @@ type extractedUploadSource struct {
 }
 
 func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSourceImportRequest) (GitHubSourceImportOutput, error) {
+	return i.importUploadedArchiveSource(ctx, req, nil)
+}
+
+// importUploadedArchiveSource keeps one extracted tree alive while Auto
+// detection selects the concrete builder. The selected strategy then consumes
+// the same bounded, validated directory instead of extracting the archive a
+// second time.
+func (i *Importer) importUploadedArchiveSource(ctx context.Context, req UploadSourceImportRequest, prepared *extractedUploadSource) (GitHubSourceImportOutput, error) {
 	scopedImporter := *i
 	scopedImporter.BuilderPolicy = builderPodPolicyWithMemoryCeiling(i.BuilderPolicy, req.BuilderMemoryCeiling)
 	i = &scopedImporter
@@ -88,12 +96,18 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 		return GitHubSourceImportOutput{}, err
 	}
 
-	src, err := i.extractUploadedArchive(req)
-	if err != nil {
-		logUploadImportResult(req.BuildStrategy, GitHubSourceImportOutput{}, err)
-		return GitHubSourceImportOutput{}, err
+	var src extractedUploadSource
+	if prepared == nil {
+		var err error
+		src, err = i.extractUploadedArchive(req)
+		if err != nil {
+			logUploadImportResult(req.BuildStrategy, GitHubSourceImportOutput{}, err)
+			return GitHubSourceImportOutput{}, err
+		}
+		defer releaseExtractedUploadSource(src)
+	} else {
+		src = *prepared
 	}
-	defer releaseExtractedUploadSource(src)
 	logger.Printf(
 		"upload import extracted upload_id=%s root=%s default_app=%s",
 		strings.TrimSpace(req.UploadID),
@@ -125,7 +139,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 		req.SourceDir = sourceDir
 		req.DockerfilePath = dockerfilePath
 		req.BuildContextDir = buildContextDir
-		return i.ImportUploadedArchiveSource(ctx, req)
+		return i.importUploadedArchiveSource(ctx, req, &src)
 	case model.AppBuildStrategyStaticSite:
 		result, err := importStaticSiteFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.DestinationRegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 		if err != nil {
