@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
+
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -23,6 +22,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/kubeauth"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
@@ -965,39 +965,11 @@ func sharedLocationCount(snapshots []resolvedClusterNodeSnapshot) int {
 }
 
 func newClusterNodeClient() (*clusterNodeClient, error) {
-	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
-	port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
-	if host == "" || port == "" {
-		return nil, fmt.Errorf("kubernetes service host/port is not available in the environment")
-	}
-
-	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	cfg, client, err := kubeauth.Load("", 10*time.Second, clusterNodeHTTPMaxIdleConns, clusterNodeHTTPMaxIdleConnsPerHost, false)
 	if err != nil {
-		return nil, fmt.Errorf("read service account token: %w", err)
+		return nil, err
 	}
-	caData, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-	if err != nil {
-		return nil, fmt.Errorf("read service account CA: %w", err)
-	}
-	rootCAs := x509.NewCertPool()
-	if !rootCAs.AppendCertsFromPEM(caData) {
-		return nil, fmt.Errorf("load service account CA")
-	}
-
-	return &clusterNodeClient{
-		client: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig:     &tls.Config{RootCAs: rootCAs},
-				MaxIdleConns:        clusterNodeHTTPMaxIdleConns,
-				MaxIdleConnsPerHost: clusterNodeHTTPMaxIdleConnsPerHost,
-				IdleConnTimeout:     clusterNodeHTTPIdleConnTimeout,
-				TLSHandshakeTimeout: clusterNodeHTTPTLSHandshakeTimeout,
-			},
-			Timeout: 10 * time.Second,
-		},
-		baseURL:     "https://" + host + ":" + port,
-		bearerToken: strings.TrimSpace(string(token)),
-	}, nil
+	return &clusterNodeClient{client: client, baseURL: cfg.BaseURL, bearerToken: cfg.Token}, nil
 }
 
 func (c *clusterNodeClient) closeIdleConnections() {

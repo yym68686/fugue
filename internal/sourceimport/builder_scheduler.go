@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
-	"crypto/tls"
-	"crypto/x509"
+
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,12 +13,12 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"fugue/internal/kubeauth"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 
@@ -1143,46 +1142,11 @@ func builderIsConflictError(err error) bool {
 }
 
 func newBuilderKubeClient(namespace string) (*builderKubeClient, error) {
-	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
-	port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
-	if host == "" || port == "" {
-		return nil, fmt.Errorf("kubernetes service host/port is not available in the environment")
-	}
-
-	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	cfg, client, err := kubeauth.Load(namespace, 15*time.Second, 0, 0, false)
 	if err != nil {
-		return nil, fmt.Errorf("read service account token: %w", err)
+		return nil, err
 	}
-	caData, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-	if err != nil {
-		return nil, fmt.Errorf("read service account CA: %w", err)
-	}
-	rootCAs := x509.NewCertPool()
-	if !rootCAs.AppendCertsFromPEM(caData) {
-		return nil, fmt.Errorf("load service account CA")
-	}
-
-	namespace = strings.TrimSpace(namespace)
-	if namespace == "" {
-		if data, err := os.ReadFile(serviceAccountNamespacePath); err == nil {
-			namespace = strings.TrimSpace(string(data))
-		}
-	}
-	if namespace == "" {
-		return nil, fmt.Errorf("resolve kubernetes namespace")
-	}
-
-	return &builderKubeClient{
-		client: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: rootCAs},
-			},
-			Timeout: 15 * time.Second,
-		},
-		baseURL:     "https://" + host + ":" + port,
-		bearerToken: strings.TrimSpace(string(token)),
-		namespace:   namespace,
-	}, nil
+	return &builderKubeClient{client: client, baseURL: cfg.BaseURL, bearerToken: cfg.Token, namespace: cfg.Namespace}, nil
 }
 
 func (c *builderKubeClient) listNodes(ctx context.Context) ([]builderKubeNode, error) {

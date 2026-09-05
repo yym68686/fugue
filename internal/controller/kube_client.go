@@ -3,18 +3,18 @@ package controller
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
+
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"fugue/internal/kubeauth"
 
 	runtimepkg "fugue/internal/runtime"
 )
@@ -341,50 +341,11 @@ type kubeStateDetail struct {
 }
 
 func newKubeClient(namespace string) (*kubeClient, error) {
-	host := os.Getenv("KUBERNETES_SERVICE_HOST")
-	port := os.Getenv("KUBERNETES_SERVICE_PORT")
-	if host == "" || port == "" {
-		return nil, fmt.Errorf("kubernetes service host/port is not available in the environment")
-	}
-
-	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	cfg, client, err := kubeauth.Load(namespace, 0, 100, 32, true)
 	if err != nil {
-		return nil, fmt.Errorf("read service account token: %w", err)
+		return nil, err
 	}
-	caData, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-	if err != nil {
-		return nil, fmt.Errorf("read service account CA: %w", err)
-	}
-	rootCAs := x509.NewCertPool()
-	if !rootCAs.AppendCertsFromPEM(caData) {
-		return nil, fmt.Errorf("load service account CA")
-	}
-
-	if strings.TrimSpace(namespace) == "" {
-		if namespaceData, err := os.ReadFile(serviceAccountNamespacePath); err == nil {
-			namespace = strings.TrimSpace(string(namespaceData))
-		}
-	}
-	if strings.TrimSpace(namespace) == "" {
-		return nil, fmt.Errorf("resolve kubernetes namespace")
-	}
-
-	return &kubeClient{
-		client: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig:     &tls.Config{RootCAs: rootCAs},
-				ForceAttemptHTTP2:   true,
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 32,
-				IdleConnTimeout:     90 * time.Second,
-				TLSHandshakeTimeout: 5 * time.Second,
-			},
-		},
-		baseURL:          "https://" + host + ":" + port,
-		bearerToken:      strings.TrimSpace(string(token)),
-		namespace:        strings.TrimSpace(namespace),
-		applyConcurrency: 4,
-	}, nil
+	return &kubeClient{client: client, baseURL: cfg.BaseURL, bearerToken: cfg.Token, namespace: cfg.Namespace, applyConcurrency: 4}, nil
 }
 
 func (c *kubeClient) effectiveNamespace(namespace string) string {
