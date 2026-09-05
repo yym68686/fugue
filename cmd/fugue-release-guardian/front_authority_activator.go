@@ -255,7 +255,8 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 			}
 			if !frontTargetGenerationMatches(state, target.PreviousFrontGeneration, operation) || state.PreviousSlot != string(target.PreviousSlot) ||
 				!bundleMatches || state.WorkerSourceCommit != target.WorkerSourceSHA ||
-				state.WorkerImageDigest != target.WorkerImageDigest || state.Operation != operation {
+				state.WorkerImageDigest != target.WorkerImageDigest || state.Operation != operation ||
+				(operation == edgegroupfront.ActivationOperationRollback && state.RollbackOfGeneration != state.Generation-1) {
 				return frontAuthorityPreflight{}, errors.New("Front activation replay state is not target-bound")
 			}
 			if targetBundle == "" {
@@ -289,6 +290,9 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 }
 
 func authorityBundleAtOrAfter(observed, committed string) bool {
+	if releaseguardian.NewerStandbyActivationBundle(observed, committed) {
+		return true
+	}
 	observedServing, observedPublication, observedRecovery, observedErr := splitPromotedBundleVersion(observed)
 	committedServing, committedPublication, committedRecovery, committedErr := splitPromotedBundleVersion(committed)
 	if observedErr != nil || committedErr != nil || observedPublication < committedPublication {

@@ -142,6 +142,7 @@ func TestRollbackReplayBundleAcceptsOnlyMonotonicSignedPublication(t *testing.T)
 		committed,
 		"edgegroupbundle_old.p41139.r176",
 		"edgegroupbundle_new.p41672.r175",
+		"edgegroupbundle_standby.p41672.r0",
 	} {
 		if !authorityBundleAtOrAfter(observed, committed) {
 			t.Fatalf("valid rollback replay bundle %q was rejected", observed)
@@ -151,6 +152,8 @@ func TestRollbackReplayBundleAcceptsOnlyMonotonicSignedPublication(t *testing.T)
 		"edgegroupbundle_new.p41138.r176",
 		"edgegroupbundle_new.p41672.r174",
 		"edgegroupbundle_old.p41137.r176",
+		"edgegroupbundle_standby.p41138.r0",
+		"edgegroupbundle_standby.p41137.r0",
 		"edgegroupbundle_new",
 	} {
 		if authorityBundleAtOrAfter(observed, committed) {

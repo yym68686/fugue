@@ -590,6 +590,9 @@ func restoredBundleGenerationMatches(observed, previous string) bool {
 	if strings.TrimSpace(observed) == strings.TrimSpace(previous) && strings.TrimSpace(observed) != "" {
 		return true
 	}
+	if NewerStandbyActivationBundle(observed, previous) {
+		return true
+	}
 	observedBase, observedPublication, observedRecovery, observedOK := splitAuthorityBundleGeneration(observed)
 	previousBase, previousPublication, previousRecovery, previousOK := splitAuthorityBundleGeneration(previous)
 	if !observedOK || !previousOK || observedPublication <= previousPublication {
@@ -601,6 +604,18 @@ func restoredBundleGenerationMatches(observed, previous string) bool {
 	// Configuration publication is independent of the code authority. A
 	// restored slot may already serve a newer signed configuration family.
 	return observedRecovery >= previousRecovery
+}
+
+// NewerStandbyActivationBundle recognizes the independent version family used
+// by staged Worker envelopes: the candidate epoch is the publication component
+// and the recovery component is always zero (including standby envelopes).
+// It is only a version comparison for an already completed LKG activation.
+// Callers must separately prove the exact rollback slot, source, image, Front
+// generation chain and current-authority CAS; this never authorizes a rollout.
+func NewerStandbyActivationBundle(observed, previous string) bool {
+	_, observedPublication, observedRecovery, observedOK := splitAuthorityBundleGeneration(observed)
+	_, previousPublication, _, previousOK := splitAuthorityBundleGeneration(previous)
+	return observedOK && previousOK && observedRecovery == 0 && observedPublication > previousPublication
 }
 
 func splitAuthorityBundleGeneration(value string) (string, uint64, uint64, bool) {

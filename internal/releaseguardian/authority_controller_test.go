@@ -293,10 +293,17 @@ func TestRestoredBundleGenerationAllowsNewerSignedConfiguration(t *testing.T) {
 	if !restoredBundleGenerationMatches(previous, previous) {
 		t.Fatal("unchanged exact LKG was rejected")
 	}
+	if !restoredBundleGenerationMatches("standby-generation.p11486.r0", previous) {
+		t.Fatal("completed rollback to a newer standby envelope was rejected")
+	}
+	if !restoredBundleGenerationMatches("standby-generation.p24.r0", "standby-generation.p20.r0") {
+		t.Fatal("newer standby epoch in the same candidate family was rejected")
+	}
 	for name, value := range map[string]string{
 		"changed same publication": "other-generation.p11377.r131",
 		"stale publication":        "route-generation.p11376.r131", "stale recovery": "route-generation.p11486.r127",
 		"older changed recovery": "other-generation.p11486.r126", "malformed": "route-generation",
+		"same standby publication": "standby-generation.p11377.r0", "older standby publication": "standby-generation.p11376.r0",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if restoredBundleGenerationMatches(value, previous) {
