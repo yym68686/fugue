@@ -341,6 +341,7 @@ type kubeStateDetail struct {
 }
 
 // newKubeClient delegates service-account authentication and pooled transport setup to kubeauth.
+// The shared constructor keeps TLS and connection-pool defaults consistent across clients.
 func newKubeClient(namespace string) (*kubeClient, error) {
 	cfg, client, err := kubeauth.Load(namespace, 0, 100, 32, true)
 	if err != nil {
