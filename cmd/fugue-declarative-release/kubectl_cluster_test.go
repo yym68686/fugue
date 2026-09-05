@@ -158,6 +158,12 @@ esac
 	if raw, err := os.ReadFile(writeCount); err != nil || strings.TrimSpace(string(raw)) != "1" {
 		t.Fatalf("mutating attempts=%q err=%v", raw, err)
 	}
+	if _, err := cluster.kubectlRun(context.Background(), nil, "exec", "example", "--", "activation-cas"); err == nil {
+		t.Fatal("failed exec command was accepted")
+	}
+	if raw, err := os.ReadFile(writeCount); err != nil || strings.TrimSpace(string(raw)) != "2" {
+		t.Fatalf("exec must not retry an unknown mutation: attempts=%q err=%v", raw, err)
+	}
 }
 
 func TestKubectlGetTimeoutIsBounded(t *testing.T) {

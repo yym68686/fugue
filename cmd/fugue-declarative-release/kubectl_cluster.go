@@ -3222,6 +3222,13 @@ func (cluster *kubectlCluster) kubectlRun(ctx context.Context, input []byte, arg
 	if len(arguments) == 0 || arguments[0] != "get" {
 		return cluster.run(ctx, input, cluster.kubectl, arguments...)
 	}
+	return cluster.kubectlRead(ctx, input, arguments...)
+}
+
+// kubectlRead is reserved for commands known to be read-only, including reads
+// of the durable activation file through exec. Mutating exec/CAS commands must
+// keep using kubectlRun so an unknown write result is never blindly replayed.
+func (cluster *kubectlCluster) kubectlRead(ctx context.Context, input []byte, arguments ...string) ([]byte, error) {
 	timeout := cluster.readTimeout
 	if timeout <= 0 {
 		timeout = defaultKubectlReadTimeout
@@ -3256,7 +3263,7 @@ func (cluster *kubectlCluster) kubectlRun(ctx context.Context, input []byte, arg
 		case <-timer.C:
 		}
 	}
-	return nil, fmt.Errorf("read-only kubectl get failed after %d attempts: %w", attempts, lastErr)
+	return nil, fmt.Errorf("read-only kubectl %s failed after %d attempts: %w", arguments[0], attempts, lastErr)
 }
 
 func (cluster *kubectlCluster) run(ctx context.Context, input []byte, binary string, arguments ...string) ([]byte, error) {

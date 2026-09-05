@@ -2346,7 +2346,7 @@ func (cluster *kubectlCluster) readEdgeActivationState(ctx context.Context, rele
 }
 
 func (cluster *kubectlCluster) readEdgeActivationStateFromPod(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, pod edgeGroupPod, container string) (edgeActivationState, bool, error) {
-	raw, err := cluster.kubectlRun(ctx, nil, "exec", "--namespace", release.Workload.Namespace, pod.Name, "--container", container,
+	raw, err := cluster.kubectlRead(ctx, nil, "exec", "--namespace", release.Workload.Namespace, pod.Name, "--container", container,
 		"--", "sh", "-ceu", `if [ ! -e "$1" ]; then printf 'absent\n'; exit 0; fi; cat "$1"`, "sh", transition.ActivationStatePath)
 	if err != nil {
 		return edgeActivationState{}, false, err
