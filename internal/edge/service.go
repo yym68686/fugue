@@ -5124,40 +5124,6 @@ func sortedPlatformReleaseMetricKeys(values map[platformReleaseMetricKey]uint64)
 	return keys
 }
 
-func sortedRouteResultMetricKeys(values map[routeResultMetricKey]uint64) []routeResultMetricKey {
-	keys := make([]routeResultMetricKey, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		left := keys[i].RouteMetricKey
-		right := keys[j].RouteMetricKey
-		if left.Hostname != right.Hostname {
-			return left.Hostname < right.Hostname
-		}
-		if left.PathPrefix != right.PathPrefix {
-			return left.PathPrefix < right.PathPrefix
-		}
-		if left.AppID != right.AppID {
-			return left.AppID < right.AppID
-		}
-		if left.RouteKind != right.RouteKind {
-			return left.RouteKind < right.RouteKind
-		}
-		if left.ClientCountry != right.ClientCountry {
-			return left.ClientCountry < right.ClientCountry
-		}
-		if left.ClientRegion != right.ClientRegion {
-			return left.ClientRegion < right.ClientRegion
-		}
-		if left.ClientASN != right.ClientASN {
-			return left.ClientASN < right.ClientASN
-		}
-		return keys[i].Result < keys[j].Result
-	})
-	return keys
-}
-
 func sortedRouteMetricKeys[V any](values map[routeMetricKey]V) []routeMetricKey {
 	keys := make([]routeMetricKey, 0, len(values))
 	for key := range values {
@@ -5186,80 +5152,6 @@ func sortedRouteMetricKeys[V any](values map[routeMetricKey]V) []routeMetricKey 
 			return keys[i].ClientRegion < keys[j].ClientRegion
 		}
 		return keys[i].ClientASN < keys[j].ClientASN
-	})
-	return keys
-}
-
-func sortedRouteStatusMetricKeys(values map[routeStatusMetricKey]uint64) []routeStatusMetricKey {
-	keys := make([]routeStatusMetricKey, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		left := keys[i].RouteMetricKey
-		right := keys[j].RouteMetricKey
-		if left.Hostname != right.Hostname {
-			return left.Hostname < right.Hostname
-		}
-		if left.PathPrefix != right.PathPrefix {
-			return left.PathPrefix < right.PathPrefix
-		}
-		if left.AppID != right.AppID {
-			return left.AppID < right.AppID
-		}
-		if left.RouteKind != right.RouteKind {
-			return left.RouteKind < right.RouteKind
-		}
-		if left.ClientCountry != right.ClientCountry {
-			return left.ClientCountry < right.ClientCountry
-		}
-		if left.ClientRegion != right.ClientRegion {
-			return left.ClientRegion < right.ClientRegion
-		}
-		if left.ClientASN != right.ClientASN {
-			return left.ClientASN < right.ClientASN
-		}
-		return keys[i].StatusCode < keys[j].StatusCode
-	})
-	return keys
-}
-
-func sortedRouteCacheMetricKeys(values map[routeCacheMetricKey]uint64) []routeCacheMetricKey {
-	keys := make([]routeCacheMetricKey, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		left := keys[i].RouteMetricKey
-		right := keys[j].RouteMetricKey
-		if left.Hostname != right.Hostname {
-			return left.Hostname < right.Hostname
-		}
-		if left.PathPrefix != right.PathPrefix {
-			return left.PathPrefix < right.PathPrefix
-		}
-		if left.AppID != right.AppID {
-			return left.AppID < right.AppID
-		}
-		if left.RouteKind != right.RouteKind {
-			return left.RouteKind < right.RouteKind
-		}
-		if left.ClientCountry != right.ClientCountry {
-			return left.ClientCountry < right.ClientCountry
-		}
-		if left.ClientRegion != right.ClientRegion {
-			return left.ClientRegion < right.ClientRegion
-		}
-		if left.ClientASN != right.ClientASN {
-			return left.ClientASN < right.ClientASN
-		}
-		if keys[i].CacheStatus != keys[j].CacheStatus {
-			return keys[i].CacheStatus < keys[j].CacheStatus
-		}
-		if keys[i].CachePolicyID != keys[j].CachePolicyID {
-			return keys[i].CachePolicyID < keys[j].CachePolicyID
-		}
-		return keys[i].AssetClass < keys[j].AssetClass
 	})
 	return keys
 }
