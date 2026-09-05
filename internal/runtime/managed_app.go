@@ -320,45 +320,7 @@ func ManagedAppSpecHash(spec ManagedAppSpec) string {
 
 func cloneManagedAppSpec(spec model.AppSpec) model.AppSpec {
 	spec, _ = model.StripFugueInjectedAppEnvFromSpec(spec)
-	out := spec
-	if len(spec.Command) > 0 {
-		out.Command = append([]string(nil), spec.Command...)
-	}
-	if len(spec.Args) > 0 {
-		out.Args = append([]string(nil), spec.Args...)
-	}
-	if len(spec.Ports) > 0 {
-		out.Ports = append([]int(nil), spec.Ports...)
-	}
-	if len(spec.Env) > 0 {
-		out.Env = make(map[string]string, len(spec.Env))
-		for key, value := range spec.Env {
-			out.Env[key] = value
-		}
-	}
-	if len(spec.Files) > 0 {
-		out.Files = append([]model.AppFile(nil), spec.Files...)
-	}
-	if spec.Workspace != nil {
-		workspace := *spec.Workspace
-		out.Workspace = &workspace
-	}
-	if spec.PersistentStorage != nil {
-		storage := *spec.PersistentStorage
-		if len(spec.PersistentStorage.Mounts) > 0 {
-			storage.Mounts = append([]model.AppPersistentStorageMount(nil), spec.PersistentStorage.Mounts...)
-		}
-		out.PersistentStorage = &storage
-	}
-	if spec.Failover != nil {
-		failover := *spec.Failover
-		out.Failover = &failover
-	}
-	out.Continuity = model.CloneAppContinuityPolicy(spec.Continuity)
-	if spec.Postgres != nil {
-		out.Postgres = model.CloneAppPostgresSpec(spec.Postgres)
-	}
-	return out
+	return spec.DeepCopy()
 }
 
 func cloneManagedAppRoute(route *model.AppRoute) *model.AppRoute {
