@@ -634,9 +634,8 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		if err := s.verifyBundle(bundle, now); err != nil {
-			if fallbackErr := s.LoadPreviousCache(); fallbackErr != nil && s.Logger != nil {
-				s.Logger.Printf("edge route previous cache fallback failed: %v", fallbackErr)
-			}
+			// Rejecting a candidate must not replace the serving LKG. Historical
+			// cache recovery belongs to startup or an explicit recovery action.
 			err = fmt.Errorf("verify edge route bundle: %w", err)
 			s.recordSyncError(err)
 			return err

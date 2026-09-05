@@ -637,9 +637,8 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		return err
 	}
 	if err := s.verifyBundle(bundle, time.Now().UTC()); err != nil {
-		if fallbackErr := s.LoadPreviousCache(); fallbackErr != nil && s.Logger != nil {
-			s.Logger.Printf("dns bundle previous cache fallback failed: %v", fallbackErr)
-		}
+		// Rejecting a candidate must not replace the serving LKG. Historical
+		// cache recovery belongs to startup or an explicit recovery action.
 		err := fmt.Errorf("verify dns bundle: %w", err)
 		s.recordSyncError(err)
 		return err
