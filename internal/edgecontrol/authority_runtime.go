@@ -19,6 +19,7 @@ type AuthorityRuntime struct {
 	mu                  sync.Mutex
 	lastRouteIntentGen  string
 	lastInventoryDigest string
+	lastInventoryKnown  bool
 	lastReconcileAt     time.Time
 	lastBatch           AuthorityRuntimeBatch
 	hasBatch            bool
@@ -30,13 +31,13 @@ type AuthorityRuntimeBatch struct {
 	Candidate GroupCandidateBatch `json:"candidate,omitempty"`
 }
 
-func (runtime *AuthorityRuntime) cachedBatchValid(routeIntentGeneration, inventoryDigest string, now time.Time) bool {
+func (runtime *AuthorityRuntime) cachedBatchValid(routeIntentGeneration, inventoryDigest string, inventoryKnown bool, now time.Time) bool {
 	if runtime == nil {
 		return false
 	}
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	return runtime.hasBatch && routeIntentGeneration == runtime.lastRouteIntentGen && inventoryDigest == runtime.lastInventoryDigest && now.Sub(runtime.lastReconcileAt) < authorityRuntimeRefreshInterval
+	return runtime.hasBatch && inventoryKnown && runtime.lastInventoryKnown && routeIntentGeneration == runtime.lastRouteIntentGen && inventoryDigest == runtime.lastInventoryDigest && now.Sub(runtime.lastReconcileAt) < authorityRuntimeRefreshInterval
 }
 
 func (runtime *AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeBatch, bool, error) {
@@ -48,13 +49,15 @@ func (runtime *AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeB
 		return AuthorityRuntimeBatch{}, false, err
 	}
 	inventoryDigest := ""
+	inventoryKnown := false
 	if runtime.Compiler.Inventory != nil && len(runtime.GroupIDs) == 1 {
 		if inventory, readErr := runtime.Compiler.Inventory.ReadGroupInventory(ctx, runtime.GroupIDs[0]); readErr == nil {
 			inventoryDigest = groupInventorySemanticDigest(inventory)
+			inventoryKnown = true
 		}
 	}
 	now := time.Now().UTC()
-	if runtime.cachedBatchValid(snapshot.Generation, inventoryDigest, now) {
+	if runtime.cachedBatchValid(snapshot.Generation, inventoryDigest, inventoryKnown, now) {
 		runtime.mu.Lock()
 		batch := runtime.lastBatch
 		runtime.mu.Unlock()
@@ -72,6 +75,7 @@ func (runtime *AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeB
 	runtime.mu.Lock()
 	runtime.lastRouteIntentGen = snapshot.Generation
 	runtime.lastInventoryDigest = inventoryDigest
+	runtime.lastInventoryKnown = inventoryKnown
 	runtime.lastReconcileAt = now
 	runtime.lastBatch = batch
 	runtime.hasBatch = true
