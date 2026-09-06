@@ -51,8 +51,12 @@ that uses the current kubeconfig when the control-plane API is unavailable.
 }
 
 func (c *CLI) newAdminDiagnosticsStartCommand(opts *platformDiagnosticCommandOptions) *cobra.Command {
+	return c.newAdminDiagnosticsStartCommandForTarget(opts, livediagnostics.TargetPlatformComponent)
+}
+
+func (c *CLI) newAdminDiagnosticsStartCommandForTarget(opts *platformDiagnosticCommandOptions, targetType livediagnostics.TargetType) *cobra.Command {
 	request := platformDiagnosticStartRequest{
-		Target: platformDiagnosticTargetRequest{Type: livediagnostics.TargetPlatformComponent},
+		Target: platformDiagnosticTargetRequest{Type: targetType},
 		Kind:   livediagnostics.ProbeCPUProfile, DurationSeconds: 60, FrequencyHz: 19, SampleIntervalMilliseconds: 1000,
 	}
 	wait := false

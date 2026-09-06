@@ -13,6 +13,21 @@ type commandHelpDoc struct {
 }
 
 var commandHelpDocOverrides = map[string]commandHelpDoc{
+	"fugue diagnostics": {
+		Long: strings.TrimSpace(`
+Run bounded live diagnostics with one target-oriented command tree.
+
+Use the app branch for tenant services, the platform branch for Fugue and
+kube-system components, and the node-process branch for explicitly allowlisted
+host processes. The branches share a name but retain separate authorization
+and target validation in the control plane.
+`),
+		Example: strings.TrimSpace(`
+fugue diagnostics app start review00 --kind cpu-profile --wait
+fugue diagnostics platform start --component api --kind memory-profile --wait
+fugue diagnostics node-process start --node ns101351 --process k3s-agent --kind process-snapshot --wait
+`),
+	},
 	"fugue deploy": {
 		Example: strings.TrimSpace(`
 fugue deploy .

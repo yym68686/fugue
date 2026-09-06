@@ -212,6 +212,8 @@ Environment variables:
 	  fugue logs query my-app --request-id req_123 --since 30m --status 200 --json
 	  fugue debug bundle my-app --request-id req_123 --archive ./bundle.zip --json
 	  fugue diagnose timing -- app overview my-app
+	  fugue diagnostics app start my-app --kind cpu-profile --wait
+	  fugue diagnostics platform start --component api --kind memory-profile --wait
 	  fugue admin users ls
 	  fugue admin users resolve user@example.com
 	  fugue web diagnose admin-users
@@ -263,6 +265,7 @@ Environment variables:
 	cmd.AddCommand(
 		c.newDeployCommand(),
 		c.newFindCommand(),
+		c.newUnifiedDiagnosticsCommand(),
 		c.newAppCommand(),
 		c.newWorkflowCommand(),
 		c.newLogsCommand(),
