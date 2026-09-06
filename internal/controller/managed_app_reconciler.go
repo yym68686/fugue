@@ -282,7 +282,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		preparedApp, guardErr := s.prepareManagedAppReconcileRolloutWithEvidence(ctx, client, namespace, managed, app, "", desiredScheduling)
 		if guardErr != nil {
 			if managedAppZeroDowntimeBlockedStatusCurrent(managed.Status, guardErr) {
-				return s.reconcileCurrentManagedAppZeroDowntimeBlock(ctx, client, namespace, app)
+				return s.reconcileCurrentManagedAppZeroDowntimeBlockWithObservedStore(ctx, client, namespace, managed, app)
 			}
 			return s.patchManagedAppZeroDowntimeBlockedStatusWithObservedStore(ctx, client, namespace, managed, app, guardErr)
 		}
@@ -311,7 +311,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		preparedApp, guardErr := s.prepareManagedAppReconcileRolloutWithEvidence(ctx, client, namespace, managed, app, "", managed.Spec.Scheduling)
 		if guardErr != nil {
 			if managedAppZeroDowntimeBlockedStatusCurrent(managed.Status, guardErr) {
-				return s.reconcileCurrentManagedAppZeroDowntimeBlock(ctx, client, namespace, app)
+				return s.reconcileCurrentManagedAppZeroDowntimeBlockWithObservedStore(ctx, client, namespace, managed, app)
 			}
 			return s.patchManagedAppZeroDowntimeBlockedStatusWithObservedStore(ctx, client, namespace, managed, app, guardErr)
 		}
@@ -1333,12 +1333,32 @@ func managedAppZeroDowntimeBlockedStatusCurrent(status runtime.ManagedAppStatus,
 // missing, stale, or unhealthy Deployment fails closed without listing or
 // deleting pods; the shared cleanup then re-checks exact Fugue identity,
 // ReplicaSet controller ownership, terminal age, and the observed pod UID.
-func (s *Service) reconcileCurrentManagedAppZeroDowntimeBlock(
+func (s *Service) reconcileCurrentManagedAppZeroDowntimeBlock(ctx context.Context, client *kubeClient, namespace string, app model.App) error {
+	return s.reconcileCurrentManagedAppZeroDowntimeBlockWithObservedStore(ctx, client, namespace, runtime.ManagedAppObject{}, app)
+}
+
+func (s *Service) reconcileCurrentManagedAppZeroDowntimeBlockWithObservedStore(
 	ctx context.Context,
 	client *kubeClient,
 	namespace string,
+	managed runtime.ManagedAppObject,
 	app model.App,
 ) error {
+	// Keep the durable App row aligned even when the CR already carries the
+	// same blocked status and this fast path skips the normal reconcile.
+	if s != nil && s.Store != nil && strings.TrimSpace(managed.Metadata.Name) != "" {
+		if err := s.Store.SyncManagedAppObservedStatus(
+			app.ID,
+			managed.Status.Phase,
+			managed.Status.ReadyReplicas,
+			managed.Status.Message,
+			managedStatusTimePointer(managed.Status.CurrentReleaseStartedAt),
+			managedStatusTimePointer(managed.Status.CurrentReleaseReadyAt),
+			backingServiceRuntimeStatuses(managed.Status.BackingServices),
+		); err != nil && s.Logger != nil {
+			s.Logger.Printf("sync observed app status behind current zero-downtime block for %s/%s failed: %v", namespace, managed.Metadata.Name, err)
+		}
+	}
 	deployment, found, err := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
 	if err != nil {
 		if s != nil && s.Logger != nil {
