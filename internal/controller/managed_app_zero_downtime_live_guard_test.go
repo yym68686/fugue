@@ -550,6 +550,18 @@ func TestManagedAppLiveGuardRecoversPromotedServingSnapshotDuringBackgroundRecon
 	if prepared.Spec.Image != desired.Spec.Image || prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate {
 		t.Fatalf("expected failed pending baseline to prepare desired image rollout, got image=%q intent=%q", prepared.Spec.Image, prepared.Spec.RolloutIntent)
 	}
+
+	// A blocked status may retain the serving release without a pending key.
+	// Preserve that proven serving baseline after a controller restart too.
+	managed.Status = runtime.ManagedAppStatus{
+		Phase: runtime.ManagedAppPhaseError, ReadyReplicas: 1, ObservedGeneration: 2,
+		CurrentReleaseKey: servingKey, CurrentReleaseStartedAt: servingStartedAt.UTC().Format(time.RFC3339Nano),
+		CurrentReleaseReadyAt: failed.CompletedAt.UTC().Format(time.RFC3339Nano),
+	}
+	recovered, ok, recoverErr = svc.recoverManagedAppPendingDeploySnapshot(context.Background(), managed, currentSnapshot, servingKey)
+	if recoverErr != nil || !ok {
+		t.Fatalf("expected serving Error status without pending key to recover: ok=%v err=%v", ok, recoverErr)
+	}
 }
 
 func TestManagedAppLiveGuardReplacesFailedCandidateWhileExactLKGServes(t *testing.T) {

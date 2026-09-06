@@ -148,6 +148,18 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 	if len(refs) == 0 {
 		return true, nil
 	}
+	// Inventory rows are deliberately lease-based, so an old row cannot prove
+	// that a blob is still complete.  The selected runtime cache is the
+	// authoritative physical witness; verify its full manifest/blob graph before
+	// falling back to the metadata tables.  This also makes a DNS outage in the
+	// control-plane registry harmless for an image already on the target node.
+	for _, ref := range refs {
+		if verified, err := s.verifyTargetImageCache(ctx, app, target, ref); verified {
+			return true, nil
+		} else if err != nil && s.Logger != nil {
+			s.Logger.Printf("target image-cache verification unavailable app=%s image=%s node=%s: %v", app.ID, ref, target.ClusterNodeName, err)
+		}
+	}
 	if s.imageStoreDistributedMode() {
 		exists, checked, err := s.deployImageReplicaAvailable(ctx, app, target, refs...)
 		if err != nil {
@@ -212,6 +224,43 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 		return true, nil
 	}
 	s.scheduleImageHydration(ctx, app, target, refs[0])
+	return true, nil
+}
+
+func (s *Service) verifyTargetImageCache(ctx context.Context, app model.App, target deployImageTarget, ref string) (bool, error) {
+	if s == nil || s.Store == nil || s.verifyDestinationImageCache == nil || strings.TrimSpace(ref) == "" {
+		return false, nil
+	}
+	pushBase := strings.Trim(strings.TrimSpace(s.registryPushBase), "/")
+	pullBase := strings.Trim(strings.TrimSpace(s.registryPullBase), "/")
+	if (pushBase == "" || !strings.HasPrefix(strings.TrimSpace(ref), pushBase+"/")) &&
+		(pullBase == "" || !strings.HasPrefix(strings.TrimSpace(ref), pullBase+"/")) {
+		return false, nil
+	}
+	node := strings.TrimSpace(target.ClusterNodeName)
+	if node == "" && strings.TrimSpace(target.RuntimeID) != "" {
+		if runtimeObj, err := s.Store.GetRuntime(strings.TrimSpace(target.RuntimeID)); err == nil {
+			node = strings.TrimSpace(runtimeObj.ClusterNodeName)
+		}
+	}
+	if node == "" {
+		return false, nil
+	}
+	runtimeObj, found := s.runtimeForClusterNode(ctx, node)
+	if !found {
+		return false, nil
+	}
+	_, endpoint := s.controllerReachableImageCacheEndpoint(runtimeObj)
+	if endpoint == "" {
+		return false, nil
+	}
+	verified, err := s.verifyDestinationImageCache(ctx, endpoint, ref)
+	if err != nil {
+		return false, err
+	}
+	if err := validateDestinationImageCacheVerification(verified, ref); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
