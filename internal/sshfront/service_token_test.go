@@ -18,3 +18,13 @@ func TestPreferNodeScopedEdgeToken(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestPreferNodeScopedEdgeTokenAcceptsLegacyAlias(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "edge-node.env")
+	if err := os.WriteFile(path, []byte("FUGUE_EDGE_TOKEN=legacy-node\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := preferNodeScopedEdgeToken(path, "static"); got != "legacy-node" {
+		t.Fatalf("got %q", got)
+	}
+}
