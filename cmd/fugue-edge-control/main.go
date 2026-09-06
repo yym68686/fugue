@@ -108,6 +108,10 @@ func run(ctx context.Context, cfg config, logger *log.Logger) error {
 					logger.Printf("edge-control group authority reconcile status=failed failure_code=%s authority=edge-control publication=enabled", observation.FailureCode)
 					return
 				}
+				if observation.SkippedUnchanged {
+					logger.Printf("edge-control group authority reconcile status=unchanged generation=%s authority=edge-control publication=enabled", observation.RouteIntentGeneration)
+					return
+				}
 				logger.Printf("edge-control group authority reconcile status=observed generation=%s published=%d failed=%d authority=edge-control publication=enabled", observation.RouteIntentGeneration, observation.Published, observation.Failed)
 			})
 		}()
