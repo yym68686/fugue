@@ -12,11 +12,12 @@ import (
 type SSHFrontConfig = sshfront.Config
 
 func SSHFrontFromEnv() SSHFrontConfig {
+	nodeEnv := readSimpleEnvFile(getenv("FUGUE_SSH_FRONT_EDGE_NODE_ENV_FILE", "/etc/fugue/edge-node.env"))
 	return SSHFrontConfig{
 		APIURL:                              getenv("FUGUE_SSH_FRONT_API_URL", getenv("FUGUE_API_URL", "")),
-		EdgeToken:                           getenv("FUGUE_SSH_FRONT_EDGE_TOKEN", getenv("FUGUE_EDGE_TOKEN", "")),
+		EdgeToken:                           getenvFilePreferred(nodeEnv, "FUGUE_EDGE_TOKEN", getenvFilePreferred(nodeEnv, "FUGUE_EDGE_NODE_TOKEN", getenv("FUGUE_SSH_FRONT_EDGE_TOKEN", getenv("FUGUE_EDGE_TOKEN", "")))),
 		EdgeID:                              strings.TrimSpace(getenv("FUGUE_SSH_FRONT_EDGE_ID", os.Getenv("FUGUE_EDGE_ID"))),
-		EdgeGroupID:                         strings.TrimSpace(getenv("FUGUE_SSH_FRONT_EDGE_GROUP_ID", os.Getenv("FUGUE_EDGE_GROUP_ID"))),
+		EdgeGroupID:                         strings.TrimSpace(getenvFilePreferred(nodeEnv, "FUGUE_EDGE_GROUP_ID", getenv("FUGUE_SSH_FRONT_EDGE_GROUP_ID", os.Getenv("FUGUE_EDGE_GROUP_ID")))),
 		ListenHost:                          getenv("FUGUE_SSH_FRONT_LISTEN_HOST", "0.0.0.0"),
 		HealthAddr:                          getenv("FUGUE_SSH_FRONT_HEALTH_LISTEN_ADDR", ":7836"),
 		CachePath:                           getenv("FUGUE_SSH_FRONT_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/ssh-routes-cache.json"),

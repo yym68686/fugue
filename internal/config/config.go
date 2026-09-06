@@ -588,14 +588,15 @@ func AgentFromEnv() AgentConfig {
 func EdgeFromEnv() EdgeConfig {
 	edgeNodeEnvFile := getenv("FUGUE_EDGE_NODE_ENV_FILE", "/etc/fugue/edge-node.env")
 	edgeNodeEnv := readSimpleEnvFile(edgeNodeEnvFile)
+	edgeGroupID := strings.TrimSpace(readTrimmedFile("/var/run/fugue/edge-identity/edge_group_id"))
 	return EdgeConfig{
 		APIURL:                    getenv("FUGUE_API_URL", ""),
 		EdgeNodeEnvFile:           edgeNodeEnvFile,
 		EdgeDesiredStateURL:       getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_DESIRED_STATE_URL", ""),
 		WorkloadMode:              getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_WORKLOAD_MODE", ""),
-		EdgeToken:                 getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_TOKEN", getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_NODE_TOKEN", "")),
+		EdgeToken:                 getenvFilePreferred(edgeNodeEnv, "FUGUE_EDGE_TOKEN", getenvFilePreferred(edgeNodeEnv, "FUGUE_EDGE_NODE_TOKEN", "")),
 		EdgeID:                    readTrimmedFile("/var/run/fugue/edge-identity/edge_id"),
-		EdgeGroupID:               readTrimmedFile("/var/run/fugue/edge-identity/edge_group_id"),
+		EdgeGroupID:               edgeGroupID,
 		EdgeSlot:                  readTrimmedFile("/var/run/fugue/edge-identity/slot"),
 		EdgeInstanceUID:           readTrimmedFile("/var/run/fugue/edge-identity/instance_uid"),
 		EdgeReleaseEpoch:          readTrimmedFile("/var/run/fugue/edge-identity/release_epoch"),
@@ -928,6 +929,16 @@ func getenvFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvFilePreferred(fileEnv map[string]string, key, fallback string) string {
+	if value := strings.TrimSpace(fileEnv[key]); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func getenvFileFallback(fileEnv map[string]string, key, fallback string) string {
