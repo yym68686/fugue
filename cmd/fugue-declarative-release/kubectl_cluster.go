@@ -1848,7 +1848,7 @@ func emergencyProbePathPointer(pointer string) bool {
 // the reviewed Caddy data path, without extending the set of fields that may
 // conflict.
 func broadEmergencyOwnershipTransferPointer(pointer string) bool {
-	if emergencyProbePathPointer(pointer) || emergencyCaddyDataHostPathPointer(pointer) || emergencyEdgeNodeCredentialsHostPathPointer(pointer) {
+	if emergencyProbePathPointer(pointer) || emergencyCaddyDataHostPathPointer(pointer) || emergencyEdgeNodeCredentialsHostPathPointer(pointer) || emergencyEnvValuePointer(pointer) {
 		return true
 	}
 	for _, prefix := range []string{"/metadata/annotations/", "/spec/template/metadata/annotations/"} {
