@@ -61,6 +61,29 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		if queuedDockerImageRef == "" {
 			return fmt.Errorf("import operation %s missing image_ref", op.ID)
 		}
+		// An internal image is already owned by Fugue's node-local registry.
+		// Never send that reference through crane's remote-registry resolver:
+		// the cluster DNS name is intentionally not resolvable from the
+		// controller.  Verify the complete graph on the selected cache instead.
+		if strings.HasPrefix(queuedDockerImageRef, strings.Trim(s.registryPushBase, "/")+"/") && imageDestination.CacheEndpoint != "" && s.verifyDestinationImageCache != nil {
+			verified, verifyErr := s.verifyDestinationImageCache(ctx, imageDestination.CacheEndpoint, queuedDockerImageRef)
+			if verifyErr != nil {
+				return fmt.Errorf("verify internal image on target cache: %w", verifyErr)
+			}
+			if verifyErr := validateDestinationImageCacheVerification(verified, queuedDockerImageRef); verifyErr != nil {
+				return fmt.Errorf("verify internal image on target cache: %w", verifyErr)
+			}
+			cacheRef := cacheEndpointImageRef(imageDestination.CacheEndpoint, queuedDockerImageRef)
+			output = sourceimport.GitHubSourceImportOutput{
+				ImportResult: sourceimport.GitHubImportResult{
+					DetectedProvider:    model.AppSourceTypeDockerImage,
+					ImageRef:            queuedDockerImageRef,
+					DestinationImageRef: cacheRef,
+				},
+				Source: model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: queuedDockerImageRef, ResolvedImageRef: queuedDockerImageRef, DetectedProvider: model.AppSourceTypeDockerImage},
+			}
+			break
+		}
 		if reusedOutput, reusedDestination, reused := s.reuseExistingManagedImageImportOutput(app, *op.DesiredSource, queuedDockerImageRef, imageDestination.Target); reused {
 			output = reusedOutput
 			if strings.TrimSpace(reusedDestination.CacheEndpoint) != "" {

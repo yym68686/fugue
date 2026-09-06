@@ -795,7 +795,8 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 		// unproven pending identities remain fail-closed.
 		phase := strings.TrimSpace(managed.Status.Phase)
 		if (pendingKey != "" && !strings.EqualFold(phase, runtime.ManagedAppPhaseError)) ||
-			(pendingKey == "" && !strings.EqualFold(phase, runtime.ManagedAppPhaseReady)) {
+			(pendingKey == "" && !strings.EqualFold(phase, runtime.ManagedAppPhaseReady) &&
+				!(strings.EqualFold(phase, runtime.ManagedAppPhaseError) && managed.Status.ReadyReplicas > 0 && recoveryKey == liveKey && recoveryStartedAt != nil)) {
 			return managedAppRecoveredDeploySnapshot{}, false, nil
 		}
 	}
