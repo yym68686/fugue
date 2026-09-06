@@ -284,7 +284,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 			if managedAppZeroDowntimeBlockedStatusCurrent(managed.Status, guardErr) {
 				return s.reconcileCurrentManagedAppZeroDowntimeBlock(ctx, client, namespace, app)
 			}
-			return patchManagedAppZeroDowntimeBlockedStatus(ctx, client, namespace, managed, app, guardErr)
+			return s.patchManagedAppZeroDowntimeBlockedStatusWithObservedStore(ctx, client, namespace, managed, app, guardErr)
 		}
 		app = preparedApp
 		rolloutPrepared = true
@@ -313,7 +313,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 			if managedAppZeroDowntimeBlockedStatusCurrent(managed.Status, guardErr) {
 				return s.reconcileCurrentManagedAppZeroDowntimeBlock(ctx, client, namespace, app)
 			}
-			return patchManagedAppZeroDowntimeBlockedStatus(ctx, client, namespace, managed, app, guardErr)
+			return s.patchManagedAppZeroDowntimeBlockedStatusWithObservedStore(ctx, client, namespace, managed, app, guardErr)
 		}
 		app = preparedApp
 	}
@@ -1258,6 +1258,10 @@ func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespa
 }
 
 func patchManagedAppZeroDowntimeBlockedStatus(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, cause error) error {
+	return (&Service{}).patchManagedAppZeroDowntimeBlockedStatusWithObservedStore(ctx, client, namespace, managed, app, cause)
+}
+
+func (s *Service) patchManagedAppZeroDowntimeBlockedStatusWithObservedStore(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, cause error) error {
 	status := managedAppBaseStatus(managed, app)
 	status.Phase = runtime.ManagedAppPhaseError
 	status.Message = strings.TrimSpace(cause.Error())
@@ -1286,6 +1290,23 @@ func patchManagedAppZeroDowntimeBlockedStatus(ctx context.Context, client *kubeC
 	})
 	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
 		return fmt.Errorf("%w (also failed to patch zero-downtime blocked status: %v)", cause, err)
+	}
+	// The blocked path intentionally leaves the last serving replica intact,
+	// but historically returned before copying that observed fact to the
+	// durable App row.  Dependents then saw phase=unknown and refused to start
+	// even though Kubernetes still had a ready endpoint.
+	if s != nil && s.Store != nil {
+		if err := s.Store.SyncManagedAppObservedStatus(
+			app.ID,
+			status.Phase,
+			status.ReadyReplicas,
+			status.Message,
+			managedStatusTimePointer(status.CurrentReleaseStartedAt),
+			managedStatusTimePointer(status.CurrentReleaseReadyAt),
+			backingServiceRuntimeStatuses(status.BackingServices),
+		); err != nil {
+			return fmt.Errorf("%w (also failed to sync observed app status: %v)", cause, err)
+		}
 	}
 	return cause
 }
