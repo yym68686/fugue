@@ -47,7 +47,9 @@ done' | sort -rn -k1,1 | awk '!seen[$2]++ && ++count <= 20'
 const clusterNodeDiagnosisJournalScript = `
 set -euo pipefail
 if chroot /host /bin/sh -lc 'command -v journalctl >/dev/null 2>&1'; then
-  chroot /host /bin/sh -lc 'journalctl -u k3s -u k3s-agent --no-pager -n 400 -o short-iso 2>/dev/null | grep -Ei "eviction|disk pressure|ephemeral-storage|imagefs|image filesystem|image garbage collection|image_gc_manager|FreeDiskSpaceFailed|ImageGCFailed|nodefs|stats/summary|metrics-server|summary" | tail -n 120' || true
+  # Filter before the line limit so ordinary kubelet chatter cannot hide recent
+  # failures. Bound the lookback to avoid returning old, unrelated incidents.
+  chroot /host /bin/sh -lc 'journalctl -u k3s -u k3s-agent --since "-1 hour" --no-pager -n 120 -o short-iso --grep "eviction|disk pressure|ephemeral-storage|imagefs|image filesystem|image garbage collection|image_gc_manager|FreeDiskSpaceFailed|ImageGCFailed|nodefs|stats/summary|metrics-server|summary" --case-sensitive=no 2>/dev/null' || true
 fi
 `
 

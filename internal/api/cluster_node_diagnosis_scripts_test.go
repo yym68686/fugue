@@ -49,7 +49,18 @@ func TestClusterNodeJournalScriptIncludesImageGCFailures(t *testing.T) {
 	output, err := runNodeDiagnosisScriptFixture(t, clusterNodeDiagnosisJournalScript, map[string]string{
 		"chroot": "#!/bin/sh\nexec /bin/sh -c \"$4\"\n",
 		"journalctl": `#!/bin/sh
-cat <<'LOG'
+# Model journalctl's matching-before-limit semantics. The old command only
+# selected the last 400 unfiltered records and lost every failure below.
+limit=400
+pattern=.
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n) limit="$2"; shift ;;
+    --grep) pattern="$2"; shift ;;
+  esac
+  shift
+done
+cat <<'LOG' | grep -Ei "$pattern" | tail -n "$limit"
 2026-01-01T00:00:00Z image_gc_manager.go: Disk usage on image filesystem is over the high threshold
 2026-01-01T00:00:01Z Image garbage collection failed multiple times in a row
 2026-01-01T00:00:02Z Insufficient free disk space on the node's image filesystem
@@ -57,7 +68,7 @@ cat <<'LOG'
 2026-01-01T00:00:04Z ImageGCFailed
 2026-01-01T00:00:05Z eviction manager: attempting to reclaim ephemeral-storage
 2026-01-01T00:00:06Z ordinary unrelated message
-LOG
+` + strings.Repeat("2026-01-01T00:01:00Z ordinary unrelated message\n", 500) + `LOG
 `,
 	})
 	if err != nil {
