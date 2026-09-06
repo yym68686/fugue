@@ -185,7 +185,7 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	if runErr != nil && strings.TrimSpace(result.FailureClass) != "" {
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
-			detail = strings.TrimSpace(result.FailureDetail)
+			detail = guardianTerminalReason(result)
 		}
 		if detail != "" {
 			if len(detail) > 1024 {

@@ -1582,7 +1582,6 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 			if flattenErr != nil || len(pointers) == 0 ||
 				(ownDeclarativeUpdate && !stringSubset(pointers, ownershipCleanupPointers(allowed))) ||
 				(emergencyOwnershipManager(conflict.manager) && !broadEmergencyOwnershipTransferPointer(pointer) &&
-					!(emergencyOwnershipManagers[conflict.manager] && emergencyEnvValuePointer(pointer)) &&
 					!stringSubset(pointers, ownershipCleanupPointers(allowed))) {
 				return errors.New("emergency managedFields entry expands beyond the exact allowlist")
 			}
