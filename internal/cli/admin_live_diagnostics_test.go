@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestAdminDiagnosticsStartSendsPlatformMemoryProbe(t *testing.T) {
+func TestUnifiedDiagnosticsPlatformStartSendsPlatformMemoryProbe(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != platformDiagnosticsPath {
@@ -30,7 +30,7 @@ func TestAdminDiagnosticsStartSendsPlatformMemoryProbe(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	err := runWithStreams([]string{
-		"--base-url", server.URL, "--token", "bootstrap", "--json", "admin", "diagnostics", "start",
+		"--base-url", server.URL, "--token", "bootstrap", "--json", "diagnostics", "platform", "start",
 		"--component", "api", "--kind", "memory-profile", "--duration", "300", "--sample-interval-ms", "500",
 	}, &stdout, &stderr)
 	if err != nil {

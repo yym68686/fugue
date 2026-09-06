@@ -23,33 +23,6 @@ type platformDiagnosticCommandOptions struct {
 	releaseInstance string
 }
 
-func (c *CLI) newAdminDiagnosticsCommand() *cobra.Command {
-	opts := platformDiagnosticCommandOptions{controlNS: "fugue-system", releaseInstance: "fugue"}
-	cmd := &cobra.Command{
-		Use:   "diagnostics",
-		Short: "Run bounded diagnostics against Fugue platform targets",
-		Long: strings.TrimSpace(`
-Run temporary CPU or memory probes against trusted Fugue components and
-allowlisted host processes. --direct-kubernetes is a break-glass control path
-that uses the current kubeconfig when the control-plane API is unavailable.
-`),
-	}
-	flags := cmd.PersistentFlags()
-	flags.BoolVar(&opts.direct, "direct-kubernetes", false, "Use Kubernetes directly instead of the Fugue API")
-	flags.StringVar(&opts.kubeconfig, "kubeconfig", "", "Kubeconfig path for direct Kubernetes mode")
-	flags.StringVar(&opts.kubeContext, "kube-context", "", "Kubeconfig context for direct Kubernetes mode")
-	flags.StringVar(&opts.controlNS, "control-namespace", opts.controlNS, "Fugue control-plane namespace")
-	flags.StringVar(&opts.releaseInstance, "release-instance", opts.releaseInstance, "Fugue Helm release instance label")
-	cmd.AddCommand(
-		c.newAdminDiagnosticsStartCommand(&opts),
-		c.newAdminDiagnosticsListCommand(&opts),
-		c.newAdminDiagnosticsShowCommand(&opts),
-		c.newAdminDiagnosticsReportCommand(&opts),
-		c.newAdminDiagnosticsCancelCommand(&opts),
-	)
-	return cmd
-}
-
 func (c *CLI) newAdminDiagnosticsStartCommand(opts *platformDiagnosticCommandOptions) *cobra.Command {
 	return c.newAdminDiagnosticsStartCommandForTarget(opts, livediagnostics.TargetPlatformComponent)
 }
