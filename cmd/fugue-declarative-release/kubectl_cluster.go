@@ -337,6 +337,9 @@ func emergencyRuntimePointerValue(resource map[string]any, pointer string) (stri
 		if emergencyCaddyDataHostPathPointer(pointer) {
 			return declaredCaddyDataHostPath(resource)
 		}
+		if emergencyEdgeNodeCredentialsHostPathPointer(pointer) {
+			return declaredEdgeNodeCredentialsHostPath(resource, pointer)
+		}
 		return "", false
 	}
 	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")[field]) {
@@ -381,6 +384,9 @@ func setEmergencyRuntimePointerValue(resource map[string]any, pointer, value str
 	if !ok {
 		if emergencyCaddyDataHostPathPointer(pointer) {
 			return setDeclaredCaddyDataHostPath(resource, value)
+		}
+		if emergencyEdgeNodeCredentialsHostPathPointer(pointer) {
+			return setDeclaredEdgeNodeCredentialsHostPath(resource, pointer, value)
 		}
 		return false
 	}
@@ -447,8 +453,17 @@ func emergencyContainerPointerParts(pointer string) (string, string, string, boo
 
 const caddyDataHostPathPointer = "/spec/template/spec/volumes[name=caddy-data]/hostPath/path"
 
+const (
+	edgeNodeCredentialsHostPathPointer     = "/spec/template/spec/volumes[name=edge-node-credentials]/hostPath/path"
+	edgeNodeCredentialsHostPathTypePointer = "/spec/template/spec/volumes[name=edge-node-credentials]/hostPath/type"
+)
+
 func emergencyCaddyDataHostPathPointer(pointer string) bool {
 	return pointer == caddyDataHostPathPointer
+}
+
+func emergencyEdgeNodeCredentialsHostPathPointer(pointer string) bool {
+	return pointer == edgeNodeCredentialsHostPathPointer || pointer == edgeNodeCredentialsHostPathTypePointer
 }
 
 func declaredCaddyDataHostPath(resource map[string]any) (string, bool) {
@@ -491,6 +506,56 @@ func setDeclaredCaddyDataHostPath(resource map[string]any, value string) bool {
 	}
 	volume, _ := volumes[index].(map[string]any)
 	mapField(volume, "hostPath")["path"] = value
+	return true
+}
+
+func declaredEdgeNodeCredentialsHostPath(resource map[string]any, pointer string) (string, bool) {
+	volumes := anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")["volumes"])
+	found := false
+	value := ""
+	for _, raw := range volumes {
+		volume, _ := raw.(map[string]any)
+		if stringValue(volume["name"]) != "edge-node-credentials" {
+			continue
+		}
+		if found {
+			return "", false
+		}
+		field := "path"
+		if pointer == edgeNodeCredentialsHostPathTypePointer {
+			field = "type"
+		}
+		value, found = mapField(volume, "hostPath")[field].(string)
+	}
+	return value, found
+}
+
+func setDeclaredEdgeNodeCredentialsHostPath(resource map[string]any, pointer, value string) bool {
+	volumes := anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")["volumes"])
+	index := -1
+	for candidate, raw := range volumes {
+		volume, _ := raw.(map[string]any)
+		if stringValue(volume["name"]) != "edge-node-credentials" {
+			continue
+		}
+		if index >= 0 {
+			return false
+		}
+		index = candidate
+	}
+	if index < 0 || !emergencyEdgeNodeCredentialsHostPathPointer(pointer) {
+		return false
+	}
+	volume, _ := volumes[index].(map[string]any)
+	field := "path"
+	if pointer == edgeNodeCredentialsHostPathTypePointer {
+		field = "type"
+	}
+	hostPath := mapField(volume, "hostPath")
+	if _, ok := hostPath[field].(string); !ok {
+		return false
+	}
+	hostPath[field] = value
 	return true
 }
 
@@ -1317,6 +1382,12 @@ func ownershipConvergencePointers(release declarativerelease.PlanRelease, identi
 		if _, ok := declaredCaddyDataHostPath(desired); ok {
 			add(caddyDataHostPathPointer)
 		}
+		if _, ok := declaredEdgeNodeCredentialsHostPath(desired, edgeNodeCredentialsHostPathPointer); ok {
+			add(edgeNodeCredentialsHostPathPointer)
+		}
+		if _, ok := declaredEdgeNodeCredentialsHostPath(desired, edgeNodeCredentialsHostPathTypePointer); ok {
+			add(edgeNodeCredentialsHostPathTypePointer)
+		}
 	}
 	if declaredRoleRulesResource(desired) {
 		add("/rules")
@@ -1658,6 +1729,28 @@ func nextOwnershipTransferPatch(desired, live map[string]any, allowed []string, 
 			base := "/spec/template/spec/volumes/" + strconv.Itoa(volumeIndex)
 			selectors = []selectorTest{{path: base + "/name", value: "caddy-data"}}
 			valuePath = base + "/hostPath/path"
+		} else if emergencyEdgeNodeCredentialsHostPathPointer(pointer) {
+			volumeIndex := -1
+			for candidate, raw := range anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["volumes"]) {
+				volume, _ := raw.(map[string]any)
+				if stringValue(volume["name"]) != "edge-node-credentials" {
+					continue
+				}
+				if volumeIndex >= 0 {
+					return nil, false, errors.New("legacy ownership transfer edge-node-credentials volume identity is ambiguous")
+				}
+				volumeIndex = candidate
+			}
+			if volumeIndex < 0 {
+				return nil, false, errors.New("legacy ownership transfer edge-node-credentials volume is absent")
+			}
+			base := "/spec/template/spec/volumes/" + strconv.Itoa(volumeIndex)
+			selectors = []selectorTest{{path: base + "/name", value: "edge-node-credentials"}}
+			field := "path"
+			if pointer == edgeNodeCredentialsHostPathTypePointer {
+				field = "type"
+			}
+			valuePath = base + "/hostPath/" + field
 		} else if !strings.HasPrefix(pointer, "/metadata/annotations/") &&
 			!strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
 			return nil, false, errors.New("legacy ownership transfer pointer is invalid")
@@ -1755,7 +1848,7 @@ func emergencyProbePathPointer(pointer string) bool {
 // the reviewed Caddy data path, without extending the set of fields that may
 // conflict.
 func broadEmergencyOwnershipTransferPointer(pointer string) bool {
-	if emergencyProbePathPointer(pointer) || emergencyCaddyDataHostPathPointer(pointer) {
+	if emergencyProbePathPointer(pointer) || emergencyCaddyDataHostPathPointer(pointer) || emergencyEdgeNodeCredentialsHostPathPointer(pointer) {
 		return true
 	}
 	for _, prefix := range []string{"/metadata/annotations/", "/spec/template/metadata/annotations/"} {
@@ -1779,7 +1872,7 @@ func ownershipTransferPointer(pointer string) bool {
 	if strings.HasPrefix(pointer, "/metadata/annotations/") || strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
 		return true
 	}
-	if emergencyCaddyDataHostPathPointer(pointer) {
+	if emergencyCaddyDataHostPathPointer(pointer) || emergencyEdgeNodeCredentialsHostPathPointer(pointer) {
 		return true
 	}
 	_, _, _, ok := emergencyContainerPointerParts(pointer)
