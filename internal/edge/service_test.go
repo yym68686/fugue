@@ -2160,6 +2160,31 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	}
 }
 
+func TestCaddyWarmupOnlyTargetsCurrentEdgeGroup(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_caddy_group_warmup")
+	local := bundle.Routes[0]
+	local.Hostname = "de.fugue.pro"
+	local.EdgeGroupID = "edge-group-country-de"
+	remote := bundle.Routes[0]
+	remote.Hostname = "us.fugue.pro"
+	remote.EdgeGroupID = "edge-group-country-us"
+	bundle.Routes = []model.EdgeRouteBinding{local, remote}
+
+	service := NewService(config.EdgeConfig{
+		EdgeGroupID:          "edge-group-country-de",
+		CaddyEnabled:         true,
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyListenAddr:      ":18443",
+		CaddyProxyListenAddr: ":7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	if got, want := fmt.Sprint(service.caddyWarmupHosts(bundle)), "[de.fugue.pro]"; got != want {
+		t.Fatalf("warmup targets crossed edge-group boundary: got %s want %s", got, want)
+	}
+}
+
 func TestApplyCaddyConfigSkipsDisabledCustomDomainTLSWork(t *testing.T) {
 	t.Parallel()
 

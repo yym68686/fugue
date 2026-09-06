@@ -94,7 +94,7 @@ func edgeCacheWarmupRouteIdentity(s *Service, bundle model.EdgeRouteBundle) stri
 	}
 	identities := make([]string, 0, len(bundle.Routes))
 	for _, route := range bundle.Routes {
-		if strings.TrimSpace(route.CachePolicyID) == "" || !s.routeAllowedForThisEdge(route) {
+		if strings.TrimSpace(route.CachePolicyID) == "" || !s.routeWarmupAllowedForThisEdge(route) {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) ||
@@ -134,7 +134,7 @@ func (s *Service) edgeCacheWarmupHosts(bundle model.EdgeRouteBundle) []string {
 		if strings.TrimSpace(route.CachePolicyID) == "" {
 			continue
 		}
-		if !s.routeAllowedForThisEdge(route) {
+		if !s.routeWarmupAllowedForThisEdge(route) {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
