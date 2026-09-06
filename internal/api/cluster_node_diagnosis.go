@@ -35,17 +35,19 @@ done' | awk '!seen[$0]++'
 
 const clusterNodeDiagnosisHotPathsScript = `
 set -euo pipefail
+# Consume the full sorted stream: head closes the pipe early and makes a
+# successful inventory fail with SIGPIPE under pipefail.
 chroot /host /bin/sh -lc '
 for base in /var/lib /var/log /var/lib/fugue /var/lib/containerd /var/lib/rancher /var/log/pods; do
   [ -d "$base" ] || continue
   du -x -B1 -d1 "$base" 2>/dev/null
-done' | sort -rn -k1,1 | awk '!seen[$2]++' | head -n 20
+done' | sort -rn -k1,1 | awk '!seen[$2]++ && ++count <= 20'
 `
 
 const clusterNodeDiagnosisJournalScript = `
 set -euo pipefail
 if chroot /host /bin/sh -lc 'command -v journalctl >/dev/null 2>&1'; then
-  chroot /host /bin/sh -lc 'journalctl -u k3s -u k3s-agent --no-pager -n 400 -o short-iso 2>/dev/null | grep -Ei "eviction|disk pressure|ephemeral-storage|imagefs|nodefs|stats/summary|metrics-server|summary" | tail -n 120' || true
+  chroot /host /bin/sh -lc 'journalctl -u k3s -u k3s-agent --no-pager -n 400 -o short-iso 2>/dev/null | grep -Ei "eviction|disk pressure|ephemeral-storage|imagefs|image filesystem|image garbage collection|image_gc_manager|FreeDiskSpaceFailed|ImageGCFailed|nodefs|stats/summary|metrics-server|summary" | tail -n 120' || true
 fi
 `
 
