@@ -3540,6 +3540,26 @@ func (s *Service) routeAllowedForThisEdge(route model.EdgeRouteBinding) bool {
 	return model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy)
 }
 
+// routeWarmupAllowedForThisEdge limits active TLS/cache warmup to routes that
+// this edge can actually receive from the current DNS answer set. Serving
+// routes remain intentionally broader (see routeAllowedForThisEdge), but an
+// on-demand ACME handshake started on an edge that is absent from DNS cannot
+// complete: the CA reaches a different edge which has no pending challenge.
+func (s *Service) routeWarmupAllowedForThisEdge(route model.EdgeRouteBinding) bool {
+	if s == nil || !s.routeAllowedForThisEdge(route) {
+		return false
+	}
+	currentEdgeGroup := strings.TrimSpace(s.Config.EdgeGroupID)
+	if currentEdgeGroup == "" {
+		return true
+	}
+	// Legacy/global bindings without an edge-group are answerable everywhere.
+	if strings.TrimSpace(route.EdgeGroupID) == "" && strings.TrimSpace(route.FallbackEdgeGroupID) == "" {
+		return true
+	}
+	return routeMatchesCurrentEdgeGroup(route, currentEdgeGroup)
+}
+
 func routeMatchesCurrentEdgeGroup(route model.EdgeRouteBinding, edgeGroupID string) bool {
 	edgeGroupID = strings.TrimSpace(edgeGroupID)
 	if edgeGroupID == "" {

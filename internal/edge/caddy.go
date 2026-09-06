@@ -696,7 +696,7 @@ type caddyTLSCertificateBundle struct {
 func (s *Service) caddyWarmupHosts(bundle model.EdgeRouteBundle) []string {
 	seen := map[string]struct{}{}
 	for _, route := range bundle.Routes {
-		if !s.routeAllowedForThisEdge(route) {
+		if !s.routeWarmupAllowedForThisEdge(route) {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
@@ -745,7 +745,7 @@ func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[s
 	}
 	out := map[string]string{}
 	for _, route := range bundle.Routes {
-		if !s.routeAllowedForThisEdge(route) {
+		if !s.routeWarmupAllowedForThisEdge(route) {
 			continue
 		}
 		host := normalizeRouteHost(route.Hostname)
@@ -779,7 +779,7 @@ func (s *Service) customDomainTLSHosts(bundle model.EdgeRouteBundle) []string {
 		seen[host] = struct{}{}
 	}
 	for _, route := range bundle.Routes {
-		if !s.routeAllowedForThisEdge(route) {
+		if !s.routeWarmupAllowedForThisEdge(route) {
 			continue
 		}
 		host := normalizeRouteHost(route.Hostname)

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1888,6 +1889,32 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	if !strings.Contains(metrics, `fugue_edge_caddy_tls_warmup_total{result="success"} 1`) ||
 		!strings.Contains(metrics, `fugue_edge_caddy_tls_warmup_total{result="error"} 0`) {
 		t.Fatalf("expected caddy warmup metrics, got %s", metrics)
+	}
+}
+
+func TestCaddyWarmupOnlyTargetsCurrentEdgeGroup(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_caddy_group_warmup")
+	local := bundle.Routes[0]
+	local.Hostname = "de.fugue.pro"
+	local.EdgeGroupID = "edge-group-country-de"
+	remote := bundle.Routes[0]
+	remote.Hostname = "us.fugue.pro"
+	remote.EdgeGroupID = "edge-group-country-us"
+	bundle.Routes = []model.EdgeRouteBinding{local, remote}
+
+	service := NewService(config.EdgeConfig{
+		EdgeGroupID:          "edge-group-country-de",
+		CaddyEnabled:         true,
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyListenAddr:      ":18443",
+		CaddyProxyListenAddr: ":7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	got := service.caddyWarmupHosts(bundle)
+	if want := []string{"de.fugue.pro"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("warmup targets crossed edge-group boundary: got %v want %v", got, want)
 	}
 }
 
