@@ -284,6 +284,10 @@
                     "value": "http://fugue-fugue.fugue-system.svc:80"
                   },
                   {
+                    "name": "FUGUE_EDGE_NODE_ENV_FILE",
+                    "value": "/etc/fugue/edge-node.env"
+                  },
+                  {
                     "name": "FUGUE_EDGE_TOKEN",
                     "valueFrom": {
                       "secretKeyRef": {
@@ -488,12 +492,17 @@
                   {
                     "mountPath": "/data",
                     "name": "caddy-data"
+                  },
+                  {
+                    "mountPath": "/etc/fugue/edge-node.env",
+                    "name": "edge-node-credentials",
+                    "readOnly": true
                   }
                 ]
               },
               {
                 "args": [
-                  "printf '%s\\n' '{' '  admin 127.0.0.1:2019' '}' \u003e/config/Caddyfile; exec caddy run --adapter caddyfile --config /config/Caddyfile"
+                  "printf '%s\\n' '{' '  admin 127.0.0.1:2019' '}' >/config/Caddyfile; exec caddy run --adapter caddyfile --config /config/Caddyfile"
                 ],
                 "command": [
                   "/bin/sh",
@@ -555,7 +564,7 @@
             "initContainers": [
               {
                 "args": [
-                  "umask 022\ntest -n \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\"\nfor field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do\n  test -s \"/var/run/fugue/edge-identity-source/${field}\"\ndone\nprintf '%s\\n' \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\" \u003e/var/run/fugue/edge-identity/edge_id\nfor field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do\n  cat \"/var/run/fugue/edge-identity-source/${field}\" \u003e\"/var/run/fugue/edge-identity/${field}\"\ndone\nchmod 0444 /var/run/fugue/edge-identity/*\n"
+                  "umask 022\ntest -n \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\"\nfor field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do\n  test -s \"/var/run/fugue/edge-identity-source/${field}\"\ndone\nprintf '%s\\n' \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\" >/var/run/fugue/edge-identity/edge_id\nfor field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do\n  cat \"/var/run/fugue/edge-identity-source/${field}\" >\"/var/run/fugue/edge-identity/${field}\"\ndone\nchmod 0444 /var/run/fugue/edge-identity/*\n"
                 ],
                 "command": [
                   "/bin/sh",
@@ -744,6 +753,13 @@
                   "type": "DirectoryOrCreate"
                 },
                 "name": "caddy-data"
+              },
+              {
+                "hostPath": {
+                  "path": "/etc/fugue/edge-node.env",
+                  "type": "FileOrCreate"
+                },
+                "name": "edge-node-credentials"
               }
             ]
           }
@@ -807,6 +823,10 @@
                   {
                     "name": "FUGUE_API_URL",
                     "value": "http://fugue-fugue.fugue-system.svc:80"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_NODE_ENV_FILE",
+                    "value": "/etc/fugue/edge-node.env"
                   },
                   {
                     "name": "FUGUE_EDGE_TOKEN",
@@ -1013,12 +1033,17 @@
                   {
                     "mountPath": "/data",
                     "name": "caddy-data"
+                  },
+                  {
+                    "mountPath": "/etc/fugue/edge-node.env",
+                    "name": "edge-node-credentials",
+                    "readOnly": true
                   }
                 ]
               },
               {
                 "args": [
-                  "printf '%s\\n' '{' '  admin 127.0.0.1:2019' '}' \u003e/config/Caddyfile; exec caddy run --adapter caddyfile --config /config/Caddyfile"
+                  "printf '%s\\n' '{' '  admin 127.0.0.1:2019' '}' >/config/Caddyfile; exec caddy run --adapter caddyfile --config /config/Caddyfile"
                 ],
                 "command": [
                   "/bin/sh",
@@ -1080,7 +1105,7 @@
             "initContainers": [
               {
                 "args": [
-                  "umask 022; test -n \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\"; printf '%s\\n' \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\" \u003e/var/run/fugue/edge-identity/edge_id; for field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do test -s \"/var/run/fugue/edge-identity-source/${field}\"; cat \"/var/run/fugue/edge-identity-source/${field}\" \u003e\"/var/run/fugue/edge-identity/${field}\"; done; chmod 0444 /var/run/fugue/edge-identity/*"
+                  "umask 022; test -n \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\"; printf '%s\\n' \"${FUGUE_EDGE_IDENTITY_NODE_NAME}\" >/var/run/fugue/edge-identity/edge_id; for field in edge_group_id slot instance_uid release_epoch fault_domain_id edge_pool_id heartbeat_fenced; do test -s \"/var/run/fugue/edge-identity-source/${field}\"; cat \"/var/run/fugue/edge-identity-source/${field}\" >\"/var/run/fugue/edge-identity/${field}\"; done; chmod 0444 /var/run/fugue/edge-identity/*"
                 ],
                 "command": [
                   "/bin/sh",
@@ -1269,6 +1294,13 @@
                   "type": "DirectoryOrCreate"
                 },
                 "name": "caddy-data"
+              },
+              {
+                "hostPath": {
+                  "path": "/etc/fugue/edge-node.env",
+                  "type": "FileOrCreate"
+                },
+                "name": "edge-node-credentials"
               }
             ]
           }
