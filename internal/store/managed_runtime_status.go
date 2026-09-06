@@ -97,7 +97,9 @@ func (s *Store) updateManagedAppObservedStatus(appID, phase string, replicas int
 		app.Status.Phase = phase
 		app.Status.CurrentReplicas = replicas
 		app.Status.LastMessage = strings.TrimSpace(message)
-		app.Status.UpdatedAt = time.Now().UTC()
+		now := time.Now().UTC()
+		app.Status.ObservedAt = &now
+		app.Status.UpdatedAt = now
 		statusJSON, err := marshalJSON(app.Status)
 		if err != nil {
 			return err
@@ -117,7 +119,9 @@ func (s *Store) updateManagedAppObservedStatus(appID, phase string, replicas int
 		app.Status.Phase = phase
 		app.Status.CurrentReplicas = replicas
 		app.Status.LastMessage = strings.TrimSpace(message)
-		app.Status.UpdatedAt = time.Now().UTC()
+		now := time.Now().UTC()
+		app.Status.ObservedAt = &now
+		app.Status.UpdatedAt = now
 		return nil
 	})
 }

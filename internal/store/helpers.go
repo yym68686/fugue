@@ -144,6 +144,9 @@ func invalidateStoredPhaseAfterFailure(app *model.App) bool {
 	if !model.AppHasCurrentFailedOperation(app.Status) {
 		return false
 	}
+	if app.Status.ObservedAt != nil && app.Status.ObservedAt.After(app.Status.LastFailedOperation.UpdatedAt) {
+		return false
+	}
 	switch strings.ToLower(strings.TrimSpace(app.Status.Phase)) {
 	case "deployed", "running", "ready", "active":
 		// A historical failure does not prove that the previous workload is

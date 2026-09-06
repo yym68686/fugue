@@ -2242,8 +2242,13 @@ type AppStatus struct {
 	// as evidence that the current runtime is serving; consumers must use
 	// ObservedStatus for that decision.
 	LastFailedOperation *AppOperationFailure `json:"last_failed_operation,omitempty"`
-	UpdatedAt           time.Time            `json:"updated_at"`
-	SourceSync          *AppSourceSyncStatus `json:"source_sync,omitempty"`
+	// ObservedAt records the last authoritative runtime observation used to
+	// project the current phase. It lets read-time failure protection
+	// distinguish fresh serving evidence from a stale stored phase while
+	// retaining the failed-operation history for operators.
+	ObservedAt *time.Time           `json:"observed_at,omitempty"`
+	UpdatedAt  time.Time            `json:"updated_at"`
+	SourceSync *AppSourceSyncStatus `json:"source_sync,omitempty"`
 }
 
 // AppOperationFailure is the redacted, stable summary of the most recent

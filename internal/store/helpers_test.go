@@ -67,3 +67,25 @@ func TestHistoricalFailedOperationDoesNotSuppressLaterOperation(t *testing.T) {
 		t.Fatalf("historical failure changed current phase to %q", app.Status.Phase)
 	}
 }
+
+func TestFreshObservedStatusRestoresServingPhaseWithFailureHistory(t *testing.T) {
+	t.Parallel()
+	failureAt := time.Date(2026, 9, 1, 12, 36, 2, 0, time.UTC)
+	observedAt := failureAt.Add(time.Minute)
+	app := model.App{Status: model.AppStatus{
+		Phase:           "deployed",
+		CurrentReplicas: 1,
+		LastOperationID: "failed-op",
+		ObservedAt:      &observedAt,
+		LastFailedOperation: &model.AppOperationFailure{
+			ID:        "failed-op",
+			UpdatedAt: failureAt,
+		},
+	}}
+	if invalidateStoredPhaseAfterFailure(&app) {
+		t.Fatal("fresh observed serving evidence was invalidated")
+	}
+	if app.Status.Phase != "deployed" {
+		t.Fatalf("fresh observed status changed phase to %q", app.Status.Phase)
+	}
+}
