@@ -1582,6 +1582,7 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 			if flattenErr != nil || len(pointers) == 0 ||
 				(ownDeclarativeUpdate && !stringSubset(pointers, ownershipCleanupPointers(allowed))) ||
 				(emergencyOwnershipManager(conflict.manager) && !broadEmergencyOwnershipTransferPointer(pointer) &&
+					!(emergencyOwnershipManagers[conflict.manager] && emergencyEnvValuePointer(pointer)) &&
 					!stringSubset(pointers, ownershipCleanupPointers(allowed))) {
 				return errors.New("emergency managedFields entry expands beyond the exact allowlist")
 			}
@@ -1848,7 +1849,7 @@ func emergencyProbePathPointer(pointer string) bool {
 // the reviewed Caddy data path, without extending the set of fields that may
 // conflict.
 func broadEmergencyOwnershipTransferPointer(pointer string) bool {
-	if emergencyProbePathPointer(pointer) || emergencyCaddyDataHostPathPointer(pointer) || emergencyEdgeNodeCredentialsHostPathPointer(pointer) || emergencyEnvValuePointer(pointer) {
+	if emergencyProbePathPointer(pointer) || emergencyCaddyDataHostPathPointer(pointer) || emergencyEdgeNodeCredentialsHostPathPointer(pointer) {
 		return true
 	}
 	for _, prefix := range []string{"/metadata/annotations/", "/spec/template/metadata/annotations/"} {
