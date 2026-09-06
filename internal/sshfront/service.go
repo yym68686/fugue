@@ -84,7 +84,37 @@ type connectionRateWindow struct {
 	attempts int
 }
 
+func preferNodeScopedEdgeToken(path, fallback string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return strings.TrimSpace(fallback)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return strings.TrimSpace(fallback)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || (strings.TrimSpace(key) != "FUGUE_SSH_FRONT_EDGE_TOKEN" && strings.TrimSpace(key) != "FUGUE_EDGE_TOKEN" && strings.TrimSpace(key) != "FUGUE_EDGE_NODE_TOKEN") {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			value = value[1 : len(value)-1]
+		}
+		if value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
 func NewService(cfg Config, logger *log.Logger) *Service {
+	cfg.EdgeToken = preferNodeScopedEdgeToken(os.Getenv("FUGUE_EDGE_NODE_ENV_FILE"), cfg.EdgeToken)
 	if logger == nil {
 		logger = log.Default()
 	}
