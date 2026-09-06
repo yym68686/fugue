@@ -495,7 +495,7 @@ func (s *Service) syncManagedAppObservedStatus(
 		}
 	}
 	s.sampleManagedAppReadyEndpoints(ctx, client, namespace, app, status)
-	if err := s.Store.SyncManagedAppRuntimeStatus(app.ID, managedStatusTimePointer(status.CurrentReleaseStartedAt), managedStatusTimePointer(status.CurrentReleaseReadyAt), backingServiceRuntimeStatuses(status.BackingServices)); err != nil {
+	if err := s.Store.SyncManagedAppObservedStatus(app.ID, status.Phase, status.ReadyReplicas, status.Message, managedStatusTimePointer(status.CurrentReleaseStartedAt), managedStatusTimePointer(status.CurrentReleaseReadyAt), backingServiceRuntimeStatuses(status.BackingServices)); err != nil {
 		return fmt.Errorf("sync managed app runtime status for %s: %w", app.ID, err)
 	}
 	if recoverStoredBaseline && managedAppStatusReady(status, app) {

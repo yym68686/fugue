@@ -44,6 +44,84 @@ func (s *Store) SyncManagedAppRuntimeStatus(appID string, currentReleaseStartedA
 	})
 }
 
+// SyncManagedAppObservedStatus publishes the Kubernetes-observed phase and
+// replica count together with the serving timestamps.  Runtime timestamps
+// alone are insufficient: a ManagedApp can remain serving while its CR status
+// carries a recoverable controller warning.  Leaving the durable App status
+// at "unknown" makes compose dependents treat a ready workload as unavailable.
+func (s *Store) SyncManagedAppObservedStatus(appID, phase string, replicas int, message string, currentReleaseStartedAt, currentReleaseReadyAt *time.Time, services []ManagedBackingServiceRuntimeStatus) error {
+	if err := s.SyncManagedAppRuntimeStatus(appID, currentReleaseStartedAt, currentReleaseReadyAt, services); err != nil {
+		return err
+	}
+	if strings.TrimSpace(appID) == "" {
+		return ErrInvalidInput
+	}
+	if replicas < 0 {
+		replicas = 0
+	}
+	normalizedPhase := strings.TrimSpace(strings.ToLower(phase))
+	switch normalizedPhase {
+	case "ready":
+		normalizedPhase = "deployed"
+	case "error":
+		// A zero-downtime block preserves a proven serving replica while
+		// recording the controller warning. Keep dependents routable.
+		if replicas > 0 && currentReleaseReadyAt != nil {
+			normalizedPhase = "deployed"
+		} else {
+			normalizedPhase = "failed"
+		}
+	case "pending":
+		normalizedPhase = "deploying"
+	case "progressing":
+		normalizedPhase = "deploying"
+	case "disabled", "deleting", "deployed", "deploying", "failed":
+	default:
+		normalizedPhase = "unknown"
+	}
+	return s.updateManagedAppObservedStatus(appID, normalizedPhase, replicas, message)
+}
+
+func (s *Store) updateManagedAppObservedStatus(appID, phase string, replicas int, message string) error {
+	if s.usingDatabase() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		app, err := s.pgGetApp(appID)
+		if err != nil {
+			return err
+		}
+		changed := app.Status.Phase != phase || app.Status.CurrentReplicas != replicas || app.Status.LastMessage != strings.TrimSpace(message)
+		if !changed {
+			return nil
+		}
+		app.Status.Phase = phase
+		app.Status.CurrentReplicas = replicas
+		app.Status.LastMessage = strings.TrimSpace(message)
+		app.Status.UpdatedAt = time.Now().UTC()
+		statusJSON, err := marshalJSON(app.Status)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `UPDATE fugue_apps SET status_json = $2, updated_at = $3 WHERE id = $1`, app.ID, statusJSON, app.UpdatedAt)
+		return err
+	}
+	return s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, appID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		app := &state.Apps[index]
+		if app.Status.Phase == phase && app.Status.CurrentReplicas == replicas && app.Status.LastMessage == strings.TrimSpace(message) {
+			return nil
+		}
+		app.Status.Phase = phase
+		app.Status.CurrentReplicas = replicas
+		app.Status.LastMessage = strings.TrimSpace(message)
+		app.Status.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+}
+
 func (s *Store) pgSyncManagedAppRuntimeStatus(appID string, currentReleaseStartedAt, currentReleaseReadyAt *time.Time, services []ManagedBackingServiceRuntimeStatus) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
