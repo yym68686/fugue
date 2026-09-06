@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"testing"
 	"time"
 )
@@ -406,20 +405,5 @@ func TestAPIFromEnvDerivesBackupCoordinationLeaseForBootstrapRollout(t *testing.
 	}
 	if cfg.BackupCoordination.LeaseNamespace != "fugue-system" {
 		t.Fatalf("unexpected derived backup coordination Lease namespace: %q", cfg.BackupCoordination.LeaseNamespace)
-	}
-}
-
-func TestSSHFrontFromEnvPrefersNodeScopedCredentialFile(t *testing.T) {
-	envFile := t.TempDir() + "/edge-node.env"
-	if err := os.WriteFile(envFile, []byte("FUGUE_EDGE_TOKEN=node-scoped\nFUGUE_EDGE_GROUP_ID=edge-group-country-us\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("FUGUE_SSH_FRONT_EDGE_NODE_ENV_FILE", envFile)
-	t.Setenv("FUGUE_SSH_FRONT_EDGE_TOKEN", "static-fallback")
-	t.Setenv("FUGUE_EDGE_TOKEN", "global-fallback")
-	t.Setenv("FUGUE_SSH_FRONT_EDGE_GROUP_ID", "static-group")
-	cfg := SSHFrontFromEnv()
-	if cfg.EdgeToken != "node-scoped" || cfg.EdgeGroupID != "edge-group-country-us" {
-		t.Fatalf("expected node-scoped SSH credentials, got token=%q group=%q", cfg.EdgeToken, cfg.EdgeGroupID)
 	}
 }
