@@ -409,6 +409,14 @@
                   {
                     "name": "FUGUE_EDGE_PROXY_LISTEN_ADDR",
                     "value": "127.0.0.1:7833"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE",
+                    "value": "/etc/caddy/static-tls/tls.crt"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE",
+                    "value": "/etc/caddy/static-tls/tls.key"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
@@ -497,6 +505,11 @@
                     "mountPath": "/etc/fugue/edge-node.env",
                     "name": "edge-node-credentials",
                     "readOnly": true
+                  },
+                  {
+                    "name": "caddy-static-tls",
+                    "mountPath": "/etc/caddy/static-tls",
+                    "readOnly": true
                   }
                 ]
               },
@@ -556,6 +569,21 @@
                   {
                     "mountPath": "/data",
                     "name": "caddy-data"
+                  },
+                  {
+                    "name": "caddy-static-tls",
+                    "mountPath": "/etc/caddy/static-tls",
+                    "readOnly": true
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE",
+                    "value": "/etc/caddy/static-tls/tls.crt"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE",
+                    "value": "/etc/caddy/static-tls/tls.key"
                   }
                 ]
               }
@@ -760,6 +788,13 @@
                   "type": "FileOrCreate"
                 },
                 "name": "edge-node-credentials"
+              },
+              {
+                "name": "caddy-static-tls",
+                "secret": {
+                  "secretName": "fugue-app-wildcard-tls",
+                  "optional": false
+                }
               }
             ]
           }
@@ -950,6 +985,14 @@
                   {
                     "name": "FUGUE_EDGE_PROXY_LISTEN_ADDR",
                     "value": "127.0.0.1:7833"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE",
+                    "value": "/etc/caddy/static-tls/tls.crt"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE",
+                    "value": "/etc/caddy/static-tls/tls.key"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
@@ -1038,6 +1081,11 @@
                     "mountPath": "/etc/fugue/edge-node.env",
                     "name": "edge-node-credentials",
                     "readOnly": true
+                  },
+                  {
+                    "name": "caddy-static-tls",
+                    "mountPath": "/etc/caddy/static-tls",
+                    "readOnly": true
                   }
                 ]
               },
@@ -1097,6 +1145,21 @@
                   {
                     "mountPath": "/data",
                     "name": "caddy-data"
+                  },
+                  {
+                    "name": "caddy-static-tls",
+                    "mountPath": "/etc/caddy/static-tls",
+                    "readOnly": true
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE",
+                    "value": "/etc/caddy/static-tls/tls.crt"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE",
+                    "value": "/etc/caddy/static-tls/tls.key"
                   }
                 ]
               }
@@ -1301,6 +1364,13 @@
                   "type": "FileOrCreate"
                 },
                 "name": "edge-node-credentials"
+              },
+              {
+                "name": "caddy-static-tls",
+                "secret": {
+                  "secretName": "fugue-app-wildcard-tls",
+                  "optional": false
+                }
               }
             ]
           }
