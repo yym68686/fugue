@@ -4634,3 +4634,16 @@ type ioDiscard struct{}
 func (ioDiscard) Write(p []byte) (int, error) {
 	return len(p), nil
 }
+
+func TestPreferNodeScopedEdgeToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "edge-node.env")
+	if err := os.WriteFile(path, []byte("FUGUE_EDGE_TOKEN='node-scoped'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := preferNodeScopedEdgeToken(path, "static-fallback"); got != "node-scoped" {
+		t.Fatalf("expected node-scoped token, got %q", got)
+	}
+	if got := preferNodeScopedEdgeToken(filepath.Join(t.TempDir(), "missing"), "static-fallback"); got != "static-fallback" {
+		t.Fatalf("expected static fallback for missing node credential, got %q", got)
+	}
+}

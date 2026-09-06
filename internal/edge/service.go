@@ -447,6 +447,35 @@ func (e statusError) Error() string {
 	return fmt.Sprintf("edge routes returned status %d: %s", e.StatusCode, e.Body)
 }
 
+func preferNodeScopedEdgeToken(path, fallback string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return strings.TrimSpace(fallback)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return strings.TrimSpace(fallback)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || (strings.TrimSpace(key) != "FUGUE_EDGE_TOKEN" && strings.TrimSpace(key) != "FUGUE_EDGE_NODE_TOKEN") {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			value = value[1 : len(value)-1]
+		}
+		if value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
 func NewServiceWithRouteBundleSource(cfg config.EdgeConfig, routeBundleSource RouteBundleSourceConfig, logger *log.Logger) *Service {
 	return newServiceWithEdgeSources(cfg, routeBundleSource, InventoryProducerConfig{}, true, logger)
 }
@@ -456,6 +485,7 @@ func NewServiceWithEdgeSources(cfg config.EdgeConfig, routeBundleSource RouteBun
 }
 
 func newServiceWithEdgeSources(cfg config.EdgeConfig, routeBundleSource RouteBundleSourceConfig, inventoryProducer InventoryProducerConfig, requireEdgeControlRouteSource bool, logger *log.Logger) *Service {
+	cfg.EdgeToken = preferNodeScopedEdgeToken(cfg.EdgeNodeEnvFile, cfg.EdgeToken)
 	if logger == nil {
 		logger = log.Default()
 	}
