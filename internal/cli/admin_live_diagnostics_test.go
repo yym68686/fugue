@@ -3,11 +3,40 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestUnifiedDiagnosticsReplacesAdminEntryPoint(t *testing.T) {
+	t.Parallel()
+	root := newCLI(io.Discard, io.Discard).newRootCommand()
+	admin, _, err := root.Find([]string{"admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range admin.Commands() {
+		if cmd.Name() == "diagnostics" {
+			t.Fatal("removed admin diagnostics command is still registered")
+		}
+	}
+	for _, target := range []string{"app", "platform", "node-process"} {
+		for _, action := range []string{"start", "list", "show", "report", "cancel"} {
+			cmd, remaining, err := root.Find([]string{"diagnostics", target, action})
+			if err != nil || len(remaining) != 0 || cmd.CommandPath() != "fugue diagnostics "+target+" "+action {
+				t.Fatalf("missing %s %s: command=%v remaining=%v err=%v", target, action, cmd, remaining, err)
+			}
+			for _, flag := range []string{"direct-kubernetes", "kubeconfig", "kube-context", "control-namespace", "release-instance"} {
+				present := cmd.InheritedFlags().Lookup(flag) != nil
+				if present != (target != "app") {
+					t.Errorf("%s %s flag %s present=%v", target, action, flag, present)
+				}
+			}
+		}
+	}
+}
 
 func TestUnifiedDiagnosticsPlatformStartSendsPlatformMemoryProbe(t *testing.T) {
 	t.Parallel()

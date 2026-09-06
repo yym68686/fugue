@@ -23,8 +23,13 @@ type platformDiagnosticCommandOptions struct {
 	releaseInstance string
 }
 
-func (c *CLI) newAdminDiagnosticsStartCommand(opts *platformDiagnosticCommandOptions) *cobra.Command {
-	return c.newAdminDiagnosticsStartCommandForTarget(opts, livediagnostics.TargetPlatformComponent)
+func addPlatformDiagnosticFlags(cmd *cobra.Command, opts *platformDiagnosticCommandOptions) {
+	flags := cmd.PersistentFlags()
+	flags.BoolVar(&opts.direct, "direct-kubernetes", false, "Use Kubernetes directly instead of the Fugue API")
+	flags.StringVar(&opts.kubeconfig, "kubeconfig", "", "Kubeconfig path for direct Kubernetes mode")
+	flags.StringVar(&opts.kubeContext, "kube-context", "", "Kubeconfig context for direct Kubernetes mode")
+	flags.StringVar(&opts.controlNS, "control-namespace", opts.controlNS, "Fugue control-plane namespace")
+	flags.StringVar(&opts.releaseInstance, "release-instance", opts.releaseInstance, "Fugue Helm release instance label")
 }
 
 func (c *CLI) newAdminDiagnosticsStartCommandForTarget(opts *platformDiagnosticCommandOptions, targetType livediagnostics.TargetType) *cobra.Command {

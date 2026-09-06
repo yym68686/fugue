@@ -60,6 +60,7 @@ fugue diagnostics node-process start --node ns101351 --process k3s-agent --kind 
 		c.newAdminDiagnosticsReportCommand(&platformOpts),
 		c.newAdminDiagnosticsCancelCommand(&platformOpts),
 	)
+	addPlatformDiagnosticFlags(platform, &platformOpts)
 
 	nodeOpts := platformDiagnosticCommandOptions{controlNS: "fugue-system", releaseInstance: "fugue"}
 	node := &cobra.Command{
@@ -75,6 +76,7 @@ fugue diagnostics node-process start --node ns101351 --process k3s-agent --kind 
 		c.newAdminDiagnosticsReportCommand(&nodeOpts),
 		c.newAdminDiagnosticsCancelCommand(&nodeOpts),
 	)
+	addPlatformDiagnosticFlags(node, &nodeOpts)
 
 	cmd.AddCommand(app, platform, node)
 	return cmd
