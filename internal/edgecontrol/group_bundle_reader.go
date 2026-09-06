@@ -253,7 +253,6 @@ func loadGroupBundleReaderKeyring(path, expectedGroupID string) (groupBundleRead
 		return groupBundleReaderKeyring{}, errors.New("edge-control group bundle reader keyring is invalid")
 	}
 	seenIDs := make(map[string]struct{}, len(keyring.Credentials))
-	seenDigests := make(map[string]struct{}, len(keyring.Credentials))
 	for _, credential := range keyring.Credentials {
 		if !groupBundleReaderIDPattern.MatchString(credential.CredentialID) || normalizeEdgeIdentity(credential.EdgeID) == "" || credential.EdgeID != normalizeEdgeIdentity(credential.EdgeID) ||
 			credential.NotBeforeUnix <= 0 || credential.NotAfterUnix <= credential.NotBeforeUnix ||
@@ -266,11 +265,7 @@ func loadGroupBundleReaderKeyring(path, expectedGroupID string) (groupBundleRead
 		if _, duplicate := seenIDs[credential.CredentialID]; duplicate {
 			return groupBundleReaderKeyring{}, errors.New("edge-control group bundle reader credential id is duplicated")
 		}
-		if _, duplicate := seenDigests[credential.TokenDigest]; duplicate {
-			return groupBundleReaderKeyring{}, errors.New("edge-control group bundle reader credential digest is duplicated")
-		}
 		seenIDs[credential.CredentialID] = struct{}{}
-		seenDigests[credential.TokenDigest] = struct{}{}
 	}
 	return keyring, nil
 }
