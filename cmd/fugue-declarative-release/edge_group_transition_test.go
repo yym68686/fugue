@@ -36,6 +36,22 @@ func TestReadEdgeCandidateStageStatusAcceptsFullAuthorityResponse(t *testing.T) 
 	}
 }
 
+func TestEdgeActivationStatesAgreeIgnoresOnlyLocalTimestamp(t *testing.T) {
+	state := edgeActivationState{Schema: edgeActivationStateSchema, GroupID: "edge-group-country-us", Generation: 9,
+		ActiveSlot: "b", PreviousSlot: "a", BundleGeneration: "routes.p9.r0", WorkerSourceCommit: strings.Repeat("a", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), Authority: edgeActivationAuthority, Operation: edgeActivationPromote,
+		Reason: "promote verified candidate authority", UpdatedAt: time.Unix(1, 0).UTC()}
+	later := state
+	later.UpdatedAt = state.UpdatedAt.Add(time.Second)
+	if !edgeActivationStatesAgree(state, later) {
+		t.Fatal("equivalent cohort activation was rejected because timestamps differ")
+	}
+	later.BundleGeneration = "routes.p10.r0"
+	if edgeActivationStatesAgree(state, later) {
+		t.Fatal("different activation bundle was accepted across a cohort")
+	}
+}
+
 func TestPostEdgeCandidateStageReportsTrustedControlErrorCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")

@@ -1829,14 +1829,27 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 	// process that serves it. Read the file from that container first so a
 	// stale Front health cache cannot hide a valid CAS record before candidate
 	// staging. Fall back to a Worker mount for older layouts.
+	var canonical *edgeActivationState
 	for _, node := range sortedEdgeNodes(front) {
 		state, exists, err := cluster.readEdgeActivationStateFromPod(ctx, release, transition, front[node], "edge-front")
 		if err != nil {
 			return nil, false, fmt.Errorf("read Front activation evidence: %w", err)
 		}
-		if exists {
-			return &state, true, nil
+		if !exists {
+			if canonical != nil {
+				return nil, false, errors.New("edge Front activation evidence is incomplete")
+			}
+			continue
 		}
+		if canonical == nil {
+			copy := state
+			canonical = &copy
+		} else if !edgeActivationStatesAgree(*canonical, state) {
+			return nil, false, errors.New("edge Front activation evidence disagrees across nodes")
+		}
+	}
+	if canonical != nil {
+		return canonical, true, nil
 	}
 	candidates := make([]edgeGroupPod, 0, len(workerA)+len(workerB))
 	for _, pods := range []map[string]edgeGroupPod{workerA, workerB} {
@@ -1844,18 +1857,50 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 			candidates = append(candidates, pod)
 		}
 	}
-	executor, err := cluster.selectEdgeCASExecutor(ctx, release.Workload.Namespace, transition, candidates...)
-	if err != nil {
-		return nil, false, fmt.Errorf("select edge activation evidence reader: %w", err)
+	// Older layouts may only mount the file in Workers. Read one Worker per
+	// node and require the same evidence from the whole cohort; selecting the
+	// first successful node would allow a split-brain activation to pass.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].NodeName != candidates[j].NodeName {
+			return candidates[i].NodeName < candidates[j].NodeName
+		}
+		return candidates[i].Name < candidates[j].Name
+	})
+	seenNodes := map[string]bool{}
+	for _, pod := range candidates {
+		if seenNodes[pod.NodeName] {
+			continue
+		}
+		seenNodes[pod.NodeName] = true
+		state, exists, err := cluster.readEdgeActivationState(ctx, release, transition, pod)
+		if err != nil {
+			return nil, false, fmt.Errorf("read edge activation evidence: %w", err)
+		}
+		if !exists {
+			if canonical != nil {
+				return nil, false, errors.New("edge Worker activation evidence is incomplete")
+			}
+			continue
+		}
+		if canonical == nil {
+			copy := state
+			canonical = &copy
+		} else if !edgeActivationStatesAgree(*canonical, state) {
+			return nil, false, errors.New("edge Worker activation evidence disagrees across nodes")
+		}
 	}
-	state, exists, err := cluster.readEdgeActivationState(ctx, release, transition, executor)
-	if err != nil {
-		return nil, false, fmt.Errorf("read edge activation evidence: %w", err)
-	}
-	if !exists {
-		return nil, false, nil
-	}
-	return &state, true, nil
+	return canonical, canonical != nil, nil
+}
+
+// UpdatedAt is a local execution timestamp. It is intentionally excluded from
+// cohort comparison because a successful per-node CAS can commit the same
+// immutable activation at slightly different times.
+func edgeActivationStatesAgree(left, right edgeActivationState) bool {
+	return left.Schema == right.Schema && left.GroupID == right.GroupID && left.Generation == right.Generation &&
+		left.ActiveSlot == right.ActiveSlot && left.PreviousSlot == right.PreviousSlot && left.BundleGeneration == right.BundleGeneration &&
+		left.WorkerSourceCommit == right.WorkerSourceCommit && left.WorkerImageDigest == right.WorkerImageDigest &&
+		left.Authority == right.Authority && left.Operation == right.Operation && left.RollbackOfGeneration == right.RollbackOfGeneration &&
+		left.Reason == right.Reason
 }
 
 // An active Worker or Front can be unready during an outage. Preserve its
