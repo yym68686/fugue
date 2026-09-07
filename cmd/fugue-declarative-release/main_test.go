@@ -11,9 +11,60 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/declarativerelease"
 )
+
+func TestExecuteReportsTimeWindowRejectionBeforeClusterAccess(t *testing.T) {
+	for _, offset := range []time.Duration{-16 * time.Minute, time.Minute} {
+		t.Run(offset.String(), func(t *testing.T) {
+			files, _, _ := monitorBundleFixture(t)
+			var prepared declarativerelease.ExecutionPlan
+			if err := json.Unmarshal(files["execution-plan.json"], &prepared); err != nil {
+				t.Fatal(err)
+			}
+			prepared.PreparedAt = time.Now().UTC().Add(offset).Format(time.RFC3339Nano)
+			prepared.PlanDigest = ""
+			unsigned, err := declarativerelease.CanonicalJSON(prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared.PlanDigest = digestBytesForMonitorTest(unsigned)
+			files["execution-plan.json"], err = declarativerelease.CanonicalJSON(prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := t.TempDir()
+			if err := os.Chmod(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for name, raw := range files {
+				if err := os.WriteFile(filepath.Join(directory, name), raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", t.TempDir())
+			t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "absent"))
+			var output bytes.Buffer
+			err = runExecute([]string{"execute", directory}, &output)
+			if err == nil || !strings.Contains(err.Error(), "stale or from the future") {
+				t.Fatalf("time-window rejection: %v", err)
+			}
+			result, err := declarativerelease.DecodeExecutionResult(&output)
+			if err != nil || result.Status != "failed-no-write" || result.Reason != "execution-plan-time-window-rejected" ||
+				result.ConfigSHA != prepared.ConfigSHA || result.ExecutionPlanDigest != prepared.PlanDigest ||
+				result.ForwardApplyCount != 0 || result.LKGApplyCount != 0 {
+				t.Fatalf("unbound or missing no-write receipt: result=%+v err=%v", result, err)
+			}
+			writeFile(t, filepath.Join(directory, "artifact-receipt.json"), []byte(`{}`))
+			output.Reset()
+			if err := runExecute([]string{"execute", directory}, &output); err == nil || output.Len() != 0 {
+				t.Fatalf("invalid immutable artifact received a terminal receipt: output=%s err=%v", output.String(), err)
+			}
+		})
+	}
+}
 
 func TestPlanCommandBindsFirstProductionAtom(t *testing.T) {
 	root := t.TempDir()

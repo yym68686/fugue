@@ -114,6 +114,29 @@ func TestProcessExecutorFailsClosedOnMissingReceipt(t *testing.T) {
 	}
 }
 
+func TestProcessExecutorRetainsTimeWindowNoWriteReceiptOnNonzeroExit(t *testing.T) {
+	configureInClusterExecutorFixture(t)
+	snapshot := processSnapshot(t)
+	result := processResult(t, "failed-no-write", "execution-plan-time-window-rejected")
+	raw, err := declarativerelease.CanonicalJSON(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "executor")
+	script := "#!/bin/sh\ncat <<'RECEIPT'\n" + string(raw) + "\nRECEIPT\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewProcessExecutor(path, "pod-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := executor.Rollout(context.Background(), snapshot)
+	if err != nil || receipt.Status != "failed-no-write" || receipt.ReceiptDigest != result.ReceiptDigest || receipt.RecordDigest != snapshot.Record.RecordDigest {
+		t.Fatalf("time-window rejection became unknown: receipt=%+v err=%v", receipt, err)
+	}
+}
+
 func TestProcessExecutorPreservesStructuredFailureWithGenericStderr(t *testing.T) {
 	configureInClusterExecutorFixture(t)
 	snapshot := processSnapshot(t)

@@ -790,7 +790,7 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 	if err != nil {
 		return err
 	}
-	prepared, err := declarativerelease.DecodeExecutionPlan(bytes.NewReader(files["execution-plan.json"]), plan, files["forward.json"], files["lkg.json"])
+	prepared, err := declarativerelease.DecodeRecordedExecutionPlan(bytes.NewReader(files["execution-plan.json"]), plan, files["forward.json"], files["lkg.json"])
 	if err != nil {
 		return err
 	}
@@ -801,6 +801,28 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 	if prepared.ArtifactDigest != receipt.ReceiptDigest || prepared.Component != receipt.Component ||
 		prepared.ConfigSHA != receipt.ConfigSHA || prepared.Forward.ImageRef != receipt.ImmutableRef {
 		return errors.New("execution plan is not bound to its immutable artifact receipt")
+	}
+	// Validate the complete immutable identity before reporting a time-window
+	// rejection. No client or mutation Lease exists at this point.
+	if _, freshnessErr := declarativerelease.DecodeExecutionPlan(bytes.NewReader(files["execution-plan.json"]), plan, files["forward.json"], files["lkg.json"]); freshnessErr != nil {
+		result := declarativerelease.ExecutionResult{
+			APIVersion: declarativerelease.ExecutionPlanAPIVersion, Kind: declarativerelease.ExecutionResultKind,
+			Component: prepared.Component, ConfigSHA: prepared.ConfigSHA, ExecutionPlanDigest: prepared.PlanDigest,
+			Status: "failed-no-write", Reason: "execution-plan-time-window-rejected", FailureDetail: freshnessErr.Error(),
+		}
+		unsigned, encodeErr := declarativerelease.CanonicalJSON(result)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		result.ReceiptDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(unsigned))
+		encoded, encodeErr := declarativerelease.CanonicalJSON(result)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if _, writeErr := output.Write(append(encoded, '\n')); writeErr != nil {
+			return writeErr
+		}
+		return freshnessErr
 	}
 	cluster, err := newKubectlCluster()
 	if err != nil {
