@@ -135,42 +135,64 @@ func (store *KubeStore) LoadStableLKG(ctx context.Context, key Key, release decl
 		release.Delivery.Writer != "guardian" || release.Delivery.Group != key.Group || !release.ExpectedPreviousPresent {
 		return nil, errors.New("stable Guardian LKG request is invalid")
 	}
-	stored, err := store.loadRelease(ctx, target)
+	recordMap, err := store.loadStableMonitorMap(ctx, target)
 	if err != nil {
 		return nil, err
 	}
-	_, artifact, prepared, monitor, forward, _, err := decodeStableRecord(stored.currentMonitorData)
+	_, artifact, prepared, monitor, forward, _, err := decodeStableRecord(recordMap.Data)
 	if err != nil {
 		return nil, err
 	}
-	if monitor.Component != release.ComponentID || monitor.ConfigSHA != release.ExpectedPreviousConfigSHA ||
-		prepared.Forward.ConfigSHA != release.ExpectedPreviousConfigSHA ||
-		prepared.Forward.ManifestSHA != release.ExpectedPreviousManifestSHA ||
-		prepared.Forward.OCIRevision != release.ExpectedPreviousOCIRevision ||
-		artifact.TopDigest != release.ExpectedPreviousImageDigest ||
-		monitor.ForwardManifestDigest != digest(forward) {
-		return nil, errors.New("stable Guardian LKG does not match the declared predecessor")
+	for _, field := range []struct{ name, expected, observed string }{
+		{"component", release.ComponentID, monitor.Component},
+		{"prepared component", release.ComponentID, prepared.Component},
+		{"config SHA", release.ExpectedPreviousConfigSHA, monitor.ConfigSHA},
+		{"forward config SHA", release.ExpectedPreviousConfigSHA, prepared.Forward.ConfigSHA},
+		{"manifest SHA", release.ExpectedPreviousManifestSHA, prepared.Forward.ManifestSHA},
+		{"OCI revision", release.ExpectedPreviousOCIRevision, prepared.Forward.OCIRevision},
+		{"image digest", release.ExpectedPreviousImageDigest, artifact.TopDigest},
+		{"image reference", release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest, prepared.Forward.ImageRef},
+		{"forward digest", monitor.ForwardManifestDigest, digest(forward)},
+	} {
+		if field.expected != field.observed {
+			return nil, fmt.Errorf("stable Guardian LKG does not match the declared predecessor: %s expected %q, observed %q (record %s)", field.name, field.expected, field.observed, monitor.RecordDigest)
+		}
 	}
 	return append([]byte(nil), forward...), nil
 }
 
-func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (storedRelease, error) {
+// Reading the positive LKG must not depend on a failed candidate or its status.
+func (store *KubeStore) loadStableMonitorMap(ctx context.Context, target TargetConfig) (*corev1.ConfigMap, error) {
 	configMaps := store.client.CoreV1().ConfigMaps(target.Namespace)
 	stateName := "fugue-release-monitor-" + target.MonitorComponent
 	state, err := configMaps.Get(ctx, stateName, metav1.GetOptions{})
 	if err != nil {
-		return storedRelease{}, fmt.Errorf("read stable monitor pointer: %w", err)
+		return nil, fmt.Errorf("read stable monitor pointer: %w", err)
 	}
 	recordName := strings.TrimSpace(state.Data["recordName"])
 	if !strings.HasPrefix(recordName, "fugue-release-record-"+target.MonitorComponent+"-") {
-		return storedRelease{}, errors.New("stable monitor pointer is invalid")
+		return nil, errors.New("stable monitor pointer is invalid")
 	}
 	recordMap, err := configMaps.Get(ctx, recordName, metav1.GetOptions{})
 	if err != nil {
-		return storedRelease{}, fmt.Errorf("read immutable stable release record: %w", err)
+		return nil, fmt.Errorf("read immutable stable release record: %w", err)
 	}
 	if recordMap.Immutable == nil || !*recordMap.Immutable || totalConfigMapBytes(recordMap.Data) > maxRecordBytes {
-		return storedRelease{}, errors.New("stable release record metadata is invalid")
+		return nil, errors.New("stable release record metadata is invalid")
+	}
+	var monitor declarativerelease.MonitorRecord
+	if err := decodeStrict([]byte(recordMap.Data["record.json"]), &monitor); err != nil ||
+		recordName != monitorRecordNameFromDigest(target.MonitorComponent, monitor.RecordDigest) {
+		return nil, errors.New("stable monitor pointer does not match the immutable record digest")
+	}
+	return recordMap, nil
+}
+
+func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (storedRelease, error) {
+	configMaps := store.client.CoreV1().ConfigMaps(target.Namespace)
+	recordMap, err := store.loadStableMonitorMap(ctx, target)
+	if err != nil {
+		return storedRelease{}, err
 	}
 	plan, artifact, prepared, monitor, forward, lkg, err := decodeStableRecord(recordMap.Data)
 	if err != nil {

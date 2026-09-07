@@ -17,6 +17,77 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
+func TestLoadStableLKGIgnoresBrokenCandidateStateAndRejectsIdentityDrift(t *testing.T) {
+	key := Key{Component: "edge-control-test", Group: "test"}
+	now := time.Unix(100, 0).UTC()
+	data, monitor, artifact, target := guardianStableFixture(t, key, now)
+	recordName := monitorRecordNameFromDigest(key.Component, monitor.RecordDigest)
+	immutable := true
+	state := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "fugue-release-monitor-" + key.Component, Namespace: "fugue-system"},
+		Data:       map[string]string{"recordName": recordName},
+	}
+	recordMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: recordName, Namespace: "fugue-system"},
+		Immutable:  &immutable, Data: data,
+	}
+	client := fake.NewSimpleClientset(state, recordMap,
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: desiredName(key), Namespace: "fugue-system"}, Data: map[string]string{"desired.json": "broken candidate"}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: statusName(key), Namespace: "fugue-system"}, Data: map[string]string{"status.json": "broken status"}},
+	)
+	store, err := NewKubeStore(client, []TargetConfig{{Key: key, Namespace: "fugue-system", MonitorComponent: key.Component, DependencyService: "service"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := guardianCandidateFixture(t, key, target, artifact.TopDigest, []byte(data["forward.json"]), now)
+	plan, err := declarativerelease.DecodePlan(bytes.NewReader(candidate["release-plan.json"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := plan.Releases[0]
+	lkg, err := store.LoadStableLKG(context.Background(), key, release)
+	if err != nil || !bytes.Equal(lkg, bytes.TrimSpace([]byte(data["forward.json"]))) {
+		t.Fatalf("positive LKG was blocked by candidate state: %v", err)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "get" {
+			t.Fatalf("read-only LKG validation mutated the cluster: %v", action)
+		}
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*declarativerelease.PlanRelease)
+	}{
+		{"config SHA", func(r *declarativerelease.PlanRelease) { r.ExpectedPreviousConfigSHA = strings.Repeat("9", 40) }},
+		{"manifest SHA", func(r *declarativerelease.PlanRelease) { r.ExpectedPreviousManifestSHA = strings.Repeat("9", 40) }},
+		{"OCI revision", func(r *declarativerelease.PlanRelease) { r.ExpectedPreviousOCIRevision = strings.Repeat("9", 40) }},
+		{"image digest", func(r *declarativerelease.PlanRelease) { r.ExpectedPreviousImageDigest = testDigest }},
+		{"image reference", func(r *declarativerelease.PlanRelease) { r.Artifact.Repository = "ghcr.io/example/other" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			drifted := release
+			test.edit(&drifted)
+			_, err := store.LoadStableLKG(context.Background(), key, drifted)
+			if err == nil || !strings.Contains(err.Error(), test.name) || !strings.Contains(err.Error(), monitor.RecordDigest) {
+				t.Fatalf("identity drift lacks a record-bound error: %v", err)
+			}
+		})
+	}
+	wrongName := monitorRecordNameFromDigest(key.Component, otherDigest)
+	recordMap = recordMap.DeepCopy()
+	recordMap.Name = wrongName
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Create(context.Background(), recordMap, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	state.Data["recordName"] = wrongName
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), state, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadStableLKG(context.Background(), key, release); err == nil || !strings.Contains(err.Error(), "pointer does not match") {
+		t.Fatalf("mismatched stable record pointer was accepted: %v", err)
+	}
+}
+
 func TestCanaryResultIsImmutableRecordBoundAndFresh(t *testing.T) {
 	key := Key{Component: "edge-control-de", Group: "de"}
 	record, err := NewReleaseRecord(key, testSHA, testDigest, testDigest, otherDigest, testDigest)
