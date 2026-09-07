@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -283,16 +284,21 @@ func candidateImportEdgeID(ctx context.Context, client kubernetes.Interface, gro
 		}
 		nodes[strings.TrimSpace(pod.Spec.NodeName)] = true
 	}
-	if len(nodes) != 1 {
-		return "", errors.New("candidate import worker identity is ambiguous")
+	if len(nodes) == 0 {
+		return "", errors.New("candidate import worker identity is unavailable")
 	}
+	identities := make([]string, 0, len(nodes))
 	for node := range nodes {
 		if len(node) < 3 || len(node) > 63 || strings.ContainsAny(node, "\r\n\t ,&=?#") {
 			return "", errors.New("candidate import worker identity is invalid")
 		}
-		return node, nil
+		identities = append(identities, node)
 	}
-	return "", errors.New("candidate import worker identity is unavailable")
+	// The authenticated endpoint returns one immutable candidate per group.
+	// A representative reader does not replace the complete Worker cohort proof
+	// required by the authority activator before any traffic switch.
+	sort.Strings(identities)
+	return identities[0], nil
 }
 
 func fetchCandidateEnvelope(ctx context.Context, config candidateImportConfig, edgeID, token string) (candidateEnvelope, bool, error) {

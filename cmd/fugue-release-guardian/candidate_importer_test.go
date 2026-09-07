@@ -89,6 +89,31 @@ func TestCandidateImporterBootstrapsExactGroupPointersIdempotently(t *testing.T)
 	}
 }
 
+func TestCandidateImportEdgeIDSupportsMultipleGroupNodes(t *testing.T) {
+	groupID := "edge-pool-a"
+	pod := func(name, node, group string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "fugue-system", Labels: map[string]string{
+			"fugue.io/edge-group-id": group, "fugue.io/edge-control-client": "true",
+		}}, Spec: corev1.PodSpec{NodeName: node}}
+	}
+	terminating := pod("old-worker", "edge-node-0", groupID)
+	now := metav1.Now()
+	terminating.DeletionTimestamp = &now
+	client := fake.NewSimpleClientset(
+		pod("worker-a", "edge-node-b", groupID),
+		pod("worker-b", "edge-node-a", groupID),
+		pod("standby", "edge-node-a", groupID),
+		pod("unrelated", "edge-node-0", "edge-pool-b"), terminating,
+	)
+	got, err := candidateImportEdgeID(context.Background(), client, groupID)
+	if err != nil || got != "edge-node-a" {
+		t.Fatalf("group reader selection: edge=%q err=%v", got, err)
+	}
+	if _, err := candidateImportEdgeID(context.Background(), client, "edge-pool-missing"); err == nil {
+		t.Fatal("missing group obtained a reader identity")
+	}
+}
+
 func TestCandidateImporterTreatsEmptyCandidateAsNoop(t *testing.T) {
 	groupID := "edge-pool-a"
 	token := strings.Repeat("t", 48)
