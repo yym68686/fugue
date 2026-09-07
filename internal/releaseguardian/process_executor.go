@@ -183,14 +183,8 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		return ExecutionReceipt{}, fmt.Errorf("Guardian %s terminal metadata is unproven: %w", operation, runErr)
 	}
 	if runErr != nil && strings.TrimSpace(result.FailureClass) != "" {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = guardianTerminalReason(result)
-		}
+		detail := guardianTerminalReason(result)
 		if detail != "" {
-			if len(detail) > 1024 {
-				detail = detail[:1024]
-			}
 			runErr = fmt.Errorf("%w: %s", runErr, detail)
 		}
 		return ExecutionReceipt{}, &ExecutionFailureError{Code: strings.TrimSpace(result.FailureClass), Err: runErr}

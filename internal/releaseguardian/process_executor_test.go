@@ -2,6 +2,7 @@ package releaseguardian
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,6 +111,34 @@ func TestProcessExecutorFailsClosedOnMissingReceipt(t *testing.T) {
 	}
 	if _, err := executor.Rollout(context.Background(), snapshot); err == nil || !strings.Contains(err.Error(), "result is unknown") {
 		t.Fatalf("unknown child result was accepted: %v", err)
+	}
+}
+
+func TestProcessExecutorPreservesStructuredFailureWithGenericStderr(t *testing.T) {
+	configureInClusterExecutorFixture(t)
+	snapshot := processSnapshot(t)
+	result := processResult(t, "failed-no-write", "forward-apply-rejected-before-commit")
+	result.FailureClass = "forward_apply"
+	result.FailureDetail = `read required Secret metadata "platform-tls": forbidden`
+	result = resealProcessResult(t, result)
+	raw, err := declarativerelease.CanonicalJSON(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "executor")
+	script := "#!/bin/sh\ncat <<'RECEIPT'\n" + string(raw) + "\nRECEIPT\nprintf 'component release failed\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewProcessExecutor(path, "pod-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.Rollout(context.Background(), snapshot)
+	var failure *ExecutionFailureError
+	if !errors.As(err, &failure) || failure.Code != result.FailureClass ||
+		!strings.Contains(failure.Error(), result.FailureDetail) || !strings.Contains(failure.Error(), result.Reason) {
+		t.Fatalf("structured failure was lost behind process stderr: %v", err)
 	}
 }
 

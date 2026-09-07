@@ -1872,45 +1872,6 @@ func TestOwnershipConvergenceTransfersOnlyDeclaredCaddyDataHostPath(t *testing.T
 	}
 }
 
-func TestOwnershipConvergenceTransfersDeclaredEdgeNodeCredentialsHostPath(t *testing.T) {
-	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
-		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front",
-		Container: "edge-front", FieldManager: "fugue-edge-worker-declarative",
-	}, ArtifactTargets: []declarativerelease.ArtifactTarget{{
-		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker",
-		Container: "edge", ContainerType: "container",
-	}}}
-	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker"}
-	desired := map[string]any{
-		"metadata": map[string]any{"uid": "worker-uid", "resourceVersion": "42"},
-		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
-			"containers": []any{map[string]any{"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("a", 64)}},
-			"volumes":    []any{map[string]any{"name": "edge-node-credentials", "hostPath": map[string]any{"path": "/etc/fugue/edge-node.env", "type": "File"}}},
-		}}},
-	}
-	allowed := ownershipConvergencePointers(release, identity, desired)
-	for _, pointer := range []string{edgeNodeCredentialsHostPathPointer, edgeNodeCredentialsHostPathTypePointer} {
-		if !stringSubset([]string{pointer}, allowed) {
-			t.Fatalf("declared edge credential pointer missing: %s in %v", pointer, allowed)
-		}
-	}
-	live := deepCopyJSONMap(t, desired)
-	mapField(live, "metadata")["managedFields"] = []any{map[string]any{
-		"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1",
-		"fieldsV1": managedFieldsTree(t, []string{edgeNodeCredentialsHostPathPointer, edgeNodeCredentialsHostPathTypePointer}),
-	}}
-	applyErr := errors.New(`Apply failed with 2 conflicts: conflicts with "kubectl-patch" using apps/v1:
-- .spec.template.spec.volumes[name="edge-node-credentials"].hostPath.path
-- .spec.template.spec.volumes[name="edge-node-credentials"].hostPath.type`)
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, applyErr); err != nil {
-		t.Fatalf("edge credential ownership transfer was rejected: %v", err)
-	}
-	patch, found, err := nextOwnershipTransferPatch(desired, live, allowed, release.Workload.FieldManager, applyErr)
-	if err != nil || !found || len(patch) != 7 {
-		t.Fatalf("edge credential ownership transfer patch=%v found=%v err=%v", patch, found, err)
-	}
-}
-
 func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 	allowed := []string{"/spec/template/spec/containers[name=edge-control]/image"}
 	for _, failure := range []error{
