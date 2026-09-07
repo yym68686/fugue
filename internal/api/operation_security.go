@@ -71,7 +71,7 @@ func operationListProjectForPrincipal(principal model.Principal, requested strin
 	return projectID, nil
 }
 
-func redactOperationEvidenceForAPI(items []model.OperationEvidence, includePayload bool) []model.OperationEvidence {
+func redactOperationEvidenceForAPI(items []model.OperationEvidence, includePayload bool, platformAdmin ...bool) []model.OperationEvidence {
 	if len(items) == 0 {
 		return []model.OperationEvidence{}
 	}
@@ -83,6 +83,9 @@ func redactOperationEvidenceForAPI(items []model.OperationEvidence, includePaylo
 		out[index].Reason = redactOperationDiagnosticString(item.Reason)
 		if includePayload {
 			out[index].Payload = redactOperationDiagnosticMap(item.Payload)
+			if len(platformAdmin) == 0 || !platformAdmin[0] {
+				delete(out[index].Payload, "builder_diagnostics")
+			}
 		} else {
 			out[index].Payload = nil
 		}
@@ -102,6 +105,7 @@ func redactOperationTimelineForAPI(items []model.OperationTimelineEntry, include
 		out[index].Reason = redactOperationDiagnosticString(item.Reason)
 		if includePayload {
 			out[index].Payload = redactOperationDiagnosticMap(item.Payload)
+			delete(out[index].Payload, "builder_diagnostics")
 		} else {
 			out[index].Payload = nil
 		}

@@ -1735,6 +1735,7 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeOperationReadError(w, err)
 		return
 	}
+	s.attachQueuedDeployOperation(&op)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 

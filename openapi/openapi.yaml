@@ -18837,6 +18837,9 @@ components:
         desired_origin_source:
           description: Durable source ownership that should persist after the operation completes.
           $ref: "#/components/schemas/AppSource"
+        queued_deploy_operation_id:
+          type: string
+          description: Explicit deployment link recovered from durable import evidence; absent when no link has been recorded. Consumers of older APIs may use the legacy queued-deploy message but must never infer a link from timestamps.
         result_message:
           type: string
         manifest_path:
@@ -19177,14 +19180,60 @@ components:
         redaction_status:
           type: string
         payload:
+          description: Optional durable evidence. Builder attempt records use build_attempt and retain every retry independently; user-facing consumers must not render arbitrary diagnostic payloads as deployment errors.
           type: object
           additionalProperties: true
+          properties:
+            build_attempt:
+              $ref: "#/components/schemas/BuilderAttemptEvidence"
+            builder_diagnostics:
+              description: Bounded build snapshots and redacted log tails. Returned only to platform administrators with include_payload; never included in public CLI deployment results.
+              type: object
+              additionalProperties: true
         payload_version:
           type: integer
           format: int32
         created_at:
           type: string
           format: date-time
+    BuilderAttemptEvidence:
+      type: object
+      additionalProperties: false
+      required: [attempt, outcome, started_at, finished_at, causes, missing_evidence]
+      properties:
+        attempt:
+          type: integer
+          minimum: 1
+        outcome:
+          type: string
+          enum: [succeeded, failed]
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        causes:
+          type: array
+          items:
+            type: string
+            description: Stable failure code, interpreted through a public message allowlist rather than raw cluster error text.
+        missing_evidence:
+          type: array
+          items:
+            type: string
+        memory_request_bytes:
+          type: integer
+          format: int64
+        memory_limit_bytes:
+          type: integer
+          format: int64
+        ephemeral_request_bytes:
+          type: integer
+          format: int64
+        ephemeral_limit_bytes:
+          type: integer
+          format: int64
     OperationTimelineEntry:
       type: object
       additionalProperties: false

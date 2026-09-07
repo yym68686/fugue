@@ -44,6 +44,7 @@ type rootOptions struct {
 }
 
 type CLI struct {
+	deployment  *deploymentCommandState
 	stdout      io.Writer
 	stderr      io.Writer
 	root        rootOptions
@@ -66,7 +67,11 @@ func runWithStreams(args []string, stdout, stderr io.Writer) error {
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
 	defer cli.closeOutputFile()
-	return cmd.Execute()
+	err := cmd.Execute()
+	if err != nil && cli.deployment != nil {
+		return cli.renderDeploymentError(err)
+	}
+	return err
 }
 
 func newCLI(stdout, stderr io.Writer) *CLI {
@@ -408,6 +413,10 @@ func (c *CLI) newWebClient(cookie string) (*Client, error) {
 
 func (c *CLI) progressf(format string, args ...any) {
 	if c.wantsJSON() {
+		return
+	}
+	if c.deployment != nil && strings.HasPrefix(format, "warning=") {
+		_, _ = fmt.Fprintln(c.stderr, strings.Split(format, ":")[0])
 		return
 	}
 	_, _ = fmt.Fprintf(c.stderr, format+"\n", args...)

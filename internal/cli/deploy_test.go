@@ -576,7 +576,7 @@ func TestRunDeployWithRepoURLImportsGitHubAndLoadsEnv(t *testing.T) {
 	if gotRequest.Env["GREETING"] != "hello world" {
 		t.Fatalf("expected quoted GREETING, got %q", gotRequest.Env["GREETING"])
 	}
-	if got := stdout.String(); got != "app_id=app_123\noperation_id=op_123\n" {
+	if got := stdout.String(); got != "outcome=accepted\napp_id=app_123\noperation_id=op_123\n" {
 		t.Fatalf("unexpected stdout %q", got)
 	}
 	if !strings.Contains(stderr.String(), "Loaded 3 env vars") {
@@ -756,9 +756,9 @@ func TestRunDeployImageExistingAppWaitsForDerivedDeploy(t *testing.T) {
 				t.Fatalf("decode rebuild body: %v", err)
 			}
 			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"operation":{"id":"op_import","app_id":"app_123","status":"pending","created_at":"2026-04-02T00:00:01Z","updated_at":"2026-04-02T00:00:01Z"},"build":{"source_type":"docker-image","image_ref":"ghcr.io/example/demo:new","build_strategy":""}}`))
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_import","app_id":"app_123","type":"import","status":"pending","created_at":"2026-04-02T00:00:01Z","updated_at":"2026-04-02T00:00:01Z"},"build":{"source_type":"docker-image","image_ref":"ghcr.io/example/demo:new","build_strategy":""}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_import":
-			_, _ = w.Write([]byte(`{"operation":{"id":"op_import","app_id":"app_123","status":"completed","created_at":"2026-04-02T00:00:01Z","updated_at":"2026-04-02T00:00:02Z","completed_at":"2026-04-02T00:00:02Z"}}`))
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_import","app_id":"app_123","type":"import","status":"completed","queued_deploy_operation_id":"op_deploy","created_at":"2026-04-02T00:00:01Z","updated_at":"2026-04-02T00:00:02Z","completed_at":"2026-04-02T00:00:02Z"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations" && r.URL.Query().Get("app_id") == "app_123":
 			listOperationCalls++
 			if listOperationCalls == 1 {
@@ -767,7 +767,7 @@ func TestRunDeployImageExistingAppWaitsForDerivedDeploy(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"operations":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_deploy":
-			_, _ = w.Write([]byte(`{"operation":{"id":"op_deploy","app_id":"app_123","status":"completed","created_at":"2026-04-02T00:00:03Z","updated_at":"2026-04-02T00:00:04Z","completed_at":"2026-04-02T00:00:04Z"}}`))
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_deploy","app_id":"app_123","type":"deploy","status":"completed","created_at":"2026-04-02T00:00:03Z","updated_at":"2026-04-02T00:00:04Z","completed_at":"2026-04-02T00:00:04Z"}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -794,8 +794,8 @@ func TestRunDeployImageExistingAppWaitsForDerivedDeploy(t *testing.T) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
 		}
 	}
-	if listOperationCalls < 2 {
-		t.Fatalf("expected CLI to re-check app operations after derived deploy completed, got %d", listOperationCalls)
+	if listOperationCalls != 0 {
+		t.Fatalf("must follow explicit deployment link without scanning unrelated operations, got %d", listOperationCalls)
 	}
 }
 

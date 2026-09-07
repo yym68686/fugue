@@ -468,7 +468,7 @@ func TestRunDeployImageSupportsIntentFlags(t *testing.T) {
 	if gotRequest.Postgres == nil || gotRequest.Postgres.Database != "appdb" || gotRequest.Postgres.User != "app_user" || gotRequest.Postgres.Password != "secret" || gotRequest.Postgres.StorageSize != "5Gi" {
 		t.Fatalf("unexpected managed postgres payload %+v", gotRequest.Postgres)
 	}
-	if got := stdout.String(); got != "app_id=app_123\noperation_id=op_123\n" {
+	if got := stdout.String(); got != "outcome=accepted\napp_id=app_123\noperation_id=op_123\n" {
 		t.Fatalf("unexpected stdout %q", got)
 	}
 }
@@ -1581,7 +1581,7 @@ func TestRunDeployGitHubSubcommandNormalizesOwnerRepo(t *testing.T) {
 	if gotRequest.Name != "demo" {
 		t.Fatalf("expected default app name demo, got %q", gotRequest.Name)
 	}
-	if got := stdout.String(); got != "app_id=app_123\noperation_id=op_123\n" {
+	if got := stdout.String(); got != "outcome=accepted\napp_id=app_123\noperation_id=op_123\n" {
 		t.Fatalf("unexpected stdout %q", got)
 	}
 }
@@ -1598,6 +1598,8 @@ func TestRunDeployGitHubWaitShowsMissingImageDiagnosis(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-github":
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"app":{"id":"app_123","name":"demo"},"operation":{"id":"op_import","app_id":"app_123","type":"import","status":"pending"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_deploy":
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_deploy","app_id":"app_123","type":"deploy","status":"completed"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_import":
 			_, _ = w.Write([]byte(`{"operation":{
 				"id":"op_import",
@@ -1707,17 +1709,14 @@ func TestRunDeployGitHubWaitShowsMissingImageDiagnosis(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{
-		"app_id=app_123",
-		"operation_id=op_import",
-		"url=https://demo.example.com",
-		"diagnosis",
-		"category=runtime-image-missing",
-		`summary=build op_import queued deploy op_deploy, but managed image "registry.example.com/demo-managed:sha256" is missing from registry inventory`,
-		"registry_image_status=missing",
-	} {
+	for _, want := range []string{"app_id=app_123", "operation_id=op_import", "outcome=succeeded", "url=https://demo.example.com"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+			t.Fatalf("missing %q in %q", want, out)
+		}
+	}
+	for _, private := range []string{"registry.example.com", "node_name", "latest_pod_group", "runtime-image-missing"} {
+		if strings.Contains(out, private) {
+			t.Fatalf("deploy result leaked diagnostic %q", private)
 		}
 	}
 }
@@ -3149,7 +3148,7 @@ func TestRunAppBuildLogsFallsBackToArtifactContextWhenJobNameMissing(t *testing.
 
 	out := stdout.String()
 	for _, want := range []string{
-		"job_name=ReplicaSet/demo-9f8d7c6b5",
+		"job_name=\n",
 		`summary=build op_import queued deploy op_deploy, but managed image "registry.example.com/demo-managed:sha256" is missing from registry inventory`,
 		"build_message=import build completed",
 		"latest_pod_group=ReplicaSet/demo-9f8d7c6b5",

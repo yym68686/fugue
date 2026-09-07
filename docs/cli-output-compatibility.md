@@ -191,3 +191,12 @@ Before changing output for any command:
 - Keep progress and warning text on stderr.
 - Do not change env raw visibility defaults.
 - Do not add OpenAPI fields from CLI guesses; update `openapi/openapi.yaml` first when API shape changes.
+
+## Deployment result addition
+
+Source deploy and app deploy/build responses add `result` with version
+`fugue.deploy-result.v1`. Submitted deployment failures and unknown outcomes now
+emit this object on stdout even when the process exits nonzero. See
+[deployment result contract](cli-deployment-results.md) for outcome, evidence and
+security semantics. Build diagnostics no longer substitute runtime ReplicaSets
+for missing builder Job names or infer child deployments from timestamps.

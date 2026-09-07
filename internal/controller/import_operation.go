@@ -35,6 +35,26 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	importCtx, cancel := context.WithTimeout(ctx, importSourceTimeout())
 	defer cancel()
+	importCtx = sourceimport.WithBuilderEvidenceRecorder(importCtx, func(fact model.BuilderAttemptEvidence, diagnostics map[string]any) {
+		severity := model.OperationEvidenceSeverityInfo
+		if fact.Outcome == "failed" {
+			severity = model.OperationEvidenceSeverityError
+		}
+		confidence := model.OperationEvidenceConfidenceConfirmed
+		if len(fact.MissingEvidence) > 0 {
+			confidence = model.OperationEvidenceConfidenceEvidenceBacked
+		}
+		payload := sourceimport.BuilderAttemptPayload(fact)
+		payload["builder_diagnostics"] = diagnostics
+		s.recordOperationEvidenceBestEffort(model.OperationEvidence{
+			TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID, OperationID: op.ID,
+			Type: model.OperationEvidenceTypeBuildAttempt, Source: model.OperationEvidenceSourceImportController,
+			Severity: severity, Confidence: confidence, ObservedAt: fact.FinishedAt,
+			Summary: fmt.Sprintf("Build attempt %d %s", fact.Attempt, fact.Outcome),
+			Payload: payload, PayloadVersion: 1,
+			RedactionStatus: model.OperationEvidenceRedactionRedacted,
+		})
+	})
 
 	jobLabels := map[string]string{
 		"fugue.pro/operation-id": op.ID,
@@ -283,6 +303,13 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return fmt.Errorf("queue deploy after import: %w", err)
 	}
 	s.recordImportQueuedDeployReleaseSteps(op, app, deployOp)
+	s.recordOperationEvidenceBestEffort(model.OperationEvidence{
+		TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID, OperationID: op.ID,
+		Type: "deploy_queued", Source: model.OperationEvidenceSourceImportController,
+		Severity: model.OperationEvidenceSeverityInfo, Confidence: model.OperationEvidenceConfidenceConfirmed,
+		Summary: "Build completed; deployment queued", RedactionStatus: model.OperationEvidenceRedactionRedacted,
+		Payload: map[string]any{"queued_deploy_operation_id": deployOp.ID}, PayloadVersion: 1,
+	})
 	timer.Mark("queue_deploy")
 	s.updateOperationProgress(op.ID, fmt.Sprintf("import build completed; queued deploy operation %s", deployOp.ID))
 

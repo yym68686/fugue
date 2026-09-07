@@ -51,7 +51,12 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 					break
 				}
 			}
+			if current.ID != id || base.AppID != "" && current.AppID != base.AppID {
+				return bundle, nil, fmt.Errorf("operation identity could not be verified")
+			}
 			tracked[id] = current
+			c.rememberDeployOperation(current)
+			c.progressBuildAttempts(client, current)
 			currentOps = append(currentOps, current)
 
 			status := strings.TrimSpace(current.Status)
@@ -66,8 +71,9 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 
 			if strings.EqualFold(strings.TrimSpace(current.Type), model.OperationTypeImport) &&
 				strings.EqualFold(status, model.OperationStatusCompleted) {
-				if linkedID := queuedDeployOperationID(current.ResultMessage); linkedID != "" {
+				if linkedID := explicitQueuedDeployOperationID(current); linkedID != "" {
 					if _, exists := tracked[linkedID]; !exists {
+						pending++ // the newly linked deployment has not been observed yet
 						order = append(order, linkedID)
 						tracked[linkedID] = model.Operation{
 							ID:    linkedID,
@@ -75,12 +81,14 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 							Type:  model.OperationTypeDeploy,
 						}
 					}
+				} else {
+					return bundle, nil, fmt.Errorf("build completed without a verifiable deployment link")
 				}
 			}
 
 			switch status {
 			case model.OperationStatusCompleted:
-			case model.OperationStatusFailed:
+			case model.OperationStatusFailed, "canceled", "cancelled", "superseded":
 				return bundle, nil, c.operationFailure(client, current)
 			default:
 				pending++
@@ -121,12 +129,8 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 			c.progressSafeRolloutPhasesForDeploy(client, currentApps, currentOps)
 			diagnosis, err := c.buildImportBundleDiagnosis(client, bundle.PrimaryApp)
 			if err != nil {
-				if isTransientDeployWaitError(err) {
-					c.progressf("warning=deploy diagnosis unavailable after completion: %v", err)
-					diagnosis = nil
-				} else {
-					return bundle, nil, err
-				}
+				c.progressf("warning=deploy diagnosis unavailable after completion")
+				diagnosis = nil
 			}
 			return bundle, diagnosis, nil
 		}
@@ -136,7 +140,7 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 }
 
 func (c *CLI) progressSafeRolloutPhasesForDeploy(client *Client, apps []model.App, operations []model.Operation) {
-	if client == nil {
+	if client == nil || c.deployment != nil {
 		return
 	}
 	appsByID := map[string]model.App{}
@@ -210,7 +214,7 @@ func cliSafeRolloutPhase(phase string) bool {
 }
 
 func (c *CLI) renderDeployProgressSnapshot(client *Client, apps []model.App, operations []model.Operation, filters projectStatusFilters, lastHash *[32]byte, haveSnapshot *bool) error {
-	if c.wantsJSON() {
+	if c.wantsJSON() || c.deployment != nil {
 		return nil
 	}
 	snapshot, err := c.buildDeployProgressSnapshot(client, apps, operations, filters)

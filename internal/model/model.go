@@ -2934,6 +2934,7 @@ type AppImageTrackingCheckFilter struct {
 }
 
 type Operation struct {
+	QueuedDeployOperationID  string                             `json:"queued_deploy_operation_id,omitempty"`
 	ID                       string                             `json:"id"`
 	TenantID                 string                             `json:"tenant_id"`
 	Type                     string                             `json:"type"`

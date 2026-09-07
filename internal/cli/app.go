@@ -46,12 +46,13 @@ type appStartCommandOptions struct {
 }
 
 type appCommandResult struct {
-	App             *model.App       `json:"app,omitempty"`
-	Operation       *model.Operation `json:"operation,omitempty"`
-	RestartToken    string           `json:"restart_token,omitempty"`
-	Deleted         bool             `json:"deleted,omitempty"`
-	AlreadyDisabled bool             `json:"already_disabled,omitempty"`
-	AlreadyDeleting bool             `json:"already_deleting,omitempty"`
+	Result          *deploymentResult `json:"result,omitempty"`
+	App             *model.App        `json:"app,omitempty"`
+	Operation       *model.Operation  `json:"operation,omitempty"`
+	RestartToken    string            `json:"restart_token,omitempty"`
+	Deleted         bool              `json:"deleted,omitempty"`
+	AlreadyDisabled bool              `json:"already_disabled,omitempty"`
+	AlreadyDeleting bool              `json:"already_deleting,omitempty"`
 }
 
 const appStatusSettleAfterOperationTimeout = 30 * time.Second
@@ -902,6 +903,7 @@ func (c *CLI) waitForSingleApp(client *Client, appID string, op model.Operation,
 
 func (c *CLI) waitForSingleAppOperation(client *Client, appID string, op model.Operation, wait bool) (*model.App, *model.Operation, error) {
 	finalOp := op
+	c.rememberDeployOperation(op)
 	if !wait {
 		app, err := client.GetApp(appID)
 		if err != nil {
@@ -1013,6 +1015,14 @@ func writeAppMoveImpact(w io.Writer, impact model.AppMoveImpact) error {
 }
 
 func (c *CLI) renderAppCommandResult(result appCommandResult) error {
+	if c.deployment != nil && result.Operation != nil {
+		bundle := importBundle{Operations: []model.Operation{*result.Operation}}
+		if result.App != nil {
+			bundle.PrimaryApp = *result.App
+		}
+		final := c.successfulDeploymentResult(bundle, result.Operation.Status == model.OperationStatusCompleted)
+		result.Result = &final
+	}
 	if c.wantsJSON() {
 		out := result
 		if result.App != nil {

@@ -39,7 +39,7 @@ func (t *deployWaitTransientErrorTracker) shouldRetry(c *CLI, err error) (bool, 
 		return false, fmt.Errorf("deploy wait API remained temporarily unavailable for %s: %w", deployWaitTransientErrorWindow, err)
 	}
 	if !t.warned {
-		c.progressf("warning=deploy wait API temporarily unavailable; continuing to poll: %v", err)
+		c.progressf("warning=deploy wait API temporarily unavailable; continuing to poll")
 		t.warned = true
 	}
 	return true, nil

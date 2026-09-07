@@ -37,15 +37,24 @@ type builderPodList struct {
 type builderPod struct {
 	Metadata struct {
 		Name              string    `json:"name"`
+		UID               string    `json:"uid"`
 		CreationTimestamp time.Time `json:"creationTimestamp"`
 	} `json:"metadata"`
 	Spec struct {
-		NodeName string `json:"nodeName,omitempty"`
+		NodeName       string                     `json:"nodeName,omitempty"`
+		Containers     []builderEvidenceContainer `json:"containers"`
+		InitContainers []builderEvidenceContainer `json:"initContainers"`
 	} `json:"spec"`
 	Status builderPodStatus `json:"status"`
 }
 
+type builderEvidenceContainer struct {
+	Name      string                      `json:"name"`
+	Resources BuilderResourceRequirements `json:"resources"`
+}
+
 type builderPodStatus struct {
+	Conditions            []builderJobCondition    `json:"conditions,omitempty"`
 	Phase                 string                   `json:"phase,omitempty"`
 	Reason                string                   `json:"reason,omitempty"`
 	Message               string                   `json:"message,omitempty"`

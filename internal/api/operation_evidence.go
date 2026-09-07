@@ -44,7 +44,7 @@ func (s *Server) handleGetOperationEvidence(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, err)
 		return
 	}
-	evidence = redactOperationEvidenceForAPI(evidence, queryBool(r, "include_payload"))
+	evidence = redactOperationEvidenceForAPI(evidence, queryBool(r, "include_payload"), principal.IsPlatformAdmin())
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"evidence": evidence})
 }
 
@@ -507,4 +507,27 @@ func queryIntDefault(r *http.Request, key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+// attachQueuedDeployOperation is read-only and optional. Failure to enrich must
+// not change an operation's status or block access during an evidence outage.
+func (s *Server) attachQueuedDeployOperation(op *model.Operation) {
+	if op.Type != model.OperationTypeImport || op.Status != model.OperationStatusCompleted {
+		return
+	}
+	evidence, err := s.store.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: op.TenantID, OperationID: op.ID, Types: []string{"deploy_queued"}, Limit: 8})
+	if err != nil {
+		return
+	}
+	for _, item := range evidence {
+		id, _ := item.Payload["queued_deploy_operation_id"].(string)
+		if id == "" || item.OperationID != op.ID {
+			continue
+		}
+		child, err := s.store.GetOperation(id)
+		if err == nil && child.TenantID == op.TenantID && child.AppID == op.AppID && child.Type == model.OperationTypeDeploy {
+			op.QueuedDeployOperationID = id
+			return
+		}
+	}
 }

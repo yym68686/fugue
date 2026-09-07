@@ -60,11 +60,14 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 		if ctx.Err() != nil {
 			break
 		}
-		err := run(ctx, builderJobAttempt{
+		started := time.Now().UTC()
+		currentAttempt := builderJobAttempt{
 			Number:              attempt,
 			OOMRetryCount:       oomRetryCount,
 			EphemeralRetryCount: ephemeralRetryCount,
-		})
+		}
+		err := run(ctx, currentAttempt)
+		recordBuilderAttempt(ctx, jobName, currentAttempt, started, err)
 		if err == nil {
 			return nil
 		}

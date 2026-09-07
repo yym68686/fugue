@@ -103,6 +103,7 @@ type importBundle struct {
 }
 
 type importBundleJSON struct {
+	Result        *deploymentResult         `json:"result,omitempty"`
 	App           *model.App                `json:"app,omitempty"`
 	Operation     *model.Operation          `json:"operation,omitempty"`
 	Apps          []model.App               `json:"apps,omitempty"`
@@ -360,6 +361,9 @@ func normalizeDeployTopologyFlags(opts *deployCommonOptions) error {
 }
 
 func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
+	if c.deployment == nil {
+		c.deployment = &deploymentCommandState{}
+	}
 	if err := normalizeDeployTopologyFlags(&opts.deployCommonOptions); err != nil {
 		return err
 	}
@@ -569,6 +573,10 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	}
 
 	c.progressf("Uploading %s (%d bytes)", archiveName, len(archiveBytes))
+	if c.deployment != nil {
+		c.deployment.requestStarted = true
+		c.deployment.client = client
+	}
 	response, err := client.ImportUpload(request, archiveName, archiveBytes)
 	if err != nil {
 		return err
@@ -577,6 +585,9 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 }
 
 func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingDir string) error {
+	if c.deployment == nil {
+		c.deployment = &deploymentCommandState{}
+	}
 	if err := normalizeDeployTopologyFlags(&opts.deployCommonOptions); err != nil {
 		return err
 	}
@@ -710,6 +721,10 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	}
 
 	c.progressf("Importing %s", request.RepoURL)
+	if c.deployment != nil {
+		c.deployment.requestStarted = true
+		c.deployment.client = client
+	}
 	response, err := client.ImportGitHub(request)
 	if err != nil {
 		return err
@@ -732,6 +747,9 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 }
 
 func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
+	if c.deployment == nil {
+		c.deployment = &deploymentCommandState{}
+	}
 	if err := normalizeDeployTopologyFlags(&opts.deployCommonOptions); err != nil {
 		return err
 	}
@@ -823,6 +841,10 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 	}
 
 	c.progressf("Importing image %s", imageRef)
+	if c.deployment != nil {
+		c.deployment.requestStarted = true
+		c.deployment.client = client
+	}
 	response, err := client.ImportImage(request)
 	if err != nil {
 		return err
@@ -855,6 +877,10 @@ func (c *CLI) runDeployImageExistingApp(imageRef, appRef string, opts deployImag
 	if model.AppOriginSource(app) == nil {
 		return fmt.Errorf("app does not have source metadata to update")
 	}
+	if c.deployment != nil {
+		c.deployment.requestStarted = true
+		c.deployment.client = client
+	}
 	response, err := client.RebuildApp(app.ID, rebuildPlanRequest{
 		ImageRef: strings.TrimSpace(imageRef),
 	})
@@ -870,6 +896,7 @@ func (c *CLI) runDeployImageExistingApp(imageRef, appRef string, opts deployImag
 			"app":       redactAppForOutput(app),
 			"operation": redactOperationForOutput(*finalOp),
 			"build":     response.Build,
+			"result":    c.successfulDeploymentResult(importBundle{Operations: []model.Operation{*finalOp}}, opts.Wait),
 		})
 	}
 	return writeKeyValues(c.stdout,
@@ -883,30 +910,15 @@ func (c *CLI) runDeployImageExistingApp(imageRef, appRef string, opts deployImag
 
 func (c *CLI) waitForExistingImageApp(client *Client, appID, imageRef string, op model.Operation, wait bool) (model.App, *model.Operation, error) {
 	finalOp := op
+	c.rememberDeployOperation(op)
 	if wait {
-		finalOps, err := c.waitForOperations(client, []model.Operation{op})
+		final, err := c.waitForAppRebuildOperation(client, appID, op, true)
 		if err != nil {
 			return model.App{}, &finalOp, err
 		}
-		if len(finalOps) > 0 {
-			finalOp = finalOps[0]
-		}
+		finalOp = final
 		deadline := time.Now().Add(deployImageExistingAppSettleTimeout)
 		for {
-			active, err := loadActiveAppOperations(client, appID)
-			if err != nil {
-				return model.App{}, &finalOp, err
-			}
-			if len(active) > 0 {
-				finalOps, err := c.waitForOperations(client, active)
-				if err != nil {
-					return model.App{}, &finalOp, err
-				}
-				if len(finalOps) > 0 {
-					finalOp = finalOps[0]
-				}
-				continue
-			}
 			app, err := client.GetApp(appID)
 			if err != nil {
 				return model.App{}, &finalOp, err
@@ -1102,6 +1114,18 @@ func dedupeOperations(operations []model.Operation, primary *model.Operation) []
 }
 
 func (c *CLI) finishImportBundle(client *Client, bundle importBundle, wait bool) error {
+	if c.deployment != nil {
+		c.deployment.client = client
+	}
+	if len(bundle.Operations) == 0 && bundle.PrimaryOp.ID != "" {
+		bundle.Operations = []model.Operation{bundle.PrimaryOp}
+	}
+	if len(bundle.Apps) == 0 && bundle.PrimaryApp.ID != "" {
+		bundle.Apps = []model.App{bundle.PrimaryApp}
+	}
+	for _, op := range bundle.Operations {
+		c.rememberDeployOperation(op)
+	}
 	if bundle.PrimaryApp.ID != "" && bundle.PrimaryOp.ID != "" {
 		c.progressf("Queued operation %s for app %s", bundle.PrimaryOp.ID, bundle.PrimaryApp.ID)
 	} else if len(bundle.Operations) > 0 {
@@ -1124,11 +1148,17 @@ func (c *CLI) finishImportBundle(client *Client, bundle importBundle, wait bool)
 }
 
 func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *appOverviewDiagnosis) error {
+	// Deployment results expose the safe result projection, not raw admin diagnostic
+	// warnings or details about a different serving revision.
+	if c.deployment != nil {
+		diagnosis = nil
+	}
 	if c.wantsJSON() {
 		if c.shouldRedact() {
 			bundle = redactImportBundleForOutput(bundle)
 		}
-		payload := importBundleJSON{
+		result := c.successfulDeploymentResult(bundle, waited)
+		payload := importBundleJSON{Result: &result,
 			Apps:          bundle.Apps,
 			Operations:    bundle.Operations,
 			Diagnosis:     diagnosis,
@@ -1149,6 +1179,8 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *ap
 	}
 
 	pairs := make([]kvPair, 0, 4)
+	finalResult := c.successfulDeploymentResult(bundle, waited)
+	pairs = append(pairs, kvPair{Key: "outcome", Value: finalResult.Outcome})
 	if strings.TrimSpace(bundle.PrimaryApp.ID) != "" {
 		pairs = append(pairs, kvPair{Key: "app_id", Value: bundle.PrimaryApp.ID})
 	}
@@ -1291,6 +1323,8 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 					break
 				}
 			}
+			c.rememberDeployOperation(current)
+			c.progressBuildAttempts(client, current)
 			status := strings.TrimSpace(current.Status)
 			if status != lastStatus[id] {
 				if len(order) == 1 {
@@ -1305,7 +1339,7 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 			case model.OperationStatusCompleted:
 				final[id] = current
 				delete(pending, id)
-			case model.OperationStatusFailed:
+			case model.OperationStatusFailed, "canceled", "cancelled", "superseded":
 				return nil, c.operationFailure(client, current)
 			default:
 				pending[id] = base
@@ -1332,28 +1366,7 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 }
 
 func (c *CLI) operationFailure(client *Client, op model.Operation) error {
-	if strings.TrimSpace(op.AppID) != "" {
-		logs, err := client.GetBuildLogs(op.AppID, op.ID, 200)
-		if err == nil {
-			text := strings.TrimSpace(logs.Logs)
-			if text == "" {
-				text = strings.TrimSpace(logs.Summary)
-			}
-			if text != "" {
-				if strings.TrimSpace(op.ErrorMessage) != "" {
-					return fmt.Errorf("operation %s failed: %s\n\n%s", op.ID, strings.TrimSpace(op.ErrorMessage), text)
-				}
-				return fmt.Errorf("operation %s failed\n\n%s", op.ID, text)
-			}
-		}
-	}
-	if strings.TrimSpace(op.ErrorMessage) != "" {
-		return fmt.Errorf("operation %s failed: %s", op.ID, strings.TrimSpace(op.ErrorMessage))
-	}
-	if strings.TrimSpace(op.ResultMessage) != "" {
-		return fmt.Errorf("operation %s failed: %s", op.ID, strings.TrimSpace(op.ResultMessage))
-	}
-	return fmt.Errorf("operation %s failed", op.ID)
+	return &deploymentResultError{Result: c.deploymentFailureResult(client, op), code: ExitCodeSystemFault}
 }
 
 func fetchFinalApps(client *Client, apps []model.App, operations []model.Operation) ([]model.App, error) {

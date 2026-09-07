@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -157,6 +156,8 @@ func summarizeAppBuildArtifact(app model.App, operations []model.Operation, imag
 	if latestImport != nil {
 		if linked := linkedDeployOperation(*latestImport, sorted); linked != nil {
 			latestDeploy = linked
+		} else {
+			latestDeploy = nil
 		}
 	}
 
@@ -183,7 +184,7 @@ func enrichBuildArtifactReport(report *appBuildArtifactReport, app model.App, im
 	if importOp != nil {
 		deployOp = linkedDeployOperation(*importOp, operations)
 	}
-	if deployOp == nil {
+	if deployOp == nil && importOp == nil {
 		deployOp = latestOperationOfType(operations, model.OperationTypeDeploy)
 	}
 
@@ -217,6 +218,14 @@ func enrichBuildArtifactReport(report *appBuildArtifactReport, app model.App, im
 		specImage(importOp),
 		strings.TrimSpace(app.Spec.Image),
 	)
+
+	if importOp != nil && deployOp == nil {
+		report.ManagedImageRef = sourceResolvedImageRef(importOp)
+		report.RuntimeImageRef = ""
+		// Live pods belong to the serving version; they are not evidence that this
+		// build deployed, and cannot be compared with an unrelated expected image.
+		podInventory = nil
+	}
 
 	if version := matchImageVersion(images, report.ManagedImageRef, report.RuntimeImageRef); version != nil {
 		report.RegistryImageStatus = normalizeImageInventoryStatus(version.Status)
@@ -684,8 +693,6 @@ func buildLogsFallbackJobName(logs buildLogsResponse) string {
 	}
 	return firstNonEmptyTrimmed(
 		strings.TrimSpace(logs.ArtifactSummary.BuildJobName),
-		strings.TrimSpace(logs.ArtifactSummary.LatestPodGroup),
-		strings.TrimSpace(logs.ArtifactSummary.LinkedDeployOperationID),
 	)
 }
 
@@ -981,30 +988,13 @@ func buildArtifactStrategy(importOp, deployOp *model.Operation) string {
 }
 
 func linkedDeployOperation(importOp model.Operation, operations []model.Operation) *model.Operation {
-	if id := queuedDeployOperationID(importOp.ResultMessage); id != "" {
-		if op := findOperationPtrByID(operations, id); op != nil {
+	if importOp.Status != model.OperationStatusCompleted {
+		return nil
+	}
+	if id := explicitQueuedDeployOperationID(importOp); id != "" {
+		if op := findOperationPtrByID(operations, id); op != nil && op.AppID == importOp.AppID && op.Type == model.OperationTypeDeploy {
 			return op
 		}
-	}
-	sorted := append([]model.Operation(nil), operations...)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].CreatedAt.Equal(sorted[j].CreatedAt) {
-			return sorted[i].ID < sorted[j].ID
-		}
-		return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
-	})
-	for i := range sorted {
-		op := &sorted[i]
-		if !strings.EqualFold(strings.TrimSpace(op.Type), model.OperationTypeDeploy) {
-			continue
-		}
-		if strings.TrimSpace(op.AppID) != strings.TrimSpace(importOp.AppID) {
-			continue
-		}
-		if op.CreatedAt.Before(importOp.CreatedAt) {
-			continue
-		}
-		return op
 	}
 	return nil
 }

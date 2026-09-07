@@ -984,6 +984,7 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			c.deployment = &deploymentCommandState{client: client, requestStarted: true}
 			response, err := client.RebuildApp(app.ID, rebuildPlanRequest{
 				Branch:          opts.Branch,
 				ImageRef:        opts.ImageRef,
@@ -1006,6 +1007,7 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 					"app_id":    app.ID,
 					"operation": redactOperationForOutput(response.Operation),
 					"build":     response.Build,
+					"result":    c.successfulDeploymentResult(importBundle{Operations: []model.Operation{response.Operation}}, opts.Wait),
 				})
 			}
 			return writeKeyValues(c.stdout,
@@ -1044,13 +1046,16 @@ func (c *CLI) waitForAppRebuildOperation(client *Client, appID string, operation
 		!strings.EqualFold(strings.TrimSpace(operation.Status), model.OperationStatusCompleted) {
 		return operation, nil
 	}
-	deployID := queuedDeployOperationID(operation.ResultMessage)
+	deployID := explicitQueuedDeployOperationID(operation)
 	if deployID == "" {
-		return operation, nil
+		return operation, fmt.Errorf("build completed without a verifiable deployment link")
 	}
 	deployOperation, err := client.GetOperation(deployID)
 	if err != nil {
 		return operation, err
+	}
+	if deployOperation.AppID != appID || deployOperation.Type != model.OperationTypeDeploy {
+		return operation, fmt.Errorf("deployment link identity mismatch")
 	}
 	_, finalDeployOperation, err := c.waitForSingleAppOperation(client, appID, deployOperation, true)
 	if err != nil {
@@ -1079,17 +1084,20 @@ func (c *CLI) newAppReleaseDeployCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			c.deployment = &deploymentCommandState{client: client, requestStarted: true}
 			response, err := client.DeployApp(app.ID, nil)
 			if err != nil {
 				return err
 			}
+			c.rememberDeployOperation(response.Operation)
 			result := appCommandResult{Operation: &response.Operation}
 			if opts.Wait {
-				finalApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				finalApp, finalOperation, err := c.waitForSingleAppOperation(client, app.ID, response.Operation, true)
 				if err != nil {
 					return err
 				}
 				result.App = finalApp
+				result.Operation = finalOperation
 			} else {
 				result.App = &app
 			}
