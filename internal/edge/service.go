@@ -456,22 +456,33 @@ func preferNodeScopedEdgeToken(path, fallback string) string {
 	if err != nil {
 		return strings.TrimSpace(fallback)
 	}
+	workloadMode, token := "", ""
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
-		if !ok || (strings.TrimSpace(key) != "FUGUE_EDGE_TOKEN" && strings.TrimSpace(key) != "FUGUE_EDGE_NODE_TOKEN") {
+		if !ok {
 			continue
 		}
+		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
 		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
 			value = value[1 : len(value)-1]
 		}
-		if value != "" {
-			return value
+		switch key {
+		case "FUGUE_EDGE_WORKLOAD_MODE":
+			workloadMode = value
+		case "FUGUE_EDGE_TOKEN", "FUGUE_EDGE_NODE_TOKEN":
+			if token == "" && value != "" {
+				token = value
+			}
 		}
+	}
+	// Static credentials are managed by the deployment, not node-updater.
+	if model.NormalizeEdgeWorkloadMode(workloadMode) == model.EdgeWorkloadModeDynamic && token != "" {
+		return token
 	}
 	return strings.TrimSpace(fallback)
 }

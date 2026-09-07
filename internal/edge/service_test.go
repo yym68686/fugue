@@ -4637,7 +4637,7 @@ func (ioDiscard) Write(p []byte) (int, error) {
 
 func TestPreferNodeScopedEdgeToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "edge-node.env")
-	if err := os.WriteFile(path, []byte("FUGUE_EDGE_TOKEN='node-scoped'\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("FUGUE_EDGE_WORKLOAD_MODE=dynamic\nFUGUE_EDGE_TOKEN='node-scoped'\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if got := preferNodeScopedEdgeToken(path, "static-fallback"); got != "node-scoped" {
@@ -4645,5 +4645,20 @@ func TestPreferNodeScopedEdgeToken(t *testing.T) {
 	}
 	if got := preferNodeScopedEdgeToken(filepath.Join(t.TempDir(), "missing"), "static-fallback"); got != "static-fallback" {
 		t.Fatalf("expected static fallback for missing node credential, got %q", got)
+	}
+}
+
+func TestPreferNodeScopedEdgeTokenKeepsStaticCredential(t *testing.T) {
+	for _, mode := range []string{"static", "", "unknown"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "edge-node.env")
+			if err := os.WriteFile(path, []byte("FUGUE_EDGE_TOKEN='stale-node-token'\nFUGUE_EDGE_WORKLOAD_MODE="+mode+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			service := NewService(config.EdgeConfig{EdgeNodeEnvFile: path, EdgeToken: "declarative-secret"}, log.New(io.Discard, "", 0))
+			if service.Config.EdgeToken != "declarative-secret" {
+				t.Fatal("non-dynamic workload replaced its declarative credential")
+			}
+		})
 	}
 }
