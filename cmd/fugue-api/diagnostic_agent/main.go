@@ -246,7 +246,7 @@ func run(opts options) error {
 	if err != nil {
 		return err
 	}
-	cgroupRoot, cgroupPath, err := resolveTargetCgroupRoot(cgroupPath, normalizeContainerID(opts.containerID))
+	cgroupRoot, cgroupPath, err := resolveTargetCgroupRoot(cgroupPath, normalizeContainerID(opts.containerID), pids)
 	if err != nil {
 		return err
 	}
@@ -480,16 +480,84 @@ func commandLineHasExactArgument(argv []string, expected string) bool {
 	return false
 }
 
-func resolveTargetCgroupRoot(reportedPath, containerID string) (string, string, error) {
+func resolveTargetCgroupRoot(reportedPath, containerID string, pids []int) (string, string, error) {
 	if containerID != "" {
 		return resolveCgroupRoot(reportedPath, containerID)
 	}
-	cleanPath := "/" + strings.TrimPrefix(filepath.Clean("/"+reportedPath), "/")
-	root := filepath.Join(hostCgroupRoot, strings.TrimPrefix(cleanPath, "/"))
-	if info, err := os.Stat(filepath.Join(root, "memory.current")); err != nil || info.IsDir() {
-		return "", "", errors.New("host process cgroup is unavailable")
+	return resolveHostProcessCgroupRootAt(hostCgroupRoot, reportedPath, pids)
+}
+
+func resolveHostProcessCgroupRootAt(root, reportedPath string, pids []int) (string, string, error) {
+	if len(pids) == 0 {
+		return "", "", errors.New("target PIDs are required to resolve a host process cgroup")
 	}
-	return root, cleanPath, nil
+	for _, pid := range pids {
+		if pid <= 1 {
+			return "", "", errors.New("invalid host process PID")
+		}
+	}
+	root = filepath.Clean(root)
+	candidate := filepath.Join(root, strings.TrimPrefix(filepath.Clean("/"+reportedPath), "/"))
+	if candidate != root && cgroupContainsProcesses(candidate, pids) {
+		relative, err := filepath.Rel(root, candidate)
+		return candidate, "/" + filepath.ToSlash(relative), err
+	}
+	// /proc/PID/cgroup is relative to the reader's cgroup namespace, even
+	// through a host /proc mount. Resolve against the mounted host hierarchy
+	// by PID membership instead of cleaning namespace-relative ../ segments.
+	visited := 0
+	var found string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if path == root {
+				return walkErr
+			}
+			return nil
+		}
+		visited++
+		if visited > maxCgroupSearchEntries {
+			return errors.New("cgroup search limit exceeded")
+		}
+		if entry.IsDir() && path != root && cgroupContainsProcesses(path, pids) {
+			found = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("resolve host process cgroup: %w", err)
+	}
+	if found == "" {
+		return "", "", fmt.Errorf("host process cgroup is unavailable for PIDs %v (reported path %q)", pids, reportedPath)
+	}
+	relative, err := filepath.Rel(root, found)
+	return found, "/" + filepath.ToSlash(relative), err
+}
+
+func cgroupContainsProcesses(root string, pids []int) bool {
+	for _, name := range []string{"cpu.stat", "memory.current"} {
+		if info, err := os.Stat(filepath.Join(root, name)); err != nil || !info.Mode().IsRegular() {
+			return false
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "cgroup.procs"))
+	if err != nil {
+		return false
+	}
+	members := make(map[int]struct{})
+	for _, field := range strings.Fields(string(raw)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			return false
+		}
+		members[pid] = struct{}{}
+	}
+	for _, pid := range pids {
+		if _, exists := members[pid]; !exists {
+			return false
+		}
+	}
+	return true
 }
 
 func runMemoryProfile(opts options, pids []int, processNames []string, cgroupRoot, cgroupPath string) error {

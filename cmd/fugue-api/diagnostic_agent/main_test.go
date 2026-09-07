@@ -202,6 +202,50 @@ func TestResolveCgroupRootFallsBackToContainerID(t *testing.T) {
 	}
 }
 
+func TestResolveHostProcessCgroupUsesPIDMembershipWhenReportedPathIsNamespaceRelative(t *testing.T) {
+	root := t.TempDir()
+	cgroup := filepath.Join(root, "kubepods.slice", "pod.slice", "cri-containerd-test.scope")
+	if err := os.MkdirAll(cgroup, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{
+		"cpu.stat":       "usage_usec 1\n",
+		"memory.current": "2\n",
+		"cgroup.procs":   "123\n456\n",
+	} {
+		if err := os.WriteFile(filepath.Join(cgroup, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gotRoot, gotPath, err := resolveHostProcessCgroupRootAt(root, "/", []int{123, 456})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRoot != cgroup || gotPath != "/kubepods.slice/pod.slice/cri-containerd-test.scope" {
+		t.Fatalf("unexpected host process cgroup root=%q path=%q", gotRoot, gotPath)
+	}
+}
+
+func TestResolveHostProcessCgroupRejectsPartialPIDMembership(t *testing.T) {
+	root := t.TempDir()
+	cgroup := filepath.Join(root, "service.scope")
+	if err := os.MkdirAll(cgroup, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{
+		"cpu.stat":       "usage_usec 1\n",
+		"memory.current": "2\n",
+		"cgroup.procs":   "123\n",
+	} {
+		if err := os.WriteFile(filepath.Join(cgroup, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := resolveHostProcessCgroupRootAt(root, "/", []int{123, 456}); err == nil {
+		t.Fatal("partial cgroup membership was accepted")
+	}
+}
+
 func TestHexAddressValidation(t *testing.T) {
 	for _, value := range []string{"513920", "ffffffff12345678", "ABCDEF"} {
 		if !isHexAddress(value) {
