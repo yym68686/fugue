@@ -60,6 +60,13 @@ type PersistentGroupStore struct {
 	root      string
 	summaryMu sync.RWMutex
 	summaries map[string]persistentGroupSummary
+	stateMu   sync.Mutex
+	validated map[string]validatedGroupState
+}
+
+type validatedGroupState struct {
+	data  []byte
+	state persistentGroupState
 }
 
 type persistentGroupSummary struct {
@@ -100,7 +107,7 @@ func OpenPersistentGroupStore(root string) (*PersistentGroupStore, error) {
 			}
 		}
 	}
-	return &PersistentGroupStore{root: root, summaries: make(map[string]persistentGroupSummary)}, nil
+	return &PersistentGroupStore{root: root, summaries: make(map[string]persistentGroupSummary), validated: make(map[string]validatedGroupState)}, nil
 }
 
 func (store *PersistentGroupStore) StoreGroupInventoryCAS(ctx context.Context, groupID string, expectedSequence uint64, snapshot GroupInventorySnapshot) error {
@@ -887,7 +894,7 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 		return err
 	}
 
-	state, err := store.readGroupState(statePath, groupID)
+	state, err := store.readGroupStateSnapshot(statePath, groupID, write)
 	if err != nil {
 		return err
 	}
@@ -923,14 +930,16 @@ func (store *PersistentGroupStore) readGroupSummary(ctx context.Context, groupID
 	var summary persistentGroupSummary
 	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
 		summary = summarizePersistentGroupState(*state)
+		// Publish under the group lock so a cold read cannot overwrite a
+		// newer writer's serving projection after releasing the lock.
+		store.summaryMu.Lock()
+		store.summaries[groupID] = summary
+		store.summaryMu.Unlock()
 		return nil
 	})
 	if err != nil {
 		return persistentGroupSummary{}, err
 	}
-	store.summaryMu.Lock()
-	store.summaries[groupID] = summary
-	store.summaryMu.Unlock()
 	return summary, nil
 }
 
@@ -1013,6 +1022,13 @@ func cloneGroupCandidateStageSnapshot(value GroupCandidateStageSnapshot) GroupCa
 }
 
 func (store *PersistentGroupStore) readGroupState(path, groupID string) (persistentGroupState, error) {
+	return store.readGroupStateSnapshot(path, groupID, true)
+}
+
+// The cache is only a decoding optimization: every transaction still locks,
+// checks permissions and reads the durable bytes. Equality preserves detection
+// of in-place corruption, atomic replacements and writes from another process.
+func (store *PersistentGroupStore) readGroupStateSnapshot(path, groupID string, mutable bool) (persistentGroupState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1027,6 +1043,15 @@ func (store *PersistentGroupStore) readGroupState(path, groupID string) (persist
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o007 != 0 {
 		return persistentGroupState{}, errors.New("edge-control group state must be a private regular file")
 	}
+	store.stateMu.Lock()
+	cached, found := store.validated[groupID]
+	store.stateMu.Unlock()
+	if found && bytes.Equal(data, cached.data) {
+		if mutable {
+			return clonePersistentGroupState(cached.state), nil
+		}
+		return cached.state, nil
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var state persistentGroupState
@@ -1039,7 +1064,17 @@ func (store *PersistentGroupStore) readGroupState(path, groupID string) (persist
 	if err := validatePersistentGroupState(state, groupID); err != nil {
 		return persistentGroupState{}, err
 	}
+	store.cacheValidatedGroupState(groupID, data, state)
+	if mutable {
+		return clonePersistentGroupState(state), nil
+	}
 	return state, nil
+}
+
+func (store *PersistentGroupStore) cacheValidatedGroupState(groupID string, data []byte, state persistentGroupState) {
+	store.stateMu.Lock()
+	store.validated[groupID] = validatedGroupState{data: data, state: state}
+	store.stateMu.Unlock()
 }
 
 // compactPersistentGroupState keeps the current published LKG and a bounded
@@ -1160,7 +1195,9 @@ func (store *PersistentGroupStore) writeGroupState(path string, state persistent
 	state.GroupID = normalizeGroupID(state.GroupID)
 	state.Digest = ""
 	state.Digest = persistentGroupStateDigest(state)
-	if err := validatePersistentGroupState(state, state.GroupID); err != nil {
+	// This writer just computed the canonical checksum. Validate all content
+	// bindings without serializing and hashing the entire state a second time.
+	if err := validatePersistentGroupStateContents(state, state.GroupID); err != nil {
 		return err
 	}
 	data, err := json.Marshal(state)
@@ -1205,12 +1242,20 @@ func (store *PersistentGroupStore) writeGroupState(path string, state persistent
 	if err := directory.Close(); err != nil {
 		return fmt.Errorf("close edge-control state directory: %w", err)
 	}
+	store.cacheValidatedGroupState(state.GroupID, data, clonePersistentGroupState(state))
 	return nil
 }
 
 func validatePersistentGroupState(state persistentGroupState, groupID string) error {
+	if state.Digest != persistentGroupStateDigest(state) {
+		return errors.New("edge-control persistent group state identity or digest is invalid")
+	}
+	return validatePersistentGroupStateContents(state, groupID)
+}
+
+func validatePersistentGroupStateContents(state persistentGroupState, groupID string) error {
 	groupID = normalizeGroupID(groupID)
-	if state.Schema != persistentGroupStateSchemaV1 || normalizeGroupID(state.GroupID) != groupID || state.Revision == 0 || state.Digest != persistentGroupStateDigest(state) {
+	if state.Schema != persistentGroupStateSchemaV1 || normalizeGroupID(state.GroupID) != groupID || state.Revision == 0 {
 		return errors.New("edge-control persistent group state identity or digest is invalid")
 	}
 	if state.Inventory != nil {

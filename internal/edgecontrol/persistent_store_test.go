@@ -1,6 +1,7 @@
 package edgecontrol
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -600,6 +601,95 @@ func TestPersistentGroupStoreRejectsWorldAccessibleStateAndLock(t *testing.T) {
 	}
 	if _, err := store.ReadGroupInventory(ctx, groupID); err == nil || !strings.Contains(err.Error(), "private regular file") {
 		t.Fatalf("world-accessible lock file was accepted: %v", err)
+	}
+}
+
+func TestPersistentGroupStoreRevalidatesChangedStateBytesAfterWarmRead(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	groupID := "edge-group-country-de"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := groupInventoryFixture(groupID, model.EdgeSlotA, "epoch-de-a", "inventory-de-1", false)
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadGroupInventory(ctx, groupID); err != nil {
+		t.Fatal(err)
+	}
+	path := store.groupStatePath(groupID)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := bytes.Replace(raw, []byte("inventory-de-1"), []byte("inventory-de-2"), 1)
+	if bytes.Equal(tampered, raw) || len(tampered) != len(raw) {
+		t.Fatal("fixture must alter content without changing file size")
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadGroupInventory(ctx, groupID); err == nil {
+		t.Fatalf("changed durable bytes bypassed validation: %v", err)
+	}
+}
+
+func TestPersistentGroupStoreCacheObservesOtherWriterAndDoesNotLeakFailedMutations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	group := "edge-group-cache-test"
+	store, _, _, _ := groupPromotionFixture(t, group, time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC))
+	path := store.groupStatePath(group)
+	before, err := store.readGroupState(path, group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _ := json.Marshal(before)
+	failure := errors.New("failed before commit")
+	err = store.withGroupState(ctx, group, true, func(state *persistentGroupState) error {
+		state.Inventory.Generation = "uncommitted"
+		state.Ledger[0].Bundle.Routes[0].Hostname = "mutated.example.test"
+		state.Published.Bundle.Routes[0].Hostname = "mutated.example.test"
+		state.Candidate.Bundle.Routes[0].Hostname = "mutated.example.test"
+		return failure
+	})
+	if !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+	after, err := store.readGroupState(path, group)
+	actual, _ := json.Marshal(after)
+	if err != nil || !bytes.Equal(expected, actual) {
+		t.Fatalf("failed transaction mutated cached state: %v", err)
+	}
+	other, err := OpenPersistentGroupStore(store.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := cloneGroupInventorySnapshot(*before.Inventory)
+	next.Sequence++
+	next.Generation = "other-writer"
+	if err := other.StoreGroupInventoryCAS(ctx, group, before.Inventory.Sequence, next); err != nil {
+		t.Fatal(err)
+	}
+	observed, err := store.ReadGroupInventory(ctx, group)
+	if err != nil || observed.Generation != next.Generation || observed.Sequence != next.Sequence {
+		t.Fatalf("cached read missed other writer: generation=%s sequence=%d err=%v", observed.Generation, observed.Sequence, err)
+	}
+	// Returned slices must also be isolated from the validated cache.
+	observed.Instances[0].InstanceUID = "caller-mutation"
+	again, err := store.ReadGroupInventory(ctx, group)
+	if err != nil || again.Instances[0].InstanceUID == "caller-mutation" {
+		t.Fatalf("caller mutated cached inventory: %v", err)
 	}
 }
 
