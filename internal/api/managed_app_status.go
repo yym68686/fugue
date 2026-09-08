@@ -1297,6 +1297,16 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	found bool,
 	snapshot managedAppKubeSnapshot,
 ) (managedAppRuntimeEvidence, error) {
+	return s.buildManagedAppRuntimeEvidenceWithStoreSnapshot(app, managed, found, snapshot, nil)
+}
+
+func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
+	app model.App,
+	managed runtime.ManagedAppObject,
+	found bool,
+	snapshot managedAppKubeSnapshot,
+	storeSnapshot *managedAppStoreSnapshot,
+) (managedAppRuntimeEvidence, error) {
 	evidence := managedAppRuntimeEvidence{
 		appObservationKey: managedAppRuntimeEvidenceObservationKey(app),
 		evidenceSources:   []string{runtime.AppObservationSourceKubernetesAPI},
@@ -1352,7 +1362,7 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	canonicalDeploymentName := runtime.RuntimeAppResourceName(app)
 	serviceName := canonicalServiceName
 	deploymentName := canonicalDeploymentName
-	servingRelease, servingReleaseFound := s.servingReleaseTrafficTarget(app)
+	servingRelease, servingReleaseFound := s.servingReleaseTrafficTargetWithSnapshot(app, storeSnapshot)
 	if servingReleaseFound {
 		if name := strings.TrimSpace(servingRelease.ServiceName); name != "" {
 			serviceName = name
@@ -1467,7 +1477,7 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 					observedRuntimeID = runtimeID
 				}
 			}
-			present, locationObservation, err := s.currentManagedImagePresenceWithObservation(app, imageRef, observedRuntimeID)
+			present, locationObservation, err := s.currentManagedImagePresenceWithStoreSnapshot(app, imageRef, observedRuntimeID, storeSnapshot)
 			if err != nil {
 				return managedAppRuntimeEvidence{}, err
 			}
@@ -1515,15 +1525,30 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 }
 
 func (s *Server) servingReleaseTrafficTarget(app model.App) (model.AppRelease, bool) {
+	return s.servingReleaseTrafficTargetWithSnapshot(app, nil)
+}
+
+func (s *Server) servingReleaseTrafficTargetWithSnapshot(app model.App, snapshot *managedAppStoreSnapshot) (model.AppRelease, bool) {
 	if s == nil || s.store == nil || strings.TrimSpace(app.ID) == "" {
 		return model.AppRelease{}, false
 	}
-	policy, err := s.store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
+	var policy model.AppTrafficPolicy
+	var err error
+	if snapshot == nil {
+		policy, err = s.store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
+	} else {
+		policy = snapshot.policies[app.ID]
+	}
 	if err != nil || !strings.EqualFold(strings.TrimSpace(policy.Mode), model.AppTrafficModeSingle) ||
 		policy.StableWeight != 100 || policy.CandidateWeight != 0 || strings.TrimSpace(policy.StableReleaseID) == "" {
 		return model.AppRelease{}, false
 	}
-	release, err := s.store.GetAppRelease(app.TenantID, true, policy.StableReleaseID)
+	var release model.AppRelease
+	if snapshot == nil {
+		release, err = s.store.GetAppRelease(app.TenantID, true, policy.StableReleaseID)
+	} else {
+		release = snapshot.releases[policy.StableReleaseID]
+	}
 	if err != nil || strings.TrimSpace(release.AppID) != strings.TrimSpace(app.ID) ||
 		!strings.EqualFold(strings.TrimSpace(release.Role), model.AppReleaseRoleStable) ||
 		!strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusServing) ||
@@ -1616,12 +1641,20 @@ func (s *Server) currentManagedImagePresence(app model.App, imageRef, runtimeID 
 }
 
 func (s *Server) currentManagedImagePresenceWithObservation(app model.App, imageRef, runtimeID string) (*bool, managedImageLocationObservation, error) {
+	return s.currentManagedImagePresenceWithStoreSnapshot(app, imageRef, runtimeID, nil)
+}
+
+func (s *Server) currentManagedImagePresenceWithStoreSnapshot(app model.App, imageRef, runtimeID string, snapshot *managedAppStoreSnapshot) (*bool, managedImageLocationObservation, error) {
 	// Image-location rows without a runtime identity cannot be tied to the
 	// current migration target (and may have been written by the source
 	// cluster). They are diagnostic history, not observed runtime evidence.
 	runtimeID = strings.TrimSpace(runtimeID)
 	if runtimeID == "" {
 		return nil, managedImageLocationObservation{}, nil
+	}
+	listLocations := s.store.ListImageLocations
+	if snapshot != nil {
+		listLocations = snapshot.imageLocations
 	}
 	refs := []string{strings.TrimSpace(imageRef)}
 	if app.Source != nil {
@@ -1648,7 +1681,7 @@ func (s *Server) currentManagedImagePresenceWithObservation(app model.App, image
 			model.ImageLocationStatusMissing,
 			model.ImageLocationStatusFailed,
 		} {
-			locations, err := s.store.ListImageLocations(model.ImageLocationFilter{
+			locations, err := listLocations(model.ImageLocationFilter{
 				TenantID:  strings.TrimSpace(app.TenantID),
 				AppID:     strings.TrimSpace(app.ID),
 				ImageRef:  ref,
@@ -1875,6 +1908,10 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			sequence.durableAppsRead = s.managedAppStatusCache.nextObservationSequence()
 		}
 		appsByID := make(map[string]model.App, len(apps))
+		storeSnapshot, snapshotErr := s.loadManagedAppStoreSnapshot(ctx)
+		if snapshotErr != nil {
+			return managedAppStatusListCacheEntry{}, snapshotErr
+		}
 		for _, app := range apps {
 			appsByID[strings.TrimSpace(app.ID)] = app
 		}
@@ -1883,7 +1920,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			if !ok {
 				continue
 			}
-			evidence, evidenceErr := s.buildManagedAppRuntimeEvidence(app, managed, true, snapshot)
+			evidence, evidenceErr := s.buildManagedAppRuntimeEvidenceWithStoreSnapshot(app, managed, true, snapshot, storeSnapshot)
 			if evidenceErr != nil {
 				return managedAppStatusListCacheEntry{}, evidenceErr
 			}
@@ -1900,7 +1937,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			if _, exists := evidenceByAppID[appID]; exists {
 				continue
 			}
-			evidence, evidenceErr := s.buildManagedAppRuntimeEvidence(app, runtime.ManagedAppObject{}, false, snapshot)
+			evidence, evidenceErr := s.buildManagedAppRuntimeEvidenceWithStoreSnapshot(app, runtime.ManagedAppObject{}, false, snapshot, storeSnapshot)
 			if evidenceErr != nil {
 				return managedAppStatusListCacheEntry{}, evidenceErr
 			}
