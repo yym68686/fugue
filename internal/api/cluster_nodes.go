@@ -321,6 +321,15 @@ func (s *Server) startConsoleSnapshotWarmLoop(ctx context.Context) {
 					return s.loadConsoleAppsList(ctx, p, p.TenantID, true, true)
 				})
 				_, _ = s.cachedProjectImageUsageResponse(ctx, p)
+				billingKey := p.TenantID + "|usage=true"
+				_, _ = s.billingSummaryCache.do(billingKey, func() (model.TenantBillingSummary, error) {
+					value, err := s.store.GetTenantBillingSummary(p.TenantID)
+					if err != nil {
+						return model.TenantBillingSummary{}, err
+					}
+					value.CurrentUsage = s.currentTenantManagedUsage(ctx, p.TenantID, false)
+					return value, nil
+				})
 			}(principal)
 		}
 	}
