@@ -101,6 +101,7 @@ type Server struct {
 	managedAppStatusCache            managedAppStatusCache
 	consoleGalleryCache              expiringResponseCache[consoleGalleryResponse]
 	consoleAppsCache                 expiringResponseCache[[]model.App]
+	billingSummaryCache              expiringResponseCache[model.TenantBillingSummary]
 	billingImageStorageRefresh       billingImageStorageRefreshScheduler
 	sourceUploadSlots                chan struct{}
 	newLogsClient                    func(namespace string) (appLogsClient, error)
@@ -232,6 +233,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		managedAppStatusCache:            newManagedAppStatusCache(0, 0),
 		consoleGalleryCache:              newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
 		consoleAppsCache:                 newExpiringResponseCache[[]model.App](15 * time.Second),
+		billingSummaryCache:              newExpiringResponseCache[model.TenantBillingSummary](15 * time.Second),
 		sourceUploadSlots:                make(chan struct{}, maxConcurrentSourceUploadRequests),
 		billingImageStorageRefresh:       newBillingImageStorageRefreshScheduler(0, 0),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
