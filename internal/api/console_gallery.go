@@ -1094,6 +1094,23 @@ func (s *Server) cachedConsoleGalleryResponse(
 	principal model.Principal,
 	includeLiveStatus bool,
 ) (consoleGalleryResponse, error) {
+	// A complete gallery snapshot is safe to serve briefly while a refresh runs
+	// in the background. This keeps navigation bounded by serialization/network
+	// time instead of the slowest store or cluster inventory call.
+	if entry, ok := s.consoleGalleryCache.getEntry(consoleGalleryCacheKey(principal, includeLiveStatus)); ok {
+		if time.Now().Before(entry.expiresAt) {
+			return entry.value, nil
+		}
+		go func() {
+			_, _ = s.consoleGalleryCache.do(
+				consoleGalleryCacheKey(principal, includeLiveStatus),
+				func() (consoleGalleryResponse, error) {
+					return s.buildConsoleGalleryResponse(context.Background(), principal, includeLiveStatus)
+				},
+			)
+		}()
+		return entry.value, nil
+	}
 	return s.consoleGalleryCache.do(
 		consoleGalleryCacheKey(principal, includeLiveStatus),
 		func() (consoleGalleryResponse, error) {

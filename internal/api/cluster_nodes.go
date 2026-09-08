@@ -306,9 +306,74 @@ func (s *Server) StartBackgroundWarmers(ctx context.Context) {
 		return
 	}
 	s.startClusterNodeInventoryWarmLoop(ctx)
+	s.startConsoleSnapshotWarmLoop(ctx)
 	s.startResourceUsageSamplingLoop(ctx)
 	s.startRightSizingAutoApplyLoop(ctx)
 	s.startOOMRightSizingLoop(ctx)
+}
+
+// startConsoleSnapshotWarmLoop keeps the complete tenant-scoped console data
+// hot before a user navigates to the Web console. The work is best-effort and
+// never participates in request handling; authorization still applies to every
+// normal request using its own principal.
+func (s *Server) startConsoleSnapshotWarmLoop(ctx context.Context) {
+	if s == nil || s.store == nil || ctx == nil {
+		return
+	}
+	warm := func() {
+		// Platform-admin pages use the all-tenant view. Keep that snapshot hot
+		// alongside tenant-scoped snapshots so admin navigation has the same
+		// bounded read path.
+		platform := model.Principal{Scopes: map[string]struct{}{"platform.admin": {}}}
+		go func() {
+			_, _ = s.consoleAppsCache.do(consoleAppsCacheKey(platform, "", true, true), func() ([]model.App, error) {
+				return s.loadConsoleAppsList(ctx, platform, "", true, true)
+			})
+		}()
+		tenants, err := s.store.ListTenants()
+		if err != nil {
+			if s.log != nil {
+				s.log.Printf("console snapshot warmup tenant listing failed: %v", err)
+			}
+			return
+		}
+		for _, tenant := range tenants {
+			tenantID := strings.TrimSpace(tenant.ID)
+			if tenantID == "" {
+				continue
+			}
+			principal := model.Principal{TenantID: tenantID}
+			go func(p model.Principal) {
+				_, _ = s.cachedConsoleGalleryResponse(ctx, p, true)
+				_, _ = s.consoleAppsCache.do(consoleAppsCacheKey(p, p.TenantID, true, true), func() ([]model.App, error) {
+					return s.loadConsoleAppsList(ctx, p, p.TenantID, true, true)
+				})
+				_, _ = s.cachedProjectImageUsageResponse(ctx, p)
+				billingKey := p.TenantID + "|usage=true"
+				_, _ = s.billingSummaryCache.do(billingKey, func() (model.TenantBillingSummary, error) {
+					value, err := s.store.GetTenantBillingSummary(p.TenantID)
+					if err != nil {
+						return model.TenantBillingSummary{}, err
+					}
+					value.CurrentUsage = s.currentTenantManagedUsage(ctx, p.TenantID, false)
+					return value, nil
+				})
+			}(principal)
+		}
+	}
+	warm()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				warm()
+			}
+		}
+	}()
 }
 
 func (s *Server) shouldWarmClusterNodeInventory() bool {
