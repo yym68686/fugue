@@ -84,3 +84,35 @@ func TestPrewarmCleanupRefusesUnrelatedResources(t *testing.T) {
 		t.Fatalf("unsafe cleanup: %d %v", mutations, err)
 	}
 }
+
+func TestCanceledPrewarmCanCleanUpAfterRuntimeDisappears(t *testing.T) {
+	st := store.New(t.TempDir() + "/state.json")
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	tenant, _ := st.CreateTenant("Canceled cache tenant")
+	ws, err := st.CreateDataWorkspace(model.DataWorkspace{TenantID: tenant.ID, Name: "dataset"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := st.CreateDataTransfer(model.DataTransfer{TenantID: tenant.ID, WorkspaceID: ws.ID, Direction: "prewarm", Status: "canceled", Target: "runtime_no_longer_exists", Cache: &model.DataPrewarmCache{Node: "former-node", State: "planned"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("unexpected mutation %s", r.Method)
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+	service := &Service{Store: st}
+	client := &kubeClient{baseURL: server.URL, client: server.Client(), namespace: "system"}
+	if err = service.reconcileDataPrewarm(context.Background(), client, tr); err != nil {
+		t.Fatal(err)
+	}
+	tr, _ = st.GetDataTransfer(tr.ID)
+	if tr.Status != "canceled" || tr.Cache.State != "removed" {
+		t.Fatal(tr)
+	}
+}

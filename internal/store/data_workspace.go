@@ -2588,12 +2588,22 @@ func (s *Store) pgUpdateDataTransfer(transfer model.DataTransfer) (model.DataTra
 	if err != nil {
 		return model.DataTransfer{}, err
 	}
-	return scanDataTransfer(s.db.QueryRowContext(ctx, `
+	updated, err := scanDataTransfer(s.db.QueryRowContext(ctx, `
 UPDATE fugue_data_transfers
 SET snapshot_id = $2, version = $3, message = $4, status = $5, manifest_json = $6, plan_blobs_json = $7, part_size = $8, expires_at = $9, bytes_total = $10, bytes_done = $11, files_total = $12, files_done = $13, error_code = $14, error_message = $15, updated_at = $16, started_at = $17, finished_at = $18, prewarm_cache_json=$19
 WHERE id = $1 AND (direction <> 'prewarm' OR updated_at=$20) AND (direction <> 'prewarm' OR status NOT IN ('completed','failed','canceled') OR status=$5)
 RETURNING id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at, prewarm_cache_json
 `, transfer.ID, transfer.SnapshotID, transfer.Version, transfer.Message, transfer.Status, manifestJSON, planBlobsJSON, transfer.PartSize, transfer.ExpiresAt, transfer.BytesTotal, transfer.BytesDone, transfer.FilesTotal, transfer.FilesDone, transfer.ErrorCode, transfer.ErrorMessage, transfer.UpdatedAt, transfer.StartedAt, transfer.FinishedAt, cacheJSON, expectedUpdatedAt))
+	if errors.Is(err, ErrNotFound) && transfer.Direction == model.DataTransferDirectionPrewarm {
+		var exists bool
+		if checkErr := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_data_transfers WHERE id=$1)`, transfer.ID).Scan(&exists); checkErr != nil {
+			return model.DataTransfer{}, checkErr
+		}
+		if exists {
+			return model.DataTransfer{}, ErrConflict
+		}
+	}
+	return updated, err
 }
 
 func (s *Store) pgGetDataTransfer(id string) (model.DataTransfer, error) {

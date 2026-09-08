@@ -110,6 +110,7 @@ func TestEventDrivenPeriodicTasksHandleChangesAfterStartupWithoutNotifications(t
 			deadline := time.Now().Add(2 * time.Second)
 			for time.Now().Before(deadline) {
 				failovers, upgrades = 0, 0
+				activeFailovers := 0
 				ops, err := state.ListOperations(tenant.ID, false)
 				if err != nil {
 					t.Fatal(err)
@@ -117,6 +118,9 @@ func TestEventDrivenPeriodicTasksHandleChangesAfterStartupWithoutNotifications(t
 				for _, op := range ops {
 					if op.AppID == app.ID && op.Type == model.OperationTypeFailover && op.TargetRuntimeID == target.ID {
 						failovers++
+						if op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent {
+							activeFailovers++
+						}
 					}
 				}
 				tasks, err := state.ListNodeUpdateTasks(tenant.ID, false, updater.ID, model.NodeUpdateTaskStatusPending)
@@ -128,7 +132,13 @@ func TestEventDrivenPeriodicTasksHandleChangesAfterStartupWithoutNotifications(t
 						upgrades++
 					}
 				}
-				if failovers == 1 && upgrades == 1 {
+				if activeFailovers > 1 {
+					t.Fatalf("periodic scheduling duplicated in-flight failovers: %d", activeFailovers)
+				}
+				// Render-only workers may finish (or fail) an attempt before
+				// the independent updater scan runs. Historical attempts can
+				// accumulate while the synthetic source remains offline.
+				if failovers >= 1 && upgrades == 1 {
 					return
 				}
 				time.Sleep(10 * time.Millisecond)
@@ -145,6 +155,7 @@ func TestPeriodicReconcileRetriesFailuresAndStopsSlowTask(t *testing.T) {
 	var mu sync.Mutex
 	calls, active, maxActive := 0, 0, 0
 	succeeded := make(chan struct{})
+	var signalSuccess sync.Once
 	stop := (&Service{}).startPeriodicReconcile(ctx, 5*time.Millisecond, "fault-test", func(taskCtx context.Context) error {
 		mu.Lock()
 		calls++
@@ -158,7 +169,7 @@ func TestPeriodicReconcileRetriesFailuresAndStopsSlowTask(t *testing.T) {
 		if n == 1 {
 			return fmt.Errorf("temporary database failure")
 		}
-		close(succeeded)
+		signalSuccess.Do(func() { close(succeeded) })
 		return nil
 	})
 	select {

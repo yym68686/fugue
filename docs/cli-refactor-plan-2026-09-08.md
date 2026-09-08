@@ -417,3 +417,8 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 - API / controller / schema：待声明式 CI 发布及健康验证。
 - CLI v0.2.0 tag / GitHub Release：待发布。
 - 本机 `/opt/homebrew/bin/fugue`：仍为 v0.1.123，待最终升级。
+
+- 首次生产 CI `34264422165`：schema 成功；API/controller 在应用前的前置状态检查中被阻止。API 的 live identity 已偏离监控器保存的 positive LKG，controller 也未达到前置健康证明；这次没有应用新 API/controller。后续使用相同已验证 LKG 的声明式重试，保留 CAS 和来源校验。
+- 补充临时 PostgreSQL 实测：分块完成、请求→operation 原子关联、缓存状态读写、并发取消、项目过滤、引用写入与删除互锁。修正 PostgreSQL 的过期 worker 更新从 404 归类为 409，与文件存储行为一致；也修正 runtime 消失后的取消清理。
+
+- 重试验证：临时 PostgreSQL 集成测试通过；时序测试修正为检查在途 failover 不重复，并用一次性信号避免重复关闭 channel。该测试连续 5 次通过，完整 `GOFLAGS=-p=2 make test` 通过。

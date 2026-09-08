@@ -74,16 +74,15 @@ func (s *Service) reconcileDataPrewarm(ctx context.Context, c *kubeClient, t mod
 		return s.failDataPrewarm(t, "legacy prewarm plan was never authorized for execution; submit a new data prewarm request")
 	}
 	if t.Cache.Job == "" {
-		rt, err := s.Store.GetRuntime(t.Target)
-		if err != nil {
-			return err
-		}
+		// Names depend only on this transfer. Cancellation must still be able
+		// to confirm absence and finish cleanup after a runtime is removed.
 		namespace := c.effectiveNamespace("")
 		name := prewarmName(t.ID)
-		t.Cache = &model.DataPrewarmCache{Namespace: namespace, Claim: name, Job: name, Node: rt.ClusterNodeName, ManifestDigest: t.Manifest.Digest, State: "planned", ObservedAt: now}
+		t.Cache = &model.DataPrewarmCache{Namespace: namespace, Claim: name, Job: name, Node: t.Cache.Node, ManifestDigest: t.Manifest.Digest, State: "planned", ObservedAt: now}
 		// Persist resource names before creation; cancellation/restart can clean up
 		// objects even when the Kubernetes response never reaches the controller.
-		t, err = s.Store.UpdateDataTransfer(t)
+		updated, err := s.Store.UpdateDataTransfer(t)
+		t = updated
 		if err != nil {
 			return err
 		}

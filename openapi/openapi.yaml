@@ -10890,6 +10890,12 @@ paths:
           required: true
           schema: {type: string}
       responses:
+        '409':
+          description: Transfer state changed concurrently or its current state does not permit the action
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '202':
           description: Cache cleanup is requested; transfer history and source snapshot remain available
           content:
@@ -11352,6 +11358,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DataTransferIdPathParam"
       responses:
+        '409':
+          description: Transfer state changed concurrently or its current state does not permit the action
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '200':
           description: Successful response
           content:
