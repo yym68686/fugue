@@ -16,11 +16,12 @@ import (
 )
 
 type deploymentCommandState struct {
-	requestStarted bool
-	lastProgressAt time.Time
-	seenAttempts   map[string]bool
-	client         *Client
-	operations     []model.Operation
+	requestStarted  bool
+	submissionStage string
+	lastProgressAt  time.Time
+	seenAttempts    map[string]bool
+	client          *Client
+	operations      []model.Operation
 }
 type deploymentCause struct {
 	Code       string `json:"code"`
@@ -45,16 +46,17 @@ type deploymentServingState struct {
 	ReadyReplicas int        `json:"ready_replicas,omitempty"`
 }
 type deploymentResult struct {
-	SchemaVersion   string                 `json:"schema_version"`
-	Outcome         string                 `json:"outcome"`
-	FailedStage     string                 `json:"failed_stage,omitempty"`
-	Summary         string                 `json:"summary"`
-	Operations      []deploymentOperation  `json:"operations"`
-	Attempts        []deploymentAttempt    `json:"attempts"`
-	Causes          []deploymentCause      `json:"causes"`
-	MissingEvidence []string               `json:"missing_evidence"`
-	ServingState    deploymentServingState `json:"serving_state"`
-	NextActions     []string               `json:"next_actions"`
+	SchemaVersion   string                    `json:"schema_version"`
+	Outcome         string                    `json:"outcome"`
+	FailedStage     string                    `json:"failed_stage,omitempty"`
+	Summary         string                    `json:"summary"`
+	Operations      []deploymentOperation     `json:"operations"`
+	Attempts        []deploymentAttempt       `json:"attempts"`
+	Causes          []deploymentCause         `json:"causes"`
+	MissingEvidence []string                  `json:"missing_evidence"`
+	ServingState    deploymentServingState    `json:"serving_state"`
+	NextActions     []string                  `json:"next_actions"`
+	Request         *deploymentRequestFailure `json:"request,omitempty"`
 }
 type deploymentResultError struct {
 	Result deploymentResult
@@ -251,9 +253,7 @@ func (c *CLI) renderDeploymentError(err error) error {
 		result = known.Result
 		code = known.code
 	} else {
-		result.Summary = "The deployment outcome could not be confirmed."
-		result.MissingEvidence = append(result.MissingEvidence, "final_operation_state")
-		result.NextActions = append(result.NextActions, "Read the operation result before retrying; the server may still be processing the request.")
+		result, code = c.deploymentRequestFailureResult(err)
 	}
 	if c.deployment != nil {
 		result.Operations = []deploymentOperation{}
@@ -278,6 +278,21 @@ func (c *CLI) renderDeploymentError(err error) error {
 func renderDeploymentResult(w io.Writer, result deploymentResult) error {
 	if _, err := fmt.Fprintf(w, "outcome=%s\n%s\n", result.Outcome, result.Summary); err != nil {
 		return err
+	}
+	if request := result.Request; request != nil {
+		pairs := []kvPair{{Key: "request_stage", Value: request.Stage}}
+		if request.HTTPStatus > 0 {
+			pairs = append(pairs, kvPair{Key: "http_status", Value: fmt.Sprint(request.HTTPStatus)})
+		}
+		if request.RequestID != "" {
+			pairs = append(pairs, kvPair{Key: "request_id", Value: request.RequestID})
+		}
+		if request.TraceID != "" {
+			pairs = append(pairs, kvPair{Key: "trace_id", Value: request.TraceID})
+		}
+		if err := writeKeyValues(w, pairs...); err != nil {
+			return err
+		}
 	}
 	for _, op := range result.Operations {
 		if _, err := fmt.Fprintf(w, "operation=%s status=%s\n", op.ID, op.Status); err != nil {

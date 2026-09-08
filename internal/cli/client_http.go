@@ -46,6 +46,15 @@ type httpPreparedResponse struct {
 	Timing     httpTimingMetrics
 }
 
+type httpResponseError struct {
+	err     error
+	status  int
+	headers http.Header
+}
+
+func (e *httpResponseError) Error() string { return e.err.Error() }
+func (e *httpResponseError) Unwrap() error { return e.err }
+
 func (c *Client) doPrepared(httpReq *http.Request) (httpPreparedResponse, error) {
 	if httpReq == nil {
 		return httpPreparedResponse{}, fmt.Errorf("request is required")
@@ -76,7 +85,7 @@ func (c *Client) doPrepared(httpReq *http.Request) (httpPreparedResponse, error)
 		}
 		lastErr = err
 		if !isRetryableHTTPClientError(err) || attempt == attempts {
-			return httpPreparedResponse{}, err
+			return result, err
 		}
 		time.Sleep(c.readRetryDelay)
 	}
@@ -193,7 +202,7 @@ func (c *Client) doPreparedOnce(httpReq *http.Request) (httpPreparedResponse, er
 		c.observer(observed)
 	}
 	if readErr != nil {
-		return httpPreparedResponse{}, fmt.Errorf("read response: %w", readErr)
+		return result, fmt.Errorf("read response: %w", readErr)
 	}
 	return result, nil
 }

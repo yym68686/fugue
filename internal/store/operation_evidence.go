@@ -443,7 +443,7 @@ func BuildOperationTimeline(op model.Operation, evidence []model.OperationEviden
 			Source:      model.OperationEvidenceSourceController,
 			Severity:    model.OperationEvidenceSeverityInfo,
 			Confidence:  model.OperationEvidenceConfidenceConfirmed,
-			Summary:     firstNonEmptyOperationEvidenceString(op.ResultMessage, "operation started"),
+			Summary:     "operation started",
 			At:          op.StartedAt.UTC(),
 		})
 	}

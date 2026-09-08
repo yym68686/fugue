@@ -8,7 +8,8 @@ nonzero. Existing successful response fields remain for compatibility.
 - `succeeded`: the tracked operations completed, including the explicitly linked
   deployment. Current serving observation is reported separately.
 - `accepted`: work was submitted without waiting; it is not a successful rollout.
-- `failed`: a terminal failure, cancellation or supersession was observed.
+- `failed`: a terminal operation failure, cancellation, supersession, or an
+  explicit structured API rejection of the submission was observed.
 - `unknown`: the final outcome could not be verified. An interrupted observation
   is not proof of a failed operation and must not trigger a duplicate deployment.
 
@@ -35,6 +36,21 @@ Failed deployments return exit code 5. Unknown results return 6. Exit code 0 wit
 their exit behavior. Progress is separate from JSON, and `--output-file` mirrors
 stdout exactly, including failures. Human-facing deploy wait output deliberately
 avoids the legacy cluster-status projection.
+
+Request failures also include an optional `request` object with `stage`
+(`upload`, `submission`, or `observation`), the received `http_status`, and
+validated edge `request_id` and `trace_id` when available. Causes use fixed public
+messages; raw server error bodies, URLs, headers and network exception strings
+are never forwarded. An upload rejected with HTTP 408, 413 or 429 reports the
+rejection without asking for a nonexistent operation result. This does not change
+the upload deadline, admission policy or retry behavior.
+
+A transport timeout, truncated/invalid response, proxy error without a structured
+API rejection, or HTTP 5xx leaves submission acceptance unknown. The result asks
+the operator to preserve the execution time, CLI version and correlation IDs.
+When an operation ID was already obtained, a failed observation cannot change
+that operation into a reported terminal failure. It remains queryable using the
+tracked ID. No deployment submission is automatically retried by this diagnostic.
 
 ## Evidence collection
 

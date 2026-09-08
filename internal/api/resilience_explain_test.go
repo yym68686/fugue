@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"fugue/internal/model"
 )
@@ -336,65 +335,5 @@ func TestTrafficSafetyExplainReportsUnroutedHostname(t *testing.T) {
 	}
 	if !stringSliceContains(response.State.Blockers, "hostname has no generated edge route") {
 		t.Fatalf("expected unrouted blocker, got %+v", response.State.Blockers)
-	}
-}
-
-func TestRequestExplainAttributesBodyReadErrorAndNetworkSignals(t *testing.T) {
-	t.Parallel()
-
-	storeState, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
-	now := time.Now().UTC()
-	if err := storeState.RecordEdgePerformanceSamples([]model.EdgePerformanceSample{{
-		ID:                   "req_explain_body_read",
-		EdgeID:               "edge-hk-1",
-		EdgeGroupID:          "edge-group-country-hk",
-		Hostname:             "api.fugue.pro",
-		PathPrefix:           "/v1",
-		Method:               "POST",
-		TrafficClass:         "large_body_api",
-		RouteGeneration:      "routegen_42",
-		StatusCode:           http.StatusServiceUnavailable,
-		SampleCount:          1,
-		ErrorCount:           1,
-		BodyReadBlockMS:      12_000,
-		UploadEffectiveBPS:   8 * 1024,
-		MinWindowBPS:         2 * 1024,
-		MaxReadGapMS:         3_500,
-		RequestBodyBytes:     64 * 1024,
-		RequestBodyReadBytes: 32 * 1024,
-		BodyReadErrorCount:   1,
-		OriginDNSMS:          15,
-		OriginConnectMS:      40,
-		OriginResponseWaitMS: 900,
-		OriginTTFBMS:         950,
-		OriginTotalMS:        1_100,
-		ClientTCPRTTMS:       88.5,
-		ClientTCPRetransRate: 0.03,
-		ClientTCPRTORate:     0.02,
-		ClientTCPDeliveryBPS: 512 * 1024,
-		DNSPolicy:            "latency_aware",
-		CacheStatus:          "miss",
-		SampledAt:            now.Add(-time.Minute),
-	}}, time.Time{}); err != nil {
-		t.Fatalf("record edge sample: %v", err)
-	}
-
-	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/requests/req_explain_body_read/explain?since=2h", platformAdminKey, nil)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected request explain status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
-	}
-	var response model.RequestExplainResponseEnvelope
-	mustDecodeJSON(t, recorder, &response)
-	explain := response.Explain
-	if !explain.Found || explain.ErrorClass != "edge.body_read_error" || !explain.SecretSafe {
-		t.Fatalf("expected secret-safe body read attribution, got %+v", explain)
-	}
-	for _, want := range []string{"client_to_edge_body_read", "client_to_edge_tcp", "edge_to_origin_dns", "edge_to_origin_connect", "origin_response_wait"} {
-		if !stringSliceContains(explain.Attribution, want) {
-			t.Fatalf("expected attribution %q in %+v", want, explain.Attribution)
-		}
-	}
-	if explain.Evidence["request_body_read_complete"] != "false" || strings.TrimSpace(explain.Evidence["dns_policy"]) != "latency_aware" {
-		t.Fatalf("expected request evidence without body/secrets, got %+v", explain.Evidence)
 	}
 }

@@ -445,6 +445,7 @@ type apiError struct {
 type apiServerError struct {
 	StatusCode int
 	Response   apiError
+	Headers    http.Header
 }
 
 func (e *apiServerError) Error() string {
@@ -708,15 +709,15 @@ func (c *Client) doMultipartJSONWithFileField(relativePath string, requestBody a
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
-	payload, err := c.do(httpReq)
+	response, err := c.doWithResponse(httpReq)
 	if err != nil {
 		return err
 	}
 	if responseBody == nil {
 		return nil
 	}
-	if err := json.Unmarshal(payload, responseBody); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+	if err := json.Unmarshal(response.Payload, responseBody); err != nil {
+		return &httpResponseError{err: fmt.Errorf("decode response: %w", err), status: response.StatusCode, headers: response.Headers}
 	}
 	return nil
 }
@@ -1378,21 +1379,35 @@ func (c *Client) doJSONRaw(method, relativePath string, requestBody any) ([]byte
 }
 
 func (c *Client) do(httpReq *http.Request) ([]byte, error) {
-	result, err := c.doPrepared(httpReq)
+	result, err := c.doWithResponse(httpReq)
 	if err != nil {
 		return nil, err
+	}
+	return result.Payload, nil
+}
+
+func (c *Client) doWithResponse(httpReq *http.Request) (httpPreparedResponse, error) {
+	result, err := c.doPrepared(httpReq)
+	if err != nil {
+		if result.StatusCode != 0 {
+			return result, &httpResponseError{err: err, status: result.StatusCode, headers: result.Headers}
+		}
+		return result, err
 	}
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		var apiErr apiError
 		if err := json.Unmarshal(result.Payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-			return nil, &apiServerError{StatusCode: result.StatusCode, Response: apiErr}
+			return result, &apiServerError{StatusCode: result.StatusCode, Response: apiErr, Headers: result.Headers}
 		}
+		var responseErr error
 		if trimmed := strings.TrimSpace(string(result.Payload)); trimmed != "" {
-			return nil, fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)
+			responseErr = fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)
+		} else {
+			responseErr = fmt.Errorf("request failed: status=%d", result.StatusCode)
 		}
-		return nil, fmt.Errorf("request failed: status=%d", result.StatusCode)
+		return result, &httpResponseError{err: responseErr, status: result.StatusCode, headers: result.Headers}
 	}
-	return result.Payload, nil
+	return result, nil
 }
 
 func (c *Client) resolveURL(relativePath string) string {

@@ -177,7 +177,7 @@ func TestNodeJanitorDefaultsToSystemNodeCritical(t *testing.T) {
 	}
 }
 
-func TestManagedPostgresInPlaceResizeGatesDefaultClosed(t *testing.T) {
+func TestManagedPostgresInPlaceResizeGatesMatchReviewedDefaultsAndCanClose(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
 	}
@@ -185,28 +185,42 @@ func TestManagedPostgresInPlaceResizeGatesDefaultClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	cmd := exec.Command("helm", "template", "fugue", chartDir)
-	cmd.Dir = chartDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("helm template failed: %v\n%s", err, output)
+	gates := []struct {
+		name    string
+		key     string
+		enabled bool
+	}{
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", "enabled", true},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", "cpuRequestUpscaleEnabled", false},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED", "cpuRequestDownscaleEnabled", false},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED", "memoryRequestUpscaleEnabled", true},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED", "memoryRequestDownscaleEnabled", true},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED", "cpuLimitUpscaleEnabled", false},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED", "cpuLimitDownscaleEnabled", false},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED", "memoryLimitUpscaleEnabled", true},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED", "memoryLimitDownscaleEnabled", false},
+		{"FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED", "recoveryEnabled", true},
 	}
-	manifest := string(output)
-	for _, name := range []string{
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED",
-		"FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED",
-	} {
-		needle := "            - name: " + name + "\n              value: \"false\""
-		if !strings.Contains(manifest, needle) {
-			t.Fatalf("controller manifest must keep %s closed by default:\n%s", name, manifest)
+	for _, closeAll := range []bool{false, true} {
+		args := []string{"template", "fugue", chartDir, "--show-only", "templates/controller-deployment.yaml"}
+		if closeAll {
+			for _, gate := range gates {
+				args = append(args, "--set", "controller.managedPostgresInPlaceResize."+gate.key+"=false")
+			}
+		}
+		cmd := exec.Command("helm", args...)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template failed: %v\n%s", err, output)
+		}
+		controller := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-controller")
+		for _, gate := range gates {
+			want := strconv.FormatBool(gate.enabled && !closeAll)
+			needle := "            - name: " + gate.name + "\n              value: \"" + want + "\""
+			if !strings.Contains(controller, needle) {
+				t.Errorf("controller gate %s: expected %s (closeAll=%t)", gate.name, want, closeAll)
+			}
 		}
 	}
 }

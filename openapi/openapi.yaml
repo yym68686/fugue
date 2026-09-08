@@ -1922,6 +1922,14 @@ paths:
     get:
       operationId: explainRequest
       summary: Explain Request
+      description: |
+        Platform-admin lookup of recorded request facts by edge request ID, application
+        request ID, or trace ID. Reads per-request telemetry, including incomplete
+        platform request facts stored as events; aggregate edge performance sample
+        IDs are not request IDs. Only a unique matching request is attributed.
+        Evidence identifies the source and lookup status. Missing records, disabled
+        telemetry, unavailable query backends, and ambiguous identifiers remain
+        explicitly unconfirmed; an empty lookup does not prove a request never ran.
       tags: [Admin]
       x-fugue-handler: handleExplainRequest
       security:
@@ -19274,6 +19282,7 @@ components:
           format: int64
     OperationTimelineEntry:
       type: object
+      description: Historical event content paired with its recorded time. The operation_started summary describes the start, never a later mutable progress message.
       additionalProperties: false
       required: [id, operation_id, type, summary, at]
       properties:

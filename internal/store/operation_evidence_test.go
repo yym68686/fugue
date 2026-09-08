@@ -9,6 +9,27 @@ import (
 	"fugue/internal/model"
 )
 
+func TestOperationStartedTimelineDoesNotBackdateLaterProgress(t *testing.T) {
+	t.Parallel()
+	started := time.Now().UTC().Add(-30 * time.Minute)
+	op := model.Operation{ID: "op_example", CreatedAt: started, StartedAt: &started}
+	for _, message := range []string{"", "import still running (24m30s)", "build completed; deployment queued"} {
+		op.ResultMessage = message
+		starts := 0
+		for _, entry := range BuildOperationTimeline(op, nil, false) {
+			if entry.Type == model.OperationEvidenceTypeOperationStarted {
+				starts++
+				if entry.Summary != "operation started" || !entry.At.Equal(started) {
+					t.Fatalf("later progress changed the historical start: %+v", entry)
+				}
+			}
+		}
+		if starts != 1 {
+			t.Fatalf("expected one immutable start event, got %d", starts)
+		}
+	}
+}
+
 func setupOperationEvidenceStore(t *testing.T) (*Store, model.Tenant, model.Project, model.App, model.Operation) {
 	t.Helper()
 	s := New(filepath.Join(t.TempDir(), "store.json"))

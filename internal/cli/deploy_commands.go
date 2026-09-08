@@ -574,6 +574,7 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 
 	c.progressf("Uploading %s (%d bytes)", archiveName, len(archiveBytes))
 	if c.deployment != nil {
+		c.deployment.submissionStage = "upload"
 		c.deployment.requestStarted = true
 		c.deployment.client = client
 	}

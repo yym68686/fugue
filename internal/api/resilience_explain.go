@@ -197,29 +197,7 @@ func (s *Server) handleExplainRequest(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	samples, err := s.store.ListEdgePerformanceSamples("", since)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	for _, sample := range samples {
-		if strings.TrimSpace(sample.ID) != requestID {
-			continue
-		}
-		httpx.WriteJSON(w, http.StatusOK, model.RequestExplainResponseEnvelope{Explain: s.requestExplainFromSample(r, requestID, sample, now)})
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, model.RequestExplainResponseEnvelope{Explain: model.RequestExplainResponse{
-		RequestID:    requestID,
-		Found:        false,
-		ErrorClass:   "not_observed",
-		FailurePlane: "control_plane_observability",
-		SecretSafe:   true,
-		GeneratedAt:  now,
-		Evidence: map[string]string{
-			"since": since.Format(time.RFC3339),
-		},
-	}})
+	httpx.WriteJSON(w, http.StatusOK, model.RequestExplainResponseEnvelope{Explain: s.explainRecordedRequest(r.Context(), requestID, since, now)})
 }
 
 func platformArtifactKinds(artifacts []model.PlatformArtifact) []string {
@@ -478,63 +456,6 @@ func sortedKeys(in map[string]struct{}) []string {
 	return out
 }
 
-func (s *Server) requestExplainFromSample(r *http.Request, requestID string, sample model.EdgePerformanceSample, generatedAt time.Time) model.RequestExplainResponse {
-	attribution := requestAttributionFromSample(sample)
-	errorClass := requestErrorClassFromSample(sample)
-	explain := model.RequestExplainResponse{
-		RequestID:               requestID,
-		Found:                   true,
-		ErrorClass:              errorClass,
-		FailurePlane:            requestFailurePlane(errorClass, sample),
-		EdgeID:                  sample.EdgeID,
-		EdgeGroupID:             sample.EdgeGroupID,
-		Hostname:                sample.Hostname,
-		PathPrefix:              sample.PathPrefix,
-		Method:                  sample.Method,
-		TrafficClass:            sample.TrafficClass,
-		RouteGeneration:         sample.RouteGeneration,
-		StatusCode:              sample.StatusCode,
-		BodyReadBlockMS:         sample.BodyReadBlockMS,
-		UploadEffectiveBPS:      sample.UploadEffectiveBPS,
-		MinWindowBPS:            sample.MinWindowBPS,
-		MaxReadGapMS:            sample.MaxReadGapMS,
-		RequestBodyBytes:        sample.RequestBodyBytes,
-		RequestBodyReadBytes:    sample.RequestBodyReadBytes,
-		BodyIncompleteCount:     sample.BodyIncompleteCount,
-		BodyReadErrorCount:      sample.BodyReadErrorCount,
-		OriginDNSMS:             sample.OriginDNSMS,
-		OriginConnectMS:         sample.OriginConnectMS,
-		OriginEndpointConnectMS: sample.OriginEndpointConnectMS,
-		OriginRequestWriteMS:    sample.OriginRequestWriteMS,
-		OriginResponseWaitMS:    sample.OriginResponseWaitMS,
-		OriginTTFBMS:            sample.OriginTTFBMS,
-		OriginTotalMS:           sample.OriginTotalMS,
-		OriginFailureClass:      firstNonEmpty(sample.OriginFailureClass, requestOriginFailureClassFromSample(sample)),
-		ClientTCPRTTMS:          sample.ClientTCPRTTMS,
-		ClientTCPRetransRate:    sample.ClientTCPRetransRate,
-		ClientTCPRTORate:        sample.ClientTCPRTORate,
-		ClientTCPDeliveryBPS:    sample.ClientTCPDeliveryBPS,
-		Attribution:             attribution,
-		FailureContracts:        requestFailureContractsFromAttribution(attribution),
-		Evidence:                requestExplainEvidence(sample),
-		SecretSafe:              true,
-		SampledAt:               sample.SampledAt,
-		GeneratedAt:             generatedAt,
-	}
-	if routeExplain, err := s.explainRouteForRobustness(r, sample.Hostname); err == nil {
-		if route := requestRouteForSample(routeExplain.Routes, sample); route != nil {
-			explain.RuntimeNode = route.RuntimeClusterNode
-			if explain.Evidence == nil {
-				explain.Evidence = map[string]string{}
-			}
-			explain.Evidence["runtime_node"] = route.RuntimeClusterNode
-			explain.Evidence["runtime_id"] = route.RuntimeID
-			explain.Evidence["route_generation_explain"] = route.RouteGeneration
-		}
-	}
-	return explain
-}
-
 func requestErrorClassFromSample(sample model.EdgePerformanceSample) string {
 	switch {
 	case sample.BodyReadErrorCount > 0:
@@ -673,39 +594,6 @@ func requestFailureContractsFromAttribution(attribution []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func requestRouteForSample(routes []model.EdgeRouteBinding, sample model.EdgePerformanceSample) *model.EdgeRouteBinding {
-	hostname := normalizeExternalAppDomain(sample.Hostname)
-	pathPrefix := strings.TrimSpace(sample.PathPrefix)
-	var best *model.EdgeRouteBinding
-	for idx := range routes {
-		route := &routes[idx]
-		if !strings.EqualFold(normalizeExternalAppDomain(route.Hostname), hostname) {
-			continue
-		}
-		if pathPrefix != "" && route.PathPrefix != "" && !strings.HasPrefix(pathPrefix, route.PathPrefix) {
-			continue
-		}
-		if strings.TrimSpace(sample.EdgeGroupID) != "" && route.EdgeGroupID != "" && !strings.EqualFold(sample.EdgeGroupID, route.EdgeGroupID) {
-			continue
-		}
-		if best == nil || len(route.PathPrefix) > len(best.PathPrefix) {
-			best = route
-		}
-	}
-	return best
-}
-
-func requestExplainEvidence(sample model.EdgePerformanceSample) map[string]string {
-	return map[string]string{
-		"sample_count":               fmt.Sprintf("%d", sample.SampleCount),
-		"error_count":                fmt.Sprintf("%d", sample.ErrorCount),
-		"route_generation":           sample.RouteGeneration,
-		"dns_policy":                 sample.DNSPolicy,
-		"cache_status":               sample.CacheStatus,
-		"request_body_read_complete": fmt.Sprintf("%t", sample.RequestBodyBytes == 0 || sample.RequestBodyReadBytes >= sample.RequestBodyBytes),
-	}
 }
 
 func platformArtifactKindList() []string {
