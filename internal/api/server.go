@@ -120,6 +120,8 @@ type Server struct {
 	nodeUpdaterEdgeIdentityMu              sync.Mutex
 	nodeUpdaterEdgeIdentityLookups         map[string]uint64
 	consoleGalleryCache                    expiringResponseCache[consoleGalleryResponse]
+	consoleAppsCache                       expiringResponseCache[[]model.App]
+	billingSummaryCache                    expiringResponseCache[model.TenantBillingSummary]
 	billingImageStorageRefresh             billingImageStorageRefreshScheduler
 	sourceUploadSlots                      chan struct{}
 	newLogsClient                          func(namespace string) (appLogsClient, error)
@@ -279,6 +281,8 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		edgeRouteSourceHeartbeats:              map[string]uint64{"edge_control": 0, "core_api": 0, "unknown": 0, "other": 0},
 		edgeRouteInventoryFallbacks:            map[string]uint64{"fencing_not_ready": 0, "active_inventory_empty": 0},
 		consoleGalleryCache:                    newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
+		consoleAppsCache:                       newExpiringResponseCache[[]model.App](15 * time.Second),
+		billingSummaryCache:                    newExpiringResponseCache[model.TenantBillingSummary](15 * time.Second),
 		sourceUploadSlots:                      make(chan struct{}, maxConcurrentSourceUploadRequests),
 		billingImageStorageRefresh:             newBillingImageStorageRefreshScheduler(0, 0),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
@@ -1160,6 +1164,27 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		Phase:     strings.TrimSpace(query.Get("phase")),
 		SourceRef: strings.TrimSpace(query.Get("source_ref")),
 	}
+	if !filter.HasAny() {
+		cacheKey := consoleAppsCacheKey(principal, tenantID, includeLiveStatus, includeResourceUsage)
+		if entry, ok := s.consoleAppsCache.getEntry(cacheKey); ok && time.Now().After(entry.expiresAt) {
+			go func() {
+				_, _ = s.consoleAppsCache.do(cacheKey, func() ([]model.App, error) {
+					return s.loadConsoleAppsList(context.Background(), principal, tenantID, includeLiveStatus, includeResourceUsage)
+				})
+			}()
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(entry.value)})
+			return
+		}
+		apps, cacheErr := s.consoleAppsCache.do(cacheKey, func() ([]model.App, error) {
+			return s.loadConsoleAppsList(r.Context(), principal, tenantID, includeLiveStatus, includeResourceUsage)
+		})
+		if cacheErr != nil {
+			s.writeStoreError(w, cacheErr)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(apps)})
+		return
+	}
 	pagination, err := readAppListPagination(r, principal, filter)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -1239,6 +1264,34 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		timings.Add("resource_usage", time.Since(resourceUsageStartedAt))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(visibleApps)})
+}
+
+func consoleAppsCacheKey(principal model.Principal, tenantID string, includeLiveStatus, includeResourceUsage bool) string {
+	return principalVisibilityCacheKey(principal) + "|tenant=" + strings.TrimSpace(tenantID) +
+		"|live=" + strconv.FormatBool(includeLiveStatus) +
+		"|usage=" + strconv.FormatBool(includeResourceUsage)
+}
+
+func (s *Server) loadConsoleAppsList(ctx context.Context, principal model.Principal, tenantID string, includeLiveStatus, includeResourceUsage bool) ([]model.App, error) {
+	apps, err := s.store.ListApps(tenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		return nil, err
+	}
+	visible := make([]model.App, 0, len(apps))
+	for _, app := range apps {
+		if strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deleting") {
+			continue
+		}
+		visible = append(visible, app)
+	}
+	visible = filterAppsForPrincipal(principal, visible)
+	if includeLiveStatus {
+		visible = s.overlayManagedAppStatuses(ctx, visible)
+	}
+	if includeResourceUsage {
+		visible = s.overlayCurrentResourceUsageOnApps(ctx, visible)
+	}
+	return visible, nil
 }
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
