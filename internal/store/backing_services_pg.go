@@ -598,7 +598,7 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		return err
 	}
 	if !found {
-		// Legacy binding fallback is part of the persisted-service compatibility contract.
+		// Legacy binding fallback is required for persisted-service compatibility.
 		// Older managed services may have a valid app binding but no
 		// owner_app_id. Treat the binding as the relationship of record so a
 		// deploy can still update the backing service instead of silently
