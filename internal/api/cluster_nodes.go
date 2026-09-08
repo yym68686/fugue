@@ -278,9 +278,56 @@ func (s *Server) StartBackgroundWarmers(ctx context.Context) {
 		return
 	}
 	s.startClusterNodeInventoryWarmLoop(ctx)
+	s.startConsoleSnapshotWarmLoop(ctx)
 	s.startResourceUsageSamplingLoop(ctx)
 	s.startRightSizingAutoApplyLoop(ctx)
 	s.startOOMRightSizingLoop(ctx)
+}
+
+// startConsoleSnapshotWarmLoop keeps the complete tenant-scoped console data
+// hot before a user navigates to the Web console. The work is best-effort and
+// never participates in request handling; authorization still applies to every
+// normal request using its own principal.
+func (s *Server) startConsoleSnapshotWarmLoop(ctx context.Context) {
+	if s == nil || s.store == nil || ctx == nil {
+		return
+	}
+	warm := func() {
+		tenants, err := s.store.ListTenants()
+		if err != nil {
+			if s.log != nil {
+				s.log.Printf("console snapshot warmup tenant listing failed: %v", err)
+			}
+			return
+		}
+		for _, tenant := range tenants {
+			tenantID := strings.TrimSpace(tenant.ID)
+			if tenantID == "" {
+				continue
+			}
+			principal := model.Principal{TenantID: tenantID}
+			go func(p model.Principal) {
+				_, _ = s.cachedConsoleGalleryResponse(ctx, p, true)
+				_, _ = s.consoleAppsCache.do(consoleAppsCacheKey(p, p.TenantID, true, true), func() ([]model.App, error) {
+					return s.loadConsoleAppsList(ctx, p, p.TenantID, true, true)
+				})
+				_, _ = s.cachedProjectImageUsageResponse(ctx, p)
+			}(principal)
+		}
+	}
+	warm()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				warm()
+			}
+		}
+	}()
 }
 
 func (s *Server) shouldWarmClusterNodeInventory() bool {
