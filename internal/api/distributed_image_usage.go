@@ -116,6 +116,25 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 			evidence.observedAt = observed
 		}
 	}
+	// Preserve stale-inventory attribution for an app that has no current
+	// location evidence. This fallback is intentionally per-app and only runs
+	// for the incomplete case; the normal project snapshot stays bounded to the
+	// fresh observation window.
+	for appID := range appIDs {
+		if len(evidence.locationsByAppID[appID]) > 0 {
+			continue
+		}
+		stale, staleErr := s.store.ListImageLocations(model.ImageLocationFilter{Status: model.ImageLocationStatusPresent, PlatformAdmin: true, AppID: appID})
+		if staleErr != nil {
+			return distributedImageUsageEvidence{}, staleErr
+		}
+		for _, location := range stale {
+			if distributedImageLocationIsFresh(location, cutoff) {
+				continue
+			}
+			evidence.staleLocationsByAppID[appID] = append(evidence.staleLocationsByAppID[appID], location)
+		}
+	}
 
 	manifests, err := s.store.ListImageCacheManifests(model.ImageCacheManifestFilter{
 		PresentOnly:       true,
