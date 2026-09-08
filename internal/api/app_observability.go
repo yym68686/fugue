@@ -131,6 +131,166 @@ func (s *Server) handleGetAppObservabilityMetricsSummary(w http.ResponseWriter, 
 	})
 }
 
+func (s *Server) handleGetAppObservabilityMetricsTimeseries(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principalCanReadAppObservability(principal) {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.observability.read scope")
+		return
+	}
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
+	if !allowed {
+		return
+	}
+	window, ok := s.readAppObservabilityWindow(w, r, app.ID)
+	if !ok {
+		return
+	}
+	step := 10
+	if raw := strings.TrimSpace(r.URL.Query().Get("step")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 5 || parsed > 300 {
+			httpx.WriteError(w, http.StatusBadRequest, "step must be between 5 and 300 seconds")
+			return
+		}
+		step = parsed
+	}
+	source := s.appObservabilitySourceStatus(app.ID, "metrics", "metrics query backend is not wired yet")
+	s.appendAudit(principal, "app.observability.metrics.timeseries.read", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
+	series := []map[string]any{}
+	if source.Status != "disabled" {
+		queried, err := s.queryAppObservabilityMetricsTimeseries(r.Context(), app.ID, window, step)
+		if err != nil {
+			source.Status = "degraded"
+			source.Available = false
+			source.Reason = err.Error()
+		} else {
+			source.Status = "available"
+			source.Available = true
+			source.Reason = "metrics query backend returned time series"
+			series = queried
+		}
+	}
+	resourceSeries, resourceErr := s.appResourceTimeseries(app, window)
+	if resourceErr != nil {
+		source.Status = "degraded"
+		source.Reason = "resource history unavailable: " + resourceErr.Error()
+	} else {
+		series = append(series, resourceSeries...)
+	}
+	for _, metric := range series {
+		points, _ := metric["points"].([]map[string]any)
+		metric["state"] = "collecting"
+		if len(points) > 0 {
+			metric["state"] = "available"
+			source.Available = true
+		}
+	}
+	series = append(series, map[string]any{"name": "network", "unit": "bytes/s", "source": "not exported by app telemetry", "state": "unavailable", "interval_seconds": 0, "points": []map[string]any{}})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"source": source, "window": window, "series": series})
+}
+
+type prometheusRangeResponse struct {
+	Status string `json:"status"`
+	Data   struct {
+		Result []struct {
+			Metric map[string]string `json:"metric"`
+			Values [][2]any          `json:"values"`
+		} `json:"result"`
+	} `json:"data"`
+	Error string `json:"error,omitempty"`
+}
+
+func (s *Server) queryAppObservabilityMetricsTimeseries(ctx context.Context, appID string, window appObservabilityWindow, step int) ([]map[string]any, error) {
+	cfg := s.observabilityConfig.Normalize()
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return nil, err
+	}
+	step = max(step, int(math.Ceil(until.Sub(since).Seconds()/1439)))
+	if strings.TrimSpace(cfg.MetricsQueryURL) == "" {
+		return s.queryAppObservabilityTimeseriesFromClickHouse(ctx, appID, window, step)
+	}
+	endpoint, err := normalizePrometheusQueryURL(cfg.MetricsQueryURL)
+	if err != nil {
+		return nil, err
+	}
+	endpoint.Path = strings.TrimSuffix(endpoint.Path, "/query") + "/query_range"
+	client := &http.Client{Timeout: cfg.ExportTimeout}
+	out := []map[string]any{}
+	// Each point describes a short rate window, independent of the selected
+	// history range. A one-hour view must not smooth away one-minute spikes.
+	queryWindow := appObservabilityWindow{Since: until.Add(-time.Minute).Format(time.RFC3339), Until: window.Until}
+	queries := buildAppObservabilityMetricQueries(appID, queryWindow)
+	for _, quantile := range []string{"50", "99"} {
+		q := queries[3]
+		q.Name = "p" + quantile + "_duration_ms"
+		q.Query = strings.Replace(q.Query, "0.95", "0."+quantile, 1)
+		queries = append(queries, q)
+	}
+	for _, item := range queries {
+		q := *endpoint
+		values := q.Query()
+		values.Set("query", item.Query)
+		values.Set("start", strconv.FormatInt(since.Unix(), 10))
+		values.Set("end", strconv.FormatInt(until.Unix(), 10))
+		values.Set("step", strconv.Itoa(step))
+		q.RawQuery = values.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, q.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("query Prometheus time series: %w", err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, cfg.MaxPayloadBytes+1))
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if int64(len(body)) > cfg.MaxPayloadBytes {
+			return nil, fmt.Errorf("metrics response exceeds payload limit")
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("query Prometheus time series returned %s", resp.Status)
+		}
+		var payload prometheusRangeResponse
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, err
+		}
+		if payload.Status != "" && payload.Status != "success" {
+			return nil, fmt.Errorf("query Prometheus time series failed: %s", payload.Error)
+		}
+		if len(payload.Data.Result) > 1 {
+			return nil, fmt.Errorf("aggregate metric returned multiple series")
+		}
+		points := []map[string]any{}
+		for _, result := range payload.Data.Result {
+			for _, pair := range result.Values {
+				ts, ok := pair[0].(float64)
+				raw, ok2 := pair[1].(string)
+				if !ok || !ok2 || math.IsNaN(ts) || math.IsInf(ts, 0) || ts < float64(since.Unix()) || ts > float64(until.Unix()) {
+					continue
+				}
+				value, err := strconv.ParseFloat(raw, 64)
+				if err != nil {
+					continue
+				}
+				var finite any = value
+				if math.IsNaN(value) || math.IsInf(value, 0) {
+					finite = nil
+				}
+				points = append(points, map[string]any{"observed_at": time.Unix(int64(ts), 0).UTC().Format(time.RFC3339), "value": finite})
+				if len(points) == 1440 {
+					break
+				}
+			}
+		}
+		out = append(out, map[string]any{"name": item.Name, "unit": item.Unit, "source": "prometheus query_range", "interval_seconds": step, "points": points})
+	}
+	return out, nil
+}
+
 func (s *Server) handleQueryAppObservabilityMetrics(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principalCanReadAppObservability(principal) {

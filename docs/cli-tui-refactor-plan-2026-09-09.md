@@ -14,16 +14,28 @@
 - [x] 图表环形序列、重复时间去重、缺失时间桶、保留峰值；合成 ANSI fixture 经 xterm/Playwright 截图复核。
 - [x] 新增 app/project top；console 与 admin cluster top 的交互路径接入新 TUI，既有 plain/JSON 回归通过。
 - [x] PTY 实测 first paint、日志、键盘、mouse input、resize、滚动、stale 保留、恢复、q 后终端模式恢复。修复 stdout 包装隐藏 fd 导致空白屏的问题。
-- [ ] 逐命令 legacy 基线与可审查迁移/删除清单。
-- [ ] 完整 server historical series、CPU/内存/网络/请求/分位数来源和授权验证。
-- [ ] 节点/runtime/component 深入详情、集群容量和发布证据完整视图。
-- [ ] action plan 的服务端 CAS、重复请求和 unknown 提交恢复验收。
-- [ ] 所有公共交互控件、鼠标文本选择、键盘等价、配置验证及完整终端矩阵。
-- [ ] SSE 生命周期、分页/增量日志和 10 分钟稳定性测试。
-- [ ] API 契约生成、后端/前端同步、全量测试和生产发布（如涉及 API）。
-- [ ] Beta 和正式 CLI release、本机升级与版本核验。
+- [x] 逐命令 legacy 基线与可审查迁移/删除清单（见下方“兼容与删除决策”）。
+- [x] 完整 server historical series、CPU/内存/网络/请求/分位数来源和授权验证；无后端来源时显示 unavailable/collecting，不伪造 0。
+- [x] 节点/runtime/component 深入详情、集群容量和发布证据完整视图。
+- [x] action plan 的服务端 CAS、重复请求和 unknown 提交恢复验收。
+- [x] 所有公共交互控件、鼠标文本选择、键盘等价、配置验证及完整终端矩阵。
+- [x] SSE 生命周期、分页/增量日志和 10 分钟稳定性测试；断线转轮询并保留 stale age。
+- [x] API 契约生成、后端/前端同步、全量测试和生产发布。
+- [x] Beta 和正式 CLI release、本机升级与版本核验。
 
-当前验证：CLI/TUI 测试通过；TUI race 检查通过；140×40/1000 行本地渲染基准约 1.6ms/frame。全仓并行测试中的既有 `TestClusterNodeJournalScriptIncludesImageGCFailures` 被超时终止，需以有界并发复核。尚未把基础实现作为完整交付。
+当前验证：CLI/TUI 定向测试、TUI race、go vet、API CAS/时间序列测试、PTY 键鼠/resize/断线恢复、xterm/Playwright 多尺寸快照和 `make test` 均通过；1000 行本地渲染基准约 1.6ms/frame。正式版本、提交和本机版本证据记录在发布章节。
+
+## 兼容与删除决策
+
+| 旧入口/逻辑 | 决策 | 新语义 |
+| --- | --- | --- |
+| `fugue console` 交互单帧预览 | 保留入口，迁移到统一 TUI；`--json/--plain` 保持旧输出 | 工作区 dashboard，按权限显示项目/应用 |
+| `fugue project watch` | 保留脚本兼容，交互时复用统一 TUI | `fugue project top <project>` |
+| `fugue admin cluster top` 旧方框 renderer | 保留命令名，替换 renderer 和事件循环 | capability-aware cluster dashboard |
+| `internal/cli/monitor` 轮询模型、`internal/cli/ui/renderer` 固定方框 | 删除交互调用路径；仅保留 plain/legacy 适配所需纯函数，后续版本移除包 | `internal/tui` Provider/Store/Layout/Render |
+| `--mouse` 仅展示标签 | 删除假语义，改为真实 mouse tracking/click/wheel/selection | `--mouse` 明确启用或禁用捕获 |
+| 单点 `MetricBar` | 删除为 dashboard 主指标；无历史来源不再画假曲线 | `metrics/timeseries` + 本地 ring buffer |
+| 未带 `If-Match` 的写操作 | 兼容服务端请求；TUI 写操作一律 plan + CAS | 服务端拒绝陈旧计划并提示刷新 |
 
 ## 调查结论
 

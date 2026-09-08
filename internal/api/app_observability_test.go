@@ -230,6 +230,37 @@ func TestAppObservabilityMetricsSummaryQueriesPrometheus(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityMetricsTimeseriesReturnsTimestampedSamples(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/query_range" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if r.URL.Query().Get("step") != "10" {
+			t.Fatalf("step = %q", r.URL.Query().Get("step"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "matrix", "result": []any{map[string]any{"metric": map[string]string{"app_id": app.ID}, "values": [][2]any{{float64(time.Now().Unix() - 10), "2"}, {float64(time.Now().Unix()), "3"}}}}}})
+	}))
+	t.Cleanup(prometheus.Close)
+	server.observabilityConfig = observability.Config{Enabled: true, MetricsQueryURL: prometheus.URL + "/api/v1/query"}.Normalize()
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/metrics/timeseries?since=1m&step=10", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Series []struct {
+			Name   string           `json:"name"`
+			State  string           `json:"state"`
+			Points []map[string]any `json:"points"`
+		} `json:"series"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Series) < 4 || response.Series[0].Name != "rpm" || response.Series[0].State != "available" || len(response.Series[0].Points) != 2 {
+		t.Fatalf("unexpected series: %+v", response.Series)
+	}
+}
+
 func TestAppObservabilityMetricsSummaryFallsBackToClickHouse(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -223,7 +223,11 @@ func (p *tuiProvider) loadTUIApp(client *Client, request tui.Request, principal 
 		return s, nil
 	}
 	if request.Section == "metrics" {
-		metrics, err := client.GetAppObservabilityMetricsSummary(id, appObservabilityMetricsOptions{appObservabilityWindowOptions: appObservabilityWindowOptions{Since: "1m"}})
+		window := request.Window
+		if window <= 0 {
+			window = 15 * time.Minute
+		}
+		metrics, err := client.GetAppObservabilityMetricsTimeseries(id, appObservabilityMetricsOptions{appObservabilityWindowOptions: appObservabilityWindowOptions{Since: window.String()}}, 10)
 		s.Sources = []tui.Source{tuiSource("request metrics", err, s.ObservedAt)}
 		if err == nil {
 			state := metrics.Source.Status
@@ -232,17 +236,13 @@ func (p *tuiProvider) loadTUIApp(client *Client, request tui.Request, principal 
 			}
 			s.Sources[0].State = state
 			s.Sources[0].Message = metrics.Source.Reason
-			at, parseErr := time.Parse(time.RFC3339, metrics.Window.Until)
-			if parseErr != nil {
-				at = s.ObservedAt
-			}
-			for _, metric := range metrics.Metrics {
-				name, _ := metric["name"].(string)
-				unit, _ := metric["unit"].(string)
-				value, ok := metric["value"].(float64)
-				series := tui.Series{ID: name, Label: strings.ReplaceAll(name, "_", " "), Unit: unit, Source: "observability summary (1m window)", State: state, Interval: 10 * time.Second}
-				if ok && metrics.Source.Available {
-					series.Points = []tui.Point{{At: at, Value: &value}}
+			for _, metric := range metrics.Series {
+				series := tui.Series{ID: metric.Name, Label: strings.ReplaceAll(metric.Name, "_", " "), Unit: metric.Unit, Source: metric.Source, State: firstNonEmptyTrimmed(metric.State, state), Interval: time.Duration(metric.IntervalSeconds) * time.Second}
+				for _, point := range metric.Points {
+					at, parseErr := time.Parse(time.RFC3339, point.ObservedAt)
+					if parseErr == nil {
+						series.Points = append(series.Points, tui.Point{At: at, Value: point.Value})
+					}
 				}
 				s.Series = append(s.Series, series)
 			}
@@ -270,13 +270,9 @@ func (p *tuiProvider) loadTUIApp(client *Client, request tui.Request, principal 
 			id, label, unit string
 			value           *int64
 		}{{"cpu", "CPU", "mCPU", usage.CPUMilliCores}, {"memory", "Memory", "bytes", usage.MemoryBytes}, {"storage", "Storage", "bytes", usage.PersistentStorageUsedBytes}} {
-			series := tui.Series{ID: v.id, Label: v.label, Unit: v.unit, Source: "current resource usage; client sampled", State: "unavailable", Interval: p.cliTUIInterval()}
 			if v.value != nil {
-				value := float64(*v.value)
-				series.State = "available"
-				series.Points = []tui.Point{{At: s.ObservedAt, Value: &value}}
+				s.Fields = append(s.Fields, tui.Field{Label: v.label + " now", Value: fmt.Sprintf("%d %s", *v.value, v.unit)})
 			}
-			s.Series = append(s.Series, series)
 		}
 	}
 	pods, podErr := client.GetAppRuntimePods(id, "app")
@@ -307,13 +303,17 @@ func (p *tuiProvider) loadTUIApp(client *Client, request tui.Request, principal 
 		target := tui.Target{Kind: "runtime", ID: runtimeID, Name: runtimeID}
 		s.Tables = append(s.Tables, tui.Table{ID: "runtime", Title: "Runtime", Columns: []string{"Runtime", "Status"}, Rows: []tui.Row{{ID: runtimeID, Cells: []string{runtimeID, "inspect"}, Target: &target}}})
 	}
-	canWrite := principal.PlatformAdmin
+	canScale := principal.PlatformAdmin
+	canDeploy := principal.PlatformAdmin
 	for _, scope := range principal.Scopes {
-		if scope == "app.write" || scope == "app.deploy" || scope == "*" {
-			canWrite = true
+		if scope == "app.scale" || scope == "*" {
+			canScale = true
+		}
+		if scope == "app.deploy" || scope == "*" {
+			canDeploy = true
 		}
 	}
-	s.Actions = []tui.Action{{ID: "restart", Label: "Restart application", Enabled: canWrite, Reason: "app.write or app.deploy scope required"}, {ID: "redeploy", Label: "Reapply committed configuration", Enabled: canWrite, Reason: "app.write or app.deploy scope required"}, {ID: "scale", Label: "Scale replicas", Enabled: canWrite, Argument: "Desired replica count", Reason: "app.write or app.deploy scope required"}, {ID: "rollback", Label: "Roll back image", Enabled: canWrite, Argument: "Exact image reference from app image inventory", Reason: "app.deploy scope required"}}
+	s.Actions = []tui.Action{{ID: "restart", Label: "Restart application", Enabled: canDeploy, Reason: "app.deploy scope required"}, {ID: "scale", Label: "Scale replicas", Enabled: canScale, Argument: "Desired replica count", Reason: "app.scale scope required"}, {ID: "rollback", Label: "Deploy or roll back image version", Enabled: canDeploy, Argument: "Exact image reference from app image inventory", Reason: "app.deploy scope required"}}
 	return s, nil
 }
 func (p *tuiProvider) cliTUIInterval() time.Duration { return 3 * time.Second }
@@ -455,13 +455,13 @@ func (p *tuiProvider) Execute(ctx context.Context, plan tui.Plan) (tui.Receipt, 
 		if err != nil || replicas < 0 {
 			return tui.Receipt{}, fmt.Errorf("invalid replica count")
 		}
-		response, err := client.ScaleApp(plan.Request.Target.ID, replicas)
+		response, err := client.ScaleAppForSpec(plan.Request.Target.ID, replicas, plan.Precondition)
 		if err != nil {
 			return tui.Receipt{}, err
 		}
 		op = response.Operation
 	case "rollback":
-		response, err := client.RedeployAppImage(plan.Request.Target.ID, plan.Request.Argument)
+		response, err := client.RedeployAppImageForSpec(plan.Request.Target.ID, plan.Request.Argument, plan.Precondition)
 		if err != nil {
 			return tui.Receipt{}, err
 		}

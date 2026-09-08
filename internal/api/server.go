@@ -1411,6 +1411,10 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.scale scope")
 		return
 	}
+	expected, valid := appSpecPrecondition(w, r)
+	if !valid {
+		return
+	}
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
 		return
@@ -1433,7 +1437,7 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		spec.Replicas = req.Replicas
-		op, err := s.store.CreateOperation(model.Operation{
+		op, err := s.createAppOperationWithPrecondition(model.Operation{
 			TenantID:            app.TenantID,
 			Type:                model.OperationTypeDeploy,
 			RequestedByType:     principal.ActorType,
@@ -1442,25 +1446,25 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 			DesiredSpec:         &spec,
 			DesiredSource:       source,
 			DesiredOriginSource: model.AppOriginSource(app),
-		})
+		}, expected)
 		if err != nil {
-			s.writeStoreError(w, err)
+			s.writeAppPreconditionError(w, err, expected)
 			return
 		}
 		s.appendAudit(principal, "app.scale", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
 		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 		return
 	}
-	op, err := s.store.CreateOperation(model.Operation{
+	op, err := s.createAppOperationWithPrecondition(model.Operation{
 		TenantID:        app.TenantID,
 		Type:            model.OperationTypeScale,
 		RequestedByType: principal.ActorType,
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		DesiredReplicas: &req.Replicas,
-	})
+	}, expected)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeAppPreconditionError(w, err, expected)
 		return
 	}
 	s.appendAudit(principal, "app.scale", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})

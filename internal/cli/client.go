@@ -917,6 +917,29 @@ func (c *Client) ScaleApp(id string, replicas int) (operationResponse, error) {
 	return response, nil
 }
 
+func (c *Client) ScaleAppForSpec(id string, replicas int, specHash string) (operationResponse, error) {
+	var response operationResponse
+	payload, err := json.Marshal(map[string]int{"replicas": replicas})
+	if err != nil {
+		return response, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.resolveURL(path.Join("/v1/apps", id, "scale")), bytes.NewReader(payload))
+	if err != nil {
+		return response, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("If-Match", `"`+strings.TrimSpace(specHash)+`"`)
+	raw, err := c.do(req)
+	if err != nil {
+		return response, err
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return response, err
+	}
+	return response, nil
+}
+
 func (c *Client) MigrateApp(id, targetRuntimeID string) (operationResponse, error) {
 	var response operationResponse
 	req := map[string]string{"target_runtime_id": strings.TrimSpace(targetRuntimeID)}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -94,6 +95,22 @@ type appObservabilityMetricsSummaryResponse struct {
 	Metrics []map[string]any             `json:"metrics"`
 }
 
+type appObservabilityMetricsTimeseriesResponse struct {
+	Source appObservabilitySourceStatus `json:"source"`
+	Window appObservabilityWindow       `json:"window"`
+	Series []struct {
+		Name            string `json:"name"`
+		Unit            string `json:"unit"`
+		Source          string `json:"source"`
+		State           string `json:"state"`
+		IntervalSeconds int    `json:"interval_seconds"`
+		Points          []struct {
+			ObservedAt string   `json:"observed_at"`
+			Value      *float64 `json:"value"`
+		} `json:"points"`
+	} `json:"series"`
+}
+
 type appObservabilityMetricsQueryResponse struct {
 	Source  appObservabilitySourceStatus `json:"source"`
 	Window  appObservabilityWindow       `json:"window"`
@@ -144,6 +161,23 @@ func (c *Client) GetAppObservabilityMetricsSummary(id string, opts appObservabil
 	var response appObservabilityMetricsSummaryResponse
 	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return appObservabilityMetricsSummaryResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetAppObservabilityMetricsTimeseries(id string, opts appObservabilityMetricsOptions, step int) (appObservabilityMetricsTimeseriesResponse, error) {
+	values := url.Values{}
+	appendAppObservabilityWindowValues(values, opts.appObservabilityWindowOptions)
+	if step > 0 {
+		values.Set("step", strconv.Itoa(step))
+	}
+	relative := appObservabilityPath(id, "metrics", "timeseries")
+	if encoded := values.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appObservabilityMetricsTimeseriesResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return response, err
 	}
 	return response, nil
 }

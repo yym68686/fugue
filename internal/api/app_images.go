@@ -355,6 +355,10 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusForbidden, "missing app.deploy scope")
 		return
 	}
+	expected, valid := appSpecPrecondition(w, r)
+	if !valid {
+		return
+	}
 	if !s.appImageInventoryConfigured() {
 		httpx.WriteError(w, http.StatusBadRequest, "internal registry image inventory is not configured")
 		return
@@ -411,7 +415,7 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 		spec.Replicas = 1
 	}
 
-	op, err := s.store.CreateOperation(model.Operation{
+	op, err := s.createAppOperationWithPrecondition(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     principal.ActorType,
@@ -420,9 +424,9 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 		DesiredSpec:         &spec,
 		DesiredSource:       &source,
 		DesiredOriginSource: model.AppOriginSource(app),
-	})
+	}, expected)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeAppPreconditionError(w, err, expected)
 		return
 	}
 

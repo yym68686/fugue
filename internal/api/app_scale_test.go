@@ -1,14 +1,47 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
+
+func TestScaleAppIfMatchGuardsCommittedSpec(t *testing.T) {
+	t.Parallel()
+	s, server, _, app := setupAppConfigTestServer(t, model.AppSpec{Image: "ghcr.io/example/demo:latest", Ports: []int{8080}, Replicas: 1, RuntimeID: "runtime_managed_shared"})
+	_, apiKey, err := s.CreateAPIKey(app.TenantID, "scaler", []string{"app.scale"})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	payload, _ := json.Marshal(map[string]any{"replicas": 2})
+	request := func(tag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/apps/"+app.ID+"/scale", bytes.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("If-Match", tag)
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	if got := request(`"` + strings.Repeat("0", 64) + `"`).Code; got != http.StatusPreconditionFailed {
+		t.Fatalf("stale If-Match status = %d, want 412", got)
+	}
+	if got := request("bad").Code; got != http.StatusBadRequest {
+		t.Fatalf("invalid If-Match status = %d, want 400", got)
+	}
+	hash := model.AppSpecSHA256(app.Spec)
+	if got := request(`"` + hash + `"`).Code; got != http.StatusAccepted {
+		t.Fatalf("valid If-Match status = %d, want 202", got)
+	}
+}
 
 func TestScaleAppRecoversFailedImportedAppDesiredState(t *testing.T) {
 	t.Parallel()

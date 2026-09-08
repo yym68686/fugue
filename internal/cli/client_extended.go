@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -965,6 +967,29 @@ func (c *Client) RedeployAppImage(id, imageRef string) (appImageRedeployResponse
 	request := map[string]string{"image_ref": strings.TrimSpace(imageRef)}
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "images", "redeploy"), request, &response); err != nil {
 		return appImageRedeployResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) RedeployAppImageForSpec(id, imageRef, specHash string) (appImageRedeployResponse, error) {
+	var response appImageRedeployResponse
+	payload, err := json.Marshal(map[string]string{"image_ref": strings.TrimSpace(imageRef)})
+	if err != nil {
+		return response, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.resolveURL(path.Join("/v1/apps", id, "images", "redeploy")), bytes.NewReader(payload))
+	if err != nil {
+		return response, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("If-Match", `"`+strings.TrimSpace(specHash)+`"`)
+	raw, err := c.do(req)
+	if err != nil {
+		return response, err
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return response, err
 	}
 	return response, nil
 }
