@@ -8,6 +8,7 @@ import (
 	cliconsole "fugue/internal/cli/console"
 	cliterminal "fugue/internal/cli/terminal"
 	"fugue/internal/model"
+	"fugue/internal/tui"
 
 	"github.com/spf13/cobra"
 )
@@ -33,6 +34,16 @@ truth and does not replace JSON/script workflows.
 			client, err := c.newClient()
 			if err != nil {
 				return err
+			}
+			if !c.wantsJSON() && c.shouldUseInteractiveMonitor(opts.Plain) {
+				target := tui.Target{Kind: "workspace", Name: "Workspace"}
+				if opts.Project != "" {
+					target = tui.Target{Kind: "project", Name: opts.Project}
+				}
+				if opts.Admin {
+					target = tui.Target{Kind: "cluster", Name: "Cluster"}
+				}
+				return c.runTUI(cmd, &tuiProvider{cli: c, client: client}, target, defaultTUIFlags())
 			}
 			view, err := c.loadConsoleView(client, opts.Project, opts.Admin, opts.Mouse, opts.LogLines)
 			if err != nil {

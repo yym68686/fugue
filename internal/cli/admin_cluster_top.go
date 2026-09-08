@@ -9,6 +9,7 @@ import (
 
 	climonitor "fugue/internal/cli/monitor"
 	"fugue/internal/model"
+	"fugue/internal/tui"
 
 	"github.com/spf13/cobra"
 )
@@ -33,6 +34,7 @@ func (c *CLI) newAdminClusterTopCommand() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+			cmd.SetContext(ctx)
 			if c.wantsJSON() {
 				payload, err := c.loadClusterTopPayload(client)
 				if err != nil {
@@ -50,7 +52,9 @@ func (c *CLI) newAdminClusterTopCommand() *cobra.Command {
 				}
 				return c.renderMonitorSnapshot(clusterTopPayloadSnapshot(payload, opts))
 			}
-			return c.watchClusterTopMonitor(ctx, client, opts)
+			flags := defaultTUIFlags()
+			flags.Interval = opts.Interval
+			return c.runTUI(cmd, &tuiProvider{cli: c, client: client}, tui.Target{Kind: "cluster", Name: "Cluster"}, flags)
 		},
 	}
 	cmd.Flags().DurationVar(&opts.Interval, "interval", opts.Interval, "Monitor refresh interval")

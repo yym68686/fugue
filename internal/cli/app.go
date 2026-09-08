@@ -77,6 +77,7 @@ in more than one visible project or tenant.
 		c.newAppStatusCommand(),
 		c.newAppOverviewCommand(),
 		c.newAppWatchCommand(),
+		c.newAppTopCommand(),
 		c.newAppDiagnosisCommand(),
 		c.newAppDriftCommand(),
 		c.newAppReconcileCommand(),
