@@ -54,6 +54,8 @@ func (c *CLI) newDataPrewarmCommand() *cobra.Command {
 		return err
 	}}
 	cmd.Flags().StringVar(&runtimeRef, "runtime", "", "Exact target managed runtime name or ID")
+	cmd.Example = "fugue data prewarm dataset --version snapshot-v1 --runtime runtime-a"
+	_ = cmd.MarkFlagRequired("runtime")
 	cmd.Flags().StringVar(&version, "version", "latest", "Snapshot ID or immutable version (latest is frozen at submission)")
 	cmd.Flags().StringSliceVar(&assets, "assets", nil, "Only cache these snapshot assets")
 	cmd.Flags().BoolVar(&wait, "wait", true, "Wait for verified cache readiness")
@@ -130,5 +132,6 @@ func (c *CLI) newDataPrewarmEvictCommand() *cobra.Command {
 		return c.renderResourceResult(out)
 	}}
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "Confirm runtime cache eviction")
+	cmd.Example = "fugue data prewarm evict data_transfer_123 --confirm"
 	return cmd
 }

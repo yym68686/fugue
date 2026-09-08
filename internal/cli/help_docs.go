@@ -1317,6 +1317,9 @@ func buildGroupCommandExamples(cmd *cobra.Command) string {
 }
 
 func buildLeafCommandExample(cmd *cobra.Command) string {
+	if example := strings.TrimSpace(cmd.Example); example != "" {
+		return example
+	}
 	path := cmd.CommandPath()
 	if override, ok := commandHelpDocOverrides[path]; ok && strings.TrimSpace(override.Example) != "" {
 		return strings.TrimSpace(override.Example)

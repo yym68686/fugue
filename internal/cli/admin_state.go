@@ -97,6 +97,8 @@ func (c *CLI) newAdminStateCommand() *cobra.Command {
 	show.Flags().StringVar(&kind, "kind", "", "Artifact kind")
 	show.Flags().StringVar(&scope, "scope", "global", "Scope key")
 	show.Flags().StringVar(&channel, "channel", "full", "Release channel")
+	show.Example = "fugue admin state show --kind " + model.PlatformArtifactKindEdgeRouteBundle + " --scope global --channel full"
+	_ = show.MarkFlagRequired("kind")
 	cmd.AddCommand(show)
 	return cmd
 }

@@ -116,7 +116,7 @@ func (c *CLI) newAppReconcileCommand() *cobra.Command {
 		if expected != "" && expected != before.DesiredSpecHash {
 			return withExitCode(fmt.Errorf("saved plan no longer matches committed intent"), ExitCodeUserInput)
 		}
-		result := map[string]any{"schema_version": 1, "dry_run": !apply, "before": before, "expected_spec_hash": before.DesiredSpecHash, "action": "restart_committed_spec", "code_build_required": false, "apply_scope": "committed_app_spec", "independent_routing_recovery": "fugue admin state show --kind edge-routes"}
+		result := map[string]any{"schema_version": 1, "dry_run": !apply, "before": before, "expected_spec_hash": before.DesiredSpecHash, "action": "restart_committed_spec", "code_build_required": false, "apply_scope": "committed_app_spec", "independent_routing_recovery": "fugue admin artifact ls --kind " + model.PlatformArtifactKindEdgeRouteBundle}
 		if !apply {
 			return c.renderResourceResult(result)
 		}

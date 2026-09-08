@@ -242,6 +242,7 @@ func (c *CLI) newImageReplicateCommand() *cobra.Command {
 	}}
 	cmd.Flags().StringVar(&runtimeRef, "runtime", "", "Target runtime name or ID")
 	cmd.Flags().StringVar(&node, "node", "", "Target cluster node name")
+	cmd.Example = "fugue image replicate img_123 --node worker-a\nfugue image replicate img_123 --runtime runtime-a --wait"
 	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the replication task")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "Maximum local wait")
 	return cmd

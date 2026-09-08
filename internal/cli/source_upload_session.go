@@ -242,5 +242,7 @@ func (c *CLI) newOperationRecoverCommand() *cobra.Command {
 		return nil
 	}}
 	cmd.Flags().StringVar(&requestID, "request-id", "", "Exact request ID from deploy --request-id")
+	cmd.Example = "fugue operation recover --request-id source-change-001"
+	_ = cmd.MarkFlagRequired("request-id")
 	return cmd
 }

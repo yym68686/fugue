@@ -113,6 +113,8 @@ func (c *CLI) newRolloutPolicyCommand() *cobra.Command {
 	show.Short = "Show rollout and continuity policy without changing it"
 	set := renamedCommand(c.newAppContinuitySetCommand(), "set <app>")
 	set.Short = "Configure zero-downtime rollout policy"
+	set.Example = "fugue app rollout policy set my-app --zero-downtime safe"
+	_ = set.MarkFlagRequired("zero-downtime")
 	original := set.RunE
 	set.RunE = func(cmd *cobra.Command, args []string) error {
 		for _, name := range []string{"app-to", "db-to", "app-runtime-id", "db-runtime-id", "rebalance-now"} {
