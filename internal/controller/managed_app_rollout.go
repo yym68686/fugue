@@ -663,6 +663,14 @@ func managedBackingServiceClusterRolloutReadyForDeployment(deployment runtime.Ma
 	}
 
 	desiredInstances := managedBackingServiceDesiredInstances(deployment, cluster)
+	if cluster.Status.Instances > 0 && cluster.Status.Instances != desiredInstances {
+		return false, fmt.Sprintf(
+			"waiting for backing service cluster %s instance topology to settle (%d/%d instances)",
+			clusterName,
+			cluster.Status.Instances,
+			desiredInstances,
+		)
+	}
 	if deployment.Suspended {
 		if cloudNativePGClusterHibernated(cluster) {
 			return true, fmt.Sprintf("backing service cluster %s suspended", clusterName)

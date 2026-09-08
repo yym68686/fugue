@@ -1859,6 +1859,14 @@ func TestManagedBackingServiceClusterRolloutReady(t *testing.T) {
 	if !strings.Contains(message, "to settle") {
 		t.Fatalf("expected settle message when cluster still has extra ready instances, got %q", message)
 	}
+
+	cluster.Spec.Instances = 1
+	cluster.Status.Instances = 2
+	cluster.Status.ReadyInstances = 1
+	ready, message = managedBackingServiceClusterRolloutReady("demo-postgres", cluster, true)
+	if ready || !strings.Contains(message, "instance topology") {
+		t.Fatalf("expected stale CNPG instance topology to keep rollout pending, ready=%v message=%q", ready, message)
+	}
 }
 
 func TestManagedBackingServiceClusterRolloutReadyHandlesSuspendAndResume(t *testing.T) {

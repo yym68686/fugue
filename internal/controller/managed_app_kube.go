@@ -145,6 +145,7 @@ type kubeCloudNativePGCluster struct {
 	Status struct {
 		Phase                  string                        `json:"phase,omitempty"`
 		PhaseReason            string                        `json:"phaseReason,omitempty"`
+		Instances              int                           `json:"instances,omitempty"`
 		ReadyInstances         int                           `json:"readyInstances,omitempty"`
 		CurrentPrimary         string                        `json:"currentPrimary,omitempty"`
 		TargetPrimary          string                        `json:"targetPrimary,omitempty"`

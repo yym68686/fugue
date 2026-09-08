@@ -2293,6 +2293,9 @@ func managedBackingServiceClusterPrimaryAvailable(deployment runtime.ManagedBack
 		return false
 	}
 	desiredInstances := managedBackingServiceDesiredInstances(deployment, cluster)
+	if cluster.Status.Instances > 0 && cluster.Status.Instances != desiredInstances {
+		return false
+	}
 	if cluster.Status.ReadyInstances < 1 || cluster.Status.ReadyInstances > desiredInstances {
 		return false
 	}
