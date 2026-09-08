@@ -412,11 +412,11 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 - E07：复核最新 main 的 pending-only operation cancel 和状态机测试；没有增加无法补偿的通用运行中取消。各对象仍使用 operation cancel、release abort、data transfer cancel 各自契约。
 - 验证：完整 `make test` 通过；CLI 示例解析、迁移/移除零请求、显式输出版本、overview 并发/截止时间、真实 image probe、source 分块恢复/并发提交锁、runtime cache 摘要/失败清理/Pod 身份、reconcile CAS、平台 LKG 及上下文等测试通过。生产发布仍需以下记录证明，尚未把本地测试当作生产完成。
 
-### 最终发布验收（进行中）
+### 最终发布验收（已完成）
 
 - [x] API / controller / schema：声明式 CI 已发布并完成健康验证。
-- [ ] CLI v0.2.0 tag / GitHub Release：待发布。
-- [ ] 本机 `/opt/homebrew/bin/fugue`：待升级到 v0.2.0。
+- [x] CLI v0.2.0 tag / GitHub Release：tag 固定到生产验收提交 `0c373f971575ac708cd18f68d4d5712289757353`；[release-cli 34278798428](https://github.com/yym68686/fugue/actions/runs/34278798428) 全量测试、六个平台打包和发布均成功，[GitHub Release](https://github.com/yym68686/fugue/releases/tag/v0.2.0) 已附迁移说明与校验文件。
+- [x] 本机 `/opt/homebrew/bin/fugue`：通过 `fugue upgrade` 从 v0.1.123 升级到 v0.2.0；`fugue version --check-latest --json` 核验 version/latest_version 均为 v0.2.0、commit 为 `0c373f9`、built_at 为 `2026-09-08T21:11:25Z`。
 
 - 首次生产 CI `34264422165`：schema 成功；API/controller 在应用前的前置状态检查中被阻止。API 的 live identity 已偏离监控器保存的 positive LKG，controller 也未达到前置健康证明；这次没有应用新 API/controller。后续使用相同已验证 LKG 的声明式重试，保留 CAS 和来源校验。
 - 补充临时 PostgreSQL 实测：分块完成、请求→operation 原子关联、缓存状态读写、并发取消、项目过滤、引用写入与删除互锁。修正 PostgreSQL 的过期 worker 更新从 404 归类为 409，与文件存储行为一致；也修正 runtime 消失后的取消清理。
@@ -429,4 +429,5 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 
 - 最终生产发布：CI `34277341215` 成功发布 controller 启动批处理修复，CI `34277651942` 成功发布 API gen202；生产 API/controller 监控器连续失败数为 0，两个 Deployment 均为 2/2 Ready。PostgreSQL 只读快照显示 0 lock/advisory/relation waits、24 个客户端连接；内部 service FQDN 末尾点探针 `/healthz` 和 `/v1/auth/context` 均 7/7 返回 200，p50 分别为 516.7ms 和 520.5ms。较高端到端耗时来自 DNS search/跨区网络，API `/healthz` origin timing 已单独记录。
 
-- v0.2.0 tag、GitHub Release 与本机升级将在实际完成后补充核验结果。
+- 最终验收链接：[controller CI](https://github.com/yym68686/fugue/actions/runs/34277341215)、[API CI](https://github.com/yym68686/fugue/actions/runs/34277651942)。新 API/controller 四个 Pod 复查均 Ready、0 重启；本机新版 CLI 成功读取生产能力目录，435 个公开 operation 包含 source upload session 和 app runtime state。39 项实施清单与 3 项最终发布清单均已勾选。
+- 内部网络测量边界：上述 7 次探针每次新建连接，末尾点 FQDN 避免 DNS search；独立 Web 任务的 keepalive 样本 `/v1/auth/context` p50 为 174ms。端到端延迟不能直接归因为 SQL；数据库快照无锁等待，但一次存在 9.625 秒的在途事务，不宣称所有查询均已优化。其余 Web/DNS 性能工作由对应任务继续跟进。
