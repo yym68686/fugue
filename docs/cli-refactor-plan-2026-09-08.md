@@ -422,3 +422,5 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 - 补充临时 PostgreSQL 实测：分块完成、请求→operation 原子关联、缓存状态读写、并发取消、项目过滤、引用写入与删除互锁。修正 PostgreSQL 的过期 worker 更新从 404 归类为 409，与文件存储行为一致；也修正 runtime 消失后的取消清理。
 
 - 重试验证：临时 PostgreSQL 集成测试通过；时序测试修正为检查在途 failover 不重复，并用一次性信号避免重复关闭 channel。该测试连续 5 次通过，完整 `GOFLAGS=-p=2 make test` 通过。
+
+- 第二次生产 CI `34268293839` 暴露发布校验器的历史 Pod 问题：Deployment 选择器中的旧 Succeeded/Failed Pod 被当作当前副本验证，历史 Failed Pod 的空 imageID 导致 forward 与回滚均无法通过。已验证实际 Running Pod 的 imageID 与注册表摘要一致；修复只排除长运行工作负载的终态历史 Pod，仍要求至少一个当前 Pod、所有当前 Pod 的精确摘要，以及 Job 成功 Pod 的镜像证明。修复通过专门负例和发布工具/Guardian 测试，将通过相同 CI 发布 Guardian 后继续 API/controller 验收。

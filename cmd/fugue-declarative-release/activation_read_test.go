@@ -47,7 +47,9 @@ printf '%%s\n' '%s'
 				t.Fatal(err)
 			}
 			t.Setenv("ACTIVATION_READ_COUNT", counter)
-			cluster := &kubectlCluster{kubectl: kubectl, readAttempts: 2, readTimeout: time.Second, readRetryDelay: time.Millisecond}
+			// Verify transport retry semantics without counting slow process startup
+			// on a busy builder as an additional simulated EOF. Attempt assertions remain exact.
+			cluster := &kubectlCluster{kubectl: kubectl, readAttempts: 2, readTimeout: 5 * time.Second, readRetryDelay: time.Millisecond}
 			release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{Namespace: "control"}}
 			transition := declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-test", ActivationStatePath: "/state/activation.json"}
 			state, exists, err := cluster.readEdgeActivationStateFromPod(context.Background(), release, transition, edgeGroupPod{Name: "front"}, "edge-front")

@@ -2527,3 +2527,36 @@ func mustJSON(t *testing.T, value any) []byte {
 	}
 	return encoded
 }
+
+func TestArtifactImageProofIgnoresHistoricalPodsButKeepsLiveAndJobChecks(t *testing.T) {
+	top := "sha256:" + strings.Repeat("a", 64)
+	platform := "sha256:" + strings.Repeat("b", 64)
+	image := "registry.example.test/controller@" + top
+	expected := map[string]string{"container\x00controller": image}
+	pod := func(phase, id string) map[string]any {
+		return map[string]any{"metadata": map[string]any{}, "status": map[string]any{"phase": phase, "containerStatuses": []any{map[string]any{"name": "controller", "imageID": id}}}}
+	}
+	raw := func(pods ...map[string]any) []byte {
+		items := make([]any, len(pods))
+		for i, p := range pods {
+			items[i] = p
+		}
+		return mustJSON(t, map[string]any{"items": items})
+	}
+	good := pod("Running", image)
+	if err := verifyArtifactPodImageIDs(raw(pod("Failed", ""), pod("Succeeded", "sha256:"+strings.Repeat("c", 64)), good), expected, image, platform, "Deployment"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyArtifactPodImageIDs(raw(pod("Failed", "")), expected, image, platform, "Deployment"); err == nil {
+		t.Fatal("history alone established a live workload")
+	}
+	if err := verifyArtifactPodImageIDs(raw(good, pod("Running", "")), expected, image, platform, "Deployment"); err == nil {
+		t.Fatal("unverified live replica was ignored")
+	}
+	if err := verifyArtifactPodImageIDs(raw(pod("Succeeded", image)), expected, image, platform, "Job"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyArtifactPodImageIDs(raw(pod("Succeeded", "sha256:"+strings.Repeat("c", 64))), expected, image, platform, "Job"); err == nil {
+		t.Fatal("successful Job with a wrong image was accepted")
+	}
+}

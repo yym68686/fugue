@@ -2892,7 +2892,7 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 		}
 		expected["container\x00"+release.Workload.Container] = image
 	}
-	return verifyArtifactPodImageIDs(podsRaw, expected, verifiedImage, platformManifestDigest)
+	return verifyArtifactPodImageIDs(podsRaw, expected, verifiedImage, platformManifestDigest, release.Workload.Kind)
 }
 
 func verifyObservedArtifactImageIDs(podsRaw, workloadRaw []byte, release declarativerelease.PlanRelease, verifiedImage, platformManifestDigest string) error {
@@ -2931,10 +2931,10 @@ func verifyObservedArtifactImageIDs(podsRaw, workloadRaw []byte, release declara
 		}
 		expected["container\x00"+release.Workload.Container] = image
 	}
-	return verifyArtifactPodImageIDs(podsRaw, expected, verifiedImage, platformManifestDigest)
+	return verifyArtifactPodImageIDs(podsRaw, expected, verifiedImage, platformManifestDigest, release.Workload.Kind)
 }
 
-func verifyArtifactPodImageIDs(podsRaw []byte, expected map[string]string, verifiedImage, platformManifestDigest string) error {
+func verifyArtifactPodImageIDs(podsRaw []byte, expected map[string]string, verifiedImage, platformManifestDigest, workloadKind string) error {
 	topDigest := verifiedImage[strings.LastIndex(verifiedImage, "@")+1:]
 	list, err := decodeJSONObject(podsRaw)
 	if err != nil {
@@ -2944,6 +2944,7 @@ func verifyArtifactPodImageIDs(podsRaw []byte, expected map[string]string, verif
 	if !ok || len(items) == 0 {
 		return errors.New("artifact workload has no Pods")
 	}
+	inspected := 0
 	for _, raw := range items {
 		pod, ok := raw.(map[string]any)
 		if !ok {
@@ -2953,6 +2954,14 @@ func verifyArtifactPodImageIDs(podsRaw []byte, expected map[string]string, verif
 			continue
 		}
 		status := mapField(pod, "status")
+		// Completed/failed Pods retained by Kubernetes are history, not live
+		// replicas of a long-running workload. A successful Job Pod remains
+		// positive execution evidence and must still prove its image identity.
+		phase := stringValue(status["phase"])
+		if phase == "Failed" || (phase == "Succeeded" && workloadKind != "Job") {
+			continue
+		}
+		inspected++
 		for key := range expected {
 			parts := strings.SplitN(key, "\x00", 2)
 			field := "containerStatuses"
@@ -2979,6 +2988,9 @@ func verifyArtifactPodImageIDs(podsRaw []byte, expected map[string]string, verif
 				return fmt.Errorf("Pod container %s status is absent", parts[1])
 			}
 		}
+	}
+	if inspected == 0 {
+		return errors.New("artifact workload has no current Pods")
 	}
 	return nil
 }
