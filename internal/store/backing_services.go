@@ -320,7 +320,7 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	if state == nil || app == nil || desiredSpec == nil || desiredSpec.Postgres == nil {
 		return nil
 	}
-	if serviceIndex := findOwnedBackingServiceByAppAndType(state, app.ID, model.BackingServiceTypePostgres); serviceIndex >= 0 {
+	if serviceIndex := findManagedBackingServiceByAppAndType(state, app.ID, model.BackingServiceTypePostgres); serviceIndex >= 0 {
 		now := time.Now().UTC()
 		service := cloneBackingService(state.BackingServices[serviceIndex])
 		if err := reconcileManagedPostgresRuntimeResources(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
@@ -1363,6 +1363,31 @@ func findOwnedBackingServiceByAppAndType(state *model.State, appID, serviceType 
 		if strings.EqualFold(service.Type, serviceType) {
 			return index
 		}
+	}
+	return -1
+}
+
+// findManagedBackingServiceByAppAndType also accepts a valid service binding
+// for legacy rows that predate owner_app_id. The binding is the relationship
+// of record for those rows; silently discarding a desired update would leave
+// the app and its backing service permanently divergent.
+func findManagedBackingServiceByAppAndType(state *model.State, appID, serviceType string) int {
+	if index := findOwnedBackingServiceByAppAndType(state, appID, serviceType); index >= 0 {
+		return index
+	}
+	for _, binding := range state.ServiceBindings {
+		if binding.AppID != appID {
+			continue
+		}
+		index := findBackingService(state, binding.ServiceID)
+		if index < 0 {
+			continue
+		}
+		service := state.BackingServices[index]
+		if isDeletedBackingService(service) || !strings.EqualFold(service.Type, serviceType) {
+			continue
+		}
+		return index
 	}
 	return -1
 }

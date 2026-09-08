@@ -593,9 +593,21 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		return nil
 	}
 
-	if service, found, err := s.pgGetOwnedBackingServiceByAppAndTypeTx(ctx, tx, app.ID, model.BackingServiceTypePostgres, true); err != nil {
+	service, found, err := s.pgGetOwnedBackingServiceByAppAndTypeTx(ctx, tx, app.ID, model.BackingServiceTypePostgres, true)
+	if err != nil {
 		return err
-	} else if found {
+	}
+	if !found {
+		// Older managed services may have a valid app binding but no
+		// owner_app_id. Treat the binding as the relationship of record so a
+		// deploy can still update the backing service instead of silently
+		// discarding the requested Postgres spec.
+		service, found, err = s.pgGetBoundBackingServiceByAppAndTypeTx(ctx, tx, app.ID, model.BackingServiceTypePostgres, true)
+		if err != nil {
+			return err
+		}
+	}
+	if found {
 		now := time.Now().UTC()
 		if err := reconcileManagedPostgresRuntimeResources(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
 			return err
@@ -659,6 +671,34 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 	}
 	desiredSpec.Postgres = nil
 	return nil
+}
+
+func (s *Store) pgGetBoundBackingServiceByAppAndTypeTx(ctx context.Context, tx *sql.Tx, appID, serviceType string, forUpdate bool) (model.BackingService, bool, error) {
+	query := `
+SELECT s.id
+FROM fugue_service_bindings AS b
+JOIN fugue_backing_services AS s ON s.id = b.service_id
+WHERE b.app_id = $1
+  AND s.type = $2
+  AND s.status <> $3
+ORDER BY s.created_at ASC, s.id ASC
+LIMIT 1
+`
+	if forUpdate {
+		query += ` FOR UPDATE OF s`
+	}
+	var serviceID string
+	if err := tx.QueryRowContext(ctx, query, appID, serviceType, model.BackingServiceStatusDeleted).Scan(&serviceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.BackingService{}, false, nil
+		}
+		return model.BackingService{}, false, err
+	}
+	service, err := s.pgGetBackingServiceTx(ctx, tx, serviceID, forUpdate)
+	if err != nil {
+		return model.BackingService{}, false, err
+	}
+	return service, true, nil
 }
 
 func (s *Store) pgApplyManagedPostgresLifecycleTx(ctx context.Context, tx *sql.Tx, app *model.App, op *model.Operation) error {

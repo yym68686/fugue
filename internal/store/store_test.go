@@ -2251,6 +2251,68 @@ func TestOwnedManagedPostgresSpecUsesBoundServiceWhenOwnerMissing(t *testing.T) 
 	}
 }
 
+func TestApplyDesiredSpecUpdatesBoundManagedPostgresWhenOwnerMissing(t *testing.T) {
+	t.Parallel()
+
+	state := &model.State{
+		Apps: []model.App{{
+			ID:        "app_123",
+			Name:      "demo",
+			TenantID:  "tenant_123",
+			ProjectID: "project_123",
+			Spec:      model.AppSpec{RuntimeID: "runtime_a"},
+		}},
+		BackingServices: []model.BackingService{{
+			ID:        "svc_pg",
+			TenantID:  "tenant_123",
+			ProjectID: "project_123",
+			// This is the legacy shape that caused the production failure.
+			OwnerAppID:  "",
+			Name:        "demo-db",
+			Type:        model.BackingServiceTypePostgres,
+			Provisioner: model.BackingServiceProvisionerManaged,
+			Status:      model.BackingServiceStatusActive,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+				Database:    "demo",
+				User:        "demo",
+				Password:    "secret",
+				ServiceName: "demo-postgres",
+				RuntimeID:   "runtime_a",
+				Resources:   &model.ResourceSpec{CPUMilliCores: 150, MemoryMebibytes: 1024, MemoryLimitMebibytes: 1536},
+			}},
+		}},
+		ServiceBindings: []model.ServiceBinding{{
+			ID:        "binding_123",
+			TenantID:  "tenant_123",
+			AppID:     "app_123",
+			ServiceID: "svc_pg",
+			Alias:     "postgres",
+		}},
+	}
+	desired := &model.AppSpec{
+		RuntimeID: "runtime_a",
+		Postgres: &model.AppPostgresSpec{
+			Database:    "demo",
+			User:        "demo",
+			Password:    "secret",
+			ServiceName: "demo-postgres",
+			RuntimeID:   "runtime_a",
+			Resources:   &model.ResourceSpec{CPUMilliCores: 150, MemoryMebibytes: 128, MemoryLimitMebibytes: 1536},
+		},
+	}
+
+	if err := applyDesiredSpecBackingServicesState(state, &state.Apps[0], desired); err != nil {
+		t.Fatalf("apply desired bound service spec: %v", err)
+	}
+	if desired.Postgres != nil {
+		t.Fatalf("expected backing-service postgres spec to be consumed, got %+v", desired.Postgres)
+	}
+	got := state.BackingServices[0].Spec.Postgres.Resources
+	if got == nil || got.MemoryMebibytes != 128 || got.MemoryLimitMebibytes != 1536 {
+		t.Fatalf("expected bound service memory request to update, got %+v", got)
+	}
+}
+
 func TestMigrateOperationRejectsExternalRuntimeWhenAppHasBoundManagedPostgres(t *testing.T) {
 	t.Parallel()
 
