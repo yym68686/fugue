@@ -593,6 +593,7 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		return nil
 	}
 
+	// Resolve ownership first, then fall back to a valid binding for legacy rows.
 	service, found, err := s.pgGetOwnedBackingServiceByAppAndTypeTx(ctx, tx, app.ID, model.BackingServiceTypePostgres, true)
 	if err != nil {
 		return err
