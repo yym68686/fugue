@@ -2533,6 +2533,7 @@ type ImageRetentionDecision struct {
 }
 
 type ImageFilter struct {
+	ProjectID       string
 	TenantID        string
 	AppID           string
 	ImageRef        string
@@ -2635,6 +2636,7 @@ type ImageReplicationTask struct {
 }
 
 type ImageReplicationTaskFilter struct {
+	ProjectID             string
 	ImageID               string
 	TenantID              string
 	AppID                 string
@@ -3377,6 +3379,7 @@ func MachinePolicyDedicatedMode(policy MachinePolicy) string {
 }
 
 type State struct {
+	SourceUploadSessions       []SourceUploadSession          `json:"source_upload_sessions,omitempty"`
 	Version                    string                         `json:"version"`
 	Tenants                    []Tenant                       `json:"tenants"`
 	Projects                   []Project                      `json:"projects"`

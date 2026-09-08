@@ -28,49 +28,14 @@ type appFailoverResult struct {
 	LastGateFailureEvidenceID string                       `json:"last_gate_failure_evidence_id,omitempty"`
 }
 
-func (c *CLI) newAppContinuityCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "continuity",
-		Short: "Audit and configure app continuity settings",
-		Example: strings.TrimSpace(`
-  fugue app continuity audit api
-  fugue app continuity enable api --zero-downtime safe
-  fugue app continuity show api
-`),
-	}
-	cmd.AddCommand(
-		c.newAppContinuityAuditCommand(),
-		c.newAppContinuityShowCommand(),
-		c.newAppContinuityEnableCommand(),
-		c.newAppContinuityDisableCommand(),
-	)
-	return cmd
-}
-
-func (c *CLI) newAppContinuityEnableCommand() *cobra.Command {
-	cmd := c.newAppContinuitySetCommand()
-	cmd.Use = "enable <app>"
-	cmd.Aliases = []string{"on", "set"}
-	cmd.Short = "Enable app and/or database continuity targets"
-	return cmd
-}
-
-func (c *CLI) newAppContinuityDisableCommand() *cobra.Command {
-	cmd := c.newAppContinuityOffCommand()
-	cmd.Use = "disable <app>"
-	cmd.Aliases = []string{"off"}
-	cmd.Short = "Disable app and/or database continuity"
-	return cmd
-}
-
 func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "audit [app]",
 		Aliases: []string{"ha", "dr"},
 		Short:   "Audit failover readiness for apps",
 		Example: strings.TrimSpace(`
-  fugue app continuity audit
-  fugue app continuity audit api
+  fugue app failover status
+  fugue app failover status api
 `),
 		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -348,8 +313,6 @@ func (c *CLI) newAppFailoverCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAppFailoverStatusCommand(),
 		c.newAppFailoverPolicyCommand(),
-		hideCompatCommand(c.newAppFailoverConfigureCommand(), "fugue app failover policy set"),
-		hideCompatCommand(c.newAppFailoverDisableCommand(), "fugue app failover policy clear"),
 		c.newAppFailoverRunCommand(),
 	)
 	return cmd
@@ -360,22 +323,6 @@ func (c *CLI) newAppFailoverStatusCommand() *cobra.Command {
 	cmd.Use = "status [app]"
 	cmd.Aliases = []string{"audit", "show", "get"}
 	cmd.Short = "Show failover readiness for one app or all visible apps"
-	return cmd
-}
-
-func (c *CLI) newAppFailoverConfigureCommand() *cobra.Command {
-	cmd := c.newAppContinuitySetCommand()
-	cmd.Use = "configure <app>"
-	cmd.Aliases = []string{"set", "enable"}
-	cmd.Short = "Configure app and/or database failover targets"
-	return cmd
-}
-
-func (c *CLI) newAppFailoverDisableCommand() *cobra.Command {
-	cmd := c.newAppContinuityOffCommand()
-	cmd.Use = "disable <app>"
-	cmd.Aliases = []string{"off"}
-	cmd.Short = "Disable app and/or database failover"
 	return cmd
 }
 
@@ -396,6 +343,7 @@ func (c *CLI) newAppFailoverPolicySetCommand() *cobra.Command {
 	cmd.Use = "set <app>"
 	cmd.Aliases = []string{"configure"}
 	cmd.Short = "Set app and/or database failover targets"
+	removeCommandFlags(cmd, isRolloutOnlyFlag)
 	return cmd
 }
 
@@ -404,6 +352,7 @@ func (c *CLI) newAppFailoverPolicyClearCommand() *cobra.Command {
 	cmd.Use = "clear <app>"
 	cmd.Aliases = []string{"disable", "off"}
 	cmd.Short = "Clear app and/or database failover targets"
+	removeCommandFlags(cmd, isRolloutOnlyFlag)
 	return cmd
 }
 

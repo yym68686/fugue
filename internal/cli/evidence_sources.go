@@ -16,6 +16,20 @@ func (s *appOverviewSnapshot) recordSource(name string, err error, empty bool) {
 	if s.Sources == nil {
 		s.Sources = map[string]evidenceSource{}
 	}
+	src := makeEvidenceSource(err, empty)
+	if err != nil {
+		s.MissingEvidence = append(s.MissingEvidence, name)
+		s.Completeness = "partial"
+	}
+	if s.Completeness == "" {
+		s.Completeness = "complete"
+	}
+	s.Sources[name] = src
+}
+
+var errEvidenceUnavailable = errors.New("source did not provide evidence")
+
+func makeEvidenceSource(err error, empty bool) evidenceSource {
 	src := evidenceSource{State: "available", ObservedAt: time.Now().UTC()}
 	if empty {
 		src.State = "empty"
@@ -30,13 +44,6 @@ func (s *appOverviewSnapshot) recordSource(name string, err error, empty bool) {
 		}
 		src.ErrorCode = describeCommandError(err).Code
 		src.Message = redactDiagnosticString(err.Error())
-		s.MissingEvidence = append(s.MissingEvidence, name)
-		s.Completeness = "partial"
 	}
-	if s.Completeness == "" {
-		s.Completeness = "complete"
-	}
-	s.Sources[name] = src
+	return src
 }
-
-var errEvidenceUnavailable = errors.New("source did not provide evidence")

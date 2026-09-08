@@ -1158,10 +1158,31 @@ func (c *Client) LocalizeAppDatabaseWithOptions(id string, opts databaseLocalize
 }
 
 func (c *Client) ListBackingServices() ([]model.BackingService, error) {
+	return c.ListBackingServicesFiltered("", "", "", false)
+}
+func (c *Client) ListBackingServicesFiltered(tenant, project, name string, metadataOnly bool) ([]model.BackingService, error) {
+	values := url.Values{}
+	if tenant != "" {
+		values.Set("tenant_id", tenant)
+	}
+	if project != "" {
+		values.Set("project_id", project)
+	}
+	if name != "" {
+		values.Set("name", name)
+	}
+	if metadataOnly {
+		values.Set("include_live_status", "false")
+		values.Set("include_resource_usage", "false")
+	}
+	relative := "/v1/backing-services"
+	if len(values) > 0 {
+		relative += "?" + values.Encode()
+	}
 	var response struct {
 		BackingServices []model.BackingService `json:"backing_services"`
 	}
-	if err := c.doJSON(http.MethodGet, "/v1/backing-services", nil, &response); err != nil {
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return nil, err
 	}
 	return response.BackingServices, nil

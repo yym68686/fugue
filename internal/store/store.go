@@ -2758,6 +2758,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		if projectDeleteRequested(state, projectID) {
 			return ErrConflict
 		}
+		if err := validateDataReferencesState(state, tenantID, &spec); err != nil {
+			return err
+		}
 		spec.RuntimeID = resolveProjectRuntimeID(state.Projects[projectIndex], spec.RuntimeID)
 		if !runtimeVisibleToTenant(state, spec.RuntimeID, tenantID) {
 			return ErrNotFound
@@ -2931,7 +2934,13 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		if app.TenantID != op.TenantID {
 			return ErrNotFound
 		}
+		if err := validateDataReferencesState(state, op.TenantID, op.DesiredSpec); err != nil {
+			return err
+		}
 		hydrateAppBackingServices(state, &app)
+		if policy.ExpectedAppSpecHash != "" && (model.AppSpecSHA256(app.Spec) != policy.ExpectedAppSpecHash || hasInFlightOperationForApp(state.Operations, app.ID)) {
+			return ErrConflict
+		}
 		if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize {
 			if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 				return err
@@ -3357,6 +3366,21 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		op.ResultMessage = defaultInFlightOperationMessage(op)
 		op.CreatedAt = now
 		op.UpdatedAt = now
+		if policy.SourceSessionID != "" {
+			found := false
+			for i := range state.SourceUploadSessions {
+				if state.SourceUploadSessions[i].ID == policy.SourceSessionID {
+					if err := recordSourceSessionOperation(&state.SourceUploadSessions[i], op); err != nil {
+						return err
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				return ErrNotFound
+			}
+		}
 		state.Operations = append(state.Operations, op)
 		if err := applyInFlightOperationToApp(state, &state.Operations[len(state.Operations)-1]); err != nil {
 			return err

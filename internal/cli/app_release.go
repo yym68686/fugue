@@ -18,7 +18,7 @@ const appImageSyncRolloutWaitTimeout = 2 * time.Minute
 func (c *CLI) newAppReleaseCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "release",
-		Aliases: []string{"releases", "image", "images"},
+		Aliases: []string{"releases"},
 		Short:   "Inspect and operate app releases",
 	}
 	cmd.AddCommand(
@@ -26,22 +26,10 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 		c.newReleaseVersionsCommand(),
 		c.newReleaseVersionCommand(),
 		c.newReleaseAttemptCommand(),
-		hideCompatCommand(c.newAppReleaseTrafficCommand(), "fugue app traffic set"),
 		c.newAppReleaseProbeCommand(),
 		c.newAppReleaseGateCommand(),
 		c.newAppReleasePromoteCommand(),
 		c.newAppReleaseAbortCommand(),
-		hideCompatCommand(c.newAppReleaseListCommand(), "fugue app image ls"),
-		hideCompatCommand(c.newAppReleaseAttemptsCommand(), "fugue app release attempt ls"),
-		hideCompatCommand(c.newAppReleaseStatusCommand(), "fugue app release attempt status"),
-		hideCompatCommand(c.newAppReleaseExplainCommand(), "fugue app release attempt explain"),
-		hideCompatCommand(c.newAppReleaseDebugBundleCommand(), "fugue app release attempt bundle"),
-		hideCompatCommand(c.newAppReleaseTrackingCommand(), "fugue app image tracking"),
-		hideCompatCommand(c.newAppReleasePruneCommand(), "fugue app image prune"),
-		hideCompatCommand(c.newAppReleasePolicyCommand(), "fugue app image retention"),
-		hideCompatCommand(c.newAppReleaseDeployCommand(), "fugue app deploy"),
-		hideCompatCommand(c.newAppReleaseRebuildCommand(), "fugue app build"),
-		hideCompatCommand(c.newAppReleaseRollbackCommand(), "fugue app rollback"),
 	)
 	return cmd
 }
@@ -946,14 +934,6 @@ func (c *CLI) newAppDeployShortcutCommand() *cobra.Command {
 	cmd := c.newAppReleaseDeployCommand()
 	cmd.Use = "deploy <app>"
 	cmd.Short = "Deploy the app's current desired spec"
-	return cmd
-}
-
-func (c *CLI) newAppRedeployCommand() *cobra.Command {
-	cmd := c.newAppReleaseDeployCommand()
-	cmd.Use = "redeploy <app>"
-	cmd.Aliases = []string{"apply"}
-	cmd.Short = "Compatibility alias for app deploy"
 	return cmd
 }
 

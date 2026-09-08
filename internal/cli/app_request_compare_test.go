@@ -143,7 +143,7 @@ func TestRunAppRequestCompareExplainsPublicRouteMismatch(t *testing.T) {
 		"evidence=public route " + publicServer.URL + "/admin -> 404 Not Found",
 		"evidence=internal service http://demo.tenant-123.svc.cluster.local:3000/admin -> 200 OK",
 		"related_object=route ref=" + publicServer.URL,
-		"next_action=fugue app route show demo",
+		"next_action=fugue app domain primary verify demo",
 		"public_route",
 		"status=404 Not Found",
 		"internal_service",

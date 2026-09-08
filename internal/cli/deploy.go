@@ -127,7 +127,7 @@ func resolveProjectReference(client *Client, tenantID, projectID, projectName st
 			matches = append(matches, project)
 		}
 	}
-	if len(matches) == 0 {
+	if len(matches) == 0 && !client.strictReferences {
 		matches = matchProjectsFuzzy(projects, projectName)
 	}
 	switch len(matches) {

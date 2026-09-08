@@ -33,16 +33,12 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		c.newProjectOpsCommand(),
 		c.newProjectImagesCommand(),
 		c.newProjectMetaCommand(),
-		c.newProjectShowCommand(),
 		c.newProjectCreateCommand(),
 		c.newProjectEditCommand(),
 		c.newProjectMoveCommand(),
 		c.newProjectSplitCommand(),
 		c.newProjectRuntimeReservationsCommand(),
-		hideCompatCommand(c.newProjectRenameCommand(), "fugue project edit"),
 		c.newProjectRemoveCommand(),
-		hideCompatCommand(c.newProjectStorageCommand(), "fugue project images usage"),
-		hideCompatCommand(c.newProjectUsageCommand(), "fugue project images usage"),
 	)
 	return cmd
 }
@@ -693,14 +689,6 @@ func (c *CLI) renderProjectMoveResult(result projectMoveResult) error {
 	return nil
 }
 
-func (c *CLI) newProjectShowCommand() *cobra.Command {
-	cmd := c.newProjectOverviewCommand()
-	cmd.Use = "show [project]"
-	cmd.Aliases = []string{"get", "status", "info"}
-	cmd.Short = "Compatibility alias for project overview"
-	return hideCompatCommand(cmd, "fugue project overview")
-}
-
 func (c *CLI) newProjectMetaCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "meta <project>",
@@ -915,18 +903,6 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.DefaultRuntimeID, "default-runtime-id", "", "Default runtime ID for new apps in this project")
 	_ = cmd.Flags().MarkHidden("default-runtime-id")
 	return cmd
-}
-
-func (c *CLI) newProjectRenameCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "rename <project> <new-name>",
-		Short: "Compatibility alias for project edit",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			newName := strings.TrimSpace(args[1])
-			return c.patchProjectMetadata(args[0], &newName, nil, "", "", false)
-		},
-	}
 }
 
 func (c *CLI) newProjectEditCommand() *cobra.Command {
@@ -1165,21 +1141,5 @@ func (c *CLI) newProjectImageUsageCommand() *cobra.Command {
 			return writeProjectUsageTableWithContext(c.stdout, usage.Projects, projectNames, c.showIDs())
 		},
 	}
-	return cmd
-}
-
-func (c *CLI) newProjectUsageCommand() *cobra.Command {
-	cmd := c.newProjectImageUsageCommand()
-	cmd.Use = "usage [project]"
-	cmd.Short = "Compatibility alias for project images usage"
-	return cmd
-}
-
-func (c *CLI) newProjectStorageCommand() *cobra.Command {
-	cmd := c.newProjectImageUsageCommand()
-	cmd.Use = "storage [project]"
-	cmd.Short = "Show project image storage usage"
-	cmd.Hidden = false
-	cmd.Deprecated = ""
 	return cmd
 }

@@ -1,7 +1,10 @@
 package api
 
 import (
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"fugue/internal/store"
 	"net/http"
 	"sort"
 	"strconv"
@@ -256,6 +259,18 @@ func (s *Server) handleDeleteAppFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
+	expectedHash := ""
+	if raw := r.Header.Get("If-Match"); raw != "" {
+		if len(raw) != 66 || raw[0] != '"' || raw[65] != '"' {
+			httpx.WriteError(w, http.StatusBadRequest, "If-Match must be a quoted SHA-256")
+			return
+		}
+		expectedHash = raw[1:65]
+		if decoded, err := hex.DecodeString(expectedHash); err != nil || len(decoded) != 32 || expectedHash != strings.ToLower(expectedHash) {
+			httpx.WriteError(w, http.StatusBadRequest, "If-Match must be a quoted lowercase SHA-256")
+			return
+		}
+	}
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.deploy") {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.deploy scope")
@@ -280,7 +295,13 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec.RestartToken = model.NewID("restart")
-	op, err := s.store.CreateOperation(model.Operation{
+	createOperation := s.store.CreateOperation
+	if expectedHash != "" {
+		createOperation = func(op model.Operation) (model.Operation, error) {
+			return s.store.CreateOperationForAppSpec(op, expectedHash)
+		}
+	}
+	op, err := createOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     principal.ActorType,
@@ -291,14 +312,19 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
+		if expectedHash != "" && errors.Is(err, store.ErrConflict) {
+			httpx.WriteError(w, http.StatusPreconditionFailed, "app intent changed or an operation is active; refresh the reconcile plan")
+			return
+		}
 		s.writeStoreError(w, err)
 		return
 	}
 
 	s.appendAudit(principal, "app.restart", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
-		"operation":     sanitizeOperationForAPI(op),
-		"restart_token": spec.RestartToken,
+		"operation":         sanitizeOperationForAPI(op),
+		"restart_token":     spec.RestartToken,
+		"desired_spec_hash": model.AppSpecSHA256(*op.DesiredSpec),
 	})
 }
 

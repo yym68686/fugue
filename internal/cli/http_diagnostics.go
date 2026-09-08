@@ -83,14 +83,6 @@ func (c *CLI) newAPICommand() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) newCurlCommand() *cobra.Command {
-	cmd := c.newAPIRequestCommand()
-	cmd.Use = "curl [method] <path-or-url>"
-	cmd.Aliases = nil
-	cmd.Short = "Compatibility alias for api request"
-	return cmd
-}
-
 func (c *CLI) newAPIRequestCommand() *cobra.Command {
 	opts := rawRequestOptions{MaxBodyBytes: defaultDiagnosticBodyLimit}
 	cmd := &cobra.Command{
@@ -127,6 +119,7 @@ func (c *CLI) newDiagnoseCommand() *cobra.Command {
 		Short: "Run request-level troubleshooting workflows",
 	}
 	cmd.AddCommand(
+		c.newObjectEvidenceCommand("request"), c.newObjectEvidenceCommand("operation"), c.newObjectEvidenceCommand("trace"), c.newObjectEvidenceCommand("incident"),
 		c.newDiagnoseTimingCommand(),
 		c.newDiagnoseFilesystemCommand(),
 	)

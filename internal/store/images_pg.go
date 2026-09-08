@@ -188,6 +188,10 @@ func (s *Store) pgListImages(filter model.ImageFilter) ([]model.Image, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	clauses, args := imageFilterClauses(filter)
+	if filter.ProjectID != "" {
+		args = append(args, filter.ProjectID)
+		clauses = append(clauses, fmt.Sprintf("EXISTS (SELECT 1 FROM fugue_apps a WHERE a.id=fugue_images.app_id AND a.project_id=$%d)", len(args)))
+	}
 	query := `SELECT ` + imageColumns() + ` FROM fugue_images`
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
@@ -678,6 +682,10 @@ func (s *Store) pgListImageReplicationTasks(filter model.ImageReplicationTaskFil
 	defer cancel()
 	clauses := []string{}
 	args := []any{}
+	if filter.ProjectID != "" {
+		args = append(args, filter.ProjectID)
+		clauses = append(clauses, fmt.Sprintf("EXISTS (SELECT 1 FROM fugue_apps a WHERE a.id=fugue_image_replication_tasks.app_id AND a.project_id=$%d)", len(args)))
+	}
 	if !filter.PlatformAdmin {
 		args = append(args, strings.TrimSpace(filter.TenantID))
 		clauses = append(clauses, fmt.Sprintf("tenant_id = $%d", len(args)))

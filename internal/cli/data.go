@@ -314,6 +314,7 @@ storage relay.
 		c.newDataStatusCommand(),
 		c.newDataPushCommand(),
 		c.newDataPullCommand(),
+		c.newDataPrewarmCommand(),
 		c.newDataEvictCommand(),
 		c.newDataCloneCommand(),
 		c.newDataWorkspaceCommand(),
@@ -1146,6 +1147,7 @@ func (c *CLI) newDataWorkspaceCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newDataWorkspaceListCommand(),
+		c.newDataWorkspaceDeleteCommand(),
 		c.newDataWorkspaceShowCommand(),
 		c.newDataWorkspaceUseCommand(),
 		c.newDataWorkspaceSetBackendCommand(),
@@ -1548,7 +1550,7 @@ func (c *CLI) newDataSnapshotCommand() *cobra.Command {
   fugue data snapshot diff before-provider-move latest
 `),
 	}
-	cmd.AddCommand(
+	cmd.AddCommand(c.newDataSnapshotDeleteCommand(),
 		&cobra.Command{
 			Use:   "ls",
 			Short: "List data versions",
@@ -1729,7 +1731,7 @@ func (c *CLI) newDataGrantCommand() *cobra.Command {
 	create.Flags().StringVar(&version, "version", "", "Version to grant")
 	create.Flags().DurationVar(&ttl, "ttl", 24*time.Hour, "Grant TTL")
 	create.Flags().BoolVar(&readOnly, "read-only", false, "Create a read-only grant")
-	cmd.AddCommand(create)
+	cmd.AddCommand(create, c.newDataGrantListCommand())
 	cmd.AddCommand(&cobra.Command{
 		Use:   "revoke <grant-id>",
 		Short: "Revoke a data grant",
@@ -1771,7 +1773,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
   fugue data transfer cancel data_transfer_123
 `),
 	}
-	cmd.AddCommand(
+	cmd.AddCommand(c.newDataTransferWaitCommand(),
 		&cobra.Command{
 			Use:   "ls",
 			Short: "List data transfers",

@@ -1,0 +1,2982 @@
+[
+  {
+    "path": "app image policy set",
+    "replacement": "fugue app image retention set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image policy show",
+    "replacement": "fugue app image retention show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images auto-update diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images auto-update disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images auto-update history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images auto-update set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images auto-update sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images policy set",
+    "replacement": "fugue app image retention set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images policy show",
+    "replacement": "fugue app image retention show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images track diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images track disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images track history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images track set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images track sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images tracking diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images tracking disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images tracking history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images tracking set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images tracking sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release auto-update diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release auto-update disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release auto-update history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release auto-update set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release auto-update sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release policy set",
+    "replacement": "fugue app image retention set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release policy show",
+    "replacement": "fugue app image retention show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release track diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release track disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release track history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release track set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release track sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release tracking diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release tracking disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release tracking history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release tracking set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release tracking sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases auto-update diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases auto-update disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases auto-update history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases auto-update set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases auto-update sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases policy set",
+    "replacement": "fugue app image retention set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases policy show",
+    "replacement": "fugue app image retention show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases track diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases track disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases track history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases track set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases track sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases tracking diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases tracking disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases tracking history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases tracking set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases tracking sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image policy set",
+    "replacement": "fugue app image retention set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image policy show",
+    "replacement": "fugue app image retention show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images auto-update diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images auto-update disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images auto-update history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images auto-update set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images auto-update sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images policy set",
+    "replacement": "fugue app image retention set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images policy show",
+    "replacement": "fugue app image retention show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images track diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images track disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images track history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images track set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images track sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images tracking diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images tracking disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images tracking history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images tracking set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images tracking sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release auto-update diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release auto-update disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release auto-update history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release auto-update set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release auto-update sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release policy set",
+    "replacement": "fugue app image retention set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release policy show",
+    "replacement": "fugue app image retention show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release track diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release track disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release track history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release track set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release track sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release tracking diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release tracking disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release tracking history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release tracking set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release tracking sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases auto-update diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases auto-update disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases auto-update history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases auto-update set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases auto-update sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases policy set",
+    "replacement": "fugue app image retention set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases policy show",
+    "replacement": "fugue app image retention show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases track diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases track disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases track history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases track set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases track sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases tracking diagnose",
+    "replacement": "fugue app image tracking diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases tracking disable",
+    "replacement": "fugue app image tracking disable",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases tracking history",
+    "replacement": "fugue app image tracking history",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases tracking set",
+    "replacement": "fugue app image tracking set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases tracking sync",
+    "replacement": "fugue app image tracking sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtime access-mode",
+    "replacement": "fugue admin runtime access set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtime grant",
+    "replacement": "fugue admin runtime access grant",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtime pool-mode",
+    "replacement": "fugue admin runtime pool set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtime revoke",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtime share",
+    "replacement": "fugue admin runtime access grant",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtime share-mode",
+    "replacement": "fugue admin runtime access set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtime unshare",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtimes access-mode",
+    "replacement": "fugue admin runtime access set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtimes grant",
+    "replacement": "fugue admin runtime access grant",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtimes pool-mode",
+    "replacement": "fugue admin runtime pool set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtimes revoke",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtimes share",
+    "replacement": "fugue admin runtime access grant",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtimes share-mode",
+    "replacement": "fugue admin runtime access set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "admin runtimes unshare",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app binding attach",
+    "replacement": "fugue app service attach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app binding bind",
+    "replacement": "fugue app service attach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app binding detach",
+    "replacement": "fugue app service detach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app binding list",
+    "replacement": "fugue app service ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app binding ls",
+    "replacement": "fugue app service ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app binding unbind",
+    "replacement": "fugue app service detach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app bindings attach",
+    "replacement": "fugue app service attach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app bindings bind",
+    "replacement": "fugue app service attach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app bindings detach",
+    "replacement": "fugue app service detach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app bindings list",
+    "replacement": "fugue app service ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app bindings ls",
+    "replacement": "fugue app service ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app bindings unbind",
+    "replacement": "fugue app service detach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app continuity audit",
+    "replacement": "fugue app failover status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app continuity disable",
+    "replacement": "fugue app failover policy clear",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app continuity dr",
+    "replacement": "fugue app failover status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app continuity enable",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app continuity ha",
+    "replacement": "fugue app failover status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app continuity off",
+    "replacement": "fugue app failover policy clear",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app continuity on",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app continuity set",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app continuity show",
+    "replacement": "fugue app rollout policy show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app failover configure",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app failover disable",
+    "replacement": "fugue app failover policy clear",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app failover enable",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app failover off",
+    "replacement": "fugue app failover policy clear",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app failover set",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app image attempts",
+    "replacement": "fugue app release attempt ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image debug-bundle",
+    "replacement": "fugue app release attempt bundle",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image deploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image explain",
+    "replacement": "fugue app release attempt explain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image policy",
+    "replacement": "fugue app image retention",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image rollback",
+    "replacement": "fugue app rollback",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image status",
+    "replacement": "fugue app release attempt status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app image traffic",
+    "replacement": "fugue app traffic set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images attempts",
+    "replacement": "fugue app release attempt ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images auto-update",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images debug-bundle",
+    "replacement": "fugue app release attempt bundle",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images deploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images explain",
+    "replacement": "fugue app release attempt explain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images list",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images ls",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images policy",
+    "replacement": "fugue app image retention",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images prune",
+    "replacement": "fugue app image prune",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images rollback",
+    "replacement": "fugue app rollback",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images show",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images status",
+    "replacement": "fugue app release attempt status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images track",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images tracking",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app images traffic",
+    "replacement": "fugue app traffic set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release attempts",
+    "replacement": "fugue app release attempt ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release auto-update",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release debug-bundle",
+    "replacement": "fugue app release attempt bundle",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release deploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release explain",
+    "replacement": "fugue app release attempt explain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release list",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release ls",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release policy",
+    "replacement": "fugue app image retention",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release prune",
+    "replacement": "fugue app image prune",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release rollback",
+    "replacement": "fugue app rollback",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release show",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release status",
+    "replacement": "fugue app release attempt status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release track",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release tracking",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app release traffic",
+    "replacement": "fugue app traffic set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases attempts",
+    "replacement": "fugue app release attempt ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases auto-update",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases debug-bundle",
+    "replacement": "fugue app release attempt bundle",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases deploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases explain",
+    "replacement": "fugue app release attempt explain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases list",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases ls",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases policy",
+    "replacement": "fugue app image retention",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases prune",
+    "replacement": "fugue app image prune",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases rollback",
+    "replacement": "fugue app rollback",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases show",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases status",
+    "replacement": "fugue app release attempt status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases track",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases tracking",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app releases traffic",
+    "replacement": "fugue app traffic set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app route check",
+    "replacement": "fugue app domain primary check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app route get",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app route set",
+    "replacement": "fugue app domain primary set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app route show",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app route status",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app routes check",
+    "replacement": "fugue app domain primary check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app routes get",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app routes set",
+    "replacement": "fugue app domain primary set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app routes show",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app routes status",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app sync get",
+    "replacement": "fugue app source sync status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app sync now",
+    "replacement": "fugue app source sync run",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app sync rebuild",
+    "replacement": "fugue app source sync run",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app sync resume",
+    "replacement": "fugue app source sync resume",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app sync run",
+    "replacement": "fugue app source sync run",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app sync show",
+    "replacement": "fugue app source sync status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app sync status",
+    "replacement": "fugue app source sync status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace cat",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace delete",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace get",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace list",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace ls",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace mkdir",
+    "replacement": "fugue app fs mkdir",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace put",
+    "replacement": "fugue app fs put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace read",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace remove",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace rm",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace tree",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace write",
+    "replacement": "fugue app fs put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps binding attach",
+    "replacement": "fugue app service attach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps binding bind",
+    "replacement": "fugue app service attach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps binding detach",
+    "replacement": "fugue app service detach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps binding list",
+    "replacement": "fugue app service ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps binding ls",
+    "replacement": "fugue app service ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps binding unbind",
+    "replacement": "fugue app service detach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps bindings attach",
+    "replacement": "fugue app service attach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps bindings bind",
+    "replacement": "fugue app service attach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps bindings detach",
+    "replacement": "fugue app service detach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps bindings list",
+    "replacement": "fugue app service ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps bindings ls",
+    "replacement": "fugue app service ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps bindings unbind",
+    "replacement": "fugue app service detach",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps continuity audit",
+    "replacement": "fugue app failover status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps continuity disable",
+    "replacement": "fugue app failover policy clear",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps continuity dr",
+    "replacement": "fugue app failover status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps continuity enable",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps continuity ha",
+    "replacement": "fugue app failover status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps continuity off",
+    "replacement": "fugue app failover policy clear",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps continuity on",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps continuity set",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps continuity show",
+    "replacement": "fugue app rollout policy show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps failover configure",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps failover disable",
+    "replacement": "fugue app failover policy clear",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps failover enable",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps failover off",
+    "replacement": "fugue app failover policy clear",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps failover set",
+    "replacement": "fugue app failover policy set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps image attempts",
+    "replacement": "fugue app release attempt ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image debug-bundle",
+    "replacement": "fugue app release attempt bundle",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image deploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image explain",
+    "replacement": "fugue app release attempt explain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image policy",
+    "replacement": "fugue app image retention",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image rollback",
+    "replacement": "fugue app rollback",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image status",
+    "replacement": "fugue app release attempt status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps image traffic",
+    "replacement": "fugue app traffic set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images attempts",
+    "replacement": "fugue app release attempt ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images auto-update",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images debug-bundle",
+    "replacement": "fugue app release attempt bundle",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images deploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images explain",
+    "replacement": "fugue app release attempt explain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images list",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images ls",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images policy",
+    "replacement": "fugue app image retention",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images prune",
+    "replacement": "fugue app image prune",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images rollback",
+    "replacement": "fugue app rollback",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images show",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images status",
+    "replacement": "fugue app release attempt status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images track",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images tracking",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps images traffic",
+    "replacement": "fugue app traffic set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release attempts",
+    "replacement": "fugue app release attempt ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release auto-update",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release debug-bundle",
+    "replacement": "fugue app release attempt bundle",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release deploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release explain",
+    "replacement": "fugue app release attempt explain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release list",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release ls",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release policy",
+    "replacement": "fugue app image retention",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release prune",
+    "replacement": "fugue app image prune",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release rollback",
+    "replacement": "fugue app rollback",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release show",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release status",
+    "replacement": "fugue app release attempt status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release track",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release tracking",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps release traffic",
+    "replacement": "fugue app traffic set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases attempts",
+    "replacement": "fugue app release attempt ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases auto-update",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases debug-bundle",
+    "replacement": "fugue app release attempt bundle",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases deploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases explain",
+    "replacement": "fugue app release attempt explain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases list",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases ls",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases policy",
+    "replacement": "fugue app image retention",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases prune",
+    "replacement": "fugue app image prune",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases rollback",
+    "replacement": "fugue app rollback",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases show",
+    "replacement": "fugue app image ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases status",
+    "replacement": "fugue app release attempt status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases track",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases tracking",
+    "replacement": "fugue app image tracking",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps releases traffic",
+    "replacement": "fugue app traffic set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps route check",
+    "replacement": "fugue app domain primary check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps route get",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps route set",
+    "replacement": "fugue app domain primary set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps route show",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps route status",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps routes check",
+    "replacement": "fugue app domain primary check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps routes get",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps routes set",
+    "replacement": "fugue app domain primary set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps routes show",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps routes status",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps sync get",
+    "replacement": "fugue app source sync status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps sync now",
+    "replacement": "fugue app source sync run",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps sync rebuild",
+    "replacement": "fugue app source sync run",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps sync resume",
+    "replacement": "fugue app source sync resume",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps sync run",
+    "replacement": "fugue app source sync run",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps sync show",
+    "replacement": "fugue app source sync status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps sync status",
+    "replacement": "fugue app source sync status",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace cat",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace delete",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace get",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace list",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace ls",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace mkdir",
+    "replacement": "fugue app fs mkdir",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace put",
+    "replacement": "fugue app fs put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace read",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace remove",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace rm",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace tree",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace write",
+    "replacement": "fugue app fs put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "deploy plan github",
+    "replacement": "fugue deploy inspect github",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Inspection output mode is inspect; this does not apply a deployment plan."
+  },
+  {
+    "path": "domain primary check",
+    "replacement": "fugue app domain primary check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain primary get",
+    "replacement": "fugue app domain primary show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain primary set",
+    "replacement": "fugue app domain primary set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain primary show",
+    "replacement": "fugue app domain primary show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain primary status",
+    "replacement": "fugue app domain primary show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain primary verify",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains primary check",
+    "replacement": "fugue app domain primary check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains primary get",
+    "replacement": "fugue app domain primary show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains primary set",
+    "replacement": "fugue app domain primary set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains primary show",
+    "replacement": "fugue app domain primary show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains primary status",
+    "replacement": "fugue app domain primary show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains primary verify",
+    "replacement": "fugue app domain primary verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated delete",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated get",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated list",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated ls",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated remove",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated rm",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated set",
+    "replacement": "fugue app env generated set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated show",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated unset",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime access get",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime access grant",
+    "replacement": "fugue admin runtime access grant",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime access revoke",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime access set",
+    "replacement": "fugue admin runtime access set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime access show",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime access status",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime access unshare",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime offer set",
+    "replacement": "fugue admin runtime offer set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime offer show",
+    "replacement": "fugue admin runtime offer show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime pool set",
+    "replacement": "fugue admin runtime pool set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime pool show",
+    "replacement": "fugue admin runtime pool show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime sharing get",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime sharing grant",
+    "replacement": "fugue admin runtime access grant",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime sharing revoke",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime sharing set",
+    "replacement": "fugue admin runtime access set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime sharing show",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime sharing status",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime sharing unshare",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes access get",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes access grant",
+    "replacement": "fugue admin runtime access grant",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes access revoke",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes access set",
+    "replacement": "fugue admin runtime access set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes access show",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes access status",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes access unshare",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes offer set",
+    "replacement": "fugue admin runtime offer set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes offer show",
+    "replacement": "fugue admin runtime offer show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes pool set",
+    "replacement": "fugue admin runtime pool set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes pool show",
+    "replacement": "fugue admin runtime pool show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes sharing get",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes sharing grant",
+    "replacement": "fugue admin runtime access grant",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes sharing revoke",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes sharing set",
+    "replacement": "fugue admin runtime access set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes sharing show",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes sharing status",
+    "replacement": "fugue admin runtime access show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes sharing unshare",
+    "replacement": "fugue admin runtime access revoke",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "template inspect github",
+    "replacement": "fugue deploy inspect github",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Inspection output mode is inspect; this does not apply a deployment plan."
+  },
+  {
+    "path": "up plan github",
+    "replacement": "fugue deploy inspect github",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Inspection output mode is inspect; this does not apply a deployment plan."
+  },
+  {
+    "path": "variables generated delete",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated get",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated list",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated ls",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated remove",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated rm",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated set",
+    "replacement": "fugue app env generated set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated show",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated unset",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated delete",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated get",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated list",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated ls",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated remove",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated rm",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated set",
+    "replacement": "fugue app env generated set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated show",
+    "replacement": "fugue app env generated show",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated unset",
+    "replacement": "fugue app env generated unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app apply",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app binding",
+    "replacement": "fugue app service",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app bindings",
+    "replacement": "fugue app service",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app continuity",
+    "replacement": "fugue app failover",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "app rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app redeploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app route",
+    "replacement": "fugue app domain primary",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app routes",
+    "replacement": "fugue app domain primary",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app sync",
+    "replacement": "fugue app source sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "app workspace",
+    "replacement": "fugue app fs",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps apply",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps binding",
+    "replacement": "fugue app service",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps bindings",
+    "replacement": "fugue app service",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps continuity",
+    "replacement": "fugue app failover",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Move zero-downtime and canary flags to app rollout policy set/clear. Split combined rollout/failover changes into separate requests."
+  },
+  {
+    "path": "apps rebuild",
+    "replacement": "fugue app build",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps redeploy",
+    "replacement": "fugue app deploy",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps route",
+    "replacement": "fugue app domain primary",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps routes",
+    "replacement": "fugue app domain primary",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps sync",
+    "replacement": "fugue app source sync",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "apps workspace",
+    "replacement": "fugue app fs",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs cat",
+    "replacement": "fugue app config get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs delete",
+    "replacement": "fugue app config delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs get",
+    "replacement": "fugue app config get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs list",
+    "replacement": "fugue app config ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs ls",
+    "replacement": "fugue app config ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs put",
+    "replacement": "fugue app config put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs read",
+    "replacement": "fugue app config get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs reconcile",
+    "replacement": "fugue app config reconcile",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs remove",
+    "replacement": "fugue app config delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs rm",
+    "replacement": "fugue app config delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs verify",
+    "replacement": "fugue app config verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs write",
+    "replacement": "fugue app config put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "database create",
+    "replacement": "fugue service postgres create",
+    "notes": "Remove --type postgres (or omit the default type). Other values remain unsupported."
+  },
+  {
+    "path": "db create",
+    "replacement": "fugue service postgres create",
+    "notes": "Remove --type postgres (or omit the default type). Other values remain unsupported."
+  },
+  {
+    "path": "deploy plan",
+    "replacement": "fugue deploy inspect",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Inspection output mode is inspect; this does not apply a deployment plan."
+  },
+  {
+    "path": "domain add",
+    "replacement": "fugue app domain add",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain attach",
+    "replacement": "fugue app domain add",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain availability",
+    "replacement": "fugue app domain check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain check",
+    "replacement": "fugue app domain check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain connect",
+    "replacement": "fugue app domain add",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain delete",
+    "replacement": "fugue app domain delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain detach",
+    "replacement": "fugue app domain delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain diagnose",
+    "replacement": "fugue app domain diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain diagnosis",
+    "replacement": "fugue app domain diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain list",
+    "replacement": "fugue app domain ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain ls",
+    "replacement": "fugue app domain ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain primary",
+    "replacement": "fugue app domain primary",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain remove",
+    "replacement": "fugue app domain delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain repair",
+    "replacement": "fugue app domain repair",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain rm",
+    "replacement": "fugue app domain delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain status",
+    "replacement": "fugue app domain check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain verify",
+    "replacement": "fugue app domain verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains add",
+    "replacement": "fugue app domain add",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains attach",
+    "replacement": "fugue app domain add",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains availability",
+    "replacement": "fugue app domain check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains check",
+    "replacement": "fugue app domain check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains connect",
+    "replacement": "fugue app domain add",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains delete",
+    "replacement": "fugue app domain delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains detach",
+    "replacement": "fugue app domain delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains diagnose",
+    "replacement": "fugue app domain diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains diagnosis",
+    "replacement": "fugue app domain diagnose",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains list",
+    "replacement": "fugue app domain ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains ls",
+    "replacement": "fugue app domain ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains primary",
+    "replacement": "fugue app domain primary",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains remove",
+    "replacement": "fugue app domain delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains repair",
+    "replacement": "fugue app domain repair",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains rm",
+    "replacement": "fugue app domain delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains status",
+    "replacement": "fugue app domain check",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains verify",
+    "replacement": "fugue app domain verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env delete",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env dump",
+    "replacement": "fugue app env export",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env export",
+    "replacement": "fugue app env export",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env generated",
+    "replacement": "fugue app env generated",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env list",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env ls",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env remove",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env rm",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env set",
+    "replacement": "fugue app env set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env show",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env unset",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files cat",
+    "replacement": "fugue app config get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files cat",
+    "replacement": "fugue app config get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files delete",
+    "replacement": "fugue app config delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files get",
+    "replacement": "fugue app config get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files list",
+    "replacement": "fugue app config ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files list",
+    "replacement": "fugue app config ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files ls",
+    "replacement": "fugue app config ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files put",
+    "replacement": "fugue app config put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files read",
+    "replacement": "fugue app config get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files read",
+    "replacement": "fugue app config get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files reconcile",
+    "replacement": "fugue app config reconcile",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files remove",
+    "replacement": "fugue app config delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files remove",
+    "replacement": "fugue app config delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files rm",
+    "replacement": "fugue app config delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files rm",
+    "replacement": "fugue app config delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files verify",
+    "replacement": "fugue app config verify",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files write",
+    "replacement": "fugue app config put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files write",
+    "replacement": "fugue app config put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "project get",
+    "replacement": "fugue project overview",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "project info",
+    "replacement": "fugue project overview",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "project rename",
+    "replacement": "fugue project edit",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "project show",
+    "replacement": "fugue project overview",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "project storage",
+    "replacement": "fugue project images usage",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "project usage",
+    "replacement": "fugue project images usage",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "projects get",
+    "replacement": "fugue project overview",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "projects info",
+    "replacement": "fugue project overview",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "projects rename",
+    "replacement": "fugue project edit",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "projects show",
+    "replacement": "fugue project overview",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "projects storage",
+    "replacement": "fugue project images usage",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "projects usage",
+    "replacement": "fugue project images usage",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime access",
+    "replacement": "fugue admin runtime access",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime attach",
+    "replacement": "fugue runtime enroll create",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime delete",
+    "replacement": "fugue admin runtime delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime offer",
+    "replacement": "fugue admin runtime offer",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime pool",
+    "replacement": "fugue admin runtime pool",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime remove",
+    "replacement": "fugue admin runtime delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime rm",
+    "replacement": "fugue admin runtime delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtime sharing",
+    "replacement": "fugue admin runtime access",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes access",
+    "replacement": "fugue admin runtime access",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes attach",
+    "replacement": "fugue runtime enroll create",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes delete",
+    "replacement": "fugue admin runtime delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes offer",
+    "replacement": "fugue admin runtime offer",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes pool",
+    "replacement": "fugue admin runtime pool",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes remove",
+    "replacement": "fugue admin runtime delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes rm",
+    "replacement": "fugue admin runtime delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "runtimes sharing",
+    "replacement": "fugue admin runtime access",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "service create",
+    "replacement": "fugue service postgres create",
+    "notes": "Remove --type postgres (or omit the default type). Other values remain unsupported."
+  },
+  {
+    "path": "services create",
+    "replacement": "fugue service postgres create",
+    "notes": "Remove --type postgres (or omit the default type). Other values remain unsupported."
+  },
+  {
+    "path": "template inspect",
+    "replacement": "fugue deploy inspect",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Inspection output mode is inspect; this does not apply a deployment plan."
+  },
+  {
+    "path": "up plan",
+    "replacement": "fugue deploy inspect",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Inspection output mode is inspect; this does not apply a deployment plan."
+  },
+  {
+    "path": "variables delete",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables dump",
+    "replacement": "fugue app env export",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables export",
+    "replacement": "fugue app env export",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables generated",
+    "replacement": "fugue app env generated",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables list",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables ls",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables remove",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables rm",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables set",
+    "replacement": "fugue app env set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables show",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "variables unset",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars delete",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars dump",
+    "replacement": "fugue app env export",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars export",
+    "replacement": "fugue app env export",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars generated",
+    "replacement": "fugue app env generated",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars list",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars ls",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars remove",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars rm",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars set",
+    "replacement": "fugue app env set",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars show",
+    "replacement": "fugue app env ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars unset",
+    "replacement": "fugue app env unset",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace cat",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace delete",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace get",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace list",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace ls",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace mkdir",
+    "replacement": "fugue app fs mkdir",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace put",
+    "replacement": "fugue app fs put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace read",
+    "replacement": "fugue app fs get",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace remove",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace rm",
+    "replacement": "fugue app fs delete",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace tree",
+    "replacement": "fugue app fs ls",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace write",
+    "replacement": "fugue app fs put",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "configs",
+    "replacement": "fugue app config",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "curl",
+    "replacement": "fugue api request",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domain",
+    "replacement": "fugue app domain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "domains",
+    "replacement": "fugue app domain",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "env",
+    "replacement": "fugue app env",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "files",
+    "replacement": "fugue app config",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "template",
+    "replacement": "fugue deploy inspect",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement. Inspection output mode is inspect; this does not apply a deployment plan."
+  },
+  {
+    "path": "variables",
+    "replacement": "fugue app env",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "vars",
+    "replacement": "fugue app env",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  },
+  {
+    "path": "workspace",
+    "replacement": "fugue app fs",
+    "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."
+  }
+]

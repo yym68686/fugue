@@ -189,8 +189,8 @@ You can audit the current app portfolio directly from the CLI:
 ```bash
 export FUGUE_BASE_URL=https://api.example.com
 export FUGUE_API_KEY=<tenant-api-key>
-fugue app continuity audit
-fugue app continuity audit <app-name>
+fugue app failover status
+fugue app failover status <app-name>
 ```
 
 The CLI reports three classes:

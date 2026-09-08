@@ -551,7 +551,7 @@ func buildAppRequestStreamNextActions(app model.App, category, layer string, req
 		}
 	case "public-route-missing":
 		return []string{
-			fmt.Sprintf("fugue app route show %s", appName),
+			fmt.Sprintf("fugue app domain primary verify %s", appName),
 			fmt.Sprintf("fugue app request %s %s", appName, "/"),
 		}
 	case "no_headers", "headers_only_stall", "sse_event_stall":
@@ -564,7 +564,7 @@ func buildAppRequestStreamNextActions(app model.App, category, layer string, req
 			}
 		default:
 			return []string{
-				fmt.Sprintf("fugue app route show %s", appName),
+				fmt.Sprintf("fugue app domain primary verify %s", appName),
 				fmt.Sprintf("fugue app request compare %s %s", appName, "/"),
 				fmt.Sprintf("fugue app request stream %s %s --accept text/event-stream", appName, "/"),
 			}

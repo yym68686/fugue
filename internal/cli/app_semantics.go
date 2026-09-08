@@ -24,6 +24,7 @@ func (c *CLI) newAppImageCommand() *cobra.Command {
 }
 func (c *CLI) newAppTrafficCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "traffic", Short: "Inspect or update app traffic intent"}
+	var observed bool
 	show := &cobra.Command{Use: "show <app>", Short: "Show stable/candidate traffic intent without changing it", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := c.newClient()
 		if err != nil {
@@ -37,6 +38,10 @@ func (c *CLI) newAppTrafficCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if observed {
+			samples := c.observeAppRoute(client, app)
+			return c.renderResourceResult(map[string]any{"schema_version": 1, "traffic": response.Traffic, "releases": response.Releases, "evidence_kind": "control_plane_intent", "observed_state": samples.State, "observations": samples, "measured_global_split": "unknown"})
+		}
 		if c.wantsJSON() {
 			return c.writeJSON(map[string]any{"schema_version": 1, "traffic": response.Traffic, "releases": response.Releases, "evidence_kind": "control_plane_intent", "observed_state": "unknown"})
 		}
@@ -45,6 +50,7 @@ func (c *CLI) newAppTrafficCommand() *cobra.Command {
 		}
 		return writeKeyValues(c.stdout, kvPair{Key: "evidence_kind", Value: "control_plane_intent"}, kvPair{Key: "observed_state", Value: "unknown (inspect route/consumer evidence separately)"})
 	}}
+	show.Flags().BoolVar(&observed, "observed", false, "Include recent edge route decision samples; does not infer a global traffic split")
 	cmd.AddCommand(show, renamedCommand(c.newAppReleaseTrafficCommand(), "set <app>"))
 	return cmd
 }

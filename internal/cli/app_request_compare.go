@@ -799,7 +799,7 @@ func buildAppRequestNextActions(app model.App, category string, requirements []a
 		}
 	case "public-route-missing", "public-route-not-forwarding", "public-proxy-failure", "static-fallback", "public-route-unreachable", "public-route-auth-failed", "public-internal-mismatch":
 		return []string{
-			fmt.Sprintf("fugue app route show %s", appName),
+			fmt.Sprintf("fugue app domain primary verify %s", appName),
 			fmt.Sprintf("fugue app overview %s", appName),
 		}
 	case "app-backend-unavailable", "internal-probe-failed", "internal-probe-failed-public-ok", "app-returned-error", "app-route-missing", "auth-failed":

@@ -240,6 +240,11 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) runActiveLoop(ctx context.Context) error {
+	prewarmContext, stopPrewarm := context.WithCancel(ctx)
+	prewarmDone := make(chan struct{})
+	go func() { defer close(prewarmDone); s.runDataPrewarmLoop(prewarmContext) }()
+	defer func() { stopPrewarm(); <-prewarmDone }()
+
 	s.markActiveLoopRunning(true)
 	defer s.markActiveLoopRunning(false)
 

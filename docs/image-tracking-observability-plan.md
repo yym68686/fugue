@@ -194,14 +194,14 @@ Extend the existing image tracking surface.
 Existing command:
 
 ```text
-fugue app release tracking <app>
+fugue app image tracking <app>
 ```
 
 Proposed commands:
 
 ```text
-fugue app release tracking history <app>
-fugue app release tracking diagnose <app>
+fugue app image tracking history <app>
+fugue app image tracking diagnose <app>
 ```
 
 `history` should show recent decision records:
@@ -289,7 +289,7 @@ After decision history and metrics exist, add alerts for:
 - `last_seen_digest` is newer than `last_queued_digest` for longer than the
   threshold.
 
-Alerts should point to `fugue app release tracking diagnose <app>` rather than
+Alerts should point to `fugue app image tracking diagnose <app>` rather than
 requiring an operator to inspect raw tables first.
 
 ## Rollout Plan
@@ -327,8 +327,8 @@ Phase 3 changes behavior only after evidence proves a specific bug:
 - [x] Add controller leader-loop and image tracking sync health metrics.
 - [x] Extend OpenAPI with image tracking history and diagnosis endpoints.
 - [x] Generate OpenAPI server artifacts.
-- [x] Add CLI support for `fugue app release tracking history <app>`.
-- [x] Add CLI support for `fugue app release tracking diagnose <app>`.
+- [x] Add CLI support for `fugue app image tracking history <app>`.
+- [x] Add CLI support for `fugue app image tracking diagnose <app>`.
 - [x] Include image tracking evidence in `fugue app diagnose <app>`.
 - [x] Add unit tests for each decision value.
 - [x] Add a controller integration test for remote digest changed but no active

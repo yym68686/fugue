@@ -476,7 +476,7 @@ stable/candidate 两阶段语义：
    自动 abort candidate，并把 traffic policy 恢复为 stable-only。
 4. promote 后 candidate 变成 stable，旧 stable 进入 `previous/draining`，并记录
    `rollback_target_release_id` 与 retention window。
-5. `fugue app deploy --wait`、`fugue app continuity audit` 和 release debug bundle
+5. `fugue app deploy --wait`、`fugue app failover status` 和 release debug bundle
    都会展示 safe rollout phases、traffic policy、release records 和 gate evidence。
 
 仍然不属于默认 safe rollout 自动保证的范围：

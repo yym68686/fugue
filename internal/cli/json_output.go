@@ -11,6 +11,9 @@ import (
 // specs even in callers that only intend to print policy or status metadata.
 // Explicit secret viewing remains an opt-in; env/file payloads are untouched.
 func (c *CLI) writeJSON(value any) error {
+	if c.jsonSchema != "" {
+		value = map[string]any{"schema_version": c.jsonSchema, "data": value}
+	}
 	if c.rawAppOutput {
 		return writeJSON(c.stdout, value)
 	}

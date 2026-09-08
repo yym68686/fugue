@@ -44,14 +44,6 @@ type workspaceRemoveOptions struct {
 	Recursive bool
 }
 
-func (c *CLI) newWorkspaceCommand() *cobra.Command {
-	cmd := c.newFilesystemCommand()
-	cmd.Use = "workspace"
-	cmd.Aliases = nil
-	cmd.Short = "Compatibility alias for app fs"
-	return cmd
-}
-
 func (c *CLI) newFilesystemCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "fs",
@@ -66,10 +58,6 @@ func (c *CLI) newFilesystemCommand() *cobra.Command {
 		c.newWorkspaceRemoveCommand(),
 	)
 	return cmd
-}
-
-func (c *CLI) newWorkspaceCompatCommand() *cobra.Command {
-	return hideCompatCommand(c.newWorkspaceCommand(), "fugue app fs")
 }
 
 func (c *CLI) newWorkspaceListCommand() *cobra.Command {

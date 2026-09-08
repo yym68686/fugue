@@ -112,7 +112,7 @@ func TestRunAppReleaseAttemptsStatusExplainAndDebugBundle(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "app", "release", "attempts", "demo"}, &stdout, &stderr); err != nil {
+	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "app", "release", "attempt", "ls", "demo"}, &stdout, &stderr); err != nil {
 		t.Fatalf("run release attempts: %v stderr=%s", err, stderr.String())
 	}
 	if out := stdout.String(); !strings.Contains(out, "rel_1") || !strings.Contains(out, "image_tracking_manual_sync") {
@@ -121,7 +121,7 @@ func TestRunAppReleaseAttemptsStatusExplainAndDebugBundle(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "app", "release", "explain", "demo"}, &stdout, &stderr); err != nil {
+	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "app", "release", "attempt", "explain", "demo"}, &stdout, &stderr); err != nil {
 		t.Fatalf("run release explain: %v stderr=%s", err, stderr.String())
 	}
 	if out := stdout.String(); !strings.Contains(out, "release_attempt_id=rel_1") || !strings.Contains(out, "[timeline]") || !strings.Contains(out, "[evidence]") || !strings.Contains(out, "evid_1") {
@@ -131,7 +131,7 @@ func TestRunAppReleaseAttemptsStatusExplainAndDebugBundle(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "release-bundle.json")
 	stdout.Reset()
 	stderr.Reset()
-	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "app", "release", "debug-bundle", "demo", "--output", outputPath}, &stdout, &stderr); err != nil {
+	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "app", "release", "attempt", "bundle", "demo", "--output", outputPath}, &stdout, &stderr); err != nil {
 		t.Fatalf("run release debug-bundle: %v stderr=%s", err, stderr.String())
 	}
 	data, err := os.ReadFile(outputPath)
@@ -145,7 +145,7 @@ func TestRunAppReleaseAttemptsStatusExplainAndDebugBundle(t *testing.T) {
 	zipPath := filepath.Join(t.TempDir(), "release-bundle.zip")
 	stdout.Reset()
 	stderr.Reset()
-	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "app", "release", "debug-bundle", "demo", "--output", zipPath}, &stdout, &stderr); err != nil {
+	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "app", "release", "attempt", "bundle", "demo", "--output", zipPath}, &stdout, &stderr); err != nil {
 		t.Fatalf("run release debug-bundle zip: %v stderr=%s", err, stderr.String())
 	}
 	zipData, err := os.ReadFile(zipPath)

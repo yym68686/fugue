@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fugue/internal/dataprewarm"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -14,6 +17,25 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--data-prewarm-worker" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		file, err := os.Open("/plan/plan.json")
+		if err != nil {
+			log.Fatal("prewarm plan unavailable")
+		}
+		defer file.Close()
+		var plan dataprewarm.Plan
+		if err = json.NewDecoder(file).Decode(&plan); err != nil {
+			log.Fatal("invalid prewarm plan")
+		}
+		encoder := json.NewEncoder(os.Stdout)
+		if err = dataprewarm.Run(ctx, plan, "/cache", func(p dataprewarm.Progress) { _ = encoder.Encode(p) }); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	cfg := config.ControllerFromEnv()
 	logger := log.Default()
 	store := store.New(cfg.StorePath, cfg.DatabaseURL)

@@ -579,7 +579,7 @@ func TestRunAppRouteCheckUsesPathPrefix(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "route", "check", "demo", "api",
+		"app", "domain", "primary", "check", "demo", "api",
 		"--path-prefix", "/v1",
 	}, &stdout, &stderr)
 	if err != nil {
@@ -618,7 +618,7 @@ func TestRunAppRouteSetUsesPathPrefix(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "route", "set", "demo", "api",
+		"app", "domain", "primary", "set", "demo", "api",
 		"--path-prefix", "/v1",
 	}, &stdout, &stderr)
 	if err != nil {
@@ -1966,7 +1966,7 @@ func TestRunAppContinuityAuditByNameUsesExplicitCommand(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "continuity", "audit", "demo",
+		"app", "failover", "status", "demo",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run app continuity audit: %v", err)
@@ -2013,7 +2013,7 @@ func TestRunAppContinuityEnableUsesSemanticCommand(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "continuity", "enable", "demo",
+		"app", "failover", "policy", "set", "demo",
 		"--app-to", "runtime-b",
 		"--wait=false",
 	}, &stdout, &stderr)
@@ -2057,7 +2057,7 @@ func TestRunAppContinuityEnableZeroDowntimeSafe(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "continuity", "enable", "demo",
+		"app", "rollout", "policy", "set", "demo",
 		"--zero-downtime", "safe",
 		"--initial-canary-weight", "2",
 		"--min-observation-seconds", "90",
@@ -2106,7 +2106,7 @@ func TestRunAppContinuityDisableZeroDowntimeOnly(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "continuity", "disable", "demo",
+		"app", "rollout", "policy", "clear", "demo",
 		"--zero-downtime",
 		"--wait=false",
 	}, &stdout, &stderr)
@@ -2144,7 +2144,7 @@ func TestRunAppContinuityShowZeroDowntime(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "continuity", "show", "demo",
+		"app", "rollout", "policy", "show", "demo",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run app continuity show: %v", err)
@@ -2176,7 +2176,7 @@ func TestRunAppContinuityShowReportsServiceDefaultZeroDowntime(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "continuity", "show", "demo",
+		"app", "rollout", "policy", "show", "demo",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run app continuity show: %v", err)
@@ -2262,7 +2262,7 @@ func TestRunAppFailoverConfigureUsesNewSemanticCommand(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "failover", "configure", "demo",
+		"app", "failover", "policy", "set", "demo",
 		"--app-to", "runtime-b",
 		"--wait=false",
 	}, &stdout, &stderr)
@@ -2778,7 +2778,7 @@ func TestRunRuntimeAttachUsesSaferInstructions(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"runtime", "attach", "edge-a",
+		"runtime", "enroll", "create", "edge-a",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run runtime attach: %v", err)
@@ -2823,7 +2823,7 @@ func TestRunRuntimeOfferSetPublishesOffer(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"runtime", "offer", "set", "edge-a",
+		"admin", "runtime", "offer", "set", "edge-a",
 		"--cpu", "2000",
 		"--memory", "4096",
 		"--storage", "50",
@@ -2872,7 +2872,7 @@ func TestRunRuntimeDeleteUsesSemanticCommand(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"runtime", "delete", "edge-a",
+		"admin", "runtime", "delete", "edge-a",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run runtime delete: %v", err)
@@ -2934,7 +2934,7 @@ func TestRunAppOverviewAggregatesRelatedState(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"app=demo", "project=demo", "runtime=shared", "domains", "www.example.com", "services", "postgres", "images", "versions=1", "image_tracking", "ghcr.io/acme/demo:main", "last_event=poll", "sync_now=fugue app release tracking sync 'demo'", "pods", "demo-8c9f6d74f7", "operations", "op_123"} {
+	for _, want := range []string{"app=demo", "project=demo", "runtime=shared", "domains", "www.example.com", "services", "postgres", "images", "versions=1", "image_tracking", "ghcr.io/acme/demo:main", "last_event=poll", "sync_now=fugue app image tracking sync 'demo'", "pods", "demo-8c9f6d74f7", "operations", "op_123"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -3973,7 +3973,7 @@ func TestRunEnvSetByNameUsesSemanticCommand(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"env", "set", "demo",
+		"app", "env", "set", "demo",
 		"FOO=bar",
 		"DEBUG=1",
 		"--wait=false",
@@ -4016,7 +4016,7 @@ func TestRunEnvListTextShowsSources(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"env", "ls", "demo",
+		"app", "env", "ls", "demo",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run env ls: %v", err)
@@ -4262,7 +4262,7 @@ func TestRunDomainAddByNameUsesSemanticCommand(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"domain", "add", "demo", "www.example.com",
+		"app", "domain", "add", "demo", "www.example.com",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run domain add: %v", err)
@@ -4311,7 +4311,7 @@ func TestRunFilesWriteByNameUsesSemanticCommand(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"files", "write", "demo", "/app/config.yaml",
+		"app", "config", "put", "demo", "/app/config.yaml",
 		"--content", "port: 8080\n",
 		"--wait=false",
 	}, &stdout, &stderr)
@@ -4356,7 +4356,7 @@ func TestRunFilesReadByNameUsesSemanticCommand(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"files", "read", "demo", "/app/config.yaml",
+		"app", "config", "get", "demo", "/app/config.yaml",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run files read: %v", err)
@@ -4392,7 +4392,7 @@ func TestRunWorkspaceReadUsesRelativePathWithinWorkspace(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"workspace", "read", "demo", "notes/hello.txt",
+		"app", "fs", "get", "demo", "notes/hello.txt",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run workspace read: %v", err)

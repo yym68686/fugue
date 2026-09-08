@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func (s *Server) handleListImages(w http.ResponseWriter, r *http.Request) {
@@ -21,7 +22,7 @@ func (s *Server) handleListImages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetImage(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	image, err := s.store.GetImage(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
+	image, err := s.authorizedImage(principal, r.PathValue("id"))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -31,7 +32,7 @@ func (s *Server) handleGetImage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListImageReplicas(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	image, err := s.store.GetImage(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
+	image, err := s.authorizedImage(principal, r.PathValue("id"))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -48,7 +49,7 @@ func (s *Server) handleListImageReplicas(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleReportImageReplica(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	image, err := s.store.GetImage(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
+	image, err := s.authorizedImage(principal, r.PathValue("id"))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -77,7 +78,7 @@ func (s *Server) handleReportImageReplica(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleVerifyImage(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	image, err := s.store.GetImage(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
+	image, err := s.authorizedImage(principal, r.PathValue("id"))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -101,7 +102,7 @@ func (s *Server) handleVerifyImage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateImagePin(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	image, err := s.store.GetImage(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
+	image, err := s.authorizedImage(principal, r.PathValue("id"))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -135,7 +136,7 @@ func (s *Server) handleCreateImagePin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteImagePin(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	image, err := s.store.GetImage(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
+	image, err := s.authorizedImage(principal, r.PathValue("id"))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -205,7 +206,7 @@ func (s *Server) handleCreateImageReplicationTask(w http.ResponseWriter, r *http
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	image, err := s.store.GetImage(req.ImageID, principal.TenantID, principal.IsPlatformAdmin())
+	image, err := s.authorizedImage(principal, req.ImageID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -340,6 +341,7 @@ func imageFilterFromRequest(r *http.Request, principal model.Principal, allowPla
 	query := r.URL.Query()
 	platformAdmin := allowPlatformAdmin && principal.IsPlatformAdmin()
 	filter := model.ImageFilter{
+		ProjectID:       firstNonEmptyImageAPIString(principal.ProjectID, strings.TrimSpace(query.Get("project_id"))),
 		TenantID:        principal.TenantID,
 		AppID:           strings.TrimSpace(query.Get("app_id")),
 		ImageRef:        strings.TrimSpace(query.Get("image_ref")),
@@ -378,6 +380,7 @@ func imageReplicationTaskFilterFromRequest(r *http.Request, principal model.Prin
 	query := r.URL.Query()
 	platformAdmin := allowPlatformAdmin && principal.IsPlatformAdmin()
 	filter := model.ImageReplicationTaskFilter{
+		ProjectID:             firstNonEmptyImageAPIString(principal.ProjectID, strings.TrimSpace(query.Get("project_id"))),
 		TenantID:              principal.TenantID,
 		ImageID:               strings.TrimSpace(query.Get("image_id")),
 		AppID:                 strings.TrimSpace(query.Get("app_id")),
@@ -478,4 +481,36 @@ func firstTimePointer(existing *time.Time, fallback time.Time) *time.Time {
 		return existing
 	}
 	return &fallback
+}
+
+func (s *Server) handleListImagePins(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	image, err := s.authorizedImage(principal, r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	pins, err := s.store.ListImagePins(model.ImagePinFilter{ImageID: image.ID, TenantID: principal.TenantID, PlatformAdmin: principal.IsPlatformAdmin()})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if pins == nil {
+		pins = []model.ImagePin{}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"pins": pins})
+}
+
+func (s *Server) authorizedImage(p model.Principal, id string) (model.Image, error) {
+	image, err := s.store.GetImage(id, p.TenantID, p.IsPlatformAdmin())
+	if err != nil {
+		return image, err
+	}
+	if p.ProjectID != "" && !p.IsPlatformAdmin() {
+		app, err := s.store.GetApp(image.AppID)
+		if err != nil || !principalAllowsApp(p, app) {
+			return model.Image{}, store.ErrNotFound
+		}
+	}
+	return image, nil
 }

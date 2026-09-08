@@ -72,7 +72,7 @@ func TestAdminArtifactReleaseSerializesKernelBreakGlassAuthorization(t *testing.
 	}
 }
 
-func TestAdminArtifactReleaseNormalizesLegacyForcePublishToSoftOverride(t *testing.T) {
+func TestAdminArtifactReleaseUsesSoftOverride(t *testing.T) {
 	t.Parallel()
 
 	var got model.PlatformArtifactReleaseRequest
@@ -102,7 +102,7 @@ func TestAdminArtifactReleaseNormalizesLegacyForcePublishToSoftOverride(t *testi
 		"-o", "json",
 		"admin", "artifact", "release", "artifact-1",
 		"--channel", "shadow",
-		"--force-publish",
+		"--soft-override",
 		"--reason", "legacy compatibility",
 	}, &stdout, &stderr)
 	if err != nil {

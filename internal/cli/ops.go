@@ -27,6 +27,7 @@ func (c *CLI) newOpsCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newOpsListCommand(),
+		c.newOperationRecoverCommand(),
 		c.newOpsShowCommand(),
 		c.newOpsResultCommand(),
 		c.newOpsCancelCommand(),

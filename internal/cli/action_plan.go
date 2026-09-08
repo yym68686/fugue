@@ -26,7 +26,7 @@ func buildRedeployActionPlan(app model.App) viewmodel.ActionPlanView {
 	plan.Risk = "queues a new deploy from the app desired image/config"
 	plan.RollbackHint = "use fugue app rollback if the redeploy promotes an unhealthy release"
 	plan.ConfirmText = fmt.Sprintf("redeploy app %s in project %s", target, firstNonEmptyTrimmed(app.ProjectID, "-"))
-	plan.NextCommands = []string{fmt.Sprintf("fugue app redeploy %s", target), fmt.Sprintf("fugue operation watch <operation-id>")}
+	plan.NextCommands = []string{fmt.Sprintf("fugue app deploy %s", target), fmt.Sprintf("fugue operation watch <operation-id>")}
 	return plan
 }
 

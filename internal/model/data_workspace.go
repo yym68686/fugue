@@ -184,7 +184,20 @@ type DataSnapshot struct {
 	DeletedAt      *time.Time   `json:"deleted_at,omitempty"`
 }
 
+type DataPrewarmCache struct {
+	WorkerCleaned  bool      `json:"worker_cleaned,omitempty"`
+	Namespace      string    `json:"namespace"`
+	Claim          string    `json:"claim"`
+	Job            string    `json:"job"`
+	JobUID         string    `json:"job_uid,omitempty"`
+	Node           string    `json:"node"`
+	ManifestDigest string    `json:"manifest_digest"`
+	State          string    `json:"state"`
+	ObservedAt     time.Time `json:"observed_at"`
+}
+
 type DataTransfer struct {
+	Cache        *DataPrewarmCache      `json:"cache,omitempty"`
 	ID           string                 `json:"id"`
 	TenantID     string                 `json:"tenant_id,omitempty"`
 	WorkspaceID  string                 `json:"workspace_id"`

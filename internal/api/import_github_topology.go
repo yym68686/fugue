@@ -29,6 +29,7 @@ type topologySourceBuilder func(service sourceimport.ComposeService, composeDepe
 type topologyAuditMetadataBuilder func(source model.AppSource, route model.AppRoute) map[string]string
 
 type topologyImportOptions struct {
+	SourceSessionID          string
 	ProjectID                string
 	ProjectName              string
 	RuntimeID                string
@@ -285,6 +286,7 @@ func applyTopologyServicePersistentStorageOverrides(services []sourceimport.Comp
 
 func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantID string, req importUploadRequest, upload model.SourceUpload, runtimeID string, replicas int, description string, baseName string, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
 	return s.importResolvedTopology(principal, tenantID, topologyImportOptions{
+		SourceSessionID:          req.sourceSessionID,
 		ProjectID:                req.ProjectID,
 		RuntimeID:                runtimeID,
 		Replicas:                 replicas,
@@ -322,6 +324,9 @@ func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantI
 }
 
 func (s *Server) importResolvedTopology(principal model.Principal, tenantID string, options topologyImportOptions, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
+	createOperation := func(op model.Operation) (model.Operation, error) {
+		return s.store.CreateSourceSessionOperation(op, options.SourceSessionID)
+	}
 	if options.BuildSource == nil {
 		return importedGitHubTopology{}, fmt.Errorf("topology source builder is required")
 	}
@@ -579,7 +584,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		if options.DesiredOriginSource != nil {
 			desiredOriginSource = options.DesiredOriginSource(plan.Match, sourceCopy)
 		}
-		op, err := s.store.CreateOperation(model.Operation{
+		op, err := createOperation(model.Operation{
 			TenantID:            app.TenantID,
 			Type:                model.OperationTypeImport,
 			RequestedByType:     principal.ActorType,
@@ -635,7 +640,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		}
 	}
 	for _, candidate := range deleteCandidates {
-		deleteOp, err := s.store.CreateOperation(model.Operation{
+		deleteOp, err := createOperation(model.Operation{
 			TenantID:        candidate.TenantID,
 			Type:            model.OperationTypeDelete,
 			RequestedByType: principal.ActorType,

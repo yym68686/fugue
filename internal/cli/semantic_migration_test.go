@@ -4,46 +4,59 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
+	"os"
 	"strings"
 	"testing"
 )
 
-func TestCanonicalReplacementsPreserveFlagsAndDefaults(t *testing.T) {
-	pairs := [][2]string{
-		{"env ls", "app env ls"}, {"files get", "app config get"}, {"workspace put", "app fs put"}, {"app workspace ls", "app fs ls"}, {"curl", "api request"},
-		{"template inspect", "deploy inspect"}, {"deploy plan", "deploy inspect"}, {"app route set", "app domain primary set"}, {"app route check", "app domain primary check"}, {"app route show", "app domain primary verify"},
-		{"app binding attach", "app service attach"}, {"app redeploy", "app deploy"}, {"app rebuild", "app build"}, {"app release deploy", "app deploy"}, {"app release rollback", "app rollback"},
-		{"project show", "project overview"}, {"project storage", "project images usage"}, {"project usage", "project images usage"}, {"runtime attach", "runtime enroll create"}, {"runtime access grant", "admin runtime access grant"},
-		{"runtime pool set", "admin runtime pool set"}, {"runtime offer set", "admin runtime offer set"}, {"runtime delete", "admin runtime delete"}, {"app failover configure", "app failover policy set"}, {"app failover disable", "app failover policy clear"},
-		{"app sync resume", "app source sync resume"}, {"app sync run", "app source sync run"}, {"app continuity show", "app rollout policy show"},
-		{"app release ls", "app image ls"}, {"app release policy set", "app image retention set"}, {"app release tracking set", "app image tracking set"}, {"app release prune", "app image prune"}, {"app release traffic", "app traffic set"},
+func TestCanonicalReplacementsPreserveR1Baseline(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/cli-refactor-audit-2026-09-08/migration-parity.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, pair := range pairs {
-		t.Run(pair[0], func(t *testing.T) {
-			root := newCLI(&bytes.Buffer{}, &bytes.Buffer{}).newRootCommand()
-			resolve := func(path string) *cobra.Command {
-				cmd, rest, err := root.Find(strings.Fields(path))
-				if err != nil || len(rest) > 0 {
-					t.Fatalf("%s: %v %v", path, err, rest)
+	var baseline struct {
+		Cases []struct {
+			Old         string            `json:"old"`
+			Replacement string            `json:"replacement"`
+			Flags       []commandFlagInfo `json:"flags"`
+		}
+	}
+	if err = json.Unmarshal(raw, &baseline); err != nil {
+		t.Fatal(err)
+	}
+	root := newCLI(&bytes.Buffer{}, &bytes.Buffer{}).newRootCommand()
+	for _, old := range baseline.Cases {
+		t.Run(old.Old, func(t *testing.T) {
+			cmd, rest, err := root.Find(strings.Fields(strings.TrimPrefix(old.Replacement, "fugue ")))
+			if err != nil || len(rest) > 0 {
+				t.Fatalf("missing replacement: %v %v", err, rest)
+			}
+			flags := pflag.NewFlagSet("parity", pflag.ContinueOnError)
+			flags.AddFlagSet(cmd.InheritedFlags())
+			flags.AddFlagSet(cmd.Flags())
+			for _, flag := range old.Flags {
+				if flag.Name == "type" && old.Old == "fugue service create" {
+					continue
 				}
-				return cmd
-			}
-			flags := func(cmd *cobra.Command) map[string]string {
-				out := map[string]string{}
-				cmd.Flags().VisitAll(func(f *pflag.Flag) { out[f.Name] = f.Value.Type() + "=" + f.DefValue })
-				return out
-			}
-			if a, b := flags(resolve(pair[0])), flags(resolve(pair[1])); !reflect.DeepEqual(a, b) {
-				t.Fatalf("old flags=%v new=%v", a, b)
+				if strings.HasPrefix(old.Replacement, "fugue app failover policy ") && isRolloutOnlyFlag(flag.Name) {
+					continue
+				}
+				now := flags.Lookup(flag.Name)
+				if now == nil {
+					t.Errorf("missing flag %s", flag.Name)
+					continue
+				}
+				if now.Value.Type() != flag.Type || now.DefValue != flag.Default {
+					t.Errorf("flag %s changed from %s=%s to %s=%s", flag.Name, flag.Type, flag.Default, now.Value.Type(), now.DefValue)
+				}
 			}
 		})
 	}
 }
+
 func TestTrafficShowIsReadOnlyAndReleaseListUsesVersions(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {

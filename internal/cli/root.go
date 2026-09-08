@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	cliterminal "fugue/internal/cli/terminal"
 
@@ -45,34 +47,48 @@ type rootOptions struct {
 }
 
 type CLI struct {
-	rawAppOutput bool
-	context      context.Context
-	deployment   *deploymentCommandState
-	stdout       io.Writer
-	stderr       io.Writer
-	root         rootOptions
-	observer     requestObserver
-	outputFile   *os.File
-	outputReady  bool
-	account      *adminWorkspaceResolveResponse
+	jsonSchema    string
+	commandEffect string
+	connection    *connectionContext
+	connectionErr error
+	rawAppOutput  bool
+	context       context.Context
+	deployment    *deploymentCommandState
+	stdout        io.Writer
+	stderr        io.Writer
+	root          rootOptions
+	observer      requestObserver
+	outputFile    *os.File
+	outputReady   bool
+	account       *adminWorkspaceResolveResponse
 }
 
 func Run(args []string) error {
-	return runWithStreams(args, os.Stdout, os.Stderr)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runWithContext(ctx, args, os.Stdout, os.Stderr)
 }
 
 func runWithStreams(args []string, stdout, stderr io.Writer) error {
+	return runWithContext(context.Background(), args, stdout, stderr)
+}
+
+func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	payload := &payloadWriter{Writer: stdout}
 	cli := newCLI(payload, stderr)
 	cmd := cli.newRootCommand()
 	cmd.SetOut(payload)
 	cmd.SetErr(stderr)
 	cmd.SetArgs(args)
+	cmd.SetContext(ctx)
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
 	defer cli.closeOutputFile()
-	err := cmd.Execute()
-	if err != nil && cli.deployment != nil {
+	err := removedCommandError(cmd, args)
+	if err == nil {
+		err = cmd.Execute()
+	}
+	if err != nil && cli.deployment != nil && (!cli.wantsJSON() || payload.written == 0) {
 		err = cli.renderDeploymentError(err)
 	}
 	if err != nil && (cli.wantsJSON() || requestedJSON(args)) && payload.written == 0 {
@@ -82,7 +98,9 @@ func runWithStreams(args []string, stdout, stderr io.Writer) error {
 }
 
 func newCLI(stdout, stderr io.Writer) *CLI {
+	connection, connectionErr := loadActiveConnectionContext()
 	return &CLI{
+		connection: connection, connectionErr: connectionErr,
 		stdout: stdout,
 		stderr: stderr,
 		root: rootOptions{
@@ -232,6 +250,7 @@ Environment variables:
 	`),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			c.context = cmd.Context()
+			c.commandEffect = commandEffect(cmd)
 			if cmd.CommandPath() == "fugue app db query" {
 				c.rawAppOutput = true
 			}
@@ -290,6 +309,7 @@ Environment variables:
 	cmd.AddCommand(
 		c.newDeployCommand(),
 		c.newFindCommand(),
+		c.newMigrateCommand(),
 		c.newUnifiedDiagnosticsCommand(),
 		c.newAppCommand(),
 		c.newWorkflowCommand(),
@@ -297,6 +317,8 @@ Environment variables:
 		c.newDebugCommand(),
 		c.newSourceUploadCommand(),
 		c.newAuthCommand(),
+		c.newContextCommand(),
+		c.newCapabilitiesCommand(),
 		c.newSSHKeyCommand(),
 		c.newTenantCommand(),
 		c.newProjectCommand(),
@@ -304,6 +326,7 @@ Environment variables:
 		c.newRuntimeCommand(),
 		c.newServiceCommand(),
 		c.newDataCommand(),
+		c.newImageCommand(),
 		c.newBackupCommand(),
 		c.newDNSCommand(),
 		c.newVersionCommand(),
@@ -313,15 +336,9 @@ Environment variables:
 		c.newWebCommand(),
 		c.newConsoleCommand(),
 		c.newOpsCommand(),
-		hideCompatCommand(c.newTemplateCommand(), "fugue deploy inspect"),
 		c.newAdminCommand(),
-		hideCompatCommand(c.newCurlCommand(), "fugue api request"),
-		c.newEnvCompatCommand(),
-		c.newFilesCompatCommand(),
-		c.newDomainCompatCommand(),
-		c.newWorkspaceCompatCommand(),
 	)
-	finalizeCompatibility(cmd)
+	c.registerVersionedResourceOutput(cmd)
 	cmd.SetHelpCommand(c.newCatalogHelpCommand(cmd))
 	applyHelpDocs(cmd)
 	return cmd
@@ -409,17 +426,24 @@ func (c *CLI) closeOutputFile() {
 }
 
 func (c *CLI) newClient() (*Client, error) {
+	if c.connectionErr != nil && firstNonEmpty(c.root.BaseURL, os.Getenv("FUGUE_BASE_URL"), os.Getenv("FUGUE_API_URL")) == "" {
+		return nil, fmt.Errorf("invalid saved context: %w; use FUGUE_CONTEXT=none or an explicit --base-url to recover", c.connectionErr)
+	}
 	if err := c.validateOutput(); err != nil {
 		return nil, err
 	}
 	return newClientWithOptions(c.effectiveBaseURL(), c.effectiveToken(), clientOptions{
-		Context:      c.context,
-		Observer:     c.observer,
-		RequireToken: true,
+		Context:          c.context,
+		StrictReferences: c.commandEffect == "may_change_state" || c.commandEffect == "caller_defined",
+		Observer:         c.observer,
+		RequireToken:     true,
 	})
 }
 
 func (c *CLI) newWebClient(cookie string) (*Client, error) {
+	if c.connectionErr != nil && firstNonEmpty(c.root.WebBaseURL, os.Getenv("FUGUE_WEB_BASE_URL"), os.Getenv("APP_BASE_URL"), c.root.BaseURL, os.Getenv("FUGUE_BASE_URL"), os.Getenv("FUGUE_API_URL")) == "" {
+		return nil, c.connectionErr
+	}
 	if err := c.validateOutput(); err != nil {
 		return nil, err
 	}
@@ -428,10 +452,11 @@ func (c *CLI) newWebClient(cookie string) (*Client, error) {
 		return nil, fmt.Errorf("web base url is required; pass --web-base-url or set FUGUE_WEB_BASE_URL/APP_BASE_URL")
 	}
 	return newClientWithOptions(baseURL, c.effectiveToken(), clientOptions{
-		Cookie:       cookie,
-		Context:      c.context,
-		Observer:     c.observer,
-		RequireToken: false,
+		Cookie:           cookie,
+		Context:          c.context,
+		StrictReferences: c.commandEffect == "may_change_state" || c.commandEffect == "caller_defined",
+		Observer:         c.observer,
+		RequireToken:     false,
 	})
 }
 
@@ -511,11 +536,11 @@ func (c *CLI) resolveCreateSelections(client *Client) (string, projectSelection,
 }
 
 func (c *CLI) effectiveBaseURL() string {
-	return firstNonEmpty(c.root.BaseURL, os.Getenv("FUGUE_BASE_URL"), os.Getenv("FUGUE_API_URL"), defaultCloudBaseURL)
+	return firstNonEmpty(c.root.BaseURL, os.Getenv("FUGUE_BASE_URL"), os.Getenv("FUGUE_API_URL"), c.contextValue("base_url"), defaultCloudBaseURL)
 }
 
 func (c *CLI) effectiveWebBaseURL() string {
-	return firstNonEmpty(c.root.WebBaseURL, os.Getenv("FUGUE_WEB_BASE_URL"), os.Getenv("APP_BASE_URL"), deriveWebBaseURL(c.effectiveBaseURL()))
+	return firstNonEmpty(c.root.WebBaseURL, os.Getenv("FUGUE_WEB_BASE_URL"), os.Getenv("APP_BASE_URL"), c.contextValue("web_base_url"), deriveWebBaseURL(c.effectiveBaseURL()))
 }
 
 func (c *CLI) effectiveToken() string {
@@ -532,7 +557,7 @@ func (c *CLI) effectiveTenantID() string {
 }
 
 func (c *CLI) effectiveTenantName() string {
-	return firstNonEmpty(c.root.TenantName, os.Getenv("FUGUE_TENANT"), os.Getenv("FUGUE_TENANT_NAME"))
+	return firstNonEmpty(c.root.TenantName, os.Getenv("FUGUE_TENANT"), os.Getenv("FUGUE_TENANT_NAME"), c.contextValue("tenant"))
 }
 
 func (c *CLI) effectiveProjectID() string {
@@ -540,7 +565,7 @@ func (c *CLI) effectiveProjectID() string {
 }
 
 func (c *CLI) effectiveProjectName() string {
-	return firstNonEmpty(c.root.ProjectName, os.Getenv("FUGUE_PROJECT"), os.Getenv("FUGUE_PROJECT_NAME"))
+	return firstNonEmpty(c.root.ProjectName, os.Getenv("FUGUE_PROJECT"), os.Getenv("FUGUE_PROJECT_NAME"), c.contextValue("project"))
 }
 
 func deriveWebBaseURL(apiBaseURL string) string {

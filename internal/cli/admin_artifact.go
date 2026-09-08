@@ -25,6 +25,8 @@ func (c *CLI) newAdminArtifactCommand() *cobra.Command {
 		c.newAdminArtifactCreateCommand(),
 		c.newAdminArtifactListCommand(),
 		c.newAdminArtifactShowCommand(),
+		c.newAdminArtifactPlanCommand(),
+		c.newAdminArtifactWaitCommand(),
 		c.newAdminArtifactDiffCommand(),
 		c.newAdminArtifactValidateCommand(),
 		c.newAdminArtifactReleaseCommand(),
@@ -123,9 +125,10 @@ func (c *CLI) newAdminArtifactListCommand() *cobra.Command {
 
 func (c *CLI) newAdminArtifactShowCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <artifact-id-or-generation>",
-		Short: "Show platform artifact metadata",
-		Args:  cobra.ExactArgs(1),
+		Use:     "show <artifact-id-or-generation>",
+		Aliases: []string{"inspect"},
+		Short:   "Show platform artifact metadata",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -210,10 +213,6 @@ func (c *CLI) newAdminArtifactReleaseCommand() *cobra.Command {
 			if strings.TrimSpace(opts.ReleaseChannel) == "" {
 				return fmt.Errorf("--channel is required: shadow, gray, or full")
 			}
-			if opts.ForcePublish {
-				opts.SoftOverride = true
-				opts.ForcePublish = false
-			}
 			if opts.SoftOverride && overrideOpts.KernelBreakGlass {
 				return fmt.Errorf("--soft-override and --kernel-break-glass are mutually exclusive")
 			}
@@ -256,8 +255,6 @@ func (c *CLI) newAdminArtifactReleaseCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.ReleaseChannel, "channel", "", "Release channel: shadow, gray, or full")
 	cmd.Flags().StringVar(&opts.CanaryRuleRef, "canary-rule-ref", "", "Optional canary or gray rule reference")
 	cmd.Flags().BoolVar(&opts.SoftOverride, "soft-override", false, "Skip non-kernel validation policy; requires --reason")
-	cmd.Flags().BoolVar(&opts.ForcePublish, "force-publish", false, "Deprecated alias for --soft-override")
-	_ = cmd.Flags().MarkDeprecated("force-publish", "use --soft-override; it cannot bypass the Platform Safety Kernel")
 	cmd.Flags().BoolVar(&overrideOpts.KernelBreakGlass, "kernel-break-glass", false, "Use one operation-scoped Platform Safety Kernel recovery authorization")
 	cmd.Flags().DurationVar(&overrideOpts.TTL, "break-glass-ttl", overrideOpts.TTL, "Kernel break-glass authorization validity, maximum 15m")
 	cmd.Flags().StringVar(&overrideOpts.Confirmation, "confirm-kernel-bypass", "", "Must equal "+platformsafety.KernelBreakGlassConfirmation)
@@ -332,10 +329,6 @@ func (c *CLI) newAdminArtifactRollbackCommand() *cobra.Command {
 			if strings.TrimSpace(opts.ToGeneration) == "" || strings.TrimSpace(opts.Reason) == "" {
 				return fmt.Errorf("--to-generation and --reason are required")
 			}
-			if opts.ForcePublish {
-				opts.SoftOverride = true
-				opts.ForcePublish = false
-			}
 			if opts.SoftOverride && overrideOpts.KernelBreakGlass {
 				return fmt.Errorf("--soft-override and --kernel-break-glass are mutually exclusive")
 			}
@@ -376,8 +369,6 @@ func (c *CLI) newAdminArtifactRollbackCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.ToGeneration, "to-generation", "", "Previously validated generation to publish")
 	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Rollback reason")
 	cmd.Flags().BoolVar(&opts.SoftOverride, "soft-override", false, "Skip non-kernel validation policy")
-	cmd.Flags().BoolVar(&opts.ForcePublish, "force-publish", false, "Deprecated alias for --soft-override")
-	_ = cmd.Flags().MarkDeprecated("force-publish", "use --soft-override; it cannot bypass the Platform Safety Kernel")
 	cmd.Flags().BoolVar(&overrideOpts.KernelBreakGlass, "kernel-break-glass", false, "Use one operation-scoped Platform Safety Kernel recovery authorization")
 	cmd.Flags().DurationVar(&overrideOpts.TTL, "break-glass-ttl", overrideOpts.TTL, "Kernel break-glass authorization validity, maximum 15m")
 	cmd.Flags().StringVar(&overrideOpts.Confirmation, "confirm-kernel-bypass", "", "Must equal "+platformsafety.KernelBreakGlassConfirmation)

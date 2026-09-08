@@ -214,7 +214,7 @@ func TestOutputCompatibilityCopySensitiveTextStaysPlainAndRawWhereExpected(t *te
 	}{
 		{
 			name: "env ls",
-			args: []string{"--base-url", server.URL, "--token", "token", "env", "ls", "demo"},
+			args: []string{"--base-url", server.URL, "--token", "token", "app", "env", "ls", "demo"},
 			wantStdout: []string{
 				"SERVICE_KEY",
 				"svc-secret",
@@ -222,7 +222,7 @@ func TestOutputCompatibilityCopySensitiveTextStaysPlainAndRawWhereExpected(t *te
 		},
 		{
 			name:       "env export",
-			args:       []string{"--base-url", server.URL, "--token", "token", "env", "export", "demo"},
+			args:       []string{"--base-url", server.URL, "--token", "token", "app", "env", "export", "demo"},
 			wantStdout: []string{"APP_PUBLIC_URL=https://demo.example.com", `GREETING="hello world"`, "SERVICE_KEY=svc-secret"},
 		},
 		{

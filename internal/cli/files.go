@@ -53,18 +53,6 @@ Use "fugue app fs" for direct reads and writes inside persisted storage or a liv
 	return cmd
 }
 
-func (c *CLI) newFilesCompatCommand() *cobra.Command {
-	cmd := c.newFilesCommand()
-	cmd.Use = "files"
-	cmd.Short = "Compatibility alias for app config"
-	cmd.Long = strings.TrimSpace(`
-Compatibility alias for declarative app config files.
-
-Prefer "fugue app config" for the primary UX.
-`)
-	return hideCompatCommand(cmd, "fugue app config")
-}
-
 func (c *CLI) newFilesListCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "ls <app>",

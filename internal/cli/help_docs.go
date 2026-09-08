@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 type commandHelpDoc struct {
@@ -1492,7 +1493,7 @@ func samplePathValue(path string) string {
 	}
 }
 
-func sampleFlagsForCommand(cmd *cobra.Command) string {
+func sampleSpecificFlagsForCommand(cmd *cobra.Command) string {
 	switch cmd.CommandPath() {
 	case "fugue app create":
 		return "--github owner/repo --branch main"
@@ -1538,7 +1539,7 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		return "--runtime shared --database app --user app"
 	case "fugue admin runtime offer set":
 		return "--cpu 2000 --memory 4096 --storage 50 --monthly-usd 19.99"
-	case "fugue runtime attach", "fugue runtime enroll create":
+	case "fugue runtime enroll create":
 		return "--ttl 3600"
 	case "fugue admin access api-key update":
 		return "--label deploy-bot-v2"
@@ -1592,7 +1593,11 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		flags = append(flags, "--replicas 1")
 	}
 	if cmd.Flags().Lookup("scope") != nil {
-		flags = append(flags, "--scope app.read")
+		value := cmd.Flags().Lookup("scope").DefValue
+		if value == "" {
+			value = "app.read"
+		}
+		flags = append(flags, "--scope "+value)
 	}
 	if cmd.Flags().Lookup("show-secrets") != nil && (cmd.CommandPath() == "fugue app overview" || strings.HasPrefix(cmd.CommandPath(), "fugue operation ")) {
 		flags = append(flags, "--show-secrets")
@@ -1629,4 +1634,39 @@ func undocumentedCommandsReport(root *cobra.Command) []string {
 		}
 	})
 	return missing
+}
+
+// Required flag examples are generated from the same Cobra definitions used by
+// parsing and completion. Command-specific examples only supply sample values.
+func sampleFlagsForCommand(cmd *cobra.Command) string {
+	value := sampleSpecificFlagsForCommand(cmd)
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if len(flag.Annotations[cobra.BashCompOneRequiredFlag]) == 0 || strings.Contains(value, "--"+flag.Name) {
+			return
+		}
+		sample := "example"
+		switch flag.Name {
+		case "from":
+			sample = "backup_artifact_example"
+		case "plan":
+			sample = "./restore-plan.json"
+		case "reason":
+			sample = "planned-recovery"
+		case "route-digest":
+			sample = "sha256:" + strings.Repeat("a", 64)
+		case "answer":
+			sample = "192.0.2.10"
+		default:
+			switch flag.Value.Type() {
+			case "int", "int32", "int64", "uint", "uint64":
+				sample = "1"
+			case "bool":
+				sample = "true"
+			case "duration":
+				sample = "1m"
+			}
+		}
+		value += " --" + flag.Name + " " + sample
+	})
+	return strings.TrimSpace(value)
 }

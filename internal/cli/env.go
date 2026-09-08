@@ -44,10 +44,6 @@ func (c *CLI) newEnvCommand() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) newEnvCompatCommand() *cobra.Command {
-	return hideCompatCommand(c.newEnvCommand(), "fugue app env")
-}
-
 func (c *CLI) newEnvListCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "ls <app>",

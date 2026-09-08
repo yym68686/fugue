@@ -23,48 +23,6 @@ type templateInspectionView struct {
 	Template      *templateMetadata
 }
 
-func (c *CLI) newTemplateCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "template",
-		Short: "Inspect deployable Fugue templates",
-	}
-	cmd.AddCommand(c.newTemplateInspectCommand())
-	return cmd
-}
-
-func (c *CLI) newTemplateInspectCommand() *cobra.Command {
-	opts := inspectTemplateOptions{}
-	cmd := &cobra.Command{
-		Use:   "inspect [path-or-repo]",
-		Short: "Inspect local source or a GitHub repo as a deploy template",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			target := ""
-			if len(args) == 1 {
-				target = args[0]
-			}
-			return c.runInspectTemplateTarget(target, opts, "inspect")
-		},
-	}
-	bindInspectTemplateFlags(cmd, &opts)
-	cmd.AddCommand(c.newTemplateInspectGitHubCommand())
-	return cmd
-}
-
-func (c *CLI) newTemplateInspectGitHubCommand() *cobra.Command {
-	opts := inspectTemplateOptions{}
-	cmd := &cobra.Command{
-		Use:   "github <repo-or-url>",
-		Short: "Inspect a GitHub repository as a Fugue template",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return c.runInspectGitHubTemplate(normalizeGitHubRepoArg(args[0]), opts, "inspect")
-		},
-	}
-	bindInspectTemplateFlags(cmd, &opts)
-	return cmd
-}
-
 func bindInspectTemplateFlags(cmd *cobra.Command, opts *inspectTemplateOptions) {
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Git branch to inspect")
 	cmd.Flags().BoolVar(&opts.Private, "private", false, "Treat the repository as private")

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "files": [
+    "docs/app-safe-zero-downtime-rollout-plan.md",
+    "docs/fugue-yaml-roadmap.md",
+    "docs/operation-evidence-observability-plan.md",
+    "docs/deploy.md",
+    "docs/ha-dr.md",
+    "docs/zero-downtime-rollout-incidents.md",
+    "docs/image-tracking-observability-plan.md",
+    "docs/runbooks/safe-zero-downtime-rollout.md",
+    "internal/cli/action_plan.go",
+    "internal/cli/app_overview.go",
+    "internal/cli/service.go",
+    "internal/cli/app_request_stream.go",
+    "internal/cli/migrate.go",
+    "internal/cli/app_request_compare.go",
+    "internal/cli/help_docs.go",
+    "internal/cli/app_failover.go"
+  ],
+  "method": "reviewed command-prefix migration; historical baseline and removal tables preserved"
+}

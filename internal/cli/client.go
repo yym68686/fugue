@@ -19,6 +19,7 @@ import (
 const sourceUploadClientTimeout = 6 * time.Minute
 
 type Client struct {
+	strictReferences     bool
 	context              context.Context
 	baseURL              string
 	token                string
@@ -31,13 +32,14 @@ type Client struct {
 }
 
 type clientOptions struct {
-	Context        context.Context
-	Cookie         string
-	Observer       requestObserver
-	RequireToken   bool
-	RequestTimeout time.Duration
-	ReadRetryCount int
-	ReadRetryDelay time.Duration
+	StrictReferences bool
+	Context          context.Context
+	Cookie           string
+	Observer         requestObserver
+	RequireToken     bool
+	RequestTimeout   time.Duration
+	ReadRetryCount   int
+	ReadRetryDelay   time.Duration
 }
 
 type importProjectRequest struct {
@@ -215,8 +217,9 @@ type runtimeLogsResponse struct {
 }
 
 type restartAppResponse struct {
-	Operation    model.Operation `json:"operation"`
-	RestartToken string          `json:"restart_token"`
+	DesiredSpecHash string          `json:"desired_spec_hash,omitempty"`
+	Operation       model.Operation `json:"operation"`
+	RestartToken    string          `json:"restart_token"`
 }
 
 type operationResponse struct {
@@ -514,10 +517,11 @@ func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, e
 		readRetryDelay = 250 * time.Millisecond
 	}
 	return &Client{
-		context: opts.Context,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		cookie:  strings.TrimSpace(opts.Cookie),
+		strictReferences: opts.StrictReferences,
+		context:          opts.Context,
+		baseURL:          strings.TrimRight(baseURL, "/"),
+		token:            token,
+		cookie:           strings.TrimSpace(opts.Cookie),
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},

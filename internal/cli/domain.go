@@ -58,10 +58,6 @@ func (c *CLI) newDomainCommand() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) newDomainCompatCommand() *cobra.Command {
-	return hideCompatCommand(c.newDomainCommand(), "fugue app domain")
-}
-
 func (c *CLI) newDomainPrimaryCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "primary",

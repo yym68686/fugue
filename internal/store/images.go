@@ -136,7 +136,18 @@ func (s *Store) ListImages(filter model.ImageFilter) ([]model.Image, error) {
 	}
 	out := []model.Image{}
 	err := s.withLockedState(false, func(state *model.State) error {
+		projectApps := map[string]bool{}
+		if filter.ProjectID != "" {
+			for _, app := range state.Apps {
+				if app.ProjectID == filter.ProjectID {
+					projectApps[app.ID] = true
+				}
+			}
+		}
 		for _, image := range state.Images {
+			if filter.ProjectID != "" && !projectApps[image.AppID] {
+				continue
+			}
 			if imageMatchesFilter(image, filter) {
 				out = append(out, image)
 			}
@@ -467,7 +478,18 @@ func (s *Store) ListImageReplicationTasks(filter model.ImageReplicationTaskFilte
 	}
 	out := []model.ImageReplicationTask{}
 	err := s.withLockedState(false, func(state *model.State) error {
+		projectApps := map[string]bool{}
+		if filter.ProjectID != "" {
+			for _, app := range state.Apps {
+				if app.ProjectID == filter.ProjectID {
+					projectApps[app.ID] = true
+				}
+			}
+		}
 		for _, task := range state.ImageReplicationTasks {
+			if filter.ProjectID != "" && !projectApps[task.AppID] {
+				continue
+			}
 			if imageReplicationTaskMatchesFilter(task, filter) {
 				out = append(out, task)
 			}

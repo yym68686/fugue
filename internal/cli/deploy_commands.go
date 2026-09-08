@@ -62,6 +62,7 @@ type deployCommonOptions struct {
 }
 
 type deployLocalOptions struct {
+	RequestID string
 	deployCommonOptions
 	AppRef         string
 	AppID          string
@@ -190,6 +191,7 @@ Defaults:
 	cmd.Flags().BoolVar(&opts.Private, "private", false, "Treat the repository as private")
 	cmd.Flags().StringVar(&opts.RepoToken, "repo-token", "", "GitHub token for private repo imports")
 	cmd.Flags().StringVar(&opts.IdempotencyKey, "idempotency-key", "", "Compatibility idempotency key for --repo-url imports")
+	cmd.Flags().StringVar(&opts.RequestID, "request-id", "", "Durable local-upload request ID; enables chunk resume and exact operation recovery")
 	cmd.Flags().StringArrayVar(&opts.SeedFiles, "seed-file", nil, "Compatibility persistent storage seed file override: <service>:<path>=<local-file>")
 	_ = cmd.Flags().MarkHidden("dir")
 	_ = cmd.Flags().MarkHidden("app-id")
@@ -204,7 +206,6 @@ Defaults:
 		c.newDeployGitHubCommand(),
 		c.newDeployImageCommand(),
 		c.newDeployInspectCommand(),
-		hideCompatCommand(c.newDeployPlanCommand(), "fugue deploy inspect"),
 	)
 	return cmd
 }
@@ -578,7 +579,12 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		c.deployment.requestStarted = true
 		c.deployment.client = client
 	}
-	response, err := client.ImportUpload(request, archiveName, archiveBytes)
+	var response importUploadResponse
+	if opts.RequestID != "" {
+		response, err = c.importUploadResumable(client, opts.RequestID, request, archiveName, archiveBytes)
+	} else {
+		response, err = client.ImportUpload(request, archiveName, archiveBytes)
+	}
 	if err != nil {
 		return err
 	}

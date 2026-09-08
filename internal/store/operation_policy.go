@@ -8,6 +8,8 @@ import (
 )
 
 type operationCreatePolicy struct {
+	SourceSessionID               string
+	ExpectedAppSpecHash           string
 	RejectActiveDeployForApp      bool
 	RejectNoopDeploy              bool
 	ReuseActiveImageRebuildForApp bool
@@ -113,4 +115,15 @@ func deployOperationDesiredStateAlreadyCurrent(op model.Operation, app model.App
 
 func operationAppSourcesEqual(left, right *model.AppSource) bool {
 	return reflect.DeepEqual(cloneAppSource(left), cloneAppSource(right))
+}
+
+// CreateOperationForAppSpec is the compare-and-swap boundary for a reconcile
+// plan. The hash check and active-operation check run under the same app lock
+// as operation creation; read-then-restart in the CLI cannot provide this.
+func (s *Store) CreateOperationForAppSpec(op model.Operation, expected string) (model.Operation, error) {
+	if len(expected) != 64 || op.Type != model.OperationTypeDeploy {
+		return model.Operation{}, ErrInvalidInput
+	}
+	created, _, err := s.createOperationWithPolicy(op, operationCreatePolicy{ExpectedAppSpecHash: expected})
+	return created, err
 }

@@ -552,6 +552,9 @@ func (s *Store) DeleteDataWorkspace(idOrName, tenantID string, platformAdmin boo
 			return ErrNotFound
 		}
 		deleted = state.DataWorkspaces[index]
+		if err := guardDataDeletion(state, deleted, nil); err != nil {
+			return err
+		}
 		state.DataWorkspaces = append(state.DataWorkspaces[:index], state.DataWorkspaces[index+1:]...)
 		filteredSnapshots := state.DataSnapshots[:0]
 		for _, snapshot := range state.DataSnapshots {
@@ -688,9 +691,18 @@ func (s *Store) DeleteDataSnapshot(workspaceID, idOrVersion string) (model.DataS
 		if index < 0 || state.DataSnapshots[index].DeletedAt != nil {
 			return ErrNotFound
 		}
+		workspaceIndex := findDataWorkspace(state, workspaceID)
+		if workspaceIndex < 0 {
+			return ErrNotFound
+		}
+		if err := guardDataDeletion(state, state.DataWorkspaces[workspaceIndex], &state.DataSnapshots[index]); err != nil {
+			return err
+		}
 		now := time.Now().UTC()
 		state.DataSnapshots[index].DeletedAt = &now
 		deleted = state.DataSnapshots[index]
+		state.DataWorkspaces[workspaceIndex].UsedBytes = totalWorkspaceSnapshotBytes(state.DataSnapshots, workspaceID)
+		state.DataWorkspaces[workspaceIndex].UpdatedAt = now
 		return nil
 	})
 	return deleted, err
@@ -729,6 +741,13 @@ func (s *Store) CreateDataTransfer(transfer model.DataTransfer) (model.DataTrans
 		if transfer.PartSize == 0 {
 			transfer.PartSize = defaultDataMultipartPartSize
 		}
+		if transfer.Direction == model.DataTransferDirectionPrewarm {
+			for _, existing := range state.DataTransfers {
+				if existing.WorkspaceID == transfer.WorkspaceID && existing.SnapshotID == transfer.SnapshotID && existing.Target == transfer.Target && existing.Direction == transfer.Direction && existing.Cache != nil && (existing.Status == model.DataTransferStatusPlanned || existing.Status == model.DataTransferStatusRunning) {
+					return ErrConflict
+				}
+			}
+		}
 		state.DataTransfers = append(state.DataTransfers, transfer)
 		return nil
 	})
@@ -749,6 +768,15 @@ func (s *Store) UpdateDataTransfer(transfer model.DataTransfer) (model.DataTrans
 			return ErrNotFound
 		}
 		current := state.DataTransfers[index]
+		if current.Direction == model.DataTransferDirectionPrewarm && !current.UpdatedAt.Equal(transfer.UpdatedAt) {
+			return ErrConflict
+		}
+		if current.Direction == model.DataTransferDirectionPrewarm && (current.Status == model.DataTransferStatusCompleted || current.Status == model.DataTransferStatusFailed || current.Status == model.DataTransferStatusCanceled) && transfer.Status != "" && current.Status != transfer.Status {
+			return ErrConflict
+		}
+		if transfer.Cache != nil {
+			current.Cache = transfer.Cache
+		}
 		if transfer.Status != "" {
 			current.Status = transfer.Status
 		}
@@ -838,6 +866,12 @@ func (s *Store) CancelDataTransfer(id string) (model.DataTransfer, error) {
 		return model.DataTransfer{}, err
 	}
 	now := time.Now().UTC()
+	if transfer.Status == model.DataTransferStatusCompleted || transfer.Status == model.DataTransferStatusFailed {
+		return model.DataTransfer{}, ErrConflict
+	}
+	if transfer.Status == model.DataTransferStatusCanceled {
+		return transfer, nil
+	}
 	transfer.Status = model.DataTransferStatusCanceled
 	transfer.FinishedAt = &now
 	return s.UpdateDataTransfer(transfer)
@@ -1811,8 +1845,8 @@ func scanDataSnapshot(scanner sqlRowScanner) (model.DataSnapshot, error) {
 
 func scanDataTransfer(scanner sqlRowScanner) (model.DataTransfer, error) {
 	var transfer model.DataTransfer
-	var manifestRaw, planBlobsRaw []byte
-	if err := scanner.Scan(&transfer.ID, &transfer.TenantID, &transfer.WorkspaceID, &transfer.SnapshotID, &transfer.Version, &transfer.Message, &transfer.Direction, &transfer.Status, &transfer.Source, &transfer.Target, &manifestRaw, &planBlobsRaw, &transfer.PartSize, &transfer.ExpiresAt, &transfer.BytesTotal, &transfer.BytesDone, &transfer.FilesTotal, &transfer.FilesDone, &transfer.ErrorCode, &transfer.ErrorMessage, &transfer.CreatedAt, &transfer.UpdatedAt, &transfer.StartedAt, &transfer.FinishedAt); err != nil {
+	var manifestRaw, planBlobsRaw, cacheRaw []byte
+	if err := scanner.Scan(&transfer.ID, &transfer.TenantID, &transfer.WorkspaceID, &transfer.SnapshotID, &transfer.Version, &transfer.Message, &transfer.Direction, &transfer.Status, &transfer.Source, &transfer.Target, &manifestRaw, &planBlobsRaw, &transfer.PartSize, &transfer.ExpiresAt, &transfer.BytesTotal, &transfer.BytesDone, &transfer.FilesTotal, &transfer.FilesDone, &transfer.ErrorCode, &transfer.ErrorMessage, &transfer.CreatedAt, &transfer.UpdatedAt, &transfer.StartedAt, &transfer.FinishedAt, &cacheRaw); err != nil {
 		return model.DataTransfer{}, mapDBErr(err)
 	}
 	manifest, err := decodeJSONValue[model.DataManifest](manifestRaw)
@@ -1825,6 +1859,11 @@ func scanDataTransfer(scanner sqlRowScanner) (model.DataTransfer, error) {
 		return model.DataTransfer{}, err
 	}
 	transfer.PlanBlobs = planBlobs
+	if len(cacheRaw) > 0 {
+		if err := json.Unmarshal(cacheRaw, &transfer.Cache); err != nil {
+			return model.DataTransfer{}, err
+		}
+	}
 	return transfer, nil
 }
 
@@ -2310,8 +2349,19 @@ func (s *Store) pgDeleteDataWorkspace(idOrName, tenantID string, platformAdmin b
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM fugue_data_workspaces WHERE id = $1`, current.ID); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.DataWorkspace{}, err
+	}
+	defer tx.Rollback()
+	if err := guardPGDataDeletion(ctx, tx, current.ID, nil); err != nil {
+		return model.DataWorkspace{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_data_workspaces WHERE id = $1`, current.ID); err != nil {
 		return model.DataWorkspace{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.DataWorkspace{}, err
 	}
 	return current, nil
 }
@@ -2444,6 +2494,9 @@ func (s *Store) pgDeleteDataSnapshot(workspaceID, idOrVersion string) (model.Dat
 		return model.DataSnapshot{}, err
 	}
 	defer tx.Rollback()
+	if err := guardPGDataDeletion(ctx, tx, workspaceID, &snapshot); err != nil {
+		return model.DataSnapshot{}, err
+	}
 	deleted, err := scanDataSnapshot(tx.QueryRowContext(ctx, `
 UPDATE fugue_data_snapshots SET deleted_at = $3
 WHERE workspace_id = $1 AND id = $2
@@ -2500,6 +2553,10 @@ func (s *Store) pgCreateDataTransfer(transfer model.DataTransfer) (model.DataTra
 	if err != nil {
 		return model.DataTransfer{}, err
 	}
+	cacheJSON, err := marshalNullableJSON(transfer.Cache)
+	if err != nil {
+		return model.DataTransfer{}, err
+	}
 	planBlobsJSON, err := marshalJSON(transfer.PlanBlobs)
 	if err != nil {
 		return model.DataTransfer{}, err
@@ -2507,18 +2564,23 @@ func (s *Store) pgCreateDataTransfer(transfer model.DataTransfer) (model.DataTra
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return scanDataTransfer(s.db.QueryRowContext(ctx, `
-INSERT INTO fugue_data_transfers (id, tenant_id, workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
-RETURNING id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at
-`, transfer.ID, nullIfEmpty(transfer.TenantID), transfer.WorkspaceID, transfer.SnapshotID, transfer.Version, transfer.Message, transfer.Direction, transfer.Status, transfer.Source, transfer.Target, manifestJSON, planBlobsJSON, transfer.PartSize, transfer.ExpiresAt, transfer.BytesTotal, transfer.BytesDone, transfer.FilesTotal, transfer.FilesDone, transfer.ErrorCode, transfer.ErrorMessage, transfer.CreatedAt, transfer.UpdatedAt, transfer.StartedAt, transfer.FinishedAt))
+INSERT INTO fugue_data_transfers (id, tenant_id, workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at, prewarm_cache_json)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+RETURNING id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at, prewarm_cache_json
+`, transfer.ID, nullIfEmpty(transfer.TenantID), transfer.WorkspaceID, transfer.SnapshotID, transfer.Version, transfer.Message, transfer.Direction, transfer.Status, transfer.Source, transfer.Target, manifestJSON, planBlobsJSON, transfer.PartSize, transfer.ExpiresAt, transfer.BytesTotal, transfer.BytesDone, transfer.FilesTotal, transfer.FilesDone, transfer.ErrorCode, transfer.ErrorMessage, transfer.CreatedAt, transfer.UpdatedAt, transfer.StartedAt, transfer.FinishedAt, cacheJSON))
 }
 
 func (s *Store) pgUpdateDataTransfer(transfer model.DataTransfer) (model.DataTransfer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	expectedUpdatedAt := transfer.UpdatedAt
 	transfer.UpdatedAt = time.Now().UTC()
 	transfer.Manifest = model.NormalizeDataManifest(transfer.Manifest)
 	manifestJSON, err := marshalJSON(transfer.Manifest)
+	if err != nil {
+		return model.DataTransfer{}, err
+	}
+	cacheJSON, err := marshalNullableJSON(transfer.Cache)
 	if err != nil {
 		return model.DataTransfer{}, err
 	}
@@ -2528,17 +2590,17 @@ func (s *Store) pgUpdateDataTransfer(transfer model.DataTransfer) (model.DataTra
 	}
 	return scanDataTransfer(s.db.QueryRowContext(ctx, `
 UPDATE fugue_data_transfers
-SET snapshot_id = $2, version = $3, message = $4, status = $5, manifest_json = $6, plan_blobs_json = $7, part_size = $8, expires_at = $9, bytes_total = $10, bytes_done = $11, files_total = $12, files_done = $13, error_code = $14, error_message = $15, updated_at = $16, started_at = $17, finished_at = $18
-WHERE id = $1
-RETURNING id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at
-`, transfer.ID, transfer.SnapshotID, transfer.Version, transfer.Message, transfer.Status, manifestJSON, planBlobsJSON, transfer.PartSize, transfer.ExpiresAt, transfer.BytesTotal, transfer.BytesDone, transfer.FilesTotal, transfer.FilesDone, transfer.ErrorCode, transfer.ErrorMessage, transfer.UpdatedAt, transfer.StartedAt, transfer.FinishedAt))
+SET snapshot_id = $2, version = $3, message = $4, status = $5, manifest_json = $6, plan_blobs_json = $7, part_size = $8, expires_at = $9, bytes_total = $10, bytes_done = $11, files_total = $12, files_done = $13, error_code = $14, error_message = $15, updated_at = $16, started_at = $17, finished_at = $18, prewarm_cache_json=$19
+WHERE id = $1 AND (direction <> 'prewarm' OR updated_at=$20) AND (direction <> 'prewarm' OR status NOT IN ('completed','failed','canceled') OR status=$5)
+RETURNING id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at, prewarm_cache_json
+`, transfer.ID, transfer.SnapshotID, transfer.Version, transfer.Message, transfer.Status, manifestJSON, planBlobsJSON, transfer.PartSize, transfer.ExpiresAt, transfer.BytesTotal, transfer.BytesDone, transfer.FilesTotal, transfer.FilesDone, transfer.ErrorCode, transfer.ErrorMessage, transfer.UpdatedAt, transfer.StartedAt, transfer.FinishedAt, cacheJSON, expectedUpdatedAt))
 }
 
 func (s *Store) pgGetDataTransfer(id string) (model.DataTransfer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return scanDataTransfer(s.db.QueryRowContext(ctx, `
-SELECT id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at
+SELECT id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at, prewarm_cache_json
 FROM fugue_data_transfers WHERE id = $1
 `, id))
 }
@@ -2546,7 +2608,7 @@ FROM fugue_data_transfers WHERE id = $1
 func (s *Store) pgListDataTransfers(tenantID, workspaceID string, platformAdmin bool) ([]model.DataTransfer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	query := `SELECT id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at FROM fugue_data_transfers`
+	query := `SELECT id, COALESCE(tenant_id, ''), workspace_id, snapshot_id, version, message, direction, status, source, target, manifest_json, plan_blobs_json, part_size, expires_at, bytes_total, bytes_done, files_total, files_done, error_code, error_message, created_at, updated_at, started_at, finished_at, prewarm_cache_json FROM fugue_data_transfers`
 	args := []any{}
 	conds := []string{}
 	if !platformAdmin {

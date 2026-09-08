@@ -37,13 +37,12 @@ your tenant already has one.
 
 Use "fugue service postgres create <name>" for the primary creation flow.
 
-Use "fugue app binding" to attach or detach a backing service from an app.
+Use "fugue app service" to attach or detach a backing service from an app.
 `),
 	}
 	cmd.AddCommand(
 		c.newServiceListCommand(),
 		c.newServicePostgresCommand(),
-		hideCompatCommand(c.newServiceCreateCommand(), "fugue service postgres create"),
 		c.newServiceShowCommand(),
 		c.newServiceSuspendCommand(),
 		c.newServiceResumeCommand(),
@@ -69,7 +68,7 @@ func (c *CLI) newServiceListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			services, err := client.ListBackingServices()
+			services, err := client.ListBackingServicesFiltered(tenantID, projectID, "", false)
 			if err != nil {
 				return err
 			}
@@ -101,39 +100,6 @@ func (c *CLI) newServiceListCommand() *cobra.Command {
 			return writeServiceTableWithContext(c.stdout, filtered, projectNames, appNames, runtimeNames, c.showIDs())
 		},
 	}
-}
-
-func (c *CLI) newServiceCreateCommand() *cobra.Command {
-	opts := struct {
-		postgresServiceCreateOptions
-		Type string
-	}{Type: model.BackingServiceTypePostgres}
-	cmd := &cobra.Command{
-		Use:   "create <name>",
-		Short: "Compatibility alias for service postgres create",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if !strings.EqualFold(strings.TrimSpace(opts.Type), model.BackingServiceTypePostgres) {
-				return fmt.Errorf("unsupported service type %q", opts.Type)
-			}
-			return c.createPostgresService(args[0], opts.postgresServiceCreateOptions)
-		},
-	}
-	cmd.Flags().StringVar(&opts.Description, "description", "", "Service description")
-	cmd.Flags().StringVar(&opts.Type, "type", opts.Type, "Compatibility service type flag")
-	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name for managed postgres")
-	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID for managed postgres")
-	cmd.Flags().StringVar(&opts.Database, "database", "", "Database name")
-	cmd.Flags().StringVar(&opts.User, "user", "", "Database user")
-	cmd.Flags().StringVar(&opts.Password, "password", "", "Database password")
-	cmd.Flags().StringVar(&opts.Image, "image", "", "Postgres image override")
-	cmd.Flags().StringVar(&opts.ServiceName, "service-name", "", "Kubernetes service name override")
-	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Persistent storage size")
-	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Persistent storage class")
-	cmd.Flags().IntVar(&opts.Instances, "instances", 0, "Number of postgres instances")
-	cmd.Flags().IntVar(&opts.SynchronousReplicas, "sync-replicas", 0, "Number of synchronous postgres replicas")
-	_ = cmd.Flags().MarkHidden("runtime-id")
-	return cmd
 }
 
 func (c *CLI) newServicePostgresCommand() *cobra.Command {

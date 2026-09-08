@@ -87,28 +87,23 @@ func TestUnknownFlagEmitsSingleJSONFailure(t *testing.T) {
 		t.Fatalf("%v %s", e, out.String())
 	}
 }
-func TestDeprecatedLeafWarningDoesNotContaminatePayload(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/apps" {
-			fmt.Fprint(w, `{"apps":[{"id":"app_test","name":"demo"}]}`)
-		} else {
-			fmt.Fprint(w, `{"env":{"KEY":"raw-value"}}`)
-		}
-	}))
+func TestRemovedLeafDoesNotMakeBusinessRequests(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("removed command made an HTTP request") }))
 	defer srv.Close()
 	var out, stderr bytes.Buffer
-	err := runWithStreams([]string{"--base-url", srv.URL, "--token", "test", "env", "ls", "demo", "--json"}, &out, &stderr)
-	if err != nil {
+	err := runWithStreams([]string{"--base-url", srv.URL, "--token", "synthetic-private-token", "env", "ls", "demo", "--json"}, &out, &stderr)
+	if ExitCodeForError(err) != ExitCodeUserInput {
 		t.Fatal(err)
 	}
-	var result map[string]any
-	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
-		t.Fatal(err)
+	var payload map[string]any
+	if json.Unmarshal(out.Bytes(), &payload) != nil {
+		t.Fatal(out.String())
 	}
-	if !strings.Contains(stderr.String(), "fugue app env ls") || !strings.Contains(out.String(), "raw-value") {
-		t.Fatalf("out=%s stderr=%s", out.String(), stderr.String())
+	if !strings.Contains(out.String(), "fugue app env ls") || strings.Contains(out.String(), "synthetic-private-token") {
+		t.Fatal(out.String())
 	}
 }
+
 func TestOverviewRecordsMissingEvidenceAndPolicyRedactsSpec(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		app := `{"id":"app_test","name":"demo","spec":{"env":{"TOKEN":"synthetic-secret"}}}`
@@ -123,7 +118,7 @@ func TestOverviewRecordsMissingEvidenceAndPolicyRedactsSpec(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	for _, args := range [][]string{{"app", "overview", "demo", "--require-complete"}, {"app", "release", "policy", "show", "demo"}} {
+	for _, args := range [][]string{{"app", "overview", "demo", "--require-complete"}, {"app", "image", "retention", "show", "demo"}} {
 		var out, stderr bytes.Buffer
 		command := append([]string{"--base-url", srv.URL, "--token", "test", "--json"}, args...)
 		err := runWithStreams(command, &out, &stderr)

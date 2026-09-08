@@ -171,7 +171,7 @@ func (c *CLI) resolveNamedProject(client *Client, ref string) (model.Project, er
 		return model.Project{}, err
 	}
 	matches := matchVisibleProjects(projects, ref)
-	if len(matches) == 0 {
+	if len(matches) == 0 && !client.strictReferences {
 		matches = matchProjectsFuzzy(projects, ref)
 	}
 	return resolveSingleMatch(ref, matches, "project", describeProjectMatch)
@@ -186,7 +186,7 @@ func (c *CLI) resolveNamedService(client *Client, ref string) (model.BackingServ
 	if err != nil {
 		return model.BackingService{}, err
 	}
-	services, err := client.ListBackingServices()
+	services, err := client.ListBackingServicesFiltered(tenantID, projectID, ref, true)
 	if err != nil {
 		return model.BackingService{}, err
 	}

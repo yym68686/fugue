@@ -4878,6 +4878,25 @@ paths:
       x-fugue-handler: handleListBackingServices
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          schema: {type: string}
+          description: Exact tenant filter; administrator-only across tenants
+        - in: query
+          name: project_id
+          schema: {type: string}
+          description: Exact project filter within authorized services
+        - in: query
+          name: name
+          schema: {type: string}
+          description: Exact service ID, name or normalized name
+        - in: query
+          name: include_live_status
+          schema: {type: boolean, default: true}
+        - in: query
+          name: include_resource_usage
+          schema: {type: boolean, default: true}
       responses:
         '200':
           description: Successful response
@@ -7906,6 +7925,26 @@ paths:
                 $ref: "#/components/schemas/OperationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/runtime-state:
+    get:
+      operationId: getAppRuntimeState
+      summary: Compare committed app intent with bounded live runtime evidence
+      description: Reads app-scoped ready pods, process environment and config file hashes. Missing evidence remains unknown; values and file contents are never returned.
+      tags: [Apps]
+      x-fugue-handler: handleGetAppRuntimeState
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Runtime comparison including partial or unknown evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRuntimeStateResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/restart:
     post:
       operationId: restartApp
@@ -7916,7 +7955,17 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
+        - in: header
+          name: If-Match
+          required: false
+          description: Quoted SHA-256 of the committed app spec. When supplied, restart atomically rejects changed intent or an active operation.
+          schema:
+            type: string
+            pattern: '^"[0-9a-f]{64}"$'
+
       responses:
+        '412':
+          $ref: "#/components/responses/ErrorResponse"
         '202':
           description: Successful response
           content:
@@ -8245,6 +8294,10 @@ paths:
         - BearerAuth: []
       parameters:
         - in: query
+          name: project_id
+          description: Exact project scope; workload credentials cannot widen their assigned project.
+          schema: {type: string}
+        - in: query
           name: tenant_id
           required: false
           schema:
@@ -8381,6 +8434,24 @@ paths:
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/images/{id}/pins:
+    get:
+      operationId: listImagePins
+      summary: List Image Pins
+      tags: [Apps]
+      x-fugue-handler: handleListImagePins
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Pins visible for the authorized image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImagePinListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
     post:
       operationId: createImagePin
       summary: Create Image Pin
@@ -8434,6 +8505,10 @@ paths:
       security:
         - BearerAuth: []
       parameters:
+        - in: query
+          name: project_id
+          description: Exact project scope; workload credentials cannot widen their assigned project.
+          schema: {type: string}
         - in: query
           name: image_id
           required: false
@@ -9276,6 +9351,158 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NodeUpdateTaskResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/source-upload-sessions:
+    post:
+      operationId: createSourceUploadSession
+      summary: Create or resume an immutable source upload request
+      tags: [Apps]
+      x-fugue-handler: handleCreateSourceUploadSession
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SourceUploadSessionCreateRequest"
+      responses:
+        '200':
+          description: Durable upload session and request receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceUploadSessionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/source-upload-sessions/{id}:
+    get:
+      operationId: getSourceUploadSession
+      summary: Read uploaded chunks and exact request effects
+      tags: [Apps]
+      x-fugue-handler: handleGetSourceUploadSession
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Durable upload session and request receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceUploadSessionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/source-upload-sessions/{id}/chunks/{index}:
+    put:
+      operationId: putSourceUploadChunk
+      summary: Store an idempotent digest checked chunk
+      tags: [Apps]
+      x-fugue-handler: handlePutSourceUploadChunk
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+        - in: path
+          name: index
+          required: true
+          schema: {type: integer, minimum: 0, maximum: 31}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SourceUploadChunkRequest"
+      responses:
+        '200':
+          description: Durable upload session and request receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceUploadSessionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/source-upload-sessions/{id}/complete:
+    post:
+      operationId: completeSourceUploadSession
+      summary: Verify and assemble the immutable source archive
+      tags: [Apps]
+      x-fugue-handler: handleCompleteSourceUploadSession
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Durable upload session and request receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceUploadSessionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/source-upload-sessions/{id}/submit:
+    post:
+      operationId: submitSourceUploadSession
+      summary: Submit a frozen import intent once; replay reads its durable receipt
+      tags: [Apps]
+      x-fugue-handler: handleSubmitSourceUploadSession
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportUploadRequest"
+      responses:
+        '200':
+          description: Durable upload session and request receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceUploadSubmitResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/source-upload-requests/{request_id}:
+    get:
+      operationId: getSourceUploadRequest
+      summary: Recover the exact operations created by a source request
+      tags: [Apps]
+      x-fugue-handler: handleGetSourceUploadRequest
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: request_id
+          required: true
+          schema: {type: string}
+        - in: query
+          name: tenant_id
+          schema: {type: string}
+      responses:
+        '200':
+          description: Durable upload session and request receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceUploadSessionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/source-uploads/{id}/archive:
@@ -10499,6 +10726,8 @@ paths:
             type: integer
             minimum: 1
       responses:
+        '409':
+          $ref: "#/components/responses/ErrorResponse"
         '200':
           description: Successful response
           content:
@@ -10584,6 +10813,8 @@ paths:
         - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
         - $ref: "#/components/parameters/DataSnapshotIdPathParam"
       responses:
+        '409':
+          $ref: "#/components/responses/ErrorResponse"
         '200':
           description: Successful response
           content:
@@ -10645,10 +10876,57 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}/cache:
+    delete:
+      operationId: deleteDataPrewarmCache
+      summary: Request cleanup of a runtime prewarm cache
+      tags: [Data Workspaces]
+      x-fugue-handler: handleDeleteDataPrewarmCache
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: transfer_id
+          required: true
+          schema: {type: string}
+      responses:
+        '202':
+          description: Cache cleanup is requested; transfer history and source snapshot remain available
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  transfer: {$ref: '#/components/schemas/DataTransferSummary'}
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+  /v1/data/workspaces/{workspace_id}/deletion-plan:
+    get:
+      operationId: getDataDeletionPlan
+      summary: Inspect references and storage reclamation before logical deletion
+      tags: [Data Workspaces]
+      x-fugue-handler: handleGetDataDeletionPlan
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/DataWorkspaceIdPathParam'
+        - in: query
+          name: snapshot_id
+          schema: {type: string}
+      responses:
+        '200':
+          description: Read-only advisory plan; DELETE repeats atomic guards
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataDeletionPlan'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
   /v1/data/workspaces/{workspace_id}/prewarm:
     post:
       operationId: createDataPrewarm
-      summary: Create Data Prewarm
+      summary: Cache a snapshot on a managed runtime
       tags: [Data Workspaces]
       x-fugue-handler: handleCreateDataPrewarm
       security:
@@ -10938,6 +11216,7 @@ paths:
   /v1/data/transfers/{transfer_id}/checkpoint:
     post:
       operationId: checkpointDataTransfer
+      description: Accepts progress only for client driven transfers; runtime prewarm returns 409.
       summary: Checkpoint Data Transfer
       tags: [Data Workspaces]
       x-fugue-handler: handleCheckpointDataTransfer
@@ -11038,6 +11317,7 @@ paths:
   /v1/data/transfers/{transfer_id}/complete:
     post:
       operationId: completeDataTransfer
+      description: Completes client driven transfers. Runtime prewarm completion is accepted only from controller observations; user completion returns 409.
       summary: Complete Data Transfer
       tags: [Data Workspaces]
       x-fugue-handler: handleCompleteDataTransfer
@@ -11063,6 +11343,7 @@ paths:
   /v1/data/transfers/{transfer_id}/cancel:
     post:
       operationId: cancelDataTransfer
+      description: Cancels a nonterminal transfer. Runtime prewarm cancellation schedules Job and PVC cleanup; it does not cancel app operations.
       summary: Cancel Data Transfer
       tags: [Data Workspaces]
       x-fugue-handler: handleCancelDataTransfer
@@ -12680,6 +12961,8 @@ components:
       additionalProperties: false
       required: [id, workspace_id, direction, status, bytes_total, bytes_done, files_total, files_done, created_at, updated_at]
       properties:
+        cache:
+          $ref: '#/components/schemas/DataPrewarmCache'
         id:
           type: string
         tenant_id:
@@ -12961,9 +13244,47 @@ components:
           type: array
           items:
             type: string
+    DataDeletionPlan:
+      type: object
+      additionalProperties: false
+      required: [schema_version, workspace_id, allowed, mode, blockers, objects_reclaimed, reclamation]
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        workspace_id: {type: string}
+        snapshot_id: {type: string}
+        allowed: {type: boolean}
+        mode: {type: string, enum: [metadata_delete, soft_delete]}
+        objects_reclaimed: {type: boolean, enum: [false]}
+        reclamation: {type: string}
+        blockers:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [kind, id, state]
+            properties:
+              kind: {type: string}
+              id: {type: string}
+              state: {type: string}
+    DataPrewarmCache:
+      type: object
+      additionalProperties: false
+      required: [namespace, claim, job, node, manifest_digest, state, observed_at]
+      properties:
+        worker_cleaned: {type: boolean}
+        namespace: {type: string}
+        claim: {type: string}
+        job: {type: string}
+        job_uid: {type: string}
+        node: {type: string}
+        manifest_digest: {type: string}
+        state: {type: string, enum: [planned, downloading, ready, cleanup_pending, removed]}
+        observed_at: {type: string, format: date-time}
     DataPrewarmRequest:
       type: object
       additionalProperties: false
+      required: [runtime_id]
+      description: Creates a digest-verified cache on an authorized managed runtime using an S3-compatible backend. Cache TTL is 24 hours. Completion does not mount data into apps.
       properties:
         version:
           type: string
@@ -21671,6 +21992,15 @@ components:
         expires_at:
           type: string
           format: date-time
+    ImagePinListResponse:
+      type: object
+      additionalProperties: false
+      required: [pins]
+      properties:
+        pins:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImagePin"
     ImagePinResponse:
       type: object
       additionalProperties: false
@@ -24202,6 +24532,67 @@ components:
           type: boolean
         dry_run:
           type: boolean
+    SourceUploadSessionCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, filename, size_bytes, sha256]
+      properties:
+        request_id: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_.-]+$'}
+        tenant_id: {type: string}
+        filename: {type: string, maxLength: 255}
+        size_bytes: {type: integer, format: int64, minimum: 1, maximum: 134217728}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+    SourceUploadChunkRequest:
+      type: object
+      additionalProperties: false
+      required: [sha256, data]
+      properties:
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        data: {type: string, format: byte, maxLength: 5592408}
+    SourceUploadSession:
+      type: object
+      additionalProperties: false
+      required: [schema_version, id, request_id, tenant_id, filename, size_bytes, sha256, chunk_size, state, created_at, updated_at, expires_at]
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        id: {type: string}
+        request_id: {type: string}
+        tenant_id: {type: string}
+        project_id: {type: string}
+        actor_type: {type: string}
+        actor_id: {type: string}
+        filename: {type: string}
+        size_bytes: {type: integer, format: int64}
+        sha256: {type: string}
+        chunk_size: {type: integer}
+        chunks:
+          type: object
+          additionalProperties: {type: string}
+          description: Zero based chunk index to verified SHA256; contains no archive bytes.
+        state: {type: string, enum: [uploading, ready, submitting, submitted, rejected, unknown, expired]}
+        upload_id: {type: string}
+        request_hash: {type: string}
+        operation_ids: {type: array, items: {type: string}}
+        app_ids: {type: array, items: {type: string}}
+        response_status: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+    SourceUploadSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [session]
+      properties:
+        session: {$ref: '#/components/schemas/SourceUploadSession'}
+    SourceUploadSubmitResponse:
+      type: object
+      additionalProperties: false
+      required: [session]
+      properties:
+        session: {$ref: '#/components/schemas/SourceUploadSession'}
+        result: {$ref: '#/components/schemas/ImportUploadResponse'}
+        replayed: {type: boolean}
+        error: {$ref: '#/components/schemas/ErrorResponse'}
     ImportUploadRequest:
       type: object
       additionalProperties: false
@@ -25958,11 +26349,48 @@ components:
           $ref: "#/components/schemas/Operation"
         build:
           $ref: "#/components/schemas/RebuildPlan"
+    AppRuntimeCheck:
+      type: object
+      additionalProperties: false
+      required: [kind, state, source]
+      properties:
+        kind: {type: string}
+        key: {type: string}
+        pod: {type: string}
+        state: {type: string, enum: [in_sync, drifted, unknown, not_configured]}
+        source: {type: string}
+        desired_sha256: {type: string}
+        observed_sha256: {type: string}
+        reason: {type: string}
+    AppRuntimeStateResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, app_id, namespace, desired_spec_hash, desired_source, observed_at, state, ready_pods, endpoint_pods, pod_uids, revisions, pending_operations, checks, missing_evidence]
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        app_id: {type: string}
+        namespace: {type: string}
+        desired_spec_hash: {type: string}
+        desired_source: {type: string}
+        observed_at: {type: string, format: date-time}
+        state: {type: string, enum: [in_sync, drifted, inconclusive, inactive]}
+        ready_pods: {type: array, items: {type: string}}
+        endpoint_pods: {type: array, items: {type: string}}
+        pod_uids: {type: object, additionalProperties: {type: string}}
+        revisions: {type: object, additionalProperties: {type: string}}
+        pending_operations: {type: array, items: {type: string}}
+        checks:
+          type: array
+          items: {$ref: "#/components/schemas/AppRuntimeCheck"}
+        missing_evidence: {type: array, items: {type: string}}
     AppRestartResponse:
       type: object
       additionalProperties: false
       required: [operation, restart_token]
       properties:
+        desired_spec_hash:
+          type: string
+          description: SHA-256 of the exact desired spec accepted for this restart
         operation:
           $ref: "#/components/schemas/Operation"
         restart_token:

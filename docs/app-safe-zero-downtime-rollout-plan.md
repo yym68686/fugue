@@ -572,10 +572,10 @@ POST /v1/apps/{id}/releases/{release_id}/gate/evaluate
 新增命令：
 
 ```sh
-fugue app continuity enable <app> --zero-downtime safe
-fugue app continuity disable <app> --zero-downtime
-fugue app continuity show <app>
-fugue app continuity audit <app>
+fugue app rollout policy set <app> --zero-downtime safe
+fugue app rollout policy clear <app>
+fugue app rollout policy show <app>
+fugue app failover status <app>
 ```
 
 发布命令增强：
@@ -822,7 +822,7 @@ Debug bundle 必须包含：
 - 增加 metrics。
 - 增加 audit events。
 - 增强 debug bundle。
-- 增强 `fugue app continuity audit`。
+- 增强 `fugue app failover status`。
 - 增加 runbook。
 
 验收：
@@ -918,10 +918,10 @@ Debug bundle 必须包含：
 
 ### CLI
 
-- [x] 实现 `fugue app continuity enable <app> --zero-downtime safe`。
-- [x] 实现 `fugue app continuity disable <app> --zero-downtime`。
-- [x] 实现 `fugue app continuity show <app>` safe rollout 字段。
-- [x] 增强 `fugue app continuity audit <app>`。
+- [x] 实现 `fugue app rollout policy set <app> --zero-downtime safe`。
+- [x] 实现 `fugue app rollout policy clear <app>`。
+- [x] 实现 `fugue app rollout policy show <app>` safe rollout 字段。
+- [x] 增强 `fugue app failover status <app>`。
 - [x] `fugue app deploy --wait` 展示 safe rollout phases。
 - [x] JSON 输出保持稳定字段并增加可选字段。
 - [x] CLI failure 输出包含 gate reason、release id、evidence id。

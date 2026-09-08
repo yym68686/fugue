@@ -21,6 +21,8 @@ func (c *CLI) newSourceUploadCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newSourceUploadShowCommand(),
+		c.newSourceUploadStatusCommand(),
+		c.newSourceUploadResumeCommand(),
 		c.newSourceUploadDownloadCommand(),
 	)
 	return cmd

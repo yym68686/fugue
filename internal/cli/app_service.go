@@ -23,14 +23,6 @@ func (c *CLI) newAppServiceCommand() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) newAppBindingCompatCommand() *cobra.Command {
-	cmd := c.newAppServiceCommand()
-	cmd.Use = "binding"
-	cmd.Aliases = []string{"bindings"}
-	cmd.Short = "Compatibility alias for app service connections"
-	return cmd
-}
-
 func (c *CLI) newAppServiceListCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "ls <app>",

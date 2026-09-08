@@ -17,7 +17,7 @@ git push -> CI 构建新镜像 -> Fugue 自动/手动同步最新镜像 -> 必�
 实际操作过程中出现了多个让人困惑的现象：
 
 1. `fugue app env set ... DB_SCHEMA_MIGRATION_MODE=migrate --wait` 触发的是旧稳定镜像的重新部署，而不是自动把 tracking 已发现的新 digest 一并部署。
-2. `fugue app release tracking sync ... --wait` 同时涉及 image import operation 和 queued deploy operation，CLI 输出中 import/deploy 的状态容易混在一起理解。
+2. `fugue app image tracking sync ... --wait` 同时涉及 image import operation 和 queued deploy operation，CLI 输出中 import/deploy 的状态容易混在一起理解。
 3. 新镜像第一次 deploy 失败后，operation 里没有保留足够的 Kubernetes pod 证据、previous container logs、事件和 rollout 快照，导致无法 100% 复盘应用启动失败的直接原因。
 4. 后续一次 migration 模式 deploy 失败时，previous logs 明确记录到 `startup failed: apply schema: ERROR: deadlock detected (SQLSTATE 40P01)`，说明在有日志证据时是可以精确判断原因的。
 5. `managed_app_rollout` 当前会把 transient pod failure 当作 deploy failure 返回，但返回前没有把完整证据持久化到 operation 或可查询诊断表里。
@@ -726,10 +726,10 @@ message: startup failed: apply schema: ERROR: deadlock detected (SQLSTATE 40P01)
 新增：
 
 ```sh
-fugue app release attempts <app>
-fugue app release status <app>
-fugue app release explain <app> [--attempt <id>]
-fugue app release debug-bundle <app> [--attempt <id>] --output ./bundle.zip
+fugue app release attempt ls <app>
+fugue app release attempt status <app>
+fugue app release attempt explain <app> [--attempt <id>]
+fugue app release attempt bundle <app> [--attempt <id>] --output ./bundle.zip
 ```
 
 `tracking sync --wait` 输出应改为 phase-aware：
@@ -1044,7 +1044,7 @@ build image -> run migration job -> deploy web -> verify -> mark release complet
 3. 如果 previous logs 缺失，diagnosis 不能猜根因，必须输出 `insufficient_evidence` 和 missing evidence。
 4. `fugue operation timeline <op>` 能展示 deploy apply、rollout wait、pod failure、evidence capture、operation failure 的顺序。
 5. `fugue operation evidence <op>` 能列出 pod/container/events/logs/snapshots。
-6. `fugue app release explain <app>` 能把 tracking/import/deploy 串成一次 release attempt。
+6. `fugue app release attempt explain <app>` 能把 tracking/import/deploy 串成一次 release attempt。
 7. debug bundle 能离线复盘，不需要人工再去多处查询。
 8. evidence/redaction 不泄漏 secret。
 9. 新功能不改变现有 deploy 行为。
@@ -1141,10 +1141,10 @@ build image -> run migration job -> deploy web -> verify -> mark release complet
 - [x] 在 `openapi/openapi.yaml` 增加 release attempt timeline/evidence endpoints。
 - [x] 运行 `make generate-openapi`。
 - [x] 实现 release attempt API handler。
-- [x] 实现 `fugue app release attempts <app>`。
-- [x] 实现 `fugue app release status <app>`。
-- [x] 实现 `fugue app release explain <app>`。
-- [x] 改进 `fugue app release tracking sync --wait` 的 phase-aware 输出。
+- [x] 实现 `fugue app release attempt ls <app>`。
+- [x] 实现 `fugue app release attempt status <app>`。
+- [x] 实现 `fugue app release attempt explain <app>`。
+- [x] 改进 `fugue app image tracking sync --wait` 的 phase-aware 输出。
 - [x] 保持现有 JSON 字段向后兼容。
 
 ### Phase 4：Diagnosis confidence
@@ -1181,7 +1181,7 @@ build image -> run migration job -> deploy web -> verify -> mark release complet
 - [x] bundle 默认 redacted。
 - [x] bundle 生成 redaction report。
 - [x] 实现 `fugue operation debug-bundle`。
-- [x] 实现 `fugue app release debug-bundle`。
+- [x] 实现 `fugue app release attempt bundle`。
 - [x] 为 bundle 内容和 redaction 编写测试。
 
 ### Phase 6：行为改造前置研究
@@ -1222,7 +1222,7 @@ build image -> run migration job -> deploy web -> verify -> mark release complet
 当未来再出现类似“不够丝滑”的部署时，操作者应该能直接运行：
 
 ```sh
-fugue app release explain <app>
+fugue app release attempt explain <app>
 fugue operation diagnose <operation-id>
 fugue operation debug-bundle <operation-id> --output ./fugue-debug.zip
 ```

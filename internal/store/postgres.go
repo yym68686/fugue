@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"fugue/internal/schemamigrate"
 	"strings"
 	"time"
 
@@ -1358,6 +1359,7 @@ var postgresSchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_source_uploads_tenant_created_at ON fugue_source_uploads (tenant_id, created_at DESC)`,
+	schemamigrate.SourceUploadSessionsSQL,
 	`CREATE TABLE IF NOT EXISTS fugue_data_backends (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -1637,6 +1639,8 @@ var postgresSchemaStatements = []string{
 		started_at TIMESTAMPTZ NULL,
 		finished_at TIMESTAMPTZ NULL
 	)`,
+	`ALTER TABLE fugue_data_transfers ADD COLUMN IF NOT EXISTS prewarm_cache_json JSONB NULL`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_data_prewarm_active ON fugue_data_transfers(workspace_id,snapshot_id,target) WHERE direction='prewarm' AND prewarm_cache_json IS NOT NULL AND status IN ('planned','running')`,
 	`ALTER TABLE fugue_data_transfers ADD COLUMN IF NOT EXISTS version TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_data_transfers ADD COLUMN IF NOT EXISTS message TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_data_transfers ADD COLUMN IF NOT EXISTS manifest_json JSONB NOT NULL DEFAULT '{}'::jsonb`,

@@ -20,7 +20,7 @@ stable/candidate releases, canary gates, and rollback behavior. Inspect both the
 configured and effective state with:
 
 ```bash
-fugue app continuity show <app>
+fugue app rollout policy show <app>
 # zero_downtime_enabled=true
 # zero_downtime_configured=false
 # zero_downtime_effective=true
@@ -46,11 +46,11 @@ previous stable release.
 ## First checks
 
 ```bash
-fugue app continuity show <app>
-fugue app continuity audit <app>
-fugue app release ls <app>
-fugue app release traffic <app>
-fugue app release attempts <app>
+fugue app rollout policy show <app>
+fugue app failover status <app>
+fugue app image ls <app>
+fugue app traffic set <app>
+fugue app release attempt ls <app>
 ```
 
 Expected traffic after a healthy promote:
@@ -74,7 +74,7 @@ Expected traffic after an abort:
 Fetch the scoped debug bundle first:
 
 ```bash
-fugue app release debug-bundle <app> --attempt <release-attempt-id>
+fugue app release attempt bundle <app> --attempt <release-attempt-id>
 ```
 
 Use the API-level global summary only when comparing platform-wide evidence:
@@ -117,7 +117,7 @@ do not patch edge route bundles directly unless this is an emergency recovery.
 
 ```bash
 fugue app release abort <app> <candidate-release-id> --mark-failed --reason "manual rollback"
-fugue app release traffic <app> --stable 100 --candidate 0 --mode single
+fugue app traffic set <app> --stable 100 --candidate 0 --mode single
 ```
 
 After any emergency manual action, backport the intended behavior into the Fugue

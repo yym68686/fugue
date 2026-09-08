@@ -11,14 +11,45 @@ import (
 
 func (s *Server) handleListBackingServices(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	services, err := s.store.ListBackingServices(principal.TenantID, principal.IsPlatformAdmin())
+	live, err := readBoolQuery(r, "include_live_status", true)
+	if err != nil {
+		httpx.WriteError(w, 400, err.Error())
+		return
+	}
+	usage, err := readBoolQuery(r, "include_resource_usage", true)
+	if err != nil {
+		httpx.WriteError(w, 400, err.Error())
+		return
+	}
+	tenant, ok := s.resolveTenantID(principal, r.URL.Query().Get("tenant_id"))
+	if !ok {
+		httpx.WriteError(w, 403, "tenant is outside the current scope")
+		return
+	}
+	services, err := s.store.ListBackingServices(tenant, principal.IsPlatformAdmin() && tenant == "")
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	services = filterBackingServicesForPrincipal(principal, services)
-	services = s.overlayCurrentResourceUsageOnServices(r.Context(), services)
-	services = s.overlayBackingServiceRuntimeStatuses(r.Context(), services)
+	filtered := []model.BackingService{}
+	project, name := strings.TrimSpace(r.URL.Query().Get("project_id")), strings.TrimSpace(r.URL.Query().Get("name"))
+	for _, service := range services {
+		if project != "" && service.ProjectID != project {
+			continue
+		}
+		if name != "" && !strings.EqualFold(service.ID, name) && !strings.EqualFold(service.Name, name) && !strings.EqualFold(model.Slugify(service.Name), model.Slugify(name)) {
+			continue
+		}
+		filtered = append(filtered, service)
+	}
+	services = filtered
+	if usage {
+		services = s.overlayCurrentResourceUsageOnServices(r.Context(), services)
+	}
+	if live {
+		services = s.overlayBackingServiceRuntimeStatuses(r.Context(), services)
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"backing_services": cloneBackingServices(services),
 	})

@@ -37,7 +37,7 @@ func TestRunAppReleaseTrackingSyncWaitsForAlreadyCurrentOperation(t *testing.T) 
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "release", "tracking", "sync", "demo",
+		"app", "image", "tracking", "sync", "demo",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run tracking sync: %v stderr=%s", err, stderr.String())
@@ -93,7 +93,7 @@ func TestRunAppReleaseTrackingSyncWaitsForQueuedDeployAfterImport(t *testing.T) 
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "release", "tracking", "sync", "demo",
+		"app", "image", "tracking", "sync", "demo",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run tracking sync: %v stderr=%s", err, stderr.String())
@@ -138,7 +138,7 @@ func TestRunAppReleaseTrackingSyncRetriesAfterDeferredActiveOperation(t *testing
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "release", "tracking", "sync", "demo",
+		"app", "image", "tracking", "sync", "demo",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run tracking sync: %v stderr=%s", err, stderr.String())
@@ -177,7 +177,7 @@ func TestRunAppReleaseTrafficSupportsStableReleaseFlag(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "release", "traffic", "demo",
+		"app", "traffic", "set", "demo",
 		"--stable-release", "apprel_stable",
 		"--stable", "100",
 		"--candidate", "0",

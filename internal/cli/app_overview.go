@@ -35,7 +35,8 @@ func (c *CLI) newAppOverviewCommand() *cobra.Command {
 	opts := struct {
 		ShowSecrets     bool
 		RequireComplete bool
-	}{}
+		Timeout         time.Duration
+	}{Timeout: 10 * time.Second}
 	cmd := &cobra.Command{
 		Use:   "overview <app>",
 		Short: "Show an app overview with related state",
@@ -45,7 +46,10 @@ func (c *CLI) newAppOverviewCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			snapshot, err := c.loadAppOverview(client, args[0])
+			if opts.Timeout <= 0 {
+				return fmt.Errorf("--timeout must be positive")
+			}
+			snapshot, err := c.loadAppOverviewWithin(client, args[0], opts.Timeout)
 			if err != nil {
 				return err
 			}
@@ -58,6 +62,7 @@ func (c *CLI) newAppOverviewCommand() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "Total budget for overview reads; unavailable sources remain explicit")
 	cmd.Flags().BoolVar(&opts.RequireComplete, "require-complete", false, "Fail when any overview evidence source is unavailable")
 	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
 	return cmd
@@ -115,7 +120,13 @@ func (c *CLI) loadAppOverviewHash(client *Client, ref string) (appOverviewSnapsh
 	if err != nil {
 		return appOverviewSnapshot{}, [32]byte{}, err
 	}
-	sum, err := json.Marshal(snapshot)
+	hashView := snapshot
+	hashView.Sources = map[string]evidenceSource{}
+	for name, source := range snapshot.Sources {
+		source.ObservedAt = time.Time{}
+		hashView.Sources[name] = source
+	}
+	sum, err := json.Marshal(hashView)
 	if err != nil {
 		return appOverviewSnapshot{}, [32]byte{}, err
 	}
@@ -123,79 +134,7 @@ func (c *CLI) loadAppOverviewHash(client *Client, ref string) (appOverviewSnapsh
 }
 
 func (c *CLI) loadAppOverview(client *Client, ref string) (appOverviewSnapshot, error) {
-	app, err := c.resolveNamedApp(client, ref)
-	if err != nil {
-		return appOverviewSnapshot{}, err
-	}
-	app, err = client.GetApp(app.ID)
-	if err != nil {
-		return appOverviewSnapshot{}, err
-	}
-	snapshot := appOverviewSnapshot{App: app}
-	if domains, err := client.ListAppDomains(app.ID); err != nil {
-		snapshot.recordSource("domains", err, false)
-		c.progressf("warning=domain inventory unavailable: %v", err)
-	} else {
-		snapshot.recordSource("domains", nil, len(domains) == 0)
-		snapshot.Domains = domains
-	}
-	if bindings, err := client.ListAppBindings(app.ID); err != nil {
-		snapshot.recordSource("bindings", err, false)
-		c.progressf("warning=service binding inventory unavailable: %v", err)
-	} else {
-		snapshot.recordSource("bindings", nil, len(bindings.Bindings) == 0)
-		snapshot.Bindings = bindings.Bindings
-		snapshot.BackingServices = bindings.BackingServices
-	}
-	if operations, err := client.ListOperations(app.ID); err != nil {
-		snapshot.recordSource("operations", err, false)
-		c.progressf("warning=operation inventory unavailable: %v", err)
-	} else {
-		snapshot.recordSource("operations", nil, len(operations) == 0)
-		snapshot.Operations = operations
-	}
-	if tracking, err := client.GetAppImageTracking(app.ID); err != nil {
-		snapshot.recordSource("image_tracking", err, false)
-		c.progressf("warning=image tracking unavailable: %v", err)
-	} else {
-		snapshot.recordSource("image_tracking", nil, tracking.Tracking == nil)
-		snapshot.ImageTracking = tracking.Tracking
-	}
-	if images, err := client.GetAppImages(app.ID); err != nil {
-		snapshot.recordSource("images", err, false)
-		c.progressf("warning=image inventory unavailable: %v", err)
-	} else {
-		snapshot.recordSource("images", nil, len(images.Versions) == 0)
-		snapshot.Images = &images
-	}
-	if podInventory, err := client.GetAppRuntimePods(app.ID, "app"); err != nil {
-		snapshot.recordSource("pods", err, false)
-		c.progressf("warning=runtime pod inventory unavailable: %v", err)
-	} else {
-		snapshot.recordSource("pods", nil, len(podInventory.Groups) == 0)
-		snapshot.PodInventory = &podInventory
-	}
-	if diagnosis, err := c.buildAppOverviewDiagnosis(client, snapshot); err != nil {
-		snapshot.recordSource("diagnosis", err, false)
-		c.progressf("warning=app diagnosis unavailable: %v", err)
-	} else {
-		snapshot.recordSource("diagnosis", nil, diagnosis == nil)
-		snapshot.Diagnosis = diagnosis
-	}
-	if runtimeDiagnosis, err := client.TryGetAppDiagnosis(app.ID, "app"); err != nil {
-		snapshot.recordSource("runtime_diagnosis", err, false)
-		c.progressf("warning=app runtime diagnosis unavailable: %v", err)
-	} else {
-		if runtimeDiagnosis == nil {
-			snapshot.recordSource("runtime_diagnosis", errEvidenceUnavailable, false)
-		} else {
-			snapshot.recordSource("runtime_diagnosis", nil, false)
-			if !strings.EqualFold(strings.TrimSpace(runtimeDiagnosis.Category), "available") {
-				snapshot.Diagnosis = selectPrimaryOverviewDiagnosis(snapshot.Diagnosis, appDiagnosisToOverviewDiagnosis(runtimeDiagnosis))
-			}
-		}
-	}
-	return snapshot, nil
+	return c.loadAppOverviewWithin(client, ref, 10*time.Second)
 }
 
 func selectPrimaryOverviewDiagnosis(primary, runtime *appOverviewDiagnosis) *appOverviewDiagnosis {
@@ -356,7 +295,7 @@ func writeAppOverviewImageTracking(w io.Writer, app model.App, tracking model.Ap
 	}
 	if tracking.Enabled {
 		appRef := firstNonEmptyTrimmed(app.Name, tracking.AppID)
-		pairs = append(pairs, kvPair{Key: "sync_now", Value: "fugue app release tracking sync " + shellSingleQuote(appRef)})
+		pairs = append(pairs, kvPair{Key: "sync_now", Value: "fugue app image tracking sync " + shellSingleQuote(appRef)})
 	}
 	return writeKeyValues(w, pairs...)
 }

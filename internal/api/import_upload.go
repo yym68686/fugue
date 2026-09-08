@@ -165,6 +165,7 @@ func validateImportUploadMultipartFields(form *multipart.Form) error {
 }
 
 type importUploadRequest struct {
+	sourceSessionID          string
 	AppID                    string                                            `json:"app_id"`
 	TenantID                 string                                            `json:"tenant_id"`
 	ProjectID                string                                            `json:"project_id"`
@@ -196,7 +197,6 @@ type importUploadRequest struct {
 }
 
 func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
-	principal := mustPrincipal(r)
 	finish, ok := s.beginSourceUploadRequest(w, r)
 	if !ok {
 		return
@@ -217,6 +217,15 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeImportUploadError(w, err)
 		return
+	}
+	s.importUploadDecoded(w, r, req, archiveHeader, archiveBytes, nil)
+}
+
+func (s *Server) importUploadDecoded(w http.ResponseWriter, r *http.Request, req importUploadRequest, archiveHeader *multipart.FileHeader, archiveBytes []byte, existingUpload *model.SourceUpload) {
+	principal := mustPrincipal(r)
+	var err error
+	createOperation := func(op model.Operation) (model.Operation, error) {
+		return s.store.CreateSourceSessionOperation(op, req.sourceSessionID)
 	}
 	if req.DeleteMissing && !req.UpdateExisting {
 		httpx.WriteError(w, http.StatusBadRequest, "delete_missing requires update_existing")
@@ -269,7 +278,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		upload, err := s.store.CreateSourceUpload(app.TenantID, sourceFileName, archiveHeader.Header.Get("Content-Type"), archiveBytes)
+		upload, err := s.createImportSourceUpload(app.TenantID, sourceFileName, archiveHeader.Header.Get("Content-Type"), archiveBytes, existingUpload)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -325,7 +334,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		applyStartupCommand(&spec, req.StartupCommand)
 		applyImportedGeneratedEnv(&spec, req.GeneratedEnv)
 
-		op, err := s.store.CreateOperation(model.Operation{
+		op, err := createOperation(model.Operation{
 			TenantID:        app.TenantID,
 			Type:            model.OperationTypeImport,
 			RequestedByType: principal.ActorType,
@@ -408,7 +417,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			SizeBytes:   int64(len(archiveBytes)),
 		}
 	default:
-		upload, err = s.store.CreateSourceUpload(tenantID, sourceFileName, archiveHeader.Header.Get("Content-Type"), archiveBytes)
+		upload, err = s.createImportSourceUpload(tenantID, sourceFileName, archiveHeader.Header.Get("Content-Type"), archiveBytes, existingUpload)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -554,7 +563,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 
 	spec := cloneAppSpec(app.Spec)
 	desiredSource := source
-	op, err := s.store.CreateOperation(model.Operation{
+	op, err := createOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeImport,
 		RequestedByType:     principal.ActorType,

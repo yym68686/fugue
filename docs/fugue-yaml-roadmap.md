@@ -299,12 +299,12 @@ intent:
 
 - [x] **阶段：补齐 Fugue CLI 对 `domains` + `entrypoints` 的适配。**  
   目标是让 CLI 与 parser、schema、导入器、route 生成器看到同一份项目合同。
-  - [x] `fugue app route check <app> <hostname> --path-prefix <path>` 支持检查 hostname + path prefix 组合。
-  - [x] `fugue app route set <app> <hostname> --path-prefix <path>` 支持设置非根路径 route。
-  - [x] `fugue app route show` 显示 `path_prefix`、`domain_name`、`entrypoint_name`。
+  - [x] `fugue app domain primary check <app> <hostname> --path-prefix <path>` 支持检查 hostname + path prefix 组合。
+  - [x] `fugue app domain primary set <app> <hostname> --path-prefix <path>` 支持设置非根路径 route。
+  - [x] `fugue app domain primary verify` 显示 `path_prefix`、`domain_name`、`entrypoint_name`。
   - [x] `fugue app domain primary ...` 兼容旧命令，并在输出里显示默认 `/` path prefix。
   - [x] `fugue app status` 输出补充 route provenance，包含 `route_path_prefix`、`route_domain_name`、`route_entrypoint_name`。
-  - [x] `fugue deploy inspect` / `fugue template inspect` 展示 `domains`、`entrypoints`、route count。
+  - [x] `fugue deploy inspect` / `fugue deploy inspect` 展示 `domains`、`entrypoints`、route count。
   - [x] `fugue deploy --dry-run` plan service 行携带 `path_prefix`、`domain_name`、`entrypoint_name`，文本表格能显示带 path 的 public URL。
   - [x] `fugue admin routes ls` 按 hostname + path prefix 分组，避免同 hostname 的不同 path route 被折叠。
   - [x] `fugue admin routes explain` 的 route binding 表显示 path prefix。

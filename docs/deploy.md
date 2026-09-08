@@ -481,8 +481,8 @@ Audit failover readiness before doing that:
 ```bash
 export FUGUE_BASE_URL=http://127.0.0.1:8080
 export FUGUE_API_KEY=<tenant-api-key>
-fugue app continuity audit
-fugue app continuity audit <app-name>
+fugue app failover status
+fugue app failover status <app-name>
 ```
 
 Interpretation:
@@ -500,9 +500,9 @@ fails.
 Enable safe rollout for an eligible stateless/RWX app:
 
 ```bash
-fugue app continuity enable <app-name> --zero-downtime safe
-fugue app continuity show <app-name>
-fugue app continuity audit <app-name>
+fugue app rollout policy set <app-name> --zero-downtime safe
+fugue app rollout policy show <app-name>
+fugue app failover status <app-name>
 ```
 
 When safe rollout is enabled, `fugue app deploy --wait` prints retained release
@@ -512,8 +512,8 @@ attempt phases such as `candidate_create`, `candidate_ready`, `gate_check`,
 available, so the matching debug bundle can be fetched directly:
 
 ```bash
-fugue app release attempts <app-name>
-fugue app release debug-bundle <app-name> --attempt <release-attempt-id>
+fugue app release attempt ls <app-name>
+fugue app release attempt bundle <app-name> --attempt <release-attempt-id>
 ```
 
 By default, release and operation debug bundles include app-scoped metrics
@@ -534,6 +534,6 @@ Flow:
 - The bundled chart keeps PostgreSQL and optional `headscale` in-cluster with `hostPath` storage, while the internal registry now defaults to PVC-backed storage. For production, externalize or harden these stateful dependencies and their placement.
 - The chart now supports `configSecret.existingSecretName` so production deployments can source Fugue credentials from an external secret manager instead of chart-generated literals.
 - A production HA baseline is included in `deploy/helm/fugue/values-production-ha.yaml`.
-- `fugue app continuity audit` uses the same migration blocker rules as the API, so you can audit app-level failover eligibility before an incident.
+- `fugue app failover status` uses the same migration blocker rules as the API, so you can audit app-level failover eligibility before an incident.
 - `api.registryPushBase` must be reachable from builder jobs inside the cluster. `api.registryPullBase` should remain a stable logical name, and `api.clusterJoinRegistryEndpoint` should point each node at its local or regional mirror for that logical registry.
 - If the controller cannot reach the in-cluster Kubernetes API, `managed-shared` and `managed-owned` deploys will stop at the render/apply stage.

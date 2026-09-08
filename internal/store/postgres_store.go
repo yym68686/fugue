@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -2406,6 +2407,9 @@ WHERE id = $1 AND tenant_id = $2
 	if err := validateManagedPostgresSpecForAppName(name, spec.Postgres); err != nil {
 		return model.App{}, err
 	}
+	if err := lockDataReferencesTx(ctx, tx, tenantID, &spec); err != nil {
+		return model.App{}, err
+	}
 	spec.RuntimeID = resolveProjectRuntimeID(project, spec.RuntimeID)
 	visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, spec.RuntimeID, tenantID)
 	if err != nil {
@@ -3154,6 +3158,21 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := s.pgHydrateAppBackingServicesWithQueryer(ctx, tx, &app); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
+	if err := lockDataReferencesTx(ctx, tx, op.TenantID, op.DesiredSpec); err != nil {
+		return model.Operation{}, operationCreateOutcome{}, err
+	}
+	if policy.ExpectedAppSpecHash != "" {
+		if model.AppSpecSHA256(app.Spec) != policy.ExpectedAppSpecHash {
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
+		}
+		var active bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND status IN ('pending','running','waiting-agent'))`, app.ID).Scan(&active); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if active {
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
+		}
+	}
 	if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize {
 		if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
@@ -3799,6 +3818,26 @@ INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode, reque
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, '', '', '', $16, $17, NULL, NULL)
 `, op.ID, op.TenantID, op.Type, op.Status, op.ExecutionMode, op.RequestedByType, op.RequestedByID, op.AppID, op.ServiceID, op.SourceRuntimeID, op.TargetRuntimeID, intPointerValue(op.DesiredReplicas), desiredSpecJSON, desiredSourceJSON, op.ResultMessage, op.CreatedAt, op.UpdatedAt); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, mapDBErr(err)
+	}
+	if policy.SourceSessionID != "" {
+		var raw []byte
+		if err := tx.QueryRowContext(ctx, `SELECT document FROM fugue_source_upload_sessions WHERE id=$1 FOR UPDATE`, policy.SourceSessionID).Scan(&raw); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, mapDBErr(err)
+		}
+		var session model.SourceUploadSession
+		if err := json.Unmarshal(raw, &session); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if err := recordSourceSessionOperation(&session, op); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		raw, err = json.Marshal(session)
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE fugue_source_upload_sessions SET document=$2 WHERE id=$1`, session.ID, raw); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
 	}
 	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err

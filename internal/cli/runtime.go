@@ -25,12 +25,7 @@ func (c *CLI) newRuntimeCommand() *cobra.Command {
 		c.newRuntimeListCommand(),
 		c.newRuntimeShowCommand(),
 		c.newRuntimeEnrollCommand(),
-		hideCompatCommand(c.newRuntimeAttachCommand(), "fugue runtime enroll create"),
 		c.newRuntimeDoctorCommand(),
-		hideCompatCommand(c.newRuntimeAccessCommand(), "fugue admin runtime access"),
-		hideCompatCommand(c.newRuntimePoolCommand(), "fugue admin runtime pool"),
-		hideCompatCommand(c.newRuntimeOfferCommand(), "fugue admin runtime offer"),
-		hideCompatCommand(c.newRuntimeDeleteCommand(), "fugue admin runtime delete"),
 	)
 	return cmd
 }

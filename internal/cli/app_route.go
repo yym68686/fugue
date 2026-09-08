@@ -7,20 +7,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func (c *CLI) newAppRouteCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     "route",
-		Aliases: []string{"routes"},
-		Short:   "Inspect and manage the primary app route",
-	}
-	cmd.AddCommand(
-		c.newAppRouteShowCommand(),
-		c.newAppRouteCheckCommand(),
-		c.newAppRouteSetCommand(),
-	)
-	return cmd
-}
-
 func (c *CLI) newAppRouteShowCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "show <app>",

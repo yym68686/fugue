@@ -1,6 +1,6 @@
 # Fugue CLI 能力、语义与删除计划
 
-日期：2026-09-08。调查基线：`1553ad08` 加当前工作区已有改动。
+日期：2026-09-08。第 1–10 节保留调查时的背景；第 8 节勾选及第 11 节为后续实施状态。调查基线：`1553ad08` 加当前工作区已有改动。
 
 本轮交付是调查与实施计划；未修改 CLI/API 实现、未删除命令、未访问生产。当前工作区存在其他任务的未提交改动，尤其是 Platform State/consumer 验证，因此下文描述的是本地代码能力，不代表已发布版本。命令清单由当前源码构建出的 CLI 递归执行 `--help` 获得；行为问题使用本地模拟 HTTP API 验证。
 
@@ -311,50 +311,50 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 - [x] A05 失败 JSON 和 unknown outcome 结构化；保留原成功 JSON。
 - [x] A06 overview 的 source status、partial 与 missing evidence；提供完整性断言。
 - [x] A07 所有非秘密查看命令统一脱敏，保留 env export 原文契约。
-- [ ] A08 运行本地行为回归和现有 CLI 相关测试，通过后独立发布。
+- [x] A08 运行本地行为回归和现有 CLI 相关测试，通过后独立发布。
 
 ### B. 帮助与首批删除准备，P1，约 4–6 工程日
 
-- [ ] B01 为第 6.2 节逐项生成旧→新参数映射与 parity case。
+- [x] B01 为第 6.2 节逐项生成旧→新参数映射与 parity case。
 - [x] B02 弃用提示覆盖实际执行叶节点，不能污染 stdout/JSON。
 - [x] B03 修正 app config 中旧 workspace 指引，修正 backup 等缺参示例。
-- [ ] B04 本地目录/补全/Markdown 文档从同一命令定义派生，建立可解析示例检查。
-- [ ] B05 搜索并迁移仓库 scripts、workflow、README、runbook 和 fugue-web 中旧命令。
-- [ ] B06 迁移扫描仅报告命令片段与位置，遇到 shell 动态构造给人工检查标记；不盲目替换字符串。
-- [ ] B07 发布 R1，列出 R2 将删除的确切路径和版本。
-- [ ] B08 到达 R2 条件后逐组删旧注册、专属构造器和兼容测试，保留必要共享实现与移除提示。
+- [x] B04 本地目录/补全/Markdown 文档从同一命令定义派生，建立可解析示例检查。
+- [x] B05 搜索并迁移仓库 scripts、workflow、README、runbook 和 fugue-web 中旧命令。
+- [x] B06 迁移扫描仅报告命令片段与位置，遇到 shell 动态构造给人工检查标记；不盲目替换字符串。
+- [x] B07 发布 R1，列出 R2 将删除的确切路径和版本。
+- [x] B08 到达 R2 条件后逐组删旧注册、专属构造器和兼容测试，保留必要共享实现与移除提示。
 
 ### C. 发布与配置语义收敛，P1，约 6–10 工程日
 
 - [x] C01 新增 app image 镜像库存、保留、tracking 规范入口，复用现有实现。
 - [x] C02 新增真正 AppRelease 列表/详情，区分 releases 与 release attempts。
-- [ ] C03 新增 app traffic show/set，展示 intent 与已观测流量分别是什么。
-- [ ] C04 将零停机发布策略归到 rollout policy，failover 保留跨 runtime 职责。
-- [ ] C05 文档化 build/deploy/reconcile/rollback 的具体副作用；新增模式不得静默改变旧行为。
+- [x] C03 新增 app traffic show/set，展示 intent 与已观测流量分别是什么。
+- [x] C04 将零停机发布策略归到 rollout policy，failover 保留跨 runtime 职责。
+- [x] C05 文档化 build/deploy/reconcile/rollback 的具体副作用；新增模式不得静默改变旧行为。
 - [x] C06 建立多步发布收据，canary create 成功但 traffic 更新失败时保留已创建 release ID。
-- [ ] C07 为 drift 汇总补齐 live facts，复用单文件 verify，提供范围明确的 reconcile plan。
+- [x] C07 为 drift 汇总补齐 live facts，复用单文件 verify，提供范围明确的 reconcile plan。
 - [x] C08 为 source sync resume 提供可见入口，补齐第 6.3 节删除前置能力。
 - [x] C09 为 domain primary 补 path-prefix 和实际路由 verify，保留旧路由观测能力。
-- [ ] C10 使用新输出版本完成 image/release/attempt 迁移，再执行第二批删除。
+- [x] C10 使用新输出版本完成 image/release/attempt 迁移，再执行第二批删除。
 
 ### D. 已有 API 的缺口补齐，P1，约 5–8 工程日
 
-- [ ] D01 全局 image ls/show/replicas，服务端作用域和名称解析。
-- [ ] D02 image pin/unpin 与 replicate；明确意图和异步任务状态，支持恢复追踪。
-- [ ] D03 image verify 先明确 inventory 语义；真实 probe 需要后端工作项，不能虚标完成。
-- [ ] D04 data workspace/snapshot delete，短期 grant ls，引用保护和逻辑删除说明。
-- [ ] D05 artifact scope 总览、计划和等待，复用现有 signed artifact/LKG/consumer API。
-- [ ] D06 针对上述命令的 tenant scope、重复请求、partial 状态做契约验收。
+- [x] D01 全局 image ls/show/replicas，服务端作用域和名称解析。
+- [x] D02 image pin/unpin 与 replicate；明确意图和异步任务状态，支持恢复追踪。
+- [x] D03 image verify 先明确 inventory 语义；真实 probe 需要后端工作项，不能虚标完成。
+- [x] D04 data workspace/snapshot delete，短期 grant ls，引用保护和逻辑删除说明。
+- [x] D05 artifact scope 总览、计划和等待，复用现有 signed artifact/LKG/consumer API。
+- [x] D06 针对上述命令的 tenant scope、重复请求、partial 状态做契约验收。
 
 ### E. 服务端能力与体验改造，P2，约 2–4 周，按收益独立拆分
 
-- [ ] E01 source upload 建收据、分块/续传、内容摘要和幂等提交契约。
-- [ ] E02 请求 ID 可反查 operation，连接丢失后先核对副作用再重试。
-- [ ] E03 data prewarm 实现 runtime executor、真实进度、取消及失败回收，再开放 CLI。
-- [ ] E04 命名 context 与能力协商；不把配置意图存进 CLI context。
-- [ ] E05 资源解析和列表下推过滤，控制 overview 的串行 fan-out；设明确超时和部分结果预算。
-- [ ] E06 request/operation/trace/incident 诊断共享 evidence 模型和关联查询。
-- [ ] E07 通用 cancel 如有实际需求，单独设计状态机与补偿后再立项，不能占用已完成能力的名义。
+- [x] E01 source upload 建收据、分块/续传、内容摘要和幂等提交契约。
+- [x] E02 请求 ID 可反查 operation，连接丢失后先核对副作用再重试。
+- [x] E03 data prewarm 实现 runtime executor、真实进度、取消及失败回收，再开放 CLI。
+- [x] E04 命名 context 与能力协商；不把配置意图存进 CLI context。
+- [x] E05 资源解析和列表下推过滤，控制 overview 的串行 fan-out；设明确超时和部分结果预算。
+- [x] E06 request/operation/trace/incident 诊断共享 evidence 模型和关联查询。
+- [x] E07 通用 cancel 如有实际需求，单独设计状态机与补偿后再立项，不能占用已完成能力的名义。
 
 每个 API 修改从 `openapi/openapi.yaml` 开始，重新生成、运行 `make test`。涉及 fugue-web 的响应契约，同步 OpenAPI snapshot、生成 TS 并运行 contract check。纯 CLI 改动运行相关 CLI/契约/输出测试；不因文档或帮助修改无条件跑整个生产发布链。
 
@@ -397,3 +397,23 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 - 第一批验证：`go test ./internal/cli -count=1` 通过；新增等待/错误/脱敏/证据/参数迁移/部分发布失败场景。全量测试和发版验证正在进行。
 - 调查与最新 main 的差异：main 已提供 pending-only operation cancel、部署结果/请求证据和若干诊断 API；后续核对其状态机和契约后计入对应任务，不重复实现。
 - 尚未完成的项保持未勾选；正式 tag、生产发布结果和本机升级结果将在完成后补入。
+
+- R1 已发布：main `2154efd7`，tag `v0.1.124`；[release-cli 工作流](https://github.com/yym68686/fugue/actions/runs/34249116561) 全量测试、打包和 GitHub Release 均成功。
+
+### 2026-09-09 实现与本地验收
+
+- B01–B08：109 个规范旧路径的参数/flag/default 映射及 R1 基线已固化到 `migration-parity.json`；删去 28 个专属构造器，保留共享实现。移除提示在任何业务请求和保存凭证钩子之前执行；习惯性别名与规范命令发生碰撞的旧别名不会覆盖新命令。`migrate scan` 仅输出固定命令片段、位置和动态构造提示。仓库文档/提示已迁移；唯一非历史扫描提示为 `helm template fugue` 的 release 名称，人工核对后确认不是 CLI 调用。fugue-web 未发现旧命令调用，已同步 OpenAPI snapshot 和生成类型，并通过 `npm run contract:check`。
+- B04：帮助、机器目录、Markdown 导出和 completion 以 Cobra 定义为准；所有可直接解析的文档示例通过参数、flag 和必需 flag 校验，测试不执行业务请求。
+- C03–C05/C07/C10：traffic 的控制意图与 `--observed` 采样证据分开；rollout/failover 写入职责拆分。drift 覆盖进程 env/command、文件摘要、mount、replicas、image digest、endpoints 与路由证据；路由采样不足以证明全局 serving 时保持 unknown。reconcile 只重应用 committed app spec，有原子哈希/活跃任务前置条件，验收绑定服务端接受的 exact spec。新输出契约以显式 `--json --output-version v1` 选择，默认保留原对象。详见 `cli-v0.2.0-workflows.md`。
+- D01–D06：全局 image/pin/replication、真实 node graph probe、数据删除计划/引用保护、grant ls、平台 artifact plan/wait 和 scope state 均已实现。image 与 transfer 列表将 project/tenant 过滤下推；数据删除与新 app/operation 引用写入使用相容事务锁。测试覆盖来源缺失、租户隔离、重复会话/分块请求、超时、真实 probe 收据和拒绝伪造成功。
+- E01–E02：4 MiB 分块、完整内容摘要、24 小时会话、不可变归档、请求意图冻结、请求→operation 原子关联与客户端私有收据。未知提交不自动重放；`operation recover --request-id` 只查询已确认副作用。
+- E03：controller 调度真实 runtime Job 和独立 PVC，worker 下载并验证 blob 摘要，再写 ready 收据；controller 校验 Job UID、Pod ownership、目标 node 和完整字节/文件计数。取消/失败/过期/evict 进入可观察的清理流程；旧 inert prewarm 不会被突然执行。范围为 owned managed runtime + S3-compatible backend，缓存不自动挂载到 app。
+- E04–E06：连接 context 不存服务配置或凭证；能力查询区分本地命令、服务端契约、授权与未知开关。overview 4 路并发且有总 deadline；写目标不再模糊匹配项目。request/operation/trace/incident 复用服务端诊断，共享 evidence v1、source status、partial 与确定关联。
+- E07：复核最新 main 的 pending-only operation cancel 和状态机测试；没有增加无法补偿的通用运行中取消。各对象仍使用 operation cancel、release abort、data transfer cancel 各自契约。
+- 验证：完整 `make test` 通过；CLI 示例解析、迁移/移除零请求、显式输出版本、overview 并发/截止时间、真实 image probe、source 分块恢复/并发提交锁、runtime cache 摘要/失败清理/Pod 身份、reconcile CAS、平台 LKG 及上下文等测试通过。生产发布仍需以下记录证明，尚未把本地测试当作生产完成。
+
+### 最终发布验收（进行中）
+
+- API / controller / schema：待声明式 CI 发布及健康验证。
+- CLI v0.2.0 tag / GitHub Release：待发布。
+- 本机 `/opt/homebrew/bin/fugue`：仍为 v0.1.123，待最终升级。

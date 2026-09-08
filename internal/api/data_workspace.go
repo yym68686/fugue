@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/dataprewarm"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/store"
@@ -61,28 +62,29 @@ type dataDownloadPlanResponse struct {
 }
 
 type dataTransferSummary struct {
-	ID           string     `json:"id"`
-	TenantID     string     `json:"tenant_id,omitempty"`
-	WorkspaceID  string     `json:"workspace_id"`
-	SnapshotID   string     `json:"snapshot_id,omitempty"`
-	Version      string     `json:"version,omitempty"`
-	Message      string     `json:"message,omitempty"`
-	Direction    string     `json:"direction"`
-	Status       string     `json:"status"`
-	Source       string     `json:"source,omitempty"`
-	Target       string     `json:"target,omitempty"`
-	PartSize     int64      `json:"part_size,omitempty"`
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
-	BytesTotal   int64      `json:"bytes_total"`
-	BytesDone    int64      `json:"bytes_done"`
-	FilesTotal   int        `json:"files_total"`
-	FilesDone    int        `json:"files_done"`
-	ErrorCode    string     `json:"error_code,omitempty"`
-	ErrorMessage string     `json:"error_message,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	Cache        *model.DataPrewarmCache `json:"cache,omitempty"`
+	ID           string                  `json:"id"`
+	TenantID     string                  `json:"tenant_id,omitempty"`
+	WorkspaceID  string                  `json:"workspace_id"`
+	SnapshotID   string                  `json:"snapshot_id,omitempty"`
+	Version      string                  `json:"version,omitempty"`
+	Message      string                  `json:"message,omitempty"`
+	Direction    string                  `json:"direction"`
+	Status       string                  `json:"status"`
+	Source       string                  `json:"source,omitempty"`
+	Target       string                  `json:"target,omitempty"`
+	PartSize     int64                   `json:"part_size,omitempty"`
+	ExpiresAt    *time.Time              `json:"expires_at,omitempty"`
+	BytesTotal   int64                   `json:"bytes_total"`
+	BytesDone    int64                   `json:"bytes_done"`
+	FilesTotal   int                     `json:"files_total"`
+	FilesDone    int                     `json:"files_done"`
+	ErrorCode    string                  `json:"error_code,omitempty"`
+	ErrorMessage string                  `json:"error_message,omitempty"`
+	CreatedAt    time.Time               `json:"created_at"`
+	UpdatedAt    time.Time               `json:"updated_at"`
+	StartedAt    *time.Time              `json:"started_at,omitempty"`
+	FinishedAt   *time.Time              `json:"finished_at,omitempty"`
 }
 
 type dataSnapshotSummary struct {
@@ -112,6 +114,7 @@ const dataTransferMaxBlobPageLimit = 5000
 
 func summarizeDataTransfer(transfer model.DataTransfer) dataTransferSummary {
 	return dataTransferSummary{
+		Cache:        transfer.Cache,
 		ID:           transfer.ID,
 		TenantID:     transfer.TenantID,
 		WorkspaceID:  transfer.WorkspaceID,
@@ -761,13 +764,61 @@ func (s *Server) handleCreateDataPrewarm(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return
 	}
+	runtimeObj, err := s.store.GetRuntime(strings.TrimSpace(req.RuntimeID))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if runtimeObj.TenantID != workspace.TenantID {
+		httpx.WriteError(w, 403, "prewarm requires a runtime owned by the workspace tenant")
+		return
+	}
+	if runtimeObj.Type != model.RuntimeTypeManagedOwned || runtimeObj.ClusterNodeName == "" {
+		httpx.WriteError(w, 409, "prewarm requires an enrolled managed runtime with a concrete node")
+		return
+	}
+	backend, err := s.store.GetDataBackendForUse(workspace.StorageBackendID, workspace.TenantID, true)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !dataBackendSupportsDirectObjectStorage(backend) {
+		httpx.WriteError(w, 409, "runtime prewarm requires an S3-compatible object backend")
+		return
+	}
+	if _, err = newDataObjectBackend(backend); err != nil {
+		httpx.WriteError(w, 409, "prewarm object backend credentials are not configured")
+		return
+	}
+	if err = s.store.ValidateAppSpecRuntimeReservations(workspace.ProjectID, model.AppSpec{RuntimeID: runtimeObj.ID}); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	available := map[string]bool{}
+	for _, entry := range snapshot.Manifest.Entries {
+		available[entry.AssetName] = true
+	}
+	for _, asset := range req.Assets {
+		if !available[asset] {
+			httpx.WriteError(w, 400, "requested asset is absent from the snapshot")
+			return
+		}
+	}
 	manifest := filterDataManifestAssets(snapshot.Manifest, req.Assets)
+	manifest.Digest = dataprewarm.ManifestDigest(manifest)
+	if manifest.TotalBytes > 10<<30 || len(manifest.Entries) > 10000 {
+		httpx.WriteError(w, 400, "prewarm supports at most 10 GiB and 10000 entries")
+		return
+	}
+	expiresAt := time.Now().UTC().Add(24 * time.Hour)
 	transfer, err := s.store.CreateDataTransfer(model.DataTransfer{
 		WorkspaceID: workspace.ID,
-		TenantID:    principal.TenantID,
+		TenantID:    workspace.TenantID,
+		ExpiresAt:   &expiresAt,
 		SnapshotID:  snapshot.ID,
 		Version:     snapshot.Version,
 		Direction:   model.DataTransferDirectionPrewarm,
+		Cache:       &model.DataPrewarmCache{Node: runtimeObj.ClusterNodeName, ManifestDigest: manifest.Digest, State: "planned", ObservedAt: time.Now().UTC()},
 		Status:      model.DataTransferStatusPlanned,
 		Source:      workspace.StorageBackendID,
 		Target:      strings.TrimSpace(req.RuntimeID),
@@ -814,6 +865,10 @@ func (s *Server) handleCompleteDataTransfer(w http.ResponseWriter, r *http.Reque
 		requiredRole = model.DataWorkspaceAccessRoleWriter
 	}
 	if !s.principalAllowsDataWorkspaceRole(w, principal, workspace, requiredRole) {
+		return
+	}
+	if transfer.Direction == model.DataTransferDirectionPrewarm {
+		httpx.WriteError(w, 409, "runtime prewarm completion requires controller evidence")
 		return
 	}
 	now := time.Now().UTC()
@@ -898,6 +953,14 @@ func (s *Server) handleCancelDataTransfer(w http.ResponseWriter, r *http.Request
 	}
 	if !principal.IsPlatformAdmin() && transfer.TenantID != principal.TenantID {
 		httpx.WriteError(w, http.StatusForbidden, "data transfer is not visible to this tenant")
+		return
+	}
+	workspace, err := s.store.GetDataWorkspaceForPrincipal(transfer.WorkspaceID, principal.TenantID, principal.ActorType, principal.ActorID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !s.principalAllowsDataWorkspaceRole(w, principal, workspace, model.DataWorkspaceAccessRoleWriter) {
 		return
 	}
 	transfer, err = s.store.CancelDataTransfer(transfer.ID)
@@ -1054,6 +1117,10 @@ func (s *Server) handleCheckpointDataTransfer(w http.ResponseWriter, r *http.Req
 	principal := mustPrincipal(r)
 	transfer, workspace, ok := s.loadAuthorizedDataTransfer(w, r, principal)
 	if !ok {
+		return
+	}
+	if transfer.Direction == model.DataTransferDirectionPrewarm {
+		httpx.WriteError(w, 409, "runtime prewarm progress is reported by the controller")
 		return
 	}
 	switch transfer.Status {
@@ -2939,4 +3006,74 @@ func readInt64Query(r *http.Request, name string, fallback int64) (int64, error)
 		return 0, fmt.Errorf("%s must be an integer", name)
 	}
 	return value, nil
+}
+
+func (s *Server) handleDeleteDataPrewarmCache(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(r)
+	t, err := s.store.GetDataTransfer(r.PathValue("transfer_id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	ws, err := s.store.GetDataWorkspaceForPrincipal(t.WorkspaceID, p.TenantID, p.ActorType, p.ActorID, p.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !s.principalAllowsDataWorkspaceRole(w, p, ws, model.DataWorkspaceAccessRoleWriter) {
+		return
+	}
+	if t.Direction != model.DataTransferDirectionPrewarm {
+		httpx.WriteError(w, 409, "transfer does not own a runtime cache")
+		return
+	}
+	if t.Cache != nil && t.Cache.State == "removed" {
+		httpx.WriteJSON(w, 202, map[string]any{"transfer": summarizeDataTransfer(t)})
+		return
+	}
+	now := time.Now().UTC()
+	t.ExpiresAt = &now
+	if t.Status == model.DataTransferStatusPlanned || t.Status == model.DataTransferStatusRunning {
+		t.Status = model.DataTransferStatusCanceled
+		t.FinishedAt = &now
+	}
+	if t.Cache != nil {
+		t.Cache.State = "cleanup_pending"
+		t.Cache.ObservedAt = now
+	}
+	t, err = s.store.UpdateDataTransfer(t)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(p, "data.prewarm.evict", "data_transfer", t.ID, ws.TenantID, map[string]string{"runtime_id": t.Target})
+	httpx.WriteJSON(w, 202, map[string]any{"transfer": summarizeDataTransfer(t)})
+}
+
+func (s *Server) handleGetDataDeletionPlan(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(r)
+	ws, ok := s.loadAuthorizedDataWorkspaceForRole(w, r, p, model.DataWorkspaceAccessRoleAdmin)
+	if !ok {
+		return
+	}
+	var snapshot *model.DataSnapshot
+	if ref := strings.TrimSpace(r.URL.Query().Get("snapshot_id")); ref != "" {
+		value, err := s.store.GetDataSnapshot(ws.ID, ref)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		snapshot = &value
+	}
+	blockers, err := s.store.InspectDataDeletion(ws, snapshot)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	result := map[string]any{"schema_version": 1, "workspace_id": ws.ID, "allowed": len(blockers) == 0, "mode": "metadata_delete", "blockers": blockers, "objects_reclaimed": false, "reclamation": "Revoke references, evict runtime caches, then soft-delete snapshots. Blob storage is reclaimed separately by data gc with its retention policy; workspace deletion does not reclaim blobs."}
+	if snapshot != nil {
+		result["snapshot_id"] = snapshot.ID
+		result["mode"] = "soft_delete"
+	}
+	httpx.WriteJSON(w, 200, result)
 }

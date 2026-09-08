@@ -50,6 +50,7 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 		c.newAdminQuarantineCommand(),
 		c.newAdminSyntheticCommand(),
 		c.newAdminArtifactCommand(),
+		c.newAdminStateCommand(),
 		c.newAdminConsumerCommand(),
 		c.newAdminBackupCommand(),
 		c.newAdminRoutesCommand(),
@@ -518,10 +519,6 @@ func (c *CLI) newAdminRuntimeCommand() *cobra.Command {
 		c.newAdminRuntimeCreateCommand(),
 		c.newRuntimeDeleteCommand(),
 		c.newAdminRuntimeTokenCommand(),
-		hideCompatCommand(c.newAdminRuntimeShareCommand(), "fugue admin runtime access grant"),
-		hideCompatCommand(c.newAdminRuntimeUnshareCommand(), "fugue admin runtime access revoke"),
-		hideCompatCommand(c.newAdminRuntimeShareModeCommand(), "fugue admin runtime access set"),
-		hideCompatCommand(c.newAdminRuntimePoolModeCommand(), "fugue admin runtime pool set"),
 	)
 	return cmd
 }
@@ -683,133 +680,6 @@ func (c *CLI) newAdminRuntimeCreateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Endpoint, "endpoint", "", "Runtime endpoint")
 	cmd.Flags().StringArrayVar(&opts.Labels, "label", nil, "Runtime label as KEY=VALUE (repeatable)")
 	return cmd
-}
-
-func (c *CLI) newAdminRuntimeShareCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:     "share <runtime> <tenant>",
-		Aliases: []string{"grant"},
-		Short:   "Grant another tenant access to a runtime",
-		Args:    cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
-			if err != nil {
-				return err
-			}
-			tenant, err := c.resolveNamedTenant(client, args[1])
-			if err != nil {
-				return err
-			}
-			grant, err := client.GrantRuntimeAccess(runtimeObj.ID, tenant.ID)
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return c.writeJSON(map[string]any{"grant": grant})
-			}
-			return writeKeyValues(c.stdout,
-				kvPair{Key: "runtime_id", Value: grant.RuntimeID},
-				kvPair{Key: "tenant_id", Value: grant.TenantID},
-				kvPair{Key: "created_at", Value: formatTime(grant.CreatedAt)},
-			)
-		},
-	}
-}
-
-func (c *CLI) newAdminRuntimeUnshareCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:     "unshare <runtime> <tenant>",
-		Aliases: []string{"revoke"},
-		Short:   "Revoke tenant access to a runtime",
-		Args:    cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
-			if err != nil {
-				return err
-			}
-			tenant, err := c.resolveNamedTenant(client, args[1])
-			if err != nil {
-				return err
-			}
-			removed, err := client.RevokeRuntimeAccess(runtimeObj.ID, tenant.ID)
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return c.writeJSON(map[string]any{"removed": removed})
-			}
-			return writeKeyValues(c.stdout,
-				kvPair{Key: "runtime_id", Value: runtimeObj.ID},
-				kvPair{Key: "tenant_id", Value: tenant.ID},
-				kvPair{Key: "removed", Value: fmt.Sprintf("%t", removed)},
-			)
-		},
-	}
-}
-
-func (c *CLI) newAdminRuntimeShareModeCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:     "share-mode <runtime> <mode>",
-		Aliases: []string{"access-mode"},
-		Short:   "Set runtime access mode",
-		Args:    cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
-			if err != nil {
-				return err
-			}
-			runtimeObj, err = client.SetRuntimeAccessMode(runtimeObj.ID, args[1])
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return c.writeJSON(map[string]any{"runtime": runtimeObj})
-			}
-			return renderRuntime(c.stdout, runtimeObj)
-		},
-	}
-}
-
-func (c *CLI) newAdminRuntimePoolModeCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "pool-mode <runtime> <mode>",
-		Short: "Set runtime pool mode",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
-			if err != nil {
-				return err
-			}
-			response, err := client.SetRuntimePoolMode(runtimeObj.ID, args[1])
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return c.writeJSON(response)
-			}
-			if err := renderRuntime(c.stdout, response.Runtime); err != nil {
-				return err
-			}
-			_, err = fmt.Fprintf(c.stdout, "node_reconciled=%t\n", response.NodeReconciled)
-			return err
-		},
-	}
 }
 
 func (c *CLI) newAdminRuntimeTokenCommand() *cobra.Command {
