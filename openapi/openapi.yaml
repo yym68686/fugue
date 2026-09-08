@@ -26838,6 +26838,8 @@ components:
           type: boolean
         error_class:
           type: string
+        failure_plane:
+          type: string
         edge_id:
           type: string
         edge_group_id:
@@ -26885,6 +26887,9 @@ components:
           type: integer
           format: int64
         origin_connect_ms:
+          type: integer
+          format: int64
+        origin_endpoint_connect_ms:
           type: integer
           format: int64
         origin_request_write_ms:

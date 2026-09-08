@@ -4,10 +4,46 @@ import (
 	"context"
 	"encoding/json"
 	"os/exec"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
+
+	"fugue/internal/model"
 
 	"github.com/getkin/kin-openapi/openapi3"
 )
+
+func TestRequestExplainContractCoversAllResponseFields(t *testing.T) {
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(YAML())
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := doc.Components.Schemas["RequestExplainResponse"].Value
+	responseType := reflect.TypeOf(model.RequestExplainResponse{})
+	for i := 0; i < responseType.NumField(); i++ {
+		name := strings.Split(responseType.Field(i).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" && schema.Properties[name] == nil {
+			t.Errorf("request explain response field %s is not declared in its strict schema", name)
+		}
+	}
+	response := model.RequestExplainResponse{
+		RequestID: "edge_abcd_1234", FailurePlane: "control_plane_observability",
+		OriginEndpointConnectMS: 12, SecretSafe: true, GeneratedAt: time.Now().UTC(),
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.VisitJSON(value); err != nil {
+		t.Fatalf("actual request explain response violates OpenAPI: %v", err)
+	}
+}
 
 func TestGeneratedArtifactsAreUpToDate(t *testing.T) {
 	cmd := exec.Command(
