@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
@@ -82,3 +84,77 @@ func TestNodeUpdaterCanReportDistributedImageReplica(t *testing.T) {
 		t.Fatalf("expected compatibility image location, got %+v", locations)
 	}
 }
+
+func TestCreateImageReplicationTaskDispatchesExecutableNodeTask(t *testing.T) {
+	t.Parallel()
+	stateStore, server, readKey, app := setupSearchTestServer(t)
+	_, deployKey, err := stateStore.CreateAPIKey(app.TenantID, "replication-owner", []string{"app.read", "app.deploy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(app.TenantID, "replication-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "replication-node", "https://replication-node.example", nil, "replication-node", "machine-replication", "v1", "v1", []string{"tasks", model.NodeUpdateTaskTypeReplicateAppImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{TenantID: app.TenantID, AppID: app.ID, ImageRef: "registry.example/app:build", CanonicalDigest: "sha256:" + strings.Repeat("a", 64), LifecycleState: model.ImageLifecycleAvailable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{ImageID: image.ID, TenantID: app.TenantID, AppID: app.ID, NodeID: "source-machine", RuntimeID: "source-runtime", ClusterNodeName: "source-node", CacheEndpoint: "http://source.example:5000", Digest: image.CanonicalDigest, Status: model.ImageReplicaStatusPresent, LastVerifiedAt: &now, LeaseExpiresAt: ptrTime(now.Add(time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+	var task model.ImageReplicationTask
+	for _, selector := range []map[string]string{
+		{"target_cluster_node_name": updater.ClusterNodeName},
+		{"target_runtime_id": updater.RuntimeID},
+		{"target_node_id": updater.MachineID},
+	} {
+		selector["image_id"] = image.ID
+		response := performJSONRequest(t, server, http.MethodPost, "/v1/image-replication-tasks", deployKey, selector)
+		if response.Code != http.StatusOK {
+			t.Fatalf("replicate response: %d %s", response.Code, response.Body.String())
+		}
+		var body struct {
+			Task model.ImageReplicationTask `json:"task"`
+		}
+		mustDecodeJSON(t, response, &body)
+		if task.ID != "" && task.ID != body.Task.ID {
+			t.Fatal("retry created a different replication task")
+		}
+		task = body.Task
+	}
+	if task.SourceReplicaID == "" || task.TargetNodeID != updater.MachineID || task.TargetRuntimeID != updater.RuntimeID || task.TargetClusterNodeName != updater.ClusterNodeName {
+		t.Fatalf("task identities were not resolved: %+v", task)
+	}
+	queued, err := stateStore.ListNodeUpdateTasks(app.TenantID, false, updater.ID, model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].Type != model.NodeUpdateTaskTypeReplicateAppImage {
+		t.Fatalf("expected executable node task, got %+v", queued)
+	}
+	if queued[0].Payload["replication_task_id"] != task.ID || queued[0].Payload["digest"] != image.CanonicalDigest {
+		t.Fatal("node task is not bound to this transfer and immutable digest")
+	}
+	request := map[string]string{"image_id": image.ID, "target_cluster_node_name": updater.ClusterNodeName}
+	if response := performJSONRequest(t, server, http.MethodPost, "/v1/image-replication-tasks", readKey, request); response.Code != http.StatusForbidden {
+		t.Fatalf("read-only key can dispatch node work: %d", response.Code)
+	}
+	for _, invalid := range []map[string]string{
+		{"image_id": image.ID},
+		{"image_id": image.ID, "target_cluster_node_name": updater.ClusterNodeName, "target_runtime_id": "different-runtime"},
+		{"image_id": image.ID, "target_cluster_node_name": updater.ClusterNodeName, "app_id": "different-app"},
+		{"image_id": image.ID, "target_cluster_node_name": updater.ClusterNodeName, "source_cache_endpoint": "http://unreported-source.example:5000"},
+	} {
+		if response := performJSONRequest(t, server, http.MethodPost, "/v1/image-replication-tasks", deployKey, invalid); response.Code < 400 {
+			t.Fatalf("invalid transfer accepted: %+v", invalid)
+		}
+	}
+}
+
+func ptrTime(value time.Time) *time.Time { return &value }

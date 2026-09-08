@@ -8556,6 +8556,7 @@ paths:
     post:
       operationId: createImageReplicationTask
       summary: Create Image Replication Task
+      description: Requires platform.admin or app.deploy. Resolve an authorized target node and an existing replica with the same immutable digest, then enqueue both the replication record and its executable node task. At least one target selector is required; multiple selectors must identify the same node. Retrying an active transfer reuses its tasks.
       tags: [Apps]
       x-fugue-handler: handleCreateImageReplicationTask
       security:
@@ -22084,6 +22085,10 @@ components:
       type: object
       additionalProperties: false
       required: [image_id]
+      anyOf:
+        - required: [target_node_id]
+        - required: [target_runtime_id]
+        - required: [target_cluster_node_name]
       properties:
         image_id:
           type: string
@@ -22095,10 +22100,13 @@ components:
           type: string
         target_node_id:
           type: string
+          minLength: 1
         target_runtime_id:
           type: string
+          minLength: 1
         target_cluster_node_name:
           type: string
+          minLength: 1
         priority:
           type: string
     ImageReplicationTaskResponse:

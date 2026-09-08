@@ -192,16 +192,11 @@ func (s *Server) handleListImageReplicationTasks(w http.ResponseWriter, r *http.
 
 func (s *Server) handleCreateImageReplicationTask(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	var req struct {
-		ImageID               string `json:"image_id"`
-		AppID                 string `json:"app_id"`
-		SourceReplicaID       string `json:"source_replica_id"`
-		SourceCacheEndpoint   string `json:"source_cache_endpoint"`
-		TargetNodeID          string `json:"target_node_id"`
-		TargetRuntimeID       string `json:"target_runtime_id"`
-		TargetClusterNodeName string `json:"target_cluster_node_name"`
-		Priority              string `json:"priority"`
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.deploy") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.deploy scope")
+		return
 	}
+	var req createImageReplicationTaskRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -211,18 +206,7 @@ func (s *Server) handleCreateImageReplicationTask(w http.ResponseWriter, r *http
 		s.writeStoreError(w, err)
 		return
 	}
-	task, err := s.store.UpsertImageReplicationTask(model.ImageReplicationTask{
-		ImageID:               image.ID,
-		TenantID:              image.TenantID,
-		AppID:                 firstNonEmptyImageAPIString(req.AppID, image.AppID),
-		SourceReplicaID:       strings.TrimSpace(req.SourceReplicaID),
-		SourceCacheEndpoint:   strings.TrimRight(strings.TrimSpace(req.SourceCacheEndpoint), "/"),
-		TargetNodeID:          strings.TrimSpace(req.TargetNodeID),
-		TargetRuntimeID:       strings.TrimSpace(req.TargetRuntimeID),
-		TargetClusterNodeName: strings.TrimSpace(req.TargetClusterNodeName),
-		Priority:              strings.TrimSpace(req.Priority),
-		Status:                model.ImageReplicationTaskStatusPending,
-	})
+	task, err := s.enqueueRequestedImageReplication(principal, image, req)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

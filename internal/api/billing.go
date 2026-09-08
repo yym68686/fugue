@@ -30,46 +30,22 @@ func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.scheduleTenantBillingImageStorageRefresh(tenantID)
-	cacheKey := strings.TrimSpace(tenantID) + "|usage=" + strconv.FormatBool(includeCurrentUsage)
-	if entry, ok := s.billingSummaryCache.getEntry(cacheKey); ok && time.Now().After(entry.expiresAt) {
-		go s.refreshBillingSummaryCache(cacheKey, tenantID, principal.IsPlatformAdmin())
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"billing": entry.value})
-		return
-	}
-	summary, err := s.billingSummaryCache.do(cacheKey, func() (model.TenantBillingSummary, error) {
-		value, loadErr := s.store.GetTenantBillingSummary(tenantID)
-		if loadErr != nil {
-			return model.TenantBillingSummary{}, loadErr
-		}
-		if includeCurrentUsage {
-			value.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
-		}
-		return value, nil
-	})
+	timings := serverTimingFromContext(r.Context())
+	started := time.Now()
+	summary, err := s.store.GetTenantBillingSummary(tenantID)
+	timings.Add("billing_summary", time.Since(started))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+	if includeCurrentUsage {
+		started = time.Now()
+		summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
+		timings.Add("billing_current_usage", time.Since(started))
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"billing": summary,
 	})
-}
-
-func (s *Server) refreshBillingSummaryCache(cacheKey, tenantID string, platformAdmin bool) {
-	_, _ = s.billingSummaryCache.do(cacheKey, func() (model.TenantBillingSummary, error) {
-		value, err := s.store.GetTenantBillingSummary(tenantID)
-		if err != nil {
-			return model.TenantBillingSummary{}, err
-		}
-		value.CurrentUsage = s.currentTenantManagedUsage(context.Background(), tenantID, platformAdmin)
-		return value, nil
-	})
-}
-
-func (s *Server) clearBillingSummaryCache(tenantID string) {
-	base := strings.TrimSpace(tenantID)
-	s.billingSummaryCache.clear(base + "|usage=false")
-	s.billingSummaryCache.clear(base + "|usage=true")
 }
 
 func (s *Server) handleUpdateBilling(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +80,6 @@ func (s *Server) handleUpdateBilling(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.clearBillingSummaryCache(tenantID)
 	summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
 	s.appendAudit(principal, "billing.update", "tenant", tenantID, tenantID, map[string]string{
 		"cpu_millicores":    strings.TrimSpace(httpxValue(req.ManagedCap.CPUMilliCores)),
@@ -149,7 +124,6 @@ func (s *Server) handleTopUpBilling(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.clearBillingSummaryCache(tenantID)
 	summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
 	s.appendAudit(principal, "billing.top_up", "tenant", tenantID, tenantID, map[string]string{
 		"amount_cents": httpxValue(req.AmountCents),
@@ -202,7 +176,6 @@ func (s *Server) handleSetBillingBalance(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return
 	}
-	s.clearBillingSummaryCache(tenantID)
 	summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, true)
 	s.appendAudit(principal, "billing.balance.set", "tenant", tenantID, tenantID, map[string]string{
 		"balance_cents": httpxValue(req.BalanceCents),
@@ -229,9 +202,6 @@ func (s *Server) refreshTenantBillingImageStorage(ctx context.Context, tenantID 
 		return err
 	}
 	_, err = s.store.SyncTenantBillingImageStorage(tenantID, storageGibibytes)
-	if err == nil {
-		s.clearBillingSummaryCache(tenantID)
-	}
 	return err
 }
 
@@ -270,7 +240,10 @@ func cloneAppImageBlobSizes(blobSizes map[string]int64) map[string]int64 {
 }
 
 func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string, platformAdmin bool) *model.ResourceUsage {
+	timings := serverTimingFromContext(ctx)
+	started := time.Now()
 	apps, err := s.store.ListApps(tenantID, platformAdmin)
+	timings.Add("billing_usage_apps", time.Since(started))
 	if err != nil {
 		return nil
 	}
@@ -284,7 +257,9 @@ func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string,
 		apps = filtered
 	}
 
+	started = time.Now()
 	runtimes, err := s.store.ListRuntimes(tenantID, platformAdmin)
+	timings.Add("billing_usage_runtimes", time.Since(started))
 	if err != nil {
 		return nil
 	}
@@ -293,7 +268,9 @@ func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string,
 		runtimeTypes[strings.TrimSpace(runtime.ID)] = runtime.Type
 	}
 
+	started = time.Now()
 	apps = s.overlayCurrentResourceUsageOnApps(ctx, apps)
+	timings.Add("billing_usage_inventory", time.Since(started))
 	accumulator := resourceUsageAccumulator{}
 	for _, app := range apps {
 		if app.TenantID != tenantID || app.Status.CurrentReplicas <= 0 {

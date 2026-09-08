@@ -352,6 +352,14 @@ func (s *Server) reconcileEdgeDNSArtifactRelease(node model.DNSNode, options edg
 			return result, nil
 		}
 		result.VerifiedLKG = lkg != nil
+		retryExpired, err := s.canReplaceExpiredEdgeDNSCandidate(fullArtifact, fullRelease, options, lkg, now)
+		if err != nil {
+			return result, err
+		}
+		if retryExpired {
+			result.ReadyForFull = true
+			return result, nil
+		}
 		verified, err := s.verifyObservedEdgeDNSArtifactRelease(fullArtifact, fullRelease, node, options, lkg, now)
 		if err != nil {
 			return result, err
@@ -370,6 +378,45 @@ func (s *Server) reconcileEdgeDNSArtifactRelease(node model.DNSNode, options edg
 		return result, nil
 	}
 	return s.reconcileInitialEdgeDNSArtifactLKG(node, options, now)
+}
+
+func (s *Server) canReplaceExpiredEdgeDNSCandidate(artifact model.PlatformArtifact, release model.PlatformArtifactRelease, options edgeDNSBundleOptions, lkg *model.PlatformLKGSnapshot, now time.Time) (bool, error) {
+	if release.VerificationState != model.PlatformArtifactVerificationStateServingUnverified || lkg == nil {
+		return false, nil
+	}
+	projected, err := edgeDNSBundleArtifactFromPlatformArtifact(artifact)
+	if err != nil {
+		return false, err
+	}
+	if projected.ValidUntil.IsZero() || now.Before(projected.ValidUntil) {
+		return false, nil
+	}
+	if err := s.validateEdgeDNSFullRelease(artifact, release); err != nil {
+		return false, err
+	}
+	if lkg.VerifiedByReleaseID == "" || lkg.VerificationEvidenceHash == "" ||
+		!now.Before(lkg.ExpiresAt) || release.PinnedRollbackGeneration != lkg.Generation {
+		return false, errors.New("expired DNS candidate has no valid verified rollback baseline")
+	}
+	rollback, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
+	if err != nil {
+		return false, err
+	}
+	if rollback.Generation != lkg.Generation || rollback.ContentHash != lkg.ContentHash {
+		return false, errors.New("DNS rollback artifact differs from the verified baseline")
+	}
+	if err := s.store.VerifyPlatformArtifactIntegrity(rollback); err != nil {
+		return false, err
+	}
+	// Expiry prevents the node from ever ACKing this candidate. Validate its
+	// historical envelope, but retain the existing LKG and publish a fresh,
+	// unverified candidate through the normal fenced release path.
+	projected.ActivatedAt = release.ReleasedAt
+	projected.UpdatedAt = release.UpdatedAt
+	if err := s.validateEdgeDNSBundleArtifact(projected, options, projected.GeneratedAt); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Server) reconcileInitialEdgeDNSArtifactLKG(node model.DNSNode, options edgeDNSBundleOptions, now time.Time) (edgeDNSArtifactReleaseReconciliation, error) {

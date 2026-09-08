@@ -856,6 +856,58 @@ func TestEdgeDNSArtifactPublisherPromotesObservedImmutableEnvelopeToFull(t *test
 	}
 }
 
+func TestEdgeDNSExpiredUnverifiedCandidateCanBeReplacedWithoutAdvancingLKG(t *testing.T) {
+	t.Parallel()
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	node := model.DNSNode{ID: "dns-recovery", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro", PublicIPv4: "203.0.113.10", Status: model.EdgeHealthHealthy, Healthy: true, CacheStatus: "ready", UDPListen: true, TCPListen: true}
+	if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+		t.Fatal(err)
+	}
+	server.runEdgeDNSArtifactController(context.Background(), time.Now().UTC())
+	options, ok := server.edgeDNSBundleOptionsForDNSNode(node)
+	if !ok {
+		t.Fatal("missing node options")
+	}
+	scope := edgeDNSBundleArtifactScopeKey(options)
+	initial, initialRelease, found, err := storeState.GetActivePlatformArtifact(model.PlatformArtifactKindDNSAnswerBundle, scope, model.PlatformArtifactReleaseChannelShadow)
+	if err != nil || !found {
+		t.Fatalf("initial shadow: found=%t err=%v", found, err)
+	}
+	_, _, _, _, err = storeState.VerifyPlatformArtifactReleaseLKG(initialRelease.ID, model.PlatformArtifactVerifyLKGRequest{
+		FencingToken: initialRelease.FencingToken, Reason: "seed recovery test baseline", AllowInitialLKG: true,
+		Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true, ExpectedConsumerSetID: "dns-node:" + node.ID, EvidenceRefs: []string{"recovery-test:" + initial.Generation}},
+	}, model.Principal{ActorType: model.ActorTypeSystem, ActorID: "edge-dns-recovery-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := storeState.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scope)
+	if err != nil || baseline == nil {
+		t.Fatalf("missing baseline: %v", err)
+	}
+	bundle, err := server.deriveEdgeDNSBundle(httptest.NewRequest(http.MethodGet, "/", nil), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := newEdgeDNSBundleArtifact(options, bundle, time.Now().UTC())
+	publishFullEdgeDNSArtifactForTest(t, storeState, server, candidate)
+	fresh, err := server.reconcileEdgeDNSArtifactRelease(node, options, time.Now().UTC())
+	if err != nil || fresh.ReadyForFull || !fresh.VerificationDeferred {
+		t.Fatalf("fresh candidate must wait for ACK: %+v %v", fresh, err)
+	}
+	expired, err := server.reconcileEdgeDNSArtifactRelease(node, options, candidate.ValidUntil.Add(time.Second))
+	if err != nil || !expired.ReadyForFull || !expired.VerifiedLKG {
+		t.Fatalf("expired candidate stuck despite verified rollback: %+v %v", expired, err)
+	}
+	current, err := storeState.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scope)
+	if err != nil || current == nil || current.ID != baseline.ID {
+		t.Fatal("expiry must not advance the LKG")
+	}
+	withoutBaseline, err := server.reconcileEdgeDNSArtifactRelease(node, options, baseline.ExpiresAt.Add(time.Second))
+	if err != nil || withoutBaseline.ReadyForFull {
+		t.Fatalf("expired rollback baseline must not authorize release: %+v %v", withoutBaseline, err)
+	}
+}
+
 func TestEdgeDNSArtifactPublisherDoesNotSeedLKGFromAmbiguousLegacyGeneration(t *testing.T) {
 	t.Parallel()
 
