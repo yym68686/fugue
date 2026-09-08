@@ -56,7 +56,7 @@ func (c *CLI) newSSHKeyListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"ssh_keys": keys})
+				return c.writeJSON(map[string]any{"ssh_keys": keys})
 			}
 			return writeSSHKeyTable(c.stdout, keys, c.showIDs())
 		},
@@ -94,7 +94,7 @@ func (c *CLI) newSSHKeyAddCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"ssh_key": key})
+				return c.writeJSON(map[string]any{"ssh_key": key})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "ssh_key", Value: formatDisplayName(key.Label, key.ID, c.showIDs())},
@@ -126,7 +126,7 @@ func (c *CLI) newSSHKeyRemoveCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"deleted": true, "ssh_key": deleted})
+				return c.writeJSON(map[string]any{"deleted": true, "ssh_key": deleted})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "deleted", Value: "true"},
@@ -252,7 +252,7 @@ func (c *CLI) newAppSSHDiagnoseCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, c.appSSHDiagnosisResponseForOutput(resp))
+				return c.writeJSON(c.appSSHDiagnosisResponseForOutput(resp))
 			}
 			if err := writeAppSSHStatus(c.stdout, resp.App, resp.SSH, c.showIDs()); err != nil {
 				return err
@@ -301,7 +301,7 @@ func (c *CLI) newAppSSHConfigCommand() *cobra.Command {
 			}
 			if c.wantsJSON() {
 				app := c.appForOutput(resp.App)
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app":         app,
 					"ssh":         resp.SSH,
 					"config":      appSSHOpenSSHConfig(resp.App, resp.SSH, identityFile),
@@ -330,7 +330,7 @@ func (c *CLI) runAppSSHConnect(appRef string, opts appSSHConnectOptions) error {
 	}
 	if c.wantsJSON() {
 		app := c.appForOutput(resp.App)
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":         app,
 			"ssh":         resp.SSH,
 			"ssh_command": appSSHCommand(resp.SSH, opts.IdentityFile),
@@ -369,7 +369,7 @@ func (c *CLI) resolveAppSSHClientAndApp(appRef string) (*Client, model.App, erro
 
 func (c *CLI) writeAppSSHResponse(resp appSSHResponse) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, c.appSSHResponseForOutput(resp))
+		return c.writeJSON(c.appSSHResponseForOutput(resp))
 	}
 	return writeAppSSHStatus(c.stdout, resp.App, resp.SSH, c.showIDs())
 }

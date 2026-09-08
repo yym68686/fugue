@@ -29,7 +29,7 @@ func (c *CLI) newFindCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeFindResponse(c.stdout, response)
 		},

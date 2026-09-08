@@ -67,7 +67,7 @@ For app-owned business log tables, prefer "app logs table". The old
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderAppObservabilityLogs(c.stdout, response)
 		},
@@ -145,7 +145,7 @@ func (c *CLI) runAppLogsTableQuery(client *Client, appID string, opts appLogQuer
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 	return renderAppDatabaseQueryResult(c.stdout, result)
 }
@@ -191,7 +191,7 @@ func (c *CLI) newAppLogsPodsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, inventory)
+				return c.writeJSON(inventory)
 			}
 			for _, warning := range inventory.Warnings {
 				c.progressf("warning=%s", warning)

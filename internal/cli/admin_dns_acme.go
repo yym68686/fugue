@@ -48,7 +48,7 @@ func (c *CLI) newAdminDNSACMEListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeDNSACMEChallengeTable(c.stdout, response.Challenges)
 		},
@@ -106,7 +106,7 @@ func (c *CLI) newAdminDNSACMEPresentCommand() *cobra.Command {
 				}
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeDNSACMEChallenge(c.stdout, response.Challenge)
 		},
@@ -143,7 +143,7 @@ func (c *CLI) newAdminDNSACMECleanupCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, response)
+					return c.writeJSON(response)
 				}
 				return writeDNSACMEChallenge(c.stdout, response.Challenge)
 			}
@@ -168,7 +168,7 @@ func (c *CLI) newAdminDNSACMECleanupCommand() *cobra.Command {
 				return fmt.Errorf("no matching ACME challenge found")
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"deleted": true, "challenges": deleted})
+				return c.writeJSON(map[string]any{"deleted": true, "challenges": deleted})
 			}
 			return writeDNSACMEChallengeTable(c.stdout, deleted)
 		},

@@ -101,7 +101,7 @@ func (c *CLI) newWorkspaceListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeWorkspaceTree(c.stdout, response)
 		},
@@ -139,7 +139,7 @@ func (c *CLI) newWorkspaceReadCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if response.Encoding != "" && response.Encoding != "utf-8" {
 				c.progressf("encoding=%s", response.Encoding)
@@ -195,7 +195,7 @@ Use --from-file - to read bytes from stdin.
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			pairs := []kvPair{
 				{Key: "path", Value: response.Path},
@@ -252,7 +252,7 @@ func (c *CLI) newWorkspaceMkdirCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			pairs := []kvPair{
 				{Key: "path", Value: response.Path},
@@ -307,7 +307,7 @@ func (c *CLI) newWorkspaceRemoveCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			pairs := []kvPair{
 				{Key: "path", Value: response.Path},

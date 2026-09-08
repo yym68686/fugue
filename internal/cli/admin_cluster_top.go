@@ -38,7 +38,7 @@ func (c *CLI) newAdminClusterTopCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			if opts.Once || !c.shouldUseInteractiveMonitor(opts.Plain) {
 				if !opts.Once {

@@ -35,6 +35,7 @@ func (c *CLI) newOpsCommand() *cobra.Command {
 		c.newOpsTimelineCommand(),
 		c.newOpsDebugBundleCommand(),
 		c.newOpsWatchCommand(),
+		c.newOperationWaitCommand(),
 		c.newOpsAuditCommand(),
 	)
 	return cmd
@@ -62,7 +63,7 @@ func (c *CLI) newOpsCancelCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"operation": redactOperationForOutput(op)})
+				return c.writeJSON(map[string]any{"operation": redactOperationForOutput(op)})
 			}
 			_, err = fmt.Fprintf(c.stdout, "operation=%s\nstatus=%s\nmessage=%s\n", op.ID, op.Status, op.ResultMessage)
 			return err
@@ -91,7 +92,7 @@ func (c *CLI) newOpsEvidenceCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"evidence": evidence})
+				return c.writeJSON(map[string]any{"evidence": evidence})
 			}
 			return writeOperationEvidenceTable(c.stdout, evidence)
 		},
@@ -118,7 +119,7 @@ func (c *CLI) newOpsTimelineCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"timeline": timeline})
+				return c.writeJSON(map[string]any{"timeline": timeline})
 			}
 			return writeOperationTimelineTable(c.stdout, timeline)
 		},
@@ -157,12 +158,12 @@ func (c *CLI) newOpsDebugBundleCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"output": opts.Output})
+					return c.writeJSON(map[string]any{"output": opts.Output})
 				}
 				_, err := fmt.Fprintf(c.stdout, "wrote debug bundle: %s\n", opts.Output)
 				return err
 			}
-			return writeJSON(c.stdout, map[string]any{"bundle": bundle})
+			return c.writeJSON(map[string]any{"bundle": bundle})
 		},
 	}
 	cmd.Flags().StringVar(&opts.Output, "output", "", "Write the debug bundle JSON to a local file")
@@ -254,7 +255,7 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 				operations = redactOperationsForOutput(operations)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"operations": operations})
+				return c.writeJSON(map[string]any{"operations": operations})
 			}
 			if err := writeOperationTableWithApps(c.stdout, operations, mapAppNames(appInventory)); err != nil {
 				return err
@@ -302,7 +303,7 @@ func (c *CLI) newOpsShowCommand() *cobra.Command {
 				if diagnosis != nil {
 					payload["diagnosis"] = diagnosis
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			return renderOperationWithDiagnosis(c.stdout, op, diagnosis)
 		},
@@ -337,7 +338,7 @@ func (c *CLI) newOpsExplainCommand() *cobra.Command {
 				op = redactOperationForOutput(op)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"operation": op,
 					"diagnosis": diagnosis,
 				})
@@ -359,10 +360,9 @@ func (c *CLI) newOpsWatchCommand() *cobra.Command {
 		Monitor     monitorOptions
 	}{Monitor: monitorOptions{Interval: 2 * time.Second}}
 	cmd := &cobra.Command{
-		Use:     "watch [operation]",
-		Aliases: []string{"wait"},
-		Short:   "Watch an operation until it completes",
-		Args:    cobra.MaximumNArgs(1),
+		Use:   "watch [operation]",
+		Short: "Watch an operation until it completes",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -399,7 +399,7 @@ func (c *CLI) newOpsWatchCommand() *cobra.Command {
 				if !opts.ShowSecrets {
 					op = redactOperationForOutput(op)
 				}
-				return writeJSON(c.stdout, map[string]any{"operation": op})
+				return c.writeJSON(map[string]any{"operation": op})
 			}
 			if opts.Monitor.Once || !c.shouldUseInteractiveMonitor(opts.Monitor.Plain) {
 				if !opts.Monitor.Once {
@@ -510,7 +510,7 @@ func (c *CLI) newOpsAuditCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"audit_events": events})
+				return c.writeJSON(map[string]any{"audit_events": events})
 			}
 			return writeAuditEventTable(c.stdout, events)
 		},

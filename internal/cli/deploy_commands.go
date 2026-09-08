@@ -562,7 +562,7 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		}
 		if !uploadInspectionHasTopology(inspection) {
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, inspection)
+				return c.writeJSON(inspection)
 			}
 			return renderTemplatePlan(c.stdout, inspectViewFromUpload(inspection))
 		}
@@ -711,7 +711,7 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 		}
 		if !githubInspectionHasTopology(inspection) {
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, inspection)
+				return c.writeJSON(inspection)
 			}
 			return renderTemplatePlan(c.stdout, inspectViewFromGitHub(inspection))
 		}
@@ -732,7 +732,7 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	}
 	if response.RequestInProgress && response.App == nil && len(response.Apps) == 0 {
 		if c.wantsJSON() {
-			return writeJSON(c.stdout, response)
+			return c.writeJSON(response)
 		}
 		pairs := []kvPair{{Key: "request_in_progress", Value: "true"}}
 		if response.Idempotency != nil {
@@ -893,7 +893,7 @@ func (c *CLI) runDeployImageExistingApp(imageRef, appRef string, opts deployImag
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":       redactAppForOutput(app),
 			"operation": redactOperationForOutput(*finalOp),
 			"build":     response.Build,
@@ -1176,7 +1176,7 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *ap
 			opCopy := bundle.PrimaryOp
 			payload.Operation = &opCopy
 		}
-		return writeJSON(c.stdout, payload)
+		return c.writeJSON(payload)
 	}
 
 	pairs := make([]kvPair, 0, 4)

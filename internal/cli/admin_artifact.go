@@ -75,7 +75,7 @@ func (c *CLI) newAdminArtifactCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact})
+				return c.writeJSON(map[string]any{"artifact": artifact})
 			}
 			return writePlatformArtifact(c.stdout, artifact)
 		},
@@ -109,7 +109,7 @@ func (c *CLI) newAdminArtifactListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifacts": artifacts})
+				return c.writeJSON(map[string]any{"artifacts": artifacts})
 			}
 			return writePlatformArtifactTable(c.stdout, artifacts)
 		},
@@ -136,7 +136,7 @@ func (c *CLI) newAdminArtifactShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact})
+				return c.writeJSON(map[string]any{"artifact": artifact})
 			}
 			return writePlatformArtifact(c.stdout, artifact)
 		},
@@ -162,7 +162,7 @@ func (c *CLI) newAdminArtifactDiffCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"left": left, "right": right, "diff": platformArtifactSafeDiff(left, right)})
+				return c.writeJSON(map[string]any{"left": left, "right": right, "diff": platformArtifactSafeDiff(left, right)})
 			}
 			return writePlatformArtifactDiff(c.stdout, left, right)
 		},
@@ -185,7 +185,7 @@ func (c *CLI) newAdminArtifactValidateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writePlatformArtifactValidation(c.stdout, response)
 		},
@@ -248,7 +248,7 @@ func (c *CLI) newAdminArtifactReleaseCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writePlatformArtifactRelease(c.stdout, response)
 		},
@@ -291,7 +291,7 @@ func (c *CLI) newAdminArtifactVerifyLKGCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writePlatformArtifactRelease(c.stdout, response)
 		},
@@ -367,7 +367,7 @@ func (c *CLI) newAdminArtifactRollbackCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writePlatformArtifactRelease(c.stdout, response)
 		},
@@ -401,7 +401,7 @@ func (c *CLI) newAdminArtifactConsumersCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"consumers": consumers})
+				return c.writeJSON(map[string]any{"consumers": consumers})
 			}
 			return writePlatformConsumers(c.stdout, consumers)
 		},
@@ -423,7 +423,7 @@ func (c *CLI) newAdminArtifactLKGCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"lkg": lkg})
+				return c.writeJSON(map[string]any{"lkg": lkg})
 			}
 			return writePlatformLKG(c.stdout, lkg)
 		},
@@ -450,7 +450,7 @@ func (c *CLI) newAdminFailureContractCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"contracts": contracts})
+				return c.writeJSON(map[string]any{"contracts": contracts})
 			}
 			return writeFailureContractTable(c.stdout, contracts)
 		},
@@ -469,7 +469,7 @@ func (c *CLI) newAdminFailureContractCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"contract": contract})
+				return c.writeJSON(map[string]any{"contract": contract})
 			}
 			return writeFailureContract(c.stdout, contract)
 		},

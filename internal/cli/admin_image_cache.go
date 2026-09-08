@@ -47,7 +47,7 @@ func (c *CLI) newAdminImageCacheInventoryCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"nodes": nodes, "manifests": manifests})
+				return c.writeJSON(map[string]any{"nodes": nodes, "manifests": manifests})
 			}
 			if err := writeImageCacheInventoryTable(c.stdout, nodes); err != nil {
 				return err
@@ -98,7 +98,7 @@ blob-only GC pass is available.
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plan": plan})
+				return c.writeJSON(map[string]any{"plan": plan})
 			}
 			return writeImageCachePrunePlan(c.stdout, plan)
 		},
@@ -161,7 +161,7 @@ unreferenced blob candidates even if there are no manifest candidates.
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plan": plan, "task": task})
+				return c.writeJSON(map[string]any{"plan": plan, "task": task})
 			}
 			if err := writeImageCachePrunePlan(c.stdout, plan); err != nil {
 				return err

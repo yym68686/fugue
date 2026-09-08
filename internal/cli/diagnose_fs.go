@@ -95,7 +95,7 @@ func (c *CLI) newDiagnoseFilesystemCommand() *cobra.Command {
 			result, runErr := c.runFilesystemDiagnosis(client, app, opts)
 			sanitized := sanitizeFilesystemDiagnosisResult(result, c.shouldRedact())
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, sanitized); err != nil {
+				if err := c.writeJSON(sanitized); err != nil {
 					return err
 				}
 			} else {

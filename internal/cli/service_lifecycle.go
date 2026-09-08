@@ -90,7 +90,7 @@ func (c *CLI) setServiceSuspended(ref string, suspended, wait bool) error {
 		if response.Operation != nil {
 			payload["operation"] = redactOperationForOutput(*response.Operation)
 		}
-		return writeJSON(c.stdout, payload)
+		return c.writeJSON(payload)
 	}
 
 	pairs := []kvPair{{Key: "already_current", Value: fmt.Sprintf("%t", response.AlreadyCurrent)}}
@@ -160,7 +160,7 @@ func (c *CLI) newServicePostgresOrphanLifecycleCommand(action string, suspended 
 				}
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"orphan": response.Orphan, "already_current": response.AlreadyCurrent})
+				return c.writeJSON(map[string]any{"orphan": response.Orphan, "already_current": response.AlreadyCurrent})
 			}
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "app_id", Value: response.Orphan.AppID},
@@ -239,7 +239,7 @@ func (c *CLI) newServicePostgresOrphanDeleteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "app_id", Value: response.AppID},
@@ -267,7 +267,7 @@ func (c *CLI) newServicePostgresOrphanListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"orphans": orphans})
+				return c.writeJSON(map[string]any{"orphans": orphans})
 			}
 			return writeOrphanManagedAppTable(c.stdout, orphans)
 		},
@@ -293,7 +293,7 @@ func (c *CLI) newServicePostgresOrphanAdoptCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app":              redactAppForOutput(response.App),
 					"backing_services": cloneBackingServicesForOutput(response.BackingServices, true),
 					"already_adopted":  response.AlreadyAdopted,

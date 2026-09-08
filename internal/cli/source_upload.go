@@ -42,7 +42,7 @@ func (c *CLI) newSourceUploadShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"source_upload": inspection})
+				return c.writeJSON(map[string]any{"source_upload": inspection})
 			}
 			return renderSourceUploadInspection(c.stdout, inspection)
 		},
@@ -91,7 +91,7 @@ inspection still uses the current API key, but the archive bytes require
 				return fmt.Errorf("write archive %s: %w", outputPath, err)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"source_upload": upload,
 					"archive":       outputPath,
 					"bytes":         len(archiveBytes),

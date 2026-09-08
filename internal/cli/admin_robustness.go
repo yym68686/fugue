@@ -41,7 +41,7 @@ func (c *CLI) newAdminRobustnessStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"status": status})
+				return c.writeJSON(map[string]any{"status": status})
 			}
 			return writeRobustnessStatus(c.stdout, status)
 		},
@@ -88,7 +88,7 @@ func (c *CLI) runAdminRobustnessCheck(subject string) error {
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{"status": status})
+		return c.writeJSON(map[string]any{"status": status})
 	}
 	return writeRobustnessStatus(c.stdout, status)
 }
@@ -114,7 +114,7 @@ func (c *CLI) newAdminRobustnessIncidentsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"incidents": incidents})
+				return c.writeJSON(map[string]any{"incidents": incidents})
 			}
 			return writeRobustnessIncidentTable(c.stdout, incidents)
 		},
@@ -133,7 +133,7 @@ func (c *CLI) newAdminRobustnessIncidentsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"incident": incident})
+				return c.writeJSON(map[string]any{"incident": incident})
 			}
 			return writeRobustnessIncident(c.stdout, incident)
 		},
@@ -160,7 +160,7 @@ func (c *CLI) newAdminRobustnessRepairPlanCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plan": plan})
+				return c.writeJSON(map[string]any{"plan": plan})
 			}
 			return writeRobustnessRepairPlan(c.stdout, plan)
 		},
@@ -188,7 +188,7 @@ func (c *CLI) newAdminRobustnessRepairCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plan": plan})
+				return c.writeJSON(map[string]any{"plan": plan})
 			}
 			return writeRobustnessRepairPlan(c.stdout, plan)
 		},

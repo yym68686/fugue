@@ -54,7 +54,7 @@ func (c *CLI) newAdminDomainsListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"bindings": bindings})
+				return c.writeJSON(map[string]any{"bindings": bindings})
 			}
 			return writePlatformDomainBindingTable(c.stdout, bindings)
 		},
@@ -79,7 +79,7 @@ func (c *CLI) newAdminDomainsGetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"binding": binding})
+				return c.writeJSON(map[string]any{"binding": binding})
 			}
 			return writePlatformDomainBinding(c.stdout, binding)
 		},
@@ -135,7 +135,7 @@ func (c *CLI) newAdminDomainsBindCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"binding": binding})
+				return c.writeJSON(map[string]any{"binding": binding})
 			}
 			return writePlatformDomainBinding(c.stdout, binding)
 		},
@@ -162,7 +162,7 @@ func (c *CLI) newAdminDomainsUnbindCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writePlatformDomainBinding(c.stdout, response.Binding); err != nil {
 				return err

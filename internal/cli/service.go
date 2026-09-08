@@ -75,7 +75,7 @@ func (c *CLI) newServiceListCommand() *cobra.Command {
 			}
 			filtered := filterServices(services, tenantID, projectID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backing_services": cloneBackingServicesForOutput(filtered, true)})
+				return c.writeJSON(map[string]any{"backing_services": cloneBackingServicesForOutput(filtered, true)})
 			}
 			projectNames := c.loadProjectNames(client, tenantID)
 			var (
@@ -228,7 +228,7 @@ func (c *CLI) createPostgresService(name string, opts postgresServiceCreateOptio
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{"backing_service": redactBackingServiceForOutput(service)})
+		return c.writeJSON(map[string]any{"backing_service": redactBackingServiceForOutput(service)})
 	}
 	return c.renderBackingServiceDetail(client, service)
 }
@@ -257,7 +257,7 @@ func (c *CLI) newServiceShowCommand() *cobra.Command {
 				if view, ok := backingServicePostgresResourcesForOutput(service); ok {
 					payload["postgres_resources"] = view
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			return c.renderBackingServiceDetail(client, service)
 		},
@@ -305,7 +305,7 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{
+					return c.writeJSON(map[string]any{
 						"backing_service":   redactBackingServiceForOutput(response.BackingService),
 						"already_current":   response.AlreadyCurrent,
 						"dry_run":           true,
@@ -339,7 +339,7 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 				if response.Operation != nil {
 					payload["operation"] = response.Operation
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			if response.Operation != nil && !opts.Wait {
 				if _, err := fmt.Fprintf(c.stdout, "operation=%s\n\n", response.Operation.ID); err != nil {
@@ -428,7 +428,7 @@ func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
 				if response.Operation != nil {
 					payload["operation"] = response.Operation
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			if response.Operation != nil && !opts.Wait {
 				if _, err := fmt.Fprintf(c.stdout, "operation=%s\n\n", response.Operation.ID); err != nil {
@@ -482,7 +482,7 @@ func (c *CLI) newServiceRemoveCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"deleted":         true,
 					"backing_service": redactBackingServiceForOutput(service),
 				})

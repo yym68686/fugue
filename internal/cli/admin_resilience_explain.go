@@ -39,7 +39,7 @@ func (c *CLI) newAdminReleaseExplainCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"release_id": args[0], "status": status})
+				return c.writeJSON(map[string]any{"release_id": args[0], "status": status})
 			}
 			if _, err := fmt.Fprintf(c.stdout, "release_id=%s\n", args[0]); err != nil {
 				return err
@@ -66,7 +66,7 @@ func (c *CLI) newAdminReleaseGuardStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"status": status})
+				return c.writeJSON(map[string]any{"status": status})
 			}
 			return writeReleaseGuardStatus(c.stdout, status)
 		},
@@ -95,7 +95,7 @@ func (c *CLI) newAdminTrafficSafetyCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"state": state})
+				return c.writeJSON(map[string]any{"state": state})
 			}
 			return writeTrafficSafetyState(c.stdout, state)
 		},
@@ -125,7 +125,7 @@ func (c *CLI) newAdminRequestCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"explain": explain})
+				return c.writeJSON(map[string]any{"explain": explain})
 			}
 			return writeRequestExplain(c.stdout, explain)
 		},

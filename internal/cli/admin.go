@@ -138,7 +138,7 @@ func (c *CLI) newAdminAPIKeyListCommand() *cobra.Command {
 			}
 			filtered := filterAPIKeys(keys, tenantID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"api_keys": filtered})
+				return c.writeJSON(map[string]any{"api_keys": filtered})
 			}
 			return writeAPIKeyTable(c.stdout, filtered)
 		},
@@ -180,7 +180,7 @@ secret to the user or automation and have them export it as FUGUE_API_KEY.
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderAPIKey(c.stdout, response.APIKey); err != nil {
 				return err
@@ -228,7 +228,7 @@ func (c *CLI) newAdminAPIKeyUpdateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"api_key": key})
+				return c.writeJSON(map[string]any{"api_key": key})
 			}
 			return renderAPIKey(c.stdout, key)
 		},
@@ -273,7 +273,7 @@ func (c *CLI) newAdminAPIKeyRotateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderAPIKey(c.stdout, response.APIKey); err != nil {
 				return err
@@ -319,7 +319,7 @@ func (c *CLI) newAdminAPIKeyStateCommand(mode string) *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"api_key": key})
+				return c.writeJSON(map[string]any{"api_key": key})
 			}
 			return renderAPIKey(c.stdout, key)
 		},
@@ -347,7 +347,7 @@ func (c *CLI) newAdminAPIKeyRemoveCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderAPIKey(c.stdout, response.APIKey); err != nil {
 				return err
@@ -395,7 +395,7 @@ func (c *CLI) newAdminNodeKeyListCommand() *cobra.Command {
 			}
 			filtered := filterNodeKeys(keys, tenantID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"node_keys": filtered})
+				return c.writeJSON(map[string]any{"node_keys": filtered})
 			}
 			return writeNodeKeyTable(c.stdout, filtered)
 		},
@@ -421,7 +421,7 @@ func (c *CLI) newAdminNodeKeyCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderNodeKey(c.stdout, response.NodeKey); err != nil {
 				return err
@@ -451,7 +451,7 @@ func (c *CLI) newAdminNodeKeyUsageCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderNodeKey(c.stdout, response.NodeKey); err != nil {
 				return err
@@ -489,7 +489,7 @@ func (c *CLI) newAdminNodeKeyRevokeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderNodeKey(c.stdout, response.NodeKey); err != nil {
 				return err
@@ -557,7 +557,7 @@ func (c *CLI) newAdminRuntimeListCommand() *cobra.Command {
 				runtimes = filtered
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtimes": runtimes})
+				return c.writeJSON(map[string]any{"runtimes": runtimes})
 			}
 			return writeRuntimeTable(c.stdout, runtimes)
 		},
@@ -580,7 +580,7 @@ func (c *CLI) newAdminRuntimeShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
+				return c.writeJSON(map[string]any{"runtime": runtimeObj})
 			}
 			return renderRuntime(c.stdout, runtimeObj)
 		},
@@ -607,7 +607,7 @@ func (c *CLI) newAdminRuntimeAccessCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderRuntime(c.stdout, response.Runtime); err != nil {
 				return err
@@ -667,7 +667,7 @@ func (c *CLI) newAdminRuntimeCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderRuntime(c.stdout, response.Runtime); err != nil {
 				return err
@@ -709,7 +709,7 @@ func (c *CLI) newAdminRuntimeShareCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"grant": grant})
+				return c.writeJSON(map[string]any{"grant": grant})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "runtime_id", Value: grant.RuntimeID},
@@ -744,7 +744,7 @@ func (c *CLI) newAdminRuntimeUnshareCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"removed": removed})
+				return c.writeJSON(map[string]any{"removed": removed})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "runtime_id", Value: runtimeObj.ID},
@@ -775,7 +775,7 @@ func (c *CLI) newAdminRuntimeShareModeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
+				return c.writeJSON(map[string]any{"runtime": runtimeObj})
 			}
 			return renderRuntime(c.stdout, runtimeObj)
 		},
@@ -801,7 +801,7 @@ func (c *CLI) newAdminRuntimePoolModeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderRuntime(c.stdout, response.Runtime); err != nil {
 				return err
@@ -843,7 +843,7 @@ func (c *CLI) newAdminRuntimeTokenListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"enrollment_tokens": tokens})
+				return c.writeJSON(map[string]any{"enrollment_tokens": tokens})
 			}
 			return writeEnrollmentTokenTable(c.stdout, tokens)
 		},
@@ -872,7 +872,7 @@ func (c *CLI) newAdminRuntimeTokenCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "token_id", Value: response.EnrollmentToken.ID},
@@ -945,7 +945,7 @@ func (c *CLI) newAdminClusterNodePolicyListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"node_policies": statuses})
+				return c.writeJSON(map[string]any{"node_policies": statuses})
 			}
 			return writeClusterNodePolicyStatusTable(c.stdout, statuses)
 		},
@@ -967,7 +967,7 @@ func (c *CLI) newAdminClusterNodePolicyGetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"node_policy": status})
+				return c.writeJSON(map[string]any{"node_policy": status})
 			}
 			return writeClusterNodePolicyDetails(c.stdout, status)
 		},
@@ -988,7 +988,7 @@ func (c *CLI) newAdminClusterNodePolicyStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"summary": summary, "node_policies": statuses})
+				return c.writeJSON(map[string]any{"summary": summary, "node_policies": statuses})
 			}
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "total", Value: formatInt(summary.Total)},
@@ -1040,7 +1040,7 @@ func (c *CLI) newAdminClusterNodePolicySetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"cluster_node": response.ClusterNode, "node_reconciled": response.NodeReconciled, "reconcile_error": response.ReconcileError})
+				return c.writeJSON(map[string]any{"cluster_node": response.ClusterNode, "node_reconciled": response.NodeReconciled, "reconcile_error": response.ReconcileError})
 			}
 			if err := writeClusterNodeTable(c.stdout, []model.ClusterNode{response.ClusterNode}); err != nil {
 				return err
@@ -1075,7 +1075,7 @@ func (c *CLI) newAdminClusterNodesCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"cluster_nodes": nodes})
+				return c.writeJSON(map[string]any{"cluster_nodes": nodes})
 			}
 			return writeClusterNodeTable(c.stdout, nodes)
 		},
@@ -1096,7 +1096,7 @@ func (c *CLI) newAdminClusterStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"control_plane": status})
+				return c.writeJSON(map[string]any{"control_plane": status})
 			}
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "namespace", Value: status.Namespace},
@@ -1192,7 +1192,7 @@ func (c *CLI) newAdminClusterJoinScriptCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"script": script})
+				return c.writeJSON(map[string]any{"script": script})
 			}
 			_, err = fmt.Fprint(c.stdout, script)
 			return err
@@ -1297,7 +1297,7 @@ func (c *CLI) newAdminBillingShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"billing": billing})
+				return c.writeJSON(map[string]any{"billing": billing})
 			}
 			return renderBillingSummary(c.stdout, billing)
 		},
@@ -1331,7 +1331,7 @@ func (c *CLI) newAdminBillingCapCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"billing": billing})
+				return c.writeJSON(map[string]any{"billing": billing})
 			}
 			return renderBillingSummary(c.stdout, billing)
 		},
@@ -1368,7 +1368,7 @@ func (c *CLI) newAdminBillingTopUpCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"billing": billing})
+				return c.writeJSON(map[string]any{"billing": billing})
 			}
 			return renderBillingSummary(c.stdout, billing)
 		},
@@ -1403,7 +1403,7 @@ func (c *CLI) newAdminBillingSetBalanceCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"billing": billing})
+				return c.writeJSON(map[string]any{"billing": billing})
 			}
 			return renderBillingSummary(c.stdout, billing)
 		},
@@ -1444,7 +1444,7 @@ func (c *CLI) newAdminTenantCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"tenant": tenant})
+				return c.writeJSON(map[string]any{"tenant": tenant})
 			}
 			return renderTenant(c.stdout, tenant)
 		},
@@ -1471,7 +1471,7 @@ func (c *CLI) newAdminTenantRemoveCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderTenant(c.stdout, response.Tenant); err != nil {
 				return err

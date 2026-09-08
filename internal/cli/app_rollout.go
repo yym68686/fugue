@@ -19,7 +19,7 @@ func (c *CLI) newAppRolloutCommand() *cobra.Command {
 		Use:   "rollout",
 		Short: "Inspect app rollout history and live state",
 	}
-	cmd.AddCommand(c.newAppRolloutTimelineCommand())
+	cmd.AddCommand(c.newRolloutPolicyCommand(), c.newAppRolloutTimelineCommand())
 	return cmd
 }
 
@@ -49,7 +49,7 @@ func (c *CLI) newAppRolloutTimelineCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderAppRolloutTimeline(c.stdout, response)
 		},

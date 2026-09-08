@@ -64,6 +64,10 @@ func (c *Client) doPrepared(httpReq *http.Request) (httpPreparedResponse, error)
 		return httpPreparedResponse{}, fmt.Errorf("http client is not configured")
 	}
 
+	if c.context != nil {
+		httpReq = httpReq.Clone(c.context)
+	}
+
 	attempts := 1
 	if isRetryableReadMethod(httpReq.Method) {
 		attempts += c.readRetryCount
@@ -78,7 +82,9 @@ func (c *Client) doPrepared(httpReq *http.Request) (httpPreparedResponse, error)
 		result, err := c.doPreparedOnce(reqForAttempt)
 		if err == nil {
 			if isRetryableReadMethod(httpReq.Method) && isRetryableHTTPStatus(result.StatusCode) && attempt < attempts {
-				time.Sleep(c.readRetryDelay)
+				if err := waitRequestRetry(httpReq.Context(), c.readRetryDelay); err != nil {
+					return result, err
+				}
 				continue
 			}
 			return result, nil
@@ -87,7 +93,9 @@ func (c *Client) doPrepared(httpReq *http.Request) (httpPreparedResponse, error)
 		if !isRetryableHTTPClientError(err) || attempt == attempts {
 			return result, err
 		}
-		time.Sleep(c.readRetryDelay)
+		if err := waitRequestRetry(httpReq.Context(), c.readRetryDelay); err != nil {
+			return result, err
+		}
 	}
 	return httpPreparedResponse{}, lastErr
 }
@@ -274,4 +282,15 @@ func isRetryableHTTPClientError(err error) bool {
 		strings.Contains(message, "client.timeout exceeded") ||
 		strings.Contains(message, "server closed idle connection") ||
 		strings.Contains(message, "connection reset by peer")
+}
+
+func waitRequestRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

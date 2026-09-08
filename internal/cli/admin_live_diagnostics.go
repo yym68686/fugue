@@ -147,7 +147,7 @@ func (c *CLI) finishPlatformDiagnosticStart(cmd *cobra.Command, response platfor
 		return err
 	}
 	if c.wantsJSON() {
-		if err := writeJSON(c.stdout, result); err != nil {
+		if err := c.writeJSON(result); err != nil {
 			return err
 		}
 	} else if err := renderPlatformDiagnosticReport(c.stdout, result); err != nil {
@@ -184,7 +184,7 @@ func (c *CLI) newAdminDiagnosticsListCommand(opts *platformDiagnosticCommandOpti
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderPlatformDiagnosticSessions(c.stdout, response.Sessions)
 		},
@@ -245,7 +245,7 @@ func (c *CLI) newAdminDiagnosticsReportCommand(opts *platformDiagnosticCommandOp
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderPlatformDiagnosticReport(c.stdout, response)
 		},
@@ -277,7 +277,7 @@ func (c *CLI) newAdminDiagnosticsCancelCommand(opts *platformDiagnosticCommandOp
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "diagnostic_session", Value: response.Session.ID},
@@ -289,7 +289,7 @@ func (c *CLI) newAdminDiagnosticsCancelCommand(opts *platformDiagnosticCommandOp
 
 func (c *CLI) renderPlatformDiagnosticSession(session platformDiagnosticSession) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, platformDiagnosticSessionResponse{Session: session})
+		return c.writeJSON(platformDiagnosticSessionResponse{Session: session})
 	}
 	return writeKeyValues(c.stdout,
 		kvPair{Key: "diagnostic_session", Value: session.ID},

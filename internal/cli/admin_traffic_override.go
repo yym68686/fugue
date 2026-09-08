@@ -43,7 +43,7 @@ func (c *CLI) newAdminTrafficOverrideListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"overrides": overrides})
+				return c.writeJSON(map[string]any{"overrides": overrides})
 			}
 			return writeTrafficOverrideTable(c.stdout, overrides)
 		},
@@ -65,7 +65,7 @@ func (c *CLI) newAdminTrafficOverrideGetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"override": override})
+				return c.writeJSON(map[string]any{"override": override})
 			}
 			return writeTrafficOverride(c.stdout, override)
 		},
@@ -112,7 +112,7 @@ func (c *CLI) newAdminTrafficOverrideStageCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"override": override})
+				return c.writeJSON(map[string]any{"override": override})
 			}
 			return writeTrafficOverride(c.stdout, override)
 		},
@@ -150,7 +150,7 @@ func (c *CLI) newAdminTrafficOverrideRevokeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"override": override})
+				return c.writeJSON(map[string]any{"override": override})
 			}
 			return writeTrafficOverride(c.stdout, override)
 		},
@@ -182,7 +182,7 @@ func (c *CLI) newAdminTrafficOverrideSigningKeyStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"signing_key": status})
+				return c.writeJSON(map[string]any{"signing_key": status})
 			}
 			return writeTrafficOverrideSigningKey(c.stdout, status)
 		},
@@ -204,7 +204,7 @@ func (c *CLI) newAdminTrafficOverrideSigningKeyRotateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"signing_key": status})
+				return c.writeJSON(map[string]any{"signing_key": status})
 			}
 			return writeTrafficOverrideSigningKey(c.stdout, status)
 		},

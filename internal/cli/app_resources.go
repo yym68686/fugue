@@ -202,7 +202,7 @@ func (c *CLI) newAppResourcesRecommendCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeResourceRecommendationTable(c.stdout, response.Recommendation)
 		},
@@ -252,7 +252,7 @@ func (c *CLI) newAppResourcesApplyCommand() *cobra.Command {
 				if len(nextSteps) != 0 {
 					payload["next_steps"] = nextSteps
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			if err := writeResourceRecommendationTable(c.stdout, response.Recommendation); err != nil {
 				return err
@@ -350,7 +350,7 @@ func (c *CLI) newAppResourcesAutoCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			result := appCommandResult{App: &response.App, Operation: response.Operation}
 			return c.renderAppCommandResult(result)
@@ -368,7 +368,7 @@ func bindAppResourcesWindowFlags(cmd *cobra.Command, opts *appResourcesOptions) 
 
 func (c *CLI) renderAppResourcesState(app model.App, operation *model.Operation, alreadyCurrent bool) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":             redactAppForOutput(app),
 			"resources":       app.Spec.Resources,
 			"right_sizing":    app.Spec.RightSizing,

@@ -41,7 +41,7 @@ func (c *CLI) newAdminAutomationListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeAutomationPolicyTable(c.stdout, response.Policies)
 		},
@@ -63,7 +63,7 @@ func (c *CLI) newAdminAutomationShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, model.AutomationPolicyResponse{Policy: policy})
+				return c.writeJSON(model.AutomationPolicyResponse{Policy: policy})
 			}
 			return writeAutomationPolicy(c.stdout, policy)
 		},

@@ -141,7 +141,7 @@ func (c *CLI) newAppDatabaseImportCommand() *cobra.Command {
 					"app":    app,
 					"result": response,
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "app_id", Value: app.ID},
@@ -250,7 +250,7 @@ func (c *CLI) newAppDatabaseAccessRevokeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app":      redactAppForOutput(app),
 					"removed":  response.Removed,
 					"grant_id": strings.TrimSpace(args[1]),
@@ -326,7 +326,7 @@ func (c *CLI) renderAppDatabaseImportStatus(app model.App, job *model.AppDatabas
 			"job":    job,
 			"action": action,
 		}
-		return writeJSON(c.stdout, payload)
+		return c.writeJSON(payload)
 	}
 	pairs := []kvPair{
 		{Key: "app_id", Value: app.ID},
@@ -348,7 +348,7 @@ func (c *CLI) renderAppDatabaseImportStatus(app model.App, job *model.AppDatabas
 
 func (c *CLI) renderAppDatabaseAccessResponse(app model.App, grants []model.AppDatabaseAccessGrant) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":    redactAppForOutput(app),
 			"grants": grants,
 		})
@@ -373,7 +373,7 @@ func (c *CLI) renderAppDatabaseAccessGrantCreate(app model.App, response appData
 	grant := response.Grant
 	tunnelCommand := fmt.Sprintf("fugue app db access tunnel %s --grant-id %s --token %s --listen %s", app.Name, grant.ID, response.Secret, strings.TrimSpace(listen))
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":            redactAppForOutput(app),
 			"grant":          grant,
 			"secret":         response.Secret,

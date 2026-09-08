@@ -41,7 +41,7 @@ func (c *CLI) newAdminClusterNodeLocalPVListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"inventories": inventories})
+				return c.writeJSON(map[string]any{"inventories": inventories})
 			}
 			return writeLocalPVInventoryTable(c.stdout, inventories)
 		},
@@ -69,7 +69,7 @@ func (c *CLI) newAdminClusterNodeLocalPVShowCommand() *cobra.Command {
 			}
 			inventory := newestLocalPVInventory(inventories)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"inventory": inventory})
+				return c.writeJSON(map[string]any{"inventory": inventory})
 			}
 			return writeLocalPVInventoryDetail(c.stdout, inventory)
 		},

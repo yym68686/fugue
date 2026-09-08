@@ -120,7 +120,7 @@ func (c *CLI) newAdminUsersListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, snapshot)
+				return c.writeJSON(snapshot)
 			}
 			return renderAdminUsersSnapshot(c.stdout, snapshot)
 		},
@@ -151,7 +151,7 @@ func (c *CLI) newAdminUsersShowCommand() *cobra.Command {
 				return fmt.Errorf("admin user %q not found", args[0])
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"enrichmentState": snapshot.EnrichmentState,
 					"errors":          snapshot.Errors,
 					"user":            user,
@@ -181,7 +181,7 @@ func (c *CLI) newAdminUsersEnrichCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, snapshot)
+				return c.writeJSON(snapshot)
 			}
 			return renderAdminUsersSnapshot(c.stdout, snapshot)
 		},
@@ -212,7 +212,7 @@ func (c *CLI) newAdminUsersResolveCommand() *cobra.Command {
 				return fmt.Errorf("admin user %q not found", args[0])
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"enrichmentState": snapshot.EnrichmentState,
 					"errors":          snapshot.Errors,
 					"user":            user,
@@ -242,7 +242,7 @@ func (c *CLI) newAdminUsersUsageCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, snapshot)
+				return c.writeJSON(snapshot)
 			}
 			return renderAdminUsersUsageSnapshot(c.stdout, snapshot)
 		},

@@ -1,0 +1,22 @@
+{
+  "audit_date": "2026-09-08",
+  "repository": "/Users/yanyuming/Downloads/GitHub/fugue",
+  "head": "1553ad08958a805d63266e6cb4b2677f29a9f2ce",
+  "scope": "Current worktree including existing uncommitted changes; no production requests. Built CLI used for help and loopback-only synthetic API probes.",
+  "visible_help_nodes": 587,
+  "visible_leaf_nodes": 447,
+  "openapi_operations": 384,
+  "paths": 317,
+  "sha256": {
+    "internal/cli/root.go": "365c79c15377ed5bf92411e4db8aa930de7c39375a860a86b49ac59bbc7e62c7",
+    "internal/cli/ops.go": "cbc486a2944a55cef389ab368ce7c0ccd06b5d01da1229b5c716053edbcaab07",
+    "internal/cli/exit_codes.go": "97f6f8274e52f80a283777ddc491d5cdf68680a176fbe7335266d71edf9f12c8",
+    "internal/cli/client.go": "927b30d7123cc442f5ae6141748385cf60fe2b0861f6cf9c2e8db22f78d86b17",
+    "internal/cli/compat.go": "c8f12efc7763d1ad6d65a85551ae7cd0d2b926164c23d4d87ef635f183141c2f",
+    "internal/cli/app_overview.go": "31a10b69b4a53a88b389f206ad7d45f5ad67a6afc03bb5b0e5625c2ea4b68032",
+    "internal/cli/app_release.go": "a83077cf9e039a3ed779f5ac767e0e0e04d9122c389b29df3dba24a257566e30",
+    "internal/cli/admin_artifact.go": "863704dfebb91e327432f7eeb8922cb349c2e6cfc8ba43033cc1474ea0ac2865",
+    "openapi/openapi.yaml": "10bb057f720a0dafed48155d6e32e573800d761ca84ee3f50c6c9c58c36369f3"
+  },
+  "audit_binary_sha256": "109ecd93f8314f78c0d7fa4f571a37781c58b3882553c2f526b1d5bb53f6ec7a"
+}

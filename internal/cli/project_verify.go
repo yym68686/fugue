@@ -52,7 +52,7 @@ func (c *CLI) newProjectVerifyCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"checks": results})
+				return c.writeJSON(map[string]any{"checks": results})
 			}
 			return renderProjectVerifyResults(c.stdout, results)
 		},

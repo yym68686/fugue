@@ -29,7 +29,7 @@ func (c *CLI) newAdminClusterPodsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"cluster_pods": pods})
+				return c.writeJSON(map[string]any{"cluster_pods": pods})
 			}
 			return writeClusterPodTable(c.stdout, pods)
 		},
@@ -56,7 +56,7 @@ func (c *CLI) newAdminClusterEventsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"events": events})
+				return c.writeJSON(map[string]any{"events": events})
 			}
 			return writeClusterEventTable(c.stdout, events)
 		},
@@ -88,7 +88,7 @@ func (c *CLI) newAdminClusterLogsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, logs)
+				return c.writeJSON(logs)
 			}
 			_, err = fmt.Fprintln(c.stdout, strings.TrimRight(logs.Logs, "\n"))
 			return err
@@ -129,7 +129,7 @@ func (c *CLI) newAdminClusterExecCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			if result.AttemptCount > 1 {
 				c.progressf("cluster_exec_attempts=%d", result.AttemptCount)
@@ -175,7 +175,7 @@ func (c *CLI) newAdminClusterDNSResolveCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderClusterDNSResolveResult(c.stdout, result)
 		},
@@ -215,7 +215,7 @@ func (c *CLI) newAdminClusterNetConnectCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderClusterNetworkConnectResult(c.stdout, result)
 		},
@@ -263,7 +263,7 @@ func (c *CLI) newAdminClusterNetWebSocketCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderClusterWebSocketProbeResult(c.stdout, result)
 		},
@@ -302,7 +302,7 @@ func (c *CLI) newAdminClusterTLSProbeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderClusterTLSProbeResult(c.stdout, result)
 		},
@@ -337,7 +337,7 @@ func (c *CLI) newAdminClusterWorkloadShowCommand() *cobra.Command {
 			}
 			workload = sanitizeClusterWorkloadForOutput(workload, c.shouldRedact())
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workload": workload})
+				return c.writeJSON(map[string]any{"workload": workload})
 			}
 			return renderClusterWorkload(c.stdout, workload)
 		},
@@ -368,7 +368,7 @@ func (c *CLI) newAdminClusterRolloutStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"rollout": rollout})
+				return c.writeJSON(map[string]any{"rollout": rollout})
 			}
 			return renderClusterRolloutStatus(c.stdout, rollout)
 		},

@@ -70,7 +70,7 @@ func (c *CLI) newAdminDNSDelegationPlanCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"dry_run":   true,
 					"operation": "plan",
 					"preflight": response,
@@ -103,7 +103,7 @@ func (c *CLI) newAdminDNSDelegationApplyCommand() *cobra.Command {
 			if !opts.Confirm {
 				actions := dnsDelegationPlannedActions("apply", response.DelegationPlan)
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{
+					return c.writeJSON(map[string]any{
 						"dry_run":   true,
 						"operation": "apply",
 						"preflight": response,
@@ -123,7 +123,7 @@ func (c *CLI) newAdminDNSDelegationApplyCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"dry_run":   false,
 					"operation": "apply",
 					"preflight": response,
@@ -155,7 +155,7 @@ func (c *CLI) newAdminDNSDelegationRollbackCommand() *cobra.Command {
 			if !opts.Confirm {
 				actions := dnsDelegationPlannedActions("rollback", response.DelegationPlan)
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{
+					return c.writeJSON(map[string]any{
 						"dry_run":   true,
 						"operation": "rollback",
 						"preflight": response,
@@ -175,7 +175,7 @@ func (c *CLI) newAdminDNSDelegationRollbackCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"dry_run":   false,
 					"operation": "rollback",
 					"preflight": response,

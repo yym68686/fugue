@@ -125,7 +125,7 @@ func (c *CLI) newAppRequestCompareCommand() *cobra.Command {
 			}
 			result = sanitizeAppRequestCompareResult(result, c.shouldRedact())
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderAppRequestCompareResult(c.stdout, result)
 		},

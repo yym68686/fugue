@@ -98,7 +98,7 @@ func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 				c.attachAppBackupReadiness(client, &result)
 				c.attachAppSafeRolloutAudit(client, &result)
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, result)
+					return c.writeJSON(result)
 				}
 				return writeAppFailoverStatus(c.stdout, result)
 			}
@@ -117,7 +117,7 @@ func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 				c.attachAppSafeRolloutAudit(client, &results[index])
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"assessments": results})
+				return c.writeJSON(map[string]any{"assessments": results})
 			}
 			return writeAppFailoverTable(c.stdout, results)
 		},
@@ -469,7 +469,7 @@ func (c *CLI) renderAppContinuityResult(appID string, result appContinuityRespon
 		source = model.AppZeroDowntimeRequirementSourceServicePolicy
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app_id":                   appID,
 			"app_failover":             result.AppFailover,
 			"zero_downtime":            result.ZeroDowntime,

@@ -66,7 +66,7 @@ func (c *CLI) newAdminDNSNodesListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeDNSNodeTable(c.stdout, response.Nodes)
 		},
@@ -91,7 +91,7 @@ func (c *CLI) newAdminDNSNodesGetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeDNSNode(c.stdout, response.Node)
 		},
@@ -114,7 +114,7 @@ func (c *CLI) newAdminDNSStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeDNSDelegationPreflight(c.stdout, response)
 		},
@@ -158,7 +158,7 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 				report.QualityRank = &quality
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, report)
+				return c.writeJSON(report)
 			}
 			return writeDNSAnswerCheck(c.stdout, report)
 		},
@@ -192,7 +192,7 @@ func (c *CLI) newAdminDNSFullZoneCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"preflight": response})
+				return c.writeJSON(map[string]any{"preflight": response})
 			}
 			return writeDNSFullZonePreflight(c.stdout, response)
 		},

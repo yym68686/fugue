@@ -1,0 +1,39 @@
+[
+  {
+    "command": "fugue env ls audit --json",
+    "exit": 0,
+    "stdout": "{\n  \"app_name\": \"audit\",\n  \"app_id\": \"app_audit\",\n  \"env\": {\n    \"AUDIT_SECRET\": \"synthetic-secret-marker\"\n  }\n}\n",
+    "stderr": "",
+    "requests": [
+      "/v1/apps?include_live_status=false&include_resource_usage=false&q=audit",
+      "/v1/apps/app_audit/env"
+    ]
+  },
+  {
+    "command": "fugue app release policy show audit --json",
+    "exit": 0,
+    "stdout": "{\n  \"app\": {\n    \"id\": \"app_audit\",\n    \"tenant_id\": \"tenant_audit\",\n    \"project_id\": \"project_audit\",\n    \"name\": \"audit\",\n    \"description\": \"\",\n    \"spec\": {\n      \"image\": \"test:latest\",\n      \"env\": {\n        \"AUDIT_SECRET\": \"synthetic-secret-marker\"\n      },\n      \"replicas\": 1,\n      \"runtime_id\": \"\"\n    },\n    \"status\": {\n      \"phase\": \"deployed\",\n      \"current_replicas\": 0,\n      \"updated_at\": \"0001-01-01T00:00:00Z\"\n    },\n    \"created_at\": \"0001-01-01T00:00:00Z\",\n    \"updated_at\": \"0001-01-01T00:00:00Z\"\n  },\n  \"image_mirror_limit\": 1\n}\n",
+    "stderr": "",
+    "requests": [
+      "/v1/apps?include_live_status=false&include_resource_usage=false&q=audit",
+      "/v1/apps/app_audit"
+    ]
+  },
+  {
+    "command": "fugue app overview audit --json",
+    "exit": 0,
+    "stdout": "{\n  \"app\": {\n    \"id\": \"app_audit\",\n    \"tenant_id\": \"tenant_audit\",\n    \"project_id\": \"project_audit\",\n    \"name\": \"audit\",\n    \"description\": \"\",\n    \"spec\": {\n      \"image\": \"test:latest\",\n      \"env\": {\n        \"AUDIT_SECRET\": \"[redacted]\"\n      },\n      \"replicas\": 1,\n      \"runtime_id\": \"\"\n    },\n    \"status\": {\n      \"phase\": \"deployed\",\n      \"current_replicas\": 0,\n      \"updated_at\": \"0001-01-01T00:00:00Z\"\n    },\n    \"created_at\": \"0001-01-01T00:00:00Z\",\n    \"updated_at\": \"0001-01-01T00:00:00Z\"\n  }\n}\n",
+    "stderr": "",
+    "requests": [
+      "/v1/apps?include_live_status=false&include_resource_usage=false&q=audit",
+      "/v1/apps/app_audit",
+      "/v1/apps/app_audit/domains",
+      "/v1/apps/app_audit/bindings",
+      "/v1/operations?app_id=app_audit",
+      "/v1/apps/app_audit/image-tracking",
+      "/v1/apps/app_audit/images",
+      "/v1/apps/app_audit/runtime-pods?component=app",
+      "/v1/apps/app_audit/diagnosis?component=app"
+    ]
+  }
+]

@@ -43,7 +43,7 @@ func (c *CLI) newAppDatabaseQueryCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderAppDatabaseQueryResult(c.stdout, response)
 		},

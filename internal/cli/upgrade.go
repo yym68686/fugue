@@ -127,7 +127,7 @@ func (c *CLI) newVersionCommand() *cobra.Command {
 			}
 
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderCLIVersionResult(c.stdout, result)
 		},
@@ -172,7 +172,7 @@ func (c *CLI) newUpgradeCommand() *cobra.Command {
 					result.Status = "available"
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, result)
+					return c.writeJSON(result)
 				}
 				return renderCLIUpgradeResult(c.stdout, result)
 			}
@@ -181,7 +181,7 @@ func (c *CLI) newUpgradeCommand() *cobra.Command {
 				result.UpToDate = true
 				result.Status = "up-to-date"
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, result)
+					return c.writeJSON(result)
 				}
 				return renderCLIUpgradeResult(c.stdout, result)
 			}
@@ -222,7 +222,7 @@ func (c *CLI) newUpgradeCommand() *cobra.Command {
 			resetCLIUpdateNoticeCache(info.Version, release.TagName, release.HTMLURL)
 
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderCLIUpgradeResult(c.stdout, result)
 		},

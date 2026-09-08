@@ -121,7 +121,7 @@ to prepare the first release artifact.
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app":       app,
 					"next_step": fmt.Sprintf("fugue app build %s", app.Name),
 				})

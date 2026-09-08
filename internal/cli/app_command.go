@@ -202,7 +202,7 @@ func (c *CLI) renderAppStartupCommandState(app model.App, operation *model.Opera
 		if operation != nil {
 			payload["operation"] = redactOperationPtrForOutput(operation)
 		}
-		return writeJSON(c.stdout, payload)
+		return c.writeJSON(payload)
 	}
 	pairs := []kvPair{
 		{Key: "app_id", Value: app.ID},

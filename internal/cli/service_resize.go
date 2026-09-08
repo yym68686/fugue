@@ -248,7 +248,7 @@ func (c *CLI) newServicePostgresResizeCommand() *cobra.Command {
 				if !operationMonitorDone(operation) {
 					payload["next_step"] = "fugue operation watch " + operation.ID
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 
 			pairs := []kvPair{

@@ -37,7 +37,7 @@ func (c *CLI) newAppDiagnosisCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, diagnosis)
+					return c.writeJSON(diagnosis)
 				}
 				return renderAppObservabilityDiagnosis(c.stdout, diagnosis)
 			}
@@ -46,7 +46,7 @@ func (c *CLI) newAppDiagnosisCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"diagnosis": diagnosis})
+				return c.writeJSON(map[string]any{"diagnosis": diagnosis})
 			}
 			if c.shouldUseRichText() {
 				return c.renderRichDiagnosis(buildAppDiagnosisEvidenceView(diagnosis))

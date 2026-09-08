@@ -1,0 +1,385 @@
+method	path	operation_id	tags	openapi_line
+GET	/button.svg	getDeployButton	[System]	61
+GET	/healthz	healthz	[System]	76
+GET	/readyz	readyz	[System]	91
+GET	/v1/metadata/geoip	getGeoIPMetadata	[System]	106
+GET	/v1/auth/context	getAuthContext	[System]	128
+GET	/v1/search	searchResources	[Discovery]	145
+GET	/v1/edge/tls/ask	edgeTLSAsk	[Edge]	180
+GET	/v1/edge/domains	edgeDomains	[Edge]	234
+GET	/v1/edge/routes	edgeRoutes	[Edge]	252
+GET	/v1/edge/ssh/routes	edgeSSHRoutes	[Edge]	287
+GET	/v1/edge/nodes	listEdgeNodes	[Edge]	322
+GET	/v1/edge/nodes/{edge_id}	getEdgeNode	[Edge]	345
+GET	/v1/edge/nodes/{edge_id}/quality	getEdgeNodeQuality	[Edge]	368
+GET	/v1/edge/quality-rank/{hostname}	getEdgeQualityRank	[Edge]	397
+GET	/v1/edge/nodes/{edge_id}/desired-state	getEdgeNodeDesiredState	[Edge]	459
+GET	/v1/admin/edge/nodes/{edge_id}/desired-state	adminGetEdgeNodeDesiredState	[Admin, Edge]	482
+POST	/v1/admin/edge/nodes/{edge_id}/probe	adminProbeEdgeNode	[Admin, Edge]	505
+POST	/v1/admin/edge/nodes/{edge_id}/canary	adminSetEdgeNodeCanary	[Admin, Edge]	528
+POST	/v1/admin/edge/nodes/{edge_id}/drain	adminDrainEdgeNode	[Admin, Edge]	557
+POST	/v1/admin/edge/nodes/{edge_id}/undrain	adminUndrainEdgeNode	[Admin, Edge]	580
+POST	/v1/edge/nodes/{edge_id}/token	createEdgeNodeToken	[Edge]	603
+POST	/v1/edge/heartbeat	edgeHeartbeat	[Edge]	632
+GET	/v1/edge/route-policies	listEdgeRoutePolicies	[Edge]	655
+GET	/v1/edge/route-policies/{hostname}	getEdgeRoutePolicy	[Edge]	672
+PUT	/v1/edge/route-policies/{hostname}	putEdgeRoutePolicy	[Edge]	694
+DELETE	/v1/edge/route-policies/{hostname}	deleteEdgeRoutePolicy	[Edge]	722
+GET	/v1/admin/domains	listPlatformDomainBindings	[Admin]	745
+GET	/v1/admin/image-cache/inventory	adminListImageCacheInventory	[Admin]	767
+GET	/v1/admin/image-cache/prune-plan	adminGetImageCachePrunePlan	[Admin]	797
+POST	/v1/admin/image-cache/prune-plan	adminCreateImageCachePrunePlanTask	[Admin]	835
+GET	/v1/admin/image-retention/plan	adminGetImageRetentionPlan	[Admin]	858
+GET	/v1/admin/localpv/inventory	adminListLocalPVInventory	[Admin]	884
+GET	/v1/admin/control-plane/store/status	getControlPlaneStoreStatus	[Admin]	914
+POST	/v1/admin/control-plane/store/promote	promoteControlPlaneStore	[Admin]	931
+GET	/v1/admin/routes	listRouteServingModes	[Admin]	954
+GET	/v1/admin/routes/explain/{hostname}	explainRoute	[Admin]	971
+GET	/v1/admin/platform/autonomy/status	getPlatformAutonomyStatus	[Admin]	994
+POST	/v1/admin/platform/failure-drills	runPlatformFailureDrill	[Admin]	1011
+GET	/v1/admin/invariants	listInvariantDefinitions	[Admin]	1034
+GET	/v1/admin/invariants/inventory	getPlatformControlInventory	[Admin]	1051
+GET	/v1/admin/invariants/{invariant_id}	getInvariantDefinition	[Admin]	1068
+GET	/v1/admin/action-contracts	listAutomaticActionContracts	[Admin]	1091
+GET	/v1/admin/action-contracts/{contract_id}	getAutomaticActionContract	[Admin]	1108
+POST	/v1/admin/action-safety/evaluate	evaluateActionSafety	[Admin]	1131
+GET	/v1/admin/release-guard/status	getReleaseGuardStatus	[Admin]	1154
+GET	/v1/admin/gates	listGatePolicies	[Admin]	1177
+GET	/v1/admin/gates/{gate_id}	getGatePolicy	[Admin]	1194
+POST	/v1/admin/gates/{gate_id}/promote	promoteGatePolicy	[Admin]	1217
+GET	/v1/admin/traffic-safety/explain/{hostname}	explainTrafficSafety	[Admin]	1246
+GET	/v1/admin/requests/{request_id}/explain	explainRequest	[Admin]	1277
+GET	/v1/admin/robustness/status	getRobustnessStatus	[Admin]	1306
+GET	/v1/admin/robustness/check/{subject}	checkRobustnessSubject	[Admin]	1341
+GET	/v1/admin/robustness/incidents	listRobustnessIncidents	[Admin]	1369
+GET	/v1/admin/robustness/incidents/{id}	getRobustnessIncident	[Admin]	1392
+POST	/v1/admin/robustness/incidents/{id}/repair-plan	planRobustnessRepair	[Admin]	1420
+POST	/v1/admin/robustness/incidents/{id}/repair	runRobustnessRepair	[Admin]	1448
+GET	/v1/admin/artifacts	listPlatformArtifacts	[Admin]	1482
+POST	/v1/admin/artifacts	createPlatformArtifact	[Admin]	1521
+GET	/v1/admin/artifacts/{artifact_id}	getPlatformArtifact	[Admin]	1544
+POST	/v1/admin/artifacts/{artifact_id}/validate	validatePlatformArtifact	[Admin]	1567
+POST	/v1/admin/artifacts/{artifact_id}/release	releasePlatformArtifact	[Admin]	1597
+POST	/v1/admin/artifacts/{artifact_id}/rollback	rollbackPlatformArtifact	[Admin]	1626
+POST	/v1/admin/artifact-releases/{release_id}/verify-lkg	verifyPlatformArtifactReleaseLKG	[Admin]	1655
+GET	/v1/admin/artifacts/{artifact_id}/consumers	listPlatformArtifactConsumers	[Admin]	1684
+GET	/v1/admin/expected-consumer-sets	listPlatformExpectedConsumerSets	[Admin]	1707
+GET	/v1/admin/artifacts/{artifact_id}/lkg	getPlatformArtifactLKG	[Admin]	1754
+GET	/v1/platform-state/artifacts/{artifact_kind}	getPlatformStateArtifact	[Admin]	1777
+POST	/v1/platform-state/consumers/heartbeat	platformConsumerHeartbeat	[Admin]	1825
+POST	/v1/platform-state/consumers/trusted-heartbeat	trustedPlatformConsumerHeartbeat	[Admin]	1848
+GET	/v1/admin/failure-contracts	listSubsystemFailureContracts	[Admin]	1883
+GET	/v1/admin/failure-contracts/{subsystem}	getSubsystemFailureContract	[Admin]	1900
+POST	/v1/admin/security/key-rotation	preflightKeyRotation	[Admin]	1923
+GET	/v1/admin/dns/full-zone/preflight	dnsFullZonePreflight	[DNS]	1946
+GET	/v1/admin/domains/{hostname}	getPlatformDomainBinding	[Admin]	1982
+PUT	/v1/admin/domains/{hostname}	putPlatformDomainBinding	[Admin]	2004
+DELETE	/v1/admin/domains/{hostname}	deletePlatformDomainBinding	[Admin]	2032
+GET	/v1/edge/dns	edgeDNSBundle	[Edge]	2055
+GET	/v1/dns/nodes	listDNSNodes	[DNS]	2122
+GET	/v1/dns/acme-challenges	listDNSACMEChallenges	[DNS]	2145
+POST	/v1/dns/acme-challenges	upsertDNSACMEChallenge	[DNS]	2172
+DELETE	/v1/dns/acme-challenges/{challenge_id}	deleteDNSACMEChallenge	[DNS]	2195
+GET	/v1/dns/zones	listHostedDNSZones	[DNS]	2218
+POST	/v1/dns/zones	createHostedDNSZone	[DNS]	2234
+GET	/v1/dns/zones/{zone}	getHostedDNSZone	[DNS]	2257
+DELETE	/v1/dns/zones/{zone}	deleteHostedDNSZone	[DNS]	2279
+GET	/v1/dns/zones/{zone}/preflight	hostedDNSZonePreflight	[DNS]	2302
+GET	/v1/dns/zones/{zone}/records	listHostedDNSRecords	[DNS]	2333
+POST	/v1/dns/zones/{zone}/records	createHostedDNSRecord	[DNS]	2355
+PATCH	/v1/dns/zones/{zone}/records/{record_id}	patchHostedDNSRecord	[DNS]	2384
+DELETE	/v1/dns/zones/{zone}/records/{record_id}	deleteHostedDNSRecord	[DNS]	2417
+GET	/v1/dns/nodes/{dns_node_id}	getDNSNode	[DNS]	2445
+POST	/v1/dns/heartbeat	dnsHeartbeat	[DNS]	2468
+GET	/v1/dns/delegation/preflight	dnsDelegationPreflight	[DNS]	2491
+GET	/v1/edge/domains/{hostname}/tls-bundle	getEdgeTLSCertificateBundle	[Edge]	2534
+PUT	/v1/edge/domains/{hostname}/tls-bundle	putEdgeTLSCertificateBundle	[Edge]	2552
+POST	/v1/edge/domains/tls-report	edgeDomainTLSReport	[Edge]	2577
+GET	/v1/tenants	listTenants	[Tenants]	2600
+POST	/v1/tenants	createTenant	[Tenants]	2616
+DELETE	/v1/tenants/{id}	deleteTenant	[Tenants]	2639
+GET	/v1/projects	listProjects	[Projects]	2663
+POST	/v1/projects	createProject	[Projects]	2681
+GET	/v1/projects/image-usage	listProjectImageUsage	[Projects]	2704
+GET	/v1/console/gallery	getConsoleGallery	[Console]	2721
+GET	/v1/console/gallery/stream	streamConsoleGallery	[Console]	2745
+GET	/v1/console/projects/{id}	getConsoleProject	[Console]	2769
+PATCH	/v1/projects/{id}	patchProject	[Projects]	2794
+DELETE	/v1/projects/{id}	deleteProject	[Projects]	2818
+GET	/v1/projects/{id}/routes	getProjectRoutes	[Projects]	2849
+PUT	/v1/projects/{id}/routes	putProjectRoutes	[Projects]	2867
+DELETE	/v1/projects/{id}/routes	deleteProjectRoutes	[Projects]	2891
+POST	/v1/projects/{id}/split-plan	planProjectSplit	[Projects]	2910
+POST	/v1/projects/{id}/split	splitProject	[Projects]	2935
+GET	/v1/projects/{id}/runtime-reservations	listProjectRuntimeReservations	[Projects]	2960
+POST	/v1/projects/{id}/runtime-reservations	reserveProjectRuntime	[Projects]	2978
+DELETE	/v1/projects/{id}/runtime-reservations/{runtime_id}	deleteProjectRuntimeReservation	[Projects]	3003
+GET	/v1/billing	getBilling	[Billing]	3023
+PATCH	/v1/billing	updateBilling	[Billing]	3047
+PATCH	/v1/billing/balance	setBillingBalance	[Billing]	3070
+POST	/v1/billing/top-ups	topUpBilling	[Billing]	3093
+GET	/v1/api-keys	listAPIKeys	[API Keys]	3116
+POST	/v1/api-keys	createAPIKey	[API Keys]	3132
+PATCH	/v1/api-keys/{id}	patchAPIKey	[API Keys]	3155
+DELETE	/v1/api-keys/{id}	deleteAPIKey	[API Keys]	3179
+POST	/v1/api-keys/{id}/rotate	rotateAPIKey	[API Keys]	3198
+POST	/v1/api-keys/{id}/disable	disableAPIKey	[API Keys]	3223
+POST	/v1/api-keys/{id}/enable	enableAPIKey	[API Keys]	3242
+GET	/v1/ssh/keys	listSSHKeys	[SSH]	3261
+POST	/v1/ssh/keys	createSSHKey	[SSH]	3277
+DELETE	/v1/ssh/keys/{id}	deleteSSHKey	[SSH]	3300
+GET	/v1/node-keys	listNodeKeys	[Node Keys]	3319
+POST	/v1/node-keys	createNodeKey	[Node Keys]	3335
+GET	/v1/node-keys/{id}/usages	getNodeKeyUsages	[Node Keys]	3358
+POST	/v1/node-keys/{id}/revoke	revokeNodeKey	[Node Keys]	3382
+GET	/v1/cluster/nodes	listClusterNodes	[Cluster]	3401
+GET	/v1/cluster/node-policies	listClusterNodePolicies	[Cluster]	3425
+GET	/v1/cluster/node-policies/status	getClusterNodePolicyStatus	[Cluster]	3442
+GET	/v1/cluster/node-policies/{name}	getClusterNodePolicy	[Cluster]	3459
+GET	/v1/cluster/nodes/{name}/diagnosis	getClusterNodeDiagnosis	[Cluster]	3482
+PATCH	/v1/cluster/nodes/{name}/policy	setClusterNodePolicy	[Cluster]	3505
+GET	/v1/cluster/control-plane	getControlPlaneStatus	[Cluster]	3534
+GET	/v1/discovery/bundle	getDiscoveryBundle	[Cluster]	3551
+GET	/v1/cluster/pods	listClusterPods	[Cluster]	3575
+GET	/v1/cluster/events	listClusterEvents	[Cluster]	3597
+GET	/v1/cluster/logs	getClusterLogs	[Cluster]	3621
+POST	/v1/cluster/exec	execClusterPod	[Cluster]	3644
+GET	/v1/cluster/dns/resolve	resolveClusterDNS	[Cluster]	3667
+GET	/v1/cluster/net/connect	connectClusterNetwork	[Cluster]	3692
+POST	/v1/cluster/net/websocket	probeClusterWebSocket	[Cluster]	3716
+GET	/v1/cluster/tls/probe	probeClusterTLS	[Cluster]	3739
+GET	/v1/cluster/workloads/{namespace}/{kind}/{name}	getClusterWorkload	[Cluster]	3764
+GET	/v1/cluster/services/{namespace}/{name}	getClusterService	[Cluster]	3797
+GET	/v1/cluster/rollouts/{namespace}/{kind}/{name}	getClusterRolloutStatus	[Cluster]	3825
+GET	/v1/nodes	listNodes	[Nodes]	3858
+GET	/v1/nodes/{id}	getNode	[Nodes]	3876
+GET	/v1/runtimes	listRuntimes	[Runtimes]	3900
+POST	/v1/runtimes	createRuntime	[Runtimes]	3923
+GET	/v1/runtimes/{id}	getRuntime	[Runtimes]	3948
+DELETE	/v1/runtimes/{id}	deleteRuntime	[Runtimes]	3971
+GET	/v1/runtimes/{id}/sharing	getRuntimeSharing	[Runtimes]	3994
+POST	/v1/runtimes/{id}/sharing/grants	grantRuntimeAccess	[Runtimes]	4013
+DELETE	/v1/runtimes/{id}/sharing/grants/{tenant_id}	revokeRuntimeAccess	[Runtimes]	4038
+POST	/v1/runtimes/{id}/sharing/mode	setRuntimeAccessMode	[Runtimes]	4058
+POST	/v1/runtimes/{id}/public-offer	setRuntimePublicOffer	[Runtimes]	4087
+POST	/v1/runtimes/{id}/pool-mode	setRuntimePoolMode	[Runtimes]	4112
+GET	/v1/runtimes/enroll-tokens	listEnrollmentTokens	[Runtimes]	4137
+POST	/v1/runtimes/enroll-tokens	createEnrollmentToken	[Runtimes]	4154
+GET	/v1/backing-services	listBackingServices	[Backing Services]	4179
+POST	/v1/backing-services	createBackingService	[Backing Services]	4195
+GET	/v1/backing-services/orphans	listManagedPostgresOrphans	[Backing Services]	4220
+POST	/v1/backing-services/orphans/{app_id}/adopt	adoptManagedPostgresOrphan	[Backing Services]	4247
+GET	/v1/backing-services/{id}	getBackingService	[Backing Services]	4293
+DELETE	/v1/backing-services/{id}	deleteBackingService	[Backing Services]	4316
+POST	/v1/backing-services/{id}/suspend	suspendBackingService	[Backing Services]	4340
+POST	/v1/backing-services/{id}/resume	resumeBackingService	[Backing Services]	4384
+GET	/v1/apps	listApps	[Apps]	4432
+POST	/v1/apps	createApp	[Apps]	4517
+POST	/v1/apps/import-github	importGitHubApp	[Apps]	4542
+POST	/v1/templates/inspect-github	inspectGitHubTemplate	[Templates]	4574
+POST	/v1/templates/inspect-upload	inspectUploadTemplate	[Templates]	4597
+POST	/v1/apps/import-image	importImageApp	[Apps]	4666
+POST	/v1/apps/import-upload	importUploadApp	[Apps]	4689
+GET	/v1/apps/{id}	getApp	[Apps]	4757
+PATCH	/v1/apps/{id}	patchApp	[Apps]	4775
+DELETE	/v1/apps/{id}	deleteApp	[Apps]	4799
+PATCH	/v1/apps/{id}/source	patchAppSource	[Apps]	4824
+GET	/v1/apps/{id}/images	getAppImages	[Apps]	4849
+GET	/v1/apps/{id}/image-tracking	getAppImageTracking	[Apps]	4868
+PUT	/v1/apps/{id}/image-tracking	putAppImageTracking	[Apps]	4886
+GET	/v1/apps/{id}/image-tracking/history	getAppImageTrackingHistory	[Apps]	4911
+GET	/v1/apps/{id}/image-tracking/diagnosis	getAppImageTrackingDiagnosis	[Apps]	4936
+GET	/v1/apps/{id}/releases	listAppReleases	[Apps]	4955
+POST	/v1/apps/{id}/releases	createAppRelease	[Apps]	4973
+GET	/v1/apps/{id}/release-attempts	listAppReleaseAttempts	[Apps]	4998
+GET	/v1/apps/{id}/release-attempts/{attempt_id}	getAppReleaseAttempt	[Apps]	5029
+GET	/v1/apps/{id}/release-attempts/{attempt_id}/timeline	getAppReleaseAttemptTimeline	[Apps]	5053
+GET	/v1/apps/{id}/release-attempts/{attempt_id}/evidence	getAppReleaseAttemptEvidence	[Apps]	5077
+GET	/v1/apps/{id}/release-attempts/{attempt_id}/debug-bundle	getAppReleaseAttemptDebugBundle	[Apps]	5113
+GET	/v1/apps/{id}/traffic	getAppTrafficPolicy	[Apps]	5152
+PATCH	/v1/apps/{id}/traffic	patchAppTrafficPolicy	[Apps]	5170
+POST	/v1/apps/{id}/releases/{release_id}/probe	probeAppRelease	[Apps]	5195
+POST	/v1/apps/{id}/releases/{release_id}/gate/evaluate	evaluateAppReleaseGate	[Apps]	5225
+POST	/v1/apps/{id}/releases/{release_id}/promote	promoteAppRelease	[Apps]	5255
+POST	/v1/apps/{id}/releases/{release_id}/abort	abortAppRelease	[Apps]	5285
+POST	/v1/apps/{id}/image-sync	syncAppImage	[Apps]	5315
+POST	/v1/apps/{id}/images/redeploy	redeployAppImage	[Apps]	5346
+POST	/v1/apps/{id}/images/delete	deleteAppImage	[Apps]	5371
+GET	/v1/apps/{id}/domains	listAppDomains	[Apps]	5396
+POST	/v1/apps/{id}/domains	putAppDomain	[Apps]	5414
+DELETE	/v1/apps/{id}/domains	deleteAppDomain	[Apps]	5438
+GET	/v1/apps/{id}/domains/availability	getAppDomainAvailability	[Apps]	5458
+POST	/v1/apps/{id}/domains/verify	verifyAppDomain	[Apps]	5478
+GET	/v1/apps/{id}/domains/diagnosis	getAppDomainDiagnosis	[Apps]	5503
+POST	/v1/apps/{id}/domains/repair	repairAppDomain	[Apps]	5523
+GET	/v1/apps/{id}/route/availability	getAppRouteAvailability	[Apps]	5548
+PATCH	/v1/apps/{id}/route	patchAppRoute	[Apps]	5569
+POST	/v1/backing-services/{id}/migrate	migrateBackingService	[Backing Services]	5594
+POST	/v1/backing-services/{id}/move-project	moveBackingServiceProject	[Backing Services]	5633
+POST	/v1/backing-services/{id}/localize	localizeBackingService	[Backing Services]	5658
+GET	/v1/apps/{id}/bindings	listAppBindings	[Apps]	5687
+POST	/v1/apps/{id}/bindings	createAppBinding	[Apps]	5705
+DELETE	/v1/apps/{id}/bindings/{binding_id}	deleteAppBinding	[Apps]	5736
+GET	/v1/apps/{id}/resources/recommendation	getAppResourceRecommendation	[Apps]	5765
+POST	/v1/apps/{id}/resources/apply-recommendation	applyAppResourceRecommendation	[Apps]	5796
+GET	/v1/apps/{id}/build-logs	getAppBuildLogs	[Apps]	5827
+GET	/v1/apps/{id}/build-logs/stream	streamAppBuildLogs	[Apps]	5848
+GET	/v1/apps/{id}/runtime-logs	getAppRuntimeLogs	[Apps]	5878
+GET	/v1/apps/{id}/runtime-logs/stream	streamAppRuntimeLogs	[Apps]	5901
+GET	/v1/apps/{id}/runtime-pods	getAppRuntimePods	[Apps]	5932
+GET	/v1/apps/{id}/observability/metrics/summary	getAppObservabilityMetricsSummary	[Apps]	5952
+GET	/v1/apps/{id}/observability/metrics/query	queryAppObservabilityMetrics	[Apps]	5973
+GET	/v1/apps/{id}/observability/logs/query	queryAppObservabilityLogs	[Apps]	6000
+GET	/v1/apps/{id}/observability/requests	listAppObservabilityRequests	[Apps]	6033
+GET	/v1/apps/{id}/observability/requests/stream	streamAppObservabilityRequests	[Apps]	6061
+GET	/v1/apps/{id}/observability/traces/{trace_id}	getAppObservabilityTrace	[Apps]	6097
+GET	/v1/apps/{id}/observability/diagnosis	getAppObservabilityDiagnosis	[Apps]	6117
+GET	/v1/apps/{id}/rollout/timeline	getAppRolloutTimeline	[Apps]	6138
+GET	/v1/apps/{id}/env	getAppEnv	[Apps]	6170
+PATCH	/v1/apps/{id}/env	patchAppEnv	[Apps]	6188
+GET	/v1/apps/{id}/ssh	getAppSSH	[Apps, SSH]	6213
+PATCH	/v1/apps/{id}/ssh	patchAppSSH	[Apps, SSH]	6231
+POST	/v1/apps/{id}/ssh/rotate-port	rotateAppSSHPort	[Apps, SSH]	6262
+GET	/v1/apps/{id}/ssh/diagnose	diagnoseAppSSH	[Apps, SSH]	6281
+POST	/v1/apps/{id}/database/query	queryAppDatabase	[Apps]	6300
+GET	/v1/apps/{id}/database/import	getAppDatabaseImport	[Apps]	6325
+POST	/v1/apps/{id}/database/import	importAppDatabase	[Apps]	6343
+POST	/v1/apps/{id}/database/import/retry	retryAppDatabaseImport	[Apps]	6404
+GET	/v1/apps/{id}/database/access	listAppDatabaseAccessGrants	[Apps]	6435
+POST	/v1/apps/{id}/database/access	createAppDatabaseAccessGrant	[Apps]	6453
+DELETE	/v1/apps/{id}/database/access/{grant_id}	revokeAppDatabaseAccessGrant	[Apps]	6478
+GET	/v1/apps/{id}/database/access/{grant_id}/tunnel	connectAppDatabaseAccessTunnel	[Apps]	6502
+POST	/v1/apps/{id}/request	requestAppInternalHTTP	[Apps]	6525
+POST	/v1/apps/{id}/request-stream	requestAppInternalHTTPStream	[Apps]	6550
+GET	/v1/apps/{id}/diagnosis	getAppDiagnosis	[Apps]	6575
+GET	/v1/apps/{id}/files	getAppFiles	[Apps]	6600
+PUT	/v1/apps/{id}/files	upsertAppFiles	[Apps]	6618
+DELETE	/v1/apps/{id}/files	deleteAppFiles	[Apps]	6642
+GET	/v1/apps/{id}/filesystem/tree	getAppFilesystemTree	[Apps]	6662
+GET	/v1/apps/{id}/filesystem/file	getAppFilesystemFile	[Apps]	6685
+PUT	/v1/apps/{id}/filesystem/file	putAppFilesystemFile	[Apps]	6707
+POST	/v1/apps/{id}/filesystem/directory	createAppFilesystemDirectory	[Apps]	6734
+DELETE	/v1/apps/{id}/filesystem	deleteAppFilesystemPath	[Apps]	6761
+POST	/v1/apps/{id}/rebuild	rebuildApp	[Apps]	6784
+POST	/v1/apps/{id}/deploy	deployApp	[Apps]	6809
+POST	/v1/apps/{id}/restart	restartApp	[Apps]	6838
+POST	/v1/apps/{id}/scale	scaleApp	[Apps]	6857
+POST	/v1/apps/{id}/disable	disableApp	[Apps]	6882
+POST	/v1/apps/{id}/migrate	migrateApp	[Apps]	6901
+POST	/v1/apps/{id}/move-project	moveAppProject	[Apps]	6936
+POST	/v1/apps/{id}/failover	failoverApp	[Apps]	6961
+POST	/v1/apps/{id}/database/switchover	switchoverAppDatabase	[Apps]	6986
+GET	/v1/apps/{id}/database/status	getAppDatabaseStatus	[Apps]	7011
+POST	/v1/apps/{id}/database/localize	localizeAppDatabase	[Apps]	7030
+PATCH	/v1/apps/{id}/continuity	patchAppContinuity	[Apps]	7055
+GET	/v1/image-locations	listImageLocations	[Apps]	7086
+POST	/v1/image-locations	reportImageLocation	[Apps]	7144
+GET	/v1/images	listImages	[Apps]	7167
+GET	/v1/images/{id}	getImage	[Apps]	7210
+GET	/v1/images/{id}/replicas	listImageReplicas	[Apps]	7229
+POST	/v1/images/{id}/replicas/report	reportImageReplica	[Apps]	7268
+POST	/v1/images/{id}/verify	verifyImage	[Apps]	7293
+POST	/v1/images/{id}/pins	createImagePin	[Apps]	7312
+DELETE	/v1/images/{id}/pins/{pin_id}	deleteImagePin	[Apps]	7337
+GET	/v1/image-replication-tasks	listImageReplicationTasks	[Apps]	7357
+POST	/v1/image-replication-tasks	createImageReplicationTask	[Apps]	7409
+GET	/v1/operations	listOperations	[Operations]	7432
+GET	/v1/operations/{id}	getOperation	[Operations]	7502
+GET	/v1/operations/{id}/diagnosis	getOperationDiagnosis	[Operations]	7521
+GET	/v1/operations/{id}/evidence	getOperationEvidence	[Operations]	7540
+GET	/v1/operations/{id}/timeline	getOperationTimeline	[Operations]	7595
+GET	/v1/operations/{id}/debug-bundle	getOperationDebugBundle	[Operations]	7619
+GET	/v1/audit-events	listAuditEvents	[Audit Events]	7653
+GET	/install/join-cluster.sh	joinClusterInstallScript	[System]	7680
+GET	/install/node-updater.sh	nodeUpdaterInstallScript	[System]	7695
+GET	/v1/node-updaters	listNodeUpdaters	[Node Updater]	7710
+GET	/v1/admin/node-health	listNodeDeepHealth	[Admin, Node Updater]	7727
+GET	/v1/admin/node-health/{node_updater_id}	getNodeDeepHealth	[Admin, Node Updater]	7744
+GET	/v1/node-update-tasks	listNodeUpdateTasks	[Node Updater]	7767
+POST	/v1/node-update-tasks	createNodeUpdateTask	[Node Updater]	7794
+POST	/v1/node-updater/enroll	nodeUpdaterEnroll	[Node Updater]	7817
+POST	/v1/node-updater/heartbeat	nodeUpdaterHeartbeat	[Node Updater]	7845
+GET	/v1/node-updater/desired-state	nodeUpdaterDesiredState	[Node Updater]	7875
+GET	/v1/node-updater/image-locations	nodeUpdaterImageLocations	[Node Updater]	7892
+POST	/v1/node-updater/image-locations	nodeUpdaterReportImageLocation	[Node Updater]	7945
+POST	/v1/node-updater/image-replicas/report	nodeUpdaterReportImageReplica	[Node Updater]	7968
+POST	/v1/node-updater/image-cache/inventory	nodeUpdaterReportImageCacheInventory	[Node Updater]	7991
+POST	/v1/node-updater/localpv/inventory	nodeUpdaterReportLocalPVInventory	[Node Updater]	8014
+GET	/v1/node-updater/image-replication-tasks	nodeUpdaterImageReplicationTasks	[Node Updater]	8037
+GET	/v1/node-updater/tasks	nodeUpdaterTasks	[Node Updater]	8070
+POST	/v1/node-updater/tasks/{id}/claim	nodeUpdaterClaimTask	[Node Updater]	8104
+POST	/v1/node-updater/tasks/{id}/log	nodeUpdaterLogTask	[Node Updater]	8123
+POST	/v1/node-updater/tasks/{id}/complete	nodeUpdaterCompleteTask	[Node Updater]	8152
+GET	/v1/source-uploads/{id}/archive	getSourceUploadArchive	[Source Uploads]	8181
+GET	/v1/source-uploads/{id}	getSourceUpload	[Source Uploads]	8217
+POST	/v1/agent/enroll	agentEnroll	[Agent]	8240
+POST	/v1/nodes/bootstrap	bootstrapNode	[Nodes]	8263
+POST	/v1/nodes/join-cluster	joinClusterNode	[Nodes]	8286
+POST	/v1/nodes/join-cluster/env	joinClusterNodeEnv	[Nodes]	8309
+POST	/v1/nodes/join-cluster/cleanup	joinClusterCleanup	[Nodes]	8331
+POST	/v1/agent/heartbeat	agentHeartbeat	[Agent]	8353
+GET	/v1/agent/operations	agentOperations	[Agent]	8378
+GET	/v1/agent/image-locations	agentImageLocations	[Agent]	8396
+POST	/v1/agent/image-locations	agentReportImageLocation	[Agent]	8449
+POST	/v1/agent/operations/{id}/complete	agentCompleteOperation	[Agent]	8472
+GET	/v1/backups/backends	listBackupBackends	[Backups]	8503
+POST	/v1/backups/backends	createBackupBackend	[Backups]	8520
+GET	/v1/backups/backends/{id}	getBackupBackend	[Backups]	8544
+DELETE	/v1/backups/backends/{id}	deleteBackupBackend	[Backups]	8563
+POST	/v1/backups/backends/{id}/test	testBackupBackend	[Backups]	8583
+GET	/v1/backups/policies	listBackupPolicies	[Backups]	8603
+POST	/v1/backups/policies	upsertBackupPolicy	[Backups]	8646
+GET	/v1/backups/policies/{id}	getBackupPolicy	[Backups]	8670
+PATCH	/v1/backups/policies/{id}	patchBackupPolicy	[Backups]	8689
+GET	/v1/backups/runs	listBackupRuns	[Backups]	8715
+POST	/v1/backups/runs	createBackupRun	[Backups]	8757
+GET	/v1/backups/runs/{id}	getBackupRun	[Backups]	8787
+GET	/v1/backups/artifacts	listBackupArtifacts	[Backups]	8807
+GET	/v1/backups/artifacts/{id}	getBackupArtifact	[Backups]	8854
+DELETE	/v1/backups/artifacts/{id}	deleteBackupArtifact	[Backups]	8873
+GET	/v1/backups/restore-plans	listBackupRestorePlans	[Backups]	8893
+POST	/v1/backups/restore-plans	createBackupRestorePlan	[Backups]	8915
+GET	/v1/backups/restore-runs	listBackupRestoreRuns	[Backups]	8939
+POST	/v1/backups/restore-runs	createBackupRestoreRun	[Backups]	8961
+GET	/v1/backups/usage	getBackupUsage	[Backups]	8984
+GET	/v1/admin/backups/status	getAdminBackupStatus	[Backups, Admin]	9001
+GET	/v1/apps/{id}/backups/status	getAppBackupStatus	[Backups, Apps]	9018
+POST	/v1/apps/{id}/backups/policies	createAppBackupPolicy	[Backups, Apps]	9037
+POST	/v1/apps/{id}/backups/runs	createAppBackupRun	[Backups, Apps]	9062
+GET	/v1/data/backends	listDataBackends	[Data Workspaces]	9093
+POST	/v1/data/backends	createDataBackend	[Data Workspaces]	9110
+GET	/v1/data/backends/{backend_id}	getDataBackend	[Data Workspaces]	9134
+DELETE	/v1/data/backends/{backend_id}	deleteDataBackend	[Data Workspaces]	9157
+POST	/v1/data/backends/{backend_id}/credentials	rotateDataBackendCredentials	[Data Workspaces]	9181
+GET	/v1/data/workspaces	listDataWorkspaces	[Data Workspaces]	9211
+POST	/v1/data/workspaces	createDataWorkspace	[Data Workspaces]	9235
+GET	/v1/data/workspaces/{workspace_id}	getDataWorkspace	[Data Workspaces]	9259
+PATCH	/v1/data/workspaces/{workspace_id}	patchDataWorkspace	[Data Workspaces]	9278
+DELETE	/v1/data/workspaces/{workspace_id}	deleteDataWorkspace	[Data Workspaces]	9314
+GET	/v1/data/workspaces/{workspace_id}/snapshots	listDataSnapshots	[Data Workspaces]	9345
+POST	/v1/data/workspaces/{workspace_id}/snapshots	createDataSnapshot	[Data Workspaces]	9364
+GET	/v1/data/workspaces/{workspace_id}/snapshots/{snapshot_id}	getDataSnapshot	[Data Workspaces]	9390
+DELETE	/v1/data/workspaces/{workspace_id}/snapshots/{snapshot_id}	deleteDataSnapshot	[Data Workspaces]	9410
+POST	/v1/data/workspaces/{workspace_id}/transfers/plan-upload	planDataUpload	[Data Workspaces]	9431
+POST	/v1/data/workspaces/{workspace_id}/transfers/plan-download	planDataDownload	[Data Workspaces]	9457
+POST	/v1/data/workspaces/{workspace_id}/prewarm	createDataPrewarm	[Data Workspaces]	9483
+GET	/v1/data/workspaces/{workspace_id}/access	listDataWorkspaceAccess	[Data Workspaces]	9508
+POST	/v1/data/workspaces/{workspace_id}/access	grantDataWorkspaceAccess	[Data Workspaces]	9527
+DELETE	/v1/data/workspaces/{workspace_id}/access/{subject_type}/{subject_id}	revokeDataWorkspaceAccess	[Data Workspaces]	9553
+GET	/v1/data/workspaces/{workspace_id}/grants	listDataGrants	[Data Workspaces]	9584
+POST	/v1/data/workspaces/{workspace_id}/grants	createDataGrant	[Data Workspaces]	9603
+POST	/v1/data/workspaces/{workspace_id}/gc/sweep	sweepDataWorkspaceGC	[Data Workspaces]	9629
+POST	/v1/data/workspaces/{workspace_id}/backend-migrations	createDataBackendMigration	[Data Workspaces]	9655
+POST	/v1/data/workspaces/{workspace_id}/backend-migrations/{transfer_id}/rollback	rollbackDataBackendMigration	[Data Workspaces]	9680
+GET	/v1/data/transfers	listDataTransfers	[Data Workspaces]	9700
+GET	/v1/data/transfers/{transfer_id}	getDataTransfer	[Data Workspaces]	9717
+POST	/v1/data/transfers/{transfer_id}/refresh	refreshDataTransferAuthorization	[Data Workspaces]	9754
+POST	/v1/data/transfers/{transfer_id}/checkpoint	checkpointDataTransfer	[Data Workspaces]	9773
+GET	/v1/data/transfers/{transfer_id}/multipart/parts	listDataMultipartParts	[Data Workspaces]	9798
+POST	/v1/data/transfers/{transfer_id}/multipart/complete	completeDataMultipartUpload	[Data Workspaces]	9822
+POST	/v1/data/transfers/{transfer_id}/multipart/abort	abortDataMultipartUpload	[Data Workspaces]	9847
+POST	/v1/data/transfers/{transfer_id}/complete	completeDataTransfer	[Data Workspaces]	9873
+POST	/v1/data/transfers/{transfer_id}/cancel	cancelDataTransfer	[Data Workspaces]	9898
+DELETE	/v1/data/grants/{grant_id}	revokeDataGrant	[Data Workspaces]	9917
+GET	/v1/data/blobs/{sha256}	getDataBlob	[Data Workspaces]	9941
+PUT	/v1/data/blobs/{sha256}	putDataBlob	[Data Workspaces]	10060

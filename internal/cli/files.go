@@ -39,7 +39,7 @@ func (c *CLI) newFilesCommand() *cobra.Command {
 		Long: strings.TrimSpace(`
 Use "config" for declarative files that are applied on the next deploy.
 
-Use "workspace" for direct reads and writes inside a persistent runtime workspace.
+Use "fugue app fs" for direct reads and writes inside persisted storage or a live runtime.
 `),
 	}
 	cmd.AddCommand(
@@ -120,7 +120,7 @@ func (c *CLI) newFilesReadCommand() *cobra.Command {
 				return fmt.Errorf("file %q not found", filePath)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id": app.ID,
 					"file":   appFile,
 				})
@@ -299,7 +299,7 @@ func findAppFileByPath(files []model.AppFile, filePath string) (model.AppFile, b
 
 func (c *CLI) renderFilesListResult(result filesResult) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 	if len(result.Files) == 0 {
 		if strings.TrimSpace(result.AppID) == "" {
@@ -320,7 +320,7 @@ func (c *CLI) renderFilesListResult(result filesResult) error {
 
 func (c *CLI) renderFilesMutationResult(result filesResult, focusPaths ...string) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 	pairs := make([]kvPair, 0, 3)
 	if strings.TrimSpace(result.AppID) != "" {

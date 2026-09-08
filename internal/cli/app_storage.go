@@ -458,7 +458,7 @@ func (c *CLI) renderAppStorageState(app model.App, operation *model.Operation, r
 		if resetRequested {
 			payload["reset_requested"] = true
 		}
-		return writeJSON(c.stdout, payload)
+		return c.writeJSON(payload)
 	}
 
 	pairs := []kvPair{
@@ -511,7 +511,7 @@ func (c *CLI) renderAppStorageReplicationState(app model.App, operation *model.O
 		}
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":                redactAppForOutput(app),
 			"volume_replication": replication,
 			"mode":               mode,

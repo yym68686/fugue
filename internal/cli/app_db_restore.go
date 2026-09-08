@@ -151,7 +151,7 @@ func (c *CLI) newAppDatabaseRestorePlanCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"plan": plan})
+					return c.writeJSON(map[string]any{"plan": plan})
 				}
 				return renderBackupRestorePlan(c.stdout, plan, true)
 			}
@@ -468,7 +468,7 @@ func appDatabaseRestoreChecksPass(checks []appDatabaseRestoreCheck) bool {
 
 func (c *CLI) renderAppDatabaseRestorePlan(plan appDatabaseRestorePlan) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, plan)
+		return c.writeJSON(plan)
 	}
 	pairs := []kvPair{
 		{Key: "app_id", Value: plan.AppID},
@@ -496,7 +496,7 @@ func (c *CLI) renderAppDatabaseRestorePlan(plan appDatabaseRestorePlan) error {
 
 func (c *CLI) renderAppDatabaseRestoreVerifyResult(result appDatabaseRestoreVerifyResult) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 	if err := writeKeyValues(c.stdout,
 		kvPair{Key: "app_id", Value: result.AppID},

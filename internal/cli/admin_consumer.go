@@ -38,7 +38,7 @@ func (c *CLI) newAdminConsumerExpectedCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"expected_consumer_sets": sets})
+				return c.writeJSON(map[string]any{"expected_consumer_sets": sets})
 			}
 			return writePlatformExpectedConsumerSets(c.stdout, sets)
 		},

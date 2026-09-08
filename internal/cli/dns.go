@@ -59,7 +59,7 @@ func (c *CLI) newDNSZoneAddCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"zone": zone})
+				return c.writeJSON(map[string]any{"zone": zone})
 			}
 			pairs := hostedDNSZoneKeyValues(zone)
 			if len(zone.ExpectedNameservers) > 0 {
@@ -86,7 +86,7 @@ func (c *CLI) newDNSZoneListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"zones": zones})
+				return c.writeJSON(map[string]any{"zones": zones})
 			}
 			return writeHostedDNSZoneTable(c.stdout, zones)
 		},
@@ -108,7 +108,7 @@ func (c *CLI) newDNSZoneShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"zone": zone})
+				return c.writeJSON(map[string]any{"zone": zone})
 			}
 			return writeKeyValues(c.stdout, hostedDNSZoneKeyValues(zone)...)
 		},
@@ -132,7 +132,7 @@ func (c *CLI) newDNSZonePreflightCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writeKeyValues(c.stdout, hostedDNSZoneKeyValues(response.Zone)...); err != nil {
 				return err
@@ -163,7 +163,7 @@ func (c *CLI) newDNSZoneDeleteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "deleted", Value: fmt.Sprintf("%t", response.Deleted)},
@@ -205,7 +205,7 @@ func (c *CLI) newDNSRecordListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"records": records})
+				return c.writeJSON(map[string]any{"records": records})
 			}
 			return writeHostedDNSRecordTable(c.stdout, records)
 		},
@@ -229,7 +229,7 @@ func (c *CLI) newDNSRecordAddCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"record": record})
+				return c.writeJSON(map[string]any{"record": record})
 			}
 			return writeKeyValues(c.stdout, hostedDNSRecordKeyValues(record)...)
 		},
@@ -259,7 +259,7 @@ func (c *CLI) newDNSRecordEditCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"record": record})
+				return c.writeJSON(map[string]any{"record": record})
 			}
 			return writeKeyValues(c.stdout, hostedDNSRecordKeyValues(record)...)
 		},
@@ -290,7 +290,7 @@ func (c *CLI) newDNSRecordDeleteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "deleted", Value: fmt.Sprintf("%t", response.Deleted)},
@@ -328,7 +328,7 @@ func (c *CLI) newDNSRecordDiagnoseCommand() *cobra.Command {
 					continue
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"record": record})
+					return c.writeJSON(map[string]any{"record": record})
 				}
 				return writeKeyValues(c.stdout, hostedDNSRecordKeyValues(record)...)
 			}

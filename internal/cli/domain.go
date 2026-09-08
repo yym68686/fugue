@@ -69,6 +69,7 @@ func (c *CLI) newDomainPrimaryCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newDomainPrimaryShowCommand(),
+		renamedCommand(c.newAppRouteShowCommand(), "verify <app>"),
 		c.newDomainPrimaryCheckCommand(),
 		c.newDomainPrimarySetCommand(),
 	)
@@ -95,7 +96,7 @@ func (c *CLI) newDomainPrimaryShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id": app.ID,
 					"route":  app.Route,
 				})
@@ -122,92 +123,9 @@ func (c *CLI) newDomainPrimaryShowCommand() *cobra.Command {
 	}
 }
 
-func (c *CLI) newDomainPrimaryCheckCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "check <app> <hostname>",
-		Short: "Check whether a primary domain hostname is available",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			app, err := c.resolveNamedApp(client, args[0])
-			if err != nil {
-				return err
-			}
-			availability, err := client.GetAppRouteAvailability(app.ID, args[1], "")
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
-					"app_id":       app.ID,
-					"availability": availability,
-				})
-			}
-			return writeKeyValues(c.stdout,
-				kvPair{Key: "app_id", Value: app.ID},
-				kvPair{Key: "input", Value: availability.Input},
-				kvPair{Key: "label", Value: availability.Label},
-				kvPair{Key: "hostname", Value: availability.Hostname},
-				kvPair{Key: "path_prefix", Value: availability.PathPrefix},
-				kvPair{Key: "base_domain", Value: availability.BaseDomain},
-				kvPair{Key: "public_url", Value: availability.PublicURL},
-				kvPair{Key: "valid", Value: fmt.Sprintf("%t", availability.Valid)},
-				kvPair{Key: "available", Value: fmt.Sprintf("%t", availability.Available)},
-				kvPair{Key: "current", Value: fmt.Sprintf("%t", availability.Current)},
-				kvPair{Key: "reason", Value: availability.Reason},
-			)
-		},
-	}
-}
+func (c *CLI) newDomainPrimaryCheckCommand() *cobra.Command { return c.newAppRouteCheckCommand() }
 
-func (c *CLI) newDomainPrimarySetCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "set <app> <hostname>",
-		Short: "Update the app's primary domain hostname",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			app, err := c.resolveNamedApp(client, args[0])
-			if err != nil {
-				return err
-			}
-			response, err := client.PatchAppRoute(app.ID, args[1], "")
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
-					"app_id":          app.ID,
-					"app":             response.App,
-					"availability":    response.Availability,
-					"already_current": response.AlreadyCurrent,
-				})
-			}
-			pairs := []kvPair{
-				{Key: "app", Value: response.App.Name},
-				{Key: "app_id", Value: response.App.ID},
-				{Key: "hostname", Value: response.Availability.Hostname},
-				{Key: "path_prefix", Value: response.Availability.PathPrefix},
-				{Key: "public_url", Value: response.Availability.PublicURL},
-				{Key: "available", Value: fmt.Sprintf("%t", response.Availability.Available)},
-				{Key: "current", Value: fmt.Sprintf("%t", response.Availability.Current)},
-			}
-			if response.AlreadyCurrent {
-				pairs = append(pairs, kvPair{Key: "already_current", Value: "true"})
-			}
-			if value := strings.TrimSpace(response.Availability.Reason); value != "" {
-				pairs = append(pairs, kvPair{Key: "reason", Value: value})
-			}
-			return writeKeyValues(c.stdout, pairs...)
-		},
-	}
-}
+func (c *CLI) newDomainPrimarySetCommand() *cobra.Command { return c.newAppRouteSetCommand() }
 
 func (c *CLI) newDomainListCommand() *cobra.Command {
 	return &cobra.Command{
@@ -229,7 +147,7 @@ func (c *CLI) newDomainListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, domainListResult{
+				return c.writeJSON(domainListResult{
 					AppID:   app.ID,
 					Domains: domains,
 				})
@@ -259,7 +177,7 @@ func (c *CLI) newDomainCheckCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, domainAvailabilityResult{
+				return c.writeJSON(domainAvailabilityResult{
 					AppID:        app.ID,
 					Availability: availability,
 				})
@@ -444,7 +362,7 @@ func (c *CLI) newDomainRemoveCommand() *cobra.Command {
 
 func (c *CLI) renderDomainMutation(result domainMutationResult) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 
 	pairs := make([]kvPair, 0, 12)
@@ -504,7 +422,7 @@ func (c *CLI) renderDomainMutation(result domainMutationResult) error {
 
 func (c *CLI) renderDomainDiagnosis(result domainDiagnosisResult) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 	pairs := []kvPair{
 		{Key: "app_id", Value: result.AppID},
@@ -548,7 +466,7 @@ func (c *CLI) renderDomainDiagnosis(result domainDiagnosisResult) error {
 
 func (c *CLI) renderDomainRepair(result domainRepairResult) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 	if err := c.renderDomainMutation(domainMutationResult{
 		AppID:  result.AppID,

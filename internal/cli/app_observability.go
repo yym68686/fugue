@@ -71,7 +71,7 @@ func (c *CLI) newAppEdgeRouteDecisionsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := renderAppObservabilityHeader(c.stdout, response.Source, response.Window); err != nil {
 				return err
@@ -167,7 +167,7 @@ func (c *CLI) newAppObservabilityExportCommand() *cobra.Command {
 					bundle.Diagnosis = &response
 				}
 			}
-			return writeJSON(c.stdout, bundle)
+			return c.writeJSON(bundle)
 		},
 	}
 	addAppObservabilityWindowFlags(cmd, &opts.appObservabilityWindowOptions)
@@ -201,7 +201,7 @@ func (c *CLI) newAppMetricsCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, response)
+					return c.writeJSON(response)
 				}
 				return renderAppObservabilityMetricsQuery(c.stdout, response)
 			}
@@ -210,7 +210,7 @@ func (c *CLI) newAppMetricsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderAppObservabilityMetricsSummary(c.stdout, response)
 		},
@@ -243,7 +243,7 @@ func (c *CLI) newAppRequestsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderAppObservabilityRequests(c.stdout, response, appObservabilityRequestFields(opts.Fields))
 		},
@@ -279,7 +279,7 @@ func (c *CLI) newAppTracesCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderAppObservabilityTrace(c.stdout, response)
 		},

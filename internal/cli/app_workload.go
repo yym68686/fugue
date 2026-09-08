@@ -131,7 +131,7 @@ func (c *CLI) newAppWorkloadClearCommand() *cobra.Command {
 
 func (c *CLI) renderAppWorkloadState(app model.App, operation *model.Operation, alreadyCurrent bool) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":                      redactAppForOutput(app),
 			"workload_class":           strings.TrimSpace(app.Spec.WorkloadClass),
 			"effective_workload_class": model.EffectiveWorkloadClass(app.Spec),

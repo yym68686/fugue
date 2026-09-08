@@ -47,7 +47,7 @@ func (c *CLI) newProjectRoutesShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderProjectRouteTable(c.stdout, response.RouteTable, c.showIDs())
 		},
@@ -87,7 +87,7 @@ fugue project routes apply sample-api-web --file routes.yaml
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderProjectRouteTable(c.stdout, response.RouteTable, c.showIDs())
 		},
@@ -116,7 +116,7 @@ func (c *CLI) newProjectRoutesDeleteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if _, err := fmt.Fprintf(c.stdout, "deleted=%t\n", response.Deleted); err != nil {
 				return err

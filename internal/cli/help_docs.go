@@ -1428,6 +1428,9 @@ func sampleUseToken(path, token string) string {
 	case "absolute-path...":
 		return "/app/config.yaml"
 	default:
+		if strings.HasPrefix(token, "<") {
+			return "example-" + strings.TrimSuffix(name, "...")
+		}
 		return ""
 	}
 }

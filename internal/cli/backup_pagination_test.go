@@ -177,7 +177,15 @@ func TestBackupListFailsLoudlyWhenLegacyServerCannotProveAnotherPage(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "omitted backup run pagination metadata") {
 		t.Fatalf("expected explicit legacy pagination error, got %v stderr=%s", err, stderr.String())
 	}
-	if requests != 1 || stdout.Len() != 0 {
+	var failure struct {
+		Error struct {
+			Category string `json:"category"`
+		} `json:"error"`
+	}
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &failure); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if requests != 1 || failure.Error.Category != "indeterminate" {
 		t.Fatalf("legacy pagination requests=%d stdout=%q", requests, stdout.String())
 	}
 }

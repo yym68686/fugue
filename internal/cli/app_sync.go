@@ -61,7 +61,7 @@ func (c *CLI) newAppSyncStatusCommand() *cobra.Command {
 					"origin_source":  originSource,
 					"latest":         latest,
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			pairs := []kvPair{
 				{Key: "app_id", Value: app.ID},
@@ -138,7 +138,7 @@ func (c *CLI) newAppSyncRunCommand() *cobra.Command {
 			}
 			response.Operation = finalOperation
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app":       redactAppForOutput(app),
 					"operation": redactOperationForOutput(response.Operation),
 					"build":     response.Build,
@@ -191,7 +191,7 @@ func (c *CLI) newAppSyncResumeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app": response.App,
 				})
 			}

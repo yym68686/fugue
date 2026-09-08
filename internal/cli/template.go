@@ -89,7 +89,7 @@ func (c *CLI) runInspectGitHubTemplate(repoURL string, opts inspectTemplateOptio
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, response)
+		return c.writeJSON(response)
 	}
 	return renderTemplateView(c.stdout, inspectViewFromGitHub(response), mode)
 }
@@ -133,7 +133,7 @@ func (c *CLI) runInspectUploadTemplate(pathArg, mode string) error {
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, response)
+		return c.writeJSON(response)
 	}
 	return renderTemplateView(c.stdout, inspectViewFromUpload(response), mode)
 }

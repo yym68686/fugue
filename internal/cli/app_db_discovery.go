@@ -32,7 +32,7 @@ func (c *CLI) newAppDatabaseTablesCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderAppDatabaseSimpleRows(c.stdout, response, []string{"table_schema", "table_name", "table_type"})
 		},
@@ -64,7 +64,7 @@ func (c *CLI) newAppDatabaseSchemaCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderAppDatabaseSimpleRows(c.stdout, response, []string{"table_schema", "table_name", "column_name", "data_type", "is_nullable", "column_default"})
 		},
@@ -113,7 +113,7 @@ func (c *CLI) newAppDatabaseSearchCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderAppDatabaseSearchResult(c.stdout, result)
 		},

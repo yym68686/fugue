@@ -179,7 +179,7 @@ func (c *CLI) newFilesVerifyCommand() *cobra.Command {
 			result, runErr := c.runAppConfigVerify(client, app, args[1], opts)
 			sanitized := sanitizeAppConfigVerifyResult(result, c.shouldRedact())
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, sanitized); err != nil {
+				if err := c.writeJSON(sanitized); err != nil {
 					return err
 				}
 			} else {
@@ -228,7 +228,7 @@ func (c *CLI) newFilesReconcileCommand() *cobra.Command {
 			result, runErr := c.runAppConfigReconcile(client, app, args[1], opts)
 			sanitized := sanitizeAppConfigReconcileResult(result, c.shouldRedact())
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, sanitized); err != nil {
+				if err := c.writeJSON(sanitized); err != nil {
 					return err
 				}
 			} else {

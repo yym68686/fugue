@@ -170,7 +170,7 @@ func (c *CLI) newBackupBackendListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backends": backends})
+				return c.writeJSON(map[string]any{"backends": backends})
 			}
 			return renderBackupBackends(c.stdout, backends, c.showIDs())
 		},
@@ -194,7 +194,7 @@ func (c *CLI) newBackupBackendCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backend": backend})
+				return c.writeJSON(map[string]any{"backend": backend})
 			}
 			return renderBackupBackend(c.stdout, backend, c.showIDs())
 		},
@@ -221,7 +221,7 @@ func (c *CLI) newBackupBackendRotateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backend": backend})
+				return c.writeJSON(map[string]any{"backend": backend})
 			}
 			return renderBackupBackend(c.stdout, backend, c.showIDs())
 		},
@@ -246,7 +246,7 @@ func (c *CLI) newBackupBackendShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backend": backend})
+				return c.writeJSON(map[string]any{"backend": backend})
 			}
 			return renderBackupBackend(c.stdout, backend, true)
 		},
@@ -269,7 +269,7 @@ func (c *CLI) newBackupBackendDeleteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backend": backend})
+				return c.writeJSON(map[string]any{"backend": backend})
 			}
 			_, _ = fmt.Fprintf(c.stdout, "deleted backup backend %s\n", backend.Name)
 			return nil
@@ -292,7 +292,7 @@ func (c *CLI) newBackupBackendTestCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			_, _ = fmt.Fprintf(c.stdout, "status=%s backend=%s message=%s\n", resp.Status, resp.Backend.Name, resp.Message)
 			return nil
@@ -399,7 +399,7 @@ func (c *CLI) newBackupPolicyListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policies": policies})
+				return c.writeJSON(map[string]any{"policies": policies})
 			}
 			return renderBackupPolicies(c.stdout, policies, c.showIDs())
 		},
@@ -426,7 +426,7 @@ func (c *CLI) newBackupPolicyShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policy": policy})
+				return c.writeJSON(map[string]any{"policy": policy})
 			}
 			return renderBackupPolicy(c.stdout, policy, true)
 		},
@@ -452,7 +452,7 @@ func (c *CLI) newBackupPolicyEnableCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policy": policy})
+				return c.writeJSON(map[string]any{"policy": policy})
 			}
 			return renderBackupPolicy(c.stdout, policy, c.showIDs())
 		},
@@ -476,7 +476,7 @@ func (c *CLI) newBackupPolicyDisableCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policy": policy})
+				return c.writeJSON(map[string]any{"policy": policy})
 			}
 			return renderBackupPolicy(c.stdout, policy, c.showIDs())
 		},
@@ -574,7 +574,7 @@ func (c *CLI) newBackupRunListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runs": runs})
+				return c.writeJSON(map[string]any{"runs": runs})
 			}
 			return renderBackupRuns(c.stdout, runs, c.showIDs())
 		},
@@ -603,7 +603,7 @@ func (c *CLI) newBackupRunStartCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			return renderBackupRun(c.stdout, resp.Run, c.showIDs())
 		},
@@ -627,7 +627,7 @@ func (c *CLI) newBackupRunShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			if err := renderBackupRun(c.stdout, resp.Run, true); err != nil {
 				return err
@@ -756,7 +756,7 @@ func (c *CLI) newBackupArtifactListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifacts": artifacts})
+				return c.writeJSON(map[string]any{"artifacts": artifacts})
 			}
 			return renderBackupArtifacts(c.stdout, artifacts, c.showIDs())
 		},
@@ -785,7 +785,7 @@ func (c *CLI) newBackupArtifactShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact})
+				return c.writeJSON(map[string]any{"artifact": artifact})
 			}
 			return renderBackupArtifact(c.stdout, artifact, true)
 		},
@@ -807,7 +807,7 @@ func (c *CLI) newBackupArtifactDeleteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact})
+				return c.writeJSON(map[string]any{"artifact": artifact})
 			}
 			_, _ = fmt.Fprintf(c.stdout, "deleted backup artifact %s\n", artifact.ID)
 			return nil
@@ -842,7 +842,7 @@ func (c *CLI) newBackupRestorePlanCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plan": plan})
+				return c.writeJSON(map[string]any{"plan": plan})
 			}
 			return renderBackupRestorePlan(c.stdout, plan, true)
 		},
@@ -866,7 +866,7 @@ func (c *CLI) newBackupRestoreRunCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"run": run})
+				return c.writeJSON(map[string]any{"run": run})
 			}
 			return renderBackupRestoreRun(c.stdout, run, true)
 		},
@@ -888,7 +888,7 @@ func (c *CLI) newBackupRestoreListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plans": plans})
+				return c.writeJSON(map[string]any{"plans": plans})
 			}
 			return renderBackupRestorePlans(c.stdout, plans, c.showIDs())
 		},
@@ -910,7 +910,7 @@ func (c *CLI) newBackupRestoreOfflineControlPlaneCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plan": plan})
+				return c.writeJSON(map[string]any{"plan": plan})
 			}
 			if err := renderBackupRestorePlan(c.stdout, plan, true); err != nil {
 				return err
@@ -935,7 +935,7 @@ func (c *CLI) newBackupUsageCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"usage": usage})
+				return c.writeJSON(map[string]any{"usage": usage})
 			}
 			return renderBackupUsage(c.stdout, usage)
 		},
@@ -956,7 +956,7 @@ func (c *CLI) newAdminBackupStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, status)
+				return c.writeJSON(status)
 			}
 			return renderAdminBackupStatus(c.stdout, status, c.showIDs())
 		},
@@ -982,7 +982,7 @@ func (c *CLI) newAdminBackupEnableCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policy": policy})
+				return c.writeJSON(map[string]any{"policy": policy})
 			}
 			return renderBackupPolicy(c.stdout, policy, c.showIDs())
 		},
@@ -1006,7 +1006,7 @@ func (c *CLI) newAdminBackupRunCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			return renderBackupRun(c.stdout, resp.Run, c.showIDs())
 		},
@@ -1031,13 +1031,13 @@ func (c *CLI) newAdminBackupShowCommand() *cobra.Command {
 			}
 			if run, err := client.GetBackupRun(args[0]); err == nil && run.Run.ID != "" {
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, run)
+					return c.writeJSON(run)
 				}
 				return renderBackupRun(c.stdout, run.Run, true)
 			}
 			if policy, err := client.GetBackupPolicy(args[0]); err == nil && policy.ID != "" {
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"policy": policy})
+					return c.writeJSON(map[string]any{"policy": policy})
 				}
 				return renderBackupPolicy(c.stdout, policy, true)
 			}
@@ -1046,7 +1046,7 @@ func (c *CLI) newAdminBackupShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact})
+				return c.writeJSON(map[string]any{"artifact": artifact})
 			}
 			return renderBackupArtifact(c.stdout, artifact, true)
 		},
@@ -1089,7 +1089,7 @@ func (c *CLI) newAppBackupStatusCommand() *cobra.Command {
 				status = sanitizeAppBackupStatusForOutput(status)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, status)
+				return c.writeJSON(status)
 			}
 			return renderAppBackupStatus(c.stdout, status, c.showIDs())
 		},
@@ -1120,7 +1120,7 @@ func (c *CLI) newAppBackupEnableCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policy": policy})
+				return c.writeJSON(map[string]any{"policy": policy})
 			}
 			return renderBackupPolicy(c.stdout, policy, c.showIDs())
 		},
@@ -1151,7 +1151,7 @@ func (c *CLI) newAppBackupRunCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			return renderBackupRun(c.stdout, resp.Run, c.showIDs())
 		},
@@ -1193,7 +1193,7 @@ func (c *CLI) newAppBackupListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runs": runs})
+				return c.writeJSON(map[string]any{"runs": runs})
 			}
 			return renderBackupRuns(c.stdout, runs, c.showIDs())
 		},
@@ -1222,7 +1222,7 @@ func (c *CLI) newAppBackupShowCommand() *cobra.Command {
 					return fmt.Errorf("backup run %s does not belong to app %s", run.Run.ID, app.Name)
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, run)
+					return c.writeJSON(run)
 				}
 				return renderBackupRun(c.stdout, run.Run, true)
 			}
@@ -1234,7 +1234,7 @@ func (c *CLI) newAppBackupShowCommand() *cobra.Command {
 				return fmt.Errorf("backup artifact %s does not belong to app %s", artifact.ID, app.Name)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact})
+				return c.writeJSON(map[string]any{"artifact": artifact})
 			}
 			return renderBackupArtifact(c.stdout, artifact, true)
 		},
@@ -1288,7 +1288,7 @@ func (c *CLI) newAppRestorePlanCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plan": plan})
+				return c.writeJSON(map[string]any{"plan": plan})
 			}
 			return renderBackupRestorePlan(c.stdout, plan, true)
 		},
@@ -1329,7 +1329,7 @@ func (c *CLI) newAppRestoreVerifyCommand() *cobra.Command {
 					return fmt.Errorf("backup artifact %s does not belong to app %s", artifact.ID, app.Name)
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"artifact": artifact, "verified": true})
+					return c.writeJSON(map[string]any{"artifact": artifact, "verified": true})
 				}
 				_, _ = fmt.Fprintf(c.stdout, "verified artifact=%s app=%s target=%s checksum=%s\n", artifact.ID, app.Name, artifact.Target.Type, blankDash(artifact.SHA256))
 				return nil
@@ -1342,7 +1342,7 @@ func (c *CLI) newAppRestoreVerifyCommand() *cobra.Command {
 					return fmt.Errorf("restore plan %s does not belong to app %s", plan.ID, app.Name)
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"plan": plan, "verified": true})
+					return c.writeJSON(map[string]any{"plan": plan, "verified": true})
 				}
 				_, _ = fmt.Fprintf(c.stdout, "verified restore_plan=%s app=%s mode=%s status=%s\n", plan.ID, app.Name, plan.Mode, plan.Status)
 				return nil
@@ -1393,7 +1393,7 @@ func (c *CLI) newAppRestoreRunCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"run": run})
+				return c.writeJSON(map[string]any{"run": run})
 			}
 			return renderBackupRestoreRun(c.stdout, run, true)
 		},

@@ -41,7 +41,7 @@ func (c *CLI) newAdminGateListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policies": policies})
+				return c.writeJSON(map[string]any{"policies": policies})
 			}
 			return writeGatePolicyTable(c.stdout, policies)
 		},
@@ -63,7 +63,7 @@ func (c *CLI) newAdminGateShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policy": policy})
+				return c.writeJSON(map[string]any{"policy": policy})
 			}
 			return writeGatePolicy(c.stdout, policy)
 		},
@@ -99,7 +99,7 @@ func (c *CLI) newAdminGatePromoteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writeGatePolicy(c.stdout, response.Policy); err != nil {
 				return err

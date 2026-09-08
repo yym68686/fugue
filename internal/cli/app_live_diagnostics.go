@@ -70,7 +70,7 @@ func (c *CLI) newAppDiagnosticsStartCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, report); err != nil {
+				if err := c.writeJSON(report); err != nil {
 					return err
 				}
 			} else if err := renderDiagnosticReport(c.stdout, report); err != nil {
@@ -107,7 +107,7 @@ func (c *CLI) newAppDiagnosticsListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderDiagnosticSessions(c.stdout, response.Sessions)
 		},
@@ -148,7 +148,7 @@ func (c *CLI) newAppDiagnosticsReportCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderDiagnosticReport(c.stdout, response)
 		},
@@ -170,7 +170,7 @@ func (c *CLI) newAppDiagnosticsCancelCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "diagnostic_session", Value: response.Session.ID},
@@ -191,7 +191,7 @@ func (c *CLI) diagnosticClientAndApp(reference string) (*Client, model.App, erro
 
 func (c *CLI) renderDiagnosticSession(session appDiagnosticSession) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, appDiagnosticSessionResponse{Session: session})
+		return c.writeJSON(appDiagnosticSessionResponse{Session: session})
 	}
 	return writeKeyValues(c.stdout,
 		kvPair{Key: "diagnostic_session", Value: session.ID},

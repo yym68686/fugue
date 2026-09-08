@@ -55,7 +55,7 @@ fugue auth login --base-url https://api.example.com --token <copied-access-key>
 				"location": authTokenLocation(source),
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			fmt.Fprintf(c.stdout, "Saved Fugue API key for %s\n", cred.BaseURL)
 			fmt.Fprintf(c.stdout, "Location: %s\n", authTokenLocation(source))
@@ -90,7 +90,7 @@ fugue auth status --json
 				"saved_updated":  meta.UpdatedAt,
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, status)
+				return c.writeJSON(status)
 			}
 			fmt.Fprintf(c.stdout, "Base URL: %s\n", c.effectiveBaseURL())
 			if strings.TrimSpace(token) == "" {
@@ -130,7 +130,7 @@ fugue auth logout --base-url https://api.example.com
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"base_url": c.effectiveBaseURL(), "deleted": deleted})
+				return c.writeJSON(map[string]any{"base_url": c.effectiveBaseURL(), "deleted": deleted})
 			}
 			if deleted {
 				fmt.Fprintf(c.stdout, "Removed saved Fugue API key for %s\n", c.effectiveBaseURL())

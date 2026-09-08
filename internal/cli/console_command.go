@@ -39,7 +39,7 @@ truth and does not replace JSON/script workflows.
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, view)
+				return c.writeJSON(view)
 			}
 			model := cliconsole.NewModel(view)
 			if !c.shouldUseInteractiveMonitor(opts.Plain) || opts.Plain {

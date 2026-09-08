@@ -40,7 +40,7 @@ func (c *CLI) newAdminInvariantListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"invariants": invariants})
+				return c.writeJSON(map[string]any{"invariants": invariants})
 			}
 			return writeInvariantDefinitionTable(c.stdout, invariants)
 		},
@@ -62,7 +62,7 @@ func (c *CLI) newAdminInvariantShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"invariant": invariant})
+				return c.writeJSON(map[string]any{"invariant": invariant})
 			}
 			return writeInvariantDefinition(c.stdout, invariant)
 		},
@@ -84,7 +84,7 @@ func (c *CLI) newAdminInvariantInventoryCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"inventory": inventory})
+				return c.writeJSON(map[string]any{"inventory": inventory})
 			}
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "artifact_kinds", Value: fmt.Sprintf("%d", len(inventory.ArtifactKinds))},

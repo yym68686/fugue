@@ -23,19 +23,22 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAppReleaseCanaryCommand(),
-		c.newAppReleaseTrafficCommand(),
+		c.newReleaseVersionsCommand(),
+		c.newReleaseVersionCommand(),
+		c.newReleaseAttemptCommand(),
+		hideCompatCommand(c.newAppReleaseTrafficCommand(), "fugue app traffic set"),
 		c.newAppReleaseProbeCommand(),
 		c.newAppReleaseGateCommand(),
 		c.newAppReleasePromoteCommand(),
 		c.newAppReleaseAbortCommand(),
-		c.newAppReleaseListCommand(),
-		c.newAppReleaseAttemptsCommand(),
-		c.newAppReleaseStatusCommand(),
-		c.newAppReleaseExplainCommand(),
-		c.newAppReleaseDebugBundleCommand(),
-		c.newAppReleaseTrackingCommand(),
-		c.newAppReleasePruneCommand(),
-		c.newAppReleasePolicyCommand(),
+		hideCompatCommand(c.newAppReleaseListCommand(), "fugue app image ls"),
+		hideCompatCommand(c.newAppReleaseAttemptsCommand(), "fugue app release attempt ls"),
+		hideCompatCommand(c.newAppReleaseStatusCommand(), "fugue app release attempt status"),
+		hideCompatCommand(c.newAppReleaseExplainCommand(), "fugue app release attempt explain"),
+		hideCompatCommand(c.newAppReleaseDebugBundleCommand(), "fugue app release attempt bundle"),
+		hideCompatCommand(c.newAppReleaseTrackingCommand(), "fugue app image tracking"),
+		hideCompatCommand(c.newAppReleasePruneCommand(), "fugue app image prune"),
+		hideCompatCommand(c.newAppReleasePolicyCommand(), "fugue app image retention"),
 		hideCompatCommand(c.newAppReleaseDeployCommand(), "fugue app deploy"),
 		hideCompatCommand(c.newAppReleaseRebuildCommand(), "fugue app build"),
 		hideCompatCommand(c.newAppReleaseRollbackCommand(), "fugue app rollback"),
@@ -62,7 +65,7 @@ func (c *CLI) newAppReleaseAttemptsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"release_attempts": attempts})
+				return c.writeJSON(map[string]any{"release_attempts": attempts})
 			}
 			return writeReleaseAttemptTable(c.stdout, attempts)
 		},
@@ -90,13 +93,13 @@ func (c *CLI) newAppReleaseStatusCommand() *cobra.Command {
 			}
 			if len(attempts) == 0 {
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"release_attempt": nil})
+					return c.writeJSON(map[string]any{"release_attempt": nil})
 				}
 				_, err := fmt.Fprintln(c.stdout, "no release attempts recorded")
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"release_attempt": attempts[0]})
+				return c.writeJSON(map[string]any{"release_attempt": attempts[0]})
 			}
 			return writeReleaseAttemptSummary(c.stdout, attempts[0])
 		},
@@ -144,7 +147,7 @@ func (c *CLI) newAppReleaseExplainCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"release_attempt": attempt, "timeline": timeline, "evidence": evidence})
+				return c.writeJSON(map[string]any{"release_attempt": attempt, "timeline": timeline, "evidence": evidence})
 			}
 			if err := writeReleaseAttemptSummary(c.stdout, attempt); err != nil {
 				return err
@@ -220,12 +223,12 @@ func (c *CLI) newAppReleaseDebugBundleCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"output": opts.Output})
+					return c.writeJSON(map[string]any{"output": opts.Output})
 				}
 				_, err := fmt.Fprintf(c.stdout, "wrote release debug bundle: %s\n", opts.Output)
 				return err
 			}
-			return writeJSON(c.stdout, map[string]any{"bundle": bundle})
+			return c.writeJSON(map[string]any{"bundle": bundle})
 		},
 	}
 	cmd.Flags().StringVar(&opts.AttemptID, "attempt", "", "Release attempt id; defaults to latest")
@@ -291,10 +294,18 @@ func (c *CLI) newAppReleaseCanaryStartCommand() *cobra.Command {
 				CandidateWeight:    intPtr(opts.Traffic),
 			})
 			if err != nil {
+				payload := map[string]any{"schema_version": 1, "outcome": "partial", "release": created.Release, "failed_stage": "traffic_update", "error": describeCommandError(err), "next_commands": []string{"fugue app release version " + shellSingleQuote(args[0]) + " " + shellSingleQuote(created.Release.ID), "fugue app traffic show " + shellSingleQuote(args[0])}}
+				if c.wantsJSON() {
+					if writeErr := c.writeJSON(payload); writeErr != nil {
+						return writeErr
+					}
+				} else {
+					c.progressf("candidate_release_id=%s failed_stage=traffic_update", created.Release.ID)
+				}
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"release": created.Release, "traffic": traffic.Traffic})
+				return c.writeJSON(map[string]any{"release": created.Release, "traffic": traffic.Traffic})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "app_id", Value: app.ID},
@@ -365,7 +376,7 @@ func (c *CLI) newAppReleaseTrafficCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeTrafficPolicySummary(c.stdout, response.Traffic)
 		},
@@ -401,7 +412,7 @@ func (c *CLI) newAppReleaseProbeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeProbeResults(c.stdout, response.Status, response.Results)
 		},
@@ -446,7 +457,7 @@ func (c *CLI) newAppReleaseGateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeGateSummary(c.stdout, response.Gate)
 		},
@@ -484,7 +495,7 @@ func (c *CLI) newAppReleasePromoteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeTrafficPolicySummary(c.stdout, response.Traffic)
 		},
@@ -520,7 +531,7 @@ func (c *CLI) newAppReleaseAbortCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeTrafficPolicySummary(c.stdout, response.Traffic)
 		},
@@ -550,7 +561,7 @@ func (c *CLI) newAppReleaseTrackingCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if response.Tracking == nil {
 				return writeKeyValues(c.stdout,
@@ -597,7 +608,7 @@ func (c *CLI) newAppReleaseTrackingSetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if response.Tracking == nil {
 				return writeKeyValues(c.stdout, kvPair{Key: "app_id", Value: app.ID}, kvPair{Key: "enabled", Value: "false"})
@@ -636,7 +647,7 @@ func (c *CLI) newAppReleaseTrackingDisableCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if response.Tracking == nil {
 				return writeKeyValues(c.stdout, kvPair{Key: "app_id", Value: app.ID}, kvPair{Key: "enabled", Value: "false"})
@@ -668,7 +679,7 @@ func (c *CLI) newAppReleaseTrackingSyncCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			pairs := []kvPair{
 				{Key: "app_id", Value: app.ID},
@@ -728,7 +739,7 @@ func (c *CLI) newAppReleaseTrackingHistoryCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeAppImageTrackingHistory(c.stdout, response)
 		},
@@ -756,7 +767,7 @@ func (c *CLI) newAppReleaseTrackingDiagnoseCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeAppImageTrackingDiagnosis(c.stdout, response.Diagnosis)
 		},
@@ -908,7 +919,7 @@ func (c *CLI) newAppReleaseListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, inventory)
+				return c.writeJSON(inventory)
 			}
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "app_id", Value: inventory.AppID},
@@ -1003,7 +1014,7 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 			}
 			response.Operation = finalOperation
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id":    app.ID,
 					"operation": redactOperationForOutput(response.Operation),
 					"build":     response.Build,
@@ -1159,7 +1170,7 @@ func (c *CLI) newAppReleaseRollbackCommand() *cobra.Command {
 					appCopy := redactAppForOutput(*result.App)
 					payloadApp = &appCopy
 				}
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app":       payloadApp,
 					"operation": redactOperationPtrForOutput(result.Operation),
 					"image":     response.Image,
@@ -1207,7 +1218,7 @@ func (c *CLI) newAppReleasePruneCommand() *cobra.Command {
 					}
 					results = append(results, result)
 				}
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id":  app.ID,
 					"deleted": results,
 				})
@@ -1267,7 +1278,7 @@ func (c *CLI) newAppReleasePolicyShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app":                app,
 					"image_mirror_limit": model.EffectiveAppImageMirrorLimit(app.Spec.ImageMirrorLimit),
 				})
@@ -1302,7 +1313,7 @@ func (c *CLI) newAppReleasePolicySetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "app", Value: response.App.Name},

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/url"
@@ -44,14 +45,16 @@ type rootOptions struct {
 }
 
 type CLI struct {
-	deployment  *deploymentCommandState
-	stdout      io.Writer
-	stderr      io.Writer
-	root        rootOptions
-	observer    requestObserver
-	outputFile  *os.File
-	outputReady bool
-	account     *adminWorkspaceResolveResponse
+	rawAppOutput bool
+	context      context.Context
+	deployment   *deploymentCommandState
+	stdout       io.Writer
+	stderr       io.Writer
+	root         rootOptions
+	observer     requestObserver
+	outputFile   *os.File
+	outputReady  bool
+	account      *adminWorkspaceResolveResponse
 }
 
 func Run(args []string) error {
@@ -59,9 +62,10 @@ func Run(args []string) error {
 }
 
 func runWithStreams(args []string, stdout, stderr io.Writer) error {
-	cli := newCLI(stdout, stderr)
+	payload := &payloadWriter{Writer: stdout}
+	cli := newCLI(payload, stderr)
 	cmd := cli.newRootCommand()
-	cmd.SetOut(stdout)
+	cmd.SetOut(payload)
 	cmd.SetErr(stderr)
 	cmd.SetArgs(args)
 	cmd.SilenceErrors = true
@@ -69,7 +73,10 @@ func runWithStreams(args []string, stdout, stderr io.Writer) error {
 	defer cli.closeOutputFile()
 	err := cmd.Execute()
 	if err != nil && cli.deployment != nil {
-		return cli.renderDeploymentError(err)
+		err = cli.renderDeploymentError(err)
+	}
+	if err != nil && (cli.wantsJSON() || requestedJSON(args)) && payload.written == 0 {
+		return cli.renderCommandError(err)
 	}
 	return err
 }
@@ -224,6 +231,19 @@ Environment variables:
 	  fugue web diagnose admin-users
 	`),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			c.context = cmd.Context()
+			if cmd.CommandPath() == "fugue app db query" {
+				c.rawAppOutput = true
+			}
+			if notice := cmd.Annotations["fugue.deprecation"]; notice != "" {
+				fmt.Fprintln(c.stderr, "Deprecated:", notice)
+			}
+			if flag := cmd.Flags().Lookup("show-secrets"); flag != nil {
+				c.rawAppOutput, _ = cmd.Flags().GetBool("show-secrets")
+			}
+			if !c.root.Redact && c.root.ConfirmRaw {
+				c.rawAppOutput = true
+			}
 			if err := c.validateOutput(); err != nil {
 				return err
 			}
@@ -301,6 +321,8 @@ Environment variables:
 		c.newDomainCompatCommand(),
 		c.newWorkspaceCompatCommand(),
 	)
+	finalizeCompatibility(cmd)
+	cmd.SetHelpCommand(c.newCatalogHelpCommand(cmd))
 	applyHelpDocs(cmd)
 	return cmd
 }
@@ -391,6 +413,7 @@ func (c *CLI) newClient() (*Client, error) {
 		return nil, err
 	}
 	return newClientWithOptions(c.effectiveBaseURL(), c.effectiveToken(), clientOptions{
+		Context:      c.context,
 		Observer:     c.observer,
 		RequireToken: true,
 	})
@@ -406,6 +429,7 @@ func (c *CLI) newWebClient(cookie string) (*Client, error) {
 	}
 	return newClientWithOptions(baseURL, c.effectiveToken(), clientOptions{
 		Cookie:       cookie,
+		Context:      c.context,
 		Observer:     c.observer,
 		RequireToken: false,
 	})

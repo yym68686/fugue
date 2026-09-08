@@ -1,0 +1,588 @@
+command	usage	visible_children
+fugue	fugue [command]	admin,api,app,auth,backup,completion,console,data,debug,deploy,diagnose,dns,find,logs,operation,project,runtime,service,source-upload,ssh-key,tenant,upgrade,version,web,workflow
+fugue admin	fugue admin [command]	access,action-contract,action-safety,apps,artifact,backup,billing,cluster,cockpit,consumer,control-plane,discovery,dns,domains,edge,failure-contract,gate,image-cache,image-retention,invariant,node-updater,platform,quarantine,release,request,robustness,routes,runtime,security,synthetic,tenant,traffic-safety,users
+fugue admin access	fugue admin access [command]	api-key,node-key
+fugue admin access api-key	fugue admin access api-key [command]	create,delete,disable,enable,ls,rotate,update
+fugue admin access api-key create	fugue admin access api-key create <label> [flags]	-
+fugue admin access api-key delete	fugue admin access api-key delete <api-key> [flags]	-
+fugue admin access api-key disable	fugue admin access api-key disable <api-key> [flags]	-
+fugue admin access api-key enable	fugue admin access api-key enable <api-key> [flags]	-
+fugue admin access api-key ls	fugue admin access api-key ls [flags]	-
+fugue admin access api-key rotate	fugue admin access api-key rotate <api-key> [flags]	-
+fugue admin access api-key update	fugue admin access api-key update <api-key> [flags]	-
+fugue admin access node-key	fugue admin access node-key [command]	create,ls,revoke,usage
+fugue admin access node-key create	fugue admin access node-key create <label> [flags]	-
+fugue admin access node-key ls	fugue admin access node-key ls [flags]	-
+fugue admin access node-key revoke	fugue admin access node-key revoke <node-key> [flags]	-
+fugue admin access node-key usage	fugue admin access node-key usage <node-key> [flags]	-
+fugue admin action-contract	fugue admin action-contract [command]	ls,show
+fugue admin action-contract ls	fugue admin action-contract ls [flags]	-
+fugue admin action-contract show	fugue admin action-contract show <contract-id> [flags]	-
+fugue admin action-safety	fugue admin action-safety [command]	evaluate
+fugue admin action-safety evaluate	fugue admin action-safety evaluate [flags]	-
+fugue admin apps	fugue admin apps [command]	move
+fugue admin apps move	fugue admin apps move <app> [flags]	-
+fugue admin artifact	fugue admin artifact [command]	consumers,create,diff,lkg,ls,release,rollback,show,validate,verify-lkg
+fugue admin artifact consumers	fugue admin artifact consumers <artifact-id-or-generation> [flags]	-
+fugue admin artifact create	fugue admin artifact create [flags]	-
+fugue admin artifact diff	fugue admin artifact diff <generation-a> <generation-b> [flags]	-
+fugue admin artifact lkg	fugue admin artifact lkg <artifact-id-or-generation> [flags]	-
+fugue admin artifact ls	fugue admin artifact ls [flags]	-
+fugue admin artifact release	fugue admin artifact release <artifact-id-or-generation> [flags]	-
+fugue admin artifact rollback	fugue admin artifact rollback <artifact-id-or-generation> [flags]	-
+fugue admin artifact show	fugue admin artifact show <artifact-id-or-generation> [flags]	-
+fugue admin artifact validate	fugue admin artifact validate <artifact-id-or-generation> [flags]	-
+fugue admin artifact verify-lkg	fugue admin artifact verify-lkg <release-id> [flags]	-
+fugue admin backup	fugue admin backup [command]	backend,enable,ls,run,show,status
+fugue admin backup backend	fugue admin backup backend [command]	create,delete,ls,rotate,show,test
+fugue admin backup backend create	fugue admin backup backend create <name> [flags]	-
+fugue admin backup backend delete	fugue admin backup backend delete <backend> [flags]	-
+fugue admin backup backend ls	fugue admin backup backend ls [flags]	-
+fugue admin backup backend rotate	fugue admin backup backend rotate <backend> [flags]	-
+fugue admin backup backend show	fugue admin backup backend show <backend> [flags]	-
+fugue admin backup backend test	fugue admin backup backend test <backend> [flags]	-
+fugue admin backup enable	fugue admin backup enable [flags]	-
+fugue admin backup ls	fugue admin backup ls [flags]	-
+fugue admin backup run	fugue admin backup run [flags]	-
+fugue admin backup show	fugue admin backup show <id> [flags]	-
+fugue admin backup status	fugue admin backup status [flags]	-
+fugue admin billing	fugue admin billing [command]	cap,set-balance,show,topup
+fugue admin billing cap	fugue admin billing cap [flags]	-
+fugue admin billing set-balance	fugue admin billing set-balance <amount> [flags]	-
+fugue admin billing show	fugue admin billing show [flags]	-
+fugue admin billing topup	fugue admin billing topup <amount> [flags]	-
+fugue admin cluster	fugue admin cluster [command]	dns,events,exec,join-script,logs,net,node,node-policy,nodes,pods,rollout,service,status,tls,top,workload
+fugue admin cluster dns	fugue admin cluster dns [command]	resolve
+fugue admin cluster dns resolve	fugue admin cluster dns resolve <name> [flags]	-
+fugue admin cluster events	fugue admin cluster events [flags]	-
+fugue admin cluster exec	fugue admin cluster exec --namespace <namespace> --pod <pod> -- <command...> [flags]	-
+fugue admin cluster join-script	fugue admin cluster join-script [flags]	-
+fugue admin cluster logs	fugue admin cluster logs [flags]	-
+fugue admin cluster net	fugue admin cluster net [command]	connect,websocket
+fugue admin cluster net connect	fugue admin cluster net connect <target> [flags]	-
+fugue admin cluster net websocket	fugue admin cluster net websocket <app> [flags]	-
+fugue admin cluster node	fugue admin cluster node [command]	disk,inspect,journal,localpv,metrics
+fugue admin cluster node disk	fugue admin cluster node disk <node> [flags]	-
+fugue admin cluster node inspect	fugue admin cluster node inspect <node> [flags]	-
+fugue admin cluster node journal	fugue admin cluster node journal <node> [flags]	-
+fugue admin cluster node localpv	fugue admin cluster node localpv [command]	ls,show
+fugue admin cluster node localpv ls	fugue admin cluster node localpv ls [flags]	-
+fugue admin cluster node localpv show	fugue admin cluster node localpv show <node> [flags]	-
+fugue admin cluster node metrics	fugue admin cluster node metrics <node> [flags]	-
+fugue admin cluster node-policy	fugue admin cluster node-policy [command]	get,ls,set,status
+fugue admin cluster node-policy get	fugue admin cluster node-policy get <node> [flags]	-
+fugue admin cluster node-policy ls	fugue admin cluster node-policy ls [flags]	-
+fugue admin cluster node-policy set	fugue admin cluster node-policy set <node> [flags]	-
+fugue admin cluster node-policy status	fugue admin cluster node-policy status [flags]	-
+fugue admin cluster nodes	fugue admin cluster nodes [flags]	-
+fugue admin cluster pods	fugue admin cluster pods [flags]	-
+fugue admin cluster rollout	fugue admin cluster rollout [command]	status
+fugue admin cluster rollout status	fugue admin cluster rollout status <namespace> <kind> <name> [flags]	-
+fugue admin cluster service	fugue admin cluster service [command]	show
+fugue admin cluster service show	fugue admin cluster service show <namespace> <name> [flags]	-
+fugue admin cluster status	fugue admin cluster status [flags]	-
+fugue admin cluster tls	fugue admin cluster tls [command]	probe
+fugue admin cluster tls probe	fugue admin cluster tls probe <target> [flags]	-
+fugue admin cluster top	fugue admin cluster top [flags]	-
+fugue admin cluster workload	fugue admin cluster workload [command]	show
+fugue admin cluster workload show	fugue admin cluster workload show <namespace> <kind> <name> [flags]	-
+fugue admin cockpit	fugue admin cockpit [flags]	-
+fugue admin consumer	fugue admin consumer [command]	expected
+fugue admin consumer expected	fugue admin consumer expected [flags]	-
+fugue admin control-plane	fugue admin control-plane [command]	store
+fugue admin control-plane store	fugue admin control-plane store [command]	promote,status
+fugue admin control-plane store promote	fugue admin control-plane store promote [flags]	-
+fugue admin control-plane store status	fugue admin control-plane store status [flags]	-
+fugue admin discovery	fugue admin discovery [command]	bundle
+fugue admin discovery bundle	fugue admin discovery bundle [command]	diff,download,show
+fugue admin discovery bundle diff	fugue admin discovery bundle diff <path> [flags]	-
+fugue admin discovery bundle download	fugue admin discovery bundle download [path] [flags]	-
+fugue admin discovery bundle show	fugue admin discovery bundle show [flags]	-
+fugue admin dns	fugue admin dns [command]	acme,answer-check,delegation,full-zone,nodes,status
+fugue admin dns acme	fugue admin dns acme [command]	cleanup,ls,present
+fugue admin dns acme cleanup	fugue admin dns acme cleanup [challenge-id] [flags]	-
+fugue admin dns acme ls	fugue admin dns acme ls [flags]	-
+fugue admin dns acme present	fugue admin dns acme present <name> <txt-value> [flags]	-
+fugue admin dns answer-check	fugue admin dns answer-check <hostname> [flags]	-
+fugue admin dns delegation	fugue admin dns delegation [command]	apply,plan,rollback
+fugue admin dns delegation apply	fugue admin dns delegation apply [flags]	-
+fugue admin dns delegation plan	fugue admin dns delegation plan [flags]	-
+fugue admin dns delegation rollback	fugue admin dns delegation rollback [flags]	-
+fugue admin dns full-zone	fugue admin dns full-zone [command]	preflight
+fugue admin dns full-zone preflight	fugue admin dns full-zone preflight [flags]	-
+fugue admin dns nodes	fugue admin dns nodes [command]	get,ls
+fugue admin dns nodes get	fugue admin dns nodes get <dns-node-id> [flags]	-
+fugue admin dns nodes ls	fugue admin dns nodes ls [flags]	-
+fugue admin dns status	fugue admin dns status [flags]	-
+fugue admin domains	fugue admin domains [command]	bind,get,ls,unbind
+fugue admin domains bind	fugue admin domains bind <hostname> [flags]	-
+fugue admin domains get	fugue admin domains get <hostname> [flags]	-
+fugue admin domains ls	fugue admin domains ls [flags]	-
+fugue admin domains unbind	fugue admin domains unbind <hostname> [flags]	-
+fugue admin edge	fugue admin edge [command]	cache-check,nodes,quality-rank,route-check,route-policy
+fugue admin edge cache-check	fugue admin edge cache-check <url> [flags]	-
+fugue admin edge nodes	fugue admin edge nodes [command]	canary,desired-state,drain,get,ls,probe,quality,token,undrain
+fugue admin edge nodes canary	fugue admin edge nodes canary [command]	set
+fugue admin edge nodes canary set	fugue admin edge nodes canary set <edge-id> [flags]	-
+fugue admin edge nodes desired-state	fugue admin edge nodes desired-state <edge-id> [flags]	-
+fugue admin edge nodes drain	fugue admin edge nodes drain <edge-id> [flags]	-
+fugue admin edge nodes get	fugue admin edge nodes get <edge-id> [flags]	-
+fugue admin edge nodes ls	fugue admin edge nodes ls [flags]	-
+fugue admin edge nodes probe	fugue admin edge nodes probe <edge-id> [flags]	-
+fugue admin edge nodes quality	fugue admin edge nodes quality <edge-id> [flags]	-
+fugue admin edge nodes token	fugue admin edge nodes token <edge-id> [flags]	-
+fugue admin edge nodes undrain	fugue admin edge nodes undrain <edge-id> [flags]	-
+fugue admin edge quality-rank	fugue admin edge quality-rank <hostname> [flags]	-
+fugue admin edge route-check	fugue admin edge route-check <hostname> [flags]	-
+fugue admin edge route-policy	fugue admin edge route-policy [command]	allow-edge,allow-edge-group,delete,exclude-edge,exclude-edge-group,ls,set,show
+fugue admin edge route-policy allow-edge	fugue admin edge route-policy allow-edge <hostname> [flags]	-
+fugue admin edge route-policy allow-edge-group	fugue admin edge route-policy allow-edge-group <hostname> [flags]	-
+fugue admin edge route-policy delete	fugue admin edge route-policy delete <hostname> [flags]	-
+fugue admin edge route-policy exclude-edge	fugue admin edge route-policy exclude-edge <hostname> [flags]	-
+fugue admin edge route-policy exclude-edge-group	fugue admin edge route-policy exclude-edge-group <hostname> [flags]	-
+fugue admin edge route-policy ls	fugue admin edge route-policy ls [flags]	-
+fugue admin edge route-policy set	fugue admin edge route-policy set <hostname> [flags]	-
+fugue admin edge route-policy show	fugue admin edge route-policy show <hostname> [flags]	-
+fugue admin failure-contract	fugue admin failure-contract [command]	ls,show
+fugue admin failure-contract ls	fugue admin failure-contract ls [flags]	-
+fugue admin failure-contract show	fugue admin failure-contract show <subsystem> [flags]	-
+fugue admin gate	fugue admin gate [command]	ls,promote,show
+fugue admin gate ls	fugue admin gate ls [flags]	-
+fugue admin gate promote	fugue admin gate promote <gate-id> [flags]	-
+fugue admin gate show	fugue admin gate show <gate-id> [flags]	-
+fugue admin image-cache	fugue admin image-cache [command]	inventory,prune,prune-plan
+fugue admin image-cache inventory	fugue admin image-cache inventory [flags]	-
+fugue admin image-cache prune	fugue admin image-cache prune [flags]	-
+fugue admin image-cache prune-plan	fugue admin image-cache prune-plan [flags]	-
+fugue admin image-retention	fugue admin image-retention [command]	plan,reconcile
+fugue admin image-retention plan	fugue admin image-retention plan [flags]	-
+fugue admin image-retention reconcile	fugue admin image-retention reconcile [flags]	-
+fugue admin invariant	fugue admin invariant [command]	inventory,ls,show
+fugue admin invariant inventory	fugue admin invariant inventory [flags]	-
+fugue admin invariant ls	fugue admin invariant ls [flags]	-
+fugue admin invariant show	fugue admin invariant show <invariant-id> [flags]	-
+fugue admin node-updater	fugue admin node-updater [command]	health,ls,repair-history,rollout,task
+fugue admin node-updater health	fugue admin node-updater health [command]	ls,show
+fugue admin node-updater health ls	fugue admin node-updater health ls [flags]	-
+fugue admin node-updater health show	fugue admin node-updater health show <node-updater-id> [flags]	-
+fugue admin node-updater ls	fugue admin node-updater ls [flags]	-
+fugue admin node-updater repair-history	fugue admin node-updater repair-history [flags]	-
+fugue admin node-updater rollout	fugue admin node-updater rollout [command]	pause,resume,status
+fugue admin node-updater rollout pause	fugue admin node-updater rollout pause [flags]	-
+fugue admin node-updater rollout resume	fugue admin node-updater rollout resume [flags]	-
+fugue admin node-updater rollout status	fugue admin node-updater rollout status [flags]	-
+fugue admin node-updater task	fugue admin node-updater task [command]	create,ls
+fugue admin node-updater task create	fugue admin node-updater task create [flags]	-
+fugue admin node-updater task ls	fugue admin node-updater task ls [flags]	-
+fugue admin platform	fugue admin platform [command]	autonomy,failure-drill
+fugue admin platform autonomy	fugue admin platform autonomy [command]	status
+fugue admin platform autonomy status	fugue admin platform autonomy status [flags]	-
+fugue admin platform failure-drill	fugue admin platform failure-drill [flags]	-
+fugue admin quarantine	fugue admin quarantine [command]	explain
+fugue admin quarantine explain	fugue admin quarantine explain <node-or-edge> [flags]	-
+fugue admin release	fugue admin release [command]	explain,guard
+fugue admin release explain	fugue admin release explain <release-id> [flags]	-
+fugue admin release guard	fugue admin release guard [command]	signals,status
+fugue admin release guard signals	fugue admin release guard signals [command]	add,ls,rm
+fugue admin release guard signals add	fugue admin release guard signals add <signal-id> [flags]	-
+fugue admin release guard signals ls	fugue admin release guard signals ls [flags]	-
+fugue admin release guard signals rm	fugue admin release guard signals rm <signal-id> [flags]	-
+fugue admin release guard status	fugue admin release guard status [flags]	-
+fugue admin request	fugue admin request [command]	explain
+fugue admin request explain	fugue admin request explain <request-id> [flags]	-
+fugue admin robustness	fugue admin robustness [command]	check,incidents,repair,repair-plan,status
+fugue admin robustness check	fugue admin robustness check <subject> [flags]	edge,node,service
+fugue admin robustness check edge	fugue admin robustness check edge <edge-id> [flags]	-
+fugue admin robustness check node	fugue admin robustness check node <node-name> [flags]	-
+fugue admin robustness check service	fugue admin robustness check service <hostname-or-app> [flags]	-
+fugue admin robustness incidents	fugue admin robustness incidents [command]	ls,show
+fugue admin robustness incidents ls	fugue admin robustness incidents ls [flags]	-
+fugue admin robustness incidents show	fugue admin robustness incidents show <incident-id> [flags]	-
+fugue admin robustness repair	fugue admin robustness repair <incident-id> [flags]	-
+fugue admin robustness repair-plan	fugue admin robustness repair-plan <incident-id> [flags]	-
+fugue admin robustness status	fugue admin robustness status [flags]	-
+fugue admin routes	fugue admin routes [command]	explain,ls
+fugue admin routes explain	fugue admin routes explain <hostname> [flags]	-
+fugue admin routes ls	fugue admin routes ls [flags]	-
+fugue admin runtime	fugue admin runtime [command]	access,create,delete,ls,offer,pool,show,token
+fugue admin runtime access	fugue admin runtime access [runtime] [flags]	grant,revoke,set,show
+fugue admin runtime access grant	fugue admin runtime access grant <runtime> <tenant> [flags]	-
+fugue admin runtime access revoke	fugue admin runtime access revoke <runtime> <tenant> [flags]	-
+fugue admin runtime access set	fugue admin runtime access set <runtime> <mode> [flags]	-
+fugue admin runtime access show	fugue admin runtime access show <runtime> [flags]	-
+fugue admin runtime create	fugue admin runtime create <name> [flags]	-
+fugue admin runtime delete	fugue admin runtime delete <runtime> [flags]	-
+fugue admin runtime ls	fugue admin runtime ls [flags]	-
+fugue admin runtime offer	fugue admin runtime offer [command]	set,show
+fugue admin runtime offer set	fugue admin runtime offer set <runtime> [flags]	-
+fugue admin runtime offer show	fugue admin runtime offer show <runtime> [flags]	-
+fugue admin runtime pool	fugue admin runtime pool [command]	set,show
+fugue admin runtime pool set	fugue admin runtime pool set <runtime> <mode> [flags]	-
+fugue admin runtime pool show	fugue admin runtime pool show <runtime> [flags]	-
+fugue admin runtime show	fugue admin runtime show <runtime> [flags]	-
+fugue admin runtime token	fugue admin runtime token [command]	create,ls
+fugue admin runtime token create	fugue admin runtime token create <label> [flags]	-
+fugue admin runtime token ls	fugue admin runtime token ls [flags]	-
+fugue admin security	fugue admin security [command]	key-rotation
+fugue admin security key-rotation	fugue admin security key-rotation [flags]	-
+fugue admin synthetic	fugue admin synthetic [command]	ls
+fugue admin synthetic ls	fugue admin synthetic ls [flags]	-
+fugue admin tenant	fugue admin tenant [command]	create,delete,ls
+fugue admin tenant create	fugue admin tenant create <name> [flags]	-
+fugue admin tenant delete	fugue admin tenant delete <tenant> [flags]	-
+fugue admin tenant ls	fugue admin tenant ls [flags]	-
+fugue admin traffic-safety	fugue admin traffic-safety [command]	explain
+fugue admin traffic-safety explain	fugue admin traffic-safety explain <hostname> [flags]	-
+fugue admin users	fugue admin users [command]	enrich,ls,resolve,show,usage
+fugue admin users enrich	fugue admin users enrich [flags]	-
+fugue admin users ls	fugue admin users ls [flags]	-
+fugue admin users resolve	fugue admin users resolve <email> [flags]	-
+fugue admin users show	fugue admin users show <email> [flags]	-
+fugue admin users usage	fugue admin users usage [flags]	-
+fugue api	fugue api [command]	request
+fugue api request	fugue api request [method] <path-or-url> [flags]	-
+fugue app	fugue app [command]	backup,build,command,config,create,db,delete,deploy,diagnose,domain,env,failover,fs,logs,ls,metrics,move,move-project,network,observability,overview,release,request,requests,resources,restart,restore,rollback,rollout,scale,service,source,ssh,start,status,stop,storage,traces,watch,workload
+fugue app backup	fugue app backup [command]	enable,ls,run,show,status
+fugue app backup enable	fugue app backup enable <app> [flags]	-
+fugue app backup ls	fugue app backup ls <app> [flags]	-
+fugue app backup run	fugue app backup run <app> [flags]	-
+fugue app backup show	fugue app backup show <app> <backup-run-or-artifact> [flags]	-
+fugue app backup status	fugue app backup status <app> [flags]	-
+fugue app build	fugue app build <app> [flags]	-
+fugue app command	fugue app command [command]	clear,set,show
+fugue app command clear	fugue app command clear <app> [flags]	-
+fugue app command set	fugue app command set <app> [shell-command] [flags]	-
+fugue app command show	fugue app command show <app> [flags]	-
+fugue app config	fugue app config [command]	delete,get,ls,put,reconcile,verify
+fugue app config delete	fugue app config delete <app> <absolute-path...> [flags]	-
+fugue app config get	fugue app config get <app> <absolute-path> [flags]	-
+fugue app config ls	fugue app config ls <app> [flags]	-
+fugue app config put	fugue app config put <app> <absolute-path> [flags]	-
+fugue app config reconcile	fugue app config reconcile <app> <absolute-path> [flags]	-
+fugue app config verify	fugue app config verify <app> <absolute-path> [flags]	-
+fugue app create	fugue app create <name> [flags]	-
+fugue app db	fugue app db [command]	access,configure,disable,import,localize,query,restore,schema,search,show,switchover,tables
+fugue app db access	fugue app db access [command]	create,revoke,show,tunnel
+fugue app db access create	fugue app db access create <app> [flags]	-
+fugue app db access revoke	fugue app db access revoke <app> <grant-id> [flags]	-
+fugue app db access show	fugue app db access show <app> [flags]	-
+fugue app db access tunnel	fugue app db access tunnel <app> [flags]	-
+fugue app db configure	fugue app db configure <app> [flags]	-
+fugue app db disable	fugue app db disable <app> [flags]	-
+fugue app db import	fugue app db import <app> [flags]	retry,status,verify
+fugue app db import retry	fugue app db import retry <app> [flags]	-
+fugue app db import status	fugue app db import status <app> [flags]	-
+fugue app db import verify	fugue app db import verify <app> [flags]	-
+fugue app db localize	fugue app db localize <app> [flags]	-
+fugue app db query	fugue app db query <app> [flags]	-
+fugue app db restore	fugue app db restore [command]	plan,verify
+fugue app db restore plan	fugue app db restore plan <app> [flags]	-
+fugue app db restore verify	fugue app db restore verify <app> [flags]	-
+fugue app db schema	fugue app db schema <app> [table] [flags]	-
+fugue app db search	fugue app db search <app> [flags]	-
+fugue app db show	fugue app db show <app> [flags]	-
+fugue app db switchover	fugue app db switchover <app> [runtime] [flags]	-
+fugue app db tables	fugue app db tables <app> [match] [flags]	-
+fugue app delete	fugue app delete <app> [flags]	-
+fugue app deploy	fugue app deploy <app> [flags]	-
+fugue app diagnose	fugue app diagnose <app> [flags]	-
+fugue app domain	fugue app domain [command]	add,check,delete,diagnose,ls,primary,repair,verify
+fugue app domain add	fugue app domain add <app> <hostname> [flags]	-
+fugue app domain check	fugue app domain check <app> <hostname> [flags]	-
+fugue app domain delete	fugue app domain delete <app> <hostname> [flags]	-
+fugue app domain diagnose	fugue app domain diagnose <app> <hostname> [flags]	-
+fugue app domain ls	fugue app domain ls <app> [flags]	-
+fugue app domain primary	fugue app domain primary [command]	check,set,show
+fugue app domain primary check	fugue app domain primary check <app> <hostname> [flags]	-
+fugue app domain primary set	fugue app domain primary set <app> <hostname> [flags]	-
+fugue app domain primary show	fugue app domain primary show <app> [flags]	-
+fugue app domain repair	fugue app domain repair <app> <hostname> [flags]	-
+fugue app domain verify	fugue app domain verify <app> <hostname> [flags]	-
+fugue app env	fugue app env [command]	export,generated,ls,set,unset
+fugue app env export	fugue app env export <app> [flags]	-
+fugue app env generated	fugue app env generated [command]	set,show,unset
+fugue app env generated set	fugue app env generated set <app> <KEY...> [flags]	-
+fugue app env generated show	fugue app env generated show <app> [flags]	-
+fugue app env generated unset	fugue app env generated unset <app> <KEY...> [flags]	-
+fugue app env ls	fugue app env ls <app> [flags]	-
+fugue app env set	fugue app env set <app> [KEY=VALUE...] [flags]	-
+fugue app env unset	fugue app env unset <app> <KEY...> [flags]	-
+fugue app failover	fugue app failover [flags]	exec,policy,status
+fugue app failover exec	fugue app failover exec <app> [flags]	-
+fugue app failover policy	fugue app failover policy [command]	clear,set
+fugue app failover policy clear	fugue app failover policy clear <app> [flags]	-
+fugue app failover policy set	fugue app failover policy set <app> [flags]	-
+fugue app failover status	fugue app failover status [app] [flags]	-
+fugue app fs	fugue app fs [command]	delete,get,ls,mkdir,put
+fugue app fs delete	fugue app fs delete <app> <path> [flags]	-
+fugue app fs get	fugue app fs get <app> <path> [flags]	-
+fugue app fs ls	fugue app fs ls <app> [path] [flags]	-
+fugue app fs mkdir	fugue app fs mkdir <app> <path> [flags]	-
+fugue app fs put	fugue app fs put <app> <path> [flags]	-
+fugue app logs	fugue app logs [app] [flags]	build,pods,query,runtime,table
+fugue app logs build	fugue app logs build <app> [flags]	-
+fugue app logs pods	fugue app logs pods <app> [flags]	-
+fugue app logs query	fugue app logs query <app> [flags]	-
+fugue app logs runtime	fugue app logs runtime <app> [flags]	-
+fugue app logs table	fugue app logs table <app> [flags]	-
+fugue app ls	fugue app ls [flags]	-
+fugue app metrics	fugue app metrics <app> [flags]	-
+fugue app move	fugue app move <app> [flags]	-
+fugue app move-project	fugue app move-project <app> [flags]	-
+fugue app network	fugue app network [command]	clear,set,show
+fugue app network clear	fugue app network clear <app> [flags]	-
+fugue app network set	fugue app network set <app> [flags]	-
+fugue app network show	fugue app network show <app> [flags]	-
+fugue app observability	fugue app observability [command]	export
+fugue app observability export	fugue app observability export <app> [flags]	-
+fugue app overview	fugue app overview <app> [flags]	-
+fugue app release	fugue app release [command]	abort,attempts,canary,debug-bundle,explain,gate,ls,policy,probe,promote,prune,status,tracking,traffic
+fugue app release abort	fugue app release abort <app> [release-id] [flags]	-
+fugue app release attempts	fugue app release attempts <app> [flags]	-
+fugue app release canary	fugue app release canary [command]	start
+fugue app release canary start	fugue app release canary start <app> [flags]	-
+fugue app release debug-bundle	fugue app release debug-bundle <app> [flags]	-
+fugue app release explain	fugue app release explain <app> [flags]	-
+fugue app release gate	fugue app release gate <app> [release-id] [flags]	-
+fugue app release ls	fugue app release ls <app> [flags]	-
+fugue app release policy	fugue app release policy [command]	set,show
+fugue app release policy set	fugue app release policy set <app> [flags]	-
+fugue app release policy show	fugue app release policy show <app> [flags]	-
+fugue app release probe	fugue app release probe <app> [release-id] [flags]	-
+fugue app release promote	fugue app release promote <app> [release-id] [flags]	-
+fugue app release prune	fugue app release prune <app> [flags]	-
+fugue app release status	fugue app release status <app> [flags]	-
+fugue app release tracking	fugue app release tracking <app> [flags]	diagnose,disable,history,set,sync
+fugue app release tracking diagnose	fugue app release tracking diagnose <app> [flags]	-
+fugue app release tracking disable	fugue app release tracking disable <app> [flags]	-
+fugue app release tracking history	fugue app release tracking history <app> [flags]	-
+fugue app release tracking set	fugue app release tracking set <app> [flags]	-
+fugue app release tracking sync	fugue app release tracking sync <app> [flags]	-
+fugue app release traffic	fugue app release traffic <app> [flags]	-
+fugue app request	fugue app request <app> [method] <path> [flags]	compare,stream
+fugue app request compare	fugue app request compare <app> [method] <path> [flags]	-
+fugue app request stream	fugue app request stream <app> [method] <path> [flags]	-
+fugue app requests	fugue app requests <app> [flags]	-
+fugue app resources	fugue app resources [command]	apply,auto,clear,recommend,set,show
+fugue app resources apply	fugue app resources apply <app> [flags]	-
+fugue app resources auto	fugue app resources auto <app> [flags]	-
+fugue app resources clear	fugue app resources clear <app> [flags]	-
+fugue app resources recommend	fugue app resources recommend <app> [flags]	-
+fugue app resources set	fugue app resources set <app> [flags]	-
+fugue app resources show	fugue app resources show <app> [flags]	-
+fugue app restart	fugue app restart <app> [flags]	-
+fugue app restore	fugue app restore [command]	plan,run,verify
+fugue app restore plan	fugue app restore plan <app> [flags]	-
+fugue app restore run	fugue app restore run <app> [flags]	-
+fugue app restore verify	fugue app restore verify <app> [flags]	-
+fugue app rollback	fugue app rollback <app> [image-ref] [flags]	-
+fugue app rollout	fugue app rollout [command]	timeline
+fugue app rollout timeline	fugue app rollout timeline <app> [flags]	-
+fugue app scale	fugue app scale <app> [flags]	-
+fugue app service	fugue app service [command]	attach,detach,ls
+fugue app service attach	fugue app service attach <app> <service> [flags]	-
+fugue app service detach	fugue app service detach <app> <binding-or-service> [flags]	-
+fugue app service ls	fugue app service ls <app> [flags]	-
+fugue app source	fugue app source [command]	bind-github,show
+fugue app source bind-github	fugue app source bind-github <app> <repo-or-url> [flags]	-
+fugue app source show	fugue app source show <app> [flags]	-
+fugue app ssh	fugue app ssh <app> [flags]	config,diagnose,disable,enable,rotate-port,show
+fugue app ssh config	fugue app ssh config <app> [flags]	-
+fugue app ssh diagnose	fugue app ssh diagnose <app> [flags]	-
+fugue app ssh disable	fugue app ssh disable <app> [flags]	-
+fugue app ssh enable	fugue app ssh enable <app> [flags]	-
+fugue app ssh rotate-port	fugue app ssh rotate-port <app> [flags]	-
+fugue app ssh show	fugue app ssh show <app> [flags]	-
+fugue app start	fugue app start <app> [flags]	-
+fugue app status	fugue app status <app> [flags]	-
+fugue app stop	fugue app stop <app> [flags]	-
+fugue app storage	fugue app storage [command]	disable,replication,reset,set,show
+fugue app storage disable	fugue app storage disable <app> [flags]	-
+fugue app storage replication	fugue app storage replication [command]	disable,set,show
+fugue app storage replication disable	fugue app storage replication disable <app> [flags]	-
+fugue app storage replication set	fugue app storage replication set <app> [flags]	-
+fugue app storage replication show	fugue app storage replication show <app> [flags]	-
+fugue app storage reset	fugue app storage reset <app> [flags]	-
+fugue app storage set	fugue app storage set <app> [flags]	-
+fugue app storage show	fugue app storage show <app> [flags]	-
+fugue app traces	fugue app traces <app> <trace_id> [flags]	-
+fugue app watch	fugue app watch <app> [flags]	-
+fugue app workload	fugue app workload [command]	clear,set,show
+fugue app workload clear	fugue app workload clear <app> [flags]	-
+fugue app workload set	fugue app workload set <app> [flags]	-
+fugue app workload show	fugue app workload show <app> [flags]	-
+fugue auth	fugue auth [command]	login,logout,status
+fugue auth login	fugue auth login [flags]	-
+fugue auth logout	fugue auth logout [flags]	-
+fugue auth status	fugue auth status [flags]	-
+fugue backup	fugue backup [command]	artifact,backend,policy,restore,run,usage
+fugue backup artifact	fugue backup artifact [command]	delete,ls,show
+fugue backup artifact delete	fugue backup artifact delete <artifact> [flags]	-
+fugue backup artifact ls	fugue backup artifact ls [flags]	-
+fugue backup artifact show	fugue backup artifact show <artifact> [flags]	-
+fugue backup backend	fugue backup backend [command]	create,delete,ls,rotate,show,test
+fugue backup backend create	fugue backup backend create <name> [flags]	-
+fugue backup backend delete	fugue backup backend delete <backend> [flags]	-
+fugue backup backend ls	fugue backup backend ls [flags]	-
+fugue backup backend rotate	fugue backup backend rotate <backend> [flags]	-
+fugue backup backend show	fugue backup backend show <backend> [flags]	-
+fugue backup backend test	fugue backup backend test <backend> [flags]	-
+fugue backup policy	fugue backup policy [command]	disable,enable,ls,show
+fugue backup policy disable	fugue backup policy disable <policy> [flags]	-
+fugue backup policy enable	fugue backup policy enable [flags]	-
+fugue backup policy ls	fugue backup policy ls [flags]	-
+fugue backup policy show	fugue backup policy show <policy> [flags]	-
+fugue backup restore	fugue backup restore [command]	control-plane,ls,plan,run
+fugue backup restore control-plane	fugue backup restore control-plane <artifact> [flags]	-
+fugue backup restore ls	fugue backup restore ls [flags]	-
+fugue backup restore plan	fugue backup restore plan <artifact> [flags]	-
+fugue backup restore run	fugue backup restore run <plan> [flags]	-
+fugue backup run	fugue backup run [command]	ls,show,start
+fugue backup run ls	fugue backup run ls [flags]	-
+fugue backup run show	fugue backup run show <run> [flags]	-
+fugue backup run start	fugue backup run start [flags]	-
+fugue backup usage	fugue backup usage [flags]	-
+fugue completion	fugue completion [command]	bash,fish,powershell,zsh
+fugue completion bash	fugue completion bash	-
+fugue completion fish	fugue completion fish [flags]	-
+fugue completion powershell	fugue completion powershell [flags]	-
+fugue completion zsh	fugue completion zsh [flags]	-
+fugue console	fugue console [flags]	-
+fugue data	fugue data [command]	backend,clone,doctor,evict,gc,grant,init,pull,push,snapshot,status,track,transfer,untrack,workspace
+fugue data backend	fugue data backend [command]	create,delete,ls,migrate,rollback,rotate-credentials,show
+fugue data backend create	fugue data backend create <name> [flags]	-
+fugue data backend delete	fugue data backend delete <backend> [flags]	-
+fugue data backend ls	fugue data backend ls [flags]	-
+fugue data backend migrate	fugue data backend migrate <workspace> <target-backend> [flags]	-
+fugue data backend rollback	fugue data backend rollback <workspace> <migration-transfer-id> [flags]	-
+fugue data backend rotate-credentials	fugue data backend rotate-credentials <backend> [flags]	-
+fugue data backend show	fugue data backend show <backend> [flags]	-
+fugue data clone	fugue data clone <workspace> [flags]	-
+fugue data doctor	fugue data doctor [flags]	-
+fugue data evict	fugue data evict [asset...] [flags]	-
+fugue data gc	fugue data gc [command]	sweep
+fugue data gc sweep	fugue data gc sweep [workspace] [flags]	-
+fugue data grant	fugue data grant [command]	create,revoke
+fugue data grant create	fugue data grant create [workspace] [flags]	-
+fugue data grant revoke	fugue data grant revoke <grant-id> [flags]	-
+fugue data init	fugue data init [flags]	-
+fugue data pull	fugue data pull [asset-or-path...] [flags]	-
+fugue data push	fugue data push [flags]	-
+fugue data snapshot	fugue data snapshot [command]	diff,ls,show
+fugue data snapshot diff	fugue data snapshot diff <from-version> <to-version> [flags]	-
+fugue data snapshot ls	fugue data snapshot ls [flags]	-
+fugue data snapshot show	fugue data snapshot show <version> [flags]	-
+fugue data status	fugue data status [flags]	-
+fugue data track	fugue data track <path> [path...] [flags]	-
+fugue data transfer	fugue data transfer [command]	cancel,ls,resume,show,watch
+fugue data transfer cancel	fugue data transfer cancel <transfer-id> [flags]	-
+fugue data transfer ls	fugue data transfer ls [flags]	-
+fugue data transfer resume	fugue data transfer resume <transfer-id> [flags]	-
+fugue data transfer show	fugue data transfer show <transfer-id> [flags]	-
+fugue data transfer watch	fugue data transfer watch <transfer-id> [flags]	-
+fugue data untrack	fugue data untrack <asset-or-path> [flags]	-
+fugue data workspace	fugue data workspace [command]	access,ls,set-backend,share,show,unshare,use
+fugue data workspace access	fugue data workspace access [command]	ls
+fugue data workspace access ls	fugue data workspace access ls <workspace> [flags]	-
+fugue data workspace ls	fugue data workspace ls [flags]	-
+fugue data workspace set-backend	fugue data workspace set-backend <workspace> <backend> [flags]	-
+fugue data workspace share	fugue data workspace share <workspace> [flags]	-
+fugue data workspace show	fugue data workspace show [workspace] [flags]	-
+fugue data workspace unshare	fugue data workspace unshare <workspace> [flags]	-
+fugue data workspace use	fugue data workspace use <workspace> [flags]	-
+fugue debug	fugue debug [command]	bundle
+fugue debug bundle	fugue debug bundle <app> [flags]	-
+fugue deploy	fugue deploy [path] [flags]	github,image,inspect
+fugue deploy github	fugue deploy github <repo-or-url> [flags]	-
+fugue deploy image	fugue deploy image <image-ref> [flags]	-
+fugue deploy inspect	fugue deploy inspect [path-or-repo] [flags]	github
+fugue deploy inspect github	fugue deploy inspect github <repo-or-url> [flags]	-
+fugue diagnose	fugue diagnose [command]	fs,timing
+fugue diagnose fs	fugue diagnose fs <app> [flags]	-
+fugue diagnose timing	fugue diagnose timing -- <fugue command...> [flags]	-
+fugue dns	fugue dns [command]	record,zone
+fugue dns record	fugue dns record [command]	add,delete,diagnose,edit,ls
+fugue dns record add	fugue dns record add <zone> <name> <type> <value...> [flags]	-
+fugue dns record delete	fugue dns record delete <zone> <record-id-or-name> [flags]	-
+fugue dns record diagnose	fugue dns record diagnose <zone> <record-id-or-name> [flags]	-
+fugue dns record edit	fugue dns record edit <zone> <record-id-or-name> [flags]	-
+fugue dns record ls	fugue dns record ls <zone> [flags]	-
+fugue dns zone	fugue dns zone [command]	add,delete,ls,preflight,show
+fugue dns zone add	fugue dns zone add <zone> [flags]	-
+fugue dns zone delete	fugue dns zone delete <zone> [flags]	-
+fugue dns zone ls	fugue dns zone ls [flags]	-
+fugue dns zone preflight	fugue dns zone preflight <zone> [flags]	-
+fugue dns zone show	fugue dns zone show <zone> [flags]	-
+fugue find	fugue find <query> [flags]	-
+fugue logs	fugue logs [command]	collect,query
+fugue logs collect	fugue logs collect <app> [flags]	-
+fugue logs query	fugue logs query <app> [flags]	-
+fugue operation	fugue operation [command]	audit,debug-bundle,evidence,explain,ls,show,timeline,watch
+fugue operation audit	fugue operation audit [flags]	-
+fugue operation debug-bundle	fugue operation debug-bundle <operation> [flags]	-
+fugue operation evidence	fugue operation evidence <operation> [flags]	-
+fugue operation explain	fugue operation explain <operation> [flags]	-
+fugue operation ls	fugue operation ls [flags]	-
+fugue operation show	fugue operation show <operation> [flags]	-
+fugue operation timeline	fugue operation timeline <operation> [flags]	-
+fugue operation watch	fugue operation watch [operation] [flags]	-
+fugue project	fugue project [command]	apps,create,delete,edit,images,ls,meta,move,ops,overview,routes,runtimes,split,verify,watch
+fugue project apps	fugue project apps <project> [flags]	-
+fugue project create	fugue project create <name> [flags]	-
+fugue project delete	fugue project delete <project> [flags]	-
+fugue project edit	fugue project edit <project> [new-name] [flags]	-
+fugue project images	fugue project images [command]	usage
+fugue project images usage	fugue project images usage [project] [flags]	-
+fugue project ls	fugue project ls [flags]	-
+fugue project meta	fugue project meta <project> [flags]	-
+fugue project move	fugue project move <project> [flags]	-
+fugue project ops	fugue project ops <project> [flags]	-
+fugue project overview	fugue project overview [project] [flags]	-
+fugue project routes	fugue project routes [command]	apply,delete,show
+fugue project routes apply	fugue project routes apply <project> [flags]	-
+fugue project routes delete	fugue project routes delete <project> [flags]	-
+fugue project routes show	fugue project routes show <project> [flags]	-
+fugue project runtimes	fugue project runtimes [command]	add,ls,remove
+fugue project runtimes add	fugue project runtimes add <project> [flags]	-
+fugue project runtimes ls	fugue project runtimes ls <project> [flags]	-
+fugue project runtimes remove	fugue project runtimes remove <project> [flags]	-
+fugue project split	fugue project split <project> [flags]	plan
+fugue project split plan	fugue project split plan <project> [flags]	-
+fugue project verify	fugue project verify <project> [flags]	-
+fugue project watch	fugue project watch [project] [flags]	-
+fugue runtime	fugue runtime [command]	doctor,enroll,ls,show
+fugue runtime doctor	fugue runtime doctor <runtime> [flags]	-
+fugue runtime enroll	fugue runtime enroll [command]	create,ls
+fugue runtime enroll create	fugue runtime enroll create <label> [flags]	-
+fugue runtime enroll ls	fugue runtime enroll ls [flags]	-
+fugue runtime ls	fugue runtime ls [flags]	-
+fugue runtime show	fugue runtime show <runtime> [flags]	-
+fugue service	fugue service [command]	delete,localize,ls,move,move-project,postgres,resume,show,suspend
+fugue service delete	fugue service delete <service> [flags]	-
+fugue service localize	fugue service localize <service> [flags]	-
+fugue service ls	fugue service ls [flags]	-
+fugue service move	fugue service move <service> [flags]	-
+fugue service move-project	fugue service move-project <service> [flags]	-
+fugue service postgres	fugue service postgres [command]	create,orphan
+fugue service postgres create	fugue service postgres create <name> [flags]	-
+fugue service postgres orphan	fugue service postgres orphan [command]	adopt,ls
+fugue service postgres orphan adopt	fugue service postgres orphan adopt <app-id> [flags]	-
+fugue service postgres orphan ls	fugue service postgres orphan ls [flags]	-
+fugue service resume	fugue service resume <service> [flags]	-
+fugue service show	fugue service show <service> [flags]	-
+fugue service suspend	fugue service suspend <service> [flags]	-
+fugue source-upload	fugue source-upload [command]	download,show
+fugue source-upload download	fugue source-upload download <upload-id> [flags]	-
+fugue source-upload show	fugue source-upload show <upload-id> [flags]	-
+fugue ssh-key	fugue ssh-key [command]	add,ls,rm
+fugue ssh-key add	fugue ssh-key add <public-key-file-or-key> [flags]	-
+fugue ssh-key ls	fugue ssh-key ls [flags]	-
+fugue ssh-key rm	fugue ssh-key rm <key> [flags]	-
+fugue tenant	fugue tenant [command]	ls
+fugue tenant ls	fugue tenant ls [flags]	-
+fugue upgrade	fugue upgrade [flags]	-
+fugue version	fugue version [flags]	-
+fugue web	fugue web [command]	diagnose
+fugue web diagnose	fugue web diagnose [method] <page-or-path> [flags]	-
+fugue workflow	fugue workflow [command]	run
+fugue workflow run	fugue workflow run <workflow-file> [flags]	-

@@ -42,7 +42,7 @@ func (c *CLI) newAdminReleaseGuardSignalsListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"signals": status.ReleaseSignals, "status": status})
+				return c.writeJSON(map[string]any{"signals": status.ReleaseSignals, "status": status})
 			}
 			return writeReleaseSignalTable(c.stdout, status.ReleaseSignals)
 		},
@@ -108,7 +108,7 @@ func (c *CLI) newAdminReleaseGuardSignalsAddCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact, "release": release, "policy": policy, "signal": signal})
+				return c.writeJSON(map[string]any{"artifact": artifact, "release": release, "policy": policy, "signal": signal})
 			}
 			return writeReleaseSignalPublish(c.stdout, artifact, release, policy)
 		},
@@ -153,7 +153,7 @@ func (c *CLI) newAdminReleaseGuardSignalsRemoveCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact, "release": release, "policy": policy, "removed": removed})
+				return c.writeJSON(map[string]any{"artifact": artifact, "release": release, "policy": policy, "removed": removed})
 			}
 			return writeReleaseSignalPublish(c.stdout, artifact, release, policy)
 		},

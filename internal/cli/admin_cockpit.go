@@ -62,7 +62,7 @@ func (c *CLI) newAdminCockpitCommand() *cobra.Command {
 				}
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			return c.renderAdminCockpit(payload, opts.Redacted)
 		},

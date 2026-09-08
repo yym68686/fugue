@@ -40,7 +40,7 @@ func (c *CLI) newTenantListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"tenants": tenants})
+				return c.writeJSON(map[string]any{"tenants": tenants})
 			}
 			return writeTenantTable(c.stdout, tenants)
 		},

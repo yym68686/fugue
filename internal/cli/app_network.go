@@ -224,7 +224,7 @@ func (c *CLI) renderAppNetworkState(app model.App, operation *model.Operation, a
 		mode = "public"
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":             redactAppForOutput(app),
 			"network_mode":    mode,
 			"network_policy":  app.Spec.NetworkPolicy,

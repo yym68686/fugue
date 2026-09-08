@@ -98,7 +98,7 @@ func (c *CLI) newAutomationListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeAutomationPolicyTable(c.stdout, response.Policies)
 		},
@@ -124,7 +124,7 @@ func (c *CLI) newAutomationShowCommand() *cobra.Command {
 				return fmt.Errorf("automation lookup returned policy %q instead of %q", policy.ID, policyID)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, model.AutomationPolicyResponse{Policy: policy})
+				return c.writeJSON(model.AutomationPolicyResponse{Policy: policy})
 			}
 			return writeAutomationPolicy(c.stdout, policy)
 		},
@@ -180,7 +180,7 @@ fugue automation create api --name "API unavailable recovery" --mode shadow --wi
 				return fmt.Errorf("automation create returned a policy outside the requested app-recovery scope")
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, model.AutomationPolicyResponse{Policy: policy})
+				return c.writeJSON(model.AutomationPolicyResponse{Policy: policy})
 			}
 			return writeAutomationPolicy(c.stdout, policy)
 		},
@@ -262,7 +262,7 @@ fugue automation update automation_policy_123 --generation 2 --window 3m --statu
 				return fmt.Errorf("automation update returned policy %q instead of %q", policy.ID, policyID)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, model.AutomationPolicyResponse{Policy: policy})
+				return c.writeJSON(model.AutomationPolicyResponse{Policy: policy})
 			}
 			return writeAutomationPolicy(c.stdout, policy)
 		},
@@ -313,7 +313,7 @@ func (c *CLI) newAutomationDeleteCommand() *cobra.Command {
 				return fmt.Errorf("automation delete returned policy %q instead of %q", response.Policy.ID, policyID)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "deleted", Value: fmt.Sprintf("%t", response.Deleted)},

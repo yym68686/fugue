@@ -84,7 +84,7 @@ func (c *CLI) newAppRequestStreamCommand() *cobra.Command {
 			result, err := c.runAppRequestStream(client, fullApp, method, requestPath, opts)
 			result = sanitizeAppRequestStreamResult(result, c.shouldRedact())
 			if c.wantsJSON() {
-				if writeErr := writeJSON(c.stdout, result); writeErr != nil {
+				if writeErr := c.writeJSON(result); writeErr != nil {
 					return writeErr
 				}
 			} else {

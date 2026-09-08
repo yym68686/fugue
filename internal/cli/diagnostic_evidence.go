@@ -97,7 +97,7 @@ func (c *CLI) newLogsCollectCommand() *cobra.Command {
 			result := c.collectDiagnosticEvidence(client, app, opts)
 			sanitized := sanitizeDiagnosticEvidenceResult(result, c.shouldRedact())
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, sanitized)
+				return c.writeJSON(sanitized)
 			}
 			return renderDiagnosticEvidenceResult(c.stdout, sanitized)
 		},

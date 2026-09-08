@@ -51,7 +51,7 @@ func (c *CLI) newAppServiceListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id":           app.ID,
 					"bindings":         response.Bindings,
 					"backing_services": response.BackingServices,
@@ -107,7 +107,7 @@ func (c *CLI) newAppServiceAttachCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id":          app.ID,
 					"binding":         response.Binding,
 					"backing_service": redactBackingServiceForOutput(response.BackingService),
@@ -164,7 +164,7 @@ func (c *CLI) newAppServiceDetachCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id":          app.ID,
 					"binding":         response.Binding,
 					"backing_service": redactBackingServiceForOutput(response.BackingService),

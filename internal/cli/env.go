@@ -103,7 +103,7 @@ func (c *CLI) newEnvExportCommand() *cobra.Command {
 				Entries: response.Entries,
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return writeEnvExport(c.stdout, normalizeEnvEntries(response.Env, response.Entries))
 		},
@@ -457,7 +457,7 @@ func (c *CLI) waitForOptionalOperation(client *Client, op *model.Operation, wait
 
 func (c *CLI) renderEnvCommandResult(result envCommandResult) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 	pairs := make([]kvPair, 0, 5)
 	if strings.TrimSpace(result.AppName) != "" {
@@ -501,7 +501,7 @@ func (c *CLI) renderEnvCommandResult(result envCommandResult) error {
 func (c *CLI) renderGeneratedEnvState(app model.App, operation *model.Operation, alreadyCurrent bool) error {
 	generated := model.NormalizeAppGeneratedEnvSpecs(app.Spec.GeneratedEnv)
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{
+		return c.writeJSON(map[string]any{
 			"app":             redactAppForOutput(app),
 			"generated_env":   generated,
 			"operation":       redactOperationPtrForOutput(operation),

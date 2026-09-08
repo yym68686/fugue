@@ -393,7 +393,7 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 					"operation":         redactOperationForOutput(response.Operation),
 					"target_runtime_id": targetRuntimeID,
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "app_id", Value: app.ID},
@@ -464,7 +464,7 @@ func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 					"storage_size":     strings.TrimSpace(opts.StorageSize),
 					"storage_class":    strings.TrimSpace(opts.StorageClassName),
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "app_id", Value: app.ID},
@@ -511,7 +511,7 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 		if payloadOp != nil {
 			payload["operation"] = payloadOp
 		}
-		return writeJSON(c.stdout, payload)
+		return c.writeJSON(payload)
 	}
 	pairs := []kvPair{
 		{Key: "app_id", Value: app.ID},

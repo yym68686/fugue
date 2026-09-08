@@ -155,7 +155,7 @@ func (c *CLI) newWorkflowRunCommand() *cobra.Command {
 			}
 			result, runErr := c.runWorkflowSpec(opts.File, spec)
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, sanitizeWorkflowRunResult(result, c.shouldRedact())); err != nil {
+				if err := c.writeJSON(sanitizeWorkflowRunResult(result, c.shouldRedact())); err != nil {
 					return err
 				}
 			} else {

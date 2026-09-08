@@ -265,7 +265,7 @@ func (c *CLI) renderDeploymentError(err error) error {
 		}
 	}
 	if c.wantsJSON() {
-		if writeErr := writeJSON(c.stdout, map[string]any{"result": result}); writeErr != nil {
+		if writeErr := c.writeJSON(map[string]any{"result": result}); writeErr != nil {
 			return fmt.Errorf("could not write deployment result")
 		}
 	} else {
@@ -388,7 +388,7 @@ func (c *CLI) newOpsResultCommand() *cobra.Command {
 			}
 		}
 		if c.wantsJSON() {
-			return writeJSON(c.stdout, map[string]any{"result": result})
+			return c.writeJSON(map[string]any{"result": result})
 		}
 		return renderDeploymentResult(c.stdout, result)
 	}}

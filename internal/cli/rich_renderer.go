@@ -27,7 +27,7 @@ func (c *CLI) shouldUseRichText() bool {
 	if mode == cliterminal.ModeAlways {
 		return true
 	}
-	file, ok := c.stdout.(*os.File)
+	file, ok := terminalFile(c.stdout)
 	return ok && xterm.IsTerminal(int(file.Fd()))
 }
 

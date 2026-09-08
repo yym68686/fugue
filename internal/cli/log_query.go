@@ -130,7 +130,7 @@ func (c *CLI) newLogsQueryCommand() *cobra.Command {
 			result, runErr := c.runLogsQuery(client, app, opts)
 			sanitized := sanitizeLogsQueryResult(result, c.shouldRedact())
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, sanitized); err != nil {
+				if err := c.writeJSON(sanitized); err != nil {
 					return err
 				}
 			} else {

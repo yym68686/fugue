@@ -66,7 +66,7 @@ func (c *CLI) newRuntimeListCommand() *cobra.Command {
 				runtimes = filtered
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtimes": runtimes})
+				return c.writeJSON(map[string]any{"runtimes": runtimes})
 			}
 			return writeRuntimeTableWithContext(c.stdout, runtimes, c.loadTenantNames(client), c.showIDs())
 		},
@@ -89,7 +89,7 @@ func (c *CLI) newRuntimeShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
+				return c.writeJSON(map[string]any{"runtime": runtimeObj})
 			}
 			return c.renderRuntimeDetail(client, runtimeObj)
 		},
@@ -144,7 +144,7 @@ func (c *CLI) runRuntimeAccessShow(runtimeRef string) error {
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, response)
+		return c.writeJSON(response)
 	}
 	if err := c.renderRuntimeDetail(client, response.Runtime); err != nil {
 		return err
@@ -184,7 +184,7 @@ func (c *CLI) newRuntimeAccessSetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
+				return c.writeJSON(map[string]any{"runtime": runtimeObj})
 			}
 			return c.renderRuntimeDetail(client, runtimeObj)
 		},
@@ -214,7 +214,7 @@ func (c *CLI) newRuntimeAccessGrantCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"grant": grant})
+				return c.writeJSON(map[string]any{"grant": grant})
 			}
 			runtimeLabel := formatDisplayName(runtimeObj.Name, runtimeObj.ID, c.showIDs())
 			tenantLabel := formatDisplayName(firstNonEmptyTrimmed(tenant.Name, tenant.Slug, tenant.ID), tenant.ID, c.showIDs())
@@ -251,7 +251,7 @@ func (c *CLI) newRuntimeAccessRevokeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"removed": removed})
+				return c.writeJSON(map[string]any{"removed": removed})
 			}
 			runtimeLabel := formatDisplayName(runtimeObj.Name, runtimeObj.ID, c.showIDs())
 			tenantLabel := formatDisplayName(firstNonEmptyTrimmed(tenant.Name, tenant.Slug, tenant.ID), tenant.ID, c.showIDs())
@@ -291,7 +291,7 @@ func (c *CLI) newRuntimePoolShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
+				return c.writeJSON(map[string]any{"runtime": runtimeObj})
 			}
 			return c.renderRuntimeDetail(client, runtimeObj)
 		},
@@ -317,7 +317,7 @@ func (c *CLI) newRuntimePoolSetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := c.renderRuntimeDetail(client, response.Runtime); err != nil {
 				return err
@@ -355,7 +355,7 @@ func (c *CLI) newRuntimeOfferShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"runtime":      runtimeObj,
 					"public_offer": runtimeObj.PublicOffer,
 				})
@@ -412,7 +412,7 @@ func (c *CLI) newRuntimeOfferSetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
+				return c.writeJSON(map[string]any{"runtime": runtimeObj})
 			}
 			return c.renderRuntimeOffer(client, runtimeObj)
 		},
@@ -459,7 +459,7 @@ func (c *CLI) newRuntimeEnrollListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"enrollment_tokens": tokens})
+				return c.writeJSON(map[string]any{"enrollment_tokens": tokens})
 			}
 			return writeEnrollmentTokenTable(c.stdout, tokens)
 		},
@@ -496,7 +496,7 @@ func (c *CLI) newRuntimeAttachCommand() *cobra.Command {
 			}
 			scriptURL := strings.TrimRight(c.effectiveBaseURL(), "/") + "/install/join-cluster.sh"
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"enrollment_token": response.EnrollmentToken,
 					"secret":           response.Secret,
 					"install_script":   scriptURL,
@@ -555,7 +555,7 @@ func (c *CLI) newRuntimeDoctorCommand() *cobra.Command {
 				warnings = append(warnings, "no cluster node is currently associated with this runtime")
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"runtime":       runtimeObj,
 					"cluster_nodes": matchingNodes,
 					"warnings":      warnings,
@@ -625,7 +625,7 @@ func (c *CLI) newRuntimeDeleteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := c.renderRuntimeDetail(client, response.Runtime); err != nil {
 				return err

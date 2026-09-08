@@ -51,7 +51,7 @@ func (c *CLI) newAdminImageRetentionPlanCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"plans": plans})
+				return c.writeJSON(map[string]any{"plans": plans})
 			}
 			return writeImageRetentionPlans(c.stdout, plans, opts.Decisions || !opts.All)
 		},
@@ -90,7 +90,7 @@ metadata reconciliation in the controller.
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"dry_run": true, "plans": plans})
+				return c.writeJSON(map[string]any{"dry_run": true, "plans": plans})
 			}
 			if _, err := fmt.Fprintln(c.stdout, "dry_run=true"); err != nil {
 				return err

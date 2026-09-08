@@ -60,7 +60,7 @@ func (c *CLI) newAdminNodeUpdaterRolloutStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"target_generation": model.NodeUpdaterCurrentVersion,
 					"gate":              gate,
 					"node_updaters":     updaters,
@@ -90,7 +90,7 @@ func (c *CLI) newAdminNodeUpdaterRolloutPauseCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeGatePolicy(c.stdout, response.Policy)
 		},
@@ -126,7 +126,7 @@ func (c *CLI) newAdminNodeUpdaterRolloutResumeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeGatePolicy(c.stdout, response.Policy)
 		},
@@ -152,7 +152,7 @@ func (c *CLI) newAdminNodeUpdaterListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"node_updaters": updaters})
+				return c.writeJSON(map[string]any{"node_updaters": updaters})
 			}
 			return writeNodeUpdaterTable(c.stdout, updaters)
 		},
@@ -197,7 +197,7 @@ func (c *CLI) newAdminNodeUpdaterRepairHistoryCommand() *cobra.Command {
 				}
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"tasks": filtered})
+				return c.writeJSON(map[string]any{"tasks": filtered})
 			}
 			return writeNodeUpdateTaskTable(c.stdout, filtered)
 		},
@@ -227,7 +227,7 @@ func (c *CLI) newAdminNodeUpdaterHealthCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"results": results})
+				return c.writeJSON(map[string]any{"results": results})
 			}
 			return writeNodeDeepHealthTable(c.stdout, results)
 		},
@@ -246,7 +246,7 @@ func (c *CLI) newAdminNodeUpdaterHealthCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"result": result})
+				return c.writeJSON(map[string]any{"result": result})
 			}
 			return writeNodeDeepHealth(c.stdout, result)
 		},
@@ -275,7 +275,7 @@ func (c *CLI) newAdminNodeUpdaterTaskListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"tasks": tasks})
+				return c.writeJSON(map[string]any{"tasks": tasks})
 			}
 			return writeNodeUpdateTaskTable(c.stdout, tasks)
 		},
@@ -372,7 +372,7 @@ func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"task": task})
+				return c.writeJSON(map[string]any{"task": task})
 			}
 			return writeNodeUpdateTask(c.stdout, task)
 		},

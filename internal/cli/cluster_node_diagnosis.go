@@ -51,7 +51,7 @@ func (c *CLI) newAdminClusterServiceShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"service": service})
+				return c.writeJSON(map[string]any{"service": service})
 			}
 			return writeClusterServiceDetail(c.stdout, service)
 		},
@@ -73,7 +73,7 @@ func (c *CLI) newAdminClusterNodeInspectCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"diagnosis": diagnosis})
+				return c.writeJSON(map[string]any{"diagnosis": diagnosis})
 			}
 			return renderClusterNodeDiagnosis(c.stdout, diagnosis)
 		},
@@ -95,7 +95,7 @@ func (c *CLI) newAdminClusterNodeDiskCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"diagnosis": diagnosis})
+				return c.writeJSON(map[string]any{"diagnosis": diagnosis})
 			}
 			if err := writeClusterNodeDiagnosisHeader(c.stdout, diagnosis); err != nil {
 				return err
@@ -123,7 +123,7 @@ func (c *CLI) newAdminClusterNodeJournalCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"diagnosis": diagnosis})
+				return c.writeJSON(map[string]any{"diagnosis": diagnosis})
 			}
 			if err := writeClusterNodeDiagnosisHeader(c.stdout, diagnosis); err != nil {
 				return err
@@ -151,7 +151,7 @@ func (c *CLI) newAdminClusterNodeMetricsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"diagnosis": diagnosis})
+				return c.writeJSON(map[string]any{"diagnosis": diagnosis})
 			}
 			if err := writeClusterNodeDiagnosisHeader(c.stdout, diagnosis); err != nil {
 				return err

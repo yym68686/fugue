@@ -112,7 +112,7 @@ func (c *CLI) newAPIRequestCommand() *cobra.Command {
 			}
 			response = sanitizeRawHTTPDiagnostic(response, c.shouldRedact())
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderRawHTTPDiagnostic(c.stdout, response)
 		},
@@ -191,7 +191,7 @@ func (c *CLI) newDiagnoseTimingCommand() *cobra.Command {
 			}
 
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, result); err != nil {
+				if err := c.writeJSON(result); err != nil {
 					return err
 				}
 			} else {
@@ -240,7 +240,7 @@ func (c *CLI) newWebDiagnoseCommand() *cobra.Command {
 			}
 			response = sanitizeRawHTTPDiagnostic(response, c.shouldRedact())
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return renderRawHTTPDiagnostic(c.stdout, response)
 		},

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"net/http"
 	"strings"
 )
 
@@ -66,8 +68,15 @@ func ExitCodeForError(err error) int {
 		}
 	}
 	var apiErr *apiServerError
-	if errors.As(err, &apiErr) && apiErr.IsRetryable() {
-		return ExitCodeSystemFault
+	if errors.As(err, &apiErr) {
+		return exitCodeForHTTPStatus(apiErr.StatusCode)
+	}
+	var responseErr *httpResponseError
+	if errors.As(err, &responseErr) && responseErr.status > 0 {
+		return exitCodeForHTTPStatus(responseErr.status)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ExitCodeIndeterminate
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	switch {
@@ -127,6 +136,10 @@ func looksUserInputError(message string) bool {
 	}
 	for _, needle := range []string{
 		"unknown command",
+		"unknown flag",
+		"unknown shorthand flag",
+		"invalid argument",
+		"required flag",
 		"unsupported ",
 		"unsupported output format",
 		"accepts ",
@@ -176,4 +189,21 @@ func looksSystemFaultError(message string) bool {
 		}
 	}
 	return false
+}
+
+func exitCodeForHTTPStatus(status int) int {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return ExitCodePermissionDenied
+	case http.StatusNotFound:
+		return ExitCodeNotFound
+	case http.StatusBadRequest, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusPreconditionFailed:
+		return ExitCodeUserInput
+	case http.StatusTooManyRequests:
+		return ExitCodeSystemFault
+	}
+	if status >= 500 {
+		return ExitCodeSystemFault
+	}
+	return ExitCodeIndeterminate
 }

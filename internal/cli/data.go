@@ -348,7 +348,7 @@ func (c *CLI) newDataInitCommand() *cobra.Command {
 				_ = region
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"config": cfg, "created": created})
+				return c.writeJSON(map[string]any{"config": cfg, "created": created})
 			}
 			if created {
 				fmt.Fprintln(c.stdout, "Created .fugue/data.yaml")
@@ -413,7 +413,7 @@ func (c *CLI) newDataTrackCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"config": cfg, "created": created})
+				return c.writeJSON(map[string]any{"config": cfg, "created": created})
 			}
 			if created {
 				fmt.Fprintln(c.stdout, "Created .fugue/data.yaml")
@@ -463,7 +463,7 @@ func (c *CLI) newDataUntrackCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"config": cfg, "removed": value})
+				return c.writeJSON(map[string]any{"config": cfg, "removed": value})
 			}
 			fmt.Fprintf(c.stdout, "Untracked %s\n", value)
 			return nil
@@ -529,7 +529,7 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workspace": workspace, "local_manifest": manifest, "latest_snapshot": latest, "untracked_large_directories": untrackedLargeDirs})
+				return c.writeJSON(map[string]any{"workspace": workspace, "local_manifest": manifest, "latest_snapshot": latest, "untracked_large_directories": untrackedLargeDirs})
 			}
 			summaryRows := [][]string{{"Data workspace", workspace.Name}}
 			if cfg.Project != "" {
@@ -598,7 +598,7 @@ func (c *CLI) renderAccountDataStatus(client *Client) error {
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{"local_bound": false, "workspaces": workspaces})
+		return c.writeJSON(map[string]any{"local_bound": false, "workspaces": workspaces})
 	}
 	fmt.Fprintln(c.stdout, "No local data workspace is bound in this directory.")
 	fmt.Fprintln(c.stdout)
@@ -680,7 +680,7 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 			scanProgress.finish()
 			if dryRun {
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"workspace": workspace, "manifest": manifest, "dry_run": true})
+					return c.writeJSON(map[string]any{"workspace": workspace, "manifest": manifest, "dry_run": true})
 				}
 				renderDataKeyValueTable(c.stdout, [][]string{
 					{"Data workspace", workspace.Name},
@@ -766,7 +766,7 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 			}
 			_ = removeDataTransferState(".", plan.Transfer.ID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, complete)
+				return c.writeJSON(complete)
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Created version", complete.Snapshot.Version},
@@ -857,7 +857,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 			preflightProgress.finish()
 			if dryRun || len(pullPlan.Conflicts) > 0 {
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"workspace": workspace, "snapshot": planResp.Snapshot, "plan": pullPlan, "dry_run": dryRun})
+					return c.writeJSON(map[string]any{"workspace": workspace, "snapshot": planResp.Snapshot, "plan": pullPlan, "dry_run": dryRun})
 				}
 				renderPullPreflight(c.stdout, workspace, planResp.Snapshot, pullPlan)
 				if len(pullPlan.Conflicts) > 0 && !dryRun {
@@ -910,7 +910,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 			}
 			_ = removeDataTransferState(".", planResp.Transfer.ID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, complete)
+				return c.writeJSON(complete)
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Restored version", planResp.Snapshot.Version},
@@ -996,7 +996,7 @@ func (c *CLI) newDataEvictCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() && (dryRun || !confirm || len(plan.Blocked) > 0) {
-				if err := writeJSON(c.stdout, map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "dry_run": dryRun || !confirm}); err != nil {
+				if err := c.writeJSON(map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "dry_run": dryRun || !confirm}); err != nil {
 					return err
 				}
 			} else if !c.wantsJSON() {
@@ -1023,12 +1023,12 @@ func (c *CLI) newDataEvictCommand() *cobra.Command {
 			}
 			if len(plan.Evict) == 0 {
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "evicted": plan.Evict, "dry_run": false})
+					return c.writeJSON(map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "evicted": plan.Evict, "dry_run": false})
 				}
 				return nil
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "evicted": plan.Evict, "dry_run": false})
+				return c.writeJSON(map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "evicted": plan.Evict, "dry_run": false})
 			}
 			fmt.Fprintln(c.stdout)
 			renderDataKeyValueTable(c.stdout, [][]string{
@@ -1114,7 +1114,7 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workspace": workspaceResp.Workspace, "path": target})
+				return c.writeJSON(map[string]any{"workspace": workspaceResp.Workspace, "path": target})
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Data workspace", workspaceResp.Workspace.Name},
@@ -1175,7 +1175,7 @@ func (c *CLI) newDataWorkspaceListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workspaces": workspaces})
+				return c.writeJSON(map[string]any{"workspaces": workspaces})
 			}
 			rows := make([][]string, 0, len(workspaces))
 			for _, workspace := range workspaces {
@@ -1226,7 +1226,7 @@ func (c *CLI) newDataWorkspaceShowCommand() *cobra.Command {
 				}
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			summaryRows := [][]string{
 				{"Data workspace", resp.Workspace.Name},
@@ -1280,7 +1280,7 @@ func (c *CLI) newDataWorkspaceUseCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workspace": resp.Workspace, "config": cfg})
+				return c.writeJSON(map[string]any{"workspace": resp.Workspace, "config": cfg})
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Data workspace", resp.Workspace.Name},
@@ -1349,7 +1349,7 @@ func (c *CLI) newDataWorkspaceAccessCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workspace": resp.Workspace, "grants": grants})
+				return c.writeJSON(map[string]any{"workspace": resp.Workspace, "grants": grants})
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Data workspace", resp.Workspace.Name},
@@ -1407,7 +1407,7 @@ func (c *CLI) newDataWorkspaceShareCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workspace": resp.Workspace, "grant": grant})
+				return c.writeJSON(map[string]any{"workspace": resp.Workspace, "grant": grant})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "data_workspace", Value: resp.Workspace.Name},
@@ -1451,7 +1451,7 @@ func (c *CLI) newDataWorkspaceUnshareCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"workspace": resp.Workspace, "removed": removed})
+				return c.writeJSON(map[string]any{"workspace": resp.Workspace, "removed": removed})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "data_workspace", Value: resp.Workspace.Name},
@@ -1574,7 +1574,7 @@ func (c *CLI) newDataSnapshotCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"snapshots": snapshots})
+					return c.writeJSON(map[string]any{"snapshots": snapshots})
 				}
 				rows := make([][]string, 0, len(snapshots))
 				for _, snapshot := range snapshots {
@@ -1615,7 +1615,7 @@ func (c *CLI) newDataSnapshotCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, snapshot)
+					return c.writeJSON(snapshot)
 				}
 				renderDataKeyValueTable(c.stdout, [][]string{
 					{"Version", snapshot.Snapshot.Version},
@@ -1657,7 +1657,7 @@ func (c *CLI) newDataSnapshotCommand() *cobra.Command {
 			}
 			diff := diffDataManifests(from.Snapshot.Manifest, to.Snapshot.Manifest)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, diff)
+				return c.writeJSON(diff)
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Added", strconv.Itoa(len(diff["added"]))},
@@ -1717,7 +1717,7 @@ func (c *CLI) newDataGrantCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, grant)
+				return c.writeJSON(grant)
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Grant", "created"},
@@ -1747,7 +1747,7 @@ func (c *CLI) newDataGrantCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Grant", args[0]},
@@ -1789,7 +1789,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"transfers": transfers})
+					return c.writeJSON(map[string]any{"transfers": transfers})
 				}
 				rows := make([][]string, 0, len(transfers))
 				for _, transfer := range transfers {
@@ -1820,7 +1820,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return writeJSON(c.stdout, transfer)
+				return c.writeJSON(transfer)
 			},
 		},
 		&cobra.Command{
@@ -1839,7 +1839,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			},
 		},
 	)
@@ -1859,7 +1859,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, map[string]any{"transfer": transfer}); err != nil {
+				if err := c.writeJSON(map[string]any{"transfer": transfer}); err != nil {
 					return err
 				}
 			} else {
@@ -1956,7 +1956,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			}
 			_ = removeDataTransferState(".", refresh.Transfer.ID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, complete)
+				return c.writeJSON(complete)
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Transfer", refresh.Transfer.ID},
@@ -2005,7 +2005,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			}
 			_ = removeDataTransferState(".", refresh.Transfer.ID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, complete)
+				return c.writeJSON(complete)
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Transfer", refresh.Transfer.ID},
@@ -2052,7 +2052,7 @@ func (c *CLI) newDataBackendCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{"backends": backends})
+					return c.writeJSON(map[string]any{"backends": backends})
 				}
 				rows := make([][]string, 0, len(backends))
 				for _, backend := range backends {
@@ -2086,7 +2086,7 @@ func (c *CLI) newDataBackendCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return writeJSON(c.stdout, map[string]any{"backend": backend})
+				return c.writeJSON(map[string]any{"backend": backend})
 			},
 		},
 		&cobra.Command{
@@ -2105,7 +2105,7 @@ func (c *CLI) newDataBackendCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			},
 		},
 	)
@@ -2141,7 +2141,7 @@ func (c *CLI) newDataBackendRotateCredentialsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backend": backend, "rotated": true})
+				return c.writeJSON(map[string]any{"backend": backend, "rotated": true})
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Data backend", backend.Name},
@@ -2201,7 +2201,7 @@ func (c *CLI) newDataBackendCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backend": backend})
+				return c.writeJSON(map[string]any{"backend": backend})
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Data backend", backend.Name},
@@ -2246,7 +2246,7 @@ func (c *CLI) newDataBackendMigrateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			rows := [][]string{
 				{"Backend migration", resp.Transfer.Source + " -> " + resp.Transfer.Target},
@@ -2289,7 +2289,7 @@ func (c *CLI) newDataBackendRollbackCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			renderDataKeyValueTable(c.stdout, [][]string{
 				{"Workspace backend", resp.Workspace.StorageBackendID},
@@ -2343,7 +2343,7 @@ func (c *CLI) newDataGCCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return c.writeJSON(resp)
 			}
 			mode := "delete"
 			if resp.GC.DryRun {
@@ -2386,7 +2386,7 @@ func (c *CLI) newDataDoctorCommand() *cobra.Command {
 				}
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"config": cfg, "warnings": warnings})
+				return c.writeJSON(map[string]any{"config": cfg, "warnings": warnings})
 			}
 			rows := [][]string{{"Data workspace", cfg.Workspace}}
 			if len(warnings) == 0 {
@@ -4345,7 +4345,7 @@ func manifestEntriesByStablePath(manifest model.DataManifest) map[string]model.D
 
 func renderDataWorkspace(c *CLI, workspace model.DataWorkspace) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{"workspace": workspace})
+		return c.writeJSON(map[string]any{"workspace": workspace})
 	}
 	renderDataKeyValueTable(c.stdout, [][]string{
 		{"Data workspace", workspace.Name},

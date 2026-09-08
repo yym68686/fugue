@@ -42,7 +42,7 @@ func (c *CLI) newAppRouteShowCommand() *cobra.Command {
 			}
 			result := c.loadAppRouteShowResult(client, app)
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, result); err != nil {
+				if err := c.writeJSON(result); err != nil {
 					return err
 				}
 			} else {
@@ -84,7 +84,7 @@ func (c *CLI) newAppRouteCheckCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id":       app.ID,
 					"availability": availability,
 				})
@@ -130,7 +130,7 @@ func (c *CLI) newAppRouteSetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app_id":          app.ID,
 					"app":             response.App,
 					"availability":    response.Availability,

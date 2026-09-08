@@ -18,6 +18,7 @@ func (c *CLI) newAppSourceCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAppSourceShowCommand(),
+		c.newAppSyncCommand(),
 		c.newAppSourceBindGitHubCommand(),
 	)
 	return cmd
@@ -44,7 +45,7 @@ func (c *CLI) newAppSourceShowCommand() *cobra.Command {
 			}
 			if c.wantsJSON() {
 				app = redactAppForOutput(app)
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"source":        app.Source,
 					"origin_source": model.AppOriginSource(app),
 					"build_source":  model.AppBuildSource(app),
@@ -136,7 +137,7 @@ func (c *CLI) newAppSourceBindGitHubCommand() *cobra.Command {
 			}
 			if c.wantsJSON() {
 				response.App = redactAppForOutput(response.App)
-				return writeJSON(c.stdout, map[string]any{
+				return c.writeJSON(map[string]any{
 					"app":             response.App,
 					"already_current": response.AlreadyCurrent,
 					"origin_source":   model.AppOriginSource(response.App),

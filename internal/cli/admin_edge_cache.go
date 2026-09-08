@@ -57,7 +57,7 @@ func (c *CLI) newAdminEdgeCacheCheckCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				if err := writeJSON(c.stdout, report); err != nil {
+				if err := c.writeJSON(report); err != nil {
 					return err
 				}
 			} else {

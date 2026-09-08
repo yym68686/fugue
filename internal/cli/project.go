@@ -638,7 +638,7 @@ func projectMoveBlockedError(projectName string, skipped []projectMoveSkippedApp
 
 func (c *CLI) renderProjectMoveResult(result projectMoveResult) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		return c.writeJSON(result)
 	}
 	if err := writeKeyValues(c.stdout,
 		kvPair{Key: "project", Value: formatDisplayName(result.Project.Name, result.Project.ID, c.showIDs())},
@@ -716,7 +716,7 @@ func (c *CLI) newProjectMetaCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"project": project})
+				return c.writeJSON(map[string]any{"project": project})
 			}
 			return c.renderProjectDetail(client, project)
 		},
@@ -757,7 +757,7 @@ func (c *CLI) newProjectRuntimeReservationsListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtime_reservations": reservations})
+				return c.writeJSON(map[string]any{"runtime_reservations": reservations})
 			}
 			runtimes, err := client.ListRuntimes()
 			if err != nil {
@@ -798,7 +798,7 @@ func (c *CLI) newProjectRuntimeReservationsAddCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"runtime_reservation": reservation})
+				return c.writeJSON(map[string]any{"runtime_reservation": reservation})
 			}
 			return writeProjectRuntimeReservationTable(c.stdout, []model.ProjectRuntimeReservation{reservation}, nil, c.showIDs())
 		},
@@ -840,7 +840,7 @@ func (c *CLI) newProjectRuntimeReservationsRemoveCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"deleted": true, "runtime_reservation": reservation})
+				return c.writeJSON(map[string]any{"deleted": true, "runtime_reservation": reservation})
 			}
 			return writeProjectRuntimeReservationTable(c.stdout, []model.ProjectRuntimeReservation{reservation}, nil, c.showIDs())
 		},
@@ -870,7 +870,7 @@ func (c *CLI) newProjectListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"projects": projects})
+				return c.writeJSON(map[string]any{"projects": projects})
 			}
 			return writeProjectTableWithContext(c.stdout, projects, c.loadTenantNames(client), c.showIDs())
 		},
@@ -905,7 +905,7 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"project": project})
+				return c.writeJSON(map[string]any{"project": project})
 			}
 			return c.renderProjectDetail(client, project)
 		},
@@ -1026,7 +1026,7 @@ func (c *CLI) newProjectRemoveCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, map[string]any{
+					return c.writeJSON(map[string]any{
 						"delete":      response,
 						"final_state": "deleted",
 						"last_detail": lastDetail,
@@ -1036,7 +1036,7 @@ func (c *CLI) newProjectRemoveCommand() *cobra.Command {
 				return c.renderProjectDeleteResult(response, true)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return c.renderProjectDeleteResult(response, false)
 		},
@@ -1069,7 +1069,7 @@ func (c *CLI) patchProjectMetadata(projectRef string, name, description *string,
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{"project": project})
+		return c.writeJSON(map[string]any{"project": project})
 	}
 	return c.renderProjectDetail(client, project)
 }
@@ -1108,7 +1108,7 @@ func (c *CLI) newProjectImageUsageCommand() *cobra.Command {
 						continue
 					}
 					if c.wantsJSON() {
-						return writeJSON(c.stdout, map[string]any{
+						return c.writeJSON(map[string]any{
 							"registry_configured": usage.RegistryConfigured,
 							"reclaim_requires_gc": usage.ReclaimRequiresGC,
 							"image_store_mode":    usage.ImageStoreMode,
@@ -1145,7 +1145,7 @@ func (c *CLI) newProjectImageUsageCommand() *cobra.Command {
 				return fmt.Errorf("project %q has no image usage", project.Name)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, usage)
+				return c.writeJSON(usage)
 			}
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "registry_configured", Value: fmt.Sprintf("%t", usage.RegistryConfigured)},

@@ -42,7 +42,7 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 					return err
 				}
 				if c.wantsJSON() {
-					return writeJSON(c.stdout, gallery)
+					return c.writeJSON(gallery)
 				}
 				return writeConsoleProjectTable(c.stdout, gallery.Projects)
 			}
@@ -76,7 +76,7 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 				if opts.Databases {
 					payload["databases"] = extras.Databases
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			if c.shouldUseRichText() {
 				return c.renderRichProjectWorkbench(buildProjectOverviewWorkbenchView(detail, extras.Services), buildProjectStatusDiagnosisEvidenceViews(status))
@@ -109,7 +109,7 @@ func (c *CLI) newProjectAppsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"apps": detail.Apps})
+				return c.writeJSON(map[string]any{"apps": detail.Apps})
 			}
 			return writeAppTable(c.stdout, detail.Apps)
 		},
@@ -132,7 +132,7 @@ func (c *CLI) newProjectOpsCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"operations": detail.Operations})
+				return c.writeJSON(map[string]any{"operations": detail.Operations})
 			}
 			return writeOperationTableWithApps(c.stdout, detail.Operations, mapAppNames(detail.Apps))
 		},
@@ -338,7 +338,7 @@ func (c *CLI) renderProjectWatchSnapshot(snapshot any, separate bool) error {
 		}
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, snapshot)
+		return c.writeJSON(snapshot)
 	}
 	if _, err := fmt.Fprintf(c.stdout, "observed_at=%s\n", formatTime(time.Now().UTC())); err != nil {
 		return err

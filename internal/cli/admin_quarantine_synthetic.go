@@ -36,7 +36,7 @@ func (c *CLI) newAdminQuarantineCommand() *cobra.Command {
 				return fmt.Errorf("no quarantine/deep-health record found for %s", args[0])
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"result": result})
+				return c.writeJSON(map[string]any{"result": result})
 			}
 			return writeNodeDeepHealth(c.stdout, result)
 		},
@@ -76,7 +76,7 @@ func (c *CLI) newAdminSyntheticCommand() *cobra.Command {
 				payload["requested_release_id"] = opts.ReleaseID
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"synthetic": payload})
+				return c.writeJSON(map[string]any{"synthetic": payload})
 			}
 			return writeStringMapAny(c.stdout, payload)
 		},

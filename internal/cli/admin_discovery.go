@@ -53,7 +53,7 @@ func (c *CLI) newAdminDiscoveryBundleShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, bundle)
+				return c.writeJSON(bundle)
 			}
 			return writeDiscoveryBundleSummary(c.stdout, bundle)
 		},
@@ -101,7 +101,7 @@ func (c *CLI) newAdminDiscoveryBundleDownloadCommand() *cobra.Command {
 				return fmt.Errorf("write discovery bundle: %w", err)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"path": outputPath, "generation": bundle.Generation})
+				return c.writeJSON(map[string]any{"path": outputPath, "generation": bundle.Generation})
 			}
 			return writeKeyValues(c.stdout,
 				kvPair{Key: "path", Value: outputPath},
@@ -144,7 +144,7 @@ func (c *CLI) newAdminDiscoveryBundleDiffCommand() *cobra.Command {
 				"current_generated_at": currentBundle.GeneratedAt,
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeDiscoveryBundleDiff(c.stdout, localBundle, currentBundle, changed)
 		},

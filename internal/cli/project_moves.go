@@ -340,7 +340,7 @@ func requireConfirmedProjectMove(dryRun, confirm bool, command string) error {
 
 func (c *CLI) renderProjectMovePlan(plan projectMovePlan) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{"plan": redactProjectMovePlanForOutput(plan)})
+		return c.writeJSON(map[string]any{"plan": redactProjectMovePlanForOutput(plan)})
 	}
 	projectNames := mapProjectNamesByID(append(append([]model.Project{plan.SourceProject}, plan.TargetProjects...), plan.CreatedProjects...))
 	if err := writeKeyValues(c.stdout,

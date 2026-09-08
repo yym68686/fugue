@@ -86,7 +86,7 @@ func (c *CLI) newDebugBundleCommand() *cobra.Command {
 				return withExitCode(err, ExitCodeSystemFault)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return renderDebugBundleResult(c.stdout, result)
 		},

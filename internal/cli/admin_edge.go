@@ -44,7 +44,7 @@ func (c *CLI) newAdminEdgeReleaseEvidenceCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, evidence)
+				return c.writeJSON(evidence)
 			}
 			_, err = fmt.Fprintf(c.stdout, "status=%s release_epoch=%s bundle=%s phase=%s evidence=%s reason=%s\n", evidence.Status, evidence.ReleaseEpoch, evidence.BundleVersion, evidence.ActivationPhase, evidence.EvidenceDigest, evidence.Reason)
 			return err
@@ -81,7 +81,7 @@ func (c *CLI) newAdminEdgeQualityRankCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeEdgeQualityRank(c.stdout, response)
 		},
@@ -111,7 +111,7 @@ func (c *CLI) newAdminEdgeRouteCheckCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"explain": explain})
+				return c.writeJSON(map[string]any{"explain": explain})
 			}
 			return writeRouteExplain(c.stdout, explain)
 		},
@@ -156,7 +156,7 @@ func (c *CLI) newAdminEdgeNodesListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writeEdgeGroupTable(c.stdout, response.Groups); err != nil {
 				return err
@@ -190,7 +190,7 @@ func (c *CLI) newAdminEdgeNodesGetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writeEdgeNode(c.stdout, response.Node); err != nil {
 				return err
@@ -223,7 +223,7 @@ func (c *CLI) newAdminEdgeNodesQualityCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeEdgeNodeQuality(c.stdout, response)
 		},
@@ -251,7 +251,7 @@ func (c *CLI) newAdminEdgeNodesTokenCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writeEdgeNode(c.stdout, response.Node); err != nil {
 				return err
@@ -289,7 +289,7 @@ func (c *CLI) newAdminEdgeNodesDesiredStateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeEdgeNodeDesiredState(c.stdout, response.DesiredState)
 		},
@@ -311,7 +311,7 @@ func (c *CLI) newAdminEdgeNodesProbeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeEdgeNodeControlResult(c.stdout, response)
 		},
@@ -338,7 +338,7 @@ func (c *CLI) newAdminEdgeNodesCanaryCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeEdgeNodeControlResult(c.stdout, response)
 		},
@@ -364,7 +364,7 @@ func (c *CLI) newAdminEdgeNodesDrainCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeEdgeNodeControlResult(c.stdout, response)
 		},
@@ -386,7 +386,7 @@ func (c *CLI) newAdminEdgeNodesUndrainCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeEdgeNodeControlResult(c.stdout, response)
 		},
@@ -432,7 +432,7 @@ func (c *CLI) newAdminEdgeRoutePolicyListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policies": policies})
+				return c.writeJSON(map[string]any{"policies": policies})
 			}
 			return writeEdgeRoutePolicyTable(c.stdout, policies)
 		},
@@ -455,7 +455,7 @@ func (c *CLI) newAdminEdgeRoutePolicyShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policy": policy})
+				return c.writeJSON(map[string]any{"policy": policy})
 			}
 			return writeEdgeRoutePolicy(c.stdout, policy)
 		},
@@ -497,7 +497,7 @@ func (c *CLI) newAdminEdgeRoutePolicySetCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"policy": updated})
+				return c.writeJSON(map[string]any{"policy": updated})
 			}
 			return writeEdgeRoutePolicy(c.stdout, updated)
 		},
@@ -547,7 +547,7 @@ func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return writeEdgeRoutePolicyMutation(c.stdout, result)
 		},
@@ -579,7 +579,7 @@ func (c *CLI) newAdminEdgeRoutePolicyAllowEdgeCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return writeEdgeRoutePolicyMutation(c.stdout, result)
 		},
@@ -624,7 +624,7 @@ func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeGroupCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return writeEdgeRoutePolicyMutation(c.stdout, result)
 		},
@@ -656,7 +656,7 @@ func (c *CLI) newAdminEdgeRoutePolicyAllowEdgeGroupCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return c.writeJSON(result)
 			}
 			return writeEdgeRoutePolicyMutation(c.stdout, result)
 		},
@@ -681,7 +681,7 @@ func (c *CLI) newAdminEdgeRoutePolicyDeleteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			if err := writeEdgeRoutePolicy(c.stdout, response.Policy); err != nil {
 				return err

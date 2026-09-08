@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 const sourceUploadClientTimeout = 6 * time.Minute
 
 type Client struct {
+	context              context.Context
 	baseURL              string
 	token                string
 	cookie               string
@@ -29,6 +31,7 @@ type Client struct {
 }
 
 type clientOptions struct {
+	Context        context.Context
 	Cookie         string
 	Observer       requestObserver
 	RequireToken   bool
@@ -511,6 +514,7 @@ func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, e
 		readRetryDelay = 250 * time.Millisecond
 	}
 	return &Client{
+		context: opts.Context,
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		cookie:  strings.TrimSpace(opts.Cookie),

@@ -33,7 +33,7 @@ func (c *CLI) newAdminControlPlaneStoreStatusCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"status": status})
+				return c.writeJSON(map[string]any{"status": status})
 			}
 			return writeControlPlaneStoreStatus(c.stdout, status)
 		},
@@ -58,7 +58,7 @@ func (c *CLI) newAdminControlPlaneStorePromoteCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				return c.writeJSON(response)
 			}
 			return writeStorePromotion(c.stdout, response.Promotion)
 		},
@@ -90,7 +90,7 @@ func (c *CLI) newAdminRoutesCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"routes": routes})
+				return c.writeJSON(map[string]any{"routes": routes})
 			}
 			return writeRouteServingModes(c.stdout, routes)
 		},
@@ -109,7 +109,7 @@ func (c *CLI) newAdminRoutesCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"explain": explain})
+				return c.writeJSON(map[string]any{"explain": explain})
 			}
 			return writeRouteExplain(c.stdout, explain)
 		},
@@ -155,7 +155,7 @@ func (c *CLI) newAdminPlatformCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"status": status})
+				return c.writeJSON(map[string]any{"status": status})
 			}
 			return writePlatformAutonomyStatus(c.stdout, status)
 		},
@@ -175,7 +175,7 @@ func (c *CLI) newAdminPlatformCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"report": report})
+				return c.writeJSON(map[string]any{"report": report})
 			}
 			return writePlatformFailureDrill(c.stdout, report)
 		},
@@ -206,7 +206,7 @@ func (c *CLI) newAdminSecurityCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"preflight": preflight})
+				return c.writeJSON(map[string]any{"preflight": preflight})
 			}
 			return writeKeyRotationPreflight(c.stdout, preflight)
 		},

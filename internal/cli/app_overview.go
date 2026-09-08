@@ -17,6 +17,9 @@ import (
 )
 
 type appOverviewSnapshot struct {
+	Sources         map[string]evidenceSource     `json:"sources,omitempty"`
+	Completeness    string                        `json:"completeness,omitempty"`
+	MissingEvidence []string                      `json:"missing_evidence,omitempty"`
 	App             model.App                     `json:"app"`
 	Domains         []model.AppDomain             `json:"domains,omitempty"`
 	Bindings        []model.ServiceBinding        `json:"bindings,omitempty"`
@@ -30,7 +33,8 @@ type appOverviewSnapshot struct {
 
 func (c *CLI) newAppOverviewCommand() *cobra.Command {
 	opts := struct {
-		ShowSecrets bool
+		ShowSecrets     bool
+		RequireComplete bool
 	}{}
 	cmd := &cobra.Command{
 		Use:   "overview <app>",
@@ -45,9 +49,16 @@ func (c *CLI) newAppOverviewCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return c.renderAppOverviewSnapshot(client, snapshot, false, opts.ShowSecrets)
+			if err := c.renderAppOverviewSnapshot(client, snapshot, false, opts.ShowSecrets); err != nil {
+				return err
+			}
+			if opts.RequireComplete && len(snapshot.MissingEvidence) > 0 {
+				return withExitCode(fmt.Errorf("incomplete evidence: %s", strings.Join(snapshot.MissingEvidence, ", ")), ExitCodeIndeterminate)
+			}
+			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&opts.RequireComplete, "require-complete", false, "Fail when any overview evidence source is unavailable")
 	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
 	return cmd
 }
@@ -122,45 +133,67 @@ func (c *CLI) loadAppOverview(client *Client, ref string) (appOverviewSnapshot, 
 	}
 	snapshot := appOverviewSnapshot{App: app}
 	if domains, err := client.ListAppDomains(app.ID); err != nil {
+		snapshot.recordSource("domains", err, false)
 		c.progressf("warning=domain inventory unavailable: %v", err)
 	} else {
+		snapshot.recordSource("domains", nil, len(domains) == 0)
 		snapshot.Domains = domains
 	}
 	if bindings, err := client.ListAppBindings(app.ID); err != nil {
+		snapshot.recordSource("bindings", err, false)
 		c.progressf("warning=service binding inventory unavailable: %v", err)
 	} else {
+		snapshot.recordSource("bindings", nil, len(bindings.Bindings) == 0)
 		snapshot.Bindings = bindings.Bindings
 		snapshot.BackingServices = bindings.BackingServices
 	}
 	if operations, err := client.ListOperations(app.ID); err != nil {
+		snapshot.recordSource("operations", err, false)
 		c.progressf("warning=operation inventory unavailable: %v", err)
 	} else {
+		snapshot.recordSource("operations", nil, len(operations) == 0)
 		snapshot.Operations = operations
 	}
 	if tracking, err := client.GetAppImageTracking(app.ID); err != nil {
+		snapshot.recordSource("image_tracking", err, false)
 		c.progressf("warning=image tracking unavailable: %v", err)
-	} else if tracking.Tracking != nil {
+	} else {
+		snapshot.recordSource("image_tracking", nil, tracking.Tracking == nil)
 		snapshot.ImageTracking = tracking.Tracking
 	}
 	if images, err := client.GetAppImages(app.ID); err != nil {
+		snapshot.recordSource("images", err, false)
 		c.progressf("warning=image inventory unavailable: %v", err)
 	} else {
+		snapshot.recordSource("images", nil, len(images.Versions) == 0)
 		snapshot.Images = &images
 	}
 	if podInventory, err := client.GetAppRuntimePods(app.ID, "app"); err != nil {
+		snapshot.recordSource("pods", err, false)
 		c.progressf("warning=runtime pod inventory unavailable: %v", err)
 	} else {
+		snapshot.recordSource("pods", nil, len(podInventory.Groups) == 0)
 		snapshot.PodInventory = &podInventory
 	}
 	if diagnosis, err := c.buildAppOverviewDiagnosis(client, snapshot); err != nil {
+		snapshot.recordSource("diagnosis", err, false)
 		c.progressf("warning=app diagnosis unavailable: %v", err)
 	} else {
+		snapshot.recordSource("diagnosis", nil, diagnosis == nil)
 		snapshot.Diagnosis = diagnosis
 	}
 	if runtimeDiagnosis, err := client.TryGetAppDiagnosis(app.ID, "app"); err != nil {
+		snapshot.recordSource("runtime_diagnosis", err, false)
 		c.progressf("warning=app runtime diagnosis unavailable: %v", err)
-	} else if runtimeDiagnosis != nil && !strings.EqualFold(strings.TrimSpace(runtimeDiagnosis.Category), "available") {
-		snapshot.Diagnosis = selectPrimaryOverviewDiagnosis(snapshot.Diagnosis, appDiagnosisToOverviewDiagnosis(runtimeDiagnosis))
+	} else {
+		if runtimeDiagnosis == nil {
+			snapshot.recordSource("runtime_diagnosis", errEvidenceUnavailable, false)
+		} else {
+			snapshot.recordSource("runtime_diagnosis", nil, false)
+			if !strings.EqualFold(strings.TrimSpace(runtimeDiagnosis.Category), "available") {
+				snapshot.Diagnosis = selectPrimaryOverviewDiagnosis(snapshot.Diagnosis, appDiagnosisToOverviewDiagnosis(runtimeDiagnosis))
+			}
+		}
 	}
 	return snapshot, nil
 }
@@ -190,7 +223,7 @@ func (c *CLI) renderAppOverviewSnapshot(client *Client, snapshot appOverviewSnap
 		snapshot = redactOverviewSnapshotForOutput(snapshot)
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, snapshot)
+		return c.writeJSON(snapshot)
 	}
 	if c.shouldUseRichText() {
 		if err := c.renderRichAppHealth(buildAppOverviewHealthView(snapshot)); err != nil {

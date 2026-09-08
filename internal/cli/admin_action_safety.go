@@ -42,7 +42,7 @@ func (c *CLI) newAdminActionContractListCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"contracts": contracts})
+				return c.writeJSON(map[string]any{"contracts": contracts})
 			}
 			return writeAutomaticActionContractTable(c.stdout, contracts)
 		},
@@ -64,7 +64,7 @@ func (c *CLI) newAdminActionContractShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"contract": contract})
+				return c.writeJSON(map[string]any{"contract": contract})
 			}
 			return writeAutomaticActionContract(c.stdout, contract)
 		},
@@ -105,7 +105,7 @@ func (c *CLI) newAdminActionSafetyEvaluateCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"decision": decision})
+				return c.writeJSON(map[string]any{"decision": decision})
 			}
 			return writeActionSafetyDecision(c.stdout, decision)
 		},

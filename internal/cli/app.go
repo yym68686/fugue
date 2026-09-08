@@ -110,6 +110,8 @@ in more than one visible project or tenant.
 		hideCompatCommand(c.newAppReleaseRebuildCommand(), "fugue app build"),
 		c.newAppRollbackShortcutCommand(),
 		c.newAppReleaseCommand(),
+		c.newAppImageCommand(),
+		c.newAppTrafficCommand(),
 		c.newAppRolloutCommand(),
 		hideCompatCommand(c.newAppContinuityCommand(), "fugue app failover"),
 		c.newAppFailoverCommand(),
@@ -167,7 +169,7 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 			}
 			filtered := filterApps(apps, tenantID, projectID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"apps": redactAppsForOutput(filtered)})
+				return c.writeJSON(map[string]any{"apps": redactAppsForOutput(filtered)})
 			}
 			runtimes, err := client.ListRuntimes()
 			if err != nil {
@@ -213,7 +215,7 @@ func (c *CLI) newAppStatusCommand() *cobra.Command {
 				if opsErr == nil {
 					payload["active_operations"] = redactOperationsForOutput(activeOps)
 				}
-				return writeJSON(c.stdout, payload)
+				return c.writeJSON(payload)
 			}
 			if c.shouldUseRichText() {
 				return c.renderRichAppHealth(buildAppHealthView(finalApp, activeOps))
@@ -458,7 +460,7 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 				}
 				if c.wantsJSON() {
 					response.App = redactAppForOutput(response.App)
-					return writeJSON(c.stdout, response)
+					return c.writeJSON(response)
 				}
 				return writeAppMoveImpact(c.stdout, response.Impact)
 			}
@@ -675,7 +677,7 @@ func (c *CLI) renderBuildLogs(client *Client, appID string, opts appLogsCommandO
 		logs.JobName = buildLogsFallbackJobName(logs)
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, logs)
+		return c.writeJSON(logs)
 	}
 	return renderBuildLogsReport(c.stdout, logs)
 }
@@ -697,7 +699,7 @@ func (c *CLI) renderRuntimeLogs(client *Client, appID string, opts runtimeLogsOp
 	}
 	logs.Logs = filterLogText(logs.Logs, filter)
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, logs)
+		return c.writeJSON(logs)
 	}
 	if len(logs.Warnings) > 0 {
 		for _, warning := range logs.Warnings {
@@ -867,7 +869,7 @@ func (c *CLI) writeStreamJSON(event sseEvent) error {
 	if err != nil {
 		return err
 	}
-	return writeJSON(c.stdout, map[string]any{
+	return c.writeJSON(map[string]any{
 		"event": event.Event,
 		"id":    event.ID,
 		"data":  decoded,
@@ -1033,7 +1035,7 @@ func (c *CLI) renderAppCommandResult(result appCommandResult) error {
 			operation := redactOperationForOutput(*result.Operation)
 			out.Operation = &operation
 		}
-		return writeJSON(c.stdout, out)
+		return c.writeJSON(out)
 	}
 	pairs := make([]kvPair, 0, 6)
 	if result.App != nil {
