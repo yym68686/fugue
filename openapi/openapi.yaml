@@ -6379,6 +6379,44 @@ paths:
                 $ref: "#/components/schemas/AppRoutePatchResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/resize:
+    post:
+      operationId: resizeBackingService
+      summary: Resize Managed Postgres Backing Service In Place
+      description: >-
+        Queues a dedicated in-place CPU and memory resize for one app-owned
+        managed PostgreSQL service. The request must provide the complete
+        runtime request and limit envelope; existing requests or limits cannot
+        be removed. The operation only uses the Kubernetes Pod resize
+        subresource and never falls back to deleting, evicting, redeploying, or
+        patching the CNPG Cluster resource template.
+      tags: [Backing Services]
+      x-fugue-handler: handleResizeBackingService
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManagedPostgresResizeRequest"
+      responses:
+        '202':
+          description: In-place resize operation accepted or exact active operation reused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceResizeResponse"
+        '409':
+          description: A conflicting database mutation blocks resize.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backing-services/{id}/migrate:
     post:
       operationId: migrateBackingService
@@ -23650,6 +23688,31 @@ components:
           $ref: "#/components/schemas/Operation"
         already_current:
           type: boolean
+    ManagedPostgresResizeResources:
+      type: object
+      additionalProperties: false
+      required: [cpu_millicores, memory_mebibytes, cpu_limit_millicores, memory_limit_mebibytes]
+      properties:
+        cpu_millicores: {type: integer, format: int64, minimum: 1}
+        memory_mebibytes: {type: integer, format: int64, minimum: 1}
+        cpu_limit_millicores: {type: integer, format: int64, minimum: 1}
+        memory_limit_mebibytes: {type: integer, format: int64, minimum: 1}
+    ManagedPostgresResizeRequest:
+      type: object
+      additionalProperties: false
+      required: [runtime_resources]
+      properties:
+        runtime_resources:
+          $ref: "#/components/schemas/ManagedPostgresResizeResources"
+    BackingServiceResizeResponse:
+      type: object
+      additionalProperties: false
+      required: [backing_service, operation]
+      properties:
+        backing_service:
+          $ref: "#/components/schemas/BackingService"
+        operation:
+          $ref: "#/components/schemas/Operation"
     ManagedPostgresOrphanBackingServiceSummary:
       type: object
       additionalProperties: false

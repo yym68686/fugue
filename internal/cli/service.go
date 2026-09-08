@@ -144,6 +144,7 @@ func (c *CLI) newServicePostgresCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newServicePostgresCreateCommand(),
+		c.newServicePostgresResizeCommand(),
 		c.newServicePostgresOrphanCommand(),
 	)
 	return cmd
@@ -252,7 +253,11 @@ func (c *CLI) newServiceShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backing_service": redactBackingServiceForOutput(service)})
+				payload := map[string]any{"backing_service": redactBackingServiceForOutput(service)}
+				if view, ok := backingServicePostgresResourcesForOutput(service); ok {
+					payload["postgres_resources"] = view
+				}
+				return writeJSON(c.stdout, payload)
 			}
 			return c.renderBackingServiceDetail(client, service)
 		},

@@ -135,12 +135,22 @@ func renderBackingServiceWithContext(w io.Writer, service model.BackingService, 
 		{Key: "updated_at", Value: formatTime(service.UpdatedAt)},
 	}
 	if service.Spec.Postgres != nil {
+		resourceView, _ := backingServicePostgresResourcesForOutput(service)
 		pairs = append(pairs,
 			kvPair{Key: "database", Value: service.Spec.Postgres.Database},
 			kvPair{Key: "user", Value: service.Spec.Postgres.User},
 			kvPair{Key: "service_name", Value: service.Spec.Postgres.ServiceName},
 			kvPair{Key: "storage_size", Value: service.Spec.Postgres.StorageSize},
 			kvPair{Key: "desired_suspended", Value: strconv.FormatBool(service.Spec.Postgres.Suspended)},
+			kvPair{Key: "bootstrap_resources_status", Value: resourceView.Bootstrap.Status},
+			kvPair{Key: "bootstrap_resources", Value: formatPostgresResourceEnvelopeForOutput(resourceView.Bootstrap)},
+			kvPair{Key: "bootstrap_resources_missing", Value: strings.Join(resourceView.Bootstrap.MissingFields, ",")},
+			kvPair{Key: "bootstrap_resources_issues", Value: strings.Join(resourceView.Bootstrap.Issues, ",")},
+			kvPair{Key: "runtime_resources_status", Value: resourceView.Runtime.Status},
+			kvPair{Key: "runtime_resources", Value: formatPostgresResourceEnvelopeForOutput(resourceView.Runtime)},
+			kvPair{Key: "runtime_resources_missing", Value: strings.Join(resourceView.Runtime.MissingFields, ",")},
+			kvPair{Key: "runtime_resources_issues", Value: strings.Join(resourceView.Runtime.Issues, ",")},
+			kvPair{Key: "live_resources_status", Value: resourceView.Live.Status},
 		)
 		if service.Spec.Postgres.Instances > 0 {
 			pairs = append(pairs, kvPair{Key: "instances", Value: formatInt(service.Spec.Postgres.Instances)})

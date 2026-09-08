@@ -1339,8 +1339,10 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 			case model.OperationStatusCompleted:
 				final[id] = current
 				delete(pending, id)
-			case model.OperationStatusFailed, "canceled", "cancelled", "superseded":
+			case model.OperationStatusFailed, "superseded":
 				return nil, c.operationFailure(client, current)
+			case "canceled", "cancelled":
+				return nil, fmt.Errorf("operation %s was canceled", current.ID)
 			default:
 				pending[id] = base
 			}

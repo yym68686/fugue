@@ -18,6 +18,19 @@ type appResourcesOptions struct {
 	Mode        string
 }
 
+type appResourceApplyNextStep struct {
+	Kind             string                            `json:"kind"`
+	AfterOperationID string                            `json:"after_operation_id"`
+	PendingDatabases []appResourceApplyPendingDatabase `json:"pending_databases"`
+	Command          string                            `json:"command"`
+}
+
+type appResourceApplyPendingDatabase struct {
+	ServiceID   string             `json:"service_id"`
+	ServiceName string             `json:"service_name,omitempty"`
+	Recommended model.ResourceSpec `json:"recommended"`
+}
+
 func (c *CLI) newAppResourcesCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "resources",
@@ -217,8 +230,29 @@ func (c *CLI) newAppResourcesApplyCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			nextSteps := appResourceApplyDatabaseNextSteps(app.ID, opts.WindowHours, opts.MinSamples, response)
+			result := appCommandResult{Operation: response.Operation}
+			if response.Operation != nil && opts.Wait {
+				finalApp, finalOperation, waitErr := c.waitForSingleAppOperation(client, app.ID, *response.Operation, true)
+				if waitErr != nil {
+					return waitErr
+				}
+				result.App = finalApp
+				result.Operation = finalOperation
+				response.Operation = finalOperation
+			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, response)
+				payload := map[string]any{
+					"recommendation":  response.Recommendation,
+					"already_current": response.AlreadyCurrent,
+				}
+				if response.Operation != nil {
+					payload["operation"] = redactOperationForOutput(*response.Operation)
+				}
+				if len(nextSteps) != 0 {
+					payload["next_steps"] = nextSteps
+				}
+				return writeJSON(c.stdout, payload)
 			}
 			if err := writeResourceRecommendationTable(c.stdout, response.Recommendation); err != nil {
 				return err
@@ -227,20 +261,65 @@ func (c *CLI) newAppResourcesApplyCommand() *cobra.Command {
 				_, err = fmt.Fprintln(c.stdout, "already_current=true")
 				return err
 			}
-			result := appCommandResult{Operation: response.Operation}
-			if opts.Wait {
-				if finalApp, err := c.waitForSingleApp(client, app.ID, *response.Operation, true); err != nil {
+			if err := c.renderAppCommandResult(result); err != nil {
+				return err
+			}
+			for _, nextStep := range nextSteps {
+				if _, err := fmt.Fprintf(
+					c.stdout,
+					"database_resize_next_step=%s (after operation %s is terminal)\n",
+					nextStep.Command,
+					nextStep.AfterOperationID,
+				); err != nil {
 					return err
-				} else if finalApp != nil {
-					result.App = finalApp
 				}
 			}
-			return c.renderAppCommandResult(result)
+			return nil
 		},
 	}
 	bindAppResourcesWindowFlags(cmd, &opts)
 	cmd.Flags().BoolVar(&opts.Wait, "wait", false, "Wait for the deploy operation to complete")
 	return cmd
+}
+
+func appResourceApplyDatabaseNextSteps(
+	appID string,
+	windowHours, minSamples int,
+	response appResourceRecommendationApplyResponse,
+) []appResourceApplyNextStep {
+	if response.Operation == nil || response.Operation.Type != model.OperationTypeDeploy || strings.TrimSpace(response.Operation.ID) == "" {
+		return nil
+	}
+	pending := make([]appResourceApplyPendingDatabase, 0, len(response.Recommendation.BackingServices))
+	for _, recommendation := range response.Recommendation.BackingServices {
+		if !recommendation.Ready || recommendation.Current == nil || recommendation.Recommended == nil ||
+			*recommendation.Current == *recommendation.Recommended ||
+			validateManualPostgresResizeEnvelope(*recommendation.Recommended) != nil ||
+			strings.TrimSpace(recommendation.TargetID) == "" ||
+			!strings.EqualFold(strings.TrimSpace(recommendation.ServiceType), model.BackingServiceTypePostgres) {
+			continue
+		}
+		target := *recommendation.Recommended
+		pending = append(pending, appResourceApplyPendingDatabase{
+			ServiceID:   strings.TrimSpace(recommendation.TargetID),
+			ServiceName: strings.TrimSpace(recommendation.TargetName),
+			Recommended: target,
+		})
+	}
+	if len(pending) == 0 || strings.TrimSpace(appID) == "" {
+		return nil
+	}
+	return []appResourceApplyNextStep{{
+		Kind:             "reapply_after_app_deploy",
+		AfterOperationID: strings.TrimSpace(response.Operation.ID),
+		PendingDatabases: pending,
+		Command: fmt.Sprintf(
+			"fugue app resources apply %s --window-hours %d --min-samples %d --wait=false",
+			strings.TrimSpace(appID),
+			windowHours,
+			minSamples,
+		),
+	}}
 }
 
 func (c *CLI) newAppResourcesAutoCommand() *cobra.Command {

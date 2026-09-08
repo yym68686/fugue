@@ -311,16 +311,16 @@ controller:
     renewDeadline: 10s
     retryPeriod: 2s
   managedPostgresInPlaceResize:
-    enabled: false
+    enabled: true
     cpuRequestUpscaleEnabled: false
     cpuRequestDownscaleEnabled: false
-    memoryRequestUpscaleEnabled: false
-    memoryRequestDownscaleEnabled: false
+    memoryRequestUpscaleEnabled: true
+    memoryRequestDownscaleEnabled: true
     cpuLimitUpscaleEnabled: false
     cpuLimitDownscaleEnabled: false
-    memoryLimitUpscaleEnabled: false
+    memoryLimitUpscaleEnabled: true
     memoryLimitDownscaleEnabled: false
-    recoveryEnabled: false
+    recoveryEnabled: true
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
