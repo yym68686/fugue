@@ -1109,6 +1109,15 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	// calls retain their existing authoritative behaviour.
 	if !filter.HasAny() {
 		cacheKey := consoleAppsCacheKey(principal, tenantID, includeLiveStatus, includeResourceUsage)
+		if entry, ok := s.consoleAppsCache.getEntry(cacheKey); ok && time.Now().After(entry.expiresAt) {
+			go func() {
+				_, _ = s.consoleAppsCache.do(cacheKey, func() ([]model.App, error) {
+					return s.loadConsoleAppsList(context.Background(), principal, tenantID, includeLiveStatus, includeResourceUsage)
+				})
+			}()
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(entry.value)})
+			return
+		}
 		apps, cacheErr := s.consoleAppsCache.do(cacheKey, func() ([]model.App, error) {
 			return s.loadConsoleAppsList(r.Context(), principal, tenantID, includeLiveStatus, includeResourceUsage)
 		})

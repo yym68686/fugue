@@ -293,6 +293,15 @@ func (s *Server) startConsoleSnapshotWarmLoop(ctx context.Context) {
 		return
 	}
 	warm := func() {
+		// Platform-admin pages use the all-tenant view. Keep that snapshot hot
+		// alongside tenant-scoped snapshots so admin navigation has the same
+		// bounded read path.
+		platform := model.Principal{Scopes: map[string]struct{}{"platform.admin": {}}}
+		go func() {
+			_, _ = s.consoleAppsCache.do(consoleAppsCacheKey(platform, "", true, true), func() ([]model.App, error) {
+				return s.loadConsoleAppsList(ctx, platform, "", true, true)
+			})
+		}()
 		tenants, err := s.store.ListTenants()
 		if err != nil {
 			if s.log != nil {
