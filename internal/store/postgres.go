@@ -2397,15 +2397,25 @@ func (s *Store) applyPostgresSchemaTx(ctx context.Context, tx *sql.Tx) (bool, er
 	if _, err := tx.ExecContext(ctx, `SELECT set_config('lock_timeout', $1, true)`, formatPostgresDuration(postgresBootstrapLockTimeout)); err != nil {
 		return false, fmt.Errorf("set postgres bootstrap lock timeout: %w", err)
 	}
-	for _, stmt := range postgresSchemaStatements[1:] {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return false, fmt.Errorf("apply postgres schema: %w", err)
-		}
+	// Send fixed repository DDL in one round trip. Replaying hundreds of
+	// statements individually holds relation locks across every network RTT.
+	// PostgreSQL still executes them in order in this transaction, and any
+	// failure rolls back the batch before the fingerprint can be advanced.
+	if _, err := tx.ExecContext(ctx, postgresSchemaBatch()); err != nil {
+		return false, fmt.Errorf("apply postgres schema: %w", err)
 	}
 	if err := s.upsertMetaTx(ctx, tx, postgresSchemaFingerprintMetaKey, desiredFingerprint); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func postgresSchemaBatch() string {
+	statements := make([]string, 0, len(postgresSchemaStatements)-1)
+	for _, statement := range postgresSchemaStatements[1:] {
+		statements = append(statements, strings.TrimSuffix(strings.TrimSpace(statement), ";"))
+	}
+	return strings.Join(statements, ";\n") + ";"
 }
 
 type managedPostgresServiceNameUpdate struct {

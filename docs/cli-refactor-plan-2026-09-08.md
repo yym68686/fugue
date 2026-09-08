@@ -424,3 +424,5 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 - 重试验证：临时 PostgreSQL 集成测试通过；时序测试修正为检查在途 failover 不重复，并用一次性信号避免重复关闭 channel。该测试连续 5 次通过，完整 `GOFLAGS=-p=2 make test` 通过。
 
 - 第二次生产 CI `34268293839` 暴露发布校验器的历史 Pod 问题：Deployment 选择器中的旧 Succeeded/Failed Pod 被当作当前副本验证，历史 Failed Pod 的空 imageID 导致 forward 与回滚均无法通过。已验证实际 Running Pod 的 imageID 与注册表摘要一致；修复只排除长运行工作负载的终态历史 Pod，仍要求至少一个当前 Pod、所有当前 Pod 的精确摘要，以及 Job 成功 Pod 的镜像证明。修复通过专门负例和发布工具/Guardian 测试，将通过相同 CI 发布 Guardian 后继续 API/controller 验收。
+
+- Guardian/controller 已在 `d5d31a99` 成功发布，controller 2/2 Ready。API 启动失败的独立原因进一步定位为 schema 指纹变化触发数百条历史 DDL 在同一事务内逐条网络往返，生产数据库出现 bootstrap advisory/relation lock 等待。改为同事务单次批量发送固定 DDL，保持顺序、锁超时、全量回滚和提交后指纹语义；临时 PostgreSQL 初始化、独立 schema migration、CLI workflow 集成及失败不推进指纹测试通过。

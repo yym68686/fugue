@@ -128,6 +128,34 @@ func TestApplyPostgresSchemaTxSkipsDDLWhenFingerprintMatches(t *testing.T) {
 	}
 }
 
+func TestSchemaBatchFailureDoesNotAdvanceFingerprint(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec(regexp.QuoteMeta(postgresMetaSchemaStatement)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT value FROM fugue_meta WHERE key = $1`)).
+		WithArgs(postgresSchemaFingerprintMetaKey).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("previous-schema"))
+	mock.ExpectExec(regexp.QuoteMeta(`SELECT set_config('lock_timeout', $1, true)`)).
+		WithArgs(formatPostgresDuration(postgresBootstrapLockTimeout)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(postgresSchemaBatch())).WillReturnError(fmt.Errorf("synthetic DDL failure"))
+	if applied, err := (&Store{}).applyPostgresSchemaTx(context.Background(), tx); err == nil || applied {
+		t.Fatalf("failed schema batch was accepted: applied=%t err=%v", applied, err)
+	}
+	mock.ExpectRollback()
+	_ = tx.Rollback()
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplyPostgresSchemaTxAppliesDDLAndStoresFingerprintWhenMissing(t *testing.T) {
 	t.Parallel()
 
@@ -153,10 +181,8 @@ func TestApplyPostgresSchemaTxAppliesDDLAndStoresFingerprintWhenMissing(t *testi
 	mock.ExpectExec(regexp.QuoteMeta(`SELECT set_config('lock_timeout', $1, true)`)).
 		WithArgs(formatPostgresDuration(postgresBootstrapLockTimeout)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	for _, stmt := range postgresSchemaStatements[1:] {
-		mock.ExpectExec(regexp.QuoteMeta(stmt)).
-			WillReturnResult(sqlmock.NewResult(0, 0))
-	}
+	mock.ExpectExec(regexp.QuoteMeta(postgresSchemaBatch())).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`
 INSERT INTO fugue_meta (key, value, updated_at)
 VALUES ($1, $2, NOW())
