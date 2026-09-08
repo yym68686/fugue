@@ -2485,6 +2485,7 @@ type ImageLocationFilter struct {
 	RuntimeID       string
 	ClusterNodeName string
 	PlatformAdmin   bool
+	ObservedAfter   time.Time
 }
 
 type Image struct {

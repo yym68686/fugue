@@ -103,33 +103,18 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 	}
 
 	cutoff := time.Now().UTC().Add(-defaultImageCacheInventoryTTL)
-	var locationsMu sync.Mutex
-	locationGroup := new(errgroup.Group)
-	locationGroup.SetLimit(projectImageUsageAppBuildLimit)
-	for appID := range appIDs {
-		appID := appID
-		locationGroup.Go(func() error {
-			locations, err := s.store.ListImageLocations(model.ImageLocationFilter{Status: model.ImageLocationStatusPresent, PlatformAdmin: true, AppID: appID})
-			if err != nil {
-				return err
-			}
-			locationsMu.Lock()
-			for _, location := range locations {
-				if distributedImageLocationIsFresh(location, cutoff) {
-					evidence.locationsByAppID[location.AppID] = append(evidence.locationsByAppID[location.AppID], location)
-					if observed := distributedImageLocationObservedAt(location); observed.After(evidence.observedAt) {
-						evidence.observedAt = observed
-					}
-				} else {
-					evidence.staleLocationsByAppID[location.AppID] = append(evidence.staleLocationsByAppID[location.AppID], location)
-				}
-			}
-			locationsMu.Unlock()
-			return nil
-		})
-	}
-	if err := locationGroup.Wait(); err != nil {
+	locations, err := s.store.ListImageLocations(model.ImageLocationFilter{Status: model.ImageLocationStatusPresent, PlatformAdmin: true, ObservedAfter: cutoff})
+	if err != nil {
 		return distributedImageUsageEvidence{}, err
+	}
+	for _, location := range locations {
+		if _, ok := appIDs[strings.TrimSpace(location.AppID)]; !ok {
+			continue
+		}
+		evidence.locationsByAppID[location.AppID] = append(evidence.locationsByAppID[location.AppID], location)
+		if observed := distributedImageLocationObservedAt(location); observed.After(evidence.observedAt) {
+			evidence.observedAt = observed
+		}
 	}
 
 	manifests, err := s.store.ListImageCacheManifests(model.ImageCacheManifestFilter{
