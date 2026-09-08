@@ -122,6 +122,7 @@ type Server struct {
 	consoleGalleryCache                    expiringResponseCache[consoleGalleryResponse]
 	consoleAppsCache                       expiringResponseCache[[]model.App]
 	billingSummaryCache                    expiringResponseCache[model.TenantBillingSummary]
+	consoleImageUsageWarmMu                sync.Mutex
 	billingImageStorageRefresh             billingImageStorageRefreshScheduler
 	sourceUploadSlots                      chan struct{}
 	newLogsClient                          func(namespace string) (appLogsClient, error)
