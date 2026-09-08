@@ -425,13 +425,8 @@ func OverlayDesiredManagedPostgres(app model.App) (model.App, error) {
 	out := app
 	normalized := normalizeManagedPostgresSpec(out.Name, out.Spec.RuntimeID, *out.Spec.Postgres)
 
-	for index, service := range out.BackingServices {
-		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
-			continue
-		}
-		if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(out.ID) {
-			continue
-		}
+	if index := findAppManagedBackingServiceByType(out, model.BackingServiceTypePostgres); index >= 0 {
+		service := out.BackingServices[index]
 		serviceCopy := cloneBackingService(service)
 		serviceCopy.Spec.Postgres = &normalized
 		out.BackingServices[index] = serviceCopy
@@ -453,6 +448,38 @@ func OverlayDesiredManagedPostgres(app model.App) (model.App, error) {
 	sortServiceBindings(out.Bindings)
 	out.Spec.Postgres = nil
 	return out, nil
+}
+
+// findAppManagedBackingServiceByType keeps the app projection compatible with
+// legacy backing-service rows that have no owner_app_id. A valid binding is
+// the relationship of record in that case, so desired Postgres changes must
+// update the bound service instead of being silently discarded.
+func findAppManagedBackingServiceByType(app model.App, serviceType string) int {
+	for index, service := range app.BackingServices {
+		if isDeletedBackingService(service) || service.Spec.Postgres == nil && serviceType == model.BackingServiceTypePostgres {
+			continue
+		}
+		if strings.EqualFold(service.Type, serviceType) && strings.TrimSpace(service.OwnerAppID) == strings.TrimSpace(app.ID) {
+			return index
+		}
+	}
+	for _, binding := range app.Bindings {
+		if strings.TrimSpace(binding.AppID) != strings.TrimSpace(app.ID) {
+			continue
+		}
+		for index, service := range app.BackingServices {
+			if service.ID != binding.ServiceID || isDeletedBackingService(service) {
+				continue
+			}
+			if serviceType == model.BackingServiceTypePostgres && service.Spec.Postgres == nil {
+				continue
+			}
+			if strings.EqualFold(service.Type, serviceType) {
+				return index
+			}
+		}
+	}
+	return -1
 }
 
 func isDeletedBackingService(service model.BackingService) bool {

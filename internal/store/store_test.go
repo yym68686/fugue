@@ -2313,6 +2313,47 @@ func TestApplyDesiredSpecUpdatesBoundManagedPostgresWhenOwnerMissing(t *testing.
 	}
 }
 
+func TestOverlayDesiredManagedPostgresUpdatesBoundServiceWhenOwnerMissing(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_123",
+		Name:     "demo",
+		TenantID: "tenant_123",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_a",
+			Postgres: &model.AppPostgresSpec{
+				Database:  "demo",
+				User:      "demo",
+				Password:  "secret",
+				RuntimeID: "runtime_a",
+				Resources: &model.ResourceSpec{CPUMilliCores: 150, MemoryMebibytes: 128, MemoryLimitMebibytes: 1536},
+			},
+		},
+		Bindings: []model.ServiceBinding{{AppID: "app_123", ServiceID: "svc_pg"}},
+		BackingServices: []model.BackingService{{
+			ID: "svc_pg", Name: "demo-db", Type: model.BackingServiceTypePostgres,
+			Provisioner: model.BackingServiceProvisionerManaged, Status: model.BackingServiceStatusActive,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+				Database: "demo", User: "demo", Password: "secret", RuntimeID: "runtime_a",
+				Resources: &model.ResourceSpec{CPUMilliCores: 150, MemoryMebibytes: 1024, MemoryLimitMebibytes: 1536},
+			}},
+		}},
+	}
+
+	got, err := OverlayDesiredManagedPostgres(app)
+	if err != nil {
+		t.Fatalf("overlay desired bound service spec: %v", err)
+	}
+	if got.Spec.Postgres != nil {
+		t.Fatalf("expected postgres app spec to be consumed, got %+v", got.Spec.Postgres)
+	}
+	resources := got.BackingServices[0].Spec.Postgres.Resources
+	if resources == nil || resources.MemoryMebibytes != 128 || resources.MemoryLimitMebibytes != 1536 {
+		t.Fatalf("expected bound service memory request to update, got %+v", resources)
+	}
+}
+
 func TestMigrateOperationRejectsExternalRuntimeWhenAppHasBoundManagedPostgres(t *testing.T) {
 	t.Parallel()
 
