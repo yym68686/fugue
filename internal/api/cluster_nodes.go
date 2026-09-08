@@ -348,7 +348,15 @@ func (s *Server) startConsoleSnapshotWarmLoop(ctx context.Context) {
 				_, _ = s.consoleAppsCache.do(consoleAppsCacheKey(p, p.TenantID, true, true), func() ([]model.App, error) {
 					return s.loadConsoleAppsList(ctx, p, p.TenantID, true, true)
 				})
-				_, _ = s.cachedProjectImageUsageResponse(ctx, p)
+				// Image inventory may inspect many registry manifests and can run
+				// for minutes. Serialize this background-only scan so tenant
+				// warmups cannot exhaust the control-plane DB connection pool.
+				if s.consoleImageUsageWarmMu.TryLock() {
+					go func() {
+						defer s.consoleImageUsageWarmMu.Unlock()
+						_, _ = s.cachedProjectImageUsageResponse(ctx, p)
+					}()
+				}
 				billingKey := p.TenantID + "|usage=true"
 				_, _ = s.billingSummaryCache.do(billingKey, func() (model.TenantBillingSummary, error) {
 					value, err := s.store.GetTenantBillingSummary(p.TenantID)
