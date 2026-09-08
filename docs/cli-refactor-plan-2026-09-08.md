@@ -414,9 +414,9 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 
 ### 最终发布验收（进行中）
 
-- API / controller / schema：待声明式 CI 发布及健康验证。
-- CLI v0.2.0 tag / GitHub Release：待发布。
-- 本机 `/opt/homebrew/bin/fugue`：仍为 v0.1.123，待最终升级。
+- [x] API / controller / schema：声明式 CI 已发布并完成健康验证。
+- [ ] CLI v0.2.0 tag / GitHub Release：待发布。
+- [ ] 本机 `/opt/homebrew/bin/fugue`：待升级到 v0.2.0。
 
 - 首次生产 CI `34264422165`：schema 成功；API/controller 在应用前的前置状态检查中被阻止。API 的 live identity 已偏离监控器保存的 positive LKG，controller 也未达到前置健康证明；这次没有应用新 API/controller。后续使用相同已验证 LKG 的声明式重试，保留 CAS 和来源校验。
 - 补充临时 PostgreSQL 实测：分块完成、请求→operation 原子关联、缓存状态读写、并发取消、项目过滤、引用写入与删除互锁。修正 PostgreSQL 的过期 worker 更新从 404 归类为 409，与文件存储行为一致；也修正 runtime 消失后的取消清理。
@@ -426,3 +426,7 @@ R2 之后被删除路径必须报清晰错误且不发业务 HTTP 请求；可�
 - 第二次生产 CI `34268293839` 暴露发布校验器的历史 Pod 问题：Deployment 选择器中的旧 Succeeded/Failed Pod 被当作当前副本验证，历史 Failed Pod 的空 imageID 导致 forward 与回滚均无法通过。已验证实际 Running Pod 的 imageID 与注册表摘要一致；修复只排除长运行工作负载的终态历史 Pod，仍要求至少一个当前 Pod、所有当前 Pod 的精确摘要，以及 Job 成功 Pod 的镜像证明。修复通过专门负例和发布工具/Guardian 测试，将通过相同 CI 发布 Guardian 后继续 API/controller 验收。
 
 - Guardian/controller 已在 `d5d31a99` 成功发布，controller 2/2 Ready。API 启动失败的独立原因进一步定位为 schema 指纹变化触发数百条历史 DDL 在同一事务内逐条网络往返，生产数据库出现 bootstrap advisory/relation lock 等待。改为同事务单次批量发送固定 DDL，保持顺序、锁超时、全量回滚和提交后指纹语义；临时 PostgreSQL 初始化、独立 schema migration、CLI workflow 集成及失败不推进指纹测试通过。
+
+- 最终生产发布：CI `34277341215` 成功发布 controller 启动批处理修复，CI `34277651942` 成功发布 API gen202；生产 API/controller 监控器连续失败数为 0，两个 Deployment 均为 2/2 Ready。PostgreSQL 只读快照显示 0 lock/advisory/relation waits、24 个客户端连接；内部 service FQDN 末尾点探针 `/healthz` 和 `/v1/auth/context` 均 7/7 返回 200，p50 分别为 516.7ms 和 520.5ms。较高端到端耗时来自 DNS search/跨区网络，API `/healthz` origin timing 已单独记录。
+
+- v0.2.0 tag、GitHub Release 与本机升级将在实际完成后补充核验结果。
