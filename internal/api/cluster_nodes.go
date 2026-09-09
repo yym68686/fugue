@@ -615,7 +615,7 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	reads.Go(func() error {
 		started := time.Now()
 		var readErr error
-		apps, readErr = s.listAppSummariesWithTiming(r.Context(), principal.TenantID, principal.IsPlatformAdmin(), false)
+		apps, readErr = s.listAppWorkloadIdentitiesWithTiming(r.Context(), principal.TenantID, principal.IsPlatformAdmin())
 		timings.Add("store_apps", time.Since(started))
 		return readErr
 	})

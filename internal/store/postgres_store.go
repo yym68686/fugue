@@ -2165,6 +2165,10 @@ status_json, created_at, updated_at FROM fugue_apps`
 	}
 	query += ` ORDER BY created_at ASC`
 
+	return s.pgReadAppRows(ctx, query, args, hydrateBackingServices, timing)
+}
+
+func (s *Store) pgReadAppRows(ctx context.Context, query string, args []any, hydrateBackingServices bool, timing *AppListReadTiming) ([]model.App, error) {
 	var readTiming *SQLReadTiming
 	if timing != nil {
 		readTiming = &SQLReadTiming{}
