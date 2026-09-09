@@ -1,13 +1,20 @@
 package controller
 
 import (
+	"context"
+	"database/sql/driver"
+	"errors"
 	"fmt"
+	"net"
+	"time"
+
+	"fugue/internal/store"
 	"reflect"
 
 	"fugue/internal/model"
 )
 
-func (s *Service) completeStaleDeployOperationIfNeeded(op model.Operation, currentApp model.App) (bool, error) {
+func (s *Service) completeStaleDeployOperationIfNeeded(ctx context.Context, op model.Operation, currentApp model.App) (bool, error) {
 	if op.Type != model.OperationTypeDeploy || op.DesiredSpec == nil {
 		return false, nil
 	}
@@ -29,7 +36,7 @@ func (s *Service) completeStaleDeployOperationIfNeeded(op model.Operation, curre
 		return true, nil
 	}
 
-	newer, found, err := s.completedDeployAfterOperationMatchingCurrentApp(op, currentApp)
+	newer, found, err := s.completedDeployAfterOperationMatchingCurrentApp(ctx, op, currentApp)
 	if err != nil {
 		return false, err
 	}
@@ -55,35 +62,58 @@ func (s *Service) completeStaleDeployOperationIfNeeded(op model.Operation, curre
 	return true, nil
 }
 
-func (s *Service) completedDeployAfterOperationMatchingCurrentApp(op model.Operation, currentApp model.App) (model.Operation, bool, error) {
-	ops, err := s.Store.ListOperationsByApp(op.TenantID, true, op.AppID)
-	if err != nil {
-		return model.Operation{}, false, fmt.Errorf("list operations for stale deploy guard: %w", err)
+func (s *Service) completedDeployAfterOperationMatchingCurrentApp(ctx context.Context, op model.Operation, currentApp model.App) (model.Operation, bool, error) {
+	var cursor *store.CompletedDeployCursor
+	for {
+		ops, err := s.completedDeployCandidatePage(ctx, op, cursor)
+		if err != nil {
+			return model.Operation{}, false, fmt.Errorf("read candidates for stale deploy guard: %w", err)
+		}
+		for _, candidate := range ops {
+			if candidate.ID != op.ID && deployOperationDesiredStateMatchesApp(candidate, currentApp) && !deployOperationDesiredStatesEqual(candidate, op) {
+				return candidate, true, nil
+			}
+		}
+		if len(ops) < store.CompletedDeployCandidatePageSize {
+			return model.Operation{}, false, nil
+		}
+		last := ops[len(ops)-1]
+		cursor = &store.CompletedDeployCursor{CompletedAt: *last.CompletedAt, ID: last.ID}
 	}
+}
 
-	var newest model.Operation
-	for _, candidate := range ops {
-		if candidate.ID == op.ID ||
-			candidate.Type != model.OperationTypeDeploy ||
-			candidate.Status != model.OperationStatusCompleted ||
-			candidate.CompletedAt == nil ||
-			!candidate.CompletedAt.After(op.CreatedAt) {
-			continue
+// Retry one transient read failure, but never skip the guard on failure or
+// continue after the owning operation/leader has been canceled.
+func (s *Service) completedDeployCandidatePage(ctx context.Context, op model.Operation, cursor *store.CompletedDeployCursor) ([]model.Operation, error) {
+	return retryCompletedDeployRead(ctx, func() ([]model.Operation, error) {
+		return s.Store.ListCompletedDeployCandidates(ctx, op.TenantID, op.AppID, op.CreatedAt, cursor)
+	})
+}
+
+func retryCompletedDeployRead(ctx context.Context, read func() ([]model.Operation, error)) ([]model.Operation, error) {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		if !deployOperationDesiredStateMatchesApp(candidate, currentApp) {
-			continue
+		ops, err := read()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		if deployOperationDesiredStatesEqual(candidate, op) {
-			continue
+		if err == nil || attempt >= 1 {
+			return ops, err
 		}
-		if newest.ID == "" || candidate.CompletedAt.After(*newest.CompletedAt) {
-			newest = candidate
+		var networkError net.Error
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, driver.ErrBadConn) && !(errors.As(err, &networkError) && networkError.Timeout()) {
+			return nil, err
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
 		}
 	}
-	if newest.ID == "" {
-		return model.Operation{}, false, nil
-	}
-	return newest, true, nil
 }
 
 func deployOperationDesiredStateMatchesApp(op model.Operation, app model.App) bool {

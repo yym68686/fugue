@@ -310,6 +310,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	triggerPendingOperationWorkers(foregroundImports...)
 	triggerPendingOperationWorkers(foregroundActivations...)
 	triggerBackgroundOps()
+	stopSourceSync := s.startGitHubSourceSync(ctx, triggerBackgroundOps)
+	defer stopSourceSync()
 	if s.Config.HostJournaldPolicyEnabled {
 		if err := s.scheduleHostJournaldPolicyReconciliation(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.Logger.Printf("initial host journald policy scheduling error: %v", err)
@@ -319,11 +321,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if !eventDriven {
 		ticker := time.NewTicker(s.Config.PollInterval)
 		defer ticker.Stop()
-		var githubTicker *time.Ticker
-		if s.Config.GitHubSyncInterval > 0 {
-			githubTicker = time.NewTicker(s.Config.GitHubSyncInterval)
-			defer githubTicker.Stop()
-		}
 		var imageTrackingTicker *time.Ticker
 		if s.Config.ImageTrackingInterval > 0 {
 			imageTrackingTicker = time.NewTicker(s.Config.ImageTrackingInterval)
@@ -366,12 +363,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-githubTickerChan(githubTicker):
-				if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					s.Logger.Printf("github sync error: %v", err)
-				} else {
-					triggerBackgroundOps()
-				}
 			case <-githubTickerChan(imageTrackingTicker):
 				if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("image tracking sync error: %v", err)
@@ -405,13 +396,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 
 	if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		s.Logger.Printf("reconcile error: %v", err)
-	}
-	if s.Config.GitHubSyncInterval > 0 {
-		if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			s.Logger.Printf("initial github sync error: %v", err)
-		} else {
-			triggerBackgroundOps()
-		}
 	}
 	if s.Config.ImageTrackingInterval > 0 {
 		if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -467,11 +451,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer fallbackTicker.Stop()
 	managedAppFallbackTicker := time.NewTicker(s.Config.ManagedAppReconcileFallbackInterval)
 	defer managedAppFallbackTicker.Stop()
-	var githubTicker *time.Ticker
-	if s.Config.GitHubSyncInterval > 0 {
-		githubTicker = time.NewTicker(s.Config.GitHubSyncInterval)
-		defer githubTicker.Stop()
-	}
 	var imageTrackingTicker *time.Ticker
 	if s.Config.ImageTrackingInterval > 0 {
 		imageTrackingTicker = time.NewTicker(s.Config.ImageTrackingInterval)
@@ -530,12 +509,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("fallback managed app reconcile error: %v", err)
 				}
-			}
-		case <-githubTickerChan(githubTicker):
-			if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				s.Logger.Printf("github sync error: %v", err)
-			} else {
-				triggerBackgroundOps()
 			}
 		case <-githubTickerChan(imageTrackingTicker):
 			if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -971,7 +944,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)
 		}
-		if completed, err := s.completeStaleDeployOperationIfNeeded(op, currentApp); err != nil {
+		if completed, err := s.completeStaleDeployOperationIfNeeded(ctx, op, currentApp); err != nil {
 			return err
 		} else if completed {
 			timer.Mark("stale_deploy_skip")
