@@ -2369,7 +2369,9 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 		runner = s.runBackup
 	}
 	var artifacts []model.BackupArtifact
-	if suspended, guardErr := s.backupRunTargetsSuspendedManagedPostgres(run); guardErr != nil {
+	if policyErr := s.validateAutomaticBackupPolicy(run); policyErr != nil {
+		err = policyErr
+	} else if suspended, guardErr := s.backupRunTargetsSuspendedManagedPostgres(run); guardErr != nil {
 		err = guardErr
 	} else if suspended {
 		err = errManagedPostgresSuspended
@@ -2422,7 +2424,7 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 			}
 			return
 		}
-		if !errors.Is(err, errManagedPostgresSuspended) {
+		if !errors.Is(err, errManagedPostgresSuspended) && !errors.Is(err, errBackupPolicyDisabled) {
 			s.scheduleBackupRetry(contextWithoutCancel(parent), finished)
 		}
 		return
