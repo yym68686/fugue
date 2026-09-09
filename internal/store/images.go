@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -569,6 +570,7 @@ func normalizeImageFilter(filter model.ImageFilter) model.ImageFilter {
 	filter.ImageRef = strings.TrimSpace(filter.ImageRef)
 	filter.CanonicalDigest = normalizeImageDigest(filter.CanonicalDigest)
 	filter.LifecycleState = normalizeImageLifecycleStateFilter(filter.LifecycleState)
+	filter.AppIDs = sortedTrimmedStringKeys(trimmedStringSet(filter.AppIDs))
 	return filter
 }
 
@@ -954,6 +956,9 @@ func imageMatchesFilter(image model.Image, filter model.ImageFilter) bool {
 		return false
 	}
 	if filter.AppID != "" && strings.TrimSpace(image.AppID) != filter.AppID {
+		return false
+	}
+	if len(filter.AppIDs) > 0 && !slices.Contains(filter.AppIDs, strings.TrimSpace(image.AppID)) {
 		return false
 	}
 	if filter.ImageRef != "" && strings.TrimSpace(image.ImageRef) != filter.ImageRef {

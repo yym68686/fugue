@@ -757,6 +757,13 @@ func imageFilterClauses(filter model.ImageFilter) ([]string, []any) {
 		args = append(args, filter.AppID)
 		clauses = append(clauses, fmt.Sprintf("app_id = $%d", len(args)))
 	}
+	if len(filter.AppIDs) > 0 {
+		placeholders := sqlPlaceholderList(len(args)+1, len(filter.AppIDs))
+		for _, appID := range filter.AppIDs {
+			args = append(args, appID)
+		}
+		clauses = append(clauses, "app_id IN ("+placeholders+")")
+	}
 	if filter.ImageRef != "" {
 		args = append(args, filter.ImageRef)
 		clauses = append(clauses, fmt.Sprintf("image_ref = $%d", len(args)))

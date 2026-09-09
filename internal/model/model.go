@@ -2485,6 +2485,7 @@ type ImageLocationFilter struct {
 	RuntimeID       string
 	ClusterNodeName string
 	PlatformAdmin   bool
+	AppIDs          []string
 }
 
 type Image struct {
@@ -2540,6 +2541,7 @@ type ImageFilter struct {
 	CanonicalDigest string
 	LifecycleState  string
 	PlatformAdmin   bool
+	AppIDs          []string
 }
 
 type ImageAlias struct {

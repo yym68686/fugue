@@ -1,6 +1,7 @@
 package store
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -261,6 +262,7 @@ func normalizeImageLocationFilter(filter model.ImageLocationFilter) model.ImageL
 	filter.NodeID = strings.TrimSpace(filter.NodeID)
 	filter.RuntimeID = strings.TrimSpace(filter.RuntimeID)
 	filter.ClusterNodeName = strings.TrimSpace(filter.ClusterNodeName)
+	filter.AppIDs = sortedTrimmedStringKeys(trimmedStringSet(filter.AppIDs))
 	return filter
 }
 
@@ -327,6 +329,9 @@ func imageLocationMatchesFilter(location model.ImageLocation, filter model.Image
 		return false
 	}
 	if filter.AppID != "" && strings.TrimSpace(location.AppID) != filter.AppID {
+		return false
+	}
+	if len(filter.AppIDs) > 0 && !slices.Contains(filter.AppIDs, strings.TrimSpace(location.AppID)) {
 		return false
 	}
 	if filter.ImageRef != "" && strings.TrimSpace(location.ImageRef) != filter.ImageRef {

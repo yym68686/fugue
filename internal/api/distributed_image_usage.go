@@ -81,8 +81,13 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 	if len(appIDs) == 0 || s == nil || s.store == nil {
 		return evidence, nil
 	}
+	filterAppIDs := make([]string, 0, len(appIDs))
+	for appID := range appIDs {
+		filterAppIDs = append(filterAppIDs, appID)
+	}
+	sort.Strings(filterAppIDs)
 
-	images, err := s.store.ListImages(model.ImageFilter{PlatformAdmin: true})
+	images, err := s.store.ListImages(model.ImageFilter{PlatformAdmin: true, AppIDs: filterAppIDs})
 	if err != nil {
 		return distributedImageUsageEvidence{}, err
 	}
@@ -97,6 +102,7 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 	locations, err := s.store.ListImageLocations(model.ImageLocationFilter{
 		Status:        model.ImageLocationStatusPresent,
 		PlatformAdmin: true,
+		AppIDs:        filterAppIDs,
 	})
 	if err != nil {
 		return distributedImageUsageEvidence{}, err
