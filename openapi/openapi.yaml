@@ -3714,6 +3714,38 @@ paths:
                 $ref: "#/components/schemas/DeleteProjectRuntimeReservationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/billing/summaries:
+    get:
+      operationId: listBillingSummaries
+      summary: List Billing Summaries
+      description: Returns billing summaries for 1 to 500 requested tenants in one platform-admin request. Tenants confirmed absent from the store are listed in missing_tenant_ids; other read failures fail the request.
+      tags: [Billing]
+      x-fugue-handler: handleListBillingSummaries
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_ids
+          required: true
+          description: Comma-separated tenant IDs, at most 500 distinct values. Duplicate IDs are read once.
+          schema:
+            type: string
+            minLength: 1
+        - in: query
+          name: include_current_usage
+          required: false
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Complete billing summaries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingSummariesResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/billing:
     get:
       operationId: getBilling
@@ -14332,6 +14364,19 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TenantBillingEvent"
+    BillingSummariesResponse:
+      type: object
+      additionalProperties: false
+      required: [billings, missing_tenant_ids]
+      properties:
+        billings:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantBillingSummary"
+        missing_tenant_ids:
+          type: array
+          items:
+            type: string
     AppSource:
       type: object
       additionalProperties: false

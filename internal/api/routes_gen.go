@@ -252,6 +252,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBilling)))
 	mux.Handle("PATCH /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleUpdateBilling)))
 	mux.Handle("PATCH /v1/billing/balance", s.auth.RequireAPI(http.HandlerFunc(s.handleSetBillingBalance)))
+	mux.Handle("GET /v1/billing/summaries", s.auth.RequireAPI(http.HandlerFunc(s.handleListBillingSummaries)))
 	mux.Handle("POST /v1/billing/top-ups", s.auth.RequireAPI(http.HandlerFunc(s.handleTopUpBilling)))
 	mux.Handle("GET /v1/cluster/control-plane", s.auth.RequireAPI(http.HandlerFunc(s.handleGetControlPlaneStatus)))
 	mux.Handle("GET /v1/cluster/dns/resolve", s.auth.RequireAPI(http.HandlerFunc(s.handleResolveClusterDNS)))

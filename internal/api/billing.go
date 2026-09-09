@@ -271,6 +271,10 @@ func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string,
 	started = time.Now()
 	apps = s.overlayCurrentResourceUsageOnApps(ctx, apps)
 	timings.Add("billing_usage_inventory", time.Since(started))
+	return tenantManagedUsageFromSnapshot(tenantID, apps, runtimeTypes)
+}
+
+func tenantManagedUsageFromSnapshot(tenantID string, apps []model.App, runtimeTypes map[string]string) *model.ResourceUsage {
 	accumulator := resourceUsageAccumulator{}
 	for _, app := range apps {
 		if app.TenantID != tenantID || app.Status.CurrentReplicas <= 0 {
