@@ -85,6 +85,13 @@ func TestBillingBatchPostgresPreservesAccrualAndCredits(t *testing.T) {
 	app.Spec.Workspace = &model.AppWorkspaceSpec{StorageSize: "3Gi"}
 	app.Spec.Env = map[string]string{"CONFIG": "private"}
 	app.Spec.Files = []model.AppFile{{Path: "/config.txt", Content: strings.Repeat("config", 1024), Secret: true}}
+	app.Spec.PersistentStorage = &model.AppPersistentStorageSpec{
+		Mode: model.AppPersistentStorageModeMovableRWO, StorageSize: "4Gi",
+		Mounts: []model.AppPersistentStorageMount{
+			{Kind: "file", Path: "/data/config", SeedContent: strings.Repeat("private", 8192), Secret: true, Mode: 0600},
+			{Kind: "directory", Path: "/data/files"},
+		},
+	}
 	spec, _ := json.Marshal(app.Spec)
 	status, _ := json.Marshal(app.Status)
 	if _, err := s.db.Exec(`UPDATE fugue_apps SET status_json = $2, spec_json = $3 WHERE id = $1`, app.ID, status, spec); err != nil {
@@ -129,6 +136,16 @@ func TestBillingBatchPostgresPreservesAccrualAndCredits(t *testing.T) {
 	}
 	if inputs.Apps[0].Spec.Workspace == nil || inputs.Apps[0].Spec.Workspace.StorageSize != "3Gi" {
 		t.Fatal("billing snapshot dropped storage accounting input")
+	}
+	projectedStorage := inputs.Apps[0].Spec.PersistentStorage
+	if projectedStorage == nil || len(projectedStorage.Mounts) != 2 || projectedStorage.Mounts[0].SeedContent != "" {
+		t.Fatal("billing snapshot retained mounted executable configuration")
+	}
+	expectedStorage := *app.Spec.PersistentStorage
+	expectedStorage.Mounts = append([]model.AppPersistentStorageMount(nil), expectedStorage.Mounts...)
+	expectedStorage.Mounts[0].SeedContent = ""
+	if !reflect.DeepEqual(*projectedStorage, expectedStorage) || appEffectiveResources(inputs.Apps[0].Spec) != appEffectiveResources(app.Spec) {
+		t.Fatal("billing projection changed storage settings or commitment")
 	}
 	if err := s.WarmBillingStatements(ctx, 2); err != nil {
 		t.Fatal(err)

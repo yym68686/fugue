@@ -14,9 +14,16 @@ SELECT jsonb_build_object(
   'tenants', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', id)) FROM fugue_tenants WHERE id = ANY($1::text[])), '[]'::jsonb),
   'apps', COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY a.created_at) FROM (
     SELECT id, tenant_id, project_id, name, description,
-      CASE WHEN jsonb_typeof(spec_json) = 'object'
-        THEN spec_json - ARRAY['env','files','generated_env','command','args']
-        ELSE spec_json END AS spec,
+      CASE WHEN jsonb_typeof(spec_json) = 'object' THEN
+        (spec_json - ARRAY['env','files','generated_env','command','args']) ||
+        CASE WHEN jsonb_typeof(spec_json#>'{persistent_storage,mounts}') = 'array' THEN
+          jsonb_build_object('persistent_storage', (spec_json->'persistent_storage') ||
+            jsonb_build_object('mounts', COALESCE((
+              SELECT jsonb_agg(CASE WHEN jsonb_typeof(mount) = 'object' THEN mount - 'seed_content' ELSE mount END ORDER BY ordinal)
+              FROM jsonb_array_elements(spec_json#>'{persistent_storage,mounts}') WITH ORDINALITY AS mounts(mount, ordinal)
+            ), '[]'::jsonb)))
+        ELSE '{}'::jsonb END
+      ELSE spec_json END AS spec,
       status_json AS status, created_at, updated_at
     FROM fugue_apps WHERE tenant_id = ANY($1::text[])
   ) a), '[]'::jsonb),
