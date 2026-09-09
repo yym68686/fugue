@@ -143,6 +143,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigratePlatformState(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate platform-state schema: %w", err)
 	}
+	if err := schemamigrate.MigratePlatformArtifactReadIndex(ctx, databaseURL); err != nil {
+		return fmt.Errorf("migrate platform-artifact read index: %w", err)
+	}
 	if err := schemamigrate.MigrateImageCacheManifestGraph(ctx, databaseURL); err != nil {
 		return fmt.Errorf("migrate image-cache manifest graph schema: %w", err)
 	}
