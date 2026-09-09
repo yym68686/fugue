@@ -4144,6 +4144,41 @@ WHERE app_id IN (%s)
 	return opsByAppID, nil
 }
 
+func (s *Store) pgListImageOperationsByApps(tenantID string, platformAdmin bool, appIDs []string) (map[string][]model.Operation, error) {
+	if len(appIDs) == 0 {
+		return map[string][]model.Operation{}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	args := make([]any, 0, len(appIDs)+1)
+	for _, id := range appIDs {
+		args = append(args, id)
+	}
+	query := fmt.Sprintf(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', desired_source_json, created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN (%s) AND desired_source_json IS NOT NULL`, sqlPlaceholderList(1, len(appIDs)))
+	if !platformAdmin {
+		args = append(args, tenantID)
+		query += fmt.Sprintf(" AND tenant_id = $%d", len(args))
+	}
+	query += " ORDER BY app_id ASC, created_at ASC"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	out := make(map[string][]model.Operation, len(appIDs))
+	for rows.Next() {
+		op, err := scanImageOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[op.AppID] = append(out[op.AppID], op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Store) pgListActiveOperations() ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -6072,6 +6107,31 @@ func scanOperationSummary(scanner sqlScanner) (model.Operation, error) {
 	if desiredReplicas.Valid {
 		value := int(desiredReplicas.Int64)
 		op.DesiredReplicas = &value
+	}
+	if startedAt.Valid {
+		op.StartedAt = &startedAt.Time
+	}
+	if completedAt.Valid {
+		op.CompletedAt = &completedAt.Time
+	}
+	return op, nil
+}
+
+func scanImageOperation(scanner sqlScanner) (model.Operation, error) {
+	var op model.Operation
+	var sourceRaw []byte
+	var image sql.NullString
+	var startedAt, completedAt sql.NullTime
+	if err := scanner.Scan(&op.ID, &op.TenantID, &op.Type, &op.Status, &op.AppID, &image, &sourceRaw, &op.CreatedAt, &op.UpdatedAt, &startedAt, &completedAt); err != nil {
+		return model.Operation{}, err
+	}
+	var err error
+	op.DesiredSource, op.DesiredOriginSource, err = decodeOperationSourceState(sourceRaw)
+	if err != nil {
+		return model.Operation{}, err
+	}
+	if image.Valid {
+		op.DesiredSpec = &model.AppSpec{Image: image.String}
 	}
 	if startedAt.Valid {
 		op.StartedAt = &startedAt.Time

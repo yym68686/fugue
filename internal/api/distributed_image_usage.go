@@ -64,7 +64,7 @@ func projectImageUsageStoreMode(s *Server) string {
 }
 
 func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []model.App) (distributedImageUsageEvidence, error) {
-	_ = ctx
+	timings := serverTimingFromContext(ctx)
 	evidence := distributedImageUsageEvidence{
 		imagesByAppID:         make(map[string][]model.Image),
 		locationsByAppID:      make(map[string][]model.ImageLocation),
@@ -87,7 +87,9 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 	}
 	sort.Strings(filterAppIDs)
 
+	started := time.Now()
 	images, err := s.store.ListImages(model.ImageFilter{PlatformAdmin: true, AppIDs: filterAppIDs})
+	timings.Add("image_evidence_images", time.Since(started))
 	if err != nil {
 		return distributedImageUsageEvidence{}, err
 	}
@@ -99,11 +101,13 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 	}
 
 	cutoff := time.Now().UTC().Add(-defaultImageCacheInventoryTTL)
+	started = time.Now()
 	locations, err := s.store.ListImageLocations(model.ImageLocationFilter{
 		Status:        model.ImageLocationStatusPresent,
 		PlatformAdmin: true,
 		AppIDs:        filterAppIDs,
 	})
+	timings.Add("image_evidence_locations", time.Since(started))
 	if err != nil {
 		return distributedImageUsageEvidence{}, err
 	}
@@ -121,13 +125,16 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 		}
 	}
 
+	started = time.Now()
 	manifests, err := s.store.ListImageCacheManifests(model.ImageCacheManifestFilter{
 		PresentOnly:       true,
 		IncludeIncomplete: true,
 	})
+	timings.Add("image_evidence_manifests", time.Since(started))
 	if err != nil {
 		return distributedImageUsageEvidence{}, err
 	}
+	started = time.Now()
 	for _, manifest := range manifests {
 		index := evidence.staleManifestsByKey
 		if distributedImageManifestIsFresh(manifest, cutoff) {
@@ -140,6 +147,7 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 			index[key] = append(index[key], manifest)
 		}
 	}
+	timings.Add("image_evidence_index", time.Since(started))
 	return evidence, nil
 }
 
@@ -263,6 +271,7 @@ func (s *Server) buildDistributedProjectImageUsageResponse(
 	}
 
 	inventoryResults := make([]projectImageUsageInventoryResult, len(apps))
+	started := time.Now()
 	inventoryGroup, _ := errgroup.WithContext(ctx)
 	inventoryGroup.SetLimit(projectImageUsageAppBuildLimit)
 	for index, app := range apps {
@@ -278,7 +287,11 @@ func (s *Server) buildDistributedProjectImageUsageResponse(
 	if err := inventoryGroup.Wait(); err != nil {
 		return projectImageUsageResponse{}, err
 	}
-	return aggregateProjectImageUsageInventories(response, inventoryResults), nil
+	serverTimingFromContext(ctx).Add("image_evidence_match", time.Since(started))
+	started = time.Now()
+	response = aggregateProjectImageUsageInventories(response, inventoryResults)
+	serverTimingFromContext(ctx).Add("image_evidence_aggregate", time.Since(started))
+	return response, nil
 }
 
 func (s *Server) buildDistributedAppImageInventory(

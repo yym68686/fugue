@@ -3720,6 +3720,39 @@ func (s *Store) ListOperationsWithDesiredSourceByApps(tenantID string, platformA
 	return opsByAppID, err
 }
 
+// ListImageOperationsByApps is a narrow projection for console image usage.
+// It avoids decoding large desired app specs when only source identity and
+// timestamps are needed to build image candidates.
+func (s *Store) ListImageOperationsByApps(tenantID string, platformAdmin bool, appIDs []string) (map[string][]model.Operation, error) {
+	ids := trimmedStringSet(appIDs)
+	if len(ids) == 0 {
+		return map[string][]model.Operation{}, nil
+	}
+	if s.usingDatabase() {
+		return s.pgListImageOperationsByApps(tenantID, platformAdmin, sortedTrimmedStringKeys(ids))
+	}
+	out := make(map[string][]model.Operation, len(ids))
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, op := range state.Operations {
+			if !platformAdmin && op.TenantID != tenantID {
+				continue
+			}
+			if _, ok := ids[strings.TrimSpace(op.AppID)]; !ok || op.DesiredSource == nil {
+				continue
+			}
+			if op.DesiredSpec != nil {
+				op.DesiredSpec = &model.AppSpec{Image: op.DesiredSpec.Image}
+			}
+			out[op.AppID] = append(out[op.AppID], op)
+		}
+		for id := range out {
+			sort.Slice(out[id], func(i, j int) bool { return out[id][i].CreatedAt.Before(out[id][j].CreatedAt) })
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (s *Store) ListActiveOperations() ([]model.Operation, error) {
 	if s.usingDatabase() {
 		return s.pgListActiveOperations()

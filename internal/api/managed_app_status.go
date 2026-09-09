@@ -1908,7 +1908,11 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			sequence.durableAppsRead = s.managedAppStatusCache.nextObservationSequence()
 		}
 		appsByID := make(map[string]model.App, len(apps))
-		storeSnapshot, snapshotErr := s.loadManagedAppStoreSnapshot(ctx)
+		appIDs := make([]string, 0, len(apps))
+		for _, app := range apps {
+			appIDs = append(appIDs, strings.TrimSpace(app.ID))
+		}
+		storeSnapshot, snapshotErr := s.loadManagedAppStoreSnapshot(ctx, appIDs...)
 		if snapshotErr != nil {
 			return managedAppStatusListCacheEntry{}, snapshotErr
 		}

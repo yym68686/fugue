@@ -46,7 +46,7 @@ func TestManagedAppStoreSnapshotMatchesPointReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Server{store: state}
-	snapshot, err := s.loadManagedAppStoreSnapshot(context.Background())
+	snapshot, err := s.loadManagedAppStoreSnapshot(context.Background(), app.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
