@@ -6226,6 +6226,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
         - in: header
+          name: Idempotency-Key
+          description: Scoped to actor and app. Stored atomically with the operation; reusing the key with a different action, body or If-Match returns 409. Requires If-Match.
+          schema:
+            type: string
+            maxLength: 200
+        - in: header
           name: If-Match
           required: false
           description: Quoted SHA-256 of the committed app spec. Atomically rejects changed intent or an active operation when supplied.
@@ -6237,7 +6243,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/AppImageActionRequest"
+              $ref: "#/components/schemas/AppImageRedeployRequest"
       responses:
         '412':
           $ref: "#/components/responses/ErrorResponse"
@@ -8076,6 +8082,37 @@ paths:
                 $ref: "#/components/schemas/AppRuntimeStateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/action-requests/{request_id}:
+    get:
+      operationId: getAppActionRequest
+      summary: Recover an action receipt without repeating the mutation
+      tags: [Apps]
+      x-fugue-handler: handleGetAppActionRequest
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: request_id
+          required: true
+          schema:
+            type: string
+            maxLength: 200
+      responses:
+        '200':
+          description: Operation for this actor and app; no write is performed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/Operation"
+        '404':
+          description: No committed receipt is visible; an in-flight submission may still commit.
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/restart:
     post:
       operationId: restartApp
@@ -8087,6 +8124,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
         - in: header
+          name: Idempotency-Key
+          description: Scoped to actor and app. Stored atomically with the operation; reusing the key with a different action, body or If-Match returns 409. Requires If-Match.
+          schema:
+            type: string
+            maxLength: 200
+        - in: header
           name: If-Match
           required: false
           description: Quoted SHA-256 of the committed app spec. When supplied, restart atomically rejects changed intent or an active operation.
@@ -8094,6 +8137,13 @@ paths:
             type: string
             pattern: '^"[0-9a-f]{64}"$'
 
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
       responses:
         '412':
           $ref: "#/components/responses/ErrorResponse"
@@ -8115,6 +8165,12 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
+        - in: header
+          name: Idempotency-Key
+          description: Scoped to actor and app. Stored atomically with the operation; reusing the key with a different action, body or If-Match returns 409. Requires If-Match.
+          schema:
+            type: string
+            maxLength: 200
         - in: header
           name: If-Match
           required: false
@@ -18957,6 +19013,10 @@ components:
       additionalProperties: false
       required: [name, status]
       properties:
+        observed_at:
+          type: string
+          format: date-time
+          description: Oldest kubelet CPU/memory sample timestamp; absent when telemetry has no timestamp.
         name:
           type: string
         status:
@@ -20871,6 +20931,17 @@ components:
           format: date-time
         source:
           $ref: "#/components/schemas/AppSource"
+    AppImageRedeployRequest:
+      type: object
+      additionalProperties: false
+      required: [image_ref]
+      properties:
+        image_ref:
+          type: string
+        expected_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+          description: Require the inventory digest shown by the plan; 412 if the tag has moved.
     AppImageActionRequest:
       type: object
       additionalProperties: false

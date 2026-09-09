@@ -8,6 +8,7 @@ import (
 	"time"
 
 	climonitor "fugue/internal/cli/monitor"
+	cliterminal "fugue/internal/cli/terminal"
 	"fugue/internal/model"
 	"fugue/internal/tui"
 
@@ -66,7 +67,8 @@ func (c *CLI) newAdminClusterTopCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return c.renderMonitorSnapshot(clusterTopPayloadSnapshot(payload, opts))
+				_, err = fmt.Fprint(c.stdout, climonitor.NewRenderer(envIntDefault("COLUMNS", 100), cliterminal.Palette{Level: cliterminal.ColorNone}).Render(clusterTopPayloadSnapshot(payload, opts)))
+				return err
 			}
 			return c.runTUI(cmd, &tuiProvider{cli: c, client: client}, tui.Target{Kind: "cluster", Name: "Cluster", Scope: scope}, flags)
 		},

@@ -3205,6 +3205,19 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if app.TenantID != op.TenantID {
 		return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 	}
+	if policy.IdempotencyKey != "" {
+		record, err := s.pgGetIdempotencyRecordTx(ctx, tx, policy.IdempotencyScope, op.TenantID, policy.IdempotencyKey, false)
+		if err == nil {
+			if record.RequestHash != policy.RequestHash {
+				return model.Operation{}, operationCreateOutcome{}, ErrIdempotencyMismatch
+			}
+			existing, err := s.pgGetOperationTx(ctx, tx, record.OperationID, false)
+			return existing, operationCreateOutcome{ReusedExistingOperation: true}, mapDBErr(err)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+	}
 	if err := s.pgHydrateAppBackingServicesWithQueryer(ctx, tx, &app); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
@@ -3903,6 +3916,12 @@ INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode, reque
 	}
 	if err := s.notifyOperationTx(ctx, tx, op.ID); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
+	}
+	if policy.IdempotencyKey != "" {
+		_, err := tx.ExecContext(ctx, `INSERT INTO fugue_idempotency_keys (scope,tenant_id,key,request_hash,status,app_id,operation_id,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)`, policy.IdempotencyScope, op.TenantID, policy.IdempotencyKey, policy.RequestHash, model.IdempotencyStatusCompleted, op.AppID, op.ID, op.CreatedAt)
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, mapDBErr(err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("commit create operation transaction: %w", err)

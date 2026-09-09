@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -66,11 +68,24 @@ func (p Preferences) Validate() error {
 		return fmt.Errorf("unknown default screen %q", p.DefaultScreen)
 	}
 	seen := map[string]bool{}
+	for _, panel := range p.HiddenPanels {
+		if panel != "metrics" && panel != "summary" {
+			return fmt.Errorf("unknown hidden panel %q", panel)
+		}
+	}
 	for action, key := range p.Keys {
-		if !validKeyAction(action) || key == "" || key == "ctrl+c" || seen[key] {
+		if !validKeyAction(action) || key == "" || key == "ctrl+c" || seen[key] || (utf8.RuneCountInString(key) != 1 && !strings.HasPrefix(key, "ctrl+") && !strings.HasPrefix(key, "alt+") && key != "backspace") {
 			return fmt.Errorf("invalid or conflicting TUI key %q for %q", key, action)
 		}
 		seen[key] = true
+		for other, binding := range defaultKeys() {
+			if key == binding && other != action {
+				return fmt.Errorf("key %q is reserved by %s", key, other)
+			}
+		}
+		if strings.Contains("123456?asmnjkb[]{}", key) || key == "enter" || key == "esc" || key == "tab" {
+			return fmt.Errorf("key %q is reserved for navigation", key)
+		}
 	}
 	return nil
 }
@@ -116,4 +131,22 @@ func validKeyAction(s string) bool {
 		return true
 	}
 	return false
+}
+
+func (p Preferences) panelHidden(name string) bool {
+	for _, value := range p.HiddenPanels {
+		if value == name {
+			return true
+		}
+	}
+	return false
+}
+func (p *Preferences) togglePanel(name string) {
+	for i, value := range p.HiddenPanels {
+		if value == name {
+			p.HiddenPanels = append(p.HiddenPanels[:i], p.HiddenPanels[i+1:]...)
+			return
+		}
+	}
+	p.HiddenPanels = append(p.HiddenPanels, name)
 }

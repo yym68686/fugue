@@ -1455,7 +1455,7 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		spec.Replicas = req.Replicas
-		op, err := s.createAppOperationWithPrecondition(model.Operation{
+		op, err := s.createAppOperationWithPrecondition(r, model.Operation{
 			TenantID:            app.TenantID,
 			Type:                model.OperationTypeDeploy,
 			RequestedByType:     principal.ActorType,
@@ -1464,7 +1464,7 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 			DesiredSpec:         &spec,
 			DesiredSource:       source,
 			DesiredOriginSource: model.AppOriginSource(app),
-		}, expected)
+		}, expected, req)
 		if err != nil {
 			s.writeAppPreconditionError(w, err, expected)
 			return
@@ -1473,14 +1473,14 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 		return
 	}
-	op, err := s.createAppOperationWithPrecondition(model.Operation{
+	op, err := s.createAppOperationWithPrecondition(r, model.Operation{
 		TenantID:        app.TenantID,
 		Type:            model.OperationTypeScale,
 		RequestedByType: principal.ActorType,
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		DesiredReplicas: &req.Replicas,
-	}, expected)
+	}, expected, req)
 	if err != nil {
 		s.writeAppPreconditionError(w, err, expected)
 		return

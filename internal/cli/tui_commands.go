@@ -41,6 +41,9 @@ func (c *CLI) newProjectTopCommand() *cobra.Command { return c.newTUITopCommand(
 func (c *CLI) newTUITopCommand(kind string) *cobra.Command {
 	opts := defaultTUIFlags()
 	cmd := &cobra.Command{Use: "top <" + kind + ">", Short: "Open an interactive " + kind + " dashboard with live metrics", Args: cobra.ExactArgs(1), Example: "fugue " + kind + " top my-" + kind, RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := applyTUIFlags(cmd, tui.DefaultPreferences(), opts); err != nil {
+			return err
+		}
 		client, err := c.newClient()
 		if err != nil {
 			return err
@@ -50,7 +53,7 @@ func (c *CLI) newTUITopCommand(kind string) *cobra.Command {
 		if c.wantsJSON() || opts.Plain || opts.Once || !c.shouldUseInteractiveMonitor(false) {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 20*time.Second)
 			defer cancel()
-			snapshot, err := provider.Load(ctx, tui.Request{Target: target, Section: "overview"})
+			snapshot, err := provider.Load(ctx, tui.Request{Target: target, Section: ""})
 			if err != nil {
 				return err
 			}
@@ -66,6 +69,9 @@ func (c *CLI) newTUITopCommand(kind string) *cobra.Command {
 }
 func (c *CLI) runTUI(cmd *cobra.Command, provider *tuiProvider, target tui.Target, flags tuiFlags) error {
 	path := filepath.Join(filepath.Dir(authConfigPath()), "tui.toml")
+	if err := provider.loadReceipts(filepath.Dir(path)); err != nil {
+		return err
+	}
 	prefs, err := tui.LoadPreferences(path)
 	if err != nil {
 		return err

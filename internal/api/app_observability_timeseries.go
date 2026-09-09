@@ -16,7 +16,7 @@ func (s *Server) appResourceTimeseries(app model.App, window appObservabilityWin
 	if err != nil {
 		return nil, err
 	}
-	samples, err := s.store.ListResourceUsageSamples(app.TenantID, model.ClusterNodeWorkloadKindApp, app.ID, since)
+	samples, err := s.store.ListResourceUsageSamples(app.TenantID, rightSizingSampleTargetKind(model.ClusterNodeWorkloadKindApp), app.ID, since)
 	if err != nil {
 		return nil, err
 	}
@@ -39,11 +39,11 @@ func (s *Server) appResourceTimeseries(app model.App, window appObservabilityWin
 			points[i] = append(points[i], map[string]any{"observed_at": sample.ObservedAt.UTC().Format(time.RFC3339), "value": number})
 		}
 	}
-	names := []string{"cpu", "memory", "ephemeral_storage"}
+	names := []string{"cpu_history", "memory_history", "ephemeral_storage_history"}
 	units := []string{"mCPU", "bytes", "bytes"}
 	out := make([]map[string]any, 3)
 	for i, name := range names {
-		out[i] = map[string]any{"name": name, "unit": units[i], "source": "resource sampler: busiest replica", "interval_seconds": 60, "points": points[i]}
+		out[i] = map[string]any{"name": name, "unit": units[i], "source": "resource sampler: busiest replica", "interval_seconds": int(resourceUsageSampleInterval.Seconds()), "points": points[i]}
 	}
 	return out, nil
 }
@@ -101,4 +101,46 @@ func (s *Server) queryAppObservabilityTimeseriesFromClickHouse(ctx context.Conte
 		out[i] = map[string]any{"name": name, "unit": units[i], "source": "clickhouse request_facts", "interval_seconds": step, "points": points[i]}
 	}
 	return out, nil
+}
+
+// Live samples retain the kubelet observation time. Repeated cached reads do
+// not manufacture new points, and lack of timestamp makes the source absent.
+func (s *Server) appLiveResourceTimeseries(ctx context.Context, app model.App) []map[string]any {
+	snapshots, err := s.loadClusterNodeInventory(ctx)
+	if err != nil {
+		return nil
+	}
+	var at *time.Time
+	resolver := newClusterWorkloadResolver([]model.App{app}, nil)
+	for _, snapshot := range snapshots {
+		for _, pod := range snapshot.pods {
+			workload, ok := resolver.resolvePod(pod)
+			if ok && workload.ID == app.ID && workload.Kind == model.ClusterNodeWorkloadKindApp {
+				if snapshot.node.ObservedAt == nil {
+					return nil
+				}
+				if at == nil || snapshot.node.ObservedAt.Before(*at) {
+					value := *snapshot.node.ObservedAt
+					at = &value
+				}
+			}
+		}
+	}
+	if at == nil {
+		return nil
+	}
+	overlay := buildCurrentResourceUsageOverlayWithPolicies(snapshots, []model.App{app}, nil, persistentVolumeUsagePolicies{strict: true, byClaim: map[string]persistentVolumeUsagePolicy{}})
+	usage, ok := overlay.rightSizingApps[app.ID]
+	if !ok {
+		return nil
+	}
+	out := []map[string]any{}
+	for i, value := range []*int64{usage.CPUMilliCores, usage.MemoryBytes, usage.EphemeralStorageBytes} {
+		var number any
+		if value != nil {
+			number = *value
+		}
+		out = append(out, map[string]any{"name": []string{"cpu", "memory", "ephemeral_storage"}[i], "unit": []string{"mCPU", "bytes", "bytes"}[i], "source": "kubelet busiest replica", "interval_seconds": int(defaultClusterNodeInventoryCacheTTL.Seconds()), "points": []map[string]any{{"observed_at": at.UTC().Format(time.RFC3339), "value": number}}})
+	}
+	return out
 }

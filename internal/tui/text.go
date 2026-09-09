@@ -54,6 +54,8 @@ func sanitizeSnapshot(s Snapshot) Snapshot {
 	}
 	for i := range s.Sources {
 		s.Sources[i].Message = Plain(s.Sources[i].Message)
+		s.Sources[i].ID = Plain(s.Sources[i].ID)
+		s.Sources[i].State = Plain(s.Sources[i].State)
 	}
 	for i := range s.Series {
 		s.Series[i].Label = Plain(s.Series[i].Label)

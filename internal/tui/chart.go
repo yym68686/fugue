@@ -11,6 +11,9 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 	if width < 4 || height < 3 {
 		return ""
 	}
+	if value, ok := m.snapshot.MetricLimits[series.ID]; ok && series.Limit == nil {
+		series.Limit = &value
+	}
 	p := theme(m.prefs.Theme)
 	color := p.graphs[index%len(p.graphs)]
 	plotWidth, plotHeight := max(1, width-2), max(1, height-4)
@@ -44,12 +47,18 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 	if valid > 0 {
 		caption = "observed " + latestAt.Local().Format("15:04:05")
 	}
+	if valid > 0 && series.State != "" && series.State != "available" {
+		caption = series.State + " · " + latestAt.Local().Format("15:04:05")
+	}
 	if valid == 1 {
-		caption += " · 1 sample"
+		caption = "collecting · 1 sample"
+	}
+	if valid > 0 && m.now.Sub(latestAt) > max(30*time.Second, 2*series.Interval) {
+		caption = "stale · " + latestAt.Local().Format("15:04:05")
 	}
 	title := pad(strings.ToUpper(series.Label), max(1, width-len(latest)-1)) + latest
 	lines := []string{m.style(color).Bold(true).Render(clip(title, width))}
-	if valid == 0 {
+	if valid < 2 {
 		lines = append(lines, m.style(p.muted).Render(pad(caption, plotWidth)))
 		for len(lines) < height-2 {
 			lines = append(lines, "")
@@ -68,6 +77,7 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 		}
 	}
 	lines = append(lines, m.style(p.muted).Render(clip("0 "+series.Unit+"   "+m.prefs.Window+"   max "+formatValue(series.Unit, maximum), width)), m.style(p.muted).Render(clip(caption, width)))
+	lines[len(lines)-1] = m.style(p.muted).Render(clip(caption+" · "+series.Source, width))
 	return strings.Join(lines, "\n")
 }
 

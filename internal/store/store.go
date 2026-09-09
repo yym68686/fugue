@@ -2934,6 +2934,22 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		if app.TenantID != op.TenantID {
 			return ErrNotFound
 		}
+		if policy.IdempotencyKey != "" {
+			if idx := findIdempotencyRecord(state, policy.IdempotencyScope, op.TenantID, policy.IdempotencyKey); idx >= 0 {
+				record := state.Idempotency[idx]
+				if record.RequestHash != policy.RequestHash {
+					return ErrIdempotencyMismatch
+				}
+				for _, existing := range state.Operations {
+					if existing.ID == record.OperationID {
+						op = existing
+						outcome.ReusedExistingOperation = true
+						return nil
+					}
+				}
+				return ErrNotFound
+			}
+		}
 		hydrateAppBackingServices(state, &app)
 		if err := rebaseImportDeployConfiguration(&op, app, policy.ImportConfigBase); err != nil {
 			return err
@@ -3392,6 +3408,9 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			return err
 		}
 		op = state.Operations[len(state.Operations)-1]
+		if policy.IdempotencyKey != "" {
+			state.Idempotency = append(state.Idempotency, model.IdempotencyRecord{Scope: policy.IdempotencyScope, TenantID: op.TenantID, Key: policy.IdempotencyKey, RequestHash: policy.RequestHash, Status: model.IdempotencyStatusCompleted, AppID: op.AppID, OperationID: op.ID, CreatedAt: now, UpdatedAt: now})
+		}
 		outcome.Decision = AutoscalingDeployDecisionQueued
 		return nil
 	})

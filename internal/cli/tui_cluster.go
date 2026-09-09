@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ func (p *tuiProvider) loadTUICluster(client *Client, request tui.Request) (tui.S
 	controlView := kind == "component" || kind == "component-pod" || kind == "release" || (kind == "cluster" && (scope == "" || scope == "all" || scope == "control-plane"))
 	runtimesView := kind == "cluster" && (scope == "" || scope == "all" || scope == "runtimes")
 	if nodesView {
-		nodes, err := client.ListClusterNodes()
+		nodes, err := client.listTUINodes()
 		s.Sources = append(s.Sources, tuiSource("nodes", err, s.ObservedAt))
 		if err == nil {
 			table := tui.Table{ID: "nodes", Title: "Nodes", Columns: []string{"Node", "Status", "CPU", "Memory", "Disk", "Workloads", "Region"}}
@@ -59,7 +60,11 @@ func (p *tuiProvider) loadTUICluster(client *Client, request tui.Request) (tui.S
 				table.Rows = append(table.Rows, tui.Row{ID: node.Name, Cells: []string{node.Name, node.Status, tuiPercent(cpu), tuiPercent(mem), tuiPercent(disk), strconv.Itoa(len(node.Workloads)), node.Region}, Numbers: numbers, Target: &target})
 				if kind == "node" {
 					appendTUINodeDetails(&s, node)
+					appendTUINodeSeries(&s, node)
 				}
+			}
+			if kind == "cluster" {
+				appendTUIClusterSeries(&s, nodes)
 			}
 			s.Tables = append([]tui.Table{table}, s.Tables...)
 			s.Fields = append(s.Fields, tui.Field{Label: "Nodes ready", Value: fmt.Sprintf("%d / %d", ready, len(table.Rows))})
@@ -201,5 +206,66 @@ func appendTUIControlDetails(s *tui.Snapshot, control model.ControlPlaneStatus, 
 	if control.Topology != nil {
 		topology := control.Topology
 		s.Fields = append(s.Fields, tui.Field{Label: "Topology", Value: topology.Mode}, tui.Field{Label: "Quorum ready", Value: strconv.FormatBool(topology.QuorumReady)}, tui.Field{Label: "Failure domains", Value: strings.Join(topology.FailureDomains, ", ")})
+	}
+}
+
+func (c *Client) listTUINodes() ([]model.ClusterNode, error) {
+	var result struct {
+		Nodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	err := c.doJSON(http.MethodGet, "/v1/cluster/nodes?sync_locations=false", nil, &result)
+	return result.Nodes, err
+}
+func appendTUINodeSeries(s *tui.Snapshot, node model.ClusterNode) {
+	var cpu, mem, disk *float64
+	if node.CPU != nil {
+		cpu = node.CPU.UsagePercent
+	}
+	if node.Memory != nil {
+		mem = node.Memory.UsagePercent
+	}
+	if node.EphemeralStorage != nil {
+		disk = node.EphemeralStorage.UsagePercent
+	}
+	for i, v := range []*float64{cpu, mem, disk} {
+		series := tui.Series{ID: []string{"cpu", "memory", "disk"}[i], Label: []string{"CPU", "Memory", "Disk"}[i], Unit: "%", Source: "kubelet node summary", State: "unavailable", Interval: 30 * time.Second}
+		if node.ObservedAt != nil && v != nil {
+			series.State = "available"
+			series.Points = []tui.Point{{At: *node.ObservedAt, Value: v}}
+		}
+		s.Series = append(s.Series, series)
+	}
+	s.Series = append(s.Series, tui.Series{ID: "network", Label: "Network", Unit: "bytes/s", Source: "not exported by node telemetry", State: "unavailable"})
+}
+
+func appendTUIClusterSeries(s *tui.Snapshot, nodes []model.ClusterNode) {
+	peak := model.ClusterNode{}
+	var cpu, mem, disk *float64
+	for _, node := range nodes {
+		if node.ObservedAt == nil {
+			continue
+		}
+		if peak.ObservedAt == nil || node.ObservedAt.Before(*peak.ObservedAt) {
+			peak.ObservedAt = node.ObservedAt
+		}
+		if node.CPU != nil && node.CPU.UsagePercent != nil && (cpu == nil || *node.CPU.UsagePercent > *cpu) {
+			cpu = node.CPU.UsagePercent
+		}
+		if node.Memory != nil && node.Memory.UsagePercent != nil && (mem == nil || *node.Memory.UsagePercent > *mem) {
+			mem = node.Memory.UsagePercent
+		}
+		if node.EphemeralStorage != nil && node.EphemeralStorage.UsagePercent != nil && (disk == nil || *node.EphemeralStorage.UsagePercent > *disk) {
+			disk = node.EphemeralStorage.UsagePercent
+		}
+	}
+	peak.CPU = &model.ClusterNodeCPUStats{UsagePercent: cpu}
+	peak.Memory = &model.ClusterNodeMemoryStats{UsagePercent: mem}
+	peak.EphemeralStorage = &model.ClusterNodeStorageStats{UsagePercent: disk}
+	appendTUINodeSeries(s, peak)
+	for i := range s.Series {
+		if s.Series[i].ID != "network" {
+			s.Series[i].Label = "Peak node " + s.Series[i].Label
+			s.Series[i].Source = "maximum across timestamped kubelet node samples"
+		}
 	}
 }

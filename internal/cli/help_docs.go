@@ -55,11 +55,11 @@ fugue deploy github owner/repo --project argus --replace --delete-missing
 	},
 	"fugue console": {
 		Long: strings.TrimSpace(`
-Open the preview Fugue terminal console over the same control-plane API used by normal CLI commands and the Web console.
+Open the interactive Fugue terminal console over the same control-plane API used by normal CLI commands and the Web console.
 
-The preview is read-only in the first release. Project, app, operation, runtime, and admin pages share the same status language as the Web console, while existing --json command output remains the machine contract for agents, jq, and CI.
+Projects, apps, operations, runtimes and administrator pages share a keyboard and mouse interface. Mutations require a plan, exact confirmation and server support for atomic action receipts. Existing --json command output remains the machine contract.
 
-Use --plain for a one-frame terminal-safe snapshot. In non-TTY output, NO_COLOR sessions, and constrained terminals, the console falls back to plain text instead of emitting terminal controls.
+Use --plain or --once for a terminal-safe snapshot. Non-TTY output remains plain; NO_COLOR disables color while retaining keyboard and mouse interaction in a TTY.
 `),
 		Example: strings.TrimSpace(`
 fugue console --plain
@@ -902,7 +902,8 @@ Watch high-density cluster, runtime, control-plane, and node-policy status in a 
 Use --once for snapshot tests or tickets, --plain for non-interactive terminals, and --filter/--search/--sort when the cluster view is too wide. JSON output returns the raw clusterTopPayload without terminal controls.
 `),
 		Example: strings.TrimSpace(`
-fugue admin cluster top
+fugue admin cluster top --mouse --theme carbon
+fugue admin cluster top --scope control-plane
 fugue admin cluster top --once
 fugue admin cluster top --plain --filter runtime-a
 fugue admin cluster top --json

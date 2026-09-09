@@ -28,9 +28,9 @@ func (c *CLI) newConsoleCommand() *cobra.Command {
 		Use:   "console",
 		Short: "Open the interactive Fugue terminal console",
 		Long: strings.TrimSpace(`
-Open a preview, read-only terminal console over the same control-plane API used
-by the CLI and Web console. The preview keeps existing commands as the source of
-truth and does not replace JSON/script workflows.
+Open an interactive terminal console over the control-plane API.
+Keyboard and mouse navigation share the same resource views.
+JSON and plain output retain their existing script contracts.
 `),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -53,7 +53,11 @@ truth and does not replace JSON/script workflows.
 				}
 				return c.runTUI(cmd, &tuiProvider{cli: c, client: client}, target, tuiOpts)
 			}
-			view, err := c.loadConsoleView(client, opts.Project, opts.Admin, tuiOpts.Mouse, opts.LogLines)
+			plainMouse := false
+			if cmd.Flags().Changed("mouse") {
+				plainMouse = tuiOpts.Mouse
+			}
+			view, err := c.loadConsoleView(client, opts.Project, opts.Admin, plainMouse, opts.LogLines)
 			if err != nil {
 				return err
 			}
@@ -61,7 +65,7 @@ truth and does not replace JSON/script workflows.
 				return c.writeJSON(view)
 			}
 			model := cliconsole.NewModel(view)
-			_, err = fmt.Fprint(c.stdout, c.consoleRenderer().Render(model))
+			_, err = fmt.Fprint(c.stdout, cliconsole.NewRenderer(envIntDefault("COLUMNS", 100), cliterminal.Palette{Level: cliterminal.ColorNone}).Render(model))
 			return err
 		},
 	}

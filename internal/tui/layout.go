@@ -50,12 +50,15 @@ func (m *Model) layout() layoutState {
 	if m.screen != "dashboard" {
 		if m.screen == "resources" {
 			l.table = l.body
+			addTableHits(&l)
 		}
 		return l
 	}
 	chartHeight := max(6, min(10, l.body.Dy()/2))
 	columns := 1
-	if w >= 140 {
+	if w >= 180 {
+		columns = 5
+	} else if w >= 140 {
 		columns = 4
 	} else if w >= 100 {
 		columns = 3
@@ -75,23 +78,32 @@ func (m *Model) layout() layoutState {
 		l.charts = append(l.charts, image.Rect(l.body.Min.X+i*(chartWidth+1), l.body.Min.Y, right, l.body.Min.Y+chartHeight))
 	}
 	below := l.body.Min.Y + chartHeight + 1
+	if m.prefs.panelHidden("metrics") {
+		l.charts = nil
+		below = l.body.Min.Y
+	}
 	l.table = image.Rect(l.body.Min.X, below, l.body.Max.X, l.body.Max.Y)
-	if w >= 110 && l.table.Dy() >= 7 {
+	if w >= 110 && l.table.Dy() >= 7 && !m.prefs.panelHidden("summary") {
 		left := l.body.Min.X + l.body.Dx()*2/3
 		l.table.Max.X = left - 1
 		l.summary = image.Rect(left, below, l.body.Max.X, l.body.Max.Y)
 	}
-	if !l.table.Empty() {
-		l.hits = append(l.hits, hit{"table", "", image.Rect(l.table.Min.X, l.table.Min.Y, l.table.Max.X-8, l.table.Min.Y+1)}, hit{"sort", "s sort", image.Rect(l.table.Max.X-8, l.table.Min.Y, l.table.Max.X, l.table.Min.Y+1)})
-	}
+	addTableHits(&l)
 	return l
 }
 func (m *Model) modalBounds() image.Rectangle {
 	w := min(76, max(1, m.width-4))
-	height := min(max(1, m.height-4), max(7, len(m.modalItems())+4))
+	height := min(max(1, m.height-4), max(9, len(m.modalItems())+5))
 	if m.modal == "confirm" {
 		height = min(max(1, m.height-4), 16)
 	}
 	x, y := (m.width-w)/2, (m.height-height)/2
 	return image.Rect(x, y, x+w, y+height)
+}
+
+func addTableHits(l *layoutState) {
+	if l.table.Empty() {
+		return
+	}
+	l.hits = append(l.hits, hit{"table", "", image.Rect(l.table.Min.X, l.table.Min.Y, l.table.Max.X-8, l.table.Min.Y+1)}, hit{"sort", "s sort", image.Rect(l.table.Max.X-8, l.table.Min.Y, l.table.Max.X, l.table.Min.Y+1)})
 }

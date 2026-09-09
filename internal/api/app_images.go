@@ -377,7 +377,10 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 	if !allowed {
 		return
 	}
-	var req appImageActionRequest
+	var req struct {
+		ImageRef       string `json:"image_ref"`
+		ExpectedDigest string `json:"expected_digest,omitempty"`
+	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -402,6 +405,10 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusNotFound, "image version not found")
 		return
 	}
+	if req.ExpectedDigest != "" && req.ExpectedDigest != version.Response.Digest {
+		httpx.WriteError(w, http.StatusPreconditionFailed, "image digest changed; refresh the image plan")
+		return
+	}
 	if !version.Response.RedeploySupported {
 		httpx.WriteError(w, http.StatusConflict, "image version is not available in the registry")
 		return
@@ -424,7 +431,7 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 		spec.Replicas = 1
 	}
 
-	op, err := s.createAppOperationWithPrecondition(model.Operation{
+	op, err := s.createAppOperationWithPrecondition(r, model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     principal.ActorType,
@@ -433,7 +440,7 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 		DesiredSpec:         &spec,
 		DesiredSource:       &source,
 		DesiredOriginSource: model.AppOriginSource(app),
-	}, expected)
+	}, expected, req)
 	if err != nil {
 		s.writeAppPreconditionError(w, err, expected)
 		return

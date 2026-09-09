@@ -10,3 +10,6 @@ secrets/
 # Local/private architecture notes and production inventory.
 docs/private/
 docs/*.local.md
+
+# Optional terminal QA dependencies (not shipped in the CLI).
+scripts/tui-qa/node_modules/

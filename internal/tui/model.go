@@ -225,8 +225,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{m.tick()}
 		if !m.paused {
 			cmds = append(cmds, m.schedule("overview", false))
-			if m.request.Target.Kind == "app" || m.request.Target.Kind == "node" || m.request.Target.Kind == "cluster" {
-				cmds = append(cmds, m.schedule("metrics", false))
+			if (m.request.Target.Kind == "app" || m.request.Target.Kind == "pod") && m.request.Target.ID != "" {
+				for _, section := range []string{"metrics", "pods", "operations"} {
+					cmds = append(cmds, m.schedule(section, false))
+				}
 			}
 			if m.screen == "logs" && m.watchCancel == nil {
 				cmds = append(cmds, m.schedule("logs", false))
@@ -253,6 +255,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.fetches[v.section] = state
 		m.ensureVisible()
+		if v.err == nil && v.section == "overview" && m.prefs.Mode == "compact" {
+			return m, tea.Println(m.compactSnapshot())
+		}
 	case watchMsg:
 		if v.epoch != m.epoch || v.generation != m.watchGeneration {
 			return m, nil
@@ -288,6 +293,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.modal = ""
 			m.notify(v.err.Error())
 		} else {
+			v.plan.Title = Plain(v.plan.Title)
+			v.plan.Confirmation = Plain(v.plan.Confirmation)
+			for i := range v.plan.Effects {
+				v.plan.Effects[i] = Plain(v.plan.Effects[i])
+			}
 			m.plan = &v.plan
 			m.modal = "confirm"
 			m.input = ""
@@ -406,21 +416,46 @@ func (m *Model) mergeSources(sources []Source) {
 	}
 }
 func (m *Model) accept(section string, s Snapshot) {
+	previousTable, previousRow := "", ""
+	hadPods := false
+	for _, table := range m.snapshot.Tables {
+		if table.ID == "pods" {
+			hadPods = true
+		}
+	}
+	if m.table < len(m.snapshot.Tables) {
+		previousTable = m.snapshot.Tables[m.table].ID
+	}
+	rows := m.rows()
+	if m.selected < len(rows) {
+		previousRow = rows[m.selected].ID
+	}
 	s = sanitizeSnapshot(s)
 	if section == "overview" {
-		selectedID := ""
-		rows := m.rows()
-		if m.selected < len(rows) {
-			selectedID = rows[m.selected].ID
-		}
 		m.snapshot.Target = s.Target
 		m.snapshot.Title = s.Title
 		m.snapshot.Subtitle = s.Subtitle
 		m.snapshot.Status = s.Status
 		m.snapshot.ObservedAt = s.ObservedAt
 		m.snapshot.Fields = s.Fields
+		m.snapshot.MetricLimits = s.MetricLimits
 		oldTables := m.snapshot.Tables
 		m.snapshot.Tables = s.Tables
+		if m.request.Target.Kind == "app" || m.request.Target.Kind == "pod" {
+			for _, table := range oldTables {
+				if table.ID == "pods" || table.ID == "operations" {
+					found := false
+					for _, next := range s.Tables {
+						if next.ID == table.ID {
+							found = true
+						}
+					}
+					if !found {
+						m.snapshot.Tables = append(m.snapshot.Tables, table)
+					}
+				}
+			}
+		}
 		// Keep confirmed rows for failed sources instead of blanking their panel.
 		for _, source := range s.Sources {
 			if source.State == "available" {
@@ -451,22 +486,57 @@ func (m *Model) accept(section string, s Snapshot) {
 				}
 			}
 		}
-		m.snapshot.Events = s.Events
+		if m.request.Target.Kind != "app" && m.request.Target.Kind != "pod" {
+			m.snapshot.Events = s.Events
+		}
 		m.snapshot.Actions = s.Actions
 		m.snapshot.Admin = s.Admin
 		if s.Target.Kind != "" {
 			m.request.Target = s.Target
 		}
-		for i, row := range m.rows() {
-			if row.ID == selectedID {
-				m.selected = i
-				break
+
+	} else if section == "pods" || section == "operations" {
+		for _, table := range s.Tables {
+			found := false
+			for i := range m.snapshot.Tables {
+				if m.snapshot.Tables[i].ID == table.ID {
+					m.snapshot.Tables[i] = table
+					found = true
+					break
+				}
 			}
+			if !found {
+				m.snapshot.Tables = append(m.snapshot.Tables, table)
+			}
+		}
+		if section == "operations" {
+			m.snapshot.Events = s.Events
 		}
 	} else if section == "logs" {
 		if m.watchCancel == nil {
 			m.snapshot.Logs = nil
 			m.appendLogs(s.Logs)
+		}
+	}
+	if m.request.Target.Kind == "app" || m.request.Target.Kind == "pod" {
+		order := map[string]int{"pods": 0, "operations": 1, "runtime": 2}
+		sort.SliceStable(m.snapshot.Tables, func(i, j int) bool { return order[m.snapshot.Tables[i].ID] < order[m.snapshot.Tables[j].ID] })
+		if section == "pods" && !hadPods {
+			previousTable = "pods"
+			previousRow = ""
+			m.selected = 0
+		}
+	}
+	for i, table := range m.snapshot.Tables {
+		if table.ID == previousTable {
+			m.table = i
+			break
+		}
+	}
+	for i, row := range m.rows() {
+		if row.ID == previousRow {
+			m.selected = i
+			break
 		}
 	}
 	m.mergeSources(s.Sources)
@@ -478,7 +548,21 @@ func (m *Model) accept(section string, s Snapshot) {
 	for key := range m.series {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	order := map[string]int{"cpu": 0, "memory": 1, "rpm": 2, "p95_duration_ms": 3, "error_rate": 4, "disk": 5, "network": 6}
+	sort.SliceStable(keys, func(i, j int) bool {
+		a, aok := order[keys[i]]
+		b, bok := order[keys[j]]
+		if !aok {
+			a = 100
+		}
+		if !bok {
+			b = 100
+		}
+		if a == b {
+			return keys[i] < keys[j]
+		}
+		return a < b
+	})
 	for _, key := range keys {
 		m.snapshot.Series = append(m.snapshot.Series, m.series[key])
 	}
