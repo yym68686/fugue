@@ -1914,7 +1914,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 		mark("observation_identity_final")
 		var apps []model.App
 		if s != nil && s.store != nil {
-			apps, err = s.store.ListApps("", true)
+			apps, err = s.store.ListAppSummaries("", true, true)
 			if err != nil {
 				return managedAppStatusListCacheEntry{}, fmt.Errorf("list apps for runtime evidence: %w", err)
 			}

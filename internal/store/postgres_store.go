@@ -2078,11 +2078,11 @@ FOR UPDATE
 }
 
 func (s *Store) pgListApps(tenantID string, platformAdmin bool) ([]model.App, error) {
-	return s.pgListAppsView(tenantID, platformAdmin, true)
+	return s.pgListAppsView(tenantID, platformAdmin, true, false)
 }
 
 func (s *Store) pgListAppsMetadata(tenantID string, platformAdmin bool) ([]model.App, error) {
-	return s.pgListAppsView(tenantID, platformAdmin, false)
+	return s.pgListAppsView(tenantID, platformAdmin, false, false)
 }
 
 func (s *Store) pgListDeletedAppsMetadata(tenantID string, platformAdmin bool) ([]model.App, error) {
@@ -2141,7 +2141,7 @@ func (s *Store) pgListAppsByProjectIDs(projectIDs []string) ([]model.App, error)
 	return s.pgListAppsViewByIDs("project_id", projectIDs, true)
 }
 
-func (s *Store) pgListAppsView(tenantID string, platformAdmin bool, hydrateBackingServices bool) ([]model.App, error) {
+func (s *Store) pgListAppsView(tenantID string, platformAdmin bool, hydrateBackingServices, summary bool) ([]model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -2149,6 +2149,11 @@ func (s *Store) pgListAppsView(tenantID string, platformAdmin bool, hydrateBacki
 SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
 FROM fugue_apps
 `
+	if summary {
+		query = `SELECT id, tenant_id, project_id, name, description, source_json, route_json,
+CASE WHEN jsonb_typeof(spec_json)='object' THEN spec_json - ARRAY['env','generated_env','files','command','args'] ELSE spec_json END,
+status_json, created_at, updated_at FROM fugue_apps`
+	}
 	args := make([]any, 0, 1)
 	if !platformAdmin {
 		query += ` WHERE tenant_id = $1`

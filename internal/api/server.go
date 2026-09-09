@@ -1128,6 +1128,12 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	timings := serverTimingFromContext(r.Context())
 
 	query := r.URL.Query()
+	view := strings.TrimSpace(query.Get("view"))
+	if view != "" && view != "full" && view != "summary" {
+		httpx.WriteError(w, http.StatusBadRequest, "view must be full or summary")
+		return
+	}
+	summaryView := view == "summary"
 	includeLiveStatus, err := readBoolQuery(r, "include_live_status", false)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -1177,6 +1183,11 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusConflict, errInvalidAppListCursor.Error())
 			return
 		}
+		if summaryView {
+			for i := range page.Apps {
+				page.Apps[i] = store.AppReadSummary(page.Apps[i])
+			}
+		}
 		if includeLiveStatus {
 			liveStatusStartedAt := time.Now()
 			page.Apps = s.overlayManagedAppStatuses(r.Context(), page.Apps)
@@ -1195,7 +1206,12 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	}
 
 	storeStartedAt := time.Now()
-	apps, err := s.store.ListApps(tenantID, principal.IsPlatformAdmin())
+	var apps []model.App
+	if summaryView {
+		apps, err = s.store.ListAppSummaries(tenantID, principal.IsPlatformAdmin(), true)
+	} else {
+		apps, err = s.store.ListApps(tenantID, principal.IsPlatformAdmin())
+	}
 	timings.Add("store_apps", time.Since(storeStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)

@@ -682,7 +682,7 @@ func visibleConsoleApps(apps []model.App) []model.App {
 }
 
 func (s *Server) loadConsoleApps(ctx context.Context, principal model.Principal, includeLiveStatus bool, includeResourceUsage bool) ([]model.App, error) {
-	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
+	apps, err := s.store.ListAppSummaries(principal.TenantID, principal.IsPlatformAdmin(), true)
 	if err != nil {
 		return nil, err
 	}

@@ -5287,6 +5287,14 @@ paths:
       parameters:
         - $ref: "#/components/parameters/TenantIdQueryParam"
         - in: query
+          name: view
+          required: false
+          description: The summary view omits app environment values, generated environment definitions, inline files, command and args. Status, resource usage, sources and service bindings are retained. Use the full view or app detail when editing configuration.
+          schema:
+            type: string
+            enum: [full, summary]
+            default: full
+        - in: query
           name: project_id
           required: false
           schema:
