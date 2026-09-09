@@ -273,12 +273,22 @@ WHERE b.tenant_id IS NULL
 }
 
 func (s *Store) pgLoadTenantBillingStateTx(ctx context.Context, tx *sql.Tx, tenantID string) (model.State, error) {
+	return s.pgLoadBillingStateTx(ctx, tx, []string{tenantID})
+}
+
+func (s *Store) pgLoadBillingStateTx(ctx context.Context, tx *sql.Tx, tenantIDs []string) (model.State, error) {
+	predicate := "tenant_id = ANY($1::text[])"
+	var tenantArg any = tenantIDs
+	if len(tenantIDs) == 1 {
+		predicate = "tenant_id = $1"
+		tenantArg = tenantIDs[0]
+	}
 	appRows, err := tx.QueryContext(ctx, `
 SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
 FROM fugue_apps
-WHERE tenant_id = $1
+WHERE `+predicate+`
 ORDER BY created_at ASC
-`, tenantID)
+`, tenantArg)
 	if err != nil {
 		return model.State{}, fmt.Errorf("list billing apps: %w", err)
 	}
@@ -299,9 +309,9 @@ ORDER BY created_at ASC
 	serviceRows, err := tx.QueryContext(ctx, `
 SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, current_runtime_started_at, current_runtime_ready_at, created_at, updated_at
 FROM fugue_backing_services
-WHERE tenant_id = $1
+WHERE `+predicate+`
 ORDER BY created_at ASC
-`, tenantID)
+`, tenantArg)
 	if err != nil {
 		return model.State{}, fmt.Errorf("list billing services: %w", err)
 	}
@@ -322,9 +332,9 @@ ORDER BY created_at ASC
 	bindingRows, err := tx.QueryContext(ctx, `
 SELECT id, tenant_id, app_id, service_id, alias, env_json, created_at, updated_at
 FROM fugue_service_bindings
-WHERE tenant_id = $1
+WHERE `+predicate+`
 ORDER BY created_at ASC
-`, tenantID)
+`, tenantArg)
 	if err != nil {
 		return model.State{}, fmt.Errorf("list billing bindings: %w", err)
 	}
@@ -364,30 +374,10 @@ ORDER BY created_at ASC
 		return model.State{}, fmt.Errorf("iterate billing runtimes: %w", err)
 	}
 
-	eventRows, err := tx.QueryContext(ctx, `
-SELECT id, tenant_id, type, amount_microcents, balance_after_microcents, metadata_json, created_at
-FROM fugue_billing_events
-WHERE tenant_id = $1
-ORDER BY created_at DESC, id DESC
-LIMIT $2
-`, tenantID, billingHistoryLimit)
+	events, err := s.pgLoadBillingEventsTx(ctx, tx, tenantIDs)
 	if err != nil {
-		return model.State{}, fmt.Errorf("list billing events: %w", err)
+		return model.State{}, err
 	}
-	defer eventRows.Close()
-
-	events := make([]model.TenantBillingEvent, 0)
-	for eventRows.Next() {
-		event, err := scanTenantBillingEvent(eventRows)
-		if err != nil {
-			return model.State{}, err
-		}
-		events = append(events, event)
-	}
-	if err := eventRows.Err(); err != nil {
-		return model.State{}, fmt.Errorf("iterate billing events: %w", err)
-	}
-
 	return model.State{
 		Apps:            apps,
 		BackingServices: services,
@@ -395,6 +385,49 @@ LIMIT $2
 		Runtimes:        runtimes,
 		BillingEvents:   events,
 	}, nil
+}
+
+func (s *Store) pgLoadBillingEventsTx(ctx context.Context, tx *sql.Tx, tenantIDs []string) ([]model.TenantBillingEvent, error) {
+	query := `
+SELECT e.id, e.tenant_id, e.type, e.amount_microcents, e.balance_after_microcents, e.metadata_json, e.created_at
+FROM unnest($1::text[]) AS requested(tenant_id)
+CROSS JOIN LATERAL (
+	SELECT id, tenant_id, type, amount_microcents, balance_after_microcents, metadata_json, created_at
+	FROM fugue_billing_events
+	WHERE tenant_id = requested.tenant_id
+	ORDER BY created_at DESC, id DESC
+	LIMIT $2
+) AS e
+`
+	var tenantArg any = tenantIDs
+	if len(tenantIDs) == 1 {
+		query = `
+SELECT id, tenant_id, type, amount_microcents, balance_after_microcents, metadata_json, created_at
+FROM fugue_billing_events
+WHERE tenant_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT $2
+`
+		tenantArg = tenantIDs[0]
+	}
+	eventRows, err := tx.QueryContext(ctx, query, tenantArg, billingHistoryLimit)
+	if err != nil {
+		return nil, fmt.Errorf("list billing events: %w", err)
+	}
+	defer eventRows.Close()
+
+	events := make([]model.TenantBillingEvent, 0)
+	for eventRows.Next() {
+		event, err := scanTenantBillingEvent(eventRows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	if err := eventRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate billing events: %w", err)
+	}
+	return events, nil
 }
 
 func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantID string, now time.Time) (model.TenantBilling, model.State, billingStateIndex, error) {

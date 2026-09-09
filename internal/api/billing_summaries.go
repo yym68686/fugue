@@ -1,14 +1,12 @@
 package api
 
 import (
-	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
-	"fugue/internal/store"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -40,8 +38,6 @@ func (s *Server) handleListBillingSummaries(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result := make([]model.TenantBillingSummary, len(ids))
-	missing := make([]bool, len(ids))
 	started := time.Now()
 	var apps []model.App
 	runtimeTypes := make(map[string]string)
@@ -61,38 +57,15 @@ func (s *Server) handleListBillingSummaries(w http.ResponseWriter, r *http.Reque
 		serverTimingFromContext(r.Context()).Add("billing_batch_usage", time.Since(started))
 	}
 	started = time.Now()
-	group := new(errgroup.Group)
-	group.SetLimit(8)
-	for index, tenantID := range ids {
-		index, tenantID := index, tenantID
-		group.Go(func() error {
-			summary, err := s.store.GetTenantBillingSummary(tenantID)
-			if errors.Is(err, store.ErrNotFound) {
-				missing[index] = true
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			if includeUsage {
-				summary.CurrentUsage = tenantManagedUsageFromSnapshot(tenantID, apps, runtimeTypes)
-			}
-			result[index] = summary
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
+	billings, missingIDs, err := s.store.GetTenantBillingSummaries(r.Context(), ids)
+	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	serverTimingFromContext(r.Context()).Add("billing_batch_summary", time.Since(started))
-	billings := make([]model.TenantBillingSummary, 0, len(ids))
-	missingIDs := make([]string, 0)
-	for index, summary := range result {
-		if missing[index] {
-			missingIDs = append(missingIDs, ids[index])
-		} else {
-			billings = append(billings, summary)
+	if includeUsage {
+		for index := range billings {
+			billings[index].CurrentUsage = tenantManagedUsageFromSnapshot(billings[index].TenantID, apps, runtimeTypes)
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"billings": billings, "missing_tenant_ids": missingIDs})
