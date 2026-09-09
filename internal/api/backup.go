@@ -2729,24 +2729,9 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 	if databaseURL == "" {
 		return nil, fmt.Errorf("database_url_missing: control-plane database URL is not configured")
 	}
-	tmpDir, err := os.MkdirTemp("", "fugue-control-plane-backup-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tmpDir)
-	dumpPath := path.Join(tmpDir, "control-plane.dump")
 	pgDump := strings.TrimSpace(os.Getenv("FUGUE_PG_DUMP_BIN"))
 	if pgDump == "" {
 		pgDump = "pg_dump"
-	}
-	cmd := exec.CommandContext(ctx, pgDump, "--format=custom", "--no-owner", "--no-privileges", "--file", dumpPath, databaseURL)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("pg_dump failed: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	size, sha256sum, err := fileSizeAndSHA256(dumpPath)
-	if err != nil {
-		return nil, err
 	}
 	version := strings.TrimSpace(run.Version)
 	if version == "" {
@@ -2757,15 +2742,10 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 	manifestKey := baseKey + "/manifest.json"
 	upload := newBackupObjectUploadTransaction(s, run, objectBackend)
 	defer upload.cleanupOnError(ctx, &retErr)
-	file, err := os.Open(dumpPath)
+	size, sha256sum, err := upload.streamPGDump(ctx, pgDump, databaseURL, dumpKey)
 	if err != nil {
-		return nil, err
-	}
-	if err := upload.putObject(ctx, dumpKey, file, size); err != nil {
-		_ = file.Close()
 		return nil, fmt.Errorf("upload control-plane dump: %w", err)
 	}
-	_ = file.Close()
 	if err := verifyBackupObjectSHA256(ctx, objectBackend, dumpKey, size, sha256sum); err != nil {
 		return nil, fmt.Errorf("verify control-plane dump: %w", err)
 	}

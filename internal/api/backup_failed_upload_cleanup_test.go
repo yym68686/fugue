@@ -643,7 +643,7 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
-exit 2
+printf 'synthetic backup dump'
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake pg_dump: %v", err)
