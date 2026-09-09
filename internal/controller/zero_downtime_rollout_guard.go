@@ -472,6 +472,27 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	desiredKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), desiredScheduling))
 	servingLKGKey := strings.TrimSpace(managed.Status.CurrentReleaseKey)
 	var recoveredOperation *model.Operation
+	// The ManagedApp scheduling projection can advance before its Deployment
+	// is replaced (for example, adding the same-node pin for an online RWO
+	// rollout). Recover the serving baseline only if rendering the unchanged
+	// app with the observed scheduling reproduces the recorded LKG exactly.
+	// This does not alter desired placement or skip the readiness, storage,
+	// capacity, and zero-downtime checks below.
+	if liveKey != currentKey && liveKey != desiredKey && liveKey == servingLKGKey &&
+		strings.TrimSpace(deployment.Spec.Template.Metadata.Annotations[runtime.FugueAnnotationReleaseKey]) == liveKey {
+		observedScheduling := runtime.SchedulingConstraints{
+			NodeSelector: clonePlacementStringMap(deployment.Spec.Template.Spec.NodeSelector),
+			Tolerations:  append([]runtime.Toleration(nil), deployment.Spec.Template.Spec.Tolerations...),
+		}
+		observedKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(current), observedScheduling))
+		if observedKey == liveKey {
+			currentScheduling = observedScheduling
+			currentKey = observedKey
+			if s.Logger != nil {
+				s.Logger.Printf("recovered managed app serving scheduling from verified live release app=%s release=%s", current.ID, liveKey)
+			}
+		}
+	}
 	if liveKey != currentKey && liveKey != desiredKey {
 		recovered, ok, err := s.recoverManagedAppPendingDeploySnapshot(ctx, managed, current, liveKey)
 		if err != nil {
