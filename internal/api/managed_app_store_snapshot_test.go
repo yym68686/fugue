@@ -34,6 +34,7 @@ func TestManagedAppStoreSnapshotMatchesPointReads(t *testing.T) {
 	release, err := state.CreateAppRelease(model.AppRelease{
 		TenantID: tenant.ID, AppID: app.ID, Role: model.AppReleaseRoleStable,
 		ResolvedImageRef: app.Spec.Image, DeploymentName: "stable-deployment", Status: model.AppReleaseStatusServing,
+		SpecSnapshot: &model.AppSpec{Env: map[string]string{"SECRET": "not-needed-for-observation"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +52,10 @@ func TestManagedAppStoreSnapshotMatchesPointReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	want, wantFound := s.servingReleaseTrafficTarget(app)
+	if want.SpecSnapshot == nil {
+		t.Fatal("full release unexpectedly omitted config")
+	}
+	want.SpecSnapshot = nil
 	got, gotFound := s.servingReleaseTrafficTargetWithSnapshot(app, snapshot)
 	if !wantFound || gotFound != wantFound || !reflect.DeepEqual(got, want) {
 		t.Fatalf("snapshot serving target differs from point read: got=%+v found=%t want=%+v found=%t", got, gotFound, want, wantFound)

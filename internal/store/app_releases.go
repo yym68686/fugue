@@ -94,6 +94,23 @@ func (s *Store) ListAppReleases(filter model.AppReleaseFilter) ([]model.AppRelea
 	return out, err
 }
 
+// ListAppReleaseMetadata is for runtime evidence readers that never consume
+// executable config snapshots. Full release reads remain available for rollback.
+func (s *Store) ListAppReleaseMetadata(filter model.AppReleaseFilter) ([]model.AppRelease, error) {
+	filter = normalizeAppReleaseFilter(filter)
+	if s.usingDatabase() {
+		return s.pgListAppReleaseView(filter, false)
+	}
+	releases, err := s.ListAppReleases(filter)
+	if err != nil {
+		return nil, err
+	}
+	for i := range releases {
+		releases[i].SpecSnapshot = nil
+	}
+	return releases, nil
+}
+
 func (s *Store) GetAppTrafficPolicy(tenantID string, platformAdmin bool, appID string) (model.AppTrafficPolicy, error) {
 	appID = strings.TrimSpace(appID)
 	if appID == "" {

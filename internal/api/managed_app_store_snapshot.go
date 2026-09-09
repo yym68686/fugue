@@ -36,7 +36,7 @@ func (s *Server) loadManagedAppStoreSnapshot(ctx context.Context, appIDs ...stri
 		started := time.Now()
 		defer func() { serverTimingFromContext(ctx).Add("observation_releases", time.Since(started)) }()
 		var err error
-		releases, err = s.store.ListAppReleases(model.AppReleaseFilter{PlatformAdmin: true, ActiveOnly: true})
+		releases, err = s.store.ListAppReleaseMetadata(model.AppReleaseFilter{PlatformAdmin: true, ActiveOnly: true})
 		return err
 	})
 	// The store treats an empty status as Present. Read every explicit status

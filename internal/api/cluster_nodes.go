@@ -306,6 +306,7 @@ func (s *Server) StartBackgroundWarmers(ctx context.Context) {
 		return
 	}
 	s.startClusterNodeInventoryWarmLoop(ctx)
+	s.startConsoleObservationWarmLoop(ctx)
 	s.startResourceUsageSamplingLoop(ctx)
 	s.startRightSizingAutoApplyLoop(ctx)
 	s.startOOMRightSizingLoop(ctx)

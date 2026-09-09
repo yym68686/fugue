@@ -94,6 +94,10 @@ func (s *Store) pgGetAppRelease(tenantID string, platformAdmin bool, releaseID s
 }
 
 func (s *Store) pgListAppReleases(filter model.AppReleaseFilter) ([]model.AppRelease, error) {
+	return s.pgListAppReleaseView(filter, true)
+}
+
+func (s *Store) pgListAppReleaseView(filter model.AppReleaseFilter, includeSpec bool) ([]model.AppRelease, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -135,7 +139,11 @@ func (s *Store) pgListAppReleases(filter model.AppReleaseFilter) ([]model.AppRel
 		clauses = append(clauses, "status IN ("+strings.Join(statusPlaceholders, ", ")+")")
 	}
 
-	query := `SELECT ` + appReleaseSelectColumns + ` FROM fugue_app_releases`
+	columns := appReleaseSelectColumns
+	if !includeSpec {
+		columns = strings.Replace(columns, "spec_snapshot_json", "NULL AS spec_snapshot_json", 1)
+	}
+	query := `SELECT ` + columns + ` FROM fugue_app_releases`
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
