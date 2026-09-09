@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"fugue/internal/auth"
+	"fugue/internal/store"
 )
 
 type serverTimingContextKey struct{}
@@ -37,6 +40,8 @@ func newServerTimingRecorder() *serverTimingRecorder {
 func withServerTiming(r *http.Request) (*http.Request, *serverTimingRecorder) {
 	recorder := newServerTimingRecorder()
 	ctx := context.WithValue(r.Context(), serverTimingContextKey{}, recorder)
+	ctx = auth.WithRequestTimingObserver(ctx, func(duration time.Duration) { recorder.Add("auth", duration) })
+	ctx = store.WithReadStageObserver(ctx, recorder.Add)
 	return r.WithContext(ctx), recorder
 }
 
@@ -57,6 +62,16 @@ func (r *serverTimingRecorder) Add(name string, duration time.Duration) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for i := range r.metrics {
+		if r.metrics[i].name == normalizedName {
+			r.metrics[i].duration += duration
+			return
+		}
+	}
+	// Retry loops must not grow response headers with one metric per attempt.
+	if len(r.metrics) >= 64 {
+		return
+	}
 	r.metrics = append(r.metrics, serverTimingMetric{
 		duration: duration,
 		name:     normalizedName,

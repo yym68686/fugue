@@ -22,22 +22,30 @@ func (s *Store) pgGetTenantBillingSnapshot(ctx context.Context, ids []string) (T
 		if !errors.As(err, &pgErr) || (pgErr.Code != "40001" && pgErr.Code != "40P01" && pgErr.Code != "55P03") {
 			return snapshot, err
 		}
-		if err := sleepContext(ctx, time.Duration(min(attempt+1, 10))*10*time.Millisecond); err != nil {
+		started := time.Now()
+		err = sleepContext(ctx, time.Duration(min(attempt+1, 10))*10*time.Millisecond)
+		recordReadStage(ctx, "billing_retry_wait", started)
+		if err != nil {
 			return TenantBillingSnapshot{}, err
 		}
 	}
 }
 
 func (s *Store) pgBillingSummariesAttempt(ctx context.Context, ids []string) (TenantBillingSnapshot, error) {
+	started := time.Now()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	recordReadStage(ctx, "billing_begin", started)
 	if err != nil {
 		return TenantBillingSnapshot{}, err
 	}
 	defer tx.Rollback()
+	started = time.Now()
 	state, err := s.pgLoadBillingSummaryInputsTx(ctx, tx, ids)
+	recordReadStage(ctx, "billing_inputs", started)
 	if err != nil {
 		return TenantBillingSnapshot{}, err
 	}
+	started = time.Now()
 	lockIDs := make([]string, 0, len(state.Tenants))
 	seen := make(map[string]bool, len(state.Tenants))
 	for _, tenant := range state.Tenants {
@@ -63,8 +71,10 @@ func (s *Store) pgBillingSummariesAttempt(ctx context.Context, ids []string) (Te
 		state.BillingEvents = append(state.BillingEvents, events...)
 	}
 	sort.Strings(lockIDs)
+	recordReadStage(ctx, "billing_owners", started)
 	// Do not wait while holding a subset of ledgers: existing single-tenant
 	// transactions may already hold the consumer and next acquire its owner.
+	started = time.Now()
 	rows, err := tx.QueryContext(ctx, `
 SELECT tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at
 FROM fugue_tenant_billing
@@ -72,6 +82,7 @@ WHERE tenant_id = ANY($1::text[])
 ORDER BY tenant_id
 FOR UPDATE NOWAIT`, lockIDs)
 	if err != nil {
+		recordReadStage(ctx, "billing_locks", started)
 		return TenantBillingSnapshot{}, err
 	}
 	before := make(map[string]model.TenantBilling, len(lockIDs))
@@ -86,9 +97,11 @@ FOR UPDATE NOWAIT`, lockIDs)
 	}
 	err = rows.Err()
 	rows.Close()
+	recordReadStage(ctx, "billing_locks", started)
 	if err != nil {
 		return TenantBillingSnapshot{}, err
 	}
+	started = time.Now()
 	previousEvents := len(state.BillingEvents)
 	summaries, missing := accrueBillingSummaries(&state, ids, time.Now().UTC())
 	changed := make([]model.TenantBilling, 0, len(state.TenantBilling))
@@ -97,10 +110,17 @@ FOR UPDATE NOWAIT`, lockIDs)
 			changed = append(changed, record)
 		}
 	}
-	if err := s.pgPersistBillingBatchTx(ctx, tx, changed, state.BillingEvents[previousEvents:]); err != nil {
+	recordReadStage(ctx, "billing_accrue", started)
+	started = time.Now()
+	err = s.pgPersistBillingBatchTx(ctx, tx, changed, state.BillingEvents[previousEvents:])
+	recordReadStage(ctx, "billing_persist", started)
+	if err != nil {
 		return TenantBillingSnapshot{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	started = time.Now()
+	err = tx.Commit()
+	recordReadStage(ctx, "billing_commit", started)
+	if err != nil {
 		return TenantBillingSnapshot{}, fmt.Errorf("commit billing summaries: %w", err)
 	}
 	return completeTenantBillingSnapshot(&state, ids, summaries, missing), nil

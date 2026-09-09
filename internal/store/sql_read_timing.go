@@ -12,6 +12,21 @@ type SQLReadTiming struct {
 	Acquire, Query, Rows, Decode time.Duration
 }
 
+type readStageObserverKey struct{}
+
+func WithReadStageObserver(ctx context.Context, observe func(string, time.Duration)) context.Context {
+	if observe == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, readStageObserverKey{}, observe)
+}
+
+func recordReadStage(ctx context.Context, name string, started time.Time) {
+	if observe, ok := ctx.Value(readStageObserverKey{}).(func(string, time.Duration)); ok {
+		observe(name, time.Since(started))
+	}
+}
+
 type sqlReadQueryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }

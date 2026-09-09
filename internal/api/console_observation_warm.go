@@ -37,6 +37,14 @@ func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) {
 	})
 	startLoop(30*time.Second, func() {
 		if snapshots, err := s.loadClusterNodeInventory(ctx); err == nil {
+			// The first runtime-list request should not have to materialize
+			// locations that the inventory observer has already discovered.
+			// This is the same hash-guarded reconciliation retained by GET.
+			if s.store != nil && ctx.Err() == nil {
+				if err := s.syncManagedSharedLocationRuntimesFromSnapshots(snapshots); err != nil && s.log != nil {
+					s.log.Printf("console runtime location warm failed: %v", err)
+				}
+			}
 			if _, err := s.loadPersistentVolumeUsagePolicies(ctx, snapshots); err != nil && ctx.Err() == nil && s.log != nil {
 				s.log.Printf("console volume observation warm failed: %v", err)
 			}

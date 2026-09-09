@@ -20,6 +20,17 @@ const principalContextKey contextKey = "principal"
 
 const platformComponentIdentityContextKey contextKey = "platform-component-identity"
 
+type requestTimingObserverKey struct{}
+
+// WithRequestTimingObserver measures authentication without recording or
+// caching credentials, decisions or principal data.
+func WithRequestTimingObserver(ctx context.Context, observe func(time.Duration)) context.Context {
+	if observe == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, requestTimingObserverKey{}, observe)
+}
+
 type Authenticator struct {
 	Store                            *store.Store
 	BootstrapAdminKey                string
@@ -151,6 +162,10 @@ func authenticatePlatformComponentRequest(r *http.Request, keyring platformcontr
 }
 
 func (a *Authenticator) authenticateRequest(r *http.Request) (model.Principal, error) {
+	if observe, ok := r.Context().Value(requestTimingObserverKey{}).(func(time.Duration)); ok {
+		started := time.Now()
+		defer func() { observe(time.Since(started)) }()
+	}
 	secret, err := bearerTokenFromRequest(r)
 	if err != nil {
 		return model.Principal{}, err
