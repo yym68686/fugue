@@ -4160,7 +4160,7 @@ func (s *Store) pgListImageOperationsByApps(tenantID string, platformAdmin bool,
 	for _, id := range appIDs {
 		args = append(args, id)
 	}
-	query := fmt.Sprintf(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', desired_source_json - 'config_base_spec', created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN (%s) AND desired_source_json IS NOT NULL`, sqlPlaceholderList(1, len(appIDs)))
+	query := fmt.Sprintf(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', CASE WHEN jsonb_typeof(desired_source_json) = 'object' THEN desired_source_json - 'config_base_spec' ELSE desired_source_json END, created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN (%s) AND desired_source_json IS NOT NULL`, sqlPlaceholderList(1, len(appIDs)))
 	if !platformAdmin {
 		args = append(args, tenantID)
 		query += fmt.Sprintf(" AND tenant_id = $%d", len(args))

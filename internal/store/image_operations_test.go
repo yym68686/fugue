@@ -62,7 +62,7 @@ func TestPostgresImageOperationProjectionUsesOneScopedQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectQuery(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', desired_source_json - 'config_base_spec', created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN \(\$1, \$2\) AND desired_source_json IS NOT NULL AND tenant_id = \$3 ORDER BY app_id ASC, created_at ASC`).
+	mock.ExpectQuery(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', CASE WHEN jsonb_typeof\(desired_source_json\) = 'object' THEN desired_source_json - 'config_base_spec' ELSE desired_source_json END, created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN \(\$1, \$2\) AND desired_source_json IS NOT NULL AND tenant_id = \$3 ORDER BY app_id ASC, created_at ASC`).
 		WithArgs("app-a", "app-b", "tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "tenant_id", "type", "status", "app_id", "image", "source", "created", "updated", "started", "completed"}).
 			AddRow("op", "tenant", "import", "running", "app-a", "registry.example/demo:v0", encoded, now, now, now, nil))

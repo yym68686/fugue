@@ -192,4 +192,18 @@ func TestImportConfigurationBaselinePostgres(t *testing.T) {
 	if err != nil || deploy.DesiredSpec.Env["CONFIG"] != "recovered" || deploy.DesiredSpec.Image != built.Image {
 		t.Fatalf("stale persisted deployment: %+v %v", deploy.DesiredSpec, err)
 	}
+	// Legacy persisted operations use both SQL NULL and JSON null. Removing a
+	// private envelope field must never apply jsonb deletion to a scalar.
+	if _, err := s.db.Exec(`UPDATE fugue_operations SET desired_source_json='null'::jsonb WHERE id=$1`, deploy.ID); err != nil {
+		t.Fatal(err)
+	}
+	images, err := s.ListImageOperationsByApps(tenant.ID, false, []string{app.ID})
+	if err != nil || len(images[app.ID]) != 2 {
+		t.Fatalf("image history failed with JSON-null source: %d %v", len(images[app.ID]), err)
+	}
+	for _, operation := range images[app.ID] {
+		if operation.ConfigBaseSpec != nil {
+			t.Fatal("image history retained configuration baseline")
+		}
+	}
 }
