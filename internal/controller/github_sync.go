@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -12,17 +13,16 @@ import (
 )
 
 func (s *Service) syncGitHubApps(ctx context.Context) error {
-	apps, err := s.Store.ListApps("", true)
+	apps, err := s.Store.ListAppsMetadata("", true)
 	if err != nil {
 		return fmt.Errorf("list apps for github sync: %w", err)
 	}
 
-	currentTime := time.Now()
-	if s.now != nil {
-		currentTime = s.now()
-	}
-
 	for _, app := range apps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		currentTime := s.gitHubSyncNow()
 		originSource := model.AppOriginSource(app)
 		if !shouldAutoSyncGitHubApp(app) {
 			continue
@@ -42,14 +42,30 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		checkCtx, cancel := context.WithTimeout(ctx, s.Config.GitHubSyncTimeout)
 		latestCommit, resolvedBranch, err := s.resolveLatestGitHubCommit(checkCtx, *originSource)
 		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		currentTime = s.gitHubSyncNow()
 		if err != nil {
-			s.recordGitHubSourceSyncFailure(app, *originSource, err, currentTime)
+			s.recordGitHubSourceSyncFailure(ctx, app, *originSource, err, currentTime)
 			continue
 		}
-		s.recordGitHubSourceSyncSuccess(app, currentTime)
+		if !s.recordGitHubSourceSyncSuccess(ctx, app, currentTime) {
+			continue
+		}
 		latestCommit = strings.TrimSpace(latestCommit)
 		if latestCommit == "" || latestCommit == strings.TrimSpace(originSource.CommitSHA) {
 			continue
+		}
+		// Resolve configuration again after the remote check. Never enqueue a
+		// build for a source rebind or a replica pause that happened meanwhile.
+		current, loadErr := s.Store.GetAppMetadata(app.ID)
+		if loadErr != nil || !shouldAutoSyncGitHubApp(current) || !reflect.DeepEqual(model.AppOriginSource(current), originSource) {
+			continue
+		}
+		app = current
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		ops, err := s.Store.ListOperationsWithDesiredSourceByApp(app.TenantID, true, app.ID)
 		if err != nil {
@@ -67,6 +83,9 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			}
 		}
 
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		op, err := s.queueGitHubAutoRebuild(app, resolvedBranch, latestCommit, retryBaseOperation)
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {

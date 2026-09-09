@@ -31,7 +31,7 @@ func gitHubSourceSyncCheckReady(status *model.AppSourceSyncStatus, now time.Time
 	return true
 }
 
-func (s *Service) recordGitHubSourceSyncFailure(app model.App, source model.AppSource, checkErr error, now time.Time) {
+func (s *Service) recordGitHubSourceSyncFailure(ctx context.Context, app model.App, source model.AppSource, checkErr error, now time.Time) {
 	if checkErr == nil {
 		return
 	}
@@ -56,6 +56,9 @@ func (s *Service) recordGitHubSourceSyncFailure(app model.App, source model.AppS
 		NeedsUserAction:     class.NeedsUserAction,
 	}
 
+	if previous != nil {
+		status.LastSuccessAt = previous.LastSuccessAt
+	}
 	if class.NeedsUserAction && failures >= gitHubSourceSyncMaxUserActionFailures {
 		suspendedAt := now
 		status.Phase = model.AppSourceSyncPhaseSuspended
@@ -69,13 +72,14 @@ func (s *Service) recordGitHubSourceSyncFailure(app model.App, source model.AppS
 		status.NextCheckAt = &nextCheckAt
 	}
 
-	if _, err := s.Store.UpdateAppSourceSyncStatus(app.ID, status); err != nil {
+	recorded, err := s.Store.RecordAppSourceSyncCheck(ctx, app, status)
+	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) && s.Logger != nil {
 			s.Logger.Printf("github sync source status update failed for app=%s: %v", app.ID, err)
 		}
 		return
 	}
-	if s.Logger == nil {
+	if !recorded || s.Logger == nil {
 		return
 	}
 
@@ -112,39 +116,19 @@ func (s *Service) recordGitHubSourceSyncFailure(app model.App, source model.AppS
 	)
 }
 
-func (s *Service) recordGitHubSourceSyncSuccess(app model.App, now time.Time) {
-	previous := model.CloneAppSourceSyncStatus(app.Status.SourceSync)
-	if previous == nil {
-		return
-	}
-	if strings.TrimSpace(previous.Provider) != model.AppSourceSyncProviderGitHub {
-		return
-	}
-	if strings.TrimSpace(previous.Phase) == model.AppSourceSyncPhaseOK &&
-		previous.ConsecutiveFailures == 0 &&
-		previous.LastErrorAt == nil &&
-		previous.NextCheckAt == nil &&
-		previous.SuspendedAt == nil {
-		return
-	}
-
-	lastCheckedAt := now
-	lastSuccessAt := now
-	status := &model.AppSourceSyncStatus{
-		Provider:      model.AppSourceSyncProviderGitHub,
-		Phase:         model.AppSourceSyncPhaseOK,
-		LastCheckedAt: &lastCheckedAt,
-		LastSuccessAt: &lastSuccessAt,
-	}
-	if _, err := s.Store.UpdateAppSourceSyncStatus(app.ID, status); err != nil {
-		if !errors.Is(err, store.ErrNotFound) && s.Logger != nil {
-			s.Logger.Printf("github sync source status recovery update failed for app=%s: %v", app.ID, err)
+func (s *Service) recordGitHubSourceSyncSuccess(ctx context.Context, app model.App, now time.Time) bool {
+	status := &model.AppSourceSyncStatus{Provider: model.AppSourceSyncProviderGitHub, Phase: model.AppSourceSyncPhaseOK, LastCheckedAt: &now, LastSuccessAt: &now}
+	recorded, err := s.Store.RecordAppSourceSyncCheck(ctx, app, status)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, context.Canceled) && s.Logger != nil {
+			s.Logger.Printf("github sync check fact update failed for app=%s: %v", app.ID, err)
 		}
-		return
+		return false
 	}
-	if strings.TrimSpace(previous.Phase) != model.AppSourceSyncPhaseOK && s.Logger != nil {
+	if recorded && app.Status.SourceSync != nil && app.Status.SourceSync.Phase != model.AppSourceSyncPhaseOK && s.Logger != nil {
 		s.Logger.Printf("github sync source recovered for app=%s", app.ID)
 	}
+	return recorded
 }
 
 func gitHubSourceSyncRetryDelay(baseDelay, maxDelay time.Duration, consecutiveFailures int) time.Duration {
