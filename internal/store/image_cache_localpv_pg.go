@@ -103,6 +103,8 @@ RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName,
 	}
 	node.SnapshotComplete = snapshotComplete
 
+	prepared := make([]model.ImageCacheManifest, 0, len(manifests))
+	positions := make(map[[5]string]int, len(manifests))
 	for _, manifest := range manifests {
 		manifest = normalizeImageCacheManifest(manifest)
 		manifest.NodeID = firstNonEmptyImageCacheString(manifest.NodeID, node.NodeID)
@@ -120,26 +122,56 @@ RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName,
 		manifest.ID = firstNonEmptyImageCacheString(manifest.ID, model.NewID("imgcacheman"))
 		manifest.CreatedAt = now
 		manifest.UpdatedAt = now
+		identity := [5]string{manifest.NodeID, manifest.ClusterNodeName, manifest.Repo, manifest.Target, manifest.Digest}
+		if position, exists := positions[identity]; exists {
+			// Sequential UPSERTs keep the first inserted ID and the last report.
+			manifest.ID = prepared[position].ID
+			prepared[position] = manifest
+		} else {
+			positions[identity] = len(prepared)
+			prepared = append(prepared, manifest)
+		}
+	}
+	for offset := 0; offset < len(prepared); offset += 500 {
+		end := min(offset+500, len(prepared))
+		if err := pgUpsertImageCacheManifestBatch(ctx, tx, prepared[offset:end]); err != nil {
+			return model.ImageCacheNodeInventory{}, err
+		}
+	}
+	if node.SnapshotComplete {
+		if err := pgMarkMissingImageCacheManifestsAbsent(ctx, tx, node, now); err != nil {
+			return model.ImageCacheNodeInventory{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.ImageCacheNodeInventory{}, mapDBErr(err)
+	}
+	return node, nil
+}
+
+func pgUpsertImageCacheManifestBatch(ctx context.Context, tx *sql.Tx, manifests []model.ImageCacheManifest) error {
+	args := make([]any, 0, len(manifests)*21)
+	values := make([]string, 0, len(manifests))
+	for _, manifest := range manifests {
 		refsJSON, jsonErr := marshalNullableJSON(manifest.ReferencedBlobs)
 		if jsonErr != nil {
-			return model.ImageCacheNodeInventory{}, jsonErr
+			return jsonErr
 		}
 		referencedManifestsJSON, jsonErr := marshalNullableJSON(manifest.ReferencedManifests)
 		if jsonErr != nil {
-			return model.ImageCacheNodeInventory{}, jsonErr
+			return jsonErr
 		}
-		if _, err := tx.ExecContext(ctx, `
+		values = append(values, "("+sqlPlaceholderList(len(args)+1, 21)+")")
+		args = append(args, manifest.ID, manifest.NodeID, manifest.ClusterNodeName, manifest.RuntimeID, manifest.ImageRef, manifest.Repo, manifest.Target, manifest.Digest, manifest.MediaType, manifest.ManifestSizeBytes, manifest.TotalBlobBytes, refsJSON, referencedManifestsJSON, manifest.GraphStatus, manifest.GraphFailureReason, manifest.CreatedAtObserved, manifest.LastSeenAt, manifest.PinnedLocally, manifest.Present, manifest.CreatedAt, manifest.UpdatedAt)
+	}
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_image_cache_manifests (
 	id, node_id, cluster_node_name, runtime_id, image_ref, repo, target, digest,
 	media_type, manifest_size_bytes, total_blob_bytes, referenced_blobs_json, referenced_manifests_json,
 	graph_status, graph_failure_reason, created_at_observed, last_seen_at,
 	pinned_locally, present, created_at, updated_at
-) VALUES (
-	$1, $2, $3, $4, $5, $6, $7, $8,
-	$9, $10, $11, $12, $13,
-	$14, $15, $16, $17,
-	$18, $19, $20, $21
-)
+) VALUES `+strings.Join(values, ",")+`
 ON CONFLICT (node_id, cluster_node_name, repo, target, digest) DO UPDATE SET
 	runtime_id = EXCLUDED.runtime_id,
 	image_ref = EXCLUDED.image_ref,
@@ -155,20 +187,10 @@ ON CONFLICT (node_id, cluster_node_name, repo, target, digest) DO UPDATE SET
 	pinned_locally = EXCLUDED.pinned_locally,
 	present = EXCLUDED.present,
 	updated_at = EXCLUDED.updated_at
-	`, manifest.ID, manifest.NodeID, manifest.ClusterNodeName, manifest.RuntimeID, manifest.ImageRef, manifest.Repo, manifest.Target, manifest.Digest, manifest.MediaType, manifest.ManifestSizeBytes, manifest.TotalBlobBytes, refsJSON, referencedManifestsJSON, manifest.GraphStatus, manifest.GraphFailureReason, manifest.CreatedAtObserved, manifest.LastSeenAt, manifest.PinnedLocally, manifest.Present, manifest.CreatedAt, manifest.UpdatedAt); err != nil {
-			return model.ImageCacheNodeInventory{}, mapDBErr(err)
-		}
+	`, args...); err != nil {
+		return mapDBErr(err)
 	}
-	if node.SnapshotComplete {
-		if err := pgMarkMissingImageCacheManifestsAbsent(ctx, tx, node, now); err != nil {
-			return model.ImageCacheNodeInventory{}, err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return model.ImageCacheNodeInventory{}, mapDBErr(err)
-	}
-	return node, nil
+	return nil
 }
 
 func pgMarkMissingImageCacheManifestsAbsent(ctx context.Context, tx *sql.Tx, node model.ImageCacheNodeInventory, now time.Time) error {
