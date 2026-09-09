@@ -13,7 +13,7 @@ func TestAPIDatabaseIdlePoolConfiguration(t *testing.T) {
 	if defaults.DatabaseMaxIdleConnections != 16 || defaults.DatabaseConnectionMaxIdleTime != 5*time.Minute {
 		t.Fatal("unexpected database idle pool defaults")
 	}
-	if defaults.DatabaseBillingWarmConnections != 16 {
+	if defaults.DatabaseBillingWarmConnections != 4 {
 		t.Fatal("unexpected statement preparation default")
 	}
 	t.Setenv("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", "2")
