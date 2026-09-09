@@ -22,17 +22,21 @@
 
 ### 当前实现与复验依据
 
+可复验记录：[PTY 与延迟](cli-tui-acceptance-2026-09-09/pty.json)、[五图 10 分钟压力测试](cli-tui-acceptance-2026-09-09/soak.txt)、[发布前检查](cli-tui-acceptance-2026-09-09/prepush.json)。
+
 - 参数/兼容：`TestTUIEntrypointsExposeSharedFlags`、`TestAdminTUIAppearanceParsingAndSnapshotCompatibility`、既有 console/monitor JSON/plain/once 测试，四入口共用 `bindTUIAppearanceFlags`。
 - 订阅：`TestWatchStopsOnNavigationPauseAndIgnoresOldEvents`、`TestTUILogStreamResumesAndCancelsAtServer`；HTTP context 取消、路由 epoch/generation 隔离、Last-Event-ID 恢复；2000 行上限且按游标而非文本去重。
 - 图表：`TestTUIResourceHistoryUsesCorrectPerReplicaSeries`、`TestTUILiveSamplesRetainKubeletTimeAcrossCachedReads`；修正 5 分钟历史采样类型和间隔，实时样本保留 kubelet 时间；没有 exporter 的 network 明示 unavailable。1 个点只显示 collecting，两个点起绘图。
 - 详情：`TestClusterComponentScopeAndPodDrilldown`；`--scope control-plane/nodes/runtimes/all`，节点容量/policy、组件 workload、最近 workflow 证据；长详情与帮助可滚动。
 - 操作：`TestAppActionReceiptReplaysAfterCASChangesAndIsActorScoped`、`TestImageActionRejectsChangedDigest`、`TestTUIUnknownSubmissionRecoversReadOnly`。操作和幂等回执原子写入；16 个并发重复请求在隔离 PostgreSQL 中只创建一个 operation；换进程后可读回本地仅含 app/request ID 的回执日志，再 GET 恢复，禁止透明 POST 重放。
-- 终端：仓库 `scripts/tui-qa/smoke.cjs` 真 PTY 覆盖四入口、鼠标/日志/resize/断线恢复、q/Ctrl-C，truecolor/256 色/ANSI/NO_COLOR。最近候选复验 first paint 167–708ms；并行编译时曾有 1.074–3.443s 的冷启动失败，正式产物需在无编译竞争下复验，不能忽略失败记录。
+- 终端：仓库 `scripts/tui-qa/smoke.cjs` 真 PTY 覆盖四入口、鼠标/日志/resize/断线恢复、q/Ctrl-C，truecolor/256 色/ANSI/NO_COLOR。空闲环境候选复验 first paint 106–253ms，40 次选行的输入响应 p95 34.9–36.6ms；并行编译时曾有 1.074–3.443s 的冷启动失败，正式产物需在无编译竞争下复验，不能忽略失败记录。
 - 视觉：xterm/Playwright 生成 60/80/100/140/200 列快照；宽/窄屏已人工查看。Go 测试覆盖 8/18/30/50 行、CJK/组合字符和无色输出。
-- 稳定性：第一轮真实 10 分钟（1000 行/4 图/10 operations）通过，goroutine 12→5、堆 4.99MB→3.98MB、日志 2000、活动订阅 0。五图 200 列的第二轮正在复验。
+- 稳定性：第一轮真实 10 分钟（1000 行/4 图/10 operations）通过，goroutine 12→5、堆 4.99MB→3.98MB、日志 2000、活动订阅 0。五图 200 列第二轮也通过：goroutine 12→5、堆 7.18MB→5.71MB、日志 2000、活动订阅 0。
 - 全量：`GOFLAGS=-p=2 make test`、TUI/CLI/API/store 定向 race、go vet、前端 OpenAPI sync/generate/contract:check 已通过。最后一次代码/发布变更仍需对应检查。
-- `[cli-tui]` 用户反馈：v0.3.0 管理员示例 unknown flag；本轮已据此修复共享参数并增加所有入口的真实 PTY 测试。beta `v0.3.1-beta.1` 已推送，等待 release 工作流资产。
+- `[cli-tui]` 用户反馈：v0.3.0 管理员示例 unknown flag；本轮已据此修复共享参数并增加所有入口的真实 PTY 测试。beta `v0.3.1-beta.1` 已推送，CLI release 工作流 34347124419 已成功，六平台资产和校验和齐全、prerelease=true；官方 macOS ARM64 包校验通过，PTY 实测首屏 106–111ms、输入 p95 35.4–36.2ms。分支通用 ci 因无生产 intent 拒绝了非生产 beta commit，正式 main 提交已包含 API intent 235，并通过本地发布计划检查。
 
+
+- 生产 API 第一轮 `de34acb1` 的 CI 34347657587 成功，monitor 记录 configSha 一致、consecutiveFailures=0；官方 beta 已连接真实集群执行用户原始命令成功。生产实测随后发现完整 OpenAPI 下载会发生公网截断，已改为 `/v1/auth/context` 中的轻量 `capabilities.app_action_receipts`，最终修复版本为 v0.3.2；等待此补丁部署与本机正式升级。
 
 ## 兼容与迁移决策
 

@@ -79,3 +79,24 @@ func TestTUIOldServerCannotEnableSafeActions(t *testing.T) {
 		t.Fatal("old server passed capability negotiation")
 	}
 }
+
+func TestTUICapabilitiesUseSmallAuthContextOnly(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/context" {
+			t.Errorf("capability check downloaded unrelated endpoint %s", r.URL.Path)
+			w.WriteHeader(500)
+			return
+		}
+		calls++
+		fmt.Fprint(w, `{"principal":{"platform_admin":true},"capabilities":{"app_action_receipts":true}}`)
+	}))
+	defer server.Close()
+	p := &tuiProvider{client: &Client{baseURL: server.URL, httpClient: server.Client()}}
+	if _, err := p.auth(p.client); err != nil {
+		t.Fatal(err)
+	}
+	if !p.supportsActionReceipts(p.client) || !p.supportsActionReceipts(p.client) || calls != 1 {
+		t.Fatalf("capability negotiation duplicated requests: %d", calls)
+	}
+}

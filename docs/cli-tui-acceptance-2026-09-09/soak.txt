@@ -1,0 +1,5 @@
+=== RUN   TestSoak
+    soak_test.go:139: duration=10m0s loads=1577 baseline_goroutines=12 final_goroutines=5 heap_baseline=7179368 heap_final=5712976 retained_logs=2000 active_streams=0
+--- PASS: TestSoak (600.02s)
+PASS
+ok  	fugue/internal/tui	600.720s

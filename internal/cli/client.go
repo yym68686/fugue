@@ -469,6 +469,9 @@ func (e *apiServerError) IsRetryable() bool {
 }
 
 type authContextResponse struct {
+	Capabilities struct {
+		AppActionReceipts bool `json:"app_action_receipts"`
+	} `json:"capabilities"`
 	Principal authPrincipalContext `json:"principal"`
 }
 

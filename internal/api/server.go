@@ -400,7 +400,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"principal": authContextFromPrincipal(principal),
+		"principal":    authContextFromPrincipal(principal),
+		"capabilities": map[string]bool{"app_action_receipts": true},
 	})
 }
 

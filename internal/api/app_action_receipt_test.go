@@ -63,3 +63,19 @@ func TestImageActionRejectsChangedDigest(t *testing.T) {
 		t.Fatalf("changed digest status=%d body=%s", response.Code, response.Body)
 	}
 }
+
+func TestAuthContextDeclaresAtomicActionReceipts(t *testing.T) {
+	_, server, key, _ := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	response := performJSONRequest(t, server, http.MethodGet, "/v1/auth/context", key, nil)
+	var body struct {
+		Capabilities struct {
+			Receipts bool `json:"app_action_receipts"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || !body.Capabilities.Receipts {
+		t.Fatalf("missing capability: %s", response.Body)
+	}
+}

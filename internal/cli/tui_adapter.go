@@ -46,6 +46,8 @@ func (p *tuiProvider) auth(client *Client) (authPrincipalContext, error) {
 	if err == nil {
 		p.principal = response.Principal
 		p.principalAt = time.Now()
+		p.actionReceipts = response.Capabilities.AppActionReceipts
+		p.actionCapabilitiesAt = p.principalAt
 	}
 	return response.Principal, err
 }

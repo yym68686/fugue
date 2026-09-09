@@ -56,7 +56,7 @@ const server = http.createServer((req,res) => {
 
 async function run(args,{admin=false,termName='xterm-256color',color='truecolor',quit='q'}={}) {
  const terminal=new Terminal({cols:140,rows:40,allowProposedApi:true});
- const started=Date.now();let output='',exitCode;
+ const started=Date.now();let output='',exitCode;let inputP95;
  const proc=pty.spawn(binary,[...args,'--base-url',`http://127.0.0.1:${server.address().port}`,'--token',admin?'synthetic-admin':'synthetic-user','--interval','1s','--mouse','--theme','carbon'],{name:termName,cols:140,rows:40,env:{...process.env,TERM:termName,COLORTERM:color,NO_COLOR:color==='none'?'1':'',FUGUE_SKIP_UPDATE_CHECK:'1'}});
  const done=new Promise(resolve=>proc.onExit(value=>{exitCode=value.exitCode;resolve(value)}));
  proc.onData(data=>{output+=data;terminal.write(data)});terminal.onData(data=>proc.write(data));
@@ -68,6 +68,14 @@ async function run(args,{admin=false,termName='xterm-256color',color='truecolor'
   assert(firstPaint<1000,`first paint ${firstPaint}ms`);
   if(args[0]==='app') {
    await wait(()=>text().includes('pod-0'),'app table');
+   const latencies=[];
+   for(let i=1;i<=40;i++){
+    const begin=performance.now();proc.write('j');const deadline=Date.now()+2000;
+    while(!text().includes(`› pod-${i} `)) {assert(Date.now()<deadline,'selection response timed out');await pause(1)}
+    latencies.push(performance.now()-begin);
+   }
+   latencies.sort((a,b)=>a-b);inputP95=latencies[Math.ceil(latencies.length*.95)-1];assert(inputP95<=50,`input p95 ${inputP95.toFixed(1)}ms`);
+   proc.write('\x1b[H');await wait(()=>text().includes('› pod-0 '),'home');
    clickLabel('Logs');await wait(()=>text().includes('repeated log line'),'SSE log');
    proc.write('1');await wait(()=>text().includes('PODS'),'dashboard');
    await wait(()=>activeStreams===0,'subscription cancellation');
@@ -81,7 +89,7 @@ async function run(args,{admin=false,termName='xterm-256color',color='truecolor'
   } else await wait(()=>text().includes('Sample'),'workspace/project');
   proc.write('?');await wait(()=>text().includes('KEYBOARD'),'keyboard help');
   proc.write(quit);const exited=await done;assert.equal(exited.exitCode,0);assert(output.includes('\x1b[?1049l'),'alt screen restored');assert(output.includes('\x1b[?1006l'),'mouse restored');
-  return {command:args.join(' '),firstPaint,terminal:termName,color,exit:quit==='q'?'q':'Ctrl-C'};
+  return {command:args.join(' '),firstPaint,inputP95,terminal:termName,color,exit:quit==='q'?'q':'Ctrl-C'};
  } finally { if(exitCode===undefined)proc.kill();terminal.dispose();disconnected=false; }
 }
 (async()=>{

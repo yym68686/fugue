@@ -13693,6 +13693,14 @@ components:
       additionalProperties: false
       required: [principal]
       properties:
+        capabilities:
+          type: object
+          additionalProperties: false
+          description: Server features, independent of principal scopes. Missing features are unsupported.
+          properties:
+            app_action_receipts:
+              type: boolean
+              description: App mutations support atomic Idempotency-Key receipts, If-Match and read-only receipt recovery.
         principal:
           $ref: "#/components/schemas/AuthPrincipalContext"
     StringMap:
