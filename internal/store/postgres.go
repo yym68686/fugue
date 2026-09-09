@@ -1757,6 +1757,109 @@ var postgresSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_service_status ON fugue_operations (service_id, status) WHERE service_id <> ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_import_failed_app_updated_created ON fugue_operations (app_id, updated_at DESC, created_at DESC) WHERE type = 'import' AND status = 'failed'`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_operations_oom_right_sizing_event ON fugue_operations (tenant_id, requested_by_id) WHERE requested_by_type = 'system' AND requested_by_id LIKE 'fugue-api/oom-right-sizing/%'`,
+	// This narrow projection is maintained by the database, so image summaries do
+	// not repeatedly deserialize full historical deployment configurations.
+	`CREATE TABLE IF NOT EXISTS fugue_image_candidate_operations (
+		operation_id TEXT PRIMARY KEY REFERENCES fugue_operations(id) ON DELETE CASCADE,
+		tenant_id TEXT NOT NULL,
+		type TEXT NOT NULL,
+		status TEXT NOT NULL,
+		app_id TEXT NOT NULL,
+		image TEXT NULL,
+		source JSONB NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		started_at TIMESTAMPTZ NULL,
+		completed_at TIMESTAMPTZ NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_image_candidate_operations_app_created ON fugue_image_candidate_operations (app_id, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_image_candidate_operations_tenant_app_created ON fugue_image_candidate_operations (tenant_id, app_id, created_at)`,
+	`CREATE OR REPLACE FUNCTION fugue_sync_image_candidate_operation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	IF TG_OP = 'DELETE' THEN
+		DELETE FROM fugue_image_candidate_operations WHERE operation_id = OLD.id;
+		RETURN OLD;
+	END IF;
+	IF NEW.desired_source_json IS NULL THEN
+		DELETE FROM fugue_image_candidate_operations WHERE operation_id = NEW.id;
+		RETURN NEW;
+	END IF;
+	INSERT INTO fugue_image_candidate_operations (
+		operation_id, tenant_id, type, status, app_id, image, source,
+		created_at, updated_at, started_at, completed_at
+	) VALUES (
+		NEW.id, NEW.tenant_id, NEW.type, NEW.status, NEW.app_id,
+		NEW.desired_spec_json->>'image',
+		CASE WHEN NEW.desired_source_json ? 'desired_source' OR NEW.desired_source_json ? 'desired_origin_source'
+			THEN jsonb_build_object('desired_source', NEW.desired_source_json->'desired_source')
+			ELSE NEW.desired_source_json END,
+		NEW.created_at, NEW.updated_at, NEW.started_at, NEW.completed_at
+	) ON CONFLICT (operation_id) DO UPDATE SET
+		tenant_id = EXCLUDED.tenant_id,
+		type = EXCLUDED.type,
+		status = EXCLUDED.status,
+		app_id = EXCLUDED.app_id,
+		image = EXCLUDED.image,
+		source = EXCLUDED.source,
+		created_at = EXCLUDED.created_at,
+		updated_at = EXCLUDED.updated_at,
+		started_at = EXCLUDED.started_at,
+		completed_at = EXCLUDED.completed_at;
+	RETURN NEW;
+END;
+$$`,
+	`DO $$ BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_trigger
+			WHERE tgname = 'fugue_image_candidate_operations_sync'
+				AND tgrelid = 'fugue_operations'::regclass
+		) THEN
+			CREATE TRIGGER fugue_image_candidate_operations_sync
+			AFTER INSERT OR UPDATE OR DELETE ON fugue_operations
+			FOR EACH ROW EXECUTE FUNCTION fugue_sync_image_candidate_operation();
+		END IF;
+	END $$`,
+	`INSERT INTO fugue_image_candidate_operations (
+		operation_id, tenant_id, type, status, app_id, image, source,
+		created_at, updated_at, started_at, completed_at
+	)
+	SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image',
+		CASE WHEN desired_source_json ? 'desired_source' OR desired_source_json ? 'desired_origin_source'
+			THEN jsonb_build_object('desired_source', desired_source_json->'desired_source')
+			ELSE desired_source_json END,
+		created_at, updated_at, started_at, completed_at
+	FROM fugue_operations
+	WHERE desired_source_json IS NOT NULL
+	ON CONFLICT (operation_id) DO UPDATE SET
+		tenant_id = EXCLUDED.tenant_id,
+		type = EXCLUDED.type,
+		status = EXCLUDED.status,
+		app_id = EXCLUDED.app_id,
+		image = EXCLUDED.image,
+		source = EXCLUDED.source,
+		created_at = EXCLUDED.created_at,
+		updated_at = EXCLUDED.updated_at,
+		started_at = EXCLUDED.started_at,
+		completed_at = EXCLUDED.completed_at
+	WHERE (fugue_image_candidate_operations.tenant_id,
+		fugue_image_candidate_operations.type,
+		fugue_image_candidate_operations.status,
+		fugue_image_candidate_operations.app_id,
+		fugue_image_candidate_operations.image,
+		fugue_image_candidate_operations.source,
+		fugue_image_candidate_operations.created_at,
+		fugue_image_candidate_operations.updated_at,
+		fugue_image_candidate_operations.started_at,
+		fugue_image_candidate_operations.completed_at)
+	IS DISTINCT FROM
+		(EXCLUDED.tenant_id, EXCLUDED.type, EXCLUDED.status, EXCLUDED.app_id,
+		EXCLUDED.image, EXCLUDED.source, EXCLUDED.created_at, EXCLUDED.updated_at,
+		EXCLUDED.started_at, EXCLUDED.completed_at)`,
+	`DELETE FROM fugue_image_candidate_operations p
+	WHERE NOT EXISTS (
+		SELECT 1 FROM fugue_operations o
+		WHERE o.id = p.operation_id AND o.desired_source_json IS NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS fugue_operation_controller_timings (
 		operation_id TEXT PRIMARY KEY REFERENCES fugue_operations(id) ON DELETE CASCADE,
 		segments_json JSONB NOT NULL,

@@ -85,18 +85,16 @@ func (s *Store) ListImageCandidateOperationsByApps(tenantID string, platformAdmi
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	predicate := fmt.Sprintf("app_id IN (%s) AND desired_source_json IS NOT NULL", sqlPlaceholderList(1, len(ids)))
+	// The projection contains exactly the operations with a desired source.
+	predicate := fmt.Sprintf("app_id IN (%s)", sqlPlaceholderList(1, len(ids)))
 	if !platformAdmin {
 		args = append(args, tenantID)
 		predicate += fmt.Sprintf(" AND tenant_id = $%d", len(args))
 	}
 	query := `WITH inputs AS (
- SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image' AS image,
-   CASE WHEN desired_source_json ? 'desired_source' OR desired_source_json ? 'desired_origin_source'
-     THEN jsonb_build_object('desired_source', desired_source_json->'desired_source')
-     ELSE desired_source_json END AS source,
+ SELECT operation_id AS id, tenant_id, type, status, app_id, image, source,
    created_at, updated_at, started_at, completed_at
- FROM fugue_operations WHERE ` + predicate + `
+ FROM fugue_image_candidate_operations WHERE ` + predicate + `
 ), ranked AS (
  SELECT *,
    row_number() OVER (PARTITION BY app_id,image,source ORDER BY created_at,id) AS first_input,

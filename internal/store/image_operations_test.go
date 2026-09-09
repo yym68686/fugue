@@ -79,3 +79,32 @@ func TestPostgresImageOperationProjectionUsesOneScopedQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPostgresImageCandidateOperationProjectionUsesNarrowTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC()
+	source := &model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/demo:v1"}
+	encoded, err := marshalOperationSourceState(model.Operation{DesiredSource: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery(`FROM fugue_image_candidate_operations`).
+		WithArgs("app-a", "tenant").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "tenant_id", "type", "status", "app_id", "image", "source", "created", "updated", "started", "completed"}).
+			AddRow("op", "tenant", "import", "completed", "app-a", "registry.example/demo:v1", encoded, now, now, now, now))
+	s := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	got, err := s.ListImageCandidateOperationsByApps("tenant", false, []string{"app-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["app-a"]) != 1 || got["app-a"][0].DesiredSpec == nil || got["app-a"][0].DesiredSpec.Image != "registry.example/demo:v1" || !reflect.DeepEqual(got["app-a"][0].DesiredSource, source) {
+		t.Fatalf("candidate projection lost image input: %+v", got["app-a"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

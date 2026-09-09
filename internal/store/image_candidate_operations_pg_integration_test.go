@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 	"sort"
 	"testing"
@@ -59,15 +58,8 @@ FROM fugue_operations o WHERE id=$1`, parent.ID, duplicate.ID, duplicate.Created
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := func(ops []model.Operation) []string {
-		result := []string{}
-		for _, op := range ops {
-			result = append(result, fmt.Sprint(op.ID))
-		}
-		return result
-	}
-	if !reflect.DeepEqual(ids(got[app.ID]), ids(want)) {
-		t.Fatalf("wrong SQL representatives: got=%v want=%v", ids(got[app.ID]), ids(want))
+	if !reflect.DeepEqual(got[app.ID], want) {
+		t.Fatalf("wrong SQL candidate projection: got=%+v want=%+v", got[app.ID], want)
 	}
 	foreign, err := s.ListImageCandidateOperationsByApps("foreign", false, []string{app.ID})
 	if err != nil || len(foreign) != 0 {
