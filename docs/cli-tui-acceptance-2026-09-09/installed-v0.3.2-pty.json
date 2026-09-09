@@ -1,0 +1,74 @@
+{
+  "status": "pass",
+  "results": [
+    {
+      "command": "app top Sample API",
+      "firstPaint": 298,
+      "inputP95": 34.7634579999999,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "q"
+    },
+    {
+      "command": "app top Sample API",
+      "firstPaint": 104,
+      "inputP95": 34.59258399999999,
+      "terminal": "xterm-256color",
+      "color": "",
+      "exit": "q"
+    },
+    {
+      "command": "app top Sample API",
+      "firstPaint": 108,
+      "inputP95": 34.95037500000035,
+      "terminal": "ansi",
+      "color": "",
+      "exit": "q"
+    },
+    {
+      "command": "app top Sample API",
+      "firstPaint": 106,
+      "inputP95": 35.48529199999939,
+      "terminal": "xterm-256color",
+      "color": "none",
+      "exit": "q"
+    },
+    {
+      "command": "admin cluster top --scope control-plane",
+      "firstPaint": 106,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "q"
+    },
+    {
+      "command": "project top Sample",
+      "firstPaint": 104,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "Ctrl-C"
+    },
+    {
+      "command": "console",
+      "firstPaint": 104,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "q"
+    }
+  ],
+  "activeStreams": 0,
+  "writes": 0,
+  "requests": {
+    "/v1/auth/context": 7,
+    "/v1/apps": 8,
+    "/v1/apps/app-a": 21,
+    "/v1/apps/app-a/runtime-pods": 8,
+    "/v1/operations": 10,
+    "/v1/apps/app-a/observability/metrics/timeseries": 12,
+    "/v1/apps/app-a/runtime-logs/stream": 4,
+    "/v1/apps/app-a/runtime-logs": 4,
+    "/v1/cluster/control-plane": 2,
+    "/v1/console/gallery/stream": 3,
+    "/v1/projects": 2,
+    "/v1/console/projects/project-a": 1
+  }
+}

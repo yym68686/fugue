@@ -14,11 +14,11 @@
 - [x] M4：真实历史指标、正确采样来源与间隔、空值/权限/stale、窗口/阈值/选点和采样预算。
 - [x] M5：节点/容量/policy、runtime、组件/workload/发布证据，管理员权限和 scope 导航。
 - [x] M6：服务端 CAS/幂等、精确确认、未知提交恢复与操作追踪；凭据脱敏验收。
-- [ ] M7：PTY、10 分钟稳定性、性能、终端矩阵、beta/反馈门槛和正式发布。
-- [ ] OpenAPI 生成、前端同步、全量测试、正式生产 lane 完成证据。
-- [ ] 全平台 release 资产及校验和、本机正式升级、示例命令真实启动验收。
+- [x] M7：PTY、10 分钟稳定性、性能、终端矩阵、beta/反馈门槛和正式发布。
+- [x] OpenAPI 生成、前端同步、全量测试、正式生产 lane 完成证据。
+- [x] 全平台 release 资产及校验和、本机正式升级、示例命令真实启动验收。
 
-已修复的审计缺陷：管理员命令遗漏 `--mouse/--theme`；console 丢失鼠标 flag 值；SSE 未绑定取消上下文；旧订阅无 epoch 隔离；日志未正确增量消费；resource history 使用错误 target kind/采样间隔；节点和组件详情不完整；发布验证及长时测试此前无充分证据，M7 仍待正式发布。
+已修复的审计缺陷：管理员命令遗漏 `--mouse/--theme`；console 丢失鼠标 flag 值；SSE 未绑定取消上下文；旧订阅无 epoch 隔离；日志未正确增量消费；resource history 使用错误 target kind/采样间隔；节点和组件详情不完整；发布验证及长时测试此前无充分证据，M7 已完成正式发布和本机验证。
 
 ### 当前实现与复验依据
 
@@ -32,11 +32,23 @@
 - 终端：仓库 `scripts/tui-qa/smoke.cjs` 真 PTY 覆盖四入口、鼠标/日志/resize/断线恢复、q/Ctrl-C，truecolor/256 色/ANSI/NO_COLOR。空闲环境候选复验 first paint 106–253ms，40 次选行的输入响应 p95 34.9–36.6ms；并行编译时曾有 1.074–3.443s 的冷启动失败，正式产物需在无编译竞争下复验，不能忽略失败记录。
 - 视觉：xterm/Playwright 生成 60/80/100/140/200 列快照；宽/窄屏已人工查看。Go 测试覆盖 8/18/30/50 行、CJK/组合字符和无色输出。
 - 稳定性：第一轮真实 10 分钟（1000 行/4 图/10 operations）通过，goroutine 12→5、堆 4.99MB→3.98MB、日志 2000、活动订阅 0。五图 200 列第二轮也通过：goroutine 12→5、堆 7.18MB→5.71MB、日志 2000、活动订阅 0。
-- 全量：`GOFLAGS=-p=2 make test`、TUI/CLI/API/store 定向 race、go vet、前端 OpenAPI sync/generate/contract:check 已通过。最后一次代码/发布变更仍需对应检查。
+- 全量：`GOFLAGS=-p=2 make test`、TUI/CLI/API/store 定向 race、go vet、前端 OpenAPI sync/generate/contract:check 已通过。最终轻量能力补丁也通过完整 make test（串行包构建）、变更范围 prepush 和前端 contract:check。
 - `[cli-tui]` 用户反馈：v0.3.0 管理员示例 unknown flag；本轮已据此修复共享参数并增加所有入口的真实 PTY 测试。beta `v0.3.1-beta.1` 已推送，CLI release 工作流 34347124419 已成功，六平台资产和校验和齐全、prerelease=true；官方 macOS ARM64 包校验通过，PTY 实测首屏 106–111ms、输入 p95 35.4–36.2ms。分支通用 ci 因无生产 intent 拒绝了非生产 beta commit，正式 main 提交已包含 API intent 235，并通过本地发布计划检查。
 
 
-- 生产 API 第一轮 `de34acb1` 的 CI 34347657587 成功，monitor 记录 configSha 一致、consecutiveFailures=0；官方 beta 已连接真实集群执行用户原始命令成功。生产实测随后发现完整 OpenAPI 下载会发生公网截断，已改为 `/v1/auth/context` 中的轻量 `capabilities.app_action_receipts`，最终修复版本为 v0.3.2；等待此补丁部署与本机正式升级。
+- 生产 API 第一轮 `de34acb1` 的 CI 34347657587 成功，monitor 记录 configSha 一致、consecutiveFailures=0；官方 beta 已连接真实集群执行用户原始命令成功。生产实测随后发现完整 OpenAPI 下载会发生公网截断，已改为 `/v1/auth/context` 中的轻量 `capabilities.app_action_receipts`，最终修复版本为 v0.3.2；此补丁部署与本机正式升级均已完成。
+
+### 最终交付（2026-09-09）
+
+- 最终版本：[v0.3.2](https://github.com/yym68686/fugue/releases/tag/v0.3.2)，CLI commit `247f7ea`，构建时间 `2026-09-09T12:26:03Z`。六个平台归档和 `fugue_checksums.txt` 齐全，正式发布而非 prerelease。
+- [API CI 34350773873](https://github.com/yym68686/fugue/actions/runs/34350773873) 成功；monitor configSha 为 `247f7ea93df97962600c942e23306ef7d55fc3d8`，consecutiveFailures=0。[CLI release CI 34350779391](https://github.com/yym68686/fugue/actions/runs/34350779391) 成功。
+- 前端契约同步提交 `29ffa96a`（轻量能力声明）；OpenAPI 生成及 typecheck 通过。
+- `/opt/homebrew/bin/fugue` 已用正式 upgrade 流程由 v0.3.0 升到 v0.3.2。匿名 GitHub API 曾限流，使用已登录 GitHub 的受支持升级认证变量重试后成功，未把临时编译文件冒充发行包。
+- 本机实际二进制执行 `fugue admin cluster top --mouse --theme carbon` 已连接真实集群成功；追加观测确认多于一个真实采样点后绘制曲线，q 退出恢复 alt screen 和鼠标状态。
+- [安装后二进制 PTY 验收](cli-tui-acceptance-2026-09-09/installed-v0.3.2-pty.json)：七种入口/终端场景全通过，首屏 104–298ms、输入 p95 34.6–35.5ms、订阅归零、零写操作。冷启动在并行编译期间的失败记录仍保留在上方，未删除。
+- 生产 `/v1/auth/context` 返回 200、能力标志 `app_action_receipts=true`，响应约 207 字节；不再用大型 OpenAPI 响应判断 TUI 写操作能力。
+- 网络曲线仅在后端确实提供时显示；目前无 exporter 的来源明确标为 unavailable，不虚构测量值。CPU/内存历史和实时数据保留各自采样来源与时间。
+
 
 ## 兼容与迁移决策
 
@@ -48,7 +60,7 @@
 | legacy console/monitor/ui | 继续承担兼容输出，不为删除包破坏既有脚本；统一新 TUI 展示代码。 |
 | 写动作 | 只在读到服务端能力、确认计划且有 CAS/幂等证据后开放。 |
 
-## 调查结论
+## 调查结论（实施前基线）
 
 当前实现不是完整 TUI，而是“数据加载器 + ANSI 字符串渲染器”的预览版。主要入口是：
 

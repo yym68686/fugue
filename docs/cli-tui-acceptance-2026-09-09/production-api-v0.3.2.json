@@ -1,0 +1,10 @@
+{
+  "apiVersion": "release.fugue.dev/v1",
+  "component": "api",
+  "configSha": "247f7ea93df97962600c942e23306ef7d55fc3d8",
+  "consecutiveFailures": 0,
+  "kind": "DeclarativeComponentMonitorState",
+  "lastCheckedAt": "2026-09-09T12:31:18.943928474Z",
+  "lastHealthyAt": "2026-09-09T12:31:18.943928474Z",
+  "recordDigest": "sha256:4a70ed6f48748902fc42b7070bad885dc5721d6730846bb77feac9a238556a97"
+}
