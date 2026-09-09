@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Opt-in export for terminal-emulator screenshot review. Fixtures are synthetic
@@ -24,6 +25,29 @@ func TestExportVisualFixtures(t *testing.T) {
 			m.opts.Color = true
 			m.prefs.Theme = theme
 			name := fmt.Sprintf("dashboard-%dx%d-%s.ansi", size[0], size[1], theme)
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(m.View().Content), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, scenario := range []string{"startup", "gap"} {
+		for _, size := range [][2]int{{140, 40}, {200, 50}} {
+			m := testModel()
+			m.width, m.height, m.opts.Color = size[0], size[1], true
+			m.prefs.Theme, m.prefs.Graph = "carbon", "braille"
+			for i := range m.snapshot.Series {
+				series := m.snapshot.Series[i]
+				series.Interval = 30 * time.Second
+				series.Points = series.Points[len(series.Points)-7:]
+				for j := range series.Points {
+					series.Points[j].At = m.now.Add(time.Duration(j-6) * 30 * time.Second)
+					if scenario == "gap" && j == 3 {
+						series.Points[j].Value = nil
+					}
+				}
+				m.snapshot.Series[i], m.series[series.ID] = series, series
+			}
+			name := fmt.Sprintf("%s-%dx%d-carbon.ansi", scenario, size[0], size[1])
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(m.View().Content), 0600); err != nil {
 				t.Fatal(err)
 			}

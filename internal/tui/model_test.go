@@ -42,7 +42,7 @@ func fixture(count int) Snapshot {
 	}
 	s.Tables = []Table{table}
 	for i, name := range []string{"CPU", "Memory", "Requests", "Latency", "Errors"} {
-		series := Series{ID: name, Label: name, Unit: "%", Source: "synthetic fixture", State: "available"}
+		series := Series{ID: name, Label: name, Unit: "%", Source: "synthetic fixture", State: "available", Interval: 5 * time.Second}
 		for j := 0; j < 120; j++ {
 			v := float64((j*(i+1)*7)%81 + 8)
 			series.Points = append(series.Points, Point{At: now.Add(time.Duration(j-119) * 5 * time.Second), Value: &v})

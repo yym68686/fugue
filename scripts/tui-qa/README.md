@@ -13,6 +13,8 @@ FUGUE_TUI_SNAPSHOT_DIR=/tmp/fugue-screens node scripts/tui-qa/screens.cjs
 
 Playwright uses its installed Chromium; `FUGUE_TUI_BROWSER` can select an existing Chrome executable. Some macOS distributions of node-pty omit the executable bit on `prebuilds/darwin-arm64/spawn-helper`; restore that bit if `posix_spawnp failed` occurs.
 
+Screenshot exports include startup charts with only three minutes of history and the same charts with a missing observation. Startup history should use the chart width and show `3m / 15m`; the missing observation must remain a visible gap. Interpolation only connects consecutive samples within the declared cadence, with 50% jitter tolerance, and never changes stored observations. Cursor values between observations are labeled `interpolated`.
+
 The PTY checks execute the real binary across truecolor, 256-color, basic ANSI and NO_COLOR environments. They assert the startup budget, mouse tab navigation, app log SSE, 1000-row scrolling, resize, stale retention, recovery, administrator component drilldown, all four public entrypoints, Ctrl-C/q cleanup, and zero writes.
 
 The ten-minute test runs 1000 rows, five charts at 200 columns, ten operations, a stream with repeated text, pause/resume, resizing, and synthetic outages. It reports active streams, goroutines, heap and retained logs. Run startup measurements without simultaneous compiler jobs; record failures as well as passing measurements.

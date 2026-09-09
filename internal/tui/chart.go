@@ -17,8 +17,8 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 	p := theme(m.prefs.Theme)
 	color := p.graphs[index%len(p.graphs)]
 	plotWidth, plotHeight := max(1, width-2), max(1, height-4)
-	start, end := m.now.Add(-m.request.Window), m.now
-	buckets := Buckets(series, start, end, plotWidth)
+	start, end := chartRange(series, m.now, m.request.Window)
+	buckets := plotBuckets(series, start, end, plotWidth)
 	latest := "--"
 	var latestAt time.Time
 	maximum := 0.0
@@ -53,7 +53,7 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 	if valid == 1 {
 		caption = "collecting · 1 sample"
 	}
-	if valid > 0 && m.now.Sub(latestAt) > max(30*time.Second, 2*series.Interval) {
+	if valid > 0 && m.now.Sub(latestAt) > staleAfter(series) {
 		caption = "stale · " + latestAt.Local().Format("15:04:05")
 	}
 	title := pad(strings.ToUpper(series.Label), max(1, width-len(latest)-1)) + latest
@@ -73,16 +73,34 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 		b := buckets[min(m.graphCursor, len(buckets)-1)]
 		caption = b.At.Local().Format("15:04:05") + " · no sample"
 		if b.Last != nil {
-			caption = b.At.Local().Format("15:04:05") + " · " + formatValue(series.Unit, *b.Last)
+			caption = b.LastAt.Local().Format("15:04:05") + " · " + formatValue(series.Unit, *b.Last)
+			if b.Interpolated {
+				caption += " (interpolated)"
+			}
 		}
 	}
-	lines = append(lines, m.style(p.muted).Render(clip("0 "+series.Unit+"   "+m.prefs.Window+"   max "+formatValue(series.Unit, maximum), width)), m.style(p.muted).Render(clip(caption, width)))
+	windowLabel := m.prefs.Window
+	if valid > 0 && end.Sub(start) < m.request.Window {
+		windowLabel = chartDuration(end.Sub(start)) + " / " + windowLabel
+	}
+	lines = append(lines, m.style(p.muted).Render(clip("0 "+series.Unit+"   "+windowLabel+"   max "+formatValue(series.Unit, maximum), width)), m.style(p.muted).Render(clip(caption, width)))
 	lines[len(lines)-1] = m.style(p.muted).Render(clip(caption+" · "+series.Source, width))
 	return strings.Join(lines, "\n")
 }
 
+func chartDuration(span time.Duration) string {
+	span = span.Round(time.Second)
+	if span >= time.Hour && span%time.Hour == 0 {
+		return fmt.Sprintf("%dh", span/time.Hour)
+	}
+	if span >= time.Minute && span%time.Minute == 0 {
+		return fmt.Sprintf("%dm", span/time.Minute)
+	}
+	return span.String()
+}
+
 // Each raster column corresponds to a time bucket. Braille has four vertical
-// subcells; empty buckets never connect to adjacent samples across a gap.
+// subcells; missing observations remain gaps after cadence-aware interpolation.
 func drawPlot(buckets []Bucket, width, height int, maximum float64, mode string, limit *float64) []string {
 	if width < 1 || height < 1 {
 		return nil
