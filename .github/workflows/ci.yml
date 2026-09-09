@@ -75,6 +75,38 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  postgres_protection:
+    # Database recovery must remain possible when an application build fails.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-postgres-protection, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Detect database protection configuration changes
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          base="${BASE_SHA}"
+          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ || "${base}" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          changed=false
+          if ! git diff --quiet "${base}" HEAD -- deploy/environments/production/control-plane-postgres scripts/reconcile_postgres_protection.py; then
+            changed=true
+          fi
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+      - name: Validate and reconcile durable database protection
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          python3 -m unittest discover -s scripts -p test_reconcile_postgres_protection.py
+          python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json
+          python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json --apply
+
   component-build:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.release_count != '0' }}

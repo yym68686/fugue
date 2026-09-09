@@ -1,0 +1,60 @@
+{
+  "namespace": "fugue-system",
+  "cluster": "fugue-fugue-control-plane-postgres",
+  "expectedSystemID": "7639860969142538261",
+  "spec": {
+    "backup": {
+      "target": "prefer-standby",
+      "retentionPolicy": "7d",
+      "barmanObjectStore": {
+        "destinationPath": "s3://fugue-data-prod/cnpg-control-plane",
+        "endpointURL": "https://8ec0d42e9131e125b020b6d4918fe721.r2.cloudflarestorage.com",
+        "s3Credentials": {
+          "accessKeyId": {
+            "name": "fugue-fugue-config",
+            "key": "FUGUE_DATA_BACKEND_ACCESS_KEY_ID"
+          },
+          "secretAccessKey": {
+            "name": "fugue-fugue-config",
+            "key": "FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY"
+          }
+        },
+        "wal": {
+          "compression": "gzip",
+          "maxParallel": 2
+        },
+        "data": {
+          "compression": "gzip",
+          "jobs": 1,
+          "additionalCommandArgs": [
+            "--max-bandwidth=15MB"
+          ]
+        }
+      }
+    },
+    "postgresql": {
+      "parameters": {
+        "archive_timeout": "60s"
+      },
+      "synchronous": {
+        "method": "any",
+        "number": 1,
+        "dataDurability": "required"
+      }
+    },
+    "resources": {
+      "limits": {
+        "memory": "2Gi"
+      },
+      "requests": {
+        "cpu": "250m",
+        "memory": "512Mi"
+      }
+    },
+    "primaryUpdateStrategy": "supervised"
+  },
+  "scheduledBackup": {
+    "name": "fugue-control-plane-physical-daily",
+    "schedule": "0 15 3 * * *"
+  }
+}

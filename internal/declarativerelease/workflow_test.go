@@ -49,11 +49,21 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "prepush", "traffic_safety_stage0",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "postgres_protection", "prepush", "traffic_safety_stage0",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	// Database configuration recovery must not depend on building application code.
+	protection := yamlMappingValue(t, jobs, "postgres_protection")
+	for _, key := range yamlMappingKeys(t, protection) {
+		if key == "needs" {
+			t.Fatal("database protection is coupled to another release job")
+		}
+	}
+	if yamlMappingValue(t, protection, "environment").Value != "production" {
+		t.Fatal("database protection must use the protected production environment")
+	}
 	for _, required := range []string{
 		"\"${RELEASE_TOOL}\" plan",
 		"\"${RELEASE_TOOL}\" build",
