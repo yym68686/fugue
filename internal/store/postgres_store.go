@@ -2142,6 +2142,10 @@ func (s *Store) pgListAppsByProjectIDs(projectIDs []string) ([]model.App, error)
 }
 
 func (s *Store) pgListAppsView(tenantID string, platformAdmin bool, hydrateBackingServices, summary bool) ([]model.App, error) {
+	return s.pgListAppsViewWithTiming(tenantID, platformAdmin, hydrateBackingServices, summary, nil)
+}
+
+func (s *Store) pgListAppsViewWithTiming(tenantID string, platformAdmin bool, hydrateBackingServices, summary bool, timing *AppListReadTiming) ([]model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -2161,29 +2165,52 @@ status_json, created_at, updated_at FROM fugue_apps`
 	}
 	query += ` ORDER BY created_at ASC`
 
+	queryStarted := time.Now()
 	rows, err := s.db.QueryContext(ctx, query, args...)
+	if timing != nil {
+		timing.Query = time.Since(queryStarted)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list apps: %w", err)
 	}
 	defer rows.Close()
 
 	apps := make([]model.App, 0)
-	for rows.Next() {
+	for {
+		rowStarted := time.Now()
+		next := rows.Next()
+		if timing != nil {
+			timing.Rows += time.Since(rowStarted)
+		}
+		if !next {
+			break
+		}
+		decodeStarted := time.Now()
 		app, err := scanApp(rows)
 		if err != nil {
+			if timing != nil {
+				timing.Decode += time.Since(decodeStarted)
+			}
 			return nil, err
 		}
 		normalizeAppStatusForRead(&app)
-		if isDeletedApp(app) {
-			continue
+		if !isDeletedApp(app) {
+			apps = append(apps, app)
 		}
-		apps = append(apps, app)
+		if timing != nil {
+			timing.Decode += time.Since(decodeStarted)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate apps: %w", err)
 	}
 	if hydrateBackingServices {
-		if err := s.pgHydrateAppsBackingServices(ctx, apps); err != nil {
+		servicesStarted := time.Now()
+		err := s.pgHydrateAppsBackingServices(ctx, apps)
+		if timing != nil {
+			timing.Services = time.Since(servicesStarted)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}

@@ -40,6 +40,13 @@ func TestAppSummaryPostgresPreservesReadFieldsAndFullConfiguration(t *testing.T)
 	if !reflect.DeepEqual(summary[0], AppReadSummary(full[0])) {
 		t.Fatal("summary changed retained app fields")
 	}
+	measured, timing, err := s.ListAppSummariesWithTiming(tenant.ID, false, true)
+	if err != nil || !reflect.DeepEqual(measured, summary) {
+		t.Fatalf("measured read changed response: %v", err)
+	}
+	if timing.Query <= 0 || timing.Rows <= 0 || timing.Decode <= 0 || timing.Services <= 0 {
+		t.Fatalf("missing read stages: %+v", timing)
+	}
 	if full[0].Spec.Env["TOKEN"] != "private" || len(full[0].Spec.Files[0].Content) != 50000 {
 		t.Fatal("summary mutated full configuration")
 	}

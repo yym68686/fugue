@@ -269,7 +269,7 @@ func (s *Server) loadProjectImageUsageResponse(
 	timings := serverTimingFromContext(ctx)
 
 	appsStartedAt := time.Now()
-	apps, err := s.store.ListAppSummaries(principal.TenantID, principal.IsPlatformAdmin(), false)
+	apps, err := s.listAppSummariesWithTiming(ctx, principal.TenantID, principal.IsPlatformAdmin(), false)
 	timings.Add("store_apps", time.Since(appsStartedAt))
 	if err != nil {
 		return projectImageUsageResponse{}, err

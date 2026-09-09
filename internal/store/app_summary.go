@@ -1,6 +1,17 @@
 package store
 
-import "fugue/internal/model"
+import (
+	"time"
+
+	"fugue/internal/model"
+)
+
+// AppListReadTiming measures disjoint client-side read stages. Query includes
+// connection-pool acquisition and the first result; Rows includes driver reads
+// of the remaining results. Decode includes scan, normalization and filtering.
+type AppListReadTiming struct {
+	Query, Rows, Decode, Services time.Duration
+}
 
 // AppReadSummary excludes executable configuration payloads from read views.
 // It preserves identities, resource settings, status, sources and bindings.
@@ -25,4 +36,14 @@ func (s *Store) ListAppSummaries(tenantID string, platformAdmin bool, hydrateSer
 		apps[i] = AppReadSummary(apps[i])
 	}
 	return apps, nil
+}
+
+func (s *Store) ListAppSummariesWithTiming(tenantID string, platformAdmin, hydrateServices bool) ([]model.App, AppListReadTiming, error) {
+	var timing AppListReadTiming
+	if s.usingDatabase() {
+		apps, err := s.pgListAppsViewWithTiming(tenantID, platformAdmin, hydrateServices, true, &timing)
+		return apps, timing, err
+	}
+	apps, err := s.ListAppSummaries(tenantID, platformAdmin, hydrateServices)
+	return apps, timing, err
 }

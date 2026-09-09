@@ -1208,7 +1208,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	storeStartedAt := time.Now()
 	var apps []model.App
 	if summaryView {
-		apps, err = s.store.ListAppSummaries(tenantID, principal.IsPlatformAdmin(), true)
+		apps, err = s.listAppSummariesWithTiming(r.Context(), tenantID, principal.IsPlatformAdmin(), true)
 	} else {
 		apps, err = s.store.ListApps(tenantID, principal.IsPlatformAdmin())
 	}
