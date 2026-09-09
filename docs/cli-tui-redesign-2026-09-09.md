@@ -57,3 +57,21 @@ of an empty chart. Narrow terminals retain the primary charts and table;
   limitation rather than counted as a pass.
 
 Synthetic screenshot: [cluster dashboard](cli-tui-acceptance-2026-09-09/redesign-cluster.png).
+
+## Released and installed
+
+- Official release: `v0.4.0`, code commit `98a6afb`, built at
+  `2026-09-09T13:57:17Z`. Release workflow `34360183496` completed successfully
+  with six platform archives and checksums; main CI `34360177852` also passed.
+- `/opt/homebrew/bin/fugue` was upgraded through `fugue upgrade`; `--version`
+  confirms this release and `upgrade --check` reports `up-to-date`.
+- The installed binary passed the real-cluster check: selected CPU/memory/disk
+  values agree with the table, keyboard selection and overview switching work,
+  real curves use fixed percentage axes, and q restores terminal state.
+- All eight installed-binary PTY scenarios passed: first paint 79–529 ms,
+  input P95 at most 30.84 ms, zero writes and zero active subscriptions.
+  See [installed receipt](cli-tui-acceptance-2026-09-09/redesign-installed-pty.json).
+- The ten-minute integration soak passed 972 loads, page switches, resizing,
+  pause/resume and simulated outages. Heap fell from 6,848,128 to 5,713,584 bytes;
+  goroutines fell from 11 to 5; retained logs stayed at 2000 and active streams
+  returned to zero. See [soak receipt](cli-tui-acceptance-2026-09-09/redesign-soak.txt).
