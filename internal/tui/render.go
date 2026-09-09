@@ -81,7 +81,11 @@ func (m *Model) render() string {
 		meta += "  PAUSED"
 	}
 	if state := m.fetches["overview"]; state.err != "" {
-		meta += "  STALE " + m.now.Sub(m.snapshot.ObservedAt).Round(time.Second).String() + " | " + state.err
+		age := "no successful snapshot"
+		if !m.snapshot.ObservedAt.IsZero() {
+			age = m.now.Sub(m.snapshot.ObservedAt).Round(time.Second).String()
+		}
+		meta += "  STALE " + age + " | " + state.err
 	} else if state.pending {
 		meta += "  refreshing"
 	}

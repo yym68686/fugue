@@ -78,6 +78,9 @@ func (p *tuiProvider) Load(ctx context.Context, request tui.Request) (tui.Snapsh
 		snapshot = tui.Snapshot{Target: request.Target, Title: request.Target.Name, Status: "unavailable", Fields: []tui.Field{{Label: "Resource type", Value: request.Target.Kind}, {Label: "Reason", Value: "No detail adapter is available for this resource"}}}
 	}
 	snapshot.Admin = principal.PlatformAdmin
+	if request.Target.Kind != "app" && request.Target.Kind != "pod" {
+		snapshot.UnavailableScreens = map[string]string{"logs": "Open an application or pod to view its log stream"}
+	}
 	if len(snapshot.Actions) > 0 && !p.supportsActionReceipts(client) {
 		for i := range snapshot.Actions {
 			snapshot.Actions[i].Enabled = false

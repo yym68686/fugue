@@ -491,6 +491,7 @@ func (m *Model) accept(section string, s Snapshot) {
 		}
 		m.snapshot.Actions = s.Actions
 		m.snapshot.Admin = s.Admin
+		m.snapshot.UnavailableScreens = s.UnavailableScreens
 		if s.Target.Kind != "" {
 			m.request.Target = s.Target
 		}

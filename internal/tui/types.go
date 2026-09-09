@@ -73,21 +73,22 @@ type Action struct {
 	Argument string `json:"argument,omitempty"`
 }
 type Snapshot struct {
-	Target       Target             `json:"target"`
-	Title        string             `json:"title"`
-	Subtitle     string             `json:"subtitle,omitempty"`
-	Status       string             `json:"status"`
-	ObservedAt   time.Time          `json:"observed_at"`
-	Fields       []Field            `json:"fields,omitempty"`
-	Tables       []Table            `json:"tables,omitempty"`
-	Series       []Series           `json:"series,omitempty"`
-	MetricLimits map[string]float64 `json:"metric_limits,omitempty"`
-	Events       []Event            `json:"events,omitempty"`
-	Logs         []string           `json:"logs,omitempty"`
-	LogCursor    string             `json:"log_cursor,omitempty"`
-	Sources      []Source           `json:"sources,omitempty"`
-	Actions      []Action           `json:"actions,omitempty"`
-	Admin        bool               `json:"admin"`
+	Target             Target             `json:"target"`
+	Title              string             `json:"title"`
+	Subtitle           string             `json:"subtitle,omitempty"`
+	Status             string             `json:"status"`
+	ObservedAt         time.Time          `json:"observed_at"`
+	Fields             []Field            `json:"fields,omitempty"`
+	Tables             []Table            `json:"tables,omitempty"`
+	Series             []Series           `json:"series,omitempty"`
+	MetricLimits       map[string]float64 `json:"metric_limits,omitempty"`
+	Events             []Event            `json:"events,omitempty"`
+	Logs               []string           `json:"logs,omitempty"`
+	LogCursor          string             `json:"log_cursor,omitempty"`
+	Sources            []Source           `json:"sources,omitempty"`
+	Actions            []Action           `json:"actions,omitempty"`
+	UnavailableScreens map[string]string  `json:"unavailable_screens,omitempty"`
+	Admin              bool               `json:"admin"`
 }
 type Request struct {
 	Target  Target

@@ -37,3 +37,4 @@ jobs:
           fail_on_unmatched_files: true
           files: ${{ runner.temp }}/fugue-cli/*
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

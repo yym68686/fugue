@@ -29,7 +29,13 @@ func (p *tuiProvider) loadTUICluster(client *Client, request tui.Request) (tui.S
 	runtimesView := kind == "cluster" && (scope == "" || scope == "all" || scope == "runtimes")
 	if nodesView {
 		nodes, err := client.listTUINodes()
-		s.Sources = append(s.Sources, tuiSource("nodes", err, s.ObservedAt))
+		observed := time.Time{}
+		for _, node := range nodes {
+			if node.ObservedAt != nil && (observed.IsZero() || node.ObservedAt.Before(observed)) {
+				observed = *node.ObservedAt
+			}
+		}
+		s.Sources = append(s.Sources, tuiSource("nodes", err, observed))
 		if err == nil {
 			table := tui.Table{ID: "nodes", Title: "Nodes", Columns: []string{"Node", "Status", "CPU", "Memory", "Disk", "Workloads", "Region"}}
 			ready := 0

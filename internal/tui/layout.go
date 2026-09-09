@@ -24,6 +24,9 @@ func (m *Model) layout() layoutState {
 	l := layoutState{body: image.Rect(1, 4, max(1, w-1), max(4, h-2))}
 	x := 1
 	for i, name := range []string{"dashboard", "resources", "events", "logs", "tasks", "details"} {
+		if m.snapshot.UnavailableScreens[name] != "" {
+			continue
+		}
 		label := strings.ToUpper(name[:1]) + name[1:]
 		if w < 90 {
 			label = string(rune('1'+i)) + " " + name[:3]

@@ -201,7 +201,7 @@ func (s *Server) handleGetAppObservabilityMetricsTimeseries(w http.ResponseWrite
 		}
 	}
 	if source.Available && source.Status == "disabled" {
-		source.Status = "partial"
+		source.Status = "degraded"
 		source.Reason = "Resource history available; request telemetry disabled"
 	}
 	series = append(series, map[string]any{"name": "network", "unit": "bytes/s", "source": "not exported by app telemetry", "state": "unavailable", "interval_seconds": 0, "points": []map[string]any{}})

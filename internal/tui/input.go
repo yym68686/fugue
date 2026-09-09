@@ -132,6 +132,10 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 	case "3":
 		m.screen = "events"
 	case "4":
+		if reason := m.snapshot.UnavailableScreens["logs"]; reason != "" {
+			m.notify(reason)
+			return nil
+		}
 		m.screen = "logs"
 		return m.schedule("logs", false)
 	case "5":
@@ -356,7 +360,13 @@ func (m *Model) execute() tea.Cmd {
 func (m *Model) modalItems() []string {
 	switch m.modal {
 	case "palette":
-		items := []string{"Dashboard", "Resources", "Events", "Logs", "Tasks", "Details", "Actions", "Refresh", "Settings", "Help"}
+		items := []string{"Dashboard", "Resources", "Events", "Tasks", "Details", "Refresh", "Settings", "Help"}
+		if m.snapshot.UnavailableScreens["logs"] == "" {
+			items = append(items, "Logs")
+		}
+		if len(m.snapshot.Actions) > 0 {
+			items = append(items, "Actions")
+		}
 		if m.snapshot.Admin {
 			items = append(items, "Cluster")
 		}
