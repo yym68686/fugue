@@ -16,6 +16,9 @@ func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) {
 					return
 				}
 				refresh()
+				if ctx.Err() != nil {
+					return
+				}
 				timer := time.NewTimer(interval)
 				select {
 				case <-ctx.Done():
