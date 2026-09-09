@@ -14,6 +14,12 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
+// Deleted app tombstones are filtered before JSON decoding. The read path
+// still applies isDeletedApp for legacy name-only tombstones and malformed
+// historical rows; this predicate removes only the exact durable deleted
+// phase, preserving all live and migration states.
+const appVisiblePhasePredicate = "COALESCE(lower(btrim(status_json->>'phase')), '') <> 'deleted'"
+
 type sqlScanner interface {
 	Scan(dest ...any) error
 }
@@ -2151,16 +2157,15 @@ func (s *Store) pgListAppsViewWithTiming(tenantID string, platformAdmin bool, hy
 
 	query := `
 SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
-FROM fugue_apps
-`
+FROM fugue_apps WHERE ` + appVisiblePhasePredicate
 	if summary {
 		query = `SELECT id, tenant_id, project_id, name, description, source_json, route_json,
 CASE WHEN jsonb_typeof(spec_json)='object' THEN spec_json - ARRAY['env','generated_env','files','command','args'] ELSE spec_json END,
-status_json, created_at, updated_at FROM fugue_apps`
+status_json, created_at, updated_at FROM fugue_apps WHERE ` + appVisiblePhasePredicate
 	}
 	args := make([]any, 0, 1)
 	if !platformAdmin {
-		query += ` WHERE tenant_id = $1`
+		query += ` AND tenant_id = $1`
 		args = append(args, tenantID)
 	}
 	query += ` ORDER BY created_at ASC`

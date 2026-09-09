@@ -54,6 +54,22 @@ func TestAppSummaryPostgresPreservesReadFieldsAndFullConfiguration(t *testing.T)
 	if err != nil || len(foreign) != 0 {
 		t.Fatal("summary crossed tenant boundary")
 	}
+	deleted, err := s.CreateApp(tenant.ID, project.ID, "retired-worker", "", app.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletedStatus, _ := json.Marshal(model.AppStatus{Phase: "deleted"})
+	if _, err := s.db.Exec(`UPDATE fugue_apps SET status_json=$2 WHERE id=$1`, deleted.ID, deletedStatus); err != nil {
+		t.Fatal(err)
+	}
+	visible, visibleTiming, err := s.ListAppSummariesWithTiming(tenant.ID, false, false)
+	if err != nil || len(visible) != 1 || visible[0].ID != app.ID || visibleTiming.Rows <= 0 {
+		t.Fatalf("deleted tombstone entered visible summary: apps=%+v timing=%+v err=%v", visible, visibleTiming, err)
+	}
+	deletedMetadata, err := s.pgListDeletedAppsMetadata(tenant.ID, false)
+	if err != nil || len(deletedMetadata) != 1 || deletedMetadata[0].ID != deleted.ID {
+		t.Fatalf("visible filter removed deleted-app metadata: apps=%+v err=%v", deletedMetadata, err)
+	}
 	if _, err := s.db.Exec(`UPDATE fugue_apps SET spec_json='null'::jsonb WHERE id=$1`, app.ID); err != nil {
 		t.Fatal(err)
 	}

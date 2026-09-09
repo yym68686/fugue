@@ -25,7 +25,7 @@ SELECT jsonb_build_object(
         ELSE '{}'::jsonb END
       ELSE spec_json END AS spec,
       status_json AS status, created_at, updated_at
-    FROM fugue_apps WHERE tenant_id = ANY($1::text[])
+    FROM fugue_apps WHERE COALESCE(lower(btrim(status_json->>'phase')), '') <> 'deleted' AND tenant_id = ANY($1::text[])
   ) a), '[]'::jsonb),
   'backing_services', COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.created_at) FROM (
     SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json AS spec,

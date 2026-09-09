@@ -21,10 +21,10 @@ func (s *Store) ListAppWorkloadIdentitiesWithTiming(tenantID string, platformAdm
 	query := `SELECT id, tenant_id, project_id, name, ''::text, NULL::jsonb, NULL::jsonb,
  jsonb_build_object('runtime_id',spec_json->'runtime_id','replicas',spec_json->'replicas'),
  jsonb_build_object('phase',status_json->'phase','current_runtime_id',status_json->'current_runtime_id','current_replicas',status_json->'current_replicas'),
- created_at, updated_at FROM fugue_apps`
+ created_at, updated_at FROM fugue_apps WHERE ` + appVisiblePhasePredicate
 	var args []any
 	if !platformAdmin {
-		query += ` WHERE tenant_id=$1`
+		query += ` AND tenant_id=$1`
 		args = append(args, tenantID)
 	}
 	query += ` ORDER BY created_at ASC`
