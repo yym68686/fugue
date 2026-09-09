@@ -318,7 +318,7 @@ func (s *Server) loadProjectImageUsageOperations(
 		appIDs = append(appIDs, appID)
 	}
 	sort.Strings(appIDs)
-	return s.store.ListImageOperationsByApps(
+	return s.store.ListImageCandidateOperationsByApps(
 		principal.TenantID,
 		principal.IsPlatformAdmin(),
 		appIDs,

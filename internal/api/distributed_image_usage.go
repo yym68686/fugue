@@ -90,10 +90,34 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 	}
 	sort.Strings(filterAppIDs)
 
-	started := time.Now()
-	images, err := s.store.ListImages(model.ImageFilter{PlatformAdmin: true, AppIDs: filterAppIDs})
-	timings.Add("image_evidence_images", time.Since(started))
-	if err != nil {
+	var images []model.Image
+	var locations []model.ImageLocation
+	var manifests []model.ImageCacheManifest
+	group := new(errgroup.Group)
+	group.Go(func() error {
+		started := time.Now()
+		var err error
+		images, err = s.store.ListImages(model.ImageFilter{PlatformAdmin: true, AppIDs: filterAppIDs})
+		timings.Add("image_evidence_images", time.Since(started))
+		return err
+	})
+	group.Go(func() error {
+		started := time.Now()
+		var err error
+		locations, err = s.store.ListImageLocations(model.ImageLocationFilter{
+			Status: model.ImageLocationStatusPresent, PlatformAdmin: true, AppIDs: filterAppIDs,
+		})
+		timings.Add("image_evidence_locations", time.Since(started))
+		return err
+	})
+	group.Go(func() error {
+		started := time.Now()
+		var err error
+		manifests, err = s.store.ListImageCacheManifests(model.ImageCacheManifestFilter{PresentOnly: true, IncludeIncomplete: true})
+		timings.Add("image_evidence_manifests", time.Since(started))
+		return err
+	})
+	if err := group.Wait(); err != nil {
 		return distributedImageUsageEvidence{}, err
 	}
 	for _, image := range images {
@@ -104,16 +128,6 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 	}
 
 	cutoff := time.Now().UTC().Add(-defaultImageCacheInventoryTTL)
-	started = time.Now()
-	locations, err := s.store.ListImageLocations(model.ImageLocationFilter{
-		Status:        model.ImageLocationStatusPresent,
-		PlatformAdmin: true,
-		AppIDs:        filterAppIDs,
-	})
-	timings.Add("image_evidence_locations", time.Since(started))
-	if err != nil {
-		return distributedImageUsageEvidence{}, err
-	}
 	for _, location := range locations {
 		if _, ok := appIDs[strings.TrimSpace(location.AppID)]; !ok {
 			continue
@@ -128,16 +142,7 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 		}
 	}
 
-	started = time.Now()
-	manifests, err := s.store.ListImageCacheManifests(model.ImageCacheManifestFilter{
-		PresentOnly:       true,
-		IncludeIncomplete: true,
-	})
-	timings.Add("image_evidence_manifests", time.Since(started))
-	if err != nil {
-		return distributedImageUsageEvidence{}, err
-	}
-	started = time.Now()
+	started := time.Now()
 	for _, manifest := range manifests {
 		index := evidence.staleManifestsByKey
 		if distributedImageManifestIsFresh(manifest, cutoff) {
