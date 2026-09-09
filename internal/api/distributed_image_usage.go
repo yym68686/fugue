@@ -23,12 +23,15 @@ type projectImageUsageInventoryResult struct {
 }
 
 type distributedImageUsageEvidence struct {
-	imagesByAppID         map[string][]model.Image
-	locationsByAppID      map[string][]model.ImageLocation
-	staleLocationsByAppID map[string][]model.ImageLocation
-	manifestsByKey        map[string][]model.ImageCacheManifest
-	staleManifestsByKey   map[string][]model.ImageCacheManifest
-	observedAt            time.Time
+	imagesByAppID               map[string][]model.Image
+	locationsByAppID            map[string][]model.ImageLocation
+	staleLocationsByAppID       map[string][]model.ImageLocation
+	manifestsByKey              map[string][]model.ImageCacheManifest
+	imageReferenceIndex         distributedImageReferenceIndex
+	locationReferenceIndex      distributedImageReferenceIndex
+	staleLocationReferenceIndex distributedImageReferenceIndex
+	staleManifestsByKey         map[string][]model.ImageCacheManifest
+	observedAt                  time.Time
 }
 
 type distributedImageCandidateMeasurement struct {
@@ -147,6 +150,7 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 			index[key] = append(index[key], manifest)
 		}
 	}
+	evidence.buildReferenceIndexes()
 	timings.Add("image_evidence_index", time.Since(started))
 	return evidence, nil
 }
@@ -432,10 +436,11 @@ func distributedImageCandidateMeasurementFor(
 		manifests:           completeManifests,
 		hadFreshEvidence:    len(locations) > 0 || len(manifests) > 0,
 		graphFailureReasons: mergeProjectImageMeasurementReasons(graphFailureReasons),
-		staleEvidence: len(distributedImageLocationsForCandidateFromIndex(
+		staleEvidence: len(distributedImageLocationsForCandidateWithReferences(
 			app.ID,
 			candidate,
 			evidence.staleLocationsByAppID,
+			evidence.staleLocationReferenceIndex,
 		)) > 0 || len(distributedImageManifestsForCandidateFromIndex(
 			candidate,
 			evidence.staleManifestsByKey,
@@ -546,11 +551,19 @@ func distributedImageForCandidate(appID string, candidate appImageCandidate, evi
 	keys := distributedImageCandidateKeys(candidate, "")
 	var best model.Image
 	found := false
-	for _, image := range evidence.imagesByAppID[appID] {
+	images := evidence.imagesByAppID[appID]
+	if evidence.imageReferenceIndex != nil {
+		matches := make([]model.Image, 0)
+		for _, position := range evidence.imageReferenceIndex.matches(appID, keys) {
+			matches = append(matches, images[position])
+		}
+		images = matches
+	}
+	for _, image := range images {
 		if image.LifecycleState != model.ImageLifecycleAvailable {
 			continue
 		}
-		if !distributedReferenceSetsIntersect(keys, distributedImageCandidateKeys(appImageCandidate{ImageRef: image.ImageRef}, image.CanonicalDigest)) {
+		if evidence.imageReferenceIndex == nil && !distributedReferenceSetsIntersect(keys, distributedImageCandidateKeys(appImageCandidate{ImageRef: image.ImageRef}, image.CanonicalDigest)) {
 			continue
 		}
 		if !found || image.UpdatedAt.After(best.UpdatedAt) {
@@ -562,7 +575,7 @@ func distributedImageForCandidate(appID string, candidate appImageCandidate, evi
 }
 
 func distributedImageLocationsForCandidate(appID string, candidate appImageCandidate, evidence distributedImageUsageEvidence) []model.ImageLocation {
-	return distributedImageLocationsForCandidateFromIndex(appID, candidate, evidence.locationsByAppID)
+	return distributedImageLocationsForCandidateWithReferences(appID, candidate, evidence.locationsByAppID, evidence.locationReferenceIndex)
 }
 
 func distributedImageLocationsForCandidateFromIndex(
