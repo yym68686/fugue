@@ -203,10 +203,6 @@ func (s *Store) pgListImageLocations(filter model.ImageLocationFilter) ([]model.
 		args = append(args, filter.ClusterNodeName)
 		clauses = append(clauses, fmt.Sprintf("cluster_node_name = $%d", len(args)))
 	}
-	if !filter.ObservedAfter.IsZero() {
-		args = append(args, filter.ObservedAfter)
-		clauses = append(clauses, fmt.Sprintf("COALESCE(last_seen_at, updated_at) >= $%d", len(args)))
-	}
 
 	query := `
 SELECT id, tenant_id, app_id, image_ref, digest, source_operation_id, node_id, runtime_id, cluster_node_name, cache_endpoint, status, last_seen_at, size_bytes, last_error, created_at, updated_at

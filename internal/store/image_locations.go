@@ -261,7 +261,6 @@ func normalizeImageLocationFilter(filter model.ImageLocationFilter) model.ImageL
 	filter.NodeID = strings.TrimSpace(filter.NodeID)
 	filter.RuntimeID = strings.TrimSpace(filter.RuntimeID)
 	filter.ClusterNodeName = strings.TrimSpace(filter.ClusterNodeName)
-	filter.ObservedAfter = filter.ObservedAfter.UTC()
 	return filter
 }
 
@@ -346,9 +345,6 @@ func imageLocationMatchesFilter(location model.ImageLocation, filter model.Image
 		return false
 	}
 	if filter.ClusterNodeName != "" && strings.TrimSpace(location.ClusterNodeName) != filter.ClusterNodeName {
-		return false
-	}
-	if !filter.ObservedAfter.IsZero() && imageLocationSeenAt(location).Before(filter.ObservedAfter) {
 		return false
 	}
 	return true

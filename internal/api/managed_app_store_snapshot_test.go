@@ -121,3 +121,30 @@ func TestManagedAppStoreSnapshotImageEvidenceRetainsIdentityAndPrecedence(t *tes
 }
 
 func boolForSnapshotTest(value bool) *bool { return &value }
+
+func TestManagedAppStoreSnapshotLoadsNegativeAndPendingLocations(t *testing.T) {
+	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := state.Init(); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: state}
+	for _, status := range []string{model.ImageLocationStatusPresent, model.ImageLocationStatusPulling, model.ImageLocationStatusMissing, model.ImageLocationStatusFailed} {
+		app := model.App{ID: "app_" + status, TenantID: "tenant", Spec: model.AppSpec{Image: "registry.example/demo:" + status}}
+		_, err := state.UpsertImageLocation(model.ImageLocation{TenantID: app.TenantID, AppID: app.ID, ImageRef: app.Spec.Image, RuntimeID: "target", Status: status})
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := s.loadManagedAppStoreSnapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, wantObservation, err := s.currentManagedImagePresenceWithObservation(app, app.Spec.Image, "target")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, gotObservation, err := s.currentManagedImagePresenceWithStoreSnapshot(app, app.Spec.Image, "target", snapshot)
+		if err != nil || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(gotObservation, wantObservation) {
+			t.Fatalf("status %s changed in batch: got=%v %+v want=%v %+v err=%v", status, got, gotObservation, want, wantObservation, err)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"fugue/internal/model"
@@ -34,11 +35,21 @@ func (s *Server) loadManagedAppStoreSnapshot(ctx context.Context) (*managedAppSt
 		releases, err = s.store.ListAppReleases(model.AppReleaseFilter{PlatformAdmin: true, ActiveOnly: true})
 		return err
 	})
-	group.Go(func() error {
-		var err error
-		locations, err = s.store.ListImageLocations(model.ImageLocationFilter{PlatformAdmin: true})
-		return err
-	})
+	// The store treats an empty status as Present. Read every explicit status
+	// so the batch preserves negative and pending evidence as well.
+	var locationsMu sync.Mutex
+	for _, status := range []string{model.ImageLocationStatusPresent, model.ImageLocationStatusPulling, model.ImageLocationStatusMissing, model.ImageLocationStatusFailed} {
+		group.Go(func() error {
+			items, err := s.store.ListImageLocations(model.ImageLocationFilter{PlatformAdmin: true, Status: status})
+			if err != nil {
+				return err
+			}
+			locationsMu.Lock()
+			locations = append(locations, items...)
+			locationsMu.Unlock()
+			return nil
+		})
+	}
 	if err := group.Wait(); err != nil {
 		return nil, fmt.Errorf("load runtime observation store snapshot: %w", err)
 	}
