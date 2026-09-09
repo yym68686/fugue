@@ -256,6 +256,27 @@ func TestHandleGetBillingCurrentUsageOnlyCountsInternalClusterWorkloads(t *testi
 	}
 	mustDecodeJSON(t, recorder, &response)
 	assertResourceUsage(t, response.Billing.CurrentUsage, 100, 128*1024*1024, 1*1024*1024*1024)
+	_, bootstrapKey, err := s.CreateAPIKey(tenant.ID, "snapshot-admin", []string{"platform.admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregateReq := httptest.NewRequest(http.MethodGet, "/v1/billing/summaries?tenant_ids="+tenant.ID, nil)
+	aggregateReq.Header.Set("Authorization", "Bearer "+bootstrapKey)
+	aggregateResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(aggregateResponse, aggregateReq)
+	if aggregateResponse.Code != http.StatusOK {
+		t.Fatalf("batch billing status=%d body=%s", aggregateResponse.Code, aggregateResponse.Body.String())
+	}
+	var aggregate struct {
+		Billings []model.TenantBillingSummary `json:"billings"`
+	}
+	if err := json.Unmarshal(aggregateResponse.Body.Bytes(), &aggregate); err != nil {
+		t.Fatal(err)
+	}
+	if len(aggregate.Billings) != 1 {
+		t.Fatalf("incomplete billing aggregate: %+v", aggregate)
+	}
+	assertResourceUsage(t, aggregate.Billings[0].CurrentUsage, 100, 128*1024*1024, 1*1024*1024*1024)
 }
 
 func TestGetBillingAllowsSkippingCurrentUsageAggregation(t *testing.T) {

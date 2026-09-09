@@ -101,13 +101,13 @@ func TestBillingServerTimingDistinguishesLedgerAndUsage(t *testing.T) {
 		t.Fatalf("billing response: %d", response.Code)
 	}
 	header := response.Header().Get("Server-Timing")
-	for _, name := range []string{"billing_summary", "billing_current_usage", "billing_usage_apps", "billing_usage_runtimes", "billing_usage_inventory"} {
+	for _, name := range []string{"billing_summary", "billing_current_usage"} {
 		if !strings.Contains(header, name+";dur=") {
 			t.Fatalf("missing %s timing in %q", name, header)
 		}
 	}
 	response = performJSONRequest(t, server, http.MethodGet, "/v1/billing?include_current_usage=false", key, nil)
-	if strings.Contains(response.Header().Get("Server-Timing"), "billing_usage_") {
+	if strings.Contains(response.Header().Get("Server-Timing"), "billing_current_usage") {
 		t.Fatal("usage timing present when usage was not requested")
 	}
 }

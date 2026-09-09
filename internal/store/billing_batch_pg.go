@@ -13,47 +13,30 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func (s *Store) pgGetTenantBillingSummaries(ctx context.Context, ids []string) ([]model.TenantBillingSummary, []string, error) {
+func (s *Store) pgGetTenantBillingSnapshot(ctx context.Context, ids []string) (TenantBillingSnapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
-		summaries, missing, err := s.pgBillingSummariesAttempt(ctx, ids)
+		snapshot, err := s.pgBillingSummariesAttempt(ctx, ids)
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || (pgErr.Code != "40001" && pgErr.Code != "40P01" && pgErr.Code != "55P03") {
-			return summaries, missing, err
+			return snapshot, err
 		}
 		if err := sleepContext(ctx, time.Duration(min(attempt+1, 10))*10*time.Millisecond); err != nil {
-			return nil, nil, err
+			return TenantBillingSnapshot{}, err
 		}
 	}
 }
 
-func (s *Store) pgBillingSummariesAttempt(ctx context.Context, ids []string) ([]model.TenantBillingSummary, []string, error) {
+func (s *Store) pgBillingSummariesAttempt(ctx context.Context, ids []string) (TenantBillingSnapshot, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
-		return nil, nil, err
+		return TenantBillingSnapshot{}, err
 	}
 	defer tx.Rollback()
-	state, err := s.pgLoadBillingStateTx(ctx, tx, ids)
+	state, err := s.pgLoadBillingSummaryInputsTx(ctx, tx, ids)
 	if err != nil {
-		return nil, nil, err
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM fugue_tenants WHERE id = ANY($1::text[])`, ids)
-	if err != nil {
-		return nil, nil, err
-	}
-	for rows.Next() {
-		var tenant model.Tenant
-		if err := rows.Scan(&tenant.ID); err != nil {
-			rows.Close()
-			return nil, nil, err
-		}
-		state.Tenants = append(state.Tenants, tenant)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return nil, nil, err
+		return TenantBillingSnapshot{}, err
 	}
 	lockIDs := make([]string, 0, len(state.Tenants))
 	seen := make(map[string]bool, len(state.Tenants))
@@ -75,28 +58,28 @@ func (s *Store) pgBillingSummariesAttempt(ctx context.Context, ids []string) ([]
 	if len(owners) > 0 {
 		events, err := s.pgLoadBillingEventsTx(ctx, tx, owners)
 		if err != nil {
-			return nil, nil, err
+			return TenantBillingSnapshot{}, err
 		}
 		state.BillingEvents = append(state.BillingEvents, events...)
 	}
 	sort.Strings(lockIDs)
 	// Do not wait while holding a subset of ledgers: existing single-tenant
 	// transactions may already hold the consumer and next acquire its owner.
-	rows, err = tx.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 SELECT tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at
 FROM fugue_tenant_billing
 WHERE tenant_id = ANY($1::text[])
 ORDER BY tenant_id
 FOR UPDATE NOWAIT`, lockIDs)
 	if err != nil {
-		return nil, nil, err
+		return TenantBillingSnapshot{}, err
 	}
 	before := make(map[string]model.TenantBilling, len(lockIDs))
 	for rows.Next() {
 		record, err := scanTenantBilling(rows)
 		if err != nil {
 			rows.Close()
-			return nil, nil, err
+			return TenantBillingSnapshot{}, err
 		}
 		state.TenantBilling = append(state.TenantBilling, record)
 		before[record.TenantID] = record
@@ -104,7 +87,7 @@ FOR UPDATE NOWAIT`, lockIDs)
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return nil, nil, err
+		return TenantBillingSnapshot{}, err
 	}
 	previousEvents := len(state.BillingEvents)
 	summaries, missing := accrueBillingSummaries(&state, ids, time.Now().UTC())
@@ -115,12 +98,12 @@ FOR UPDATE NOWAIT`, lockIDs)
 		}
 	}
 	if err := s.pgPersistBillingBatchTx(ctx, tx, changed, state.BillingEvents[previousEvents:]); err != nil {
-		return nil, nil, err
+		return TenantBillingSnapshot{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, nil, fmt.Errorf("commit billing summaries: %w", err)
+		return TenantBillingSnapshot{}, fmt.Errorf("commit billing summaries: %w", err)
 	}
-	return summaries, missing, nil
+	return completeTenantBillingSnapshot(&state, ids, summaries, missing), nil
 }
 
 func (s *Store) pgPersistBillingBatchTx(ctx context.Context, tx *sql.Tx, records []model.TenantBilling, events []model.TenantBillingEvent) error {

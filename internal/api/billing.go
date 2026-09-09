@@ -10,6 +10,7 @@ import (
 	"fugue/internal/appimages"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
@@ -32,15 +33,25 @@ func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 	s.scheduleTenantBillingImageStorageRefresh(tenantID)
 	timings := serverTimingFromContext(r.Context())
 	started := time.Now()
-	summary, err := s.store.GetTenantBillingSummary(tenantID)
+	snapshot, err := s.store.GetTenantBillingSnapshot(r.Context(), []string{tenantID})
 	timings.Add("billing_summary", time.Since(started))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+	if len(snapshot.Billings) != 1 {
+		s.writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	summary := snapshot.Billings[0]
 	if includeCurrentUsage {
 		started = time.Now()
-		summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
+		runtimeTypes := make(map[string]string, len(snapshot.Runtimes))
+		for _, runtime := range snapshot.Runtimes {
+			runtimeTypes[strings.TrimSpace(runtime.ID)] = runtime.Type
+		}
+		apps := s.overlayCurrentResourceUsageOnApps(r.Context(), snapshot.Apps)
+		summary.CurrentUsage = tenantManagedUsageFromSnapshot(tenantID, apps, runtimeTypes)
 		timings.Add("billing_current_usage", time.Since(started))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{

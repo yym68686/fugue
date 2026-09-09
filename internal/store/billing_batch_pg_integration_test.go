@@ -82,8 +82,12 @@ func TestBillingBatchPostgresPreservesAccrualAndCredits(t *testing.T) {
 	}
 	app.Status.CurrentRuntimeID = runtime.ID
 	app.Status.CurrentReplicas = 2
+	app.Spec.Workspace = &model.AppWorkspaceSpec{StorageSize: "3Gi"}
+	app.Spec.Env = map[string]string{"CONFIG": "private"}
+	app.Spec.Files = []model.AppFile{{Path: "/config.txt", Content: strings.Repeat("config", 1024), Secret: true}}
+	spec, _ := json.Marshal(app.Spec)
 	status, _ := json.Marshal(app.Status)
-	if _, err := s.db.Exec(`UPDATE fugue_apps SET status_json = $2 WHERE id = $1`, app.ID, status); err != nil {
+	if _, err := s.db.Exec(`UPDATE fugue_apps SET status_json = $2, spec_json = $3 WHERE id = $1`, app.ID, status, spec); err != nil {
 		t.Fatal(err)
 	}
 	stale := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
@@ -110,6 +114,21 @@ func TestBillingBatchPostgresPreservesAccrualAndCredits(t *testing.T) {
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+	tx, err = s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs, err := s.pgLoadBillingSummaryInputsTx(ctx, tx, []string{consumer.ID})
+	tx.Rollback()
+	if err != nil || len(inputs.Apps) != 1 {
+		t.Fatalf("billing snapshot inputs: %v", err)
+	}
+	if len(inputs.Apps[0].Spec.Env) != 0 || len(inputs.Apps[0].Spec.Files) != 0 {
+		t.Fatal("billing snapshot transferred unrelated secret config")
+	}
+	if inputs.Apps[0].Spec.Workspace == nil || inputs.Apps[0].Spec.Workspace.StorageSize != "3Gi" {
+		t.Fatal("billing snapshot dropped storage accounting input")
 	}
 	started := time.Now()
 	result, missing, err := s.GetTenantBillingSummaries(ctx, []string{owner.ID, consumer.ID, "absent", idle.ID, consumer.ID})

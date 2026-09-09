@@ -11,12 +11,26 @@ import (
 // GetTenantBillingSummaries accrues each distinct tenant once and returns the
 // complete result only after every ledger and counterparty credit is committed.
 func (s *Store) GetTenantBillingSummaries(ctx context.Context, tenantIDs []string) ([]model.TenantBillingSummary, []string, error) {
+	snapshot, err := s.GetTenantBillingSnapshot(ctx, tenantIDs)
+	return snapshot.Billings, snapshot.MissingTenantIDs, err
+}
+
+// TenantBillingSnapshot contains the complete ledger result and its resource
+// inputs for an API usage overlay. It is internal store data, not an HTTP body.
+type TenantBillingSnapshot struct {
+	Billings         []model.TenantBillingSummary
+	MissingTenantIDs []string
+	Apps             []model.App
+	Runtimes         []model.Runtime
+}
+
+func (s *Store) GetTenantBillingSnapshot(ctx context.Context, tenantIDs []string) (TenantBillingSnapshot, error) {
 	ids := make([]string, 0, len(tenantIDs))
 	seen := make(map[string]bool, len(tenantIDs))
 	for _, raw := range tenantIDs {
 		id := strings.TrimSpace(raw)
 		if id == "" {
-			return nil, nil, ErrInvalidInput
+			return TenantBillingSnapshot{}, ErrInvalidInput
 		}
 		if !seen[id] {
 			seen[id] = true
@@ -24,21 +38,42 @@ func (s *Store) GetTenantBillingSummaries(ctx context.Context, tenantIDs []strin
 		}
 	}
 	if len(ids) == 0 || len(ids) > 500 {
-		return nil, nil, ErrInvalidInput
+		return TenantBillingSnapshot{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgGetTenantBillingSummaries(ctx, ids)
+		return s.pgGetTenantBillingSnapshot(ctx, ids)
 	}
-	var summaries []model.TenantBillingSummary
-	var missing []string
+	var snapshot TenantBillingSnapshot
 	err := s.withLockedState(true, func(state *model.State) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		summaries, missing = accrueBillingSummaries(state, ids, time.Now().UTC())
+		summaries, missing := accrueBillingSummaries(state, ids, time.Now().UTC())
+		snapshot = completeTenantBillingSnapshot(state, ids, summaries, missing)
 		return nil
 	})
-	return summaries, missing, err
+	return snapshot, err
+}
+
+func completeTenantBillingSnapshot(state *model.State, ids []string, summaries []model.TenantBillingSummary, missing []string) TenantBillingSnapshot {
+	selected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		selected[id] = true
+	}
+	result := TenantBillingSnapshot{Billings: summaries, MissingTenantIDs: missing, Runtimes: state.Runtimes}
+	index := newAppBackingServiceIndex(state)
+	for _, app := range state.Apps {
+		if !selected[app.TenantID] {
+			continue
+		}
+		normalizeAppStatusForRead(&app)
+		if isDeletedApp(app) {
+			continue
+		}
+		hydrateAppBackingServicesWithIndex(index, &app)
+		result.Apps = append(result.Apps, app)
+	}
+	return result
 }
 
 func accrueBillingSummaries(state *model.State, ids []string, now time.Time) ([]model.TenantBillingSummary, []string) {
