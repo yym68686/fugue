@@ -65,6 +65,16 @@ func imageOperationObservedAt(op model.Operation) time.Time {
 }
 
 func (s *Store) ListImageCandidateOperationsByApps(tenantID string, platformAdmin bool, appIDs []string) (map[string][]model.Operation, error) {
+	return s.listImageCandidateOperationsByApps(tenantID, platformAdmin, appIDs, nil)
+}
+
+func (s *Store) ListImageCandidateOperationsByAppsWithTiming(tenantID string, platformAdmin bool, appIDs []string) (map[string][]model.Operation, SQLReadTiming, error) {
+	var timing SQLReadTiming
+	operations, err := s.listImageCandidateOperationsByApps(tenantID, platformAdmin, appIDs, &timing)
+	return operations, timing, err
+}
+
+func (s *Store) listImageCandidateOperationsByApps(tenantID string, platformAdmin bool, appIDs []string, timing *SQLReadTiming) (map[string][]model.Operation, error) {
 	if !s.usingDatabase() {
 		groups, err := s.ListImageOperationsByApps(tenantID, platformAdmin, appIDs)
 		if err != nil {
@@ -103,14 +113,35 @@ func (s *Store) ListImageCandidateOperationsByApps(tenantID string, platformAdmi
 )
 SELECT id,tenant_id,type,status,app_id,image,source,created_at,updated_at,started_at,completed_at
 FROM ranked WHERE first_input=1 OR latest_input=1 ORDER BY app_id,created_at,id`
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	reader, release, err := acquireSQLRead(ctx, s.db, timing)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	queryStarted := time.Now()
+	rows, err := reader.QueryContext(ctx, query, args...)
+	if timing != nil {
+		timing.Query += time.Since(queryStarted)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	result := make(map[string][]model.Operation, len(ids))
-	for rows.Next() {
+	for {
+		started := time.Now()
+		next := rows.Next()
+		if timing != nil {
+			timing.Rows += time.Since(started)
+		}
+		if !next {
+			break
+		}
+		started = time.Now()
 		op, err := scanImageOperation(rows)
+		if timing != nil {
+			timing.Decode += time.Since(started)
+		}
 		if err != nil {
 			return nil, err
 		}

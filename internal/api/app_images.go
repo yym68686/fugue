@@ -318,11 +318,17 @@ func (s *Server) loadProjectImageUsageOperations(
 		appIDs = append(appIDs, appID)
 	}
 	sort.Strings(appIDs)
-	return s.store.ListImageCandidateOperationsByApps(
+	operations, stages, err := s.store.ListImageCandidateOperationsByAppsWithTiming(
 		principal.TenantID,
 		principal.IsPlatformAdmin(),
 		appIDs,
 	)
+	timing := serverTimingFromContext(ctx)
+	timing.Add("image_ops_acquire", stages.Acquire)
+	timing.Add("image_ops_query", stages.Query)
+	timing.Add("image_ops_rows", stages.Rows)
+	timing.Add("image_ops_decode", stages.Decode)
+	return operations, err
 }
 
 func (s *Server) handleGetAppImages(w http.ResponseWriter, r *http.Request) {

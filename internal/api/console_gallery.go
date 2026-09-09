@@ -1107,7 +1107,16 @@ func (s *Server) handleGetConsoleGallery(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleGetConsoleProjectsSnapshot(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	before := s.store.DatabaseReadStats()
+	started := time.Now()
 	response, err := s.cachedConsoleProjectsSnapshotResponse(r.Context(), principal)
+	if s.log != nil {
+		after := s.store.DatabaseReadStats()
+		s.log.Printf("console snapshot database duration_ms=%.1f open=%d in_use=%d idle=%d max_idle_closed_delta=%d wait_count_delta=%d wait_duration_ms=%.1f",
+			float64(time.Since(started))/float64(time.Millisecond), after.OpenConnections, after.InUse, after.Idle,
+			after.MaxIdleClosed-before.MaxIdleClosed, after.WaitCount-before.WaitCount,
+			float64(after.WaitDuration-before.WaitDuration)/float64(time.Millisecond))
+	}
 	if err != nil {
 		var httpErr consoleHTTPError
 		if errors.As(err, &httpErr) {

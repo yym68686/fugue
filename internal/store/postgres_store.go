@@ -2165,8 +2165,20 @@ status_json, created_at, updated_at FROM fugue_apps`
 	}
 	query += ` ORDER BY created_at ASC`
 
+	var readTiming *SQLReadTiming
+	if timing != nil {
+		readTiming = &SQLReadTiming{}
+	}
+	reader, release, err := acquireSQLRead(ctx, s.db, readTiming)
+	if timing != nil {
+		timing.Acquire = readTiming.Acquire
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	queryStarted := time.Now()
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := reader.QueryContext(ctx, query, args...)
 	if timing != nil {
 		timing.Query = time.Since(queryStarted)
 	}
@@ -2204,6 +2216,8 @@ status_json, created_at, updated_at FROM fugue_apps`
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate apps: %w", err)
 	}
+	_ = rows.Close()
+	release()
 	if hydrateBackingServices {
 		servicesStarted := time.Now()
 		err := s.pgHydrateAppsBackingServices(ctx, apps)

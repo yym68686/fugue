@@ -6,10 +6,10 @@ import (
 	"fugue/internal/model"
 )
 
-// AppListReadTiming measures disjoint client-side read stages. Query includes
-// connection-pool acquisition and the first result; Rows includes driver reads
-// of the remaining results. Decode includes scan, normalization and filtering.
+// AppListReadTiming measures disjoint client-side read stages. Acquire includes
+// establishing a connection when necessary; Query excludes that acquisition.
 type AppListReadTiming struct {
+	Acquire                       time.Duration
 	Query, Rows, Decode, Services time.Duration
 }
 
