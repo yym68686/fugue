@@ -485,11 +485,32 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 			Tolerations:  append([]runtime.Toleration(nil), deployment.Spec.Template.Spec.Tolerations...),
 		}
 		observedKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(current), observedScheduling))
+		// A later pre-apply failure can advance the whole ManagedApp spec
+		// before any Deployment write. The committed app remains a candidate
+		// serving snapshot, but only its exact rendered release key is proof.
+		if observedKey != liveKey && s.Store != nil {
+			committed, err := s.Store.GetApp(current.ID)
+			if err != nil {
+				return model.App{}, fmt.Errorf("read committed app while recovering live release: %w", err)
+			}
+			if committed.ID == current.ID && committed.TenantID == current.TenantID {
+				if normalized, changed := s.normalizeManagedAppRuntimeImageRefs(committed); changed {
+					committed = normalized
+				}
+				committed = s.appWithResolvedLaunchOverride(ctx, committed)
+				committedKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(committed), observedScheduling))
+
+				if committedKey == liveKey {
+					current = committed
+					observedKey = committedKey
+				}
+			}
+		}
 		if observedKey == liveKey {
 			currentScheduling = observedScheduling
 			currentKey = observedKey
 			if s.Logger != nil {
-				s.Logger.Printf("recovered managed app serving scheduling from verified live release app=%s release=%s", current.ID, liveKey)
+				s.Logger.Printf("recovered managed app serving baseline from verified live release app=%s release=%s", current.ID, liveKey)
 			}
 		}
 	}
