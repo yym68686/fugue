@@ -113,6 +113,17 @@ func main() {
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	billingStatementsReady := false
+	go store.RunBillingStatementWarmer(ctx, min(cfg.DatabaseBillingWarmConnections, cfg.DatabaseMaxIdleConnections), func(err error) {
+		if err != nil && ctx.Err() == nil {
+			// Database errors may contain SQL or connection details.
+			logger.Printf("billing statement preparation failed; normal queries remain available")
+		}
+		if err == nil && !billingStatementsReady {
+			logger.Printf("billing statement preparation ready connections=%d", min(cfg.DatabaseBillingWarmConnections, cfg.DatabaseMaxIdleConnections))
+		}
+		billingStatementsReady = err == nil
+	})
 	if err := livediagnostics.StartRuntimeEndpoint(ctx, "api"); err != nil {
 		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
 	}

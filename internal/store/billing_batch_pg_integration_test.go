@@ -130,6 +130,9 @@ func TestBillingBatchPostgresPreservesAccrualAndCredits(t *testing.T) {
 	if inputs.Apps[0].Spec.Workspace == nil || inputs.Apps[0].Spec.Workspace.StorageSize != "3Gi" {
 		t.Fatal("billing snapshot dropped storage accounting input")
 	}
+	if err := s.WarmBillingStatements(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
 	started := time.Now()
 	result, missing, err := s.GetTenantBillingSummaries(ctx, []string{owner.ID, consumer.ID, "absent", idle.ID, consumer.ID})
 	if err != nil {

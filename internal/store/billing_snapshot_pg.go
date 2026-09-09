@@ -9,12 +9,7 @@ import (
 	"fugue/internal/model"
 )
 
-// The billing snapshot is read inside the ledger transaction. Combining its
-// independent relations avoids six inter-region round trips without caching
-// balances or changing the transaction's repeatable-read snapshot.
-func (s *Store) pgLoadBillingSummaryInputsTx(ctx context.Context, tx *sql.Tx, ids []string) (model.State, error) {
-	var raw []byte
-	err := tx.QueryRowContext(ctx, `
+const billingSnapshotInputsSQL = `
 SELECT jsonb_build_object(
   'tenants', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', id)) FROM fugue_tenants WHERE id = ANY($1::text[])), '[]'::jsonb),
   'apps', COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY a.created_at) FROM (
@@ -44,7 +39,14 @@ SELECT jsonb_build_object(
       FROM fugue_billing_events WHERE tenant_id = requested.tenant_id
       ORDER BY created_at DESC, id DESC LIMIT $2
     ) e), '[]'::jsonb)
-)`, ids, billingHistoryLimit).Scan(&raw)
+)`
+
+// The billing snapshot is read inside the ledger transaction. Combining its
+// independent relations avoids six inter-region round trips without caching
+// balances or changing the transaction's repeatable-read snapshot.
+func (s *Store) pgLoadBillingSummaryInputsTx(ctx context.Context, tx *sql.Tx, ids []string) (model.State, error) {
+	var raw []byte
+	err := tx.QueryRowContext(ctx, billingSnapshotInputsSQL, ids, billingHistoryLimit).Scan(&raw)
 	if err != nil {
 		return model.State{}, fmt.Errorf("read billing snapshot inputs: %w", err)
 	}

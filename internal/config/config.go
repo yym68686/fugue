@@ -25,6 +25,7 @@ type APIConfig struct {
 	StorePath                              string
 	DatabaseURL                            string
 	DatabaseMaxIdleConnections             int
+	DatabaseBillingWarmConnections         int
 	DatabaseConnectionMaxIdleTime          time.Duration
 	BootstrapAdminKey                      string
 	WorkloadIdentitySigningKey             string
@@ -327,16 +328,17 @@ type DNSGeoIPOverride struct {
 
 func APIFromEnv() APIConfig {
 	cfg := APIConfig{
-		BindAddr:                      getenv("FUGUE_BIND_ADDR", ":8080"),
-		MetricsBindAddr:               strings.TrimSpace(os.Getenv("FUGUE_API_METRICS_BIND_ADDR")),
-		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
-		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
-		DatabaseMaxIdleConnections:    max(0, getenvInt("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", 16)),
-		DatabaseConnectionMaxIdleTime: getenvDuration("FUGUE_DATABASE_CONNECTION_MAX_IDLE_TIME", 5*time.Minute),
-		BootstrapAdminKey:             getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
-		WorkloadIdentitySigningKey:    strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
-		ControlPlaneNamespace:         getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
-		ControlPlaneReleaseInstance:   getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
+		BindAddr:                       getenv("FUGUE_BIND_ADDR", ":8080"),
+		MetricsBindAddr:                strings.TrimSpace(os.Getenv("FUGUE_API_METRICS_BIND_ADDR")),
+		StorePath:                      getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:                    getenv("FUGUE_DATABASE_URL", ""),
+		DatabaseMaxIdleConnections:     max(0, getenvInt("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", 16)),
+		DatabaseBillingWarmConnections: max(0, min(16, getenvInt("FUGUE_DATABASE_BILLING_WARM_CONNECTIONS", 4))),
+		DatabaseConnectionMaxIdleTime:  getenvDuration("FUGUE_DATABASE_CONNECTION_MAX_IDLE_TIME", 5*time.Minute),
+		BootstrapAdminKey:              getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
+		WorkloadIdentitySigningKey:     strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
+		ControlPlaneNamespace:          getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
+		ControlPlaneReleaseInstance:    getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
 		BackupCoordination: BackupCoordinationConfig{
 			LeaseName:      strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME")),
 			LeaseNamespace: strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE")),

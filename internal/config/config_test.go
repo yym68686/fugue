@@ -8,15 +8,23 @@ import (
 func TestAPIDatabaseIdlePoolConfiguration(t *testing.T) {
 	t.Setenv("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", "")
 	t.Setenv("FUGUE_DATABASE_CONNECTION_MAX_IDLE_TIME", "")
+	t.Setenv("FUGUE_DATABASE_BILLING_WARM_CONNECTIONS", "")
 	defaults := APIFromEnv()
 	if defaults.DatabaseMaxIdleConnections != 16 || defaults.DatabaseConnectionMaxIdleTime != 5*time.Minute {
 		t.Fatal("unexpected database idle pool defaults")
 	}
+	if defaults.DatabaseBillingWarmConnections != 4 {
+		t.Fatal("unexpected statement preparation default")
+	}
 	t.Setenv("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", "2")
 	t.Setenv("FUGUE_DATABASE_CONNECTION_MAX_IDLE_TIME", "30s")
+	t.Setenv("FUGUE_DATABASE_BILLING_WARM_CONNECTIONS", "0")
 	override := APIFromEnv()
 	if override.DatabaseMaxIdleConnections != 2 || override.DatabaseConnectionMaxIdleTime != 30*time.Second {
 		t.Fatal("database idle pool overrides were ignored")
+	}
+	if override.DatabaseBillingWarmConnections != 0 {
+		t.Fatal("statement preparation cannot be disabled independently")
 	}
 }
 

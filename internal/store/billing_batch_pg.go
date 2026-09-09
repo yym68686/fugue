@@ -13,6 +13,32 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+const billingSnapshotLocksSQL = `
+SELECT tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at
+FROM fugue_tenant_billing
+WHERE tenant_id = ANY($1::text[])
+ORDER BY tenant_id
+FOR UPDATE NOWAIT`
+
+const billingSnapshotPersistSQL = `
+INSERT INTO fugue_tenant_billing (tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at)
+SELECT tenant_id, managed_cap, COALESCE(managed_image_storage_gibibytes, 0), balance_microcents, price_book, last_accrued_at, created_at, updated_at
+FROM jsonb_to_recordset($1::jsonb) AS r(tenant_id text, managed_cap jsonb, managed_image_storage_gibibytes bigint, balance_microcents bigint, price_book jsonb, last_accrued_at timestamptz, created_at timestamptz, updated_at timestamptz)
+ORDER BY tenant_id
+ON CONFLICT (tenant_id) DO UPDATE SET
+managed_cap_json = EXCLUDED.managed_cap_json,
+managed_image_storage_gibibytes = EXCLUDED.managed_image_storage_gibibytes,
+balance_microcents = EXCLUDED.balance_microcents,
+price_book_json = EXCLUDED.price_book_json,
+last_accrued_at = EXCLUDED.last_accrued_at,
+created_at = EXCLUDED.created_at,
+updated_at = EXCLUDED.updated_at`
+
+const billingSnapshotEventsSQL = `
+INSERT INTO fugue_billing_events (id, tenant_id, type, amount_microcents, balance_after_microcents, metadata_json, created_at)
+SELECT id, tenant_id, type, amount_microcents, balance_after_microcents, metadata, created_at
+FROM jsonb_to_recordset($1::jsonb) AS e(id text, tenant_id text, type text, amount_microcents bigint, balance_after_microcents bigint, metadata jsonb, created_at timestamptz)`
+
 func (s *Store) pgGetTenantBillingSnapshot(ctx context.Context, ids []string) (TenantBillingSnapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -75,12 +101,7 @@ func (s *Store) pgBillingSummariesAttempt(ctx context.Context, ids []string) (Te
 	// Do not wait while holding a subset of ledgers: existing single-tenant
 	// transactions may already hold the consumer and next acquire its owner.
 	started = time.Now()
-	rows, err := tx.QueryContext(withReadStageName(ctx, "billing_locks"), `
-SELECT tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at
-FROM fugue_tenant_billing
-WHERE tenant_id = ANY($1::text[])
-ORDER BY tenant_id
-FOR UPDATE NOWAIT`, lockIDs)
+	rows, err := tx.QueryContext(withReadStageName(ctx, "billing_locks"), billingSnapshotLocksSQL, lockIDs)
 	if err != nil {
 		recordReadStage(ctx, "billing_locks", started)
 		return TenantBillingSnapshot{}, err
@@ -132,19 +153,7 @@ func (s *Store) pgPersistBillingBatchTx(ctx context.Context, tx *sql.Tx, records
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_tenant_billing (tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at)
-SELECT tenant_id, managed_cap, COALESCE(managed_image_storage_gibibytes, 0), balance_microcents, price_book, last_accrued_at, created_at, updated_at
-FROM jsonb_to_recordset($1::jsonb) AS r(tenant_id text, managed_cap jsonb, managed_image_storage_gibibytes bigint, balance_microcents bigint, price_book jsonb, last_accrued_at timestamptz, created_at timestamptz, updated_at timestamptz)
-ORDER BY tenant_id
-ON CONFLICT (tenant_id) DO UPDATE SET
-managed_cap_json = EXCLUDED.managed_cap_json,
-managed_image_storage_gibibytes = EXCLUDED.managed_image_storage_gibibytes,
-balance_microcents = EXCLUDED.balance_microcents,
-price_book_json = EXCLUDED.price_book_json,
-last_accrued_at = EXCLUDED.last_accrued_at,
-created_at = EXCLUDED.created_at,
-updated_at = EXCLUDED.updated_at`, payload); err != nil {
+		if _, err := tx.ExecContext(ctx, billingSnapshotPersistSQL, payload); err != nil {
 			return fmt.Errorf("persist billing summary ledgers: %w", err)
 		}
 	}
@@ -153,10 +162,7 @@ updated_at = EXCLUDED.updated_at`, payload); err != nil {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_billing_events (id, tenant_id, type, amount_microcents, balance_after_microcents, metadata_json, created_at)
-SELECT id, tenant_id, type, amount_microcents, balance_after_microcents, metadata, created_at
-FROM jsonb_to_recordset($1::jsonb) AS e(id text, tenant_id text, type text, amount_microcents bigint, balance_after_microcents bigint, metadata jsonb, created_at timestamptz)`, payload); err != nil {
+		if _, err := tx.ExecContext(ctx, billingSnapshotEventsSQL, payload); err != nil {
 			return fmt.Errorf("persist billing summary events: %w", err)
 		}
 	}
