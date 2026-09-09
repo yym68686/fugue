@@ -201,7 +201,10 @@ func (s *Server) cachedProjectImageUsageResponse(
 	staleEntry, hasStaleEntry := s.projectImageUsageCache.getEntry(key)
 
 	resultCh := make(chan projectImageUsageLoadResult, 1)
-	refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Preserve the request's Server-Timing recorder while detaching the
+	// refresh from client cancellation. Without this, the expensive cold
+	// image snapshot was invisible in the API's own stage timings.
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	go func() {
 		defer cancel()
 		response, err := s.projectImageUsageCache.do(key, func() (projectImageUsageResponse, error) {
