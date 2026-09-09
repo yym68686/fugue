@@ -8,6 +8,12 @@ import (
 
 func TestBillingReadTimingRecordsActualTransactionStages(t *testing.T) {
 	s := billingBatchPGStore(t)
+	db, err := openPostgresDatabase(s.databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s.db = db
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -21,6 +27,11 @@ func TestBillingReadTimingRecordsActualTransactionStages(t *testing.T) {
 	for _, name := range []string{"billing_begin", "billing_inputs", "billing_owners", "billing_locks", "billing_accrue", "billing_persist", "billing_commit"} {
 		if _, ok := stages[name]; !ok {
 			t.Fatalf("missing transaction stage %s", name)
+		}
+	}
+	for _, name := range []string{"billing_inputs_prepare", "billing_inputs_query", "billing_locks_prepare", "billing_persist_query"} {
+		if _, ok := stages[name]; !ok {
+			t.Fatalf("driver omitted stage %s", name)
 		}
 	}
 }

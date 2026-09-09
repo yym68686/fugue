@@ -40,7 +40,7 @@ func (s *Store) pgBillingSummariesAttempt(ctx context.Context, ids []string) (Te
 	}
 	defer tx.Rollback()
 	started = time.Now()
-	state, err := s.pgLoadBillingSummaryInputsTx(ctx, tx, ids)
+	state, err := s.pgLoadBillingSummaryInputsTx(withReadStageName(ctx, "billing_inputs"), tx, ids)
 	recordReadStage(ctx, "billing_inputs", started)
 	if err != nil {
 		return TenantBillingSnapshot{}, err
@@ -75,7 +75,7 @@ func (s *Store) pgBillingSummariesAttempt(ctx context.Context, ids []string) (Te
 	// Do not wait while holding a subset of ledgers: existing single-tenant
 	// transactions may already hold the consumer and next acquire its owner.
 	started = time.Now()
-	rows, err := tx.QueryContext(ctx, `
+	rows, err := tx.QueryContext(withReadStageName(ctx, "billing_locks"), `
 SELECT tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at
 FROM fugue_tenant_billing
 WHERE tenant_id = ANY($1::text[])
@@ -112,7 +112,7 @@ FOR UPDATE NOWAIT`, lockIDs)
 	}
 	recordReadStage(ctx, "billing_accrue", started)
 	started = time.Now()
-	err = s.pgPersistBillingBatchTx(ctx, tx, changed, state.BillingEvents[previousEvents:])
+	err = s.pgPersistBillingBatchTx(withReadStageName(ctx, "billing_persist"), tx, changed, state.BillingEvents[previousEvents:])
 	recordReadStage(ctx, "billing_persist", started)
 	if err != nil {
 		return TenantBillingSnapshot{}, err

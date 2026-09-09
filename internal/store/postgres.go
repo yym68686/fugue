@@ -2399,7 +2399,7 @@ func (s *Store) ensureDatabaseReady() error {
 	}
 
 	if s.db == nil {
-		db, err := sql.Open("pgx", s.databaseURL)
+		db, err := openPostgresDatabase(s.databaseURL)
 		if err != nil {
 			return fmt.Errorf("open postgres: %w", err)
 		}
