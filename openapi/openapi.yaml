@@ -19344,6 +19344,10 @@ components:
           format: int32
         desired_spec:
           $ref: "#/components/schemas/AppSpec"
+        config_base_spec:
+          description: Configuration observed when an import was accepted. Used to preserve intervening configuration changes when the built artifact is deployed. Secret values are redacted on API reads.
+          readOnly: true
+          $ref: "#/components/schemas/AppSpec"
         desired_source:
           description: Build input requested by the operation.
           $ref: "#/components/schemas/AppSource"

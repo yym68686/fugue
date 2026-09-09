@@ -289,7 +289,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return err
 	}
 
-	deployOp, err := s.Store.CreateOperation(model.Operation{
+	deployOp, err := s.Store.CreateDeployOperationAfterImport(op.ID, model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     op.RequestedByType,
@@ -302,13 +302,14 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if err != nil {
 		return fmt.Errorf("queue deploy after import: %w", err)
 	}
+	finalSpec = cloneImportSpec(*deployOp.DesiredSpec)
 	s.recordImportQueuedDeployReleaseSteps(op, app, deployOp)
 	s.recordOperationEvidenceBestEffort(model.OperationEvidence{
 		TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID, OperationID: op.ID,
 		Type: "deploy_queued", Source: model.OperationEvidenceSourceImportController,
 		Severity: model.OperationEvidenceSeverityInfo, Confidence: model.OperationEvidenceConfidenceConfirmed,
 		Summary: "Build completed; deployment queued", RedactionStatus: model.OperationEvidenceRedactionRedacted,
-		Payload: map[string]any{"queued_deploy_operation_id": deployOp.ID}, PayloadVersion: 1,
+		Payload: map[string]any{"queued_deploy_operation_id": deployOp.ID, "configuration_baseline_recorded": op.ConfigBaseSpec != nil}, PayloadVersion: 1,
 	})
 	timer.Mark("queue_deploy")
 	s.updateOperationProgress(op.ID, fmt.Sprintf("import build completed; queued deploy operation %s", deployOp.ID))

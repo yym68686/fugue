@@ -3158,6 +3158,12 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := s.pgHydrateAppBackingServicesWithQueryer(ctx, tx, &app); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
+	if err := rebaseImportDeployConfiguration(&op, app, policy.ImportConfigBase); err != nil {
+		return model.Operation{}, operationCreateOutcome{}, err
+	}
+	if op.Type == model.OperationTypeImport {
+		op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
+	}
 	if err := lockDataReferencesTx(ctx, tx, op.TenantID, op.DesiredSpec); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
@@ -4154,7 +4160,7 @@ func (s *Store) pgListImageOperationsByApps(tenantID string, platformAdmin bool,
 	for _, id := range appIDs {
 		args = append(args, id)
 	}
-	query := fmt.Sprintf(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', desired_source_json, created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN (%s) AND desired_source_json IS NOT NULL`, sqlPlaceholderList(1, len(appIDs)))
+	query := fmt.Sprintf(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', desired_source_json - 'config_base_spec', created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN (%s) AND desired_source_json IS NOT NULL`, sqlPlaceholderList(1, len(appIDs)))
 	if !platformAdmin {
 		args = append(args, tenantID)
 		query += fmt.Sprintf(" AND tenant_id = $%d", len(args))
@@ -6087,6 +6093,10 @@ func scanOperation(scanner sqlScanner) (model.Operation, error) {
 	op.DesiredSpec = desiredSpec
 	op.DesiredSource = desiredSource
 	op.DesiredOriginSource = desiredOriginSource
+	op.ConfigBaseSpec, err = decodeOperationConfigBase(desiredSourceRaw)
+	if err != nil {
+		return model.Operation{}, err
+	}
 	if startedAt.Valid {
 		op.StartedAt = &startedAt.Time
 	}

@@ -45,11 +45,12 @@ func TestListOperationSummariesOmitsDesiredState(t *testing.T) {
 		ImageRef: "ghcr.io/example/demo:new",
 	}
 	op, err := s.CreateOperation(model.Operation{
-		TenantID:      tenant.ID,
-		Type:          model.OperationTypeDeploy,
-		AppID:         app.ID,
-		DesiredSpec:   &desiredSpec,
-		DesiredSource: &desiredSource,
+		TenantID:       tenant.ID,
+		Type:           model.OperationTypeDeploy,
+		AppID:          app.ID,
+		DesiredSpec:    &desiredSpec,
+		ConfigBaseSpec: &desiredSpec,
+		DesiredSource:  &desiredSource,
 	})
 	if err != nil {
 		t.Fatalf("create operation: %v", err)
@@ -62,7 +63,7 @@ func TestListOperationSummariesOmitsDesiredState(t *testing.T) {
 	if len(summaries) != 1 || summaries[0].ID != op.ID {
 		t.Fatalf("unexpected summaries: %+v", summaries)
 	}
-	if summaries[0].DesiredSpec != nil || summaries[0].DesiredSource != nil || summaries[0].DesiredOriginSource != nil {
+	if summaries[0].DesiredSpec != nil || summaries[0].ConfigBaseSpec != nil || summaries[0].DesiredSource != nil || summaries[0].DesiredOriginSource != nil {
 		t.Fatalf("expected desired state to be omitted from summary, got %+v", summaries[0])
 	}
 

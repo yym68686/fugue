@@ -97,6 +97,7 @@ func managedPostgresResizeRetryMatches(existing, candidate model.Operation) bool
 
 func cloneOperation(op model.Operation) model.Operation {
 	op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
+	op.ConfigBaseSpec = cloneAppSpec(op.ConfigBaseSpec)
 	op.DesiredSource = cloneAppSource(op.DesiredSource)
 	op.DesiredOriginSource = cloneAppSource(op.DesiredOriginSource)
 	op.ControllerTimingSegments = cloneOperationControllerTimingSegments(op.ControllerTimingSegments)

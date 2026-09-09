@@ -17,8 +17,9 @@ func TestImageOperationProjectionPreservesCandidateInputs(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	op := model.Operation{ID: "operation", TenantID: "tenant", AppID: "app", CreatedAt: now, UpdatedAt: now, StartedAt: &now, CompletedAt: &now,
-		DesiredSpec:   &model.AppSpec{Image: "registry.example/demo:v1", Env: map[string]string{"SECRET": "hidden"}},
-		DesiredSource: &model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://github.com/example/demo", CommitSHA: "abc", ResolvedImageRef: "registry.example/demo:v1"}}
+		DesiredSpec:    &model.AppSpec{Image: "registry.example/demo:v1", Env: map[string]string{"SECRET": "hidden"}},
+		ConfigBaseSpec: &model.AppSpec{Env: map[string]string{"SECRET": "baseline"}},
+		DesiredSource:  &model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://github.com/example/demo", CommitSHA: "abc", ResolvedImageRef: "registry.example/demo:v1"}}
 	if err := s.withLockedState(true, func(state *model.State) error {
 		state.Operations = []model.Operation{op}
 		return nil
@@ -35,6 +36,7 @@ func TestImageOperationProjectionPreservesCandidateInputs(t *testing.T) {
 	}
 	want := baseline[op.AppID][0]
 	want.DesiredSpec = &model.AppSpec{Image: op.DesiredSpec.Image}
+	want.ConfigBaseSpec = nil
 	if !reflect.DeepEqual(got[op.AppID], []model.Operation{want}) {
 		t.Fatalf("projection changed inputs: %+v", got)
 	}
@@ -60,7 +62,7 @@ func TestPostgresImageOperationProjectionUsesOneScopedQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectQuery(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', desired_source_json, created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN \(\$1, \$2\) AND desired_source_json IS NOT NULL AND tenant_id = \$3 ORDER BY app_id ASC, created_at ASC`).
+	mock.ExpectQuery(`SELECT id, tenant_id, type, status, app_id, desired_spec_json->>'image', desired_source_json - 'config_base_spec', created_at, updated_at, started_at, completed_at FROM fugue_operations WHERE app_id IN \(\$1, \$2\) AND desired_source_json IS NOT NULL AND tenant_id = \$3 ORDER BY app_id ASC, created_at ASC`).
 		WithArgs("app-a", "app-b", "tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "tenant_id", "type", "status", "app_id", "image", "source", "created", "updated", "started", "completed"}).
 			AddRow("op", "tenant", "import", "running", "app-a", "registry.example/demo:v0", encoded, now, now, now, nil))

@@ -10,6 +10,7 @@ import (
 type operationCreatePolicy struct {
 	SourceSessionID               string
 	ExpectedAppSpecHash           string
+	ImportConfigBase              *model.AppSpec
 	RejectActiveDeployForApp      bool
 	RejectNoopDeploy              bool
 	ReuseActiveImageRebuildForApp bool

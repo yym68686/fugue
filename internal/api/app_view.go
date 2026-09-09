@@ -44,6 +44,10 @@ func redactAppForDebugBundle(app model.App) model.App {
 
 func redactOperationForDebugBundle(op model.Operation) model.Operation {
 	out := op
+	if op.ConfigBaseSpec != nil {
+		spec := redactAppSpecForDebugBundle(*op.ConfigBaseSpec)
+		out.ConfigBaseSpec = &spec
+	}
 	if op.DesiredSpec != nil {
 		spec := redactAppSpecForDebugBundle(*op.DesiredSpec)
 		out.DesiredSpec = &spec

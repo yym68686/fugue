@@ -2934,10 +2934,16 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		if app.TenantID != op.TenantID {
 			return ErrNotFound
 		}
+		hydrateAppBackingServices(state, &app)
+		if err := rebaseImportDeployConfiguration(&op, app, policy.ImportConfigBase); err != nil {
+			return err
+		}
 		if err := validateDataReferencesState(state, op.TenantID, op.DesiredSpec); err != nil {
 			return err
 		}
-		hydrateAppBackingServices(state, &app)
+		if op.Type == model.OperationTypeImport {
+			op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
+		}
 		if policy.ExpectedAppSpecHash != "" && (model.AppSpecSHA256(app.Spec) != policy.ExpectedAppSpecHash || hasInFlightOperationForApp(state.Operations, app.ID)) {
 			return ErrConflict
 		}
@@ -3482,6 +3488,7 @@ func (s *Store) ListOperationSummariesByApp(tenantID string, platformAdmin bool,
 
 func operationSummary(op model.Operation) model.Operation {
 	op.DesiredSpec = nil
+	op.ConfigBaseSpec = nil
 	op.DesiredSource = nil
 	op.DesiredOriginSource = nil
 	return op
@@ -3743,6 +3750,7 @@ func (s *Store) ListImageOperationsByApps(tenantID string, platformAdmin bool, a
 			if op.DesiredSpec != nil {
 				op.DesiredSpec = &model.AppSpec{Image: op.DesiredSpec.Image}
 			}
+			op.ConfigBaseSpec = nil
 			out[op.AppID] = append(out[op.AppID], op)
 		}
 		for id := range out {

@@ -16,6 +16,7 @@ type persistedAppSourceState struct {
 type persistedOperationSourceState struct {
 	DesiredSource       *model.AppSource `json:"desired_source,omitempty"`
 	DesiredOriginSource *model.AppSource `json:"desired_origin_source,omitempty"`
+	ConfigBaseSpec      *model.AppSpec   `json:"config_base_spec,omitempty"`
 }
 
 func marshalAppSourceState(app model.App) ([]byte, error) {
@@ -77,13 +78,25 @@ func decodeLegacyAppSourceState(raw []byte) (*model.AppSource, *model.AppSource,
 }
 
 func marshalOperationSourceState(op model.Operation) ([]byte, error) {
-	if op.DesiredSource == nil && op.DesiredOriginSource == nil {
+	if op.DesiredSource == nil && op.DesiredOriginSource == nil && op.ConfigBaseSpec == nil {
 		return nil, nil
 	}
 	return json.Marshal(persistedOperationSourceState{
 		DesiredSource:       model.CloneAppSource(op.DesiredSource),
 		DesiredOriginSource: model.CloneAppSource(op.DesiredOriginSource),
+		ConfigBaseSpec:      cloneAppSpec(op.ConfigBaseSpec),
 	})
+}
+
+func decodeOperationConfigBase(raw []byte) (*model.AppSpec, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
+	var envelope persistedOperationSourceState
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	return cloneAppSpec(envelope.ConfigBaseSpec), nil
 }
 
 func decodeOperationSourceState(raw []byte) (*model.AppSource, *model.AppSource, error) {

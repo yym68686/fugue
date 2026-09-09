@@ -2952,6 +2952,7 @@ type Operation struct {
 	TargetRuntimeID          string                             `json:"target_runtime_id,omitempty"`
 	DesiredReplicas          *int                               `json:"desired_replicas,omitempty"`
 	DesiredSpec              *AppSpec                           `json:"desired_spec,omitempty"`
+	ConfigBaseSpec           *AppSpec                           `json:"config_base_spec,omitempty"`
 	DesiredSource            *AppSource                         `json:"desired_source,omitempty"`
 	DesiredOriginSource      *AppSource                         `json:"desired_origin_source,omitempty"`
 	ResultMessage            string                             `json:"result_message,omitempty"`
