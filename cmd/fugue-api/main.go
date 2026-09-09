@@ -42,6 +42,7 @@ func main() {
 	if err := store.Init(); err != nil {
 		logger.Fatalf("init store: %v", err)
 	}
+	store.ConfigureDatabasePool(cfg.DatabaseMaxIdleConnections, cfg.DatabaseConnectionMaxIdleTime)
 
 	authenticator := auth.New(store, cfg.BootstrapAdminKey)
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey

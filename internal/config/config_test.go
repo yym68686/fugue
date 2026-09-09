@@ -5,6 +5,21 @@ import (
 	"time"
 )
 
+func TestAPIDatabaseIdlePoolConfiguration(t *testing.T) {
+	t.Setenv("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", "")
+	t.Setenv("FUGUE_DATABASE_CONNECTION_MAX_IDLE_TIME", "")
+	defaults := APIFromEnv()
+	if defaults.DatabaseMaxIdleConnections != 16 || defaults.DatabaseConnectionMaxIdleTime != 5*time.Minute {
+		t.Fatal("unexpected database idle pool defaults")
+	}
+	t.Setenv("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", "2")
+	t.Setenv("FUGUE_DATABASE_CONNECTION_MAX_IDLE_TIME", "30s")
+	override := APIFromEnv()
+	if override.DatabaseMaxIdleConnections != 2 || override.DatabaseConnectionMaxIdleTime != 30*time.Second {
+		t.Fatal("database idle pool overrides were ignored")
+	}
+}
+
 func TestEdgeWorkloadIdentityCannotBeInjectedThroughEnvironment(t *testing.T) {
 	t.Setenv("FUGUE_EDGE_SLOT", "forged-slot")
 	t.Setenv("FUGUE_EDGE_ID", "forged-edge")

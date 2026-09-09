@@ -26,6 +26,8 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -580,51 +582,60 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		}
 		timings.Add("runtime_sync", time.Since(syncStartedAt))
 	}
-	managedSharedRuntime, err := s.store.GetRuntime(tenantSharedRuntimeID)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
 	_, defaultSharedDisplayRegion, _ := selectDefaultManagedSharedLocation(snapshots)
-
-	storeNodesStartedAt := time.Now()
-	runtimes, err := s.store.ListNodes(principal.TenantID, principal.IsPlatformAdmin())
-	timings.Add("store_nodes", time.Since(storeNodesStartedAt))
-	if err != nil {
+	var (
+		managedSharedRuntime model.Runtime
+		runtimes             []model.Runtime
+		machines             []model.Machine
+		apps                 []model.App
+		services             []model.BackingService
+	)
+	reads := new(errgroup.Group)
+	reads.Go(func() error {
+		var readErr error
+		managedSharedRuntime, readErr = s.store.GetRuntime(tenantSharedRuntimeID)
+		return readErr
+	})
+	reads.Go(func() error {
+		started := time.Now()
+		var readErr error
+		runtimes, readErr = s.store.ListNodes(principal.TenantID, principal.IsPlatformAdmin())
+		timings.Add("store_nodes", time.Since(started))
+		return readErr
+	})
+	if principal.IsPlatformAdmin() {
+		reads.Go(func() error {
+			started := time.Now()
+			var readErr error
+			machines, readErr = s.store.ListMachines(principal.TenantID, true)
+			timings.Add("store_machines", time.Since(started))
+			return readErr
+		})
+	}
+	reads.Go(func() error {
+		started := time.Now()
+		var readErr error
+		apps, readErr = s.listAppSummariesWithTiming(r.Context(), principal.TenantID, principal.IsPlatformAdmin(), false)
+		timings.Add("store_apps", time.Since(started))
+		return readErr
+	})
+	reads.Go(func() error {
+		started := time.Now()
+		var readErr error
+		services, readErr = s.store.ListBackingServices(principal.TenantID, principal.IsPlatformAdmin())
+		timings.Add("store_services", time.Since(started))
+		return readErr
+	})
+	if err := reads.Wait(); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-
-	machines := []model.Machine(nil)
 	if principal.IsPlatformAdmin() {
-		storeMachinesStartedAt := time.Now()
-		machines, err = s.store.ListMachines(principal.TenantID, true)
-		timings.Add("store_machines", time.Since(storeMachinesStartedAt))
-		if err != nil {
-			s.writeStoreError(w, err)
-			return
-		}
 		machines, err = s.ensureBootstrapControlPlaneMachines(snapshots, runtimes, machines)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
-	}
-
-	storeAppsStartedAt := time.Now()
-	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
-	timings.Add("store_apps", time.Since(storeAppsStartedAt))
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-
-	storeServicesStartedAt := time.Now()
-	services, err := s.store.ListBackingServices(principal.TenantID, principal.IsPlatformAdmin())
-	timings.Add("store_services", time.Since(storeServicesStartedAt))
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
 	}
 
 	workloadResolver := newClusterWorkloadResolver(apps, services)
