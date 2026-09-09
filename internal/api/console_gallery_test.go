@@ -280,6 +280,35 @@ func TestConsoleGallerySkipsResourceOverlayByDefault(t *testing.T) {
 	}
 }
 
+func TestConsoleProjectsSnapshotReturnsCompleteProjectCardData(t *testing.T) {
+	t.Parallel()
+	_, server, key, app := setupSearchTestServer(t)
+
+	recorder := performJSONRequest(
+		t,
+		server,
+		http.MethodGet,
+		"/v1/console/projects/snapshot",
+		key,
+		nil,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("snapshot response: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response consoleProjectsSnapshotResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Projects) != 1 || response.Projects[0].ID != app.ProjectID {
+		t.Fatalf("snapshot did not return the visible project: %+v", response.Projects)
+	}
+	if response.ImageUsage.Projects == nil {
+		t.Fatal("snapshot omitted the complete image usage collection")
+	}
+	if response.ImageUsage.MeasurementStatus == "" {
+		t.Fatal("snapshot omitted image measurement status")
+	}
+}
+
 func TestConsoleGalleryHashIgnoresInactiveDatabaseSwitchoverOperations(t *testing.T) {
 	t.Parallel()
 

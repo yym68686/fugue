@@ -274,6 +274,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/cluster/workloads/{namespace}/{kind}/{name}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetClusterWorkload)))
 	mux.Handle("GET /v1/console/gallery", s.auth.RequireAPI(http.HandlerFunc(s.handleGetConsoleGallery)))
 	mux.Handle("GET /v1/console/gallery/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamConsoleGallery)))
+	mux.Handle("GET /v1/console/projects/snapshot", s.auth.RequireAPI(http.HandlerFunc(s.handleGetConsoleProjectsSnapshot)))
 	mux.Handle("GET /v1/console/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetConsoleProject)))
 	mux.Handle("GET /v1/data/backends", s.auth.RequireAPI(http.HandlerFunc(s.handleListDataBackends)))
 	mux.Handle("POST /v1/data/backends", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateDataBackend)))

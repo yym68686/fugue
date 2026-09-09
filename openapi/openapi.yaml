@@ -3436,6 +3436,23 @@ paths:
                 $ref: "#/components/schemas/ConsoleGalleryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/console/projects/snapshot:
+    get:
+      operationId: getConsoleProjectsSnapshot
+      summary: Get Complete Console Project Snapshot
+      tags: [Console]
+      x-fugue-handler: handleGetConsoleProjectsSnapshot
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Complete project cards, current resource rollups, and image usage from one consistent read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleProjectsSnapshotResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/console/gallery/stream:
     get:
       operationId: streamConsoleGallery
@@ -20718,6 +20735,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ConsoleProjectSummary"
+    ConsoleProjectsSnapshotResponse:
+      type: object
+      additionalProperties: false
+      required: [projects, image_usage]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConsoleProjectSummary"
+        image_usage:
+          $ref: "#/components/schemas/ProjectImageUsageResponse"
     ConsoleProjectDetailResponse:
       type: object
       additionalProperties: false

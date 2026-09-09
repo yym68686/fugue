@@ -21,11 +21,12 @@ import (
 )
 
 const (
-	consoleGalleryStreamPollInterval      = 5 * time.Second
-	consoleGalleryStreamHeartbeatInterval = 15 * time.Second
-	consoleGalleryStreamRetryMS           = 5000
-	defaultConsoleGalleryCacheTTL         = 5 * time.Second
-	consoleProjectOperationsRecentLimit   = 12
+	consoleGalleryStreamPollInterval       = 5 * time.Second
+	consoleGalleryStreamHeartbeatInterval  = 15 * time.Second
+	consoleGalleryStreamRetryMS            = 5000
+	defaultConsoleGalleryCacheTTL          = 5 * time.Second
+	defaultConsoleProjectsSnapshotCacheTTL = 5 * time.Second
+	consoleProjectOperationsRecentLimit    = 12
 )
 
 type consoleHTTPError struct {
@@ -62,6 +63,14 @@ type consoleProjectSummary struct {
 
 type consoleGalleryResponse struct {
 	Projects []consoleProjectSummary `json:"projects"`
+}
+
+// consoleProjectsSnapshotResponse is the complete data set rendered by the
+// project cards. It avoids making the Web layer stitch together independently
+// read gallery, app-usage, and image-usage responses.
+type consoleProjectsSnapshotResponse struct {
+	Projects   []consoleProjectSummary   `json:"projects"`
+	ImageUsage projectImageUsageResponse `json:"image_usage"`
 }
 
 type consoleProjectDetailResponse struct {
@@ -778,7 +787,14 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 	if err := loadGroup.Wait(); err != nil {
 		return consoleGalleryResponse{}, err
 	}
+	return buildConsoleGalleryResponseFromInputs(projects, apps, operations), nil
+}
 
+func buildConsoleGalleryResponseFromInputs(
+	projects []model.Project,
+	apps []model.App,
+	operations []model.Operation,
+) consoleGalleryResponse {
 	activeOperationsByAppID := collectConsoleActiveOperations(operations)
 	projectsByID := make(map[string]*model.Project, len(projects))
 	projectApps := make(map[string][]model.App)
@@ -912,7 +928,7 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 		response.Projects = append(response.Projects, record.project)
 	}
 
-	return response, nil
+	return response
 }
 
 func (s *Server) buildConsoleGalleryHash(ctx context.Context, principal model.Principal, includeLiveStatus bool) (string, error) {
@@ -1087,6 +1103,148 @@ func (s *Server) handleGetConsoleGallery(w http.ResponseWriter, r *http.Request)
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleGetConsoleProjectsSnapshot(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	response, err := s.cachedConsoleProjectsSnapshotResponse(r.Context(), principal)
+	if err != nil {
+		var httpErr consoleHTTPError
+		if errors.As(err, &httpErr) {
+			httpx.WriteError(w, httpErr.status, httpErr.message)
+			return
+		}
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) cachedConsoleProjectsSnapshotResponse(
+	ctx context.Context,
+	principal model.Principal,
+) (consoleProjectsSnapshotResponse, error) {
+	return s.consoleProjectsSnapshotCache.do(
+		consoleProjectsSnapshotCacheKey(principal),
+		func() (consoleProjectsSnapshotResponse, error) {
+			return s.buildConsoleProjectsSnapshotResponse(ctx, principal)
+		},
+	)
+}
+
+func consoleProjectsSnapshotCacheKey(principal model.Principal) string {
+	return principalVisibilityCacheKey(principal)
+}
+
+func (s *Server) buildConsoleProjectsSnapshotResponse(
+	ctx context.Context,
+	principal model.Principal,
+) (consoleProjectsSnapshotResponse, error) {
+	timings := serverTimingFromContext(ctx)
+
+	var (
+		projects   []model.Project
+		apps       []model.App
+		operations []model.Operation
+	)
+	loadGroup, loadCtx := errgroup.WithContext(ctx)
+	loadGroup.Go(func() error {
+		startedAt := time.Now()
+		result, err := s.store.ListProjects(principal.TenantID)
+		timings.Add("snapshot_projects", time.Since(startedAt))
+		if err != nil {
+			return err
+		}
+		projects = result
+		return nil
+	})
+	loadGroup.Go(func() error {
+		startedAt := time.Now()
+		result, err := s.listAppSummariesWithTiming(
+			loadCtx,
+			principal.TenantID,
+			principal.IsPlatformAdmin(),
+			true,
+		)
+		timings.Add("snapshot_apps", time.Since(startedAt))
+		if err != nil {
+			return err
+		}
+		apps = result
+		return nil
+	})
+	loadGroup.Go(func() error {
+		startedAt := time.Now()
+		result, err := s.store.ListActiveOperations()
+		timings.Add("snapshot_operations", time.Since(startedAt))
+		if err != nil {
+			return err
+		}
+		operations = scopeConsoleActiveOperations(principal, result)
+		return nil
+	})
+	if err := loadGroup.Wait(); err != nil {
+		return consoleProjectsSnapshotResponse{}, err
+	}
+
+	visibleApps := visibleConsoleApps(apps)
+	imageUsage, imageUsageCached := s.projectImageUsageCache.get(projectImageUsageCacheKey(principal))
+	imageUsageResult := make(chan struct {
+		response projectImageUsageResponse
+		err      error
+	}, 1)
+	if !imageUsageCached {
+		go func() {
+			opsStartedAt := time.Now()
+			opsByAppID, err := s.loadProjectImageUsageOperations(ctx, principal, apps)
+			timings.Add("snapshot_image_operations", time.Since(opsStartedAt))
+			if err != nil {
+				imageUsageResult <- struct {
+					response projectImageUsageResponse
+					err      error
+				}{err: err}
+				return
+			}
+
+			buildStartedAt := time.Now()
+			response, err := s.buildProjectImageUsageResponse(
+				ctx,
+				visibleAppsForImageInventory(apps),
+				opsByAppID,
+			)
+			timings.Add("snapshot_image_usage", time.Since(buildStartedAt))
+			if err == nil {
+				s.projectImageUsageCache.set(projectImageUsageCacheKey(principal), response)
+			}
+			imageUsageResult <- struct {
+				response projectImageUsageResponse
+				err      error
+			}{response: response, err: err}
+		}()
+	}
+
+	liveStartedAt := time.Now()
+	visibleApps = s.overlayManagedAppStatuses(ctx, visibleApps)
+	timings.Add("snapshot_live_status", time.Since(liveStartedAt))
+	resourceStartedAt := time.Now()
+	visibleApps = s.overlayCurrentResourceUsageOnApps(ctx, visibleApps)
+	timings.Add("snapshot_resource_usage", time.Since(resourceStartedAt))
+
+	if !imageUsageCached {
+		result := <-imageUsageResult
+		if result.err != nil {
+			return consoleProjectsSnapshotResponse{}, consoleHTTPError{
+				message: result.err.Error(),
+				status:  http.StatusBadGateway,
+			}
+		}
+		imageUsage = result.response
+	}
+
+	return consoleProjectsSnapshotResponse{
+		Projects:   buildConsoleGalleryResponseFromInputs(projects, visibleApps, operations).Projects,
+		ImageUsage: imageUsage,
+	}, nil
 }
 
 func (s *Server) cachedConsoleGalleryResponse(

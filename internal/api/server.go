@@ -120,6 +120,7 @@ type Server struct {
 	nodeUpdaterEdgeIdentityMu              sync.Mutex
 	nodeUpdaterEdgeIdentityLookups         map[string]uint64
 	consoleGalleryCache                    expiringResponseCache[consoleGalleryResponse]
+	consoleProjectsSnapshotCache           expiringResponseCache[consoleProjectsSnapshotResponse]
 	billingImageStorageRefresh             billingImageStorageRefreshScheduler
 	sourceUploadSlots                      chan struct{}
 	newLogsClient                          func(namespace string) (appLogsClient, error)
@@ -279,6 +280,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		edgeRouteSourceHeartbeats:              map[string]uint64{"edge_control": 0, "core_api": 0, "unknown": 0, "other": 0},
 		edgeRouteInventoryFallbacks:            map[string]uint64{"fencing_not_ready": 0, "active_inventory_empty": 0},
 		consoleGalleryCache:                    newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
+		consoleProjectsSnapshotCache:           newExpiringResponseCache[consoleProjectsSnapshotResponse](defaultConsoleProjectsSnapshotCacheTTL),
 		sourceUploadSlots:                      make(chan struct{}, maxConcurrentSourceUploadRequests),
 		billingImageStorageRefresh:             newBillingImageStorageRefreshScheduler(0, 0),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
