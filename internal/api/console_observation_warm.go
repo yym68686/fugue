@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -41,4 +42,13 @@ func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) {
 			}
 		}
 	})
+	if s.store != nil && strings.EqualFold(strings.TrimSpace(s.imageStoreMode), "distributed") {
+		startLoop(defaultProjectImageUsageCacheTTL/2, func() {
+			refreshCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			if err := s.refreshDistributedProjectImageUsageSnapshots(refreshCtx); err != nil && ctx.Err() == nil && s.log != nil {
+				s.log.Printf("project image snapshot warm failed: %v", err)
+			}
+		})
+	}
 }

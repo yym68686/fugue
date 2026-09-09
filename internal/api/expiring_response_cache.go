@@ -51,11 +51,21 @@ func (c *expiringResponseCache[T]) get(key string) (T, bool) {
 }
 
 func (c *expiringResponseCache[T]) set(key string, value T) {
+	c.setUnlessUpdatedAfter(key, value, time.Time{})
+}
+
+// A background read must not overwrite a response published while it was
+// running. A zero start time keeps the normal unconditional set behavior.
+func (c *expiringResponseCache[T]) setUnlessUpdatedAfter(key string, value T, started time.Time) {
 	if c == nil || key == "" || c.ttl <= 0 {
 		return
 	}
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if current, ok := c.byKey[key]; ok && !started.IsZero() && current.expiresAt.Add(-c.ttl).After(started) {
+		return
+	}
 	if c.byKey == nil {
 		c.byKey = make(map[string]expiringResponseCacheEntry[T])
 	}
@@ -64,7 +74,6 @@ func (c *expiringResponseCache[T]) set(key string, value T) {
 		expiresAt: time.Now().Add(c.ttl),
 		ok:        true,
 	}
-	c.mu.Unlock()
 }
 
 func (c *expiringResponseCache[T]) clear(key string) {

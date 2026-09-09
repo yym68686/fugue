@@ -32,6 +32,7 @@ type distributedImageUsageEvidence struct {
 	staleLocationReferenceIndex distributedImageReferenceIndex
 	staleManifestsByKey         map[string][]model.ImageCacheManifest
 	observedAt                  time.Time
+	manifestObservedAt          time.Time
 }
 
 type distributedImageCandidateMeasurement struct {
@@ -147,6 +148,9 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 		index := evidence.staleManifestsByKey
 		if distributedImageManifestIsFresh(manifest, cutoff) {
 			index = evidence.manifestsByKey
+			if manifest.LastSeenAt.After(evidence.manifestObservedAt) {
+				evidence.manifestObservedAt = manifest.LastSeenAt.UTC()
+			}
 			if manifest.LastSeenAt.After(evidence.observedAt) {
 				evidence.observedAt = manifest.LastSeenAt.UTC()
 			}
@@ -257,11 +261,7 @@ func aggregateProjectImageUsageInventories(
 	return response
 }
 
-func (s *Server) buildDistributedProjectImageUsageResponse(
-	ctx context.Context,
-	apps []model.App,
-	opsByAppID map[string][]model.Operation,
-) (projectImageUsageResponse, error) {
+func newDistributedProjectImageUsageResponse(observedAt time.Time) projectImageUsageResponse {
 	response := projectImageUsageResponse{
 		RegistryConfigured: false,
 		ReclaimNote:        distributedImageReclaimNote,
@@ -270,22 +270,43 @@ func (s *Server) buildDistributedProjectImageUsageResponse(
 		MeasurementNote:    distributedImageUsageMeasurementNote,
 		Projects:           []projectImageUsageSummary{},
 	}
+	if !observedAt.IsZero() {
+		observed := observedAt.UTC()
+		response.ObservedAt = &observed
+	}
+	return response
+}
+
+func (s *Server) buildDistributedProjectImageUsageResponse(
+	ctx context.Context,
+	apps []model.App,
+	opsByAppID map[string][]model.Operation,
+) (projectImageUsageResponse, error) {
 	evidence, err := s.loadDistributedImageUsageEvidence(ctx, apps)
 	if err != nil {
 		return projectImageUsageResponse{}, err
 	}
-	if !evidence.observedAt.IsZero() {
-		observed := evidence.observedAt.UTC()
-		response.ObservedAt = &observed
+	inventoryResults, err := s.buildDistributedImageUsageInventories(ctx, apps, opsByAppID, evidence)
+	if err != nil {
+		return projectImageUsageResponse{}, err
 	}
+	started := time.Now()
+	response := aggregateProjectImageUsageInventories(newDistributedProjectImageUsageResponse(evidence.observedAt), inventoryResults)
+	serverTimingFromContext(ctx).Add("image_evidence_aggregate", time.Since(started))
+	return response, nil
+}
 
+func (s *Server) buildDistributedImageUsageInventories(ctx context.Context, apps []model.App, opsByAppID map[string][]model.Operation, evidence distributedImageUsageEvidence) ([]projectImageUsageInventoryResult, error) {
 	inventoryResults := make([]projectImageUsageInventoryResult, len(apps))
 	started := time.Now()
-	inventoryGroup, _ := errgroup.WithContext(ctx)
+	inventoryGroup, buildCtx := errgroup.WithContext(ctx)
 	inventoryGroup.SetLimit(projectImageUsageAppBuildLimit)
 	for index, app := range apps {
 		index, app := index, app
 		inventoryGroup.Go(func() error {
+			if err := buildCtx.Err(); err != nil {
+				return err
+			}
 			inventoryResults[index] = projectImageUsageInventoryResult{
 				App:       app,
 				Inventory: s.buildDistributedAppImageInventory(app, opsByAppID[app.ID], evidence),
@@ -294,13 +315,10 @@ func (s *Server) buildDistributedProjectImageUsageResponse(
 		})
 	}
 	if err := inventoryGroup.Wait(); err != nil {
-		return projectImageUsageResponse{}, err
+		return nil, err
 	}
 	serverTimingFromContext(ctx).Add("image_evidence_match", time.Since(started))
-	started = time.Now()
-	response = aggregateProjectImageUsageInventories(response, inventoryResults)
-	serverTimingFromContext(ctx).Add("image_evidence_aggregate", time.Since(started))
-	return response, nil
+	return inventoryResults, nil
 }
 
 func (s *Server) buildDistributedAppImageInventory(
