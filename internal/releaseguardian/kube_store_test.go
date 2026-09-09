@@ -340,6 +340,34 @@ func TestLocalHealthUsesPodTemplateLabelsForBroadDeploymentSelector(t *testing.T
 	if health := store.localHealth(context.Background(), release, target, nil, now); health.State != HealthHealthy {
 		t.Fatalf("broad workload selector or historical restart changed health: %+v", health)
 	}
+	for _, phase := range []corev1.PodPhase{corev1.PodFailed, corev1.PodSucceeded} {
+		terminal := readyPod("old-"+strings.ToLower(string(phase)), apiLabels, "api")
+		terminal.Status.Phase = phase
+		terminal.Status.Conditions = nil
+		terminal.Status.ContainerStatuses = nil
+		if _, err := client.CoreV1().Pods("fugue-system").Create(context.Background(), terminal, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if health := store.localHealth(context.Background(), release, target, nil, now); health.State != HealthHealthy {
+		t.Fatalf("terminal historical pods blocked healthy replacement: %+v", health)
+	}
+	for _, phase := range []corev1.PodPhase{corev1.PodPending, corev1.PodUnknown} {
+		active := readyPod("extra", apiLabels, "api")
+		active.Status.Phase = phase
+		if _, err := client.CoreV1().Pods("fugue-system").Create(context.Background(), active, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if health := store.localHealth(context.Background(), release, target, nil, now); health.State != HealthDegraded {
+			t.Fatalf("non-terminal %s pod was incorrectly ignored", phase)
+		}
+		if _, err := store.oneWorkloadHealth(context.Background(), release, target, "deployment", release.Workload.Name); err == nil {
+			t.Fatal("component health ignored non-terminal pod")
+		}
+		if err := client.CoreV1().Pods("fugue-system").Delete(context.Background(), "extra", metav1.DeleteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	pod, err := client.CoreV1().Pods("fugue-system").Get(context.Background(), "api-1", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)

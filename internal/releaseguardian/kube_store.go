@@ -404,10 +404,14 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		return degraded(fmt.Sprintf("rollout is incomplete desired=%d updated=%d ready=%d available=%d generation=%d observed=%d", desired, updated, ready, available, generation, observed))
 	}
 	pods, err := store.client.CoreV1().Pods(release.Workload.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
-	if err != nil || len(pods.Items) != int(desired) {
+	if err != nil {
+		return degraded("cannot read workload pod inventory")
+	}
+	activePods := nonTerminalPods(pods.Items)
+	if len(activePods) != int(desired) {
 		return degraded("workload pod inventory is incomplete")
 	}
-	for _, pod := range pods.Items {
+	for _, pod := range activePods {
 		if pod.DeletionTimestamp != nil || !podReady(pod) {
 			return degraded("workload Pod is not Ready")
 		}
@@ -625,14 +629,18 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s rollout is incomplete desired=%d updated=%d ready=%d available=%d generation=%d observed=%d", probeType, name, desired, updated, ready, available, generation, observed)
 	}
 	pods, err := store.client.CoreV1().Pods(podNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
-	if err != nil || len(pods.Items) != int(desired) {
+	if err != nil {
+		return workloadHealthEvidence{}, fmt.Errorf("read health %s/%s Pod inventory: %w", probeType, name, err)
+	}
+	activePods := nonTerminalPods(pods.Items)
+	if len(activePods) != int(desired) {
 		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s Pod inventory is incomplete", probeType, name)
 	}
 	artifactContainers := artifactTargetContainers(release, kind, name)
 	if len(artifactContainers) == 0 {
 		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s has no immutable artifact target", probeType, name)
 	}
-	for _, pod := range pods.Items {
+	for _, pod := range activePods {
 		if pod.DeletionTimestamp != nil || !podReady(pod) {
 			return workloadHealthEvidence{}, fmt.Errorf("health %s/%s Pod is not Ready", probeType, name)
 		}
@@ -647,6 +655,19 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 		}
 	}
 	return workloadHealthEvidence{Kind: kind, Name: name, Desired: desired, Updated: updated, Ready: ready, Available: available, Generation: generation}, nil
+}
+
+// Evicted and completed pods can remain in Kubernetes after their replacement
+// is healthy. They cannot serve traffic. Pending, unknown and terminating live
+// pods still participate in the strict inventory/readiness checks.
+func nonTerminalPods(pods []corev1.Pod) []corev1.Pod {
+	active := make([]corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod.Status.Phase != corev1.PodFailed && pod.Status.Phase != corev1.PodSucceeded {
+			active = append(active, pod)
+		}
+	}
+	return active
 }
 
 func workloadReleaseIdentity(release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, kind, name string, annotations, templateAnnotations map[string]string, containers, initContainers []corev1.Container) error {
