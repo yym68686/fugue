@@ -412,7 +412,7 @@ func trafficSafetyRouteStatusReady(status string) bool {
 }
 
 func (s *Server) trafficSafetyGrayReleaseScope(hostname string) string {
-	artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 500})
+	artifacts, err := s.store.ListPlatformArtifactMetadata(model.PlatformArtifactFilter{Limit: 500})
 	if err != nil {
 		return ""
 	}

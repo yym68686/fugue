@@ -230,17 +230,31 @@ func equalPlatformArtifactMetadata(left, right map[string]string) bool {
 }
 
 func (s *Store) ListPlatformArtifacts(filter model.PlatformArtifactFilter) ([]model.PlatformArtifact, error) {
+	return s.listPlatformArtifacts(filter, true)
+}
+
+// ListPlatformArtifactMetadata preserves listing filters, order, and metadata
+// without loading executable artifact content. It must not be used for content
+// validation, signature verification, publication, or application.
+func (s *Store) ListPlatformArtifactMetadata(filter model.PlatformArtifactFilter) ([]model.PlatformArtifact, error) {
+	return s.listPlatformArtifacts(filter, false)
+}
+
+func (s *Store) listPlatformArtifacts(filter model.PlatformArtifactFilter, includeContent bool) ([]model.PlatformArtifact, error) {
 	filter.ArtifactKind = NormalizePlatformArtifactKind(filter.ArtifactKind)
 	filter.ScopeKey = strings.TrimSpace(strings.ToLower(filter.ScopeKey))
 	filter.Status = strings.TrimSpace(strings.ToLower(filter.Status))
 	if s.usingDatabase() {
-		return s.pgListPlatformArtifacts(filter)
+		return s.pgListPlatformArtifactsView(filter, includeContent)
 	}
 	artifacts := []model.PlatformArtifact{}
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, artifact := range state.PlatformArtifacts {
 			if !platformArtifactMatchesFilter(artifact, filter) {
 				continue
+			}
+			if !includeContent {
+				artifact.Content = nil
 			}
 			artifacts = append(artifacts, artifact)
 		}

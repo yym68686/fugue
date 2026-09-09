@@ -218,6 +218,10 @@ WHERE content_hash = $1`, contentHash))
 }
 
 func (s *Store) pgListPlatformArtifacts(filter model.PlatformArtifactFilter) ([]model.PlatformArtifact, error) {
+	return s.pgListPlatformArtifactsView(filter, true)
+}
+
+func (s *Store) pgListPlatformArtifactsView(filter model.PlatformArtifactFilter, includeContent bool) ([]model.PlatformArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	limit := filter.Limit
@@ -225,8 +229,12 @@ func (s *Store) pgListPlatformArtifacts(filter model.PlatformArtifactFilter) ([]
 		limit = 100
 	}
 	args := []any{}
+	contentColumn := "content_json"
+	if !includeContent {
+		contentColumn = "NULL::jsonb AS content_json"
+	}
 	query := `SELECT id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
-	content_json, validation_results_json, compatibility_floor, metadata_json,
+	` + contentColumn + `, validation_results_json, compatibility_floor, metadata_json,
 	created_by_type, created_by_id, provenance_json, created_at, updated_at
 FROM fugue_platform_artifacts WHERE true`
 	if filter.ArtifactKind != "" {

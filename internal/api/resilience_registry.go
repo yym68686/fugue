@@ -161,7 +161,7 @@ func (s *Server) buildResilienceInventory(rSubject string) []model.ResilienceInv
 			UpdatedAt: now,
 		})
 	}
-	if artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 500}); err == nil {
+	if artifacts, err := s.store.ListPlatformArtifactMetadata(model.PlatformArtifactFilter{Limit: 500}); err == nil {
 		kinds := platformArtifactKinds(artifacts)
 		out = append(out, model.ResilienceInventoryItem{
 			Category:  "release_pipeline",
@@ -630,7 +630,7 @@ func isHardObservedInvariantBlocker(blocker string) bool {
 }
 
 func (s *Server) robustnessPlatformConsumerChecks() ([]model.RobustnessCheck, error) {
-	artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 500})
+	artifacts, err := s.store.ListPlatformArtifactMetadata(model.PlatformArtifactFilter{Limit: 500})
 	if err != nil {
 		return nil, err
 	}
@@ -693,7 +693,7 @@ func (s *Server) robustnessPlatformConsumerChecks() ([]model.RobustnessCheck, er
 }
 
 func (s *Server) robustnessPlatformConsumers() ([]model.PlatformConsumerInstance, error) {
-	artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 500})
+	artifacts, err := s.store.ListPlatformArtifactMetadata(model.PlatformArtifactFilter{Limit: 500})
 	if err != nil {
 		return nil, err
 	}

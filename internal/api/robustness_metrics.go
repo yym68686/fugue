@@ -119,7 +119,7 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 		}
 		observability.WriteGaugeMetric(w, "fugue_robustness_bundle_publish_rejections_recent", "Recent structured bundle publish rejection audit events.", nil, bundleRejections)
 	}
-	if artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 500}); err == nil {
+	if artifacts, err := s.store.ListPlatformArtifactMetadata(model.PlatformArtifactFilter{Limit: 500}); err == nil {
 		seen := map[string]bool{}
 		drift := 0.0
 		lkgExpired := 0.0
