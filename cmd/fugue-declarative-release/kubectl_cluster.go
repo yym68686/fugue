@@ -58,11 +58,11 @@ var emergencyOwnershipManagers = map[string]bool{
 	"kubectl-set":   true,
 }
 
-// Helm may still own a declared literal environment scalar on deployments
-// created before declarative ownership was introduced. Permit only the
-// UID/RV-bound scalar bridge for that narrow case; Helm remains unauthorized
-// to transfer images, annotations, probes, resources, or structural fields.
-var legacyEnvironmentOwnershipManagers = map[string]bool{
+// Helm may still own declared environment values and CPU quantities on
+// workloads created before declarative ownership. Transfer only those leaves
+// through the UID/RV-bound scalar bridge. Images, annotations, probes, other
+// resources and structural fields remain outside this legacy boundary.
+var legacyScalarOwnershipManagers = map[string]bool{
 	"helm": true,
 }
 
@@ -1488,12 +1488,12 @@ func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, al
 	for _, conflict := range conflicts {
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
 		ownDeclarativeUpdate := declarativeManager != "" && conflict.manager == declarativeManager
-		legacyEnvironmentOwnership := legacyEnvironmentOwnershipManagers[conflict.manager]
-		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !legacyEnvironmentOwnership && !ownDeclarativeUpdate) {
+		legacyScalarOwnership := legacyScalarOwnershipManagers[conflict.manager]
+		if pointer == "" || (!emergencyOwnershipManager(conflict.manager) && !legacyScalarOwnership && !ownDeclarativeUpdate) {
 			return fmt.Errorf("emergency ownership conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
 		}
-		if legacyEnvironmentOwnership && !emergencyEnvValuePointer(pointer) {
-			return fmt.Errorf("legacy ownership conflict %s:%s is outside the exact allowlist for environment scalar ownership", conflict.manager, conflict.field)
+		if legacyScalarOwnership && !legacyScalarOwnershipPointer(pointer) {
+			return fmt.Errorf("legacy ownership conflict %s:%s is outside the exact allowlist for legacy scalar ownership", conflict.manager, conflict.field)
 		}
 		key := conflict.manager + "\x00" + pointer
 		if seen[key] {
@@ -1553,7 +1553,7 @@ func nextOwnershipTransferPatch(desired, live map[string]any, allowed []string, 
 		pointer := pointerForEmergencySSAField(conflict.field, allowed)
 		if pointer != "" && ownershipTransferPointer(pointer) &&
 			(emergencyOwnershipManager(conflict.manager) ||
-				(legacyEnvironmentOwnershipManagers[conflict.manager] && emergencyEnvValuePointer(pointer)) ||
+				(legacyScalarOwnershipManagers[conflict.manager] && legacyScalarOwnershipPointer(pointer)) ||
 				(declarativeManager != "" && conflict.manager == declarativeManager)) {
 			hasTransfer = true
 		} else {
@@ -1773,6 +1773,21 @@ func emergencyEnvValuePointer(pointer string) bool {
 	}
 	_, ok = envValueTail(tail)
 	return ok
+}
+
+// CPU quantities already belong to the reviewed emergency rollback boundary.
+// Extending legacy Helm convergence to those same leaves allows a configuration
+// correction without taking ownership of a whole container or resource map.
+func legacyScalarOwnershipPointer(pointer string) bool {
+	if emergencyEnvValuePointer(pointer) {
+		return true
+	}
+	_, _, tail, ok := emergencyContainerPointerParts(pointer)
+	if !ok {
+		return false
+	}
+	_, resource, ok := resourceQuantityTail(tail)
+	return ok && resource == "cpu"
 }
 
 func ownershipTransferPointer(pointer string) bool {

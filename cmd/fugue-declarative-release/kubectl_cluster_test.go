@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1940,8 +1941,51 @@ func TestHelmOwnershipTransferAllowsOnlyDeclaredEnvironmentScalar(t *testing.T) 
 		}
 	}
 	outside := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="controller"].image`)
-	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer, "/spec/template/spec/containers[name=controller]/image"}, "fugue-controller-declarative", outside); err == nil || !strings.Contains(err.Error(), "environment scalar ownership") {
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer, "/spec/template/spec/containers[name=controller]/image"}, "fugue-controller-declarative", outside); err == nil || !strings.Contains(err.Error(), "legacy scalar ownership") {
 		t.Fatalf("Helm image ownership conflict was accepted: %v", err)
+	}
+}
+
+func TestHelmCPUOwnershipTransferKeepsExactScalarAndCASBoundary(t *testing.T) {
+	pointer := "/spec/template/spec/containers[name=worker]/resources/limits/cpu"
+	desired := map[string]any{
+		"metadata": map[string]any{"uid": "workload-uid", "resourceVersion": "42"},
+		"spec": map[string]any{"replicas": 2, "template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+			"name": "worker", "resources": map[string]any{"limits": map[string]any{"cpu": "2", "memory": "1Gi"}},
+		}}}}},
+	}
+	live := deepCopyJSONMap(t, desired)
+	metadata := mapField(live, "metadata")
+	metadata["managedFields"] = []any{map[string]any{
+		"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
+	}}
+	container := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	mapField(mapField(container, "resources"), "limits")["cpu"] = "1"
+	applyErr := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: ` + ssaFieldForPointer(pointer))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "workload-declarative", applyErr); err != nil {
+		t.Fatalf("reviewed CPU quantity was rejected: %v", err)
+	}
+	patch, found, err := nextOwnershipTransferPatch(desired, live, []string{pointer}, "workload-declarative", applyErr)
+	expected := []map[string]any{
+		{"op": "test", "path": "/metadata/uid", "value": "workload-uid"},
+		{"op": "test", "path": "/metadata/resourceVersion", "value": "42"},
+		{"op": "test", "path": "/spec/template/spec/containers/0/name", "value": "worker"},
+		{"op": "test", "path": "/spec/template/spec/containers/0/resources/limits/cpu", "value": "1"},
+		{"op": "replace", "path": "/spec/template/spec/containers/0/resources/limits/cpu", "value": "2"},
+	}
+	if err != nil || !found || !reflect.DeepEqual(patch, expected) {
+		t.Fatalf("CPU transfer escaped exact CAS boundary: patch=%v found=%v err=%v", patch, found, err)
+	}
+	for _, field := range []string{"resources/limits/memory", "resources", "image", "resources/limits/vendor.example~1device"} {
+		outside := "/spec/template/spec/containers[name=worker]/" + field
+		failure := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: ` + ssaFieldForPointer(outside))
+		if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer, outside}, "workload-declarative", failure); err == nil {
+			t.Fatalf("Helm CPU support admitted %s", outside)
+		}
+	}
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, nil, "workload-declarative", applyErr); err == nil {
+		t.Fatal("undeclared CPU quantity was admitted")
 	}
 }
 
