@@ -2258,7 +2258,8 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, backupRunTimeout)
+	runTimeout := configuredBackupRunTimeout()
+	ctx, cancel := context.WithTimeout(parent, runTimeout)
 	defer cancel()
 	candidate, err := s.store.GetBackupRun(runID, "", true)
 	if err != nil {
@@ -2335,6 +2336,9 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 			s.log.Printf("claim backup run %s failed: %v", runID, err)
 		}
 		return
+	}
+	if s.log != nil {
+		s.log.Printf("backup run %s claimed with execution timeout %s", run.ID, runTimeout)
 	}
 	if coordinationLease != nil {
 		// The process may have stopped between the first Kubernetes Lease acquire

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -89,7 +90,7 @@ func (tx *backupObjectUploadTransaction) streamPGDump(ctx context.Context, execu
 	go func() {
 		err := cmd.Run()
 		if err != nil {
-			err = fmt.Errorf("pg_dump failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+			err = fmt.Errorf("pg_dump failed: %w: %s", errors.Join(err, producerCtx.Err()), strings.TrimSpace(stderr.String()))
 		}
 		_ = writer.CloseWithError(err)
 		finished <- err
@@ -106,6 +107,14 @@ func (tx *backupObjectUploadTransaction) streamPGDump(ctx context.Context, execu
 		return 0, "", errors.Join(err, producerErr)
 	}
 	return count.n, hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func configuredBackupRunTimeout() time.Duration {
+	value, err := time.ParseDuration(strings.TrimSpace(os.Getenv("FUGUE_BACKUP_RUN_TIMEOUT")))
+	if err != nil || value <= 0 {
+		return backupRunTimeout
+	}
+	return value
 }
 
 type backupLimitedOutput struct {

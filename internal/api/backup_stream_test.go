@@ -153,3 +153,36 @@ func TestBackupUploadFailureStopsStreamingProducer(t *testing.T) {
 		t.Fatal("upload failure did not promptly stop the producer")
 	}
 }
+
+func TestBackupRunTimeoutIsConfigurable(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		want  time.Duration
+	}{
+		{"", 30 * time.Minute}, {"2h", 2 * time.Hour}, {"0s", 30 * time.Minute}, {"invalid", 30 * time.Minute},
+	} {
+		t.Setenv("FUGUE_BACKUP_RUN_TIMEOUT", tt.input)
+		if got := configuredBackupRunTimeout(); got != tt.want {
+			t.Fatalf("%q: got %s, want %s", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestBackupProducerPreservesDeadlineCause(t *testing.T) {
+	fake := newFailedUploadS3(t)
+	script := filepath.Join(t.TempDir(), "dump")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 60\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	run := model.BackupRun{ID: "backup_run_deadline", Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}}
+	tx := newBackupObjectUploadTransaction(nil, run, newTestDataObjectBackend(t, fake.URL))
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, _, err := tx.streamPGDump(ctx, script, "postgres://example.invalid/database", "control-plane/2026/01/01/00/backup_run_deadline/control-plane.dump")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline was hidden behind process termination: %v", err)
+	}
+	if fake.objectCount() != 0 {
+		t.Fatal("timed-out producer published a backup")
+	}
+}

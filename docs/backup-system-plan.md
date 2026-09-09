@@ -1144,3 +1144,14 @@ control-plane release path:
 - [x] Add operator runbook for offline control-plane restore.
 - [x] Add restore drill runbook.
 - [x] Add backend provider examples for R2, S3, B2, and MinIO.
+
+### Execution duration for large control-plane databases
+
+Control-plane logical dumps stream directly into object storage with a bounded
+64 MiB buffer; they do not require enough API-node disk for the complete dump.
+The execution deadline defaults to 30 minutes and can be configured with
+`FUGUE_BACKUP_RUN_TIMEOUT` using a positive Go duration (for example, `2h`).
+The worker logs the selected deadline when it claims the run. Timeout and
+cancellation causes remain attached to producer errors, and incomplete uploads
+are aborted instead of being published as usable backups. A successful logical
+dump does not replace continuous WAL archiving and verified physical recovery.
