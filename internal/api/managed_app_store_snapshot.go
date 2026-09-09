@@ -26,11 +26,15 @@ func (s *Server) loadManagedAppStoreSnapshot(ctx context.Context, appIDs ...stri
 	var locations []model.ImageLocation
 	group := new(errgroup.Group)
 	group.Go(func() error {
+		started := time.Now()
+		defer func() { serverTimingFromContext(ctx).Add("observation_traffic_policies", time.Since(started)) }()
 		var err error
 		policies, err = s.store.ListAppTrafficPolicies("", true)
 		return err
 	})
 	group.Go(func() error {
+		started := time.Now()
+		defer func() { serverTimingFromContext(ctx).Add("observation_releases", time.Since(started)) }()
 		var err error
 		releases, err = s.store.ListAppReleases(model.AppReleaseFilter{PlatformAdmin: true, ActiveOnly: true})
 		return err
@@ -40,6 +44,8 @@ func (s *Server) loadManagedAppStoreSnapshot(ctx context.Context, appIDs ...stri
 	var locationsMu sync.Mutex
 	for _, status := range []string{model.ImageLocationStatusPresent, model.ImageLocationStatusPulling, model.ImageLocationStatusMissing, model.ImageLocationStatusFailed} {
 		group.Go(func() error {
+			started := time.Now()
+			defer func() { serverTimingFromContext(ctx).Add("observation_locations_"+status, time.Since(started)) }()
 			items, err := s.store.ListImageLocations(model.ImageLocationFilter{PlatformAdmin: true, Status: status, AppIDs: appIDs})
 			if err != nil {
 				return err

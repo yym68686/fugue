@@ -941,7 +941,9 @@ func (s *Server) overlayManagedAppStatuses(ctx context.Context, apps []model.App
 	if len(apps) == 0 {
 		return apps
 	}
+	started := time.Now()
 	runtimeByID := s.observationRuntimeByID(apps)
+	serverTimingFromContext(ctx).Add("observation_runtimes", time.Since(started))
 
 	cached, ok, expired := s.managedAppStatusCache.getObservedList()
 	if ok && !expired {
@@ -1838,6 +1840,12 @@ func (s *Server) fetchManagedAppInventory(ctx context.Context) (managedAppStatus
 }
 
 func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context, requireClusterIdentity bool) (entry managedAppStatusListCacheEntry, err error) {
+	started := time.Now()
+	timings := serverTimingFromContext(ctx)
+	mark := func(name string) {
+		timings.Add(name, time.Since(started))
+		started = time.Now()
+	}
 	cacheLayer := "inventory"
 	if requireClusterIdentity {
 		cacheLayer = "list"
@@ -1866,6 +1874,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			return managedAppStatusListCacheEntry{}, err
 		}
 	}
+	mark("observation_cluster_identity")
 	var items map[string]runtime.ManagedAppObject
 	if requireClusterIdentity {
 		items, err = client.listObservedManagedAppsByAppID(refreshCtx)
@@ -1875,6 +1884,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 	if err != nil {
 		return managedAppStatusListCacheEntry{}, err
 	}
+	mark("observation_managed_objects")
 	sequence.managedAppsRead = s.managedAppStatusCache.nextObservationSequence()
 	if requireClusterIdentity {
 		confirmedClusterID, err := client.getClusterID(refreshCtx)
@@ -1885,12 +1895,14 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			return managedAppStatusListCacheEntry{}, fmt.Errorf("kubernetes cluster identity changed during managed app inventory observation")
 		}
 	}
+	mark("observation_identity_confirmation")
 	evidenceByAppID := make(map[string]managedAppRuntimeEvidence)
 	if requireClusterIdentity && s != nil && s.store != nil {
 		snapshot, snapshotErr := client.readRuntimeSnapshot(refreshCtx)
 		if snapshotErr != nil {
 			return managedAppStatusListCacheEntry{}, snapshotErr
 		}
+		mark("observation_kubernetes_snapshot")
 		sequence.kubeSnapshotRead = s.managedAppStatusCache.nextObservationSequence()
 		finalClusterID, finalErr := client.getClusterID(refreshCtx)
 		if finalErr != nil {
@@ -1899,6 +1911,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 		if finalClusterID != clusterID {
 			return managedAppStatusListCacheEntry{}, fmt.Errorf("kubernetes cluster identity changed during runtime evidence observation")
 		}
+		mark("observation_identity_final")
 		var apps []model.App
 		if s != nil && s.store != nil {
 			apps, err = s.store.ListApps("", true)
@@ -1907,6 +1920,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			}
 			sequence.durableAppsRead = s.managedAppStatusCache.nextObservationSequence()
 		}
+		mark("observation_durable_apps")
 		appsByID := make(map[string]model.App, len(apps))
 		appIDs := make([]string, 0, len(apps))
 		for _, app := range apps {
@@ -1916,6 +1930,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 		if snapshotErr != nil {
 			return managedAppStatusListCacheEntry{}, snapshotErr
 		}
+		mark("observation_durable_evidence")
 		for _, app := range apps {
 			appsByID[strings.TrimSpace(app.ID)] = app
 		}
@@ -1947,6 +1962,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			}
 			evidenceByAppID[appID] = evidence
 		}
+		mark("observation_evidence_compute")
 	}
 
 	now := time.Now().UTC()

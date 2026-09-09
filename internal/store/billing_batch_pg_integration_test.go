@@ -120,6 +120,9 @@ func TestBillingBatchPostgresPreservesAccrualAndCredits(t *testing.T) {
 	if len(result) != 3 || !reflect.DeepEqual(missing, []string{"absent"}) || result[0].TenantID != owner.ID || result[1].TenantID != consumer.ID {
 		t.Fatalf("incorrect coverage/order: %+v missing=%v", result, missing)
 	}
+	if result[0].AppCount != 0 || result[1].AppCount != 1 || result[2].AppCount != 0 {
+		t.Fatalf("incorrect per-tenant application counts: %+v", result)
+	}
 	transfer := result[1].HourlyRateMicroCents * result[1].LastAccruedAt.Sub(stale).Nanoseconds() / int64(time.Hour)
 	if transfer <= 0 || result[1].BalanceMicroCents != seed[1].BalanceMicroCents-transfer || result[0].BalanceMicroCents != seed[0].BalanceMicroCents+transfer {
 		t.Fatalf("unbalanced public runtime transfer %d: owner=%d consumer=%d", transfer, result[0].BalanceMicroCents, result[1].BalanceMicroCents)

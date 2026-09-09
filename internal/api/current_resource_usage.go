@@ -123,7 +123,9 @@ func (s *Server) currentResourceUsageOverlay(ctx context.Context, apps []model.A
 		}
 		return overlay
 	}
+	started := time.Now()
 	policies, err := s.loadPersistentVolumeUsagePolicies(ctx, snapshots)
+	serverTimingFromContext(ctx).Add("usage_volume_policies", time.Since(started))
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("current persistent volume usage overlay error: %v", err)
@@ -135,7 +137,10 @@ func (s *Server) currentResourceUsageOverlay(ctx context.Context, apps []model.A
 			byClaim: map[string]persistentVolumeUsagePolicy{},
 		}
 	}
-	return buildCurrentResourceUsageOverlayWithPolicies(snapshots, apps, services, policies)
+	started = time.Now()
+	result := buildCurrentResourceUsageOverlayWithPolicies(snapshots, apps, services, policies)
+	serverTimingFromContext(ctx).Add("usage_aggregate", time.Since(started))
+	return result
 }
 
 func buildCurrentResourceUsageOverlay(snapshots []clusterNodeSnapshot, apps []model.App, services []model.BackingService) currentResourceUsageOverlay {

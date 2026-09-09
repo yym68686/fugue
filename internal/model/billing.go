@@ -80,6 +80,7 @@ type TenantBillingEvent struct {
 
 type TenantBillingSummary struct {
 	TenantID                  string               `json:"tenant_id"`
+	AppCount                  int                  `json:"app_count"`
 	Status                    string               `json:"status"`
 	StatusReason              string               `json:"status_reason,omitempty"`
 	BYOVPSFree                bool                 `json:"byo_vps_free"`

@@ -14298,6 +14298,7 @@ components:
       required:
         [
           tenant_id,
+          app_count,
           status,
           byo_vps_free,
           over_cap,
@@ -14318,6 +14319,10 @@ components:
       properties:
         tenant_id:
           type: string
+        app_count:
+          type: integer
+          minimum: 0
+          description: Number of non-deleted tenant applications in the billing snapshot, including disabled applications.
         status:
           type: string
         status_reason:

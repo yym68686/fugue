@@ -38,31 +38,40 @@ func (s *Server) handleListBillingSummaries(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	started := time.Now()
 	var apps []model.App
 	runtimeTypes := make(map[string]string)
+	var billings []model.TenantBillingSummary
+	var missingIDs []string
+	group := new(errgroup.Group)
+	group.Go(func() error {
+		started := time.Now()
+		var err error
+		billings, missingIDs, err = s.store.GetTenantBillingSummaries(r.Context(), ids)
+		serverTimingFromContext(r.Context()).Add("billing_batch_summary", time.Since(started))
+		return err
+	})
 	if includeUsage {
-		var runtimes []model.Runtime
-		usageGroup := new(errgroup.Group)
-		usageGroup.Go(func() error { var err error; apps, err = s.store.ListApps("", true); return err })
-		usageGroup.Go(func() error { var err error; runtimes, err = s.store.ListRuntimes("", true); return err })
-		if err := usageGroup.Wait(); err != nil {
-			s.writeStoreError(w, err)
-			return
-		}
-		for _, runtime := range runtimes {
-			runtimeTypes[strings.TrimSpace(runtime.ID)] = runtime.Type
-		}
-		apps = s.overlayCurrentResourceUsageOnApps(r.Context(), apps)
-		serverTimingFromContext(r.Context()).Add("billing_batch_usage", time.Since(started))
+		group.Go(func() error {
+			started := time.Now()
+			var runtimes []model.Runtime
+			usageGroup := new(errgroup.Group)
+			usageGroup.Go(func() error { var err error; apps, err = s.store.ListApps("", true); return err })
+			usageGroup.Go(func() error { var err error; runtimes, err = s.store.ListRuntimes("", true); return err })
+			if err := usageGroup.Wait(); err != nil {
+				return err
+			}
+			for _, runtime := range runtimes {
+				runtimeTypes[strings.TrimSpace(runtime.ID)] = runtime.Type
+			}
+			apps = s.overlayCurrentResourceUsageOnApps(r.Context(), apps)
+			serverTimingFromContext(r.Context()).Add("billing_batch_usage", time.Since(started))
+			return nil
+		})
 	}
-	started = time.Now()
-	billings, missingIDs, err := s.store.GetTenantBillingSummaries(r.Context(), ids)
-	if err != nil {
+	if err := group.Wait(); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	serverTimingFromContext(r.Context()).Add("billing_batch_summary", time.Since(started))
 	if includeUsage {
 		for index := range billings {
 			billings[index].CurrentUsage = tenantManagedUsageFromSnapshot(billings[index].TenantID, apps, runtimeTypes)

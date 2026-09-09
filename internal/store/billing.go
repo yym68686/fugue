@@ -970,6 +970,14 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 }
 
 func buildTenantBillingSummaryWithIndex(state *model.State, index billingStateIndex, record model.TenantBilling) model.TenantBillingSummary {
+	appCount := 0
+	if state != nil {
+		for _, app := range state.Apps {
+			if app.TenantID == record.TenantID && !isDeletedApp(app) {
+				appCount++
+			}
+		}
+	}
 	committed := tenantManagedCommittedResourcesForBillingWithIndex(state, index, record)
 	available := clampResourceSpecSub(record.ManagedCap, committed)
 	managedHourlyRate := activatedManagedHourlyRateMicroCents(record, committed)
@@ -984,6 +992,7 @@ func buildTenantBillingSummaryWithIndex(state *model.State, index billingStateIn
 
 	return model.TenantBillingSummary{
 		TenantID:                  record.TenantID,
+		AppCount:                  appCount,
 		Status:                    status,
 		StatusReason:              reason,
 		BYOVPSFree:                true,
