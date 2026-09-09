@@ -83,7 +83,7 @@ func (p Preferences) Validate() error {
 				return fmt.Errorf("key %q is reserved by %s", key, other)
 			}
 		}
-		if strings.Contains("123456?asmnjkb[]{}", key) || key == "enter" || key == "esc" || key == "tab" {
+		if strings.Contains("123456?asmnojkb[]{}", key) || key == "enter" || key == "esc" || key == "tab" {
 			return fmt.Errorf("key %q is reserved for navigation", key)
 		}
 	}

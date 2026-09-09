@@ -97,17 +97,46 @@ func (m *Model) render() string {
 	}
 	put(image.Rect(1, 1, w-1, 2), m.style(p.muted).Render(clip(meta, w-2)))
 	if m.screen == "dashboard" {
+		series := m.chartSeries()
+		frame := func(rect image.Rectangle, title, color string) {
+			if !rect.Empty() {
+				put(rect.Inset(-1), m.panelFrame(rect.Dx()+2, rect.Dy()+2, title, color))
+			}
+		}
 		for i, rect := range l.charts {
-			index := m.chartOffset + i
-			if index < len(m.snapshot.Series) {
-				put(rect, m.renderChart(m.snapshot.Series[index], rect.Dx(), rect.Dy(), i))
+			index := (m.chartOffset + i) % max(1, len(series))
+			if index < len(series) {
+				scope := m.chartScope()
+				if series[index].Subject != "" {
+					scope = "Cluster peak · " + series[index].Subject
+				}
+				frame(rect, scope, p.graphs[i%len(p.graphs)])
+				put(rect, m.renderChart(series[index], rect.Dx(), rect.Dy(), i))
 			} else {
 				put(rect, m.style(p.muted).Render("PERFORMANCE\nWaiting for metric observations"))
 			}
 		}
+		frame(l.table, "RESOURCES · select to inspect · Enter to open", p.accent)
 		put(l.table, m.renderTable(l.table))
+		if !l.capacity.Empty() {
+			frame(l.capacity, "CAPACITY · "+m.chartScope(), p.green)
+			put(l.capacity, m.renderCapacity(l.capacity.Dx(), l.capacity.Dy()))
+		}
 		if !l.summary.Empty() {
-			put(l.summary, m.renderSummary(l.summary.Dx(), l.summary.Dy()))
+			frame(l.summary, strings.ToUpper(m.request.Target.Kind)+" · HEALTH & ACTIVITY", p.amber)
+			put(l.summary, m.renderOverview(l.summary.Dx(), l.summary.Dy()))
+		}
+		if !l.inspector.Empty() {
+			title := "SELECTION"
+			if row := m.selectedRow(); row != nil {
+				title += " · " + cell(*row, 0)
+			}
+			frame(l.inspector, title, p.graphs[3])
+			put(l.inspector, m.renderInspector(l.inspector.Dx(), l.inspector.Dy()))
+		}
+		if !l.context.Empty() {
+			frame(l.context, "WORKLOADS & ACTIVITY", p.amber)
+			put(l.context, m.renderRelated(l.context.Dx(), l.context.Dy()))
 		}
 	} else {
 		switch m.screen {
@@ -151,8 +180,8 @@ func (m *Model) statusLine() string {
 	if partial > 0 {
 		status += fmt.Sprintf(" · %d sources unavailable", partial)
 	}
-	if len(m.snapshot.Series) > len(m.layout().charts) && m.screen == "dashboard" {
-		status += fmt.Sprintf(" · %d more charts (n/b)", len(m.snapshot.Series)-len(m.layout().charts))
+	if len(m.chartSeries()) > len(m.layout().charts) && m.screen == "dashboard" {
+		status += fmt.Sprintf(" · %d more charts (n/b)", len(m.chartSeries())-len(m.layout().charts))
 	}
 	return status + " · ? help"
 }
@@ -167,14 +196,8 @@ func (m *Model) renderTable(rect image.Rectangle) string {
 	}
 	table := m.snapshot.Tables[min(m.table, len(m.snapshot.Tables)-1)]
 	rows := m.rows()
-	columns := min(len(table.Columns), max(1, width/13))
-	widths := make([]int, columns)
-	for i := range widths {
-		widths[i] = max(3, (width-3-columns)/max(1, columns))
-	}
-	if columns > 0 {
-		widths[0] += width - 3 - columns - sum(widths)
-	}
+	widths := tableWidths(table, width)
+	columns := len(widths)
 	header := []string{}
 	for i := 0; i < columns; i++ {
 		header = append(header, pad(table.Columns[i], widths[i]))
@@ -187,7 +210,13 @@ func (m *Model) renderTable(rect image.Rectangle) string {
 		row := rows[i]
 		values := []string{}
 		for j := 0; j < columns; j++ {
-			values = append(values, pad(cell(row, j), widths[j]))
+			value := pad(cell(row, j), widths[j])
+			if i != m.selected {
+				if n, ok := row.Numbers[j]; ok && strings.Contains(cell(row, j), "%") {
+					value = m.style(m.loadColor(n)).Render(value)
+				}
+			}
+			values = append(values, value)
 		}
 		marker := "   "
 		style := m.style(p.foreground)
@@ -291,7 +320,7 @@ func (m *Model) renderTasks(rect image.Rectangle) string {
 	return strings.Join(lines, "\n")
 }
 func (m *Model) help() string {
-	return "KEYBOARD\n\n1 Dashboard   2 Resources   3 Events   4 Logs   5 Tasks   6 Details\nTab / Shift+Tab  resource table     Enter  open selection\nJ/K or arrows   move               Backspace / Esc  return\n/  search       S  sort            Ctrl+P  command palette\nP  pause        R  refresh         A  actions\nW  time window  G  graph style     T  theme\nM  mouse        C  copy selection  ,  preferences\n[ / ]  inspect chart time   { / }  select chart         Ctrl+A  select log text\nQ / Ctrl+C  exit\n\nMOUSE\n\nClick tabs or controls; select a row, double-click to open.\nWheel scrolls the focused view. Drag log or table text to select, C to copy.\nDisable mouse with M to use the terminal's own selection.\n\nSOURCES\n\nCharts grow to the selected window; 30s / 15m means 30s observed.\nLines connect normal samples; missing intervals stay blank.\nInterpolated cursor values are labeled. UI refreshes do not create samples.\nActions require a server-backed plan and exact confirmation."
+	return "KEYBOARD\n\n1 Dashboard   2 Resources   3 Events   4 Logs   5 Tasks   6 Details\nTab / Shift+Tab  resource table     Enter  open selection\nJ/K or arrows   move               Backspace / Esc  return\n/  search       S  sort            Ctrl+P  command palette\nP  pause        R  refresh         A  actions\nW  time window  G  graph style     T  theme\nO  selected node / cluster peaks\nM  mouse        C  copy selection  ,  preferences\n[ / ]  inspect chart time   { / }  select chart         Ctrl+A  select log text\nQ / Ctrl+C  exit\n\nMOUSE\n\nClick tabs or controls; select a row, double-click to open.\nNode selection updates charts and capacity immediately.\nCluster overview shows per-node peaks with the current node named.\nWheel scrolls the focused view. Drag log or table text to select, C to copy.\nDisable mouse with M to use the terminal's own selection.\n\nSOURCES\n\nCharts grow to the selected window; 30s / 15m means 30s observed.\nLines connect normal samples; missing intervals stay blank.\nInterpolated cursor values are labeled. UI refreshes do not create samples.\nActions require a server-backed plan and exact confirmation."
 }
 func (m *Model) renderModal(rect image.Rectangle) string {
 	p := theme(m.prefs.Theme)

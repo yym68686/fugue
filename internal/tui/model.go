@@ -80,6 +80,7 @@ type Model struct {
 	filter, editing, input                          string
 	fixedFilter                                     string
 	paused                                          bool
+	pausedAt                                        time.Time
 	now                                             time.Time
 	modal                                           string
 	modalIndex                                      int
@@ -103,6 +104,7 @@ type Model struct {
 	viewCancel                                      context.CancelFunc
 	sortColumns                                     map[string]int
 	chartOffset                                     int
+	overviewCharts                                  bool
 }
 
 func New(provider Provider, request Request, opts Options) *Model {
@@ -135,7 +137,7 @@ func Run(ctx context.Context, provider Provider, request Request, opts Options) 
 			m.viewCancel()
 		}
 	}()
-	programOptions := []tea.ProgramOption{tea.WithContext(ctx), tea.WithFPS(30)}
+	programOptions := []tea.ProgramOption{tea.WithContext(ctx), tea.WithFPS(60)}
 	if opts.Input != nil {
 		programOptions = append(programOptions, tea.WithInput(opts.Input))
 	}
@@ -221,7 +223,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseReleaseMsg:
 		m.release(v)
 	case tickMsg:
-		m.now = time.Time(v)
+		if at := time.Time(v); at.After(m.now) {
+			m.now = at
+		}
 		cmds := []tea.Cmd{m.tick()}
 		if !m.paused {
 			cmds = append(cmds, m.schedule("overview", false))
@@ -239,6 +243,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.epoch != m.epoch {
 			return m, nil
 		}
+		// Evaluate newly received observations against receipt time, not the
+		// previous one-second tick (which can predate the entire HTTP request).
+		if at := time.Now(); at.After(m.now) {
+			m.now = at
+		}
 		state := m.fetches[v.section]
 		state.pending = false
 		state.elapsed = v.elapsed
@@ -251,7 +260,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			state.failures = 0
 			state.due = m.now.Add(m.ttl(v.section))
-			m.accept(v.section, v.value)
+			if !m.paused {
+				m.accept(v.section, v.value)
+			}
 		}
 		m.fetches[v.section] = state
 		m.ensureVisible()
@@ -431,6 +442,7 @@ func (m *Model) accept(section string, s Snapshot) {
 		previousRow = rows[m.selected].ID
 	}
 	s = sanitizeSnapshot(s)
+	m.mergeResourceHistory(&s)
 	if section == "overview" {
 		m.snapshot.Target = s.Target
 		m.snapshot.Title = s.Title

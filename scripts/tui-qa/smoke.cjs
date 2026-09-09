@@ -45,16 +45,17 @@ const server = http.createServer((req,res) => {
  case '/v1/apps/app-a/runtime-logs': return result({logs:'snapshot log line\n',available:true});
  case '/v1/apps/app-a/observability/metrics/timeseries': return result({source:{available:true,status:'available'},series:['cpu','memory','rpm','p95_duration_ms','error_rate'].map((name,i)=>({name,unit:i===1?'bytes':'%',source:'synthetic timestamped history',state:'available',interval_seconds:5,points:Array.from({length:120},(_,j)=>({observed_at:new Date(Date.now()-(119-j)*5000).toISOString(),value:(j*7+i*11)%90}))}))});
  case '/v1/operations': return result({operations:[]});
- case '/v1/cluster/nodes': return result({cluster_nodes:[{name:'node-a',status:'ready',observed_at:now,cpu:{usage_percent:45},memory:{usage_percent:60},ephemeral_storage:{usage_percent:30},workloads:[{kind:'app',id:app.id,name:app.name,tenant_id:app.tenant_id,project_id:app.project_id,pod_count:2}]}]});
+ case '/v1/cluster/nodes': return result({cluster_nodes:[{name:'node-a',status:'ready',observed_at:now,cpu:{usage_percent:45},memory:{usage_percent:60},ephemeral_storage:{usage_percent:30},workloads:[{kind:'app',id:app.id,name:app.name,tenant_id:app.tenant_id,project_id:app.project_id,pod_count:2}]},{name:'node-b',status:'ready',observed_at:now,cpu:{usage_percent:70},memory:{usage_percent:75},ephemeral_storage:{usage_percent:85},workloads:[]}]});
  case '/v1/cluster/node-policies/status': return result({summary:{total:1,ready:1,reconciled:1},node_policies:[]});
  case '/v1/runtimes': return result({runtimes:[{id:'runtime-a',name:'Sample Runtime',status:'active',type:'managed-owned',cluster_node_name:'node-a'}]});
  case '/v1/runtimes/runtime-a': return result({runtime:{id:'runtime-a',name:'Sample Runtime',status:'active',cluster_node_name:'node-a'}});
+ case '/v1/cluster/node-policies/status': return result({summary:{total:2,ready:2,reconciled:2},node_policies:[]});
  case '/v1/cluster/control-plane': return result({control_plane:{status:'ready',observed_at:now,components:[{component:'api',deployment_name:'control-api',status:'ready',desired_replicas:1,ready_replicas:1,image_tag:'build-a',observed_pods:[{name:'api-pod',node_name:'node-a',phase:'Running',ready:true}]}],deploy_workflow:{workflow:'ci.yml',head_sha:'abcdef0123456789',status:'completed',conclusion:'success'}}});
  default: res.writeHead(404);return result({error:'unimplemented synthetic endpoint'});
  }
 });
 
-async function run(args,{admin=false,termName='xterm-256color',color='truecolor',quit='q'}={}) {
+async function run(args,{admin=false,nodeSelection=false,termName='xterm-256color',color='truecolor',quit='q'}={}) {
  const terminal=new Terminal({cols:140,rows:40,allowProposedApi:true});
  const started=Date.now();let output='',exitCode;let inputP95;
  const proc=pty.spawn(binary,[...args,'--base-url',`http://127.0.0.1:${server.address().port}`,'--token',admin?'synthetic-admin':'synthetic-user','--interval','1s','--mouse','--theme','carbon'],{name:termName,cols:140,rows:40,env:{...process.env,TERM:termName,COLORTERM:color,NO_COLOR:color==='none'?'1':'',FUGUE_SKIP_UPDATE_CHECK:'1'}});
@@ -83,6 +84,17 @@ async function run(args,{admin=false,termName='xterm-256color',color='truecolor'
    proc.resize(140,40);terminal.resize(140,40);await pause(150);
    disconnected=true;proc.write('r');await wait(()=>text().includes('STALE'),'stale');assert(text().includes('pod-'));
    disconnected=false;proc.write('r');await wait(()=>!text().includes('STALE'),'recovery');
+  } else if(nodeSelection) {
+   await wait(()=>text().includes('Selected · node-a'),'selected node charts');
+   proc.write('j');await wait(()=>text().includes('Selected · node-b'),'keyboard linked selection');
+   assert(/DISK\s+85\.0%/.test(text()),'disk chart did not follow node-b');
+   for(let y=0;y<terminal.rows;y++){
+    const line=terminal.buffer.active.getLine(y)?.translateToString(true)||'';
+    if(line.includes('node-a')&&line.includes('ready')){const x=line.indexOf('node-a');proc.write(`\x1b[<0;${x+2};${y+1}M\x1b[<0;${x+2};${y+1}m`);break}
+   }
+   await wait(()=>text().includes('Selected · node-a'),'mouse linked selection');
+   proc.write('o');await wait(()=>text().includes('Cluster · per-node peaks'),'explicit cluster overview');
+   proc.write('o');await wait(()=>text().includes('Selected · node-a'),'selection restored');
   } else if(admin) {
    await wait(()=>text().includes('CONTROL PLANE'),'admin components');
    proc.write('\r');await wait(()=>text().includes('api-pod'),'component drilldown');
@@ -97,6 +109,7 @@ async function run(args,{admin=false,termName='xterm-256color',color='truecolor'
  const results=[];
  for(const [termName,color] of [['xterm-256color','truecolor'],['xterm-256color',''],['ansi',''],['xterm-256color','none']])results.push(await run(['app','top','Sample API'],{termName,color}));
  results.push(await run(['admin','cluster','top','--scope','control-plane'],{admin:true}));
+ results.push(await run(['admin','cluster','top','--scope','nodes'],{admin:true,nodeSelection:true}));
  results.push(await run(['project','top','Sample'],{quit:'\x03'}));
  results.push(await run(['console']));
  await pause(300);assert.equal(activeStreams,0);assert.equal(writes,0);

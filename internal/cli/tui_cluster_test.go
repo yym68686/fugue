@@ -8,9 +8,35 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"fugue/internal/model"
 	"fugue/internal/tui"
 )
+
+func TestTUINodePreviewAndPeakAttribution(t *testing.T) {
+	now := time.Now()
+	older := now.Add(-time.Minute)
+	low, high := 12.0, 91.0
+	capacity, used := int64(500<<30), int64(60<<30)
+	a := model.ClusterNode{Name: "worker-a", ObservedAt: &now, CPU: &model.ClusterNodeCPUStats{UsagePercent: &high}, EphemeralStorage: &model.ClusterNodeStorageStats{UsagePercent: &low, CapacityBytes: &capacity, UsedBytes: &used}}
+	b := model.ClusterNode{Name: "worker-b", ObservedAt: &older, CPU: &model.ClusterNodeCPUStats{UsagePercent: &low}, EphemeralStorage: &model.ClusterNodeStorageStats{UsagePercent: &high}}
+	detail := tuiNodePreview(a)
+	if *detail.Series[2].Points[0].Value != 12 || detail.Capacity[1].Value != "60.0 GiB / 500.0 GiB" {
+		t.Fatalf("wrong node preview: %+v", detail)
+	}
+	if detail.Capacity[0].Value != "-- / --" {
+		t.Fatal("missing capacity became zero")
+	}
+	s := tui.Snapshot{}
+	appendTUIClusterSeries(&s, []model.ClusterNode{a, b})
+	if s.Series[0].Subject != "worker-a" || !s.Series[0].Points[0].At.Equal(now) {
+		t.Fatal("CPU peak lost its owning node/time")
+	}
+	if s.Series[2].Subject != "worker-b" || !s.Series[2].Points[0].At.Equal(older) {
+		t.Fatal("disk peak lost its owning node/time")
+	}
+}
 
 func TestTUIEntrypointsExposeSharedFlags(t *testing.T) {
 	for _, path := range [][]string{{"app", "top"}, {"project", "top"}, {"admin", "cluster", "top"}, {"console"}} {

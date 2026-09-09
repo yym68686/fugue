@@ -53,6 +53,18 @@ func TestExportVisualFixtures(t *testing.T) {
 			}
 		}
 	}
+	for _, size := range [][2]int{{60, 18}, {80, 30}, {100, 30}, {140, 40}, {200, 50}, {250, 72}} {
+		m := New(&testProvider{}, Request{Target: Target{Kind: "cluster"}}, Options{Preferences: DefaultPreferences()})
+		m.accept("overview", clusterFixture(m.now))
+		m.width, m.height, m.opts.Color = size[0], size[1], true
+		for _, palette := range []string{"carbon", "light", "terminal"} {
+			m.prefs.Theme = palette
+			name := fmt.Sprintf("cluster-%dx%d-%s.ansi", size[0], size[1], palette)
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(m.View().Content), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	m := testModel()
 	m.width, m.height = 100, 30
 	m.opts.Color = true

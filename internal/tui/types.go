@@ -31,6 +31,18 @@ type Row struct {
 	Numbers map[int]float64 `json:"numbers,omitempty"`
 	Target  *Target         `json:"target,omitempty"`
 	Tone    string          `json:"tone,omitempty"`
+	Detail  *ResourceDetail `json:"detail,omitempty"`
+}
+
+// ResourceDetail is already-authorized data from the parent collection. Row
+// selection is local: it never starts a new request or changes action scope.
+type ResourceDetail struct {
+	Fields     []Field   `json:"fields,omitempty"`
+	Capacity   []Field   `json:"capacity,omitempty"`
+	Series     []Series  `json:"series,omitempty"`
+	Items      []Field   `json:"items,omitempty"`
+	ItemsTitle string    `json:"items_title,omitempty"`
+	ObservedAt time.Time `json:"observed_at,omitempty"`
 }
 type Table struct {
 	ID      string   `json:"id"`
@@ -64,6 +76,7 @@ type Series struct {
 	Interval time.Duration `json:"interval_ns,omitempty"`
 	Limit    *float64      `json:"limit,omitempty"`
 	Points   []Point       `json:"points"`
+	Subject  string        `json:"subject,omitempty"`
 }
 type Action struct {
 	ID       string `json:"id"`

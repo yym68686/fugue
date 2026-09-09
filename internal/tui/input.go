@@ -116,7 +116,10 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 	case "r":
 		return tea.Batch(m.schedule("overview", true), m.schedule("metrics", true))
 	case "p", "space":
-		m.paused = !m.paused
+		m.togglePause()
+	case "o":
+		m.overviewCharts = !m.overviewCharts
+		m.chartOffset, m.graphCursor = 0, -1
 	case "/":
 		m.editing = "search"
 		m.input = m.filter
@@ -212,7 +215,7 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 	case "]":
 		m.graphCursor++
 	case "n":
-		m.chartOffset = (m.chartOffset + max(1, len(m.layout().charts))) % max(1, len(m.snapshot.Series))
+		m.chartOffset = (m.chartOffset + max(1, len(m.layout().charts))) % max(1, len(m.chartSeries()))
 	case "b":
 		m.chartOffset = max(0, m.chartOffset-max(1, len(m.layout().charts)))
 	}
@@ -261,10 +264,21 @@ func (m *Model) rows() []Row {
 	}
 	table := m.snapshot.Tables[min(m.table, len(m.snapshot.Tables)-1)]
 	filter := strings.ToLower(m.filter)
+	fixedFilter := strings.ToLower(m.fixedFilter)
+	_, sorted := m.sortColumns[table.ID]
+	// All callers read the returned rows. The common unfiltered view needs
+	// neither copies nor repeated lowercasing of every cell on each frame.
+	if filter == "" && fixedFilter == "" && !sorted {
+		return table.Rows
+	}
 	out := make([]Row, 0, len(table.Rows))
 	for _, row := range table.Rows {
+		if filter == "" && fixedFilter == "" {
+			out = append(out, row)
+			continue
+		}
 		haystack := strings.ToLower(strings.Join(row.Cells, " "))
-		if strings.Contains(haystack, filter) && strings.Contains(haystack, strings.ToLower(m.fixedFilter)) {
+		if strings.Contains(haystack, filter) && strings.Contains(haystack, fixedFilter) {
 			out = append(out, row)
 		}
 	}
@@ -528,7 +542,7 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 	for i, box := range layout.charts {
 		if p.In(box) {
 			m.graphIndex = i
-			m.graphCursor = p.X - box.Min.X - 1
+			m.graphCursor = max(0, p.X-box.Min.X-5)
 			return nil
 		}
 	}
@@ -547,12 +561,15 @@ func (m *Model) activateHit(id string) tea.Cmd {
 		return nil
 	}
 	switch id {
+	case "chart-scope":
+		m.overviewCharts = !m.overviewCharts
+		m.chartOffset, m.graphCursor = 0, -1
 	case "back":
 		return m.back()
 	case "refresh":
 		return tea.Batch(m.schedule("overview", true), m.schedule("metrics", true))
 	case "pause":
-		m.paused = !m.paused
+		m.togglePause()
 	case "window":
 		m.prefs.Window = cycle([]string{"5m", "15m", "1h"}, m.prefs.Window)
 		m.request.Window, _ = time.ParseDuration(m.prefs.Window)

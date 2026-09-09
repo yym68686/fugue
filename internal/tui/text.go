@@ -27,6 +27,7 @@ func pad(value string, width int) string {
 	value = clip(value, width)
 	return value + strings.Repeat(" ", max(0, width-ansi.StringWidth(value)))
 }
+func displayWidth(value string) int { return ansi.StringWidth(value) }
 func sanitizeSnapshot(s Snapshot) Snapshot {
 	s.Title = Plain(s.Title)
 	s.Subtitle = Plain(s.Subtitle)
@@ -44,6 +45,17 @@ func sanitizeSnapshot(s Snapshot) Snapshot {
 			for k := range s.Tables[i].Rows[j].Cells {
 				s.Tables[i].Rows[j].Cells[k] = Plain(s.Tables[i].Rows[j].Cells[k])
 			}
+			if d := s.Tables[i].Rows[j].Detail; d != nil {
+				d.ItemsTitle = Plain(d.ItemsTitle)
+				for _, fields := range [][]Field{d.Fields, d.Capacity, d.Items} {
+					for k := range fields {
+						fields[k].Label, fields[k].Value = Plain(fields[k].Label), Plain(fields[k].Value)
+					}
+				}
+				for k := range d.Series {
+					d.Series[k] = cleanSeries(d.Series[k])
+				}
+			}
 		}
 	}
 	for i := range s.Events {
@@ -58,13 +70,16 @@ func sanitizeSnapshot(s Snapshot) Snapshot {
 		s.Sources[i].State = Plain(s.Sources[i].State)
 	}
 	for i := range s.Series {
-		s.Series[i].Label = Plain(s.Series[i].Label)
-		s.Series[i].Source = Plain(s.Series[i].Source)
-		s.Series[i].Unit = Plain(s.Series[i].Unit)
+		s.Series[i] = cleanSeries(s.Series[i])
 	}
 	for i := range s.Actions {
 		s.Actions[i].Label = Plain(s.Actions[i].Label)
 		s.Actions[i].Reason = Plain(s.Actions[i].Reason)
 	}
+	return s
+}
+
+func cleanSeries(s Series) Series {
+	s.Label, s.Source, s.Unit, s.Subject = Plain(s.Label), Plain(s.Source), Plain(s.Unit), Plain(s.Subject)
 	return s
 }

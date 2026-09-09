@@ -17,6 +17,10 @@ Screenshot exports include startup charts with only three minutes of history and
 
 The PTY checks execute the real binary across truecolor, 256-color, basic ANSI and NO_COLOR environments. They assert the startup budget, mouse tab navigation, app log SSE, 1000-row scrolling, resize, stale retention, recovery, administrator component drilldown, all four public entrypoints, Ctrl-C/q cleanup, and zero writes.
 
+The node scenario additionally checks that keyboard and mouse selection update the metric subject and disk value, and that `o` switches explicitly between selected-node data and cluster peaks. Row selection uses the existing collection snapshot and adds no requests. The rendering cap is 60 FPS for input responsiveness; telemetry still uses its independent collection intervals.
+
+Cluster fixtures cover 60–250 columns, selected-node capacity, workload details, fixed percentage axes and unavailable metrics. To review specific sizes/themes, set `FUGUE_TUI_SCREEN_FILTER='cluster-(200x50|80x30)-(carbon|light)'` when running `screens.cjs`.
+
 The ten-minute test runs 1000 rows, five charts at 200 columns, ten operations, a stream with repeated text, pause/resume, resizing, and synthetic outages. It reports active streams, goroutines, heap and retained logs. Run startup measurements without simultaneous compiler jobs; record failures as well as passing measurements.
 
 For an isolated PostgreSQL integration database, set `FUGUE_TEST_ACTION_DATABASE_URL` and run `TestAppActionConcurrentRetryCreatesOneOperation` in `internal/store`. Never point that variable at production.

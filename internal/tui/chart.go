@@ -16,8 +16,9 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 	}
 	p := theme(m.prefs.Theme)
 	color := p.graphs[index%len(p.graphs)]
-	plotWidth, plotHeight := max(1, width-2), max(1, height-4)
-	start, end := chartRange(series, m.now, m.request.Window)
+	plotWidth, plotHeight := max(1, width-5), max(1, height-4)
+	now := m.chartNow()
+	start, end := chartRange(series, now, m.request.Window)
 	buckets := plotBuckets(series, start, end, plotWidth)
 	latest := "--"
 	var latestAt time.Time
@@ -34,8 +35,15 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 			maximum = *point.Value
 		}
 	}
+	peak := maximum
 	if series.Limit != nil {
 		maximum = math.Max(maximum, *series.Limit)
+	}
+	if series.Unit == "%" {
+		maximum = 100
+	}
+	if series.Unit == "ratio" {
+		maximum = 1
 	}
 	if maximum <= 0 {
 		maximum = 1
@@ -53,7 +61,7 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 	if valid == 1 {
 		caption = "collecting · 1 sample"
 	}
-	if valid > 0 && m.now.Sub(latestAt) > staleAfter(series) {
+	if valid > 0 && now.Sub(latestAt) > staleAfter(series) {
 		caption = "stale · " + latestAt.Local().Format("15:04:05")
 	}
 	title := pad(strings.ToUpper(series.Label), max(1, width-len(latest)-1)) + latest
@@ -65,8 +73,24 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 		}
 	} else {
 		grid := drawPlot(buckets, plotWidth, plotHeight, maximum, m.prefs.Graph, series.Limit)
-		for _, line := range grid {
-			lines = append(lines, m.style(color).Render(line))
+		for y, line := range grid {
+			tick := ""
+			scale, suffix := 1.0, ""
+			if series.Unit == "%" {
+				suffix = "%"
+			}
+			if series.Unit == "ratio" {
+				scale, suffix = 100, "%"
+			}
+			if y == 0 {
+				tick = axisNumber(maximum*scale) + suffix
+			} else if y == plotHeight-1 {
+				tick = "0" + suffix
+			} else if y == plotHeight/2 {
+				tick = axisNumber(maximum*scale/2) + suffix
+			}
+			shade := blendColor(color, p.background, 0.95-0.5*float64(y)/float64(max(1, plotHeight-1)))
+			lines = append(lines, m.style(p.muted).Render(pad(tick, 4)+" ")+m.style(shade).Render(line))
 		}
 	}
 	if m.graphIndex == index && m.graphCursor >= 0 && len(buckets) > 0 {
@@ -83,9 +107,32 @@ func (m *Model) renderChart(series Series, width, height, index int) string {
 	if valid > 0 && end.Sub(start) < m.request.Window {
 		windowLabel = chartDuration(end.Sub(start)) + " / " + windowLabel
 	}
-	lines = append(lines, m.style(p.muted).Render(clip("0 "+series.Unit+"   "+windowLabel+"   max "+formatValue(series.Unit, maximum), width)), m.style(p.muted).Render(clip(caption, width)))
-	lines[len(lines)-1] = m.style(p.muted).Render(clip(caption+" · "+series.Source, width))
+	axis := windowLabel + " · peak " + formatValue(series.Unit, peak)
+	if valid == 0 {
+		axis = "No measurements · " + m.prefs.Window
+	}
+	lines = append(lines, m.style(p.muted).Render(clip(axis, width)), m.style(p.muted).Render(clip(caption, width)))
+	source := series.Source
+	if series.Subject != "" {
+		source = "latest peak: " + series.Subject
+	}
+	lines[len(lines)-1] = m.style(p.muted).Render(clip(caption+" · "+source, width))
 	return strings.Join(lines, "\n")
+}
+
+func axisNumber(value float64) string {
+	for _, unit := range []struct {
+		size  float64
+		label string
+	}{{1 << 40, "T"}, {1 << 30, "G"}, {1 << 20, "M"}, {1 << 10, "K"}} {
+		if value >= unit.size {
+			return fmt.Sprintf("%.0f%s", value/unit.size, unit.label)
+		}
+	}
+	if value < 1 && value > 0 {
+		return fmt.Sprintf("%.1f", value)
+	}
+	return fmt.Sprintf("%.0f", value)
 }
 
 func chartDuration(span time.Duration) string {

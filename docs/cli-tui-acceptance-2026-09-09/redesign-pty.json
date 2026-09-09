@@ -1,0 +1,83 @@
+{
+  "status": "pass",
+  "results": [
+    {
+      "command": "app top Sample API",
+      "firstPaint": 111,
+      "inputP95": 18.12258299999985,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "q"
+    },
+    {
+      "command": "app top Sample API",
+      "firstPaint": 80,
+      "inputP95": 18.402334000000337,
+      "terminal": "xterm-256color",
+      "color": "",
+      "exit": "q"
+    },
+    {
+      "command": "app top Sample API",
+      "firstPaint": 82,
+      "inputP95": 18.70587499999965,
+      "terminal": "ansi",
+      "color": "",
+      "exit": "q"
+    },
+    {
+      "command": "app top Sample API",
+      "firstPaint": 78,
+      "inputP95": 18.466957999999067,
+      "terminal": "xterm-256color",
+      "color": "none",
+      "exit": "q"
+    },
+    {
+      "command": "admin cluster top --scope control-plane",
+      "firstPaint": 79,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "q"
+    },
+    {
+      "command": "admin cluster top --scope nodes",
+      "firstPaint": 78,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "q"
+    },
+    {
+      "command": "project top Sample",
+      "firstPaint": 79,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "Ctrl-C"
+    },
+    {
+      "command": "console",
+      "firstPaint": 79,
+      "terminal": "xterm-256color",
+      "color": "truecolor",
+      "exit": "q"
+    }
+  ],
+  "activeStreams": 0,
+  "writes": 0,
+  "requests": {
+    "/v1/auth/context": 8,
+    "/v1/apps": 8,
+    "/v1/apps/app-a": 16,
+    "/v1/operations": 4,
+    "/v1/apps/app-a/observability/metrics/timeseries": 12,
+    "/v1/apps/app-a/runtime-pods": 4,
+    "/v1/apps/app-a/runtime-logs/stream": 4,
+    "/v1/apps/app-a/runtime-logs": 4,
+    "/v1/cluster/control-plane": 2,
+    "/v1/cluster/nodes": 1,
+    "/v1/cluster/node-policies/status": 1,
+    "/v1/console/gallery/stream": 3,
+    "/v1/projects": 2,
+    "/v1/console/projects/project-a": 1
+  }
+}

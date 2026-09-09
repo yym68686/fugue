@@ -63,7 +63,7 @@ func (p *tuiProvider) loadTUICluster(client *Client, request tui.Request) (tui.S
 						numbers[i+2] = *v
 					}
 				}
-				table.Rows = append(table.Rows, tui.Row{ID: node.Name, Cells: []string{node.Name, node.Status, tuiPercent(cpu), tuiPercent(mem), tuiPercent(disk), strconv.Itoa(len(node.Workloads)), node.Region}, Numbers: numbers, Target: &target})
+				table.Rows = append(table.Rows, tui.Row{ID: node.Name, Cells: []string{node.Name, node.Status, tuiPercent(cpu), tuiPercent(mem), tuiPercent(disk), strconv.Itoa(len(node.Workloads)), node.Region}, Numbers: numbers, Target: &target, Detail: tuiNodePreview(node)})
 				if kind == "node" {
 					appendTUINodeDetails(&s, node)
 					appendTUINodeSeries(&s, node)
@@ -72,7 +72,11 @@ func (p *tuiProvider) loadTUICluster(client *Client, request tui.Request) (tui.S
 			if kind == "cluster" {
 				appendTUIClusterSeries(&s, nodes)
 			}
-			s.Tables = append([]tui.Table{table}, s.Tables...)
+			if kind == "node" && len(s.Tables) > 0 {
+				s.Tables = append(s.Tables, table)
+			} else {
+				s.Tables = append([]tui.Table{table}, s.Tables...)
+			}
 			s.Fields = append(s.Fields, tui.Field{Label: "Nodes ready", Value: fmt.Sprintf("%d / %d", ready, len(table.Rows))})
 			if kind == "node" && len(table.Rows) == 0 {
 				s.Status = "not found"
@@ -247,6 +251,8 @@ func appendTUINodeSeries(s *tui.Snapshot, node model.ClusterNode) {
 func appendTUIClusterSeries(s *tui.Snapshot, nodes []model.ClusterNode) {
 	peak := model.ClusterNode{}
 	var cpu, mem, disk *float64
+	var cpuNode, memNode, diskNode string
+	var cpuAt, memAt, diskAt time.Time
 	for _, node := range nodes {
 		if node.ObservedAt == nil {
 			continue
@@ -256,12 +262,18 @@ func appendTUIClusterSeries(s *tui.Snapshot, nodes []model.ClusterNode) {
 		}
 		if node.CPU != nil && node.CPU.UsagePercent != nil && (cpu == nil || *node.CPU.UsagePercent > *cpu) {
 			cpu = node.CPU.UsagePercent
+			cpuNode = node.Name
+			cpuAt = *node.ObservedAt
 		}
 		if node.Memory != nil && node.Memory.UsagePercent != nil && (mem == nil || *node.Memory.UsagePercent > *mem) {
 			mem = node.Memory.UsagePercent
+			memNode = node.Name
+			memAt = *node.ObservedAt
 		}
 		if node.EphemeralStorage != nil && node.EphemeralStorage.UsagePercent != nil && (disk == nil || *node.EphemeralStorage.UsagePercent > *disk) {
 			disk = node.EphemeralStorage.UsagePercent
+			diskNode = node.Name
+			diskAt = *node.ObservedAt
 		}
 	}
 	peak.CPU = &model.ClusterNodeCPUStats{UsagePercent: cpu}
@@ -272,6 +284,63 @@ func appendTUIClusterSeries(s *tui.Snapshot, nodes []model.ClusterNode) {
 		if s.Series[i].ID != "network" {
 			s.Series[i].Label = "Peak node " + s.Series[i].Label
 			s.Series[i].Source = "maximum across timestamped kubelet node samples"
+			s.Series[i].Subject = map[string]string{"cpu": cpuNode, "memory": memNode, "disk": diskNode}[s.Series[i].ID]
+			if len(s.Series[i].Points) > 0 {
+				s.Series[i].Points[0].At = map[string]time.Time{"cpu": cpuAt, "memory": memAt, "disk": diskAt}[s.Series[i].ID]
+			}
 		}
 	}
+}
+
+func tuiNodePreview(node model.ClusterNode) *tui.ResourceDetail {
+	s := tui.Snapshot{}
+	appendTUINodeSeries(&s, node)
+	d := &tui.ResourceDetail{Series: s.Series, ItemsTitle: "Workloads", Fields: []tui.Field{
+		{Label: "Region", Value: node.Region}, {Label: "Zone", Value: node.Zone},
+		{Label: "OS", Value: node.OSImage}, {Label: "Kubelet", Value: node.KubeletVersion},
+		{Label: "Container runtime", Value: node.ContainerRuntime},
+	}}
+	if node.ObservedAt != nil {
+		d.ObservedAt = *node.ObservedAt
+	}
+	amount := func(value *int64, cpu bool) string {
+		if value == nil {
+			return "--"
+		}
+		if cpu {
+			return fmt.Sprintf("%.2f cores", float64(*value)/1000)
+		}
+		return tuiBytes(*value)
+	}
+	add := func(label string, used, capacity, free *int64, cpu bool) {
+		d.Capacity = append(d.Capacity, tui.Field{Label: label, Value: amount(used, cpu) + " / " + amount(capacity, cpu)})
+		if free != nil {
+			d.Fields = append(d.Fields, tui.Field{Label: label + " schedulable", Value: amount(free, cpu)})
+		}
+	}
+	if v := node.CPU; v != nil {
+		add("CPU", v.UsedMilliCores, v.CapacityMilliCores, v.SchedulableFreeMilliCores, true)
+	}
+	if v := node.Memory; v != nil {
+		add("Memory", v.UsedBytes, v.CapacityBytes, v.SchedulableFreeBytes, false)
+	}
+	if v := node.EphemeralStorage; v != nil {
+		add("Disk", v.UsedBytes, v.CapacityBytes, v.SchedulableFreeBytes, false)
+	}
+	for _, workload := range node.Workloads {
+		d.Items = append(d.Items, tui.Field{Label: workload.Name, Value: fmt.Sprintf("%s · %d pods", workload.Kind, workload.PodCount)})
+	}
+	return d
+}
+
+func tuiBytes(value int64) string {
+	for _, unit := range []struct {
+		size  int64
+		label string
+	}{{1 << 40, "TiB"}, {1 << 30, "GiB"}, {1 << 20, "MiB"}, {1 << 10, "KiB"}} {
+		if value >= unit.size {
+			return fmt.Sprintf("%.1f %s", float64(value)/float64(unit.size), unit.label)
+		}
+	}
+	return fmt.Sprintf("%d B", value)
 }
