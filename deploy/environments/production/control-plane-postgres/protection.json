@@ -11,11 +11,11 @@
         "endpointURL": "https://8ec0d42e9131e125b020b6d4918fe721.r2.cloudflarestorage.com",
         "s3Credentials": {
           "accessKeyId": {
-            "name": "fugue-fugue-config",
+            "name": "fugue-control-plane-backup-r2",
             "key": "FUGUE_DATA_BACKEND_ACCESS_KEY_ID"
           },
           "secretAccessKey": {
-            "name": "fugue-fugue-config",
+            "name": "fugue-control-plane-backup-r2",
             "key": "FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY"
           }
         },
