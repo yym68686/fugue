@@ -56,5 +56,10 @@
   "scheduledBackup": {
     "name": "fugue-control-plane-physical-daily",
     "schedule": "0 15 3 * * *"
+  },
+  "newInstanceStorage": {
+    "size": "100Gi",
+    "storageClass": "local-path",
+    "resizeInUseVolumes": false
   }
 }

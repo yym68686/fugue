@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import subprocess
+import re
 
 
 def validate(config, live):
@@ -28,6 +29,12 @@ def validate(config, live):
     old_archive = live['spec'].get('backup', {}).get('barmanObjectStore', {}).get('destinationPath')
     if old_archive and old_archive != spec['backup']['barmanObjectStore']['destinationPath']:
         raise ValueError('Cannot replace the existing WAL archive in a protection rollout')
+    storage = config.get('newInstanceStorage')
+    if storage:
+        if set(storage) != {'size', 'storageClass', 'resizeInUseVolumes'} or storage['resizeInUseVolumes'] is not False:
+            raise ValueError('New-volume defaults must not resize existing volumes')
+        if not re.fullmatch(r'[1-9][0-9]*Gi', storage['size']) or not storage['storageClass']:
+            raise ValueError('Invalid new-volume size or storage class')
 
 
 def main():
@@ -43,7 +50,14 @@ def main():
     ns, name = config['namespace'], config['cluster']
     live = json.loads(kube('-n', ns, 'get', 'cluster', name, '-o', 'json'))
     validate(config, live)
-    patch = json.dumps({'metadata': {'resourceVersion': live['metadata']['resourceVersion']}, 'spec': config['spec']})
+    desired = dict(config['spec'])
+    if config.get('newInstanceStorage'):
+        storage = config['newInstanceStorage']
+        pvcs = json.loads(kube('-n', ns, 'get', 'pvc', '-l', 'cnpg.io/cluster=' + name, '-o', 'json'))
+        if any(pvc['spec']['storageClassName'] != storage['storageClass'] for pvc in pvcs['items']):
+            raise ValueError('New storage class differs from existing database volumes')
+        desired['storage'] = storage
+    patch = json.dumps({'metadata': {'resourceVersion': live['metadata']['resourceVersion']}, 'spec': desired})
     flags = [] if args.apply else ['--dry-run=server']
     print(kube('-n', ns, 'patch', 'cluster', name, '--type=merge', '-p', patch, *flags))
     schedule = config['scheduledBackup']

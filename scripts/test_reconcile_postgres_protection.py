@@ -30,6 +30,13 @@ class ProtectionSafetyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate(self.config, self.live)
 
+    def test_new_volume_defaults_cannot_resize_live_data(self):
+        self.config['newInstanceStorage'] = {'size': '100Gi', 'storageClass': 'test-local', 'resizeInUseVolumes': False}
+        validate(self.config, self.live)
+        self.config['newInstanceStorage']['resizeInUseVolumes'] = True
+        with self.assertRaises(ValueError):
+            validate(self.config, self.live)
+
 
 if __name__ == '__main__':
     unittest.main()
