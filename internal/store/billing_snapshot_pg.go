@@ -24,7 +24,12 @@ SELECT jsonb_build_object(
             ), '[]'::jsonb)))
         ELSE '{}'::jsonb END
       ELSE spec_json END AS spec,
-      status_json AS status, created_at, updated_at
+      CASE WHEN jsonb_typeof(status_json) = 'object' THEN
+        (status_json - ARRAY['last_message','source_sync']) ||
+        CASE WHEN jsonb_typeof(status_json->'last_failed_operation') = 'object' THEN
+          jsonb_build_object('last_failed_operation', (status_json->'last_failed_operation') - ARRAY['error_message','result_message'])
+        ELSE '{}'::jsonb END
+      ELSE status_json END AS status, created_at, updated_at
     FROM fugue_apps WHERE COALESCE(lower(btrim(status_json->>'phase')), '') <> 'deleted' AND tenant_id = ANY($1::text[])
   ) a), '[]'::jsonb),
   'backing_services', COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.created_at) FROM (

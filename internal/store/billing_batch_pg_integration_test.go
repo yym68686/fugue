@@ -82,6 +82,11 @@ func TestBillingBatchPostgresPreservesAccrualAndCredits(t *testing.T) {
 	}
 	app.Status.CurrentRuntimeID = runtime.ID
 	app.Status.CurrentReplicas = 2
+	app.Status.LastMessage = strings.Repeat("operation output ", 2048)
+	app.Status.LastFailedOperation = &model.AppOperationFailure{
+		ID: "older-failure", Type: "deploy", UpdatedAt: time.Now().UTC().Add(-3 * time.Hour),
+		ErrorMessage: strings.Repeat("diagnostic output ", 4096), ResultMessage: "previous deployment diagnostics",
+	}
 	app.Spec.Workspace = &model.AppWorkspaceSpec{StorageSize: "3Gi"}
 	app.Spec.Env = map[string]string{"CONFIG": "private"}
 	app.Spec.Files = []model.AppFile{{Path: "/config.txt", Content: strings.Repeat("config", 1024), Secret: true}}
@@ -146,6 +151,16 @@ func TestBillingBatchPostgresPreservesAccrualAndCredits(t *testing.T) {
 	expectedStorage.Mounts[0].SeedContent = ""
 	if !reflect.DeepEqual(*projectedStorage, expectedStorage) || appEffectiveResources(inputs.Apps[0].Spec) != appEffectiveResources(app.Spec) {
 		t.Fatal("billing projection changed storage settings or commitment")
+	}
+	projectedStatus := inputs.Apps[0].Status
+	if projectedStatus.LastMessage != "" || projectedStatus.LastFailedOperation == nil ||
+		projectedStatus.LastFailedOperation.ErrorMessage != "" || projectedStatus.LastFailedOperation.ResultMessage != "" {
+		t.Fatal("billing input transferred operation diagnostic payloads")
+	}
+	if projectedStatus.CurrentRuntimeID != app.Status.CurrentRuntimeID || projectedStatus.CurrentReplicas != app.Status.CurrentReplicas ||
+		projectedStatus.LastFailedOperation.ID != app.Status.LastFailedOperation.ID ||
+		!projectedStatus.LastFailedOperation.UpdatedAt.Equal(app.Status.LastFailedOperation.UpdatedAt) {
+		t.Fatal("billing input changed accounting or failure identity")
 	}
 	if err := s.WarmBillingStatements(ctx, 2); err != nil {
 		t.Fatal(err)
