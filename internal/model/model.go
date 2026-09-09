@@ -946,6 +946,7 @@ type ClusterNodeWorkload struct {
 }
 
 type ClusterNode struct {
+	ObservedAt       *time.Time                      `json:"observed_at,omitempty"`
 	Name             string                          `json:"name"`
 	Status           string                          `json:"status"`
 	Roles            []string                        `json:"roles,omitempty"`

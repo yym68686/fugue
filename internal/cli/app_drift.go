@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"fugue/internal/model"
 	"github.com/spf13/cobra"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -19,13 +21,22 @@ func (c *Client) GetAppRuntimeState(id string) (model.AppRuntimeState, error) {
 	}
 	return result, err
 }
-func (c *Client) RestartAppForSpec(id, hash string) (restartAppResponse, error) {
+func (c *Client) RestartAppForSpec(id, hash string, idempotencyKey ...string) (restartAppResponse, error) {
 	var result restartAppResponse
 	req, err := http.NewRequest(http.MethodPost, c.resolveURL("/v1/apps/"+url.PathEscape(id)+"/restart"), nil)
 	if err != nil {
 		return result, err
 	}
 	req.Header.Set("If-Match", `"`+hash+`"`)
+	if len(idempotencyKey) > 0 {
+		req.Header.Set("Idempotency-Key", idempotencyKey[0])
+		// Non-rewindable body prevents net/http from transparently resubmitting
+		// an idempotent write after a broken keep-alive connection.
+		req.Body = io.NopCloser(strings.NewReader("{}"))
+		req.ContentLength = 2
+		req.Header.Set("Content-Type", "application/json")
+		req.GetBody = nil
+	}
 	raw, err := c.do(req)
 	if err != nil {
 		return result, err

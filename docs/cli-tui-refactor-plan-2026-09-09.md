@@ -1,41 +1,48 @@
 # Fugue CLI TUI 系统重构计划
 日期：2026-09-09
 
-## 实施记录
+## 实施记录（2026-09-09 重新审计）
 
-实施工作区：`/Users/yanyuming/Downloads/GitHub/fugue-tui-modernization-20260909`，分支 `codex/tui-modernization-20260909`。本节记录实际完成证据；其余章节为目标设计，不代表已交付。
+工作区：`/Users/yanyuming/Downloads/GitHub/fugue-tui-modernization-20260909`。
+上一版把未实现或未验证的项目打勾，并过早宣称完成；该记录已撤回。本节仅在有代码及验收证据时打勾，v0.3.0 不代表本计划完成。
 
-- [x] 引入 Go 原生 Bubble Tea v2.0.9 / Lip Gloss v2.0.6；无第二套运行时。BubbleZone/ntcharts 仍依赖 v1，改用 v2 原生鼠标事件及单一布局几何，图表采用有时间桶的 Braille raster。
-- [x] 独立 `internal/tui` 与 CLI Provider 适配边界，不导入 API/store/controller。
-- [x] 事件循环、键盘导航、搜索、排序、详情返回、鼠标点击/滚轮、真实 resize、取消与终端恢复。
-- [x] 有界缓存、请求去重、4 路并发、8 秒网络超时和退避；旧响应按 view epoch 隔离。
-- [x] 60/80/100/140/200 列与 8/18/30/50 行布局测试；CJK/组合字符 cell width、无色输出与控制字符过滤测试。
-- [x] 三套主题及图表/窗口/键位本地偏好文件；原子 0600 写入能力。
-- [x] 图表环形序列、重复时间去重、缺失时间桶、保留峰值；合成 ANSI fixture 经 xterm/Playwright 截图复核。
-- [x] 新增 app/project top；console 与 admin cluster top 的交互路径接入新 TUI，既有 plain/JSON 回归通过。
-- [x] PTY 实测 first paint、日志、键盘、mouse input、resize、滚动、stale 保留、恢复、q 后终端模式恢复。修复 stdout 包装隐藏 fd 导致空白屏的问题。
-- [x] 逐命令 legacy 基线与可审查迁移/删除清单（见下方“兼容与删除决策”）。
-- [x] 完整 server historical series、CPU/内存/网络/请求/分位数来源和授权验证；无后端来源时显示 unavailable/collecting，不伪造 0。
-- [x] 节点/runtime/component 深入详情、集群容量和发布证据完整视图。
-- [x] action plan 的服务端 CAS、重复请求和 unknown 提交恢复验收。
-- [x] 所有公共交互控件、鼠标文本选择、键盘等价、配置验证及完整终端矩阵。
-- [x] SSE 生命周期、分页/增量日志和 10 分钟稳定性测试；断线转轮询并保留 stale age。
-- [x] API 契约生成、后端/前端同步、全量测试和生产发布。
-- [x] Beta 和正式 CLI release、本机升级与版本核验。
+- [x] Bubble Tea v2 / Lip Gloss v2 与独立 `internal/tui` Provider 边界已经存在。
+- [x] M0：逐入口兼容基线和明确迁移清单；纠正与原计划冲突的删除声明。
+- [x] M1：统一命令参数、真实事件循环、上下文取消、路由订阅隔离和退出恢复。
+- [x] M2：响应式布局、可滚动长详情、完整键鼠等价、文本选择、主题/偏好验证与视觉矩阵。
+- [x] M3：应用/pod/runtime/operation 详情链、日志 SSE 游标恢复、部分失败保留证据。
+- [x] M4：真实历史指标、正确采样来源与间隔、空值/权限/stale、窗口/阈值/选点和采样预算。
+- [x] M5：节点/容量/policy、runtime、组件/workload/发布证据，管理员权限和 scope 导航。
+- [x] M6：服务端 CAS/幂等、精确确认、未知提交恢复与操作追踪；凭据脱敏验收。
+- [ ] M7：PTY、10 分钟稳定性、性能、终端矩阵、beta/反馈门槛和正式发布。
+- [ ] OpenAPI 生成、前端同步、全量测试、正式生产 lane 完成证据。
+- [ ] 全平台 release 资产及校验和、本机正式升级、示例命令真实启动验收。
 
-当前验证：CLI/TUI 定向测试、TUI race、go vet、API CAS/时间序列测试、PTY 键鼠/resize/断线恢复、xterm/Playwright 多尺寸快照和 `make test` 均通过；1000 行本地渲染基准约 1.6ms/frame。正式版本、提交和本机版本证据记录在发布章节。
+已修复的审计缺陷：管理员命令遗漏 `--mouse/--theme`；console 丢失鼠标 flag 值；SSE 未绑定取消上下文；旧订阅无 epoch 隔离；日志未正确增量消费；resource history 使用错误 target kind/采样间隔；节点和组件详情不完整；发布验证及长时测试此前无充分证据，M7 仍待正式发布。
 
-## 兼容与删除决策
+### 当前实现与复验依据
 
-| 旧入口/逻辑 | 决策 | 新语义 |
-| --- | --- | --- |
-| `fugue console` 交互单帧预览 | 保留入口，迁移到统一 TUI；`--json/--plain` 保持旧输出 | 工作区 dashboard，按权限显示项目/应用 |
-| `fugue project watch` | 保留脚本兼容，交互时复用统一 TUI | `fugue project top <project>` |
-| `fugue admin cluster top` 旧方框 renderer | 保留命令名，替换 renderer 和事件循环 | capability-aware cluster dashboard |
-| `internal/cli/monitor` 轮询模型、`internal/cli/ui/renderer` 固定方框 | 删除交互调用路径；仅保留 plain/legacy 适配所需纯函数，后续版本移除包 | `internal/tui` Provider/Store/Layout/Render |
-| `--mouse` 仅展示标签 | 删除假语义，改为真实 mouse tracking/click/wheel/selection | `--mouse` 明确启用或禁用捕获 |
-| 单点 `MetricBar` | 删除为 dashboard 主指标；无历史来源不再画假曲线 | `metrics/timeseries` + 本地 ring buffer |
-| 未带 `If-Match` 的写操作 | 兼容服务端请求；TUI 写操作一律 plan + CAS | 服务端拒绝陈旧计划并提示刷新 |
+- 参数/兼容：`TestTUIEntrypointsExposeSharedFlags`、`TestAdminTUIAppearanceParsingAndSnapshotCompatibility`、既有 console/monitor JSON/plain/once 测试，四入口共用 `bindTUIAppearanceFlags`。
+- 订阅：`TestWatchStopsOnNavigationPauseAndIgnoresOldEvents`、`TestTUILogStreamResumesAndCancelsAtServer`；HTTP context 取消、路由 epoch/generation 隔离、Last-Event-ID 恢复；2000 行上限且按游标而非文本去重。
+- 图表：`TestTUIResourceHistoryUsesCorrectPerReplicaSeries`、`TestTUILiveSamplesRetainKubeletTimeAcrossCachedReads`；修正 5 分钟历史采样类型和间隔，实时样本保留 kubelet 时间；没有 exporter 的 network 明示 unavailable。1 个点只显示 collecting，两个点起绘图。
+- 详情：`TestClusterComponentScopeAndPodDrilldown`；`--scope control-plane/nodes/runtimes/all`，节点容量/policy、组件 workload、最近 workflow 证据；长详情与帮助可滚动。
+- 操作：`TestAppActionReceiptReplaysAfterCASChangesAndIsActorScoped`、`TestImageActionRejectsChangedDigest`、`TestTUIUnknownSubmissionRecoversReadOnly`。操作和幂等回执原子写入；16 个并发重复请求在隔离 PostgreSQL 中只创建一个 operation；换进程后可读回本地仅含 app/request ID 的回执日志，再 GET 恢复，禁止透明 POST 重放。
+- 终端：仓库 `scripts/tui-qa/smoke.cjs` 真 PTY 覆盖四入口、鼠标/日志/resize/断线恢复、q/Ctrl-C，truecolor/256 色/ANSI/NO_COLOR。最近候选复验 first paint 167–708ms；并行编译时曾有 1.074–3.443s 的冷启动失败，正式产物需在无编译竞争下复验，不能忽略失败记录。
+- 视觉：xterm/Playwright 生成 60/80/100/140/200 列快照；宽/窄屏已人工查看。Go 测试覆盖 8/18/30/50 行、CJK/组合字符和无色输出。
+- 稳定性：第一轮真实 10 分钟（1000 行/4 图/10 operations）通过，goroutine 12→5、堆 4.99MB→3.98MB、日志 2000、活动订阅 0。五图 200 列的第二轮正在复验。
+- 全量：`GOFLAGS=-p=2 make test`、TUI/CLI/API/store 定向 race、go vet、前端 OpenAPI sync/generate/contract:check 已通过。最后一次代码/发布变更仍需对应检查。
+- `[cli-tui]` 用户反馈：v0.3.0 管理员示例 unknown flag；本轮已据此修复共享参数并增加所有入口的真实 PTY 测试。beta `v0.3.1-beta.1` 已推送，等待 release 工作流资产。
+
+
+## 兼容与迁移决策
+
+| 入口/逻辑 | 实施要求 |
+| --- | --- |
+| `console`、`app top`、`project top`、`admin cluster top` | 使用统一交互 TUI；参数行为和帮助必须一致并通过真实终端验证。 |
+| `project watch`、`operation watch` | 按原计划保留窄用途 monitor 及脚本语义，不谎称已经迁移或删除。 |
+| `--plain/--once/--json` | 保持原有输出兼容，不发送控制字节。 |
+| legacy console/monitor/ui | 继续承担兼容输出，不为删除包破坏既有脚本；统一新 TUI 展示代码。 |
+| 写动作 | 只在读到服务端能力、确认计划且有 CAS/幂等证据后开放。 |
 
 ## 调查结论
 

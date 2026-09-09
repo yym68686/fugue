@@ -18,6 +18,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/observability"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -177,13 +178,31 @@ func (s *Server) handleGetAppObservabilityMetricsTimeseries(w http.ResponseWrite
 	} else {
 		series = append(series, resourceSeries...)
 	}
+	since, until, _ := parseAppObservabilityWindowTimes(window)
+	for _, live := range s.appLiveResourceTimeseries(r.Context(), app) {
+		points := live["points"].([]map[string]any)
+		if len(points) > 0 {
+			at, _ := time.Parse(time.RFC3339, fmt.Sprint(points[0]["observed_at"]))
+			if at.Before(since) || at.After(until) {
+				continue
+			}
+		}
+		series = append(series, live)
+	}
 	for _, metric := range series {
 		points, _ := metric["points"].([]map[string]any)
 		metric["state"] = "collecting"
-		if len(points) > 0 {
-			metric["state"] = "available"
-			source.Available = true
+		for _, point := range points {
+			if point["value"] != nil {
+				metric["state"] = "available"
+				source.Available = true
+				break
+			}
 		}
+	}
+	if source.Available && source.Status == "disabled" {
+		source.Status = "degraded"
+		source.Reason = "Resource history available; request telemetry disabled"
 	}
 	series = append(series, map[string]any{"name": "network", "unit": "bytes/s", "source": "not exported by app telemetry", "state": "unavailable", "interval_seconds": 0, "points": []map[string]any{}})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"source": source, "window": window, "series": series})
@@ -227,67 +246,80 @@ func (s *Server) queryAppObservabilityMetricsTimeseries(ctx context.Context, app
 		q.Query = strings.Replace(q.Query, "0.95", "0."+quantile, 1)
 		queries = append(queries, q)
 	}
-	for _, item := range queries {
-		q := *endpoint
-		values := q.Query()
-		values.Set("query", item.Query)
-		values.Set("start", strconv.FormatInt(since.Unix(), 10))
-		values.Set("end", strconv.FormatInt(until.Unix(), 10))
-		values.Set("step", strconv.Itoa(step))
-		q.RawQuery = values.Encode()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, q.String(), nil)
-		if err != nil {
-			return nil, err
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("query Prometheus time series: %w", err)
-		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, cfg.MaxPayloadBytes+1))
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, readErr
-		}
-		if int64(len(body)) > cfg.MaxPayloadBytes {
-			return nil, fmt.Errorf("metrics response exceeds payload limit")
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("query Prometheus time series returned %s", resp.Status)
-		}
-		var payload prometheusRangeResponse
-		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, err
-		}
-		if payload.Status != "" && payload.Status != "success" {
-			return nil, fmt.Errorf("query Prometheus time series failed: %s", payload.Error)
-		}
-		if len(payload.Data.Result) > 1 {
-			return nil, fmt.Errorf("aggregate metric returned multiple series")
-		}
-		points := []map[string]any{}
-		for _, result := range payload.Data.Result {
-			for _, pair := range result.Values {
-				ts, ok := pair[0].(float64)
-				raw, ok2 := pair[1].(string)
-				if !ok || !ok2 || math.IsNaN(ts) || math.IsInf(ts, 0) || ts < float64(since.Unix()) || ts > float64(until.Unix()) {
-					continue
-				}
-				value, err := strconv.ParseFloat(raw, 64)
-				if err != nil {
-					continue
-				}
-				var finite any = value
-				if math.IsNaN(value) || math.IsInf(value, 0) {
-					finite = nil
-				}
-				points = append(points, map[string]any{"observed_at": time.Unix(int64(ts), 0).UTC().Format(time.RFC3339), "value": finite})
-				if len(points) == 1440 {
-					break
+	out = make([]map[string]any, len(queries))
+	group, queryCtx := errgroup.WithContext(ctx)
+	group.SetLimit(3)
+	for index, item := range queries {
+		group.Go(func() error {
+			q := *endpoint
+			values := q.Query()
+			values.Set("query", item.Query)
+			values.Set("start", strconv.FormatInt(since.Unix(), 10))
+			values.Set("end", strconv.FormatInt(until.Unix(), 10))
+			values.Set("step", strconv.Itoa(step))
+			q.RawQuery = values.Encode()
+			req, err := http.NewRequestWithContext(queryCtx, http.MethodGet, q.String(), nil)
+			if err != nil {
+				return err
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return fmt.Errorf("query Prometheus time series: %w", err)
+			}
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, cfg.MaxPayloadBytes+1))
+			resp.Body.Close()
+			if readErr != nil {
+				return readErr
+			}
+			if int64(len(body)) > cfg.MaxPayloadBytes {
+				return fmt.Errorf("metrics response exceeds payload limit")
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return fmt.Errorf("query Prometheus time series returned %s", resp.Status)
+			}
+			var payload prometheusRangeResponse
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return err
+			}
+			if payload.Status != "" && payload.Status != "success" {
+				return fmt.Errorf("query Prometheus time series failed: %s", payload.Error)
+			}
+			if len(payload.Data.Result) > 1 {
+				return fmt.Errorf("aggregate metric returned multiple series")
+			}
+			points := []map[string]any{}
+			for _, result := range payload.Data.Result {
+				for _, pair := range result.Values {
+					ts, ok := pair[0].(float64)
+					raw, ok2 := pair[1].(string)
+					if !ok || !ok2 || math.IsNaN(ts) || math.IsInf(ts, 0) || ts < float64(since.Unix()) || ts > float64(until.Unix()) {
+						continue
+					}
+					value, err := strconv.ParseFloat(raw, 64)
+					if err != nil {
+						continue
+					}
+					var finite any = value
+					if math.IsNaN(value) || math.IsInf(value, 0) {
+						finite = nil
+					}
+					points = append(points, map[string]any{"observed_at": time.Unix(int64(ts), 0).UTC().Format(time.RFC3339), "value": finite})
+					if len(points) == 1440 {
+						break
+					}
 				}
 			}
-		}
-		out = append(out, map[string]any{"name": item.Name, "unit": item.Unit, "source": "prometheus query_range", "interval_seconds": step, "points": points})
+			out[index] = map[string]any{"name": item.Name, "unit": item.Unit, "source": "prometheus query_range", "interval_seconds": step, "points": points}
+			return nil
+		})
 	}
+	if err := group.Wait(); err != nil {
+		if cfg.ClickHouseDSN != "" {
+			return s.queryAppObservabilityTimeseriesFromClickHouse(ctx, appID, window, step)
+		}
+		return nil, err
+	}
+
 	return out, nil
 }
 

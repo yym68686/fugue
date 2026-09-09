@@ -247,7 +247,7 @@ func TestLogSelectionCellCoordinates(t *testing.T) {
 func BenchmarkDashboard(b *testing.B) {
 	m := testModel()
 	m.accept("overview", fixture(1000))
-	m.width, m.height = 140, 40
+	m.width, m.height = 200, 50
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = m.View()

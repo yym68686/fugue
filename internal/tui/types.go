@@ -9,6 +9,7 @@ import (
 
 type Target struct {
 	Kind      string `json:"kind"`
+	Scope     string `json:"scope,omitempty"`
 	ID        string `json:"id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	TenantID  string `json:"tenant_id,omitempty"`
@@ -16,7 +17,7 @@ type Target struct {
 }
 
 func (t Target) Key() string {
-	return t.Kind + ":" + t.TenantID + ":" + t.ProjectID + ":" + t.ID + ":" + t.Name
+	return t.Scope + ":" + t.Kind + ":" + t.TenantID + ":" + t.ProjectID + ":" + t.ID + ":" + t.Name
 }
 
 type Field struct {
@@ -72,19 +73,22 @@ type Action struct {
 	Argument string `json:"argument,omitempty"`
 }
 type Snapshot struct {
-	Target     Target    `json:"target"`
-	Title      string    `json:"title"`
-	Subtitle   string    `json:"subtitle,omitempty"`
-	Status     string    `json:"status"`
-	ObservedAt time.Time `json:"observed_at"`
-	Fields     []Field   `json:"fields,omitempty"`
-	Tables     []Table   `json:"tables,omitempty"`
-	Series     []Series  `json:"series,omitempty"`
-	Events     []Event   `json:"events,omitempty"`
-	Logs       []string  `json:"logs,omitempty"`
-	Sources    []Source  `json:"sources,omitempty"`
-	Actions    []Action  `json:"actions,omitempty"`
-	Admin      bool      `json:"admin"`
+	Target             Target             `json:"target"`
+	Title              string             `json:"title"`
+	Subtitle           string             `json:"subtitle,omitempty"`
+	Status             string             `json:"status"`
+	ObservedAt         time.Time          `json:"observed_at"`
+	Fields             []Field            `json:"fields,omitempty"`
+	Tables             []Table            `json:"tables,omitempty"`
+	Series             []Series           `json:"series,omitempty"`
+	MetricLimits       map[string]float64 `json:"metric_limits,omitempty"`
+	Events             []Event            `json:"events,omitempty"`
+	Logs               []string           `json:"logs,omitempty"`
+	LogCursor          string             `json:"log_cursor,omitempty"`
+	Sources            []Source           `json:"sources,omitempty"`
+	Actions            []Action           `json:"actions,omitempty"`
+	UnavailableScreens map[string]string  `json:"unavailable_screens,omitempty"`
+	Admin              bool               `json:"admin"`
 }
 type Request struct {
 	Target  Target
@@ -107,13 +111,19 @@ type Plan struct {
 	Confirmation string
 	ExpiresAt    time.Time
 	Precondition string
+	ImageDigest  string
 }
 type Receipt struct {
 	Operation Target
 	Message   string
 	Unknown   bool
 }
-type Notice struct{ Err error }
+type Notice struct {
+	Err     error
+	Logs    []string
+	Cursor  string
+	Section string
+}
 
 // Provider implementations own authentication and wire contracts. These methods
 // must honor ctx; Execute must never retry a request whose outcome is unknown.
@@ -126,7 +136,7 @@ type Provider interface {
 // WatchProvider is optional. Providers without an event stream automatically
 // use the bounded polling scheduler in Model.
 type WatchProvider interface {
-	Watch(context.Context, Target, func(Notice)) error
+	Watch(context.Context, Target, string, func(Notice)) error
 }
 
 // Extension receives only a copied, sanitized view snapshot; it has no client,

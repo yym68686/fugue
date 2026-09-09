@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -100,4 +101,23 @@ func (s *Store) ReleaseIdempotencyRecord(scope, tenantID, key string) error {
 		state.Idempotency = append(state.Idempotency[:index], state.Idempotency[index+1:]...)
 		return nil
 	})
+}
+
+func (s *Store) GetIdempotencyRecord(scope, tenantID, key string) (model.IdempotencyRecord, error) {
+	if s.usingDatabase() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		record, err := scanIdempotencyRecord(s.db.QueryRowContext(ctx, `SELECT scope, tenant_id, key, request_hash, status, app_id, operation_id, created_at, updated_at FROM fugue_idempotency_keys WHERE scope=$1 AND tenant_id=$2 AND key=$3`, scope, tenantID, key))
+		return record, mapDBErr(err)
+	}
+	var record model.IdempotencyRecord
+	err := s.withLockedState(false, func(state *model.State) error {
+		idx := findIdempotencyRecord(state, scope, tenantID, key)
+		if idx < 0 {
+			return ErrNotFound
+		}
+		record = state.Idempotency[idx]
+		return nil
+	})
+	return record, err
 }

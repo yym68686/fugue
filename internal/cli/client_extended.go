@@ -971,9 +971,13 @@ func (c *Client) RedeployAppImage(id, imageRef string) (appImageRedeployResponse
 	return response, nil
 }
 
-func (c *Client) RedeployAppImageForSpec(id, imageRef, specHash string) (appImageRedeployResponse, error) {
+func (c *Client) RedeployAppImageForSpec(id, imageRef, specHash string, idempotencyKey ...string) (appImageRedeployResponse, error) {
 	var response appImageRedeployResponse
-	payload, err := json.Marshal(map[string]string{"image_ref": strings.TrimSpace(imageRef)})
+	request := map[string]string{"image_ref": strings.TrimSpace(imageRef)}
+	if len(idempotencyKey) > 1 {
+		request["expected_digest"] = idempotencyKey[1]
+	}
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return response, err
 	}
@@ -984,6 +988,10 @@ func (c *Client) RedeployAppImageForSpec(id, imageRef, specHash string) (appImag
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("If-Match", `"`+strings.TrimSpace(specHash)+`"`)
+	if len(idempotencyKey) > 0 {
+		req.Header.Set("Idempotency-Key", idempotencyKey[0])
+		req.GetBody = nil
+	}
 	raw, err := c.do(req)
 	if err != nil {
 		return response, err

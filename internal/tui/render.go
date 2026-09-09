@@ -81,7 +81,11 @@ func (m *Model) render() string {
 		meta += "  PAUSED"
 	}
 	if state := m.fetches["overview"]; state.err != "" {
-		meta += "  STALE " + m.now.Sub(m.snapshot.ObservedAt).Round(time.Second).String() + " | " + state.err
+		age := "no successful snapshot"
+		if !m.snapshot.ObservedAt.IsZero() {
+			age = m.now.Sub(m.snapshot.ObservedAt).Round(time.Second).String()
+		}
+		meta += "  STALE " + age + " | " + state.err
 	} else if state.pending {
 		meta += "  refreshing"
 	}
@@ -114,11 +118,11 @@ func (m *Model) render() string {
 		case "events":
 			put(l.body, m.renderEvents(l.body))
 		case "tasks":
-			put(l.body, m.renderTasks(l.body))
+			put(l.body, m.renderTextViewport(l.body))
 		case "details":
-			put(l.body, m.renderSummary(l.body.Dx(), l.body.Dy()))
+			put(l.body, m.renderTextViewport(l.body))
 		case "help":
-			put(l.body, m.help())
+			put(l.body, m.renderTextViewport(l.body))
 		}
 	}
 	if m.toast != "" && m.now.Before(m.toastUntil) {
@@ -187,7 +191,8 @@ func (m *Model) renderTable(rect image.Rectangle) string {
 		}
 		marker := "   "
 		style := m.style(p.foreground)
-		if i == m.selected {
+		selectedText := m.selection.surface == "table" && (m.selection.dragging || m.selection.text != "") && i-m.offset+rect.Min.Y+2 >= min(m.selection.start.Y, m.selection.end.Y) && i-m.offset+rect.Min.Y+2 <= max(m.selection.start.Y, m.selection.end.Y)
+		if i == m.selected || selectedText {
 			marker = " › "
 			style = m.style(p.accent)
 			if m.opts.Color {
@@ -196,23 +201,31 @@ func (m *Model) renderTable(rect image.Rectangle) string {
 		}
 		lines = append(lines, style.Render(pad(marker+strings.Join(values, " "), width)))
 	}
-	lines = append(lines, m.style(p.muted).Render(fmt.Sprintf("%d/%d  %d columns hidden", min(len(rows), m.selected+1), len(rows), len(table.Columns)-columns)))
+	lines = append(lines, m.style(p.muted).Render(fmt.Sprintf("%d/%d  %d columns hidden", min(len(rows), m.selected+1), len(rows), len(table.Columns)-columns)+"  "+scrollPosition(m.offset, len(rows), max(1, height-3), 8)))
 	return strings.Join(lines, "\n")
 }
 func (m *Model) renderSummary(width, height int) string {
 	p := theme(m.prefs.Theme)
 	lines := []string{m.style(p.accent).Bold(true).Render("STATE & EVIDENCE")}
 	for _, f := range m.snapshot.Fields {
-		lines = append(lines, m.style(p.muted).Render(pad(f.Label, min(19, width/3)))+" "+clip(f.Value, max(1, width-min(19, width/3)-1)))
+		value := f.Value
+		if m.screen != "details" {
+			value = clip(value, max(1, width-min(19, width/3)-1))
+		}
+		lines = append(lines, m.style(p.muted).Render(pad(f.Label, min(19, width/3)))+" "+value)
 	}
 	lines = append(lines, "")
 	for _, s := range m.snapshot.Sources {
-		lines = append(lines, m.style(m.tone(s.State)).Render(s.ID+"  "+s.State))
+		meta := s.ID + "  " + s.State
+		if !s.ObservedAt.IsZero() {
+			meta += " · " + s.ObservedAt.Local().Format("15:04:05")
+		}
+		lines = append(lines, m.style(m.tone(s.State)).Render(meta))
 		if s.Message != "" {
-			lines = append(lines, clip(s.Message, width))
+			lines = append(lines, s.Message)
 		}
 	}
-	return strings.Join(lines[:min(len(lines), height)], "\n")
+	return strings.Join(lines, "\n")
 }
 func (m *Model) renderLogs(rect image.Rectangle) string {
 	p := theme(m.prefs.Theme)
@@ -278,7 +291,7 @@ func (m *Model) renderTasks(rect image.Rectangle) string {
 	return strings.Join(lines, "\n")
 }
 func (m *Model) help() string {
-	return "KEYBOARD\n\n1 Dashboard   2 Resources   3 Events   4 Logs   5 Tasks   6 Details\nTab / Shift+Tab  resource table     Enter  open selection\nJ/K or arrows   move               Backspace / Esc  return\n/  search       S  sort            Ctrl+P  command palette\nP  pause        R  refresh         A  actions\nW  time window  G  graph style     T  theme\nM  mouse        C  copy selection  ,  preferences\n[ / ]  inspect chart time         Ctrl+A  select log text\nQ / Ctrl+C  exit\n\nMOUSE\n\nClick tabs or controls; select a row, double-click to open.\nWheel scrolls the focused view. Drag log text to select, C to copy.\nDisable mouse with M to use the terminal's own selection.\n\nSOURCES\n\nGaps indicate missing observations. UI refreshes do not create samples.\nActions require a server-backed plan and exact confirmation."
+	return "KEYBOARD\n\n1 Dashboard   2 Resources   3 Events   4 Logs   5 Tasks   6 Details\nTab / Shift+Tab  resource table     Enter  open selection\nJ/K or arrows   move               Backspace / Esc  return\n/  search       S  sort            Ctrl+P  command palette\nP  pause        R  refresh         A  actions\nW  time window  G  graph style     T  theme\nM  mouse        C  copy selection  ,  preferences\n[ / ]  inspect chart time   { / }  select chart         Ctrl+A  select log text\nQ / Ctrl+C  exit\n\nMOUSE\n\nClick tabs or controls; select a row, double-click to open.\nWheel scrolls the focused view. Drag log or table text to select, C to copy.\nDisable mouse with M to use the terminal's own selection.\n\nSOURCES\n\nGaps indicate missing observations. UI refreshes do not create samples.\nActions require a server-backed plan and exact confirmation."
 }
 func (m *Model) renderModal(rect image.Rectangle) string {
 	p := theme(m.prefs.Theme)
@@ -297,7 +310,8 @@ func (m *Model) renderModal(rect image.Rectangle) string {
 		lines = append(lines, m.action.Label, m.action.Argument, m.input+"▏")
 	} else {
 		items := m.modalItems()
-		for i, item := range items {
+		for i := m.modalScrollOffset(); i < min(len(items), m.modalScrollOffset()+max(1, rect.Dy()-5)); i++ {
+			item := items[i]
 			prefix := "  "
 			if i == m.modalIndex%max(1, len(items)) {
 				prefix = "› "
@@ -305,7 +319,23 @@ func (m *Model) renderModal(rect image.Rectangle) string {
 			lines = append(lines, prefix+item)
 		}
 	}
-	lines = append(lines, "", "Esc cancel  Enter select")
+	footer := pad("[Cancel]", max(1, width/2)) + "[Select]"
+	if m.modal == "confirm" {
+		footer = pad("[Cancel]", max(1, width/2)) + "[Confirm]"
+	}
+	available := max(1, rect.Dy()-3)
+	if len(lines) > available {
+		if m.modal == "confirm" {
+			tail := []string{"Type: " + m.plan.Confirmation, m.input + "▏"}
+			lines = append(lines[:max(0, available-len(tail))], tail...)
+		} else {
+			lines = lines[:available]
+		}
+	}
+	for len(lines) < available {
+		lines = append(lines, "")
+	}
+	lines = append(lines, footer)
 	for i := range lines {
 		lines[i] = pad(lines[i], width)
 	}
@@ -330,4 +360,14 @@ func sum(values []int) int {
 		n += v
 	}
 	return n
+}
+
+func scrollPosition(offset, total, visible, width int) string {
+	if total <= visible {
+		return ""
+	}
+	position := min(width-1, offset*width/max(1, total-visible))
+	cells := []rune(strings.Repeat("─", width))
+	cells[position] = '●'
+	return string(cells)
 }

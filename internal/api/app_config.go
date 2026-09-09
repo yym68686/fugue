@@ -295,13 +295,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec.RestartToken = model.NewID("restart")
-	createOperation := s.store.CreateOperation
-	if expectedHash != "" {
-		createOperation = func(op model.Operation) (model.Operation, error) {
-			return s.store.CreateOperationForAppSpec(op, expectedHash)
-		}
-	}
-	op, err := createOperation(model.Operation{
+	op, err := s.createAppOperationWithPrecondition(r, model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     principal.ActorType,
@@ -310,7 +304,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		DesiredSpec:         &spec,
 		DesiredSource:       source,
 		DesiredOriginSource: model.AppOriginSource(app),
-	})
+	}, expectedHash, nil)
 	if err != nil {
 		if expectedHash != "" && errors.Is(err, store.ErrConflict) {
 			httpx.WriteError(w, http.StatusPreconditionFailed, "app intent changed or an operation is active; refresh the reconcile plan")
@@ -323,7 +317,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	s.appendAudit(principal, "app.restart", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"operation":         sanitizeOperationForAPI(op),
-		"restart_token":     spec.RestartToken,
+		"restart_token":     op.DesiredSpec.RestartToken,
 		"desired_spec_hash": model.AppSpecSHA256(*op.DesiredSpec),
 	})
 }

@@ -1,8 +1,11 @@
 package api
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -28,7 +31,21 @@ func appSpecPrecondition(w http.ResponseWriter, r *http.Request) (string, bool) 
 	}
 	return hash, true
 }
-func (s *Server) createAppOperationWithPrecondition(op model.Operation, expected string) (model.Operation, error) {
+func (s *Server) createAppOperationWithPrecondition(r *http.Request, op model.Operation, expected string, requestData any) (model.Operation, error) {
+	key, err := resolveIdempotencyKey(r, "")
+	if err != nil {
+		return model.Operation{}, store.ErrInvalidInput
+	}
+	if key != "" {
+		if expected == "" {
+			return model.Operation{}, store.ErrInvalidInput
+		}
+		payload, _ := json.Marshal([]any{r.Method, r.URL.Path, expected, requestData})
+		hash := sha256.Sum256(payload)
+		principal := mustPrincipal(r)
+		scope := "app-action:" + op.AppID + ":" + principal.ActorType + ":" + principal.ActorID
+		return s.store.CreateAppActionOperation(op, expected, scope, key, hex.EncodeToString(hash[:]))
+	}
 	if expected == "" {
 		return s.store.CreateOperation(op)
 	}
@@ -40,4 +57,32 @@ func (s *Server) writeAppPreconditionError(w http.ResponseWriter, err error, exp
 		return
 	}
 	s.writeStoreError(w, err)
+}
+
+func (s *Server) handleGetAppActionRequest(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.read") && !principal.HasScope("app.deploy") && !principal.HasScope("app.scale") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app read/deploy/scale scope")
+		return
+	}
+	app, ok := s.loadAuthorizedAppMetadata(w, r, principal)
+	if !ok {
+		return
+	}
+	scope := "app-action:" + app.ID + ":" + principal.ActorType + ":" + principal.ActorID
+	record, err := s.store.GetIdempotencyRecord(scope, app.TenantID, r.PathValue("request_id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	op, err := s.store.GetOperation(record.OperationID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if op.AppID != app.ID {
+		httpx.WriteError(w, http.StatusNotFound, fmt.Sprint("action receipt not found"))
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }

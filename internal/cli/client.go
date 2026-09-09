@@ -917,7 +917,7 @@ func (c *Client) ScaleApp(id string, replicas int) (operationResponse, error) {
 	return response, nil
 }
 
-func (c *Client) ScaleAppForSpec(id string, replicas int, specHash string) (operationResponse, error) {
+func (c *Client) ScaleAppForSpec(id string, replicas int, specHash string, idempotencyKey ...string) (operationResponse, error) {
 	var response operationResponse
 	payload, err := json.Marshal(map[string]int{"replicas": replicas})
 	if err != nil {
@@ -930,6 +930,10 @@ func (c *Client) ScaleAppForSpec(id string, replicas int, specHash string) (oper
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("If-Match", `"`+strings.TrimSpace(specHash)+`"`)
+	if len(idempotencyKey) > 0 {
+		req.Header.Set("Idempotency-Key", idempotencyKey[0])
+		req.GetBody = nil
+	}
 	raw, err := c.do(req)
 	if err != nil {
 		return response, err

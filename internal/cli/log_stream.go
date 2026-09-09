@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +23,8 @@ type sseEvent struct {
 }
 
 type streamSSEOptions struct {
-	Follow bool
+	Follow      bool
+	LastEventID string
 }
 
 const sseScanBuffer = 32 * 1024 * 1024
@@ -143,8 +145,16 @@ func (c *Client) streamSSE(relative string, handler func(sseEvent) error) error 
 
 func (c *Client) streamSSEWithOptions(relative string, opts streamSSEOptions, handler func(sseEvent) error) error {
 	httpClient := &http.Client{}
+	if c.httpClient != nil {
+		*httpClient = *c.httpClient
+		httpClient.Timeout = 0
+	}
+	ctx := c.context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	retryDelay := 3 * time.Second
-	lastEventID := ""
+	lastEventID := opts.LastEventID
 	openedStream := false
 
 	for {
@@ -176,17 +186,26 @@ func (c *Client) streamSSEWithOptions(relative string, opts streamSSEOptions, ha
 		} else if ended || !opts.Follow {
 			return nil
 		}
-		time.Sleep(retryDelay)
+		if err := waitRequestRetry(ctx, max(100*time.Millisecond, min(30*time.Second, retryDelay))); err != nil {
+			return err
+		}
 	}
 }
 
 func (c *Client) streamSSEOnce(httpClient *http.Client, relative string, lastEventID string, retryDelay *time.Duration, handler func(sseEvent) error) (bool, bool, error) {
-	httpReq, err := http.NewRequest(http.MethodGet, c.resolveURL(relative), nil)
+	ctx := c.context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resolveURL(relative), nil)
 	if err != nil {
 		return false, false, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	if c.cookie != "" {
+		httpReq.Header.Set("Cookie", c.cookie)
+	}
 	if strings.TrimSpace(lastEventID) != "" {
 		httpReq.Header.Set("Last-Event-ID", lastEventID)
 	}
@@ -198,7 +217,7 @@ func (c *Client) streamSSEOnce(httpClient *http.Client, relative string, lastEve
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		payload, readErr := io.ReadAll(resp.Body)
+		payload, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if readErr != nil {
 			return false, false, fmt.Errorf("read response: %w", readErr)
 		}

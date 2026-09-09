@@ -223,10 +223,12 @@ type kubeNodeSummaryNode struct {
 }
 
 type kubeNodeSummaryCPU struct {
+	Time           string  `json:"time,omitempty"`
 	UsageNanoCores *uint64 `json:"usageNanoCores,omitempty"`
 }
 
 type kubeNodeSummaryMem struct {
+	Time            string  `json:"time,omitempty"`
 	AvailableBytes  *uint64 `json:"availableBytes,omitempty"`
 	UsageBytes      *uint64 `json:"usageBytes,omitempty"`
 	WorkingSetBytes *uint64 `json:"workingSetBytes,omitempty"`
@@ -1353,6 +1355,15 @@ func buildClusterNode(node kubeNode, summary *kubeNodeSummary, pods []clusterNod
 		Memory:           buildClusterNodeMemoryStats(node, summary, clusterNodeRequestedMemory(requests)),
 		EphemeralStorage: buildClusterNodeStorageStats(node, summary, clusterNodeRequestedEphemeralStorage(requests)),
 		ImageFilesystem:  buildClusterNodeImageFilesystemStats(summary),
+	}
+	if summary != nil {
+		cpuAt, memAt := parseClusterNodeTimestamp(summary.Node.CPU.Time), parseClusterNodeTimestamp(summary.Node.Memory.Time)
+		if cpuAt != nil && memAt != nil {
+			out.ObservedAt = cpuAt
+			if memAt.Before(*cpuAt) {
+				out.ObservedAt = memAt
+			}
+		}
 	}
 	if createdAt := parseClusterNodeTimestamp(node.Metadata.CreationTimestamp); createdAt != nil {
 		out.CreatedAt = createdAt

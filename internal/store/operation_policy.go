@@ -8,13 +8,14 @@ import (
 )
 
 type operationCreatePolicy struct {
-	SourceSessionID               string
-	ExpectedAppSpecHash           string
-	ImportConfigBase              *model.AppSpec
-	RejectActiveDeployForApp      bool
-	RejectNoopDeploy              bool
-	ReuseActiveImageRebuildForApp bool
-	RejectActiveImportForApp      bool
+	SourceSessionID                               string
+	IdempotencyScope, IdempotencyKey, RequestHash string
+	ExpectedAppSpecHash                           string
+	ImportConfigBase                              *model.AppSpec
+	RejectActiveDeployForApp                      bool
+	RejectNoopDeploy                              bool
+	ReuseActiveImageRebuildForApp                 bool
+	RejectActiveImportForApp                      bool
 }
 
 type operationCreateOutcome struct {
@@ -126,5 +127,15 @@ func (s *Store) CreateOperationForAppSpec(op model.Operation, expected string) (
 		return model.Operation{}, ErrInvalidInput
 	}
 	created, _, err := s.createOperationWithPolicy(op, operationCreatePolicy{ExpectedAppSpecHash: expected})
+	return created, err
+}
+
+// CreateAppActionOperation commits the idempotency receipt and operation in
+// the same app-locked transaction. A retry is resolved before CAS checks.
+func (s *Store) CreateAppActionOperation(op model.Operation, expected, scope, key, requestHash string) (model.Operation, error) {
+	if len(expected) != 64 || scope == "" || key == "" || len(key) > 200 || requestHash == "" || (op.Type != model.OperationTypeDeploy && op.Type != model.OperationTypeScale) {
+		return model.Operation{}, ErrInvalidInput
+	}
+	created, _, err := s.createOperationWithPolicy(op, operationCreatePolicy{ExpectedAppSpecHash: expected, IdempotencyScope: scope, IdempotencyKey: key, RequestHash: requestHash})
 	return created, err
 }

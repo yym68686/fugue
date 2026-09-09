@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"sort"
 	"strconv"
@@ -16,6 +17,7 @@ type textSelection struct {
 	start, end image.Point
 	dragging   bool
 	text       string
+	surface    string
 }
 
 func (m *Model) paste(text string) {
@@ -92,7 +94,7 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		case "esc", "q":
 			m.modal = ""
 		case "j", "down":
-			m.modalIndex++
+			m.modalIndex = (m.modalIndex + 1) % max(1, len(m.modalItems()))
 		case "k", "up":
 			m.modalIndex = max(0, m.modalIndex-1)
 		case "enter":
@@ -130,6 +132,10 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 	case "3":
 		m.screen = "events"
 	case "4":
+		if reason := m.snapshot.UnavailableScreens["logs"]; reason != "" {
+			m.notify(reason)
+			return nil
+		}
 		m.screen = "logs"
 		return m.schedule("logs", false)
 	case "5":
@@ -157,10 +163,12 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		m.selected = 0
 		m.logOffset = 0
 		m.eventOffset = 0
+		m.textOffset = 0
 	case "end":
 		m.selected = max(0, len(m.rows())-1)
 		m.logOffset = max(0, len(m.snapshot.Logs)-m.height+8)
 		m.eventOffset = max(0, len(m.snapshot.Events)-m.height+8)
+		m.textOffset = max(0, len(m.textLines())-m.layout().body.Dy())
 	case "enter":
 		return m.openSelected()
 	case "s":
@@ -195,6 +203,10 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 	case ",":
 		m.modal = "settings"
 		m.modalIndex = 0
+	case "{":
+		m.graphIndex = max(0, m.graphIndex-1)
+	case "}":
+		m.graphIndex = min(max(0, len(m.layout().charts)-1), m.graphIndex+1)
 	case "[":
 		m.graphCursor = max(0, m.graphCursor-1)
 	case "]":
@@ -222,6 +234,8 @@ func (m *Model) move(delta int) {
 	switch m.screen {
 	case "logs":
 		m.logOffset = max(0, min(max(0, len(m.snapshot.Logs)-1), m.logOffset+delta))
+	case "details", "tasks", "help":
+		m.textOffset = max(0, min(max(0, len(m.textLines())-m.layout().body.Dy()), m.textOffset+delta))
 	case "events":
 		m.eventOffset = max(0, min(max(0, len(m.snapshot.Events)-1), m.eventOffset+delta))
 	default:
@@ -249,7 +263,8 @@ func (m *Model) rows() []Row {
 	filter := strings.ToLower(m.filter)
 	out := make([]Row, 0, len(table.Rows))
 	for _, row := range table.Rows {
-		if filter == "" || strings.Contains(strings.ToLower(strings.Join(row.Cells, " ")), filter) {
+		haystack := strings.ToLower(strings.Join(row.Cells, " "))
+		if strings.Contains(haystack, filter) && strings.Contains(haystack, strings.ToLower(m.fixedFilter)) {
 			out = append(out, row)
 		}
 	}
@@ -277,7 +292,20 @@ func (m *Model) openSelected() tea.Cmd {
 	if m.selected < len(rows) && rows[m.selected].Target != nil {
 		return m.navigate(*rows[m.selected].Target)
 	}
+	if m.selected < len(rows) {
+		row := rows[m.selected]
+		m.snapshot.Fields = nil
+		table := m.snapshot.Tables[min(m.table, len(m.snapshot.Tables)-1)]
+		for i, value := range row.Cells {
+			label := fmt.Sprintf("Column %d", i+1)
+			if i < len(table.Columns) {
+				label = table.Columns[i]
+			}
+			m.snapshot.Fields = append(m.snapshot.Fields, Field{Label: label, Value: value})
+		}
+	}
 	m.screen = "details"
+	m.textOffset = 0
 	return nil
 }
 func (m *Model) copyText() string {
@@ -332,7 +360,13 @@ func (m *Model) execute() tea.Cmd {
 func (m *Model) modalItems() []string {
 	switch m.modal {
 	case "palette":
-		items := []string{"Dashboard", "Resources", "Events", "Logs", "Tasks", "Details", "Actions", "Refresh", "Settings", "Help"}
+		items := []string{"Dashboard", "Resources", "Events", "Tasks", "Details", "Refresh", "Settings", "Help"}
+		if m.snapshot.UnavailableScreens["logs"] == "" {
+			items = append(items, "Logs")
+		}
+		if len(m.snapshot.Actions) > 0 {
+			items = append(items, "Actions")
+		}
 		if m.snapshot.Admin {
 			items = append(items, "Cluster")
 		}
@@ -352,7 +386,7 @@ func (m *Model) modalItems() []string {
 			return m.snapshot.Tables[min(m.table, len(m.snapshot.Tables)-1)].Columns
 		}
 	case "settings":
-		return []string{"Theme: " + m.prefs.Theme, "Graph: " + m.prefs.Graph, "Window: " + m.prefs.Window, "Mouse: " + strconv.FormatBool(m.prefs.Mouse), "Mode: " + m.prefs.Mode}
+		return []string{"Theme: " + m.prefs.Theme, "Graph: " + m.prefs.Graph, "Window: " + m.prefs.Window, "Mouse: " + strconv.FormatBool(m.prefs.Mouse), "Mode: " + m.prefs.Mode, "Metrics panel: " + strconv.FormatBool(!m.prefs.panelHidden("metrics")), "Summary panel: " + strconv.FormatBool(!m.prefs.panelHidden("summary"))}
 	}
 	return nil
 }
@@ -378,6 +412,7 @@ func (m *Model) activateModal() tea.Cmd {
 		case "Cluster":
 			return m.navigate(Target{Kind: "cluster", Name: "Cluster"})
 		default:
+			m.textOffset = 0
 			m.screen = strings.ToLower(items[index])
 			if m.screen == "logs" {
 				return m.schedule("logs", false)
@@ -422,6 +457,10 @@ func (m *Model) activateModal() tea.Cmd {
 			m.request.Window, _ = time.ParseDuration(m.prefs.Window)
 		case 3:
 			m.prefs.Mouse = !m.prefs.Mouse
+		case 5:
+			m.prefs.togglePanel("metrics")
+		case 6:
+			m.prefs.togglePanel("summary")
 		case 4:
 			m.prefs.Mode = cycle([]string{"fullscreen", "compact"}, m.prefs.Mode)
 		}
@@ -441,10 +480,25 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 		if !p.In(box) {
 			return nil
 		}
+		if p.Y == box.Max.Y-2 {
+			if p.X < box.Min.X+box.Dx()/2 {
+				if !m.executing {
+					m.modal = ""
+				}
+				return nil
+			}
+			if m.modal == "confirm" && m.plan != nil && m.input == m.plan.Confirmation {
+				return m.execute()
+			}
+			if m.modal == "argument" {
+				return m.key(tea.KeyPressMsg{Code: tea.KeyEnter})
+			}
+			return m.activateModal()
+		}
 		if m.modal == "confirm" || m.modal == "argument" || m.modal == "planning" {
 			return nil
 		}
-		index := p.Y - box.Min.Y - 3
+		index := p.Y - box.Min.Y - 3 + m.modalScrollOffset()
 		if index >= 0 && index < len(m.modalItems()) {
 			m.modalIndex = index
 			return m.activateModal()
@@ -462,6 +516,7 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 		if index >= 0 && index < len(rows) {
 			id := rows[index].ID
 			m.selected = index
+			m.selection = textSelection{start: p, end: p, dragging: true, surface: "table"}
 			if m.lastClick == id && time.Since(m.lastClickAt) < 500*time.Millisecond {
 				return m.openSelected()
 			}
@@ -484,6 +539,7 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 }
 func (m *Model) activateHit(id string) tea.Cmd {
 	if strings.HasPrefix(id, "screen:") {
+		m.textOffset = 0
 		m.screen = strings.TrimPrefix(id, "screen:")
 		if m.screen == "logs" {
 			return m.schedule("logs", false)
@@ -494,7 +550,7 @@ func (m *Model) activateHit(id string) tea.Cmd {
 	case "back":
 		return m.back()
 	case "refresh":
-		return m.schedule("overview", true)
+		return tea.Batch(m.schedule("overview", true), m.schedule("metrics", true))
 	case "pause":
 		m.paused = !m.paused
 	case "window":
@@ -529,7 +585,7 @@ func (m *Model) wheel(msg tea.MouseWheelMsg) {
 		delta = -3
 	}
 	if m.modal != "" {
-		m.modalIndex = max(0, m.modalIndex+delta)
+		m.modalIndex = max(0, min(max(0, len(m.modalItems())-1), m.modalIndex+delta))
 		return
 	}
 	m.move(delta)
@@ -546,17 +602,24 @@ func (m *Model) release(msg tea.MouseReleaseMsg) {
 	m.selection.dragging = false
 	m.selection.end = image.Pt(msg.X, msg.Y)
 	box := m.layout().body
+	lines := m.snapshot.Logs
+	offset := m.logOffset
+	if m.selection.surface == "table" {
+		box = m.layout().table
+		lines = strings.Split(ansi.Strip(m.renderTable(box)), "\n")
+		offset = 0
+	}
 	start, end := m.selection.start, m.selection.end
 	if start.Y > end.Y || (start.Y == end.Y && start.X > end.X) {
 		start, end = end, start
 	}
 	out := []string{}
 	for y := max(box.Min.Y, start.Y); y <= min(box.Max.Y-1, end.Y); y++ {
-		index := m.logOffset + y - box.Min.Y
-		if index < 0 || index >= len(m.snapshot.Logs) {
+		index := offset + y - box.Min.Y
+		if index < 0 || index >= len(lines) {
 			continue
 		}
-		line := m.snapshot.Logs[index]
+		line := lines[index]
 		left, right := 0, box.Dx()
 		if y == start.Y {
 			left = max(0, start.X-box.Min.X)
@@ -566,5 +629,13 @@ func (m *Model) release(msg tea.MouseReleaseMsg) {
 		}
 		out = append(out, ansi.Cut(line, left, right))
 	}
-	m.selection.text = strings.Join(out, "\n")
+	if start == end {
+		m.selection.text = ""
+	} else {
+		m.selection.text = strings.Join(out, "\n")
+	}
+}
+
+func (m *Model) modalScrollOffset() int {
+	return max(0, m.modalIndex%max(1, len(m.modalItems()))-max(0, m.modalBounds().Dy()-6))
 }

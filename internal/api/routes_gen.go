@@ -106,6 +106,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
 	mux.Handle("PATCH /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchApp)))
 	mux.Handle("DELETE /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteApp)))
+	mux.Handle("GET /v1/apps/{id}/action-requests/{request_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppActionRequest)))
 	mux.Handle("POST /v1/apps/{id}/backups/policies", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppBackupPolicy)))
 	mux.Handle("POST /v1/apps/{id}/backups/runs", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppBackupRun)))
 	mux.Handle("GET /v1/apps/{id}/backups/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppBackupStatus)))

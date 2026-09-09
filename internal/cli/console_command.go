@@ -14,6 +14,8 @@ import (
 )
 
 func (c *CLI) newConsoleCommand() *cobra.Command {
+	tuiOpts := defaultTUIFlags()
+	var once bool
 	opts := struct {
 		Project   string
 		Admin     bool
@@ -24,18 +26,18 @@ func (c *CLI) newConsoleCommand() *cobra.Command {
 	}{LogLines: 80}
 	cmd := &cobra.Command{
 		Use:   "console",
-		Short: "Open the preview Fugue terminal console",
+		Short: "Open the interactive Fugue terminal console",
 		Long: strings.TrimSpace(`
-Open a preview, read-only terminal console over the same control-plane API used
-by the CLI and Web console. The preview keeps existing commands as the source of
-truth and does not replace JSON/script workflows.
+Open an interactive terminal console over the control-plane API.
+Keyboard and mouse navigation share the same resource views.
+JSON and plain output retain their existing script contracts.
 `),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
 				return err
 			}
-			if !c.wantsJSON() && c.shouldUseInteractiveMonitor(opts.Plain) {
+			if !once && !c.wantsJSON() && c.shouldUseInteractiveMonitor(opts.Plain) {
 				target := tui.Target{Kind: "workspace", Name: "Workspace"}
 				if opts.Project != "" {
 					target = tui.Target{Kind: "project", Name: opts.Project}
@@ -43,9 +45,19 @@ truth and does not replace JSON/script workflows.
 				if opts.Admin {
 					target = tui.Target{Kind: "cluster", Name: "Cluster"}
 				}
-				return c.runTUI(cmd, &tuiProvider{cli: c, client: client}, target, defaultTUIFlags())
+				if cmd.Flags().Changed("alt-screen") && !cmd.Flags().Changed("screen-mode") {
+					tuiOpts.Mode = "compact"
+					if opts.AltScreen {
+						tuiOpts.Mode = "fullscreen"
+					}
+				}
+				return c.runTUI(cmd, &tuiProvider{cli: c, client: client}, target, tuiOpts)
 			}
-			view, err := c.loadConsoleView(client, opts.Project, opts.Admin, opts.Mouse, opts.LogLines)
+			plainMouse := false
+			if cmd.Flags().Changed("mouse") {
+				plainMouse = tuiOpts.Mouse
+			}
+			view, err := c.loadConsoleView(client, opts.Project, opts.Admin, plainMouse, opts.LogLines)
 			if err != nil {
 				return err
 			}
@@ -53,25 +65,15 @@ truth and does not replace JSON/script workflows.
 				return c.writeJSON(view)
 			}
 			model := cliconsole.NewModel(view)
-			if !c.shouldUseInteractiveMonitor(opts.Plain) || opts.Plain {
-				_, err := fmt.Fprint(c.stdout, c.consoleRenderer().Render(model))
-				return err
-			}
-			return cliterminal.RunWithSession(cliterminal.SessionOptions{
-				Writer:         c.stdout,
-				AltScreen:      opts.AltScreen,
-				RawMode:        false,
-				BracketedPaste: false,
-				HideCursor:     opts.AltScreen,
-			}, func(*cliterminal.Session) error {
-				_, err := fmt.Fprint(c.stdout, c.consoleRenderer().Render(model))
-				return err
-			})
+			_, err = fmt.Fprint(c.stdout, cliconsole.NewRenderer(envIntDefault("COLUMNS", 100), cliterminal.Palette{Level: cliterminal.ColorNone}).Render(model))
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&opts.Project, "project", "", "Open a specific project by name or id")
 	cmd.Flags().BoolVar(&opts.Admin, "admin", false, "Include admin overview data")
-	cmd.Flags().BoolVar(&opts.Mouse, "mouse", false, "Enable optional mouse affordance labels")
+	bindTUIAppearanceFlags(cmd, &tuiOpts)
+	cmd.Flags().DurationVar(&tuiOpts.Interval, "interval", tuiOpts.Interval, "Status refresh interval (1s to 1m)")
+	cmd.Flags().BoolVar(&once, "once", false, "Render one console snapshot and exit")
 	cmd.Flags().BoolVar(&opts.Plain, "plain", false, "Render one plain console frame and exit")
 	cmd.Flags().BoolVar(&opts.AltScreen, "alt-screen", false, "Use alternate screen for the preview frame")
 	cmd.Flags().IntVar(&opts.LogLines, "log-lines", opts.LogLines, "Runtime log lines to load for the selected app")
