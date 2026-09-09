@@ -114,11 +114,11 @@ func (m *Model) render() string {
 		case "events":
 			put(l.body, m.renderEvents(l.body))
 		case "tasks":
-			put(l.body, m.renderTasks(l.body))
+			put(l.body, m.renderTextViewport(l.body))
 		case "details":
-			put(l.body, m.renderSummary(l.body.Dx(), l.body.Dy()))
+			put(l.body, m.renderTextViewport(l.body))
 		case "help":
-			put(l.body, m.help())
+			put(l.body, m.renderTextViewport(l.body))
 		}
 	}
 	if m.toast != "" && m.now.Before(m.toastUntil) {
@@ -212,7 +212,7 @@ func (m *Model) renderSummary(width, height int) string {
 			lines = append(lines, clip(s.Message, width))
 		}
 	}
-	return strings.Join(lines[:min(len(lines), height)], "\n")
+	return strings.Join(lines, "\n")
 }
 func (m *Model) renderLogs(rect image.Rectangle) string {
 	p := theme(m.prefs.Theme)
@@ -305,7 +305,23 @@ func (m *Model) renderModal(rect image.Rectangle) string {
 			lines = append(lines, prefix+item)
 		}
 	}
-	lines = append(lines, "", "Esc cancel  Enter select")
+	footer := "[Cancel]              [Select / Enter]"
+	if m.modal == "confirm" {
+		footer = "[Cancel]              [Confirm / Enter]"
+	}
+	available := max(1, rect.Dy()-3)
+	if len(lines) > available {
+		if m.modal == "confirm" {
+			tail := []string{"Type: " + m.plan.Confirmation, m.input + "▏"}
+			lines = append(lines[:max(0, available-len(tail))], tail...)
+		} else {
+			lines = lines[:available]
+		}
+	}
+	for len(lines) < available {
+		lines = append(lines, "")
+	}
+	lines = append(lines, footer)
 	for i := range lines {
 		lines[i] = pad(lines[i], width)
 	}

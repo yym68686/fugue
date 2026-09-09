@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"sort"
 	"strconv"
@@ -92,7 +93,7 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		case "esc", "q":
 			m.modal = ""
 		case "j", "down":
-			m.modalIndex++
+			m.modalIndex = (m.modalIndex + 1) % max(1, len(m.modalItems()))
 		case "k", "up":
 			m.modalIndex = max(0, m.modalIndex-1)
 		case "enter":
@@ -157,10 +158,12 @@ func (m *Model) key(msg tea.KeyPressMsg) tea.Cmd {
 		m.selected = 0
 		m.logOffset = 0
 		m.eventOffset = 0
+		m.textOffset = 0
 	case "end":
 		m.selected = max(0, len(m.rows())-1)
 		m.logOffset = max(0, len(m.snapshot.Logs)-m.height+8)
 		m.eventOffset = max(0, len(m.snapshot.Events)-m.height+8)
+		m.textOffset = max(0, len(m.textLines())-m.layout().body.Dy())
 	case "enter":
 		return m.openSelected()
 	case "s":
@@ -222,6 +225,8 @@ func (m *Model) move(delta int) {
 	switch m.screen {
 	case "logs":
 		m.logOffset = max(0, min(max(0, len(m.snapshot.Logs)-1), m.logOffset+delta))
+	case "details", "tasks", "help":
+		m.textOffset = max(0, min(max(0, len(m.textLines())-m.layout().body.Dy()), m.textOffset+delta))
 	case "events":
 		m.eventOffset = max(0, min(max(0, len(m.snapshot.Events)-1), m.eventOffset+delta))
 	default:
@@ -249,7 +254,8 @@ func (m *Model) rows() []Row {
 	filter := strings.ToLower(m.filter)
 	out := make([]Row, 0, len(table.Rows))
 	for _, row := range table.Rows {
-		if filter == "" || strings.Contains(strings.ToLower(strings.Join(row.Cells, " ")), filter) {
+		haystack := strings.ToLower(strings.Join(row.Cells, " "))
+		if strings.Contains(haystack, filter) && strings.Contains(haystack, strings.ToLower(m.fixedFilter)) {
 			out = append(out, row)
 		}
 	}
@@ -277,7 +283,20 @@ func (m *Model) openSelected() tea.Cmd {
 	if m.selected < len(rows) && rows[m.selected].Target != nil {
 		return m.navigate(*rows[m.selected].Target)
 	}
+	if m.selected < len(rows) {
+		row := rows[m.selected]
+		m.snapshot.Fields = nil
+		table := m.snapshot.Tables[min(m.table, len(m.snapshot.Tables)-1)]
+		for i, value := range row.Cells {
+			label := fmt.Sprintf("Column %d", i+1)
+			if i < len(table.Columns) {
+				label = table.Columns[i]
+			}
+			m.snapshot.Fields = append(m.snapshot.Fields, Field{Label: label, Value: value})
+		}
+	}
 	m.screen = "details"
+	m.textOffset = 0
 	return nil
 }
 func (m *Model) copyText() string {
@@ -378,6 +397,7 @@ func (m *Model) activateModal() tea.Cmd {
 		case "Cluster":
 			return m.navigate(Target{Kind: "cluster", Name: "Cluster"})
 		default:
+			m.textOffset = 0
 			m.screen = strings.ToLower(items[index])
 			if m.screen == "logs" {
 				return m.schedule("logs", false)
@@ -441,6 +461,21 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 		if !p.In(box) {
 			return nil
 		}
+		if p.Y == box.Max.Y-2 {
+			if p.X < box.Min.X+box.Dx()/2 {
+				if !m.executing {
+					m.modal = ""
+				}
+				return nil
+			}
+			if m.modal == "confirm" && m.plan != nil && m.input == m.plan.Confirmation {
+				return m.execute()
+			}
+			if m.modal == "argument" {
+				return m.key(tea.KeyPressMsg{Code: tea.KeyEnter})
+			}
+			return m.activateModal()
+		}
 		if m.modal == "confirm" || m.modal == "argument" || m.modal == "planning" {
 			return nil
 		}
@@ -484,6 +519,7 @@ func (m *Model) click(msg tea.MouseClickMsg) tea.Cmd {
 }
 func (m *Model) activateHit(id string) tea.Cmd {
 	if strings.HasPrefix(id, "screen:") {
+		m.textOffset = 0
 		m.screen = strings.TrimPrefix(id, "screen:")
 		if m.screen == "logs" {
 			return m.schedule("logs", false)
@@ -529,7 +565,7 @@ func (m *Model) wheel(msg tea.MouseWheelMsg) {
 		delta = -3
 	}
 	if m.modal != "" {
-		m.modalIndex = max(0, m.modalIndex+delta)
+		m.modalIndex = max(0, min(max(0, len(m.modalItems())-1), m.modalIndex+delta))
 		return
 	}
 	m.move(delta)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -12,13 +13,14 @@ import (
 )
 
 type Options struct {
-	Interval, Window        time.Duration
-	Mouse, Color, AltScreen bool
-	Input                   io.Reader
-	Output                  io.Writer
-	Preferences             Preferences
-	SavePreferences         func(Preferences) error
-	Extensions              []Extension
+	InitialFilter, InitialSearch, InitialSort string
+	Interval, Window                          time.Duration
+	Mouse, Color, AltScreen                   bool
+	Input                                     io.Reader
+	Output                                    io.Writer
+	Preferences                               Preferences
+	SavePreferences                           func(Preferences) error
+	Extensions                                []Extension
 }
 type tickMsg time.Time
 type fetchedMsg struct {
@@ -38,7 +40,11 @@ type executedMsg struct {
 	err     error
 }
 type savedMsg struct{ err error }
-type watchMsg struct{ err error }
+type watchMsg struct {
+	epoch, generation int
+	notice            Notice
+	done              bool
+}
 type fetchState struct {
 	pending  bool
 	due      time.Time
@@ -70,7 +76,9 @@ type Model struct {
 	screen                                          string
 	navigation                                      []navState
 	table, selected, offset, logOffset, eventOffset int
+	textOffset                                      int
 	filter, editing, input                          string
+	fixedFilter                                     string
 	paused                                          bool
 	now                                             time.Time
 	modal                                           string
@@ -86,6 +94,13 @@ type Model struct {
 	lastClickAt                                     time.Time
 	watchEvents                                     chan watchMsg
 	watchCancel                                     context.CancelFunc
+	watchCtx                                        context.Context
+	watchKey                                        string
+	watchGeneration                                 int
+	watchRetry                                      time.Time
+	watchFailures                                   int
+	viewCtx                                         context.Context
+	viewCancel                                      context.CancelFunc
 	sortColumns                                     map[string]int
 	chartOffset                                     int
 }
@@ -106,7 +121,7 @@ func New(provider Provider, request Request, opts Options) *Model {
 		opts.Window, _ = time.ParseDuration(p.Window)
 	}
 	request.Window = opts.Window
-	return &Model{ctx: context.Background(), provider: provider, store: NewStore(provider), request: request, opts: opts, prefs: p, series: map[string]Series{}, fetches: map[string]fetchState{}, width: 100, height: 30, screen: p.DefaultScreen, now: time.Now(), graphCursor: -1, sortColumns: map[string]int{}}
+	return &Model{filter: opts.InitialSearch, fixedFilter: opts.InitialFilter, ctx: context.Background(), provider: provider, store: NewStore(provider), request: request, opts: opts, prefs: p, series: map[string]Series{}, fetches: map[string]fetchState{}, width: 100, height: 30, screen: p.DefaultScreen, now: time.Now(), graphCursor: -1, sortColumns: map[string]int{}}
 }
 
 func Run(ctx context.Context, provider Provider, request Request, opts Options) error {
@@ -114,6 +129,12 @@ func Run(ctx context.Context, provider Provider, request Request, opts Options) 
 	defer cancel()
 	m := New(provider, request, opts)
 	m.ctx = ctx
+	defer m.stopWatch()
+	defer func() {
+		if m.viewCancel != nil {
+			m.viewCancel()
+		}
+	}()
 	programOptions := []tea.ProgramOption{tea.WithContext(ctx), tea.WithFPS(30)}
 	if opts.Input != nil {
 		programOptions = append(programOptions, tea.WithInput(opts.Input))
@@ -132,7 +153,7 @@ func Run(ctx context.Context, provider Provider, request Request, opts Options) 
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.schedule("overview", true), m.tick(), m.startWatch())
+	return tea.Batch(m.schedule("overview", true), m.tick(), m.syncWatch())
 }
 func (m *Model) tick() tea.Cmd {
 	ctx := m.ctx
@@ -167,7 +188,10 @@ func (m *Model) schedule(section string, force bool) tea.Cmd {
 	m.fetches[section] = state
 	request := m.request
 	request.Section = section
-	epoch, ctx, store, ttl := m.epoch, m.ctx, m.store, m.ttl(section)
+	if m.viewCtx == nil {
+		m.viewCtx, m.viewCancel = context.WithCancel(m.ctx)
+	}
+	epoch, ctx, store, ttl := m.epoch, m.viewCtx, m.store, m.ttl(section)
 	return func() tea.Msg {
 		start := time.Now()
 		value, err := store.Fetch(ctx, request, ttl, force)
@@ -175,6 +199,10 @@ func (m *Model) schedule(section string, force bool) tea.Cmd {
 	}
 }
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	model, cmd := m.update(msg)
+	return model, tea.Batch(cmd, m.syncWatch())
+}
+func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = max(1, v.Width), max(1, v.Height)
@@ -200,7 +228,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.request.Target.Kind == "app" || m.request.Target.Kind == "node" || m.request.Target.Kind == "cluster" {
 				cmds = append(cmds, m.schedule("metrics", false))
 			}
-			if m.screen == "logs" {
+			if m.screen == "logs" && m.watchCancel == nil {
 				cmds = append(cmds, m.schedule("logs", false))
 			}
 		}
@@ -226,11 +254,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fetches[v.section] = state
 		m.ensureVisible()
 	case watchMsg:
-		if v.err != nil {
-			m.notify("Live stream unavailable; polling remains active")
+		if v.epoch != m.epoch || v.generation != m.watchGeneration {
+			return m, nil
 		}
-		if !m.paused {
-			return m, tea.Batch(m.schedule("overview", true), m.waitWatch())
+		notice := v.notice
+		if v.done {
+			m.stopWatch()
+			m.watchFailures++
+			m.watchRetry = m.now.Add(time.Second * time.Duration(1<<min(5, m.watchFailures)))
+		}
+		if notice.Err != nil {
+			m.notify("Live stream unavailable; polling remains active: " + notice.Err.Error())
+			m.mergeSources([]Source{{ID: "live stream", State: "stale", Message: Plain(notice.Err.Error())}})
+		} else if !v.done {
+			m.watchFailures = 0
+			m.mergeSources([]Source{{ID: "live stream", State: "available", ObservedAt: m.now}})
+		}
+		if !m.paused && len(notice.Logs) > 0 && (notice.Cursor == "" || notice.Cursor != m.snapshot.LogCursor) {
+			m.appendLogs(notice.Logs)
+			m.snapshot.LogCursor = notice.Cursor
+		}
+		if !m.paused && notice.Section == "overview" {
+			// An invalidation respects the normal TTL; streams never amplify polling.
+			return m, tea.Batch(m.schedule("overview", false), m.waitWatch())
 		}
 		return m, m.waitWatch()
 	case plannedMsg:
@@ -268,32 +314,43 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
-func (m *Model) startWatch() tea.Cmd {
-	provider, ok := m.provider.(WatchProvider)
-	if !ok {
-		return nil
+func (m *Model) stopWatch() {
+	if m.watchCancel != nil {
+		m.watchCancel()
 	}
-	if m.request.Target.Kind != "workspace" && m.request.Target.Kind != "project" {
+	m.watchCancel, m.watchCtx, m.watchEvents = nil, nil, nil
+	m.watchKey = ""
+	m.watchGeneration++
+}
+func (m *Model) syncWatch() tea.Cmd {
+	provider, ok := m.provider.(WatchProvider)
+	target := m.request.Target
+	wanted := ok && !m.paused && (target.Kind == "workspace" || target.Kind == "project" || ((target.Kind == "app" || target.Kind == "pod") && target.ID != "" && m.screen == "logs"))
+	key := target.Key()
+	if !wanted || (m.watchKey != "" && m.watchKey != key) {
+		if m.watchCancel != nil {
+			m.stopWatch()
+		}
+	}
+	if !wanted || m.watchCancel != nil || m.now.Before(m.watchRetry) {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	m.watchCancel = cancel
-	m.watchEvents = make(chan watchMsg, 1)
-	ch, epoch, target := m.watchEvents, m.epoch, m.request.Target
+	m.watchCtx, m.watchCancel, m.watchKey = ctx, cancel, key
+	m.watchEvents = make(chan watchMsg, 64)
+	ch, epoch, generation, cursor := m.watchEvents, m.epoch, m.watchGeneration, m.snapshot.LogCursor
 	go func() {
-		err := provider.Watch(ctx, target, func(_ Notice) {
+		defer close(ch)
+		err := provider.Watch(ctx, target, cursor, func(notice Notice) {
 			select {
-			case ch <- watchMsg{}:
-			default:
+			case ch <- watchMsg{epoch: epoch, generation: generation, notice: notice}:
+			case <-ctx.Done():
 			}
 		})
-		if err != nil && ctx.Err() == nil {
-			select {
-			case ch <- watchMsg{err: err}:
-			default:
-			}
+		select {
+		case ch <- watchMsg{epoch: epoch, generation: generation, notice: Notice{Err: err}, done: true}:
+		case <-ctx.Done():
 		}
-		_ = epoch
 	}()
 	return m.waitWatch()
 }
@@ -301,13 +358,50 @@ func (m *Model) waitWatch() tea.Cmd {
 	if m.watchEvents == nil {
 		return nil
 	}
-	ch, ctx := m.watchEvents, m.ctx
+	ch, ctx := m.watchEvents, m.watchCtx
 	return func() tea.Msg {
 		select {
-		case value := <-ch:
-			return value
+		case value, ok := <-ch:
+			if ok {
+				return value
+			}
+			return nil
 		case <-ctx.Done():
 			return nil
+		}
+	}
+}
+
+const maxLogLines = 2000
+
+func (m *Model) appendLogs(lines []string) {
+	atTail := m.logOffset >= max(0, len(m.snapshot.Logs)-m.layout().body.Dy())
+	for _, line := range lines {
+		m.snapshot.Logs = append(m.snapshot.Logs, clip(Plain(line), 4096))
+	}
+	if extra := len(m.snapshot.Logs) - maxLogLines; extra > 0 {
+		m.snapshot.Logs = append([]string(nil), m.snapshot.Logs[extra:]...)
+		m.logOffset = max(0, m.logOffset-extra)
+	}
+	if atTail {
+		m.logOffset = max(0, len(m.snapshot.Logs)-m.layout().body.Dy())
+	}
+}
+func (m *Model) mergeSources(sources []Source) {
+	for _, source := range sources {
+		found := false
+		for i := range m.snapshot.Sources {
+			if m.snapshot.Sources[i].ID == source.ID {
+				if source.State != "available" && source.ObservedAt.IsZero() {
+					source.ObservedAt = m.snapshot.Sources[i].ObservedAt
+				}
+				m.snapshot.Sources[i] = source
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.snapshot.Sources = append(m.snapshot.Sources, source)
 		}
 	}
 }
@@ -325,7 +419,38 @@ func (m *Model) accept(section string, s Snapshot) {
 		m.snapshot.Status = s.Status
 		m.snapshot.ObservedAt = s.ObservedAt
 		m.snapshot.Fields = s.Fields
+		oldTables := m.snapshot.Tables
 		m.snapshot.Tables = s.Tables
+		// Keep confirmed rows for failed sources instead of blanking their panel.
+		for _, source := range s.Sources {
+			if source.State == "available" {
+				continue
+			}
+			for _, old := range oldTables {
+				if old.ID == source.ID {
+					found := false
+					for _, next := range s.Tables {
+						if next.ID == old.ID {
+							found = true
+						}
+					}
+					if !found {
+						m.snapshot.Tables = append(m.snapshot.Tables, old)
+					}
+				}
+			}
+		}
+		if len(s.Tables) > 0 && m.opts.InitialSort != "" {
+			table := s.Tables[0]
+			if _, ok := m.sortColumns[table.ID]; !ok {
+				for i, column := range table.Columns {
+					if strings.EqualFold(column, m.opts.InitialSort) {
+						m.sortColumns[table.ID] = i
+						break
+					}
+				}
+			}
+		}
 		m.snapshot.Events = s.Events
 		m.snapshot.Actions = s.Actions
 		m.snapshot.Admin = s.Admin
@@ -339,21 +464,12 @@ func (m *Model) accept(section string, s Snapshot) {
 			}
 		}
 	} else if section == "logs" {
-		m.snapshot.Logs = s.Logs
-	}
-	for _, source := range s.Sources {
-		found := false
-		for i := range m.snapshot.Sources {
-			if m.snapshot.Sources[i].ID == source.ID {
-				m.snapshot.Sources[i] = source
-				found = true
-				break
-			}
-		}
-		if !found {
-			m.snapshot.Sources = append(m.snapshot.Sources, source)
+		if m.watchCancel == nil {
+			m.snapshot.Logs = nil
+			m.appendLogs(s.Logs)
 		}
 	}
+	m.mergeSources(s.Sources)
 	for _, series := range s.Series {
 		m.series[series.ID] = MergeSeries(m.series[series.ID], series, m.now)
 	}
@@ -386,6 +502,13 @@ func (m *Model) navigate(target Target) tea.Cmd {
 	return m.setTarget(Request{Target: target, Window: m.request.Window})
 }
 func (m *Model) setTarget(request Request) tea.Cmd {
+	m.stopWatch()
+	if m.viewCancel != nil {
+		m.viewCancel()
+		m.viewCancel = nil
+		m.viewCtx = nil
+	}
+	m.watchRetry = time.Time{}
 	m.epoch++
 	m.request = request
 	m.snapshot = Snapshot{Target: request.Target, Title: request.Target.Name, Status: "loading"}
@@ -395,6 +518,7 @@ func (m *Model) setTarget(request Request) tea.Cmd {
 	m.selected = 0
 	m.offset = 0
 	m.filter = ""
+	m.textOffset, m.logOffset, m.eventOffset, m.chartOffset = 0, 0, 0, 0
 	m.screen = "dashboard"
 	m.modal = ""
 	m.plan = nil

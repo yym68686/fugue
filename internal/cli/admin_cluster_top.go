@@ -24,10 +24,26 @@ type clusterTopPayload struct {
 
 func (c *CLI) newAdminClusterTopCommand() *cobra.Command {
 	opts := monitorOptions{Interval: 3 * time.Second, Sort: "NODE"}
+	tuiOpts := defaultTUIFlags()
+	var scope string
 	cmd := &cobra.Command{
 		Use:   "top",
 		Short: "Watch high-density cluster, runtime, and control-plane status",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if scope != "all" && scope != "nodes" && scope != "runtimes" && scope != "control-plane" {
+				return fmt.Errorf("scope must be all, nodes, runtimes or control-plane")
+			}
+			flags := tuiOpts
+			flags.Interval, flags.Filter, flags.Search, flags.Sort = opts.Interval, opts.Filter, opts.Search, opts.Sort
+			if cmd.Flags().Changed("alt-screen") && !cmd.Flags().Changed("screen-mode") {
+				flags.Mode = "compact"
+				if opts.AltScreen {
+					flags.Mode = "fullscreen"
+				}
+			}
+			if _, err := applyTUIFlags(cmd, tui.DefaultPreferences(), flags); err != nil {
+				return err
+			}
 			client, err := c.newClient()
 			if err != nil {
 				return err
@@ -52,9 +68,7 @@ func (c *CLI) newAdminClusterTopCommand() *cobra.Command {
 				}
 				return c.renderMonitorSnapshot(clusterTopPayloadSnapshot(payload, opts))
 			}
-			flags := defaultTUIFlags()
-			flags.Interval = opts.Interval
-			return c.runTUI(cmd, &tuiProvider{cli: c, client: client}, tui.Target{Kind: "cluster", Name: "Cluster"}, flags)
+			return c.runTUI(cmd, &tuiProvider{cli: c, client: client}, tui.Target{Kind: "cluster", Name: "Cluster", Scope: scope}, flags)
 		},
 	}
 	cmd.Flags().DurationVar(&opts.Interval, "interval", opts.Interval, "Monitor refresh interval")
@@ -64,6 +78,8 @@ func (c *CLI) newAdminClusterTopCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Filter, "filter", "", "Filter monitor table rows")
 	cmd.Flags().StringVar(&opts.Search, "search", "", "Search monitor table rows")
 	cmd.Flags().StringVar(&opts.Sort, "sort", opts.Sort, "Sort monitor table rows by column")
+	bindTUIAppearanceFlags(cmd, &tuiOpts)
+	cmd.Flags().StringVar(&scope, "scope", "all", "Cluster scope: all, nodes, runtimes or control-plane")
 	return cmd
 }
 

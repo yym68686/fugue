@@ -51,7 +51,7 @@ func (p *tuiProvider) Load(ctx context.Context, request tui.Request) (tui.Snapsh
 	if err != nil {
 		return tui.Snapshot{}, err
 	}
-	if request.Target.Kind == "cluster" || request.Target.Kind == "node" || request.Target.Kind == "component" {
+	if request.Target.Kind == "cluster" || request.Target.Kind == "node" || request.Target.Kind == "component" || request.Target.Kind == "component-pod" || request.Target.Kind == "release" {
 		if !principal.PlatformAdmin {
 			return tui.Snapshot{}, fmt.Errorf("platform administrator scope is required")
 		}
@@ -62,20 +62,22 @@ func (p *tuiProvider) Load(ctx context.Context, request tui.Request) (tui.Snapsh
 		snapshot, err = p.loadTUIApp(client, request, principal)
 	case "operation":
 		snapshot, err = p.loadTUIOperation(client, request)
-	case "cluster", "node", "component":
+	case "cluster", "node", "component", "component-pod", "release":
 		snapshot, err = p.loadTUICluster(client, request)
 	case "runtime":
 		snapshot, err = p.loadTUIRuntime(client, request)
 	case "project":
 		snapshot, err = p.loadTUIProject(client, request)
-	default:
+	case "workspace", "":
 		snapshot, err = p.loadTUIWorkspace(client, request, principal)
+	default:
+		snapshot = tui.Snapshot{Target: request.Target, Title: request.Target.Name, Status: "unavailable", Fields: []tui.Field{{Label: "Resource type", Value: request.Target.Kind}, {Label: "Reason", Value: "No detail adapter is available for this resource"}}}
 	}
 	snapshot.Admin = principal.PlatformAdmin
 	// Keep the authentication token and known environment values out of any
 	// diagnostic text that an API error or log payload might contain.
 	if err != nil {
-		return snapshot, fmt.Errorf("%s", redactDiagnosticString(strings.ReplaceAll(err.Error(), client.token, "[redacted]")))
+		return snapshot, fmt.Errorf("%s", redactDiagnosticString(tuiRedactToken(err.Error(), client.token)))
 	}
 	data, marshalErr := json.Marshal(snapshot)
 	if marshalErr != nil {
@@ -90,15 +92,45 @@ func (p *tuiProvider) Load(ctx context.Context, request tui.Request) (tui.Snapsh
 	}
 	return snapshot, nil
 }
-func (p *tuiProvider) Watch(ctx context.Context, target tui.Target, notify func(tui.Notice)) error {
+func (p *tuiProvider) Watch(ctx context.Context, target tui.Target, cursor string, notify func(tui.Notice)) error {
+	client := p.scoped(ctx)
+	if target.Kind == "app" || target.Kind == "pod" {
+		appID, pod := target.ID, ""
+		if target.Kind == "pod" {
+			appID, pod = target.ProjectID, target.ID
+		}
+		query := url.Values{"component": {"app"}, "tail_lines": {"300"}, "follow": {"true"}}
+		if pod != "" {
+			query.Set("pod", pod)
+		}
+		relative := "/v1/apps/" + url.PathEscape(appID) + "/runtime-logs/stream?" + query.Encode()
+		return client.streamSSEWithOptions(relative, streamSSEOptions{Follow: true, LastEventID: cursor}, func(event sseEvent) error {
+			switch event.Event {
+			case "log":
+				var payload logStreamLogEvent
+				if err := json.Unmarshal(event.Data, &payload); err != nil {
+					return err
+				}
+				line := payload.Line
+				if client.token != "" {
+					line = strings.ReplaceAll(line, client.token, "[redacted]")
+				}
+				notify(tui.Notice{Section: "logs", Cursor: firstNonEmptyTrimmed(event.ID, payload.Cursor), Logs: []string{redactDiagnosticString(line)}})
+			case "warning":
+				notify(tui.Notice{Err: fmt.Errorf("log source reported a warning; inspect runtime logs")})
+			case "ready", "state":
+				notify(tui.Notice{Section: "logs"})
+			}
+			return nil
+		})
+	}
 	if target.Kind != "workspace" && target.Kind != "project" {
 		return nil
 	}
-	client := p.scoped(ctx)
-	return client.StreamConsoleGallery(true, func(event sseEvent) error {
-		switch strings.TrimSpace(event.Event) {
+	return client.streamSSEWithOptions("/v1/console/gallery/stream?include_live_status=true", streamSSEOptions{Follow: true}, func(event sseEvent) error {
+		switch event.Event {
 		case "changed", "ready":
-			notify(tui.Notice{})
+			notify(tui.Notice{Section: "overview"})
 		case "error":
 			notify(tui.Notice{Err: fmt.Errorf("console event stream reported an error")})
 		}
@@ -220,6 +252,9 @@ func (p *tuiProvider) loadTUIApp(client *Client, request tui.Request, principal 
 				s.Logs = append(s.Logs, redactDiagnosticString(line))
 			}
 		}
+		if request.Target.Kind == "pod" {
+			s.Fields = append(s.Fields, tui.Field{Label: "Stream", Value: "SSE cursor resumes on reconnect"})
+		}
 		return s, nil
 	}
 	if request.Section == "metrics" {
@@ -290,7 +325,9 @@ func (p *tuiProvider) loadTUIApp(client *Client, request tui.Request, principal 
 			}
 		}
 	}
-	s.Tables = append(s.Tables, table)
+	if podErr == nil {
+		s.Tables = append(s.Tables, table)
+	}
 	ops, opErr := client.ListOperationsFiltered(listOperationsOptions{AppID: app.ID, Limit: 50})
 	s.Sources = append(s.Sources, tuiSource("operations", opErr, s.ObservedAt))
 	if opErr == nil {
@@ -335,63 +372,20 @@ func (p *tuiProvider) loadTUIRuntime(client *Client, request tui.Request) (tui.S
 	if err != nil {
 		return tui.Snapshot{}, err
 	}
-	s := tui.Snapshot{Target: request.Target, Title: runtimeObj.Name, Status: runtimeObj.Status, ObservedAt: time.Now(), Fields: []tui.Field{{Label: "Type", Value: runtimeObj.Type}, {Label: "Access", Value: runtimeObj.AccessMode}, {Label: "Node", Value: runtimeObj.ClusterNodeName}}, Sources: []tui.Source{tuiSource("runtime", nil, time.Now())}}
+	now := time.Now()
+	s := tui.Snapshot{Target: request.Target, Title: runtimeObj.Name, Status: runtimeObj.Status, ObservedAt: now, Fields: []tui.Field{{Label: "Type", Value: runtimeObj.Type}, {Label: "Access", Value: runtimeObj.AccessMode}, {Label: "Node", Value: runtimeObj.ClusterNodeName}, {Label: "Endpoint", Value: runtimeObj.Endpoint}, {Label: "Last heartbeat", Value: formatOptionalTime(runtimeObj.LastHeartbeatAt)}}, Sources: []tui.Source{tuiSource("runtime", nil, now)}}
+	if len(runtimeObj.Labels) > 0 {
+		keys := make([]string, 0, len(runtimeObj.Labels))
+		for k := range runtimeObj.Labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			s.Fields = append(s.Fields, tui.Field{Label: "Label " + k, Value: runtimeObj.Labels[k]})
+		}
+	}
 	return s, nil
 }
-func (p *tuiProvider) loadTUICluster(client *Client, request tui.Request) (tui.Snapshot, error) {
-	s := tui.Snapshot{Target: request.Target, Title: "Cluster", Status: "ready", ObservedAt: time.Now()}
-	nodes, err := client.ListClusterNodes()
-	if err != nil {
-		return s, err
-	}
-	table := tui.Table{ID: "nodes", Title: "Nodes", Columns: []string{"Node", "Status", "CPU", "Memory", "Region", "Workloads"}}
-	for _, node := range nodes {
-		if request.Target.Kind == "node" && node.Name != request.Target.ID {
-			continue
-		}
-		target := tui.Target{Kind: "node", ID: node.Name, Name: node.Name}
-		cpu, mem := "--", "--"
-		numbers := map[int]float64{5: float64(len(node.Workloads))}
-		if node.CPU != nil && node.CPU.UsagePercent != nil {
-			cpu = fmt.Sprintf("%.1f%%", *node.CPU.UsagePercent)
-			numbers[2] = *node.CPU.UsagePercent
-		}
-		if node.Memory != nil && node.Memory.UsagePercent != nil {
-			mem = fmt.Sprintf("%.1f%%", *node.Memory.UsagePercent)
-			numbers[3] = *node.Memory.UsagePercent
-		}
-		table.Rows = append(table.Rows, tui.Row{ID: node.Name, Cells: []string{node.Name, node.Status, cpu, mem, node.Region, strconv.Itoa(len(node.Workloads))}, Numbers: numbers, Target: &target})
-	}
-	s.Tables = []tui.Table{table}
-	s.Sources = []tui.Source{tuiSource("node inventory", nil, s.ObservedAt)}
-	if request.Section == "metrics" {
-		return s, nil
-	}
-	control, controlErr := client.GetControlPlaneStatus()
-	s.Sources = append(s.Sources, tuiSource("control plane", controlErr, s.ObservedAt))
-	if controlErr == nil {
-		components := tui.Table{ID: "components", Title: "Control plane", Columns: []string{"Component", "Status", "Ready", "Version"}}
-		for _, component := range control.Components {
-			target := tui.Target{Kind: "component", ID: component.DeploymentName, Name: component.Component}
-			components.Rows = append(components.Rows, tui.Row{ID: component.Component, Cells: []string{component.Component, component.Status, fmt.Sprintf("%d/%d", component.ReadyReplicas, component.DesiredReplicas), component.ImageTag}, Target: &target})
-		}
-		s.Tables = append(s.Tables, components)
-		s.Fields = append(s.Fields, tui.Field{Label: "Control plane", Value: control.Status})
-	}
-	runtimes, runtimeErr := client.ListRuntimes()
-	s.Sources = append(s.Sources, tuiSource("runtimes", runtimeErr, s.ObservedAt))
-	if runtimeErr == nil {
-		rt := tui.Table{ID: "runtimes", Title: "Runtimes", Columns: []string{"Runtime", "Status", "Type", "Access", "Node"}}
-		for _, r := range runtimes {
-			target := tui.Target{Kind: "runtime", ID: r.ID, Name: r.Name}
-			rt.Rows = append(rt.Rows, tui.Row{ID: r.ID, Cells: []string{r.Name, r.Status, r.Type, r.AccessMode, r.ClusterNodeName}, Target: &target})
-		}
-		s.Tables = append(s.Tables, rt)
-	}
-	s.Fields = append(s.Fields, tui.Field{Label: "Nodes", Value: strconv.Itoa(len(table.Rows))})
-	return s, nil
-}
-
 func (p *tuiProvider) Plan(ctx context.Context, request tui.ActionRequest) (tui.Plan, error) {
 	client := p.scoped(ctx)
 	if request.Target.Kind != "app" {
