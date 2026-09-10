@@ -47,6 +47,9 @@ func TestDNSFromEnvDefaultsEdgeHealthProbeEnabled(t *testing.T) {
 	if !cfg.EdgeHealthProbeEnabled {
 		t.Fatal("expected DNS edge health probe to default enabled")
 	}
+	if cfg.EdgeHealthProbePath != "" {
+		t.Fatalf("expected edge health probes to default to TCP-only mode, got path %q", cfg.EdgeHealthProbePath)
+	}
 }
 
 func TestDNSFromEnvAllowsDisablingEdgeHealthProbe(t *testing.T) {

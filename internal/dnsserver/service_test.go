@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -396,6 +397,36 @@ func TestEdgeHealthProbeTargetsIncludeScopedCandidatesAndNormalizeWildcards(t *t
 		if targets[i] != want[i] {
 			t.Fatalf("expected sorted target %+v at %d, got %+v", want[i], i, targets[i])
 		}
+	}
+}
+
+func TestProbeEdgeTargetDefaultsToTCPWithoutHTTP(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			_ = c.Close()
+		}
+	}()
+	port, _ := strconv.Atoi(strings.Split(ln.Addr().String(), ":")[1])
+	s := NewService(config.DNSConfig{EdgeHealthProbePort: port}, nil)
+	obs := s.probeEdgeTargetObservation(context.Background(), "app.example.test", "127.0.0.1")
+	if !obs.Healthy || obs.HTTP || obs.Path != "" {
+		t.Fatalf("expected TCP-only probe, got %+v", obs)
+	}
+}
+
+func TestProbeEdgeTargetRejectsRootHTTPPath(t *testing.T) {
+	t.Parallel()
+	s := NewService(config.DNSConfig{EdgeHealthProbePath: "/"}, nil)
+	obs := s.probeEdgeTargetObservation(context.Background(), "app.example.test", "127.0.0.1")
+	if obs.Healthy || obs.HTTP != true {
+		t.Fatalf("expected root path to be rejected, got %+v", obs)
 	}
 }
 

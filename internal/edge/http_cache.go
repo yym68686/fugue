@@ -30,6 +30,13 @@ const (
 const (
 	edgeCacheWarmupHeader          = "X-Fugue-Cache-Warmup"
 	edgeCacheWarmupDiscoveryHeader = "X-Fugue-Cache-Warmup-Discovery"
+	edgeCacheWarmupIDHeader        = "X-Fugue-Cache-Warmup-Id"
+	edgeCacheWarmupSourceHeader    = "X-Fugue-Cache-Warmup-Source"
+	edgeHealthProbeHeader          = "X-Fugue-Health-Probe"
+	edgeHealthProbeIDHeader        = "X-Fugue-Health-Probe-Id"
+	edgeHealthProbeSourceHeader    = "X-Fugue-Health-Probe-Source"
+	edgeHealthProbeTargetIPHeader  = "X-Fugue-Health-Probe-Target-IP"
+	edgeHealthProbeReachedHeader   = "X-Fugue-Health-Probe-Reached-App"
 )
 
 var nextDocumentVaryAllowlist = []string{
