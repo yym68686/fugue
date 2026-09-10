@@ -123,7 +123,7 @@ func (s *Server) rebuildEdgeDNSArtifacts(ctx context.Context, now time.Time) (ed
 	} else if updated > 0 && s.log != nil {
 		s.log.Printf("hosted dns flatten resolver updated %d records", updated)
 	}
-	decisionCount, err := s.reconcileEdgeDNSRoutingDecisions(now)
+	decisionCount, err := s.reconcileEdgeDNSRoutingDecisionsWithContext(ctx, now)
 	if err != nil {
 		return edgeDNSArtifactPublicationStats{}, decisionCount, fmt.Errorf("reconcile edge dns routing decisions: %w", err)
 	}

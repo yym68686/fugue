@@ -241,7 +241,7 @@ func (s *Server) loadEdgeDNSBundleCompileSnapshot(ctx context.Context, zones []s
 	if err != nil {
 		return nil, err
 	}
-	latencyProfiles, err := s.edgeDNSLatencyProfilesAt(now)
+	latencyProfiles, err := s.edgeDNSLatencyProfilesWithContext(ctx, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1614,13 +1614,17 @@ func (s *Server) edgeDNSLatencyProfiles(_ edgeDNSBundleOptions) (edgeDNSLatencyP
 }
 
 func (s *Server) edgeDNSLatencyProfilesAt(now time.Time) (edgeDNSLatencyProfileCatalog, error) {
+	return s.edgeDNSLatencyProfilesWithContext(context.Background(), now)
+}
+
+func (s *Server) edgeDNSLatencyProfilesWithContext(ctx context.Context, now time.Time) (edgeDNSLatencyProfileCatalog, error) {
 	if s.store == nil || s.edgeQualityRankingDisabled() {
 		return edgeDNSLatencyProfileCatalog{}, nil
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	samples, err := s.store.ListEdgePerformanceSamples("", now.Add(-edgeDNSLatencyWindow))
+	builder, severe, err := s.loadEdgeDNSLatencyProfileBuilder(ctx, now, true)
 	if err != nil {
 		return edgeDNSLatencyProfileCatalog{}, err
 	}
@@ -1628,19 +1632,23 @@ func (s *Server) edgeDNSLatencyProfilesAt(now time.Time) (edgeDNSLatencyProfileC
 	if err != nil {
 		return edgeDNSLatencyProfileCatalog{}, err
 	}
-	catalog, _ := edgeDNSLatencyProfilesByHostname(samples, decisions, now)
-	edgeDNSApplySevereDegradeToCatalog(&catalog, samples, now)
+	catalog, _ := builder.finish(decisions, now)
+	edgeDNSApplySevereDegradeGroupsToCatalog(&catalog, severe)
 	return catalog, nil
 }
 
 func (s *Server) reconcileEdgeDNSRoutingDecisions(now time.Time) (int, error) {
+	return s.reconcileEdgeDNSRoutingDecisionsWithContext(context.Background(), now)
+}
+
+func (s *Server) reconcileEdgeDNSRoutingDecisionsWithContext(ctx context.Context, now time.Time) (int, error) {
 	if s.store == nil || s.edgeQualityRankingDisabled() {
 		return 0, nil
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	samples, err := s.store.ListEdgePerformanceSamples("", now.Add(-edgeDNSLatencyWindow))
+	builder, _, err := s.loadEdgeDNSLatencyProfileBuilder(ctx, now, false)
 	if err != nil {
 		return 0, err
 	}
@@ -1648,7 +1656,7 @@ func (s *Server) reconcileEdgeDNSRoutingDecisions(now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	_, updates := edgeDNSLatencyProfilesByHostname(samples, decisions, now)
+	_, updates := builder.finish(decisions, now)
 	if len(updates) > 0 {
 		sortEdgeDNSRoutingDecisionUpdates(updates)
 		if err := s.store.UpsertEdgeDNSRoutingDecisions(updates); err != nil {
@@ -1658,25 +1666,71 @@ func (s *Server) reconcileEdgeDNSRoutingDecisions(now time.Time) (int, error) {
 	return len(updates), nil
 }
 
-func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample, decisions []model.EdgeDNSRoutingDecision, now time.Time) (edgeDNSLatencyProfileCatalog, []model.EdgeDNSRoutingDecision) {
-	byHostnameScope := make(map[string]map[string]map[string]*edgeDNSLatencyGroupAccumulator)
-	for _, sample := range samples {
-		hostname := normalizeExternalAppDomain(sample.Hostname)
-		edgeGroupID := strings.TrimSpace(sample.EdgeGroupID)
-		if hostname == "" || edgeGroupID == "" {
-			continue
-		}
-		for _, scope := range edgeDNSLatencyScopesForSample(sample) {
-			if _, ok := byHostnameScope[hostname]; !ok {
-				byHostnameScope[hostname] = make(map[string]map[string]*edgeDNSLatencyGroupAccumulator)
-			}
-			scopeKey := scope.key()
-			if _, ok := byHostnameScope[hostname][scopeKey]; !ok {
-				byHostnameScope[hostname][scopeKey] = make(map[string]*edgeDNSLatencyGroupAccumulator)
-			}
-			edgeDNSLatencyAccumulate(byHostnameScope[hostname][scopeKey], edgeGroupID, sample)
-		}
+type edgeDNSLatencyProfileBuilder struct {
+	byHostnameScope map[string]map[string]map[string]*edgeDNSLatencyGroupAccumulator
+}
+
+// Aggregate the ordered database cursor without retaining the 24-hour raw
+// sample slice. Both statistics and exact five-minute percentile weights use
+// the same sample snapshot; a failed read publishes no partial catalog.
+func (s *Server) loadEdgeDNSLatencyProfileBuilder(ctx context.Context, now time.Time, withSeverity bool) (*edgeDNSLatencyProfileBuilder, map[string]float64, error) {
+	builder := newEdgeDNSLatencyProfileBuilder()
+	var severe *edgeQualityRollupBuildState
+	var weights map[store.EdgeQualityPercentileValueKey]int
+	if withSeverity {
+		target := &edgeQualityRollupWindowTarget{ID: 0, Window: "5m", Duration: 5 * time.Minute, StartedAt: now.Add(-5 * time.Minute), EndedAt: now}
+		severe = newEdgeQualityRollupBuildState([]edgeQualityRollupWindowPlan{{Duration: target.Duration, Targets: map[int64]*edgeQualityRollupWindowTarget{now.UnixNano(): target}}})
+		weights = make(map[store.EdgeQualityPercentileValueKey]int)
 	}
+	err := s.store.WalkEdgePerformanceSamples(ctx, "", now.Add(-edgeDNSLatencyWindow), func(sample model.EdgePerformanceSample) error {
+		builder.add(sample)
+		if severe != nil {
+			severe.addSamples([]model.EdgePerformanceSample{sample}, weights)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	var degraded map[string]float64
+	if severe != nil {
+		degraded = edgeDNSSevereDegradeGroupsFromRollups(severe.rollups(edgeQualityPercentilesFromWeights(weights), now))
+	}
+	return builder, degraded, nil
+}
+
+func newEdgeDNSLatencyProfileBuilder() *edgeDNSLatencyProfileBuilder {
+	return &edgeDNSLatencyProfileBuilder{byHostnameScope: make(map[string]map[string]map[string]*edgeDNSLatencyGroupAccumulator)}
+}
+
+func (builder *edgeDNSLatencyProfileBuilder) add(sample model.EdgePerformanceSample) {
+	hostname := normalizeExternalAppDomain(sample.Hostname)
+	edgeGroupID := strings.TrimSpace(sample.EdgeGroupID)
+	if hostname == "" || edgeGroupID == "" {
+		return
+	}
+	for _, scope := range edgeDNSLatencyScopesForSample(sample) {
+		if _, ok := builder.byHostnameScope[hostname]; !ok {
+			builder.byHostnameScope[hostname] = make(map[string]map[string]*edgeDNSLatencyGroupAccumulator)
+		}
+		scopeKey := scope.key()
+		if _, ok := builder.byHostnameScope[hostname][scopeKey]; !ok {
+			builder.byHostnameScope[hostname][scopeKey] = make(map[string]*edgeDNSLatencyGroupAccumulator)
+		}
+		edgeDNSLatencyAccumulate(builder.byHostnameScope[hostname][scopeKey], edgeGroupID, sample)
+	}
+}
+
+func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample, decisions []model.EdgeDNSRoutingDecision, now time.Time) (edgeDNSLatencyProfileCatalog, []model.EdgeDNSRoutingDecision) {
+	builder := newEdgeDNSLatencyProfileBuilder()
+	for _, sample := range samples {
+		builder.add(sample)
+	}
+	return builder.finish(decisions, now)
+}
+
+func (builder *edgeDNSLatencyProfileBuilder) finish(decisions []model.EdgeDNSRoutingDecision, now time.Time) (edgeDNSLatencyProfileCatalog, []model.EdgeDNSRoutingDecision) {
+	byHostnameScope := builder.byHostnameScope
 
 	decisionByKey := make(map[string]model.EdgeDNSRoutingDecision, len(decisions))
 	for _, decision := range decisions {
@@ -2090,7 +2144,13 @@ func edgeDNSApplySevereDegradeToCatalog(catalog *edgeDNSLatencyProfileCatalog, s
 	if catalog == nil {
 		return
 	}
-	degraded := edgeDNSSevereDegradeGroups(samples, now)
+	edgeDNSApplySevereDegradeGroupsToCatalog(catalog, edgeDNSSevereDegradeGroups(samples, now))
+}
+
+func edgeDNSApplySevereDegradeGroupsToCatalog(catalog *edgeDNSLatencyProfileCatalog, degraded map[string]float64) {
+	if catalog == nil {
+		return
+	}
 	if len(degraded) == 0 {
 		return
 	}
@@ -2110,6 +2170,10 @@ func edgeDNSApplySevereDegradeToCatalog(catalog *edgeDNSLatencyProfileCatalog, s
 func edgeDNSSevereDegradeGroups(samples []model.EdgePerformanceSample, now time.Time) map[string]float64 {
 	startedAt := now.Add(-5 * time.Minute)
 	rollups := buildEdgeQualityRollupsForWindow(samples, "5m", startedAt, now, now)
+	return edgeDNSSevereDegradeGroupsFromRollups(rollups)
+}
+
+func edgeDNSSevereDegradeGroupsFromRollups(rollups []model.EdgeQualityRollup) map[string]float64 {
 	out := map[string]float64{}
 	for _, rollup := range rollups {
 		if strings.TrimSpace(rollup.EdgeID) != "" || rollup.ClientScopeKind != "global" {
