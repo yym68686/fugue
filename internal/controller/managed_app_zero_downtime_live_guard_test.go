@@ -1438,25 +1438,47 @@ func managedAppLiveGuardClientWithPods(
 	}
 }
 
-func TestManagedAppLiveGuardAllowsStartFromExplicitlyStoppedApp(t *testing.T) {
-	t.Parallel()
-	current := managedAppLiveGuardTestApp(nil)
-	current.Spec.Replicas = 0
-	desired := current
-	desired.Spec.Replicas = 1
-	desired.Spec.Image = "registry.example/live-guard:v2"
-	managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
-	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseError}
-	live, found := (&Service{Renderer: runtime.Renderer{}}).expectedManagedAppDeployment(runtime.Renderer{}.PrepareApp(current), runtime.SchedulingConstraints{})
-	if !found {
-		t.Fatal("expected rendered deployment")
-	}
-	client := managedAppLiveGuardClient(t, managed, live, false, false, nil)
-	got, err := (&Service{Renderer: runtime.Renderer{}}).prepareManagedAppRolloutFromLiveState(context.Background(), client, managed.Metadata.Namespace, managed, current, desired, model.OperationTypeDeploy, runtime.SchedulingConstraints{})
-	if err != nil {
-		t.Fatalf("explicitly stopped app should allow recreate start: %v", err)
-	}
-	if got.Spec.Replicas != 1 || got.Spec.Image != desired.Spec.Image {
-		t.Fatalf("unexpected desired app: %#v", got.Spec)
+func TestManagedAppLiveGuardStartRequiresLiveStoppedEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mutate    func(*kubeDeployment)
+		pods      []kubePod
+		endpoint  bool
+		wantError bool
+	}{
+		{name: "observed empty deployment"},
+		{name: "live replica despite stopped intent", mutate: func(d *kubeDeployment) { n := 1; d.Spec.Replicas = &n; d.Status.Replicas = 1 }, wantError: true},
+		{name: "ready replica remains", mutate: func(d *kubeDeployment) { d.Status.ReadyReplicas = 1 }, wantError: true},
+		{name: "unobserved stop", mutate: func(d *kubeDeployment) { d.Status.ObservedGeneration = 0 }, wantError: true},
+		{name: "pod remains", pods: []kubePod{{}}, wantError: true},
+		{name: "endpoint remains", endpoint: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := managedAppLiveGuardTestApp(&model.AppPersistentStorageSpec{Mode: model.AppPersistentStorageModeDedicatedPVC, StorageClassName: "fugue-workspace-rwo", StorageSize: "1Gi", Mounts: []model.AppPersistentStorageMount{{Path: "/data"}}})
+			current.Spec.Replicas = 0
+			desired := current
+			desired.Spec.Replicas = 1
+			desired.Spec.Image = "registry.example/live-guard:v2"
+			managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
+			managed.Status.CurrentReleaseReadyAt = "2026-07-28T00:00:00Z"
+			svc := &Service{Renderer: runtime.Renderer{}}
+			live, found := svc.expectedManagedAppDeployment(current, runtime.SchedulingConstraints{})
+			if !found {
+				t.Fatal("expected rendered deployment")
+			}
+			live.Metadata.Generation = 1
+			live.Status.ObservedGeneration = 1
+			if tc.mutate != nil {
+				tc.mutate(&live)
+			}
+			client := managedAppLiveGuardClientWithPods(t, managed, live, true, tc.endpoint, tc.pods, nil)
+			got, err := svc.prepareManagedAppRolloutFromLiveState(context.Background(), client, managed.Metadata.Namespace, managed, current, desired, model.OperationTypeDeploy, runtime.SchedulingConstraints{})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error=%v; wantError=%v", err, tc.wantError)
+			}
+			if err == nil && got.Spec.Image != desired.Spec.Image {
+				t.Fatal("desired image was not preserved")
+			}
+		})
 	}
 }
