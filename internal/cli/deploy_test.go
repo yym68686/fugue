@@ -897,3 +897,42 @@ services:
 		t.Fatalf("expected fugue_manifest in stdout, got %s", stdout.String())
 	}
 }
+
+func TestRunDeployExistingAppResumableUsesResolvedTenant(t *testing.T) {
+	t.Setenv("FUGUE_CONFIG_FILE", filepath.Join(t.TempDir(), "config.json"))
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM nginx:alpine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var tenant string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1}}]}`))
+		case "/v1/source-upload-sessions":
+			var request struct {
+				TenantID string `json:"tenant_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+			}
+			tenant = request.TenantID
+			// Stop before uploading: the regression is that the initial session
+			// request omitted the app owner under platform-admin credentials.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"test upload intentionally stopped"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	err := runWithStreams([]string{"--base-url", server.URL, "--token", "token", "deploy", dir, "--app", "demo", "--request-id", "test-existing-app", "--wait=false"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected intentional session failure")
+	}
+	if tenant != "tenant_123" {
+		t.Fatalf("session tenant=%q, want resolved app owner", tenant)
+	}
+}

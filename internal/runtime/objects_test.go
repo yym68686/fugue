@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"path"
 	"reflect"
 	"strings"
@@ -3349,5 +3350,59 @@ func TestBuildAppObjectsSplitsLargeDeclarativeFilesAcrossSecrets(t *testing.T) {
 	mounts := podSpec["containers"].([]map[string]any)[0]["volumeMounts"].([]map[string]any)
 	if mounts[0]["name"] == mounts[1]["name"] {
 		t.Fatalf("large files must use separate secret volumes: %#v", mounts)
+	}
+}
+
+func TestAppFileSecretChunksPreservePayloadAndLegacyBoundary(t *testing.T) {
+	for _, total := range []int{950000, 1 << 20, (1 << 20) + 1, 1500000} {
+		t.Run(fmt.Sprint(total), func(t *testing.T) {
+			files := []model.AppFile{{Path: "/etc/a", Content: strings.Repeat("a", 750000), Mode: 0o600}, {Path: "/etc/b", Content: strings.Repeat("b", total-750000), Mode: 0o444}}
+			app := model.App{ID: "app_example", TenantID: "tenant_example", Name: "example", Spec: model.AppSpec{Image: "example/app:latest", Files: files, Replicas: 1}}
+			objects := buildAppObjects(app, SchedulingConstraints{})
+			secrets := map[string]map[string]string{}
+			for _, o := range objects {
+				if o["kind"] != "Secret" {
+					continue
+				}
+				data := o["stringData"].(map[string]string)
+				bytes := 0
+				for _, content := range data {
+					bytes += len(content)
+				}
+				if bytes > 1<<20 {
+					t.Fatalf("oversized Secret: %d bytes", bytes)
+				}
+				secrets[o["metadata"].(map[string]any)["name"].(string)] = data
+			}
+			if total <= 1<<20 && len(secrets) != 1 {
+				t.Fatal("changed previously valid single-Secret layout")
+			}
+			deployment := firstObjectByKind(t, objects, "Deployment")
+			podSpec := deployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+			volumes := map[string]map[string]any{}
+			for _, v := range podSpec["volumes"].([]map[string]any) {
+				volumes[v["name"].(string)] = v
+			}
+			mounts := podSpec["containers"].([]map[string]any)[0]["volumeMounts"].([]map[string]any)
+			for i, mount := range mounts {
+				secret := volumes[mount["name"].(string)]["secret"].(map[string]any)
+				key := mount["subPath"].(string)
+				if secrets[secret["secretName"].(string)][key] != files[i].Content || mount["mountPath"] != files[i].Path {
+					t.Fatalf("file %d payload or path changed", i)
+				}
+				found := false
+				for _, item := range secret["items"].([]map[string]any) {
+					if item["key"] == key {
+						found = true
+						if item["mode"] != appFileMode(files[i]) {
+							t.Fatal("file mode changed")
+						}
+					}
+				}
+				if !found {
+					t.Fatal("mount has no projected item")
+				}
+			}
+		})
 	}
 }

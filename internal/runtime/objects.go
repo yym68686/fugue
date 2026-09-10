@@ -288,9 +288,9 @@ func labelSubset(labels map[string]string, keys ...string) map[string]string {
 	return subset
 }
 
-// Keep headroom below Kubernetes' single-Secret 1 MiB limit, including
-// serialization overhead and future metadata additions.
-const appFilesSecretMaxBytes = 900 << 10
+// Kubernetes limits decoded data values. Preserve the existing single-Secret
+// volume layout for every previously valid payload through 1 MiB.
+const appFilesSecretMaxBytes = 1 << 20
 
 func appFileSecretChunks(files []model.AppFile) [][]int {
 	var chunks [][]int
