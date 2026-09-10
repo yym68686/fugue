@@ -642,6 +642,25 @@ func TestAppObservabilityRequestPathValidationRejectsQueriesAndFragments(t *test
 	}
 }
 
+func TestAppObservabilityEmptyQueryReportsHealthySourceWithoutClaimingData(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{Enabled: true, ClickHouseDSN: clickHouse.URL + "?database=fugue_observability"}.Normalize()
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/requests?since=15m", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source appObservabilitySourceStatus `json:"source"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "available" ||
+		response.Source.Reason != "request analytics query backend is healthy; no request samples matched the window" {
+		t.Fatalf("expected a healthy empty source explanation, got %+v", response.Source)
+	}
+}
+
 func TestAppObservabilityRequestPathFallsBackToSummaryAndRedactsQueryMarker(t *testing.T) {
 	request := appObservabilityRequestFromClickHouseRow(map[string]any{
 		"path_template": "/v1",

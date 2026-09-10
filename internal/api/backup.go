@@ -3700,33 +3700,6 @@ func fileSizeAndSHA256(path string) (int64, string, error) {
 	return size, hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func verifyBackupObjectSHA256(ctx context.Context, backend *dataObjectBackend, key string, expectedSize int64, expectedSHA256 string) error {
-	if backend == nil {
-		return fmt.Errorf("backup object backend is not configured")
-	}
-	body, objectSize, err := backend.getObject(ctx, key)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-	hash := sha256.New()
-	size, err := io.Copy(hash, body)
-	if err != nil {
-		return err
-	}
-	if expectedSize >= 0 && size != expectedSize {
-		return fmt.Errorf("size mismatch: expected %d bytes, got %d bytes", expectedSize, size)
-	}
-	if objectSize > 0 && expectedSize >= 0 && objectSize != expectedSize {
-		return fmt.Errorf("object metadata size mismatch: expected %d bytes, got %d bytes", expectedSize, objectSize)
-	}
-	actualSHA256 := hex.EncodeToString(hash.Sum(nil))
-	if !strings.EqualFold(strings.TrimSpace(expectedSHA256), actualSHA256) {
-		return fmt.Errorf("sha256 mismatch: expected %s, got %s", expectedSHA256, actualSHA256)
-	}
-	return nil
-}
-
 func backupBillingClass(backend model.BackupBackend) string {
 	if backend.Billable && model.NormalizeDataBackendProvider(backend.Provider) == model.DataBackendProviderCloudflareR2 {
 		return "cloudflare-r2-standard-storage-plus-5pct"
