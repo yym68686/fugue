@@ -185,7 +185,7 @@ func BenchmarkEdgeQualityRollupsPostgresChunked(b *testing.B) {
 
 var benchmarkEdgeQualityRollupSink []model.EdgeQualityRollup
 
-func benchmarkEdgeQualityPostgresStore(b *testing.B, samples []model.EdgePerformanceSample) *store.Store {
+func benchmarkEdgeQualityPostgresStore(b testing.TB, samples []model.EdgePerformanceSample) *store.Store {
 	b.Helper()
 	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
 	if databaseURL == "" {
