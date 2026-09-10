@@ -122,6 +122,13 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 		samples[0].OriginFailureClass != "origin_dns_failed" {
 		t.Fatalf("unexpected normalized sample: %+v", samples[0])
 	}
+	edgeSamples, err := s.ListEdgePerformanceSamplesForEdge("edge-hk-1", time.Time{})
+	if err != nil {
+		t.Fatalf("list samples for edge: %v", err)
+	}
+	if len(edgeSamples) != 1 || edgeSamples[0].ID != "recent-hk" {
+		t.Fatalf("expected edge-scoped sample list, got %+v", edgeSamples)
+	}
 }
 
 func TestUpsertEdgeQualityRollupsPrunesAndListsByHostname(t *testing.T) {

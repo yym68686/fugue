@@ -203,7 +203,7 @@ func (s *Server) handleGetEdgeNodeQuality(w http.ResponseWriter, r *http.Request
 		s.writeStoreError(w, instanceErr)
 		return
 	}
-	samples, err := s.store.ListEdgePerformanceSamples("", since)
+	samples, err := s.store.ListEdgePerformanceSamplesForEdge(edgeID, since)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

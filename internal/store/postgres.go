@@ -1092,6 +1092,7 @@ var postgresSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_hostname_sampled ON fugue_edge_performance_samples (hostname, sampled_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_route_sampled ON fugue_edge_performance_samples (hostname, path_prefix, sampled_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_class_sampled ON fugue_edge_performance_samples (hostname, traffic_class, sampled_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_edge_id_sampled ON fugue_edge_performance_samples (edge_id, sampled_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_edge_group_sampled ON fugue_edge_performance_samples (edge_group_id, sampled_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_client_scope ON fugue_edge_performance_samples (client_country, client_region, client_asn, sampled_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_edge_quality_rollups (

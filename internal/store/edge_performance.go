@@ -130,13 +130,28 @@ func (s *Store) RecordEdgePerformanceSamples(samples []model.EdgePerformanceSamp
 
 func (s *Store) ListEdgePerformanceSamples(hostname string, since time.Time) ([]model.EdgePerformanceSample, error) {
 	hostname = normalizeEdgePerformanceHostname(hostname)
+	return s.listEdgePerformanceSamples(hostname, "", since)
+}
+
+// ListEdgePerformanceSamplesForEdge keeps node-specific diagnostics scoped to
+// the requested edge. The previous caller loaded every edge's raw sample into
+// one slice and filtered by edge ID in the API layer, which made a seven-day
+// table grow into multi-gigabyte allocation bursts.
+func (s *Store) ListEdgePerformanceSamplesForEdge(edgeID string, since time.Time) ([]model.EdgePerformanceSample, error) {
+	return s.listEdgePerformanceSamples("", strings.TrimSpace(strings.ToLower(edgeID)), since)
+}
+
+func (s *Store) listEdgePerformanceSamples(hostname, edgeID string, since time.Time) ([]model.EdgePerformanceSample, error) {
 	if s.usingDatabase() {
-		return s.pgListEdgePerformanceSamples(hostname, since)
+		return s.pgListEdgePerformanceSamples(hostname, edgeID, since)
 	}
 	var samples []model.EdgePerformanceSample
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, sample := range state.EdgePerformanceSamples {
 			if hostname != "" && !strings.EqualFold(normalizeEdgePerformanceHostname(sample.Hostname), hostname) {
+				continue
+			}
+			if edgeID != "" && !strings.EqualFold(strings.TrimSpace(sample.EdgeID), edgeID) {
 				continue
 			}
 			if !since.IsZero() && sample.SampledAt.Before(since) {
@@ -343,7 +358,7 @@ func (s *Store) pgRecordEdgePerformanceSamples(samples []model.EdgePerformanceSa
 	return nil
 }
 
-func (s *Store) pgListEdgePerformanceSamples(hostname string, since time.Time) ([]model.EdgePerformanceSample, error) {
+func (s *Store) pgListEdgePerformanceSamples(hostname, edgeID string, since time.Time) ([]model.EdgePerformanceSample, error) {
 	if err := s.ensureDatabaseReady(); err != nil {
 		return nil, err
 	}
@@ -368,6 +383,10 @@ WHERE 1=1
 	if hostname != "" {
 		args = append(args, hostname)
 		query += fmt.Sprintf(" AND hostname = $%d", len(args))
+	}
+	if edgeID != "" {
+		args = append(args, edgeID)
+		query += fmt.Sprintf(" AND edge_id = $%d", len(args))
 	}
 	if !since.IsZero() {
 		args = append(args, since)
