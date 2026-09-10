@@ -37,6 +37,8 @@ const dnsCacheEnvelopeKind = "dns_answer_bundle"
 
 const dnsCacheEnvelopeFallbackTTL = 24 * time.Hour
 
+// Health probes run at a bounded cadence so a DNS refresh cannot create a
+// burst of application traffic.
 const edgeHealthProbeTTL = 15 * time.Second
 
 const edgeHealthObservationTTL = 2 * edgeHealthProbeTTL
