@@ -3325,3 +3325,29 @@ func resourceStringValues(t *testing.T, value any) map[string]string {
 	}
 	return values
 }
+
+func TestBuildAppObjectsSplitsLargeDeclarativeFilesAcrossSecrets(t *testing.T) {
+	t.Parallel()
+	files := []model.AppFile{{Path: "/app/a", Content: strings.Repeat("a", 700000)}, {Path: "/app/b", Content: strings.Repeat("b", 700000)}}
+	app := model.App{ID: "app_large", TenantID: "tenant_large", Name: "large", Spec: model.AppSpec{Image: "example/large:latest", Replicas: 1, RuntimeID: "runtime_large", Files: files}}
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	secrets := make([]map[string]any, 0)
+	for _, object := range objects {
+		if object["kind"] == "Secret" {
+			secrets = append(secrets, object)
+		}
+	}
+	if len(secrets) != 2 {
+		t.Fatalf("expected two file Secrets, got %d", len(secrets))
+	}
+	deployment := firstObjectByKind(t, objects, "Deployment")
+	podSpec := deployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	volumes := podSpec["volumes"].([]map[string]any)
+	if len(volumes) < 2 {
+		t.Fatalf("expected two file volumes, got %d", len(volumes))
+	}
+	mounts := podSpec["containers"].([]map[string]any)[0]["volumeMounts"].([]map[string]any)
+	if mounts[0]["name"] == mounts[1]["name"] {
+		t.Fatalf("large files must use separate secret volumes: %#v", mounts)
+	}
+}

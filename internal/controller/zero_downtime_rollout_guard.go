@@ -454,6 +454,14 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		return desired, nil
 	}
 
+	// A committed zero-replica app is explicitly stopped. A stale Deployment
+	// from a failed rollout must not force the next start through the online
+	// replacement readiness guard; the rendered durable-storage workload uses
+	// Recreate semantics for this transition.
+	if current.Spec.Replicas <= 0 && desired.Spec.Replicas > 0 {
+		return desired, nil
+	}
+
 	liveReplicas := 1
 	if deployment.Spec.Replicas != nil {
 		liveReplicas = *deployment.Spec.Replicas

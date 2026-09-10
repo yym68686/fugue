@@ -88,7 +88,7 @@ func buildAppObjectsWithOwnerAndOptions(app model.App, scheduling SchedulingCons
 	}
 
 	if len(app.Spec.Files) > 0 {
-		objects = append(objects, buildAppFilesSecretObject(namespace, appRuntimeName, app.Spec.Files, labels))
+		objects = append(objects, buildAppFilesSecretObjects(namespace, appRuntimeName, app.Spec.Files, labels)...)
 	}
 	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil && len(ssh.AuthorizedKeys) > 0 {
 		objects = append(objects, buildAppSSHAuthorizedKeysSecretObject(namespace, appRuntimeName, ssh.AuthorizedKeys, labels))
@@ -288,22 +288,53 @@ func labelSubset(labels map[string]string, keys ...string) map[string]string {
 	return subset
 }
 
-func buildAppFilesSecretObject(namespace, appName string, files []model.AppFile, labels map[string]string) map[string]any {
-	stringData := make(map[string]string, len(files))
+const appFilesSecretMaxBytes = 900 << 10
+
+func buildAppFilesSecretObjects(namespace, appName string, files []model.AppFile, labels map[string]string) []map[string]any {
+	objects := make([]map[string]any, 0, 1)
+	stringData := make(map[string]string)
+	encodedBytes := 0
+	chunk := 0
+	flush := func() {
+		if len(stringData) == 0 {
+			return
+		}
+		name := appFilesSecretName(appName)
+		if chunk > 0 {
+			name = fmt.Sprintf("%s-%d", name, chunk)
+		}
+		objects = append(objects, map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata": map[string]any{
+				"name": name, "namespace": namespace, "labels": labels,
+			},
+			"type": "Opaque", "stringData": stringData,
+		})
+		stringData = make(map[string]string)
+		encodedBytes = 0
+		chunk++
+	}
 	for index, file := range files {
-		stringData[fileKey(index)] = file.Content
+		key := fileKey(index)
+		// Secret.data stores base64, so budget the encoded payload plus key overhead.
+		cost := ((len(file.Content)+2)/3)*4 + len(key) + 64
+		if len(stringData) > 0 && encodedBytes+cost > appFilesSecretMaxBytes {
+			flush()
+		}
+		stringData[key] = file.Content
+		encodedBytes += cost
 	}
-	return map[string]any{
-		"apiVersion": "v1",
-		"kind":       "Secret",
-		"metadata": map[string]any{
-			"name":      appFilesSecretName(appName),
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"type":       "Opaque",
-		"stringData": stringData,
+	flush()
+	return objects
+}
+
+func appFilesSecretObject(namespace, appName string, files []model.AppFile, labels map[string]string) map[string]any {
+	objects := buildAppFilesSecretObjects(namespace, appName, files, labels)
+	if len(objects) == 0 {
+		return nil
 	}
+	return objects[0]
 }
 
 func buildAppSSHAuthorizedKeysSecretObject(namespace, appName string, authorizedKeys []string, labels map[string]string) map[string]any {
@@ -552,23 +583,19 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 	sidecars := []map[string]any{}
 	initContainers := []map[string]any{}
 	if len(app.Spec.Files) > 0 {
-		items := make([]map[string]any, 0, len(app.Spec.Files))
-		for index, file := range app.Spec.Files {
-			key := fileKey(index)
-			mode := appFileMode(file)
-			items = append(items, map[string]any{
-				"key":  key,
-				"path": key,
-				"mode": mode,
-			})
+		for chunk, chunkFiles := range appFileSecretChunks(app.Spec.Files) {
+			volumeName := appFilesVolumeName
+			secretName := appFilesSecretName(resourceName)
+			if chunk > 0 {
+				volumeName = fmt.Sprintf("%s-%d", appFilesVolumeName, chunk)
+				secretName = fmt.Sprintf("%s-%d", secretName, chunk)
+			}
+			items := make([]map[string]any, 0, len(chunkFiles))
+			for _, item := range chunkFiles {
+				items = append(items, item)
+			}
+			volumes = append(volumes, map[string]any{"name": volumeName, "secret": map[string]any{"secretName": secretName, "items": items}})
 		}
-		volumes = append(volumes, map[string]any{
-			"name": appFilesVolumeName,
-			"secret": map[string]any{
-				"secretName": appFilesSecretName(resourceName),
-				"items":      items,
-			},
-		})
 		volumeMounts = append(volumeMounts, buildAppFileVolumeMounts(app.Spec.Files)...)
 	}
 	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil && len(ssh.AuthorizedKeys) > 0 {
@@ -712,19 +739,48 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 	return object
 }
 
+func appFileSecretChunks(files []model.AppFile) [][]map[string]any {
+	chunks := make([][]map[string]any, 0, 1)
+	chunk := []map[string]any{}
+	encodedBytes := 0
+	for index, file := range files {
+		key := fileKey(index)
+		cost := ((len(file.Content)+2)/3)*4 + len(key) + 64
+		if len(chunk) > 0 && encodedBytes+cost > appFilesSecretMaxBytes {
+			chunks = append(chunks, chunk)
+			chunk = []map[string]any{}
+			encodedBytes = 0
+		}
+		chunk = append(chunk, map[string]any{"key": key, "path": key, "mode": appFileMode(file)})
+		encodedBytes += cost
+	}
+	if len(chunk) > 0 {
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
 func buildAppFileVolumeMounts(files []model.AppFile) []map[string]any {
 	mounts := make([]map[string]any, 0, len(files))
+	chunks := appFileSecretChunks(files)
+	chunkByIndex := make(map[int]int, len(files))
+	index := 0
+	for chunk, items := range chunks {
+		for range items {
+			chunkByIndex[index] = chunk
+			index++
+		}
+	}
 	for index, file := range files {
 		target := strings.TrimSpace(file.Path)
 		if target == "" {
 			continue
 		}
-		mounts = append(mounts, map[string]any{
-			"name":      appFilesVolumeName,
-			"mountPath": target,
-			"subPath":   fileKey(index),
-			"readOnly":  true,
-		})
+		volumeName := appFilesVolumeName
+		if chunk := chunkByIndex[index]; chunk > 0 {
+			volumeName = fmt.Sprintf("%s-%d", appFilesVolumeName, chunk)
+		}
+		mounts = append(mounts, map[string]any{"name": volumeName, "mountPath": target, "subPath": fileKey(index), "readOnly": true})
 	}
 	return mounts
 }

@@ -1437,3 +1437,26 @@ func managedAppLiveGuardClientWithPods(
 		namespace:   namespace,
 	}
 }
+
+func TestManagedAppLiveGuardAllowsStartFromExplicitlyStoppedApp(t *testing.T) {
+	t.Parallel()
+	current := managedAppLiveGuardTestApp(nil)
+	current.Spec.Replicas = 0
+	desired := current
+	desired.Spec.Replicas = 1
+	desired.Spec.Image = "registry.example/live-guard:v2"
+	managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
+	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseError}
+	live, found := (&Service{Renderer: runtime.Renderer{}}).expectedManagedAppDeployment(runtime.Renderer{}.PrepareApp(current), runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected rendered deployment")
+	}
+	client := managedAppLiveGuardClient(t, managed, live, false, false, nil)
+	got, err := (&Service{Renderer: runtime.Renderer{}}).prepareManagedAppRolloutFromLiveState(context.Background(), client, managed.Metadata.Namespace, managed, current, desired, model.OperationTypeDeploy, runtime.SchedulingConstraints{})
+	if err != nil {
+		t.Fatalf("explicitly stopped app should allow recreate start: %v", err)
+	}
+	if got.Spec.Replicas != 1 || got.Spec.Image != desired.Spec.Image {
+		t.Fatalf("unexpected desired app: %#v", got.Spec)
+	}
+}
