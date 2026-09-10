@@ -454,22 +454,27 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		return desired, nil
 	}
 
-	// An explicitly stopped app may leave a stale failed Deployment object.
-	// Its next start is a deliberate Recreate transition, so it must not be
-	// rejected by the online replacement readiness guard.
-	if current.Spec.Replicas <= 0 && desired.Spec.Replicas > 0 {
-		return desired, nil
-	}
-
 	liveReplicas := 1
 	if deployment.Spec.Replicas != nil {
 		liveReplicas = *deployment.Spec.Replicas
 	}
-	// A Deployment explicitly scaled to zero is stopped state. Starting it
-	// must use the durable-storage Recreate path even if the old failed Pod
-	// object still exists.
-	if liveReplicas <= 0 && desired.Spec.Replicas > 0 {
-		return desired, nil
+	// A fully observed stop can retain historical serving timestamps. Only
+	// live proof of no remaining Pods or endpoints makes a subsequent start
+	// independent of the online replacement guard.
+	if liveReplicas == 0 && desired.Spec.Replicas > 0 &&
+		deployment.Metadata.Generation > 0 && deployment.Status.ObservedGeneration >= deployment.Metadata.Generation &&
+		deployment.Status.Replicas == 0 && deployment.Status.ReadyReplicas == 0 && deployment.Status.AvailableReplicas == 0 {
+		pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(current))
+		if err != nil {
+			return model.App{}, fmt.Errorf("verify stopped workload pods: %w", err)
+		}
+		readyEndpoint, err := liveManagedAppHasReadyEndpoint(ctx, client, namespace, current)
+		if err != nil {
+			return model.App{}, err
+		}
+		if len(pods) == 0 && !readyEndpoint {
+			return desired, nil
+		}
 	}
 	liveWorkload := liveReplicas > 0 || deployment.Status.Replicas > 0 || deployment.Status.ReadyReplicas > 0 || statusServing
 	if !liveWorkload {

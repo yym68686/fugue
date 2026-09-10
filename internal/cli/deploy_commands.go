@@ -475,6 +475,12 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		}
 	}
 
+	// Resumable upload sessions require the resolved app's tenant even when
+	// the caller is a platform administrator selecting an existing app.
+	if resolvedAppID != "" {
+		tenantID = targetApp.TenantID
+	}
+
 	archiveBaseName := strings.TrimSpace(opts.Name)
 	if archiveBaseName == "" && strings.TrimSpace(targetApp.Name) != "" {
 		archiveBaseName = targetApp.Name
