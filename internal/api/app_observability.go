@@ -460,7 +460,11 @@ func (s *Server) handleListAppObservabilityRequests(w http.ResponseWriter, r *ht
 		}
 		source.Status = "available"
 		source.Available = true
-		source.Reason = "request analytics query backend returned data"
+		if len(requests) == 0 {
+			source.Reason = "request analytics query backend is healthy; no request samples matched the window"
+		} else {
+			source.Reason = "request analytics query backend returned data"
+		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"source":   source,
 			"window":   window,
