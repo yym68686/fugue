@@ -448,11 +448,12 @@ WHERE 1=1
 		return fmt.Errorf("list edge performance samples: %w", err)
 	}
 	defer rows.Close()
+	scanner := newEdgePerformanceSampleScanner()
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		sample, err := scanEdgePerformanceSample(rows)
+		sample, err := scanner.scan(rows)
 		if err != nil {
 			return err
 		}
@@ -466,165 +467,178 @@ WHERE 1=1
 	return nil
 }
 
-func scanEdgePerformanceSample(scanner sqlScanner) (model.EdgePerformanceSample, error) {
-	var sample model.EdgePerformanceSample
-	var tlsHandshake, ttfb, upstream, total sql.NullInt64
-	var bodyReadBlock, fileWrite, uploadEffective, minWindow, maxReadGap sql.NullInt64
-	var requestBodyBytes, requestBodyReadBytes, responseWrite, responseBytes, responseEgress sql.NullInt64
-	var originDNS, originConnect, originEndpointConnect, originWrite, originWait, originTTFB, originTotal sql.NullInt64
-	var memoryAlloc sql.NullInt64
-	var clientTCPRTT, clientTCPMinRTT, clientTCPRTTVar, clientTCPRetransRate, clientTCPBytesRetransRate, clientTCPRTORate sql.NullFloat64
-	var clientTCPTotalRetrans, clientTCPBytesRetrans, clientTCPTotalRTO, clientTCPDeliveryBPS sql.NullInt64
-	var sampleCount, cacheHitCount, cacheObservationCount, errorCount sql.NullInt64
-	var uploadRequestCount, bodyBufferCount, bodyIncompleteCount, bodyReadErrorCount sql.NullInt64
-	var streamingRequestCount, webSocketRequestCount, sseRequestCount, clientCancelCount sql.NullInt64
-	var activeRequests, activeBodyBuffers, goroutineCount sql.NullInt64
-	if err := scanner.Scan(
-		&sample.ID,
-		&sample.EdgeID,
-		&sample.EdgeGroupID,
-		&sample.Hostname,
-		&sample.ClientCountry,
-		&sample.ClientRegion,
-		&sample.ClientASN,
-		&sample.RuntimeRegion,
-		&sample.PathPrefix,
-		&sample.Method,
-		&sample.TrafficClass,
-		&sample.RouteGeneration,
-		&sample.CacheStatus,
-		&sample.DNSPolicy,
-		&tlsHandshake,
-		&ttfb,
-		&upstream,
-		&total,
-		&sample.StatusCode,
-		&sampleCount,
-		&cacheHitCount,
-		&cacheObservationCount,
-		&errorCount,
-		&uploadRequestCount,
-		&bodyBufferCount,
-		&bodyReadBlock,
-		&fileWrite,
-		&uploadEffective,
-		&minWindow,
-		&maxReadGap,
-		&requestBodyBytes,
-		&requestBodyReadBytes,
-		&bodyIncompleteCount,
-		&bodyReadErrorCount,
-		&responseWrite,
-		&responseBytes,
-		&responseEgress,
-		&originDNS,
-		&originConnect,
-		&originEndpointConnect,
-		&originWrite,
-		&originWait,
-		&originTTFB,
-		&originTotal,
-		&streamingRequestCount,
-		&webSocketRequestCount,
-		&sseRequestCount,
-		&clientCancelCount,
-		&activeRequests,
-		&activeBodyBuffers,
-		&goroutineCount,
-		&memoryAlloc,
-		&clientTCPRTT,
-		&clientTCPMinRTT,
-		&clientTCPRTTVar,
-		&clientTCPTotalRetrans,
-		&clientTCPRetransRate,
-		&clientTCPBytesRetrans,
-		&clientTCPBytesRetransRate,
-		&clientTCPTotalRTO,
-		&clientTCPRTORate,
-		&clientTCPDeliveryBPS,
-		&sample.OriginFailureClass,
-		&sample.SampledAt,
-	); err != nil {
+// A cursor owns one set of Scan destinations. Each result is a value copy,
+// so callbacks and List callers can safely retain previously returned rows.
+type edgePerformanceSampleScanner struct {
+	sample                                                                                                            model.EdgePerformanceSample
+	tlsHandshake, ttfb, upstream, total                                                                               sql.NullInt64
+	bodyReadBlock, fileWrite, uploadEffective, minWindow, maxReadGap                                                  sql.NullInt64
+	requestBodyBytes, requestBodyReadBytes, responseWrite, responseBytes, responseEgress                              sql.NullInt64
+	originDNS, originConnect, originEndpointConnect, originWrite, originWait, originTTFB, originTotal                 sql.NullInt64
+	memoryAlloc                                                                                                       sql.NullInt64
+	clientTCPRTT, clientTCPMinRTT, clientTCPRTTVar, clientTCPRetransRate, clientTCPBytesRetransRate, clientTCPRTORate sql.NullFloat64
+	clientTCPTotalRetrans, clientTCPBytesRetrans, clientTCPTotalRTO, clientTCPDeliveryBPS                             sql.NullInt64
+	sampleCount, cacheHitCount, cacheObservationCount, errorCount                                                     sql.NullInt64
+	uploadRequestCount, bodyBufferCount, bodyIncompleteCount, bodyReadErrorCount                                      sql.NullInt64
+	streamingRequestCount, webSocketRequestCount, sseRequestCount, clientCancelCount                                  sql.NullInt64
+	activeRequests, activeBodyBuffers, goroutineCount                                                                 sql.NullInt64
+	targets                                                                                                           []any
+}
+
+func newEdgePerformanceSampleScanner() *edgePerformanceSampleScanner {
+	s := &edgePerformanceSampleScanner{}
+	s.targets = []any{
+		&s.sample.ID,
+		&s.sample.EdgeID,
+		&s.sample.EdgeGroupID,
+		&s.sample.Hostname,
+		&s.sample.ClientCountry,
+		&s.sample.ClientRegion,
+		&s.sample.ClientASN,
+		&s.sample.RuntimeRegion,
+		&s.sample.PathPrefix,
+		&s.sample.Method,
+		&s.sample.TrafficClass,
+		&s.sample.RouteGeneration,
+		&s.sample.CacheStatus,
+		&s.sample.DNSPolicy,
+		&s.tlsHandshake,
+		&s.ttfb,
+		&s.upstream,
+		&s.total,
+		&s.sample.StatusCode,
+		&s.sampleCount,
+		&s.cacheHitCount,
+		&s.cacheObservationCount,
+		&s.errorCount,
+		&s.uploadRequestCount,
+		&s.bodyBufferCount,
+		&s.bodyReadBlock,
+		&s.fileWrite,
+		&s.uploadEffective,
+		&s.minWindow,
+		&s.maxReadGap,
+		&s.requestBodyBytes,
+		&s.requestBodyReadBytes,
+		&s.bodyIncompleteCount,
+		&s.bodyReadErrorCount,
+		&s.responseWrite,
+		&s.responseBytes,
+		&s.responseEgress,
+		&s.originDNS,
+		&s.originConnect,
+		&s.originEndpointConnect,
+		&s.originWrite,
+		&s.originWait,
+		&s.originTTFB,
+		&s.originTotal,
+		&s.streamingRequestCount,
+		&s.webSocketRequestCount,
+		&s.sseRequestCount,
+		&s.clientCancelCount,
+		&s.activeRequests,
+		&s.activeBodyBuffers,
+		&s.goroutineCount,
+		&s.memoryAlloc,
+		&s.clientTCPRTT,
+		&s.clientTCPMinRTT,
+		&s.clientTCPRTTVar,
+		&s.clientTCPTotalRetrans,
+		&s.clientTCPRetransRate,
+		&s.clientTCPBytesRetrans,
+		&s.clientTCPBytesRetransRate,
+		&s.clientTCPTotalRTO,
+		&s.clientTCPRTORate,
+		&s.clientTCPDeliveryBPS,
+		&s.sample.OriginFailureClass,
+		&s.sample.SampledAt,
+	}
+	return s
+}
+func (s *edgePerformanceSampleScanner) scan(row sqlScanner) (model.EdgePerformanceSample, error) {
+	s.sample = model.EdgePerformanceSample{}
+
+	if err := row.Scan(s.targets...); err != nil {
 		return model.EdgePerformanceSample{}, fmt.Errorf("scan edge performance sample: %w", err)
 	}
-	sample.TLSHandshakeMS = edgePerformanceInt64FromNull(tlsHandshake)
-	sample.TTFBMS = edgePerformanceInt64FromNull(ttfb)
-	sample.UpstreamMS = edgePerformanceInt64FromNull(upstream)
-	sample.TotalMS = edgePerformanceInt64FromNull(total)
-	if sampleCount.Valid {
-		sample.SampleCount = int(sampleCount.Int64)
+	s.sample.TLSHandshakeMS = edgePerformanceInt64FromNull(s.tlsHandshake)
+	s.sample.TTFBMS = edgePerformanceInt64FromNull(s.ttfb)
+	s.sample.UpstreamMS = edgePerformanceInt64FromNull(s.upstream)
+	s.sample.TotalMS = edgePerformanceInt64FromNull(s.total)
+	if s.sampleCount.Valid {
+		s.sample.SampleCount = int(s.sampleCount.Int64)
 	}
-	if cacheHitCount.Valid {
-		sample.CacheHitCount = int(cacheHitCount.Int64)
+	if s.cacheHitCount.Valid {
+		s.sample.CacheHitCount = int(s.cacheHitCount.Int64)
 	}
-	if cacheObservationCount.Valid {
-		sample.CacheObservationCount = int(cacheObservationCount.Int64)
+	if s.cacheObservationCount.Valid {
+		s.sample.CacheObservationCount = int(s.cacheObservationCount.Int64)
 	}
-	if errorCount.Valid {
-		sample.ErrorCount = int(errorCount.Int64)
+	if s.errorCount.Valid {
+		s.sample.ErrorCount = int(s.errorCount.Int64)
 	}
-	sample.BodyReadBlockMS = edgePerformanceInt64FromNull(bodyReadBlock)
-	sample.FileWriteMS = edgePerformanceInt64FromNull(fileWrite)
-	sample.UploadEffectiveBPS = edgePerformanceInt64FromNull(uploadEffective)
-	sample.MinWindowBPS = edgePerformanceInt64FromNull(minWindow)
-	sample.MaxReadGapMS = edgePerformanceInt64FromNull(maxReadGap)
-	sample.RequestBodyBytes = edgePerformanceInt64FromNull(requestBodyBytes)
-	sample.RequestBodyReadBytes = edgePerformanceInt64FromNull(requestBodyReadBytes)
-	sample.ResponseWriteMS = edgePerformanceInt64FromNull(responseWrite)
-	sample.ResponseBytes = edgePerformanceInt64FromNull(responseBytes)
-	sample.ResponseEgressBPS = edgePerformanceInt64FromNull(responseEgress)
-	sample.OriginDNSMS = edgePerformanceInt64FromNull(originDNS)
-	sample.OriginConnectMS = edgePerformanceInt64FromNull(originConnect)
-	sample.OriginEndpointConnectMS = edgePerformanceInt64FromNull(originEndpointConnect)
-	sample.OriginRequestWriteMS = edgePerformanceInt64FromNull(originWrite)
-	sample.OriginResponseWaitMS = edgePerformanceInt64FromNull(originWait)
-	sample.OriginTTFBMS = edgePerformanceInt64FromNull(originTTFB)
-	sample.OriginTotalMS = edgePerformanceInt64FromNull(originTotal)
-	sample.MemoryAllocBytes = edgePerformanceInt64FromNull(memoryAlloc)
-	sample.ClientTCPRTTMS = edgePerformanceFloat64FromNull(clientTCPRTT)
-	sample.ClientTCPMinRTTMS = edgePerformanceFloat64FromNull(clientTCPMinRTT)
-	sample.ClientTCPRTTVarMS = edgePerformanceFloat64FromNull(clientTCPRTTVar)
-	sample.ClientTCPTotalRetrans = edgePerformanceInt64FromNull(clientTCPTotalRetrans)
-	sample.ClientTCPRetransRate = edgePerformanceFloat64FromNull(clientTCPRetransRate)
-	sample.ClientTCPBytesRetrans = edgePerformanceInt64FromNull(clientTCPBytesRetrans)
-	sample.ClientTCPBytesRetransRate = edgePerformanceFloat64FromNull(clientTCPBytesRetransRate)
-	sample.ClientTCPTotalRTO = edgePerformanceInt64FromNull(clientTCPTotalRTO)
-	sample.ClientTCPRTORate = edgePerformanceFloat64FromNull(clientTCPRTORate)
-	sample.ClientTCPDeliveryBPS = edgePerformanceInt64FromNull(clientTCPDeliveryBPS)
-	if uploadRequestCount.Valid {
-		sample.UploadRequestCount = int(uploadRequestCount.Int64)
+	s.sample.BodyReadBlockMS = edgePerformanceInt64FromNull(s.bodyReadBlock)
+	s.sample.FileWriteMS = edgePerformanceInt64FromNull(s.fileWrite)
+	s.sample.UploadEffectiveBPS = edgePerformanceInt64FromNull(s.uploadEffective)
+	s.sample.MinWindowBPS = edgePerformanceInt64FromNull(s.minWindow)
+	s.sample.MaxReadGapMS = edgePerformanceInt64FromNull(s.maxReadGap)
+	s.sample.RequestBodyBytes = edgePerformanceInt64FromNull(s.requestBodyBytes)
+	s.sample.RequestBodyReadBytes = edgePerformanceInt64FromNull(s.requestBodyReadBytes)
+	s.sample.ResponseWriteMS = edgePerformanceInt64FromNull(s.responseWrite)
+	s.sample.ResponseBytes = edgePerformanceInt64FromNull(s.responseBytes)
+	s.sample.ResponseEgressBPS = edgePerformanceInt64FromNull(s.responseEgress)
+	s.sample.OriginDNSMS = edgePerformanceInt64FromNull(s.originDNS)
+	s.sample.OriginConnectMS = edgePerformanceInt64FromNull(s.originConnect)
+	s.sample.OriginEndpointConnectMS = edgePerformanceInt64FromNull(s.originEndpointConnect)
+	s.sample.OriginRequestWriteMS = edgePerformanceInt64FromNull(s.originWrite)
+	s.sample.OriginResponseWaitMS = edgePerformanceInt64FromNull(s.originWait)
+	s.sample.OriginTTFBMS = edgePerformanceInt64FromNull(s.originTTFB)
+	s.sample.OriginTotalMS = edgePerformanceInt64FromNull(s.originTotal)
+	s.sample.MemoryAllocBytes = edgePerformanceInt64FromNull(s.memoryAlloc)
+	s.sample.ClientTCPRTTMS = edgePerformanceFloat64FromNull(s.clientTCPRTT)
+	s.sample.ClientTCPMinRTTMS = edgePerformanceFloat64FromNull(s.clientTCPMinRTT)
+	s.sample.ClientTCPRTTVarMS = edgePerformanceFloat64FromNull(s.clientTCPRTTVar)
+	s.sample.ClientTCPTotalRetrans = edgePerformanceInt64FromNull(s.clientTCPTotalRetrans)
+	s.sample.ClientTCPRetransRate = edgePerformanceFloat64FromNull(s.clientTCPRetransRate)
+	s.sample.ClientTCPBytesRetrans = edgePerformanceInt64FromNull(s.clientTCPBytesRetrans)
+	s.sample.ClientTCPBytesRetransRate = edgePerformanceFloat64FromNull(s.clientTCPBytesRetransRate)
+	s.sample.ClientTCPTotalRTO = edgePerformanceInt64FromNull(s.clientTCPTotalRTO)
+	s.sample.ClientTCPRTORate = edgePerformanceFloat64FromNull(s.clientTCPRTORate)
+	s.sample.ClientTCPDeliveryBPS = edgePerformanceInt64FromNull(s.clientTCPDeliveryBPS)
+	if s.uploadRequestCount.Valid {
+		s.sample.UploadRequestCount = int(s.uploadRequestCount.Int64)
 	}
-	if bodyBufferCount.Valid {
-		sample.BodyBufferCount = int(bodyBufferCount.Int64)
+	if s.bodyBufferCount.Valid {
+		s.sample.BodyBufferCount = int(s.bodyBufferCount.Int64)
 	}
-	if bodyIncompleteCount.Valid {
-		sample.BodyIncompleteCount = int(bodyIncompleteCount.Int64)
+	if s.bodyIncompleteCount.Valid {
+		s.sample.BodyIncompleteCount = int(s.bodyIncompleteCount.Int64)
 	}
-	if bodyReadErrorCount.Valid {
-		sample.BodyReadErrorCount = int(bodyReadErrorCount.Int64)
+	if s.bodyReadErrorCount.Valid {
+		s.sample.BodyReadErrorCount = int(s.bodyReadErrorCount.Int64)
 	}
-	if streamingRequestCount.Valid {
-		sample.StreamingRequestCount = int(streamingRequestCount.Int64)
+	if s.streamingRequestCount.Valid {
+		s.sample.StreamingRequestCount = int(s.streamingRequestCount.Int64)
 	}
-	if webSocketRequestCount.Valid {
-		sample.WebSocketRequestCount = int(webSocketRequestCount.Int64)
+	if s.webSocketRequestCount.Valid {
+		s.sample.WebSocketRequestCount = int(s.webSocketRequestCount.Int64)
 	}
-	if sseRequestCount.Valid {
-		sample.SSERequestCount = int(sseRequestCount.Int64)
+	if s.sseRequestCount.Valid {
+		s.sample.SSERequestCount = int(s.sseRequestCount.Int64)
 	}
-	if clientCancelCount.Valid {
-		sample.ClientCancelCount = int(clientCancelCount.Int64)
+	if s.clientCancelCount.Valid {
+		s.sample.ClientCancelCount = int(s.clientCancelCount.Int64)
 	}
-	if activeRequests.Valid {
-		sample.ActiveRequests = int(activeRequests.Int64)
+	if s.activeRequests.Valid {
+		s.sample.ActiveRequests = int(s.activeRequests.Int64)
 	}
-	if activeBodyBuffers.Valid {
-		sample.ActiveBodyBuffers = int(activeBodyBuffers.Int64)
+	if s.activeBodyBuffers.Valid {
+		s.sample.ActiveBodyBuffers = int(s.activeBodyBuffers.Int64)
 	}
-	if goroutineCount.Valid {
-		sample.GoroutineCount = int(goroutineCount.Int64)
+	if s.goroutineCount.Valid {
+		s.sample.GoroutineCount = int(s.goroutineCount.Int64)
 	}
-	return sample, nil
+	return s.sample, nil
 }
 
 const pgUpsertEdgeQualityRollupSQL = `

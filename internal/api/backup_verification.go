@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-const backupVerifyRangeSize int64 = 8 << 20
+const backupVerifyRangeSize int64 = 64 << 20
 
 // Small objects retain the existing single-GET contract. Large objects are
 // verified in bounded reads so a truncated connection does not discard hours
