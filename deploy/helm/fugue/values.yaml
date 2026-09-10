@@ -705,6 +705,9 @@ dns:
     enabled: true
     port: 443
     timeout: 250ms
+    # Empty means TCP connect only. HTTP requires an explicit side-effect-free path.
+    path: ""
+    minInterval: 15s
   nameservers: []
   tokenSecret:
     name: ""

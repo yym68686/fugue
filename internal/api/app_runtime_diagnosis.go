@@ -26,7 +26,9 @@ const (
 	appDiagnosisDrainAgentName     = "fugue-drain-agent"
 )
 
-var appDiagnosisHTTPProbePaths = []string{"/healthz", "/"}
+// Kept empty until an application explicitly declares a side-effect-free
+// diagnostic probe. The diagnosis path must never guess a user route.
+var appDiagnosisHTTPProbePaths []string
 
 type appDiagnosis struct {
 	Category       string                     `json:"category"`
@@ -244,13 +246,10 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		}
 	}
 
+	// Runtime diagnosis is deliberately service-level only. HTTP requests to an
+	// application are side-effectful unless the application explicitly exposes
+	// a safe probe, so diagnostics rely on Pod/Service/EndpointSlice state.
 	httpProbe := appHTTPProbeDiagnosis{}
-	if component == "app" && diagnosis.ReadyPods > 0 {
-		httpProbe = s.diagnoseAppHTTPAvailability(r.Context(), app)
-		for _, evidence := range httpProbe.evidence {
-			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, evidence)
-		}
-	}
 
 	switch {
 	case sameNodeMountEvent != nil:

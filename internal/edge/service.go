@@ -368,6 +368,12 @@ type edgeProxyObservation struct {
 	Upload                  bool
 	PeerFallback            bool
 	InternalWarmup          bool
+	HealthProbe             bool
+	HealthProbeID           string
+	HealthProbeSource       string
+	HealthProbeTargetIP     string
+	HealthProbeUserAgent    string
+	CacheWarmupID           string
 	ClientCanceled          bool
 	CacheStatus             string
 	CachePolicyID           string
@@ -1149,29 +1155,35 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(edgeTraceIDHeader, traceID)
 	}
 	observed := edgeProxyObservation{
-		ReceivedAt:       startedAt.UTC(),
-		Host:             host,
-		Route:            selectedRoute,
-		BundleVersion:    bundleVersion,
-		ReleaseID:        strings.TrimSpace(selectedUpstream.ReleaseID),
-		ReleaseRole:      strings.TrimSpace(selectedUpstream.Role),
-		TrafficWeight:    selectedUpstream.Weight,
-		Method:           r.Method,
-		Path:             safeProxyLogPath(r),
-		TraceID:          traceID,
-		RequestID:        edgeRequestIDFromRequest(r),
-		EdgeRequestID:    edgeRequestID,
-		Protocol:         strings.TrimSpace(r.Proto),
-		ClientIP:         edgeClientIPFromRequest(r),
-		ClientRemoteAddr: edgeClientRemoteAddrFromRequest(r),
-		ClientCountry:    edgeClientCountryFromRequest(r),
-		ClientRegion:     edgeClientRegionFromRequest(r),
-		ClientASN:        edgeClientASNFromRequest(r),
-		FallbackHit:      fallbackHit,
-		WebSocket:        edgeRequestIsWebSocket(r),
-		SSE:              edgeRequestWantsSSE(r),
-		Upload:           edgeRequestHasUpload(r),
-		InternalWarmup:   edgeRequestIsInternalCacheWarmup(r),
+		ReceivedAt:           startedAt.UTC(),
+		Host:                 host,
+		Route:                selectedRoute,
+		BundleVersion:        bundleVersion,
+		ReleaseID:            strings.TrimSpace(selectedUpstream.ReleaseID),
+		ReleaseRole:          strings.TrimSpace(selectedUpstream.Role),
+		TrafficWeight:        selectedUpstream.Weight,
+		Method:               r.Method,
+		Path:                 safeProxyLogPath(r),
+		TraceID:              traceID,
+		RequestID:            edgeRequestIDFromRequest(r),
+		EdgeRequestID:        edgeRequestID,
+		Protocol:             strings.TrimSpace(r.Proto),
+		ClientIP:             edgeClientIPFromRequest(r),
+		ClientRemoteAddr:     edgeClientRemoteAddrFromRequest(r),
+		ClientCountry:        edgeClientCountryFromRequest(r),
+		ClientRegion:         edgeClientRegionFromRequest(r),
+		ClientASN:            edgeClientASNFromRequest(r),
+		FallbackHit:          fallbackHit,
+		WebSocket:            edgeRequestIsWebSocket(r),
+		SSE:                  edgeRequestWantsSSE(r),
+		Upload:               edgeRequestHasUpload(r),
+		InternalWarmup:       edgeRequestIsInternalCacheWarmup(r),
+		HealthProbe:          strings.TrimSpace(r.Header.Get(edgeHealthProbeHeader)) == "1",
+		HealthProbeID:        strings.TrimSpace(r.Header.Get(edgeHealthProbeIDHeader)),
+		HealthProbeSource:    strings.TrimSpace(r.Header.Get(edgeHealthProbeSourceHeader)),
+		HealthProbeTargetIP:  strings.TrimSpace(r.Header.Get(edgeHealthProbeTargetIPHeader)),
+		HealthProbeUserAgent: strings.TrimSpace(r.UserAgent()),
+		CacheWarmupID:        strings.TrimSpace(r.Header.Get(edgeCacheWarmupIDHeader)),
 	}
 	if r.ContentLength > 0 {
 		observed.RequestBytes = r.ContentLength
@@ -1194,6 +1206,9 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 			s.recordProxyObservation(observed)
 		}
 		s.logProxyObservation(observed)
+		if s.Logger != nil && (observed.HealthProbe || observed.InternalWarmup) {
+			s.Logger.Printf("edge_request_audit request_source=%s probe_id=%s cache_warmup_id=%s hostname=%s target_ip=%s source_node=%s path=%s user_agent=%s reached_app=%t status=%d request_count=1", edgeRequestSourceForObservation(observed), logSafeValue(observed.HealthProbeID), logSafeValue(observed.CacheWarmupID), logSafeValue(observed.Host), logSafeValue(observed.HealthProbeTargetIP), logSafeValue(firstNonEmpty(observed.HealthProbeSource, s.Config.EdgeID)), logSafeValue(observed.Path), logSafeValue(observed.HealthProbeUserAgent), observed.HealthProbe && observed.OriginWroteRequest, observed.StatusCode)
+		}
 	}()
 
 	if !ok {
@@ -1457,6 +1472,22 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			req.Out.Header.Del(edgeClientRemoteAddrHeader)
 			req.Out.Header.Del(edgeCacheWarmupHeader)
 			req.Out.Header.Del(edgeCacheWarmupDiscoveryHeader)
+			req.Out.Header.Del(edgeCacheWarmupIDHeader)
+			req.Out.Header.Del(edgeCacheWarmupSourceHeader)
+			if observed != nil && observed.InternalWarmup {
+				req.Out.Header.Set(edgeCacheWarmupHeader, "1")
+				if strings.TrimSpace(req.In.Header.Get(edgeCacheWarmupDiscoveryHeader)) == "1" {
+					req.Out.Header.Set(edgeCacheWarmupDiscoveryHeader, "1")
+				}
+				req.Out.Header.Set(edgeCacheWarmupIDHeader, firstNonEmpty(observed.CacheWarmupID, "unknown"))
+				req.Out.Header.Set(edgeCacheWarmupSourceHeader, strings.TrimSpace(s.Config.EdgeID))
+			}
+			if observed != nil && observed.HealthProbe {
+				req.Out.Header.Set(edgeHealthProbeHeader, "1")
+				req.Out.Header.Set(edgeHealthProbeIDHeader, observed.HealthProbeID)
+				req.Out.Header.Set(edgeHealthProbeSourceHeader, observed.HealthProbeSource)
+				req.Out.Header.Set(edgeHealthProbeTargetIPHeader, observed.HealthProbeTargetIP)
+			}
 			req.Out.Host = target.Host
 			req.Out.Header.Set("X-Forwarded-Host", host)
 			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
@@ -1510,6 +1541,9 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if observed != nil && resp != nil {
+				if observed.HealthProbe {
+					resp.Header.Set(edgeHealthProbeReachedHeader, "1")
+				}
 				if strings.TrimSpace(observed.RequestID) == "" {
 					observed.RequestID = edgeRequestIDFromHeader(resp.Header)
 				}
@@ -2292,6 +2326,13 @@ func edgeRequestSource(internalWarmup bool) string {
 		return "cache_warmup"
 	}
 	return "external"
+}
+
+func edgeRequestSourceForObservation(observed edgeProxyObservation) string {
+	if observed.HealthProbe {
+		return "health_probe"
+	}
+	return edgeRequestSource(observed.InternalWarmup)
 }
 
 func normalizeEdgeClientScopeValue(value string) string {
@@ -4676,7 +4717,7 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		observed.Streaming,
 		observed.Upload,
 		observed.ClientCanceled,
-		edgeRequestSource(observed.InternalWarmup),
+		edgeRequestSourceForObservation(observed),
 	)
 	if !observed.InternalWarmup {
 		s.logProxyObservationFact(observed)

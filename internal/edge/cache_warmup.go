@@ -3,6 +3,7 @@ package edge
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -335,6 +336,9 @@ func (s *Service) edgeWarmupFetch(ctx context.Context, client *http.Client, targ
 		return nil, nil, err
 	}
 	req.Header.Set(edgeCacheWarmupHeader, "1")
+	req.Header.Set(edgeCacheWarmupIDHeader, edgeCacheWarmupRequestID(targetURL))
+	req.Header.Set(edgeCacheWarmupSourceHeader, strings.TrimSpace(s.Config.EdgeID))
+	req.Header.Set("User-Agent", "fugue-cache-warmup/1")
 	if discovery {
 		req.Header.Set(edgeCacheWarmupDiscoveryHeader, "1")
 		req.Header.Set("Accept-Encoding", "identity")
@@ -352,6 +356,14 @@ func (s *Service) edgeWarmupFetch(ctx context.Context, client *http.Client, targ
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, edgeWarmupBodyLimit))
 	return resp, body, readErr
+}
+
+func edgeCacheWarmupRequestID(targetURL *url.URL) string {
+	if targetURL == nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(targetURL.String()))
+	return fmt.Sprintf("cw-%x", sum[:8])
 }
 
 func edgeWarmupContentType(resp *http.Response) string {

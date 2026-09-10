@@ -41,6 +41,17 @@ const edgeHealthProbeTTL = 15 * time.Second
 
 const edgeHealthObservationTTL = 2 * edgeHealthProbeTTL
 
+const edgeHealthProbeBodyLimit = 4096
+
+const (
+	edgeHealthProbeHeader         = "X-Fugue-Health-Probe"
+	edgeHealthProbeIDHeader       = "X-Fugue-Health-Probe-Id"
+	edgeHealthProbeSourceHeader   = "X-Fugue-Health-Probe-Source"
+	edgeHealthProbeTargetIPHeader = "X-Fugue-Health-Probe-Target-IP"
+	edgeHealthProbeReachedHeader  = "X-Fugue-Health-Probe-Reached-App"
+	edgeHealthProbeUserAgent      = "fugue-dns-health-probe/1"
+)
+
 const dnsTemporaryFilterWALInterval = time.Minute
 
 type edgeDNSLiveHealthFunc func(string, string) bool
@@ -58,11 +69,13 @@ type Service struct {
 	etag        string
 	metrics     telemetry
 
-	edgeHealthMu sync.Mutex
-	edgeHealth   map[string]edgeHealthObservation
-	edgeProbe    edgeHealthProbeFunc
-	peerHealthMu sync.Mutex
-	peerHealth   map[string]model.PeerHealthDecision
+	edgeHealthMu   sync.Mutex
+	edgeHealth     map[string]edgeHealthObservation
+	edgeProbe      edgeHealthProbeFunc
+	edgeProbeLast  map[string]time.Time
+	edgeProbeCount map[string]uint64
+	peerHealthMu   sync.Mutex
+	peerHealth     map[string]model.PeerHealthDecision
 
 	walMu         sync.Mutex
 	walFilterLast map[string]time.Time
@@ -133,8 +146,18 @@ type edgeHealthProbeTarget struct {
 }
 
 type edgeHealthObservation struct {
-	Healthy   bool
-	CheckedAt time.Time
+	Healthy      bool
+	CheckedAt    time.Time
+	ProbeID      string
+	Hostname     string
+	TargetIP     string
+	SourceNode   string
+	Path         string
+	UserAgent    string
+	HTTP         bool
+	ReachedApp   bool
+	StatusCode   int
+	RequestCount uint64
 }
 
 type edgeDNSFilteredCandidate struct {
@@ -227,13 +250,15 @@ func NewService(cfg config.DNSConfig, logger *log.Logger) *Service {
 		HTTPClient: &http.Client{
 			Timeout: timeout,
 		},
-		Logger:        logger,
-		edgeHealth:    map[string]edgeHealthObservation{},
-		peerHealth:    map[string]model.PeerHealthDecision{},
-		walFilterLast: map[string]time.Time{},
-		overrides:     map[string]model.TrafficOverride{},
-		prepared:      map[string]model.TrafficOverride{},
-		override:      trafficOverrideSettingsFromEnv(),
+		Logger:         logger,
+		edgeHealth:     map[string]edgeHealthObservation{},
+		peerHealth:     map[string]model.PeerHealthDecision{},
+		walFilterLast:  map[string]time.Time{},
+		edgeProbeLast:  map[string]time.Time{},
+		edgeProbeCount: map[string]uint64{},
+		overrides:      map[string]model.TrafficOverride{},
+		prepared:       map[string]model.TrafficOverride{},
+		override:       trafficOverrideSettingsFromEnv(),
 		snapshot: Status{
 			Status:      "unhealthy",
 			DNSNodeID:   strings.TrimSpace(cfg.DNSNodeID),
@@ -1248,6 +1273,12 @@ func (s *Service) startEdgeHealthProbeLoop(ctx context.Context) {
 	if !s.Config.EdgeHealthProbeEnabled {
 		return
 	}
+	if path := strings.TrimSpace(s.Config.EdgeHealthProbePath); path != "" && (path == "/" || !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#")) {
+		if s.Logger != nil {
+			s.Logger.Printf("dns edge health probe disabled: invalid explicit path %q; configure a side-effect-free path such as /__fugue_health", path)
+		}
+		return
+	}
 	go func() {
 		s.refreshEdgeHealth(ctx)
 		ticker := time.NewTicker(edgeHealthProbeTTL)
@@ -1290,15 +1321,39 @@ func (s *Service) refreshEdgeHealth(ctx context.Context) {
 			}
 			probeCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
+			key := edgeHealthKey(target.Hostname, target.IP)
+			minInterval := s.Config.EdgeHealthProbeMinInterval
+			if minInterval <= 0 {
+				minInterval = edgeHealthProbeTTL
+			}
+			s.edgeHealthMu.Lock()
+			last := s.edgeProbeLast[key]
+			if !last.IsZero() && now.Sub(last) < minInterval {
+				s.edgeHealthMu.Unlock()
+				return
+			}
+			s.edgeProbeLast[key] = now
+			s.edgeProbeCount[key]++
+			count := s.edgeProbeCount[key]
+			s.edgeHealthMu.Unlock()
 			healthy := false
+			observation := edgeHealthObservation{Hostname: target.Hostname, TargetIP: target.IP, SourceNode: firstNonEmpty(s.Config.PhysicalNodeID, s.Config.DNSNodeID), Path: strings.TrimSpace(s.Config.EdgeHealthProbePath), UserAgent: edgeHealthProbeUserAgent, HTTP: strings.TrimSpace(s.Config.EdgeHealthProbePath) != "", RequestCount: count, CheckedAt: now}
 			if s.edgeProbe != nil {
 				healthy = s.edgeProbe(probeCtx, target.Hostname, target.IP)
 			} else {
-				healthy = s.probeEdgeTarget(probeCtx, target.Hostname, target.IP)
+				var detailed edgeHealthObservation
+				detailed = s.probeEdgeTargetObservation(probeCtx, target.Hostname, target.IP)
+				healthy = detailed.Healthy
+				observation = detailed
+				observation.RequestCount = count
 			}
+			observation.Healthy, observation.CheckedAt = healthy, now
 			observationsMu.Lock()
-			observations[edgeHealthKey(target.Hostname, target.IP)] = edgeHealthObservation{Healthy: healthy, CheckedAt: now}
+			observations[key] = observation
 			observationsMu.Unlock()
+			if s.Logger != nil {
+				s.Logger.Printf("dns_edge_health_probe probe_id=%s hostname=%s target_ip=%s source_node=%s path=%s user_agent=%s http=%t reached_app=%t status=%d healthy=%t request_count=%d", observation.ProbeID, observation.Hostname, observation.TargetIP, observation.SourceNode, observation.Path, observation.UserAgent, observation.HTTP, observation.ReachedApp, observation.StatusCode, observation.Healthy, observation.RequestCount)
+			}
 		}()
 	}
 	probes.Wait()
@@ -2117,16 +2172,32 @@ func edgeHealthKey(hostname, ip string) string {
 }
 
 func (s *Service) probeEdgeTarget(ctx context.Context, hostname, ip string) bool {
+	return s.probeEdgeTargetObservation(ctx, hostname, ip).Healthy
+}
+
+func (s *Service) probeEdgeTargetObservation(ctx context.Context, hostname, ip string) edgeHealthObservation {
+	observation := edgeHealthObservation{Hostname: edgeHealthProbeHostname(hostname), TargetIP: strings.TrimSpace(ip), SourceNode: firstNonEmpty(s.Config.PhysicalNodeID, s.Config.DNSNodeID), Path: strings.TrimSpace(s.Config.EdgeHealthProbePath), UserAgent: edgeHealthProbeUserAgent, HTTP: strings.TrimSpace(s.Config.EdgeHealthProbePath) != "", ProbeID: healthProbeID(hostname, ip)}
 	hostname = edgeHealthProbeHostname(hostname)
 	parsedIP := net.ParseIP(strings.TrimSpace(ip))
 	if hostname == "" || parsedIP == nil {
-		return false
+		return observation
 	}
 	port := s.Config.EdgeHealthProbePort
 	if port <= 0 {
 		port = 443
 	}
 	dialer := net.Dialer{}
+	if observation.Path == "" {
+		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(parsedIP.String(), strconv.Itoa(port)))
+		if err == nil {
+			_ = conn.Close()
+			observation.Healthy = true
+		}
+		return observation
+	}
+	if observation.Path == "/" || !strings.HasPrefix(observation.Path, "/") || strings.ContainsAny(observation.Path, "?#") {
+		return observation
+	}
 	transport := &http.Transport{
 		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(parsedIP.String(), strconv.Itoa(port)))
@@ -2140,20 +2211,33 @@ func (s *Service) probeEdgeTarget(ctx context.Context, hostname, ip string) bool
 			return http.ErrUseLastResponse
 		},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, (&url.URL{Scheme: "https", Host: hostname, Path: "/"}).String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, (&url.URL{Scheme: "https", Host: hostname, Path: observation.Path}).String(), nil)
 	if err != nil {
-		return false
+		return observation
 	}
+	req.Header.Set(edgeHealthProbeHeader, "1")
+	req.Header.Set(edgeHealthProbeIDHeader, observation.ProbeID)
+	req.Header.Set(edgeHealthProbeSourceHeader, observation.SourceNode)
+	req.Header.Set(edgeHealthProbeTargetIPHeader, parsedIP.String())
+	req.Header.Set("User-Agent", observation.UserAgent)
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return observation
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	observation.StatusCode = resp.StatusCode
+	observation.ReachedApp = resp.Header.Get(edgeHealthProbeReachedHeader) == "1"
+	body, err := io.ReadAll(io.LimitReader(resp.Body, edgeHealthProbeBodyLimit))
 	if err != nil {
-		return false
+		return observation
 	}
-	return !bytes.Contains(bytes.ToLower(body), []byte("edge route not found"))
+	observation.Healthy = !bytes.Contains(bytes.ToLower(body), []byte("edge route not found")) && resp.StatusCode < 500
+	return observation
+}
+
+func healthProbeID(hostname, ip string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", edgeHealthProbeHostname(hostname), strings.TrimSpace(ip), time.Now().UnixNano())))
+	return fmt.Sprintf("hp-%x", sum[:8])
 }
 
 func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc) ([]miekgdns.RR, bool) {
