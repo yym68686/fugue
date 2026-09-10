@@ -454,10 +454,9 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		return desired, nil
 	}
 
-	// A committed zero-replica app is explicitly stopped. A stale Deployment
-	// from a failed rollout must not force the next start through the online
-	// replacement readiness guard; the rendered durable-storage workload uses
-	// Recreate semantics for this transition.
+	// An explicitly stopped app may leave a stale failed Deployment object.
+	// Its next start is a deliberate Recreate transition, so it must not be
+	// rejected by the online replacement readiness guard.
 	if current.Spec.Replicas <= 0 && desired.Spec.Replicas > 0 {
 		return desired, nil
 	}
@@ -465,6 +464,12 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	liveReplicas := 1
 	if deployment.Spec.Replicas != nil {
 		liveReplicas = *deployment.Spec.Replicas
+	}
+	// A Deployment explicitly scaled to zero is stopped state. Starting it
+	// must use the durable-storage Recreate path even if the old failed Pod
+	// object still exists.
+	if liveReplicas <= 0 && desired.Spec.Replicas > 0 {
+		return desired, nil
 	}
 	liveWorkload := liveReplicas > 0 || deployment.Status.Replicas > 0 || deployment.Status.ReadyReplicas > 0 || statusServing
 	if !liveWorkload {
