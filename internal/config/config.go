@@ -302,7 +302,7 @@ type DNSConfig struct {
 	EdgeHealthProbeEnabled     bool
 	EdgeHealthProbePort        int
 	EdgeHealthProbeTimeout     time.Duration
-	EdgeHealthProbePath        string
+	EdgeHealthProbePathsJSON   string
 	EdgeHealthProbeMinInterval time.Duration
 	ListenAddr                 string
 	UDPAddr                    string
@@ -706,7 +706,7 @@ func DNSFromEnv() DNSConfig {
 		EdgeHealthProbeEnabled:     getenvBool("FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", true),
 		EdgeHealthProbePort:        getenvInt("FUGUE_DNS_EDGE_HEALTH_PROBE_PORT", 443),
 		EdgeHealthProbeTimeout:     getenvDuration("FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT", 250*time.Millisecond),
-		EdgeHealthProbePath:        strings.TrimSpace(os.Getenv("FUGUE_DNS_EDGE_HEALTH_PROBE_PATH")),
+		EdgeHealthProbePathsJSON:   strings.TrimSpace(os.Getenv("FUGUE_DNS_EDGE_HEALTH_PROBE_PATHS_JSON")),
 		EdgeHealthProbeMinInterval: getenvDuration("FUGUE_DNS_EDGE_HEALTH_PROBE_MIN_INTERVAL", 15*time.Second),
 		ListenAddr:                 getenv("FUGUE_DNS_LISTEN_ADDR", "127.0.0.1:7834"),
 		UDPAddr:                    getenv("FUGUE_DNS_UDP_ADDR", "127.0.0.1:5353"),

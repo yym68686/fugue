@@ -42,13 +42,14 @@ func TestEdgeWorkloadIdentityCannotBeInjectedThroughEnvironment(t *testing.T) {
 
 func TestDNSFromEnvDefaultsEdgeHealthProbeEnabled(t *testing.T) {
 	t.Setenv("FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "")
+	t.Setenv("FUGUE_DNS_EDGE_HEALTH_PROBE_PATHS_JSON", "")
 
 	cfg := DNSFromEnv()
 	if !cfg.EdgeHealthProbeEnabled {
 		t.Fatal("expected DNS edge health probe to default enabled")
 	}
-	if cfg.EdgeHealthProbePath != "" {
-		t.Fatalf("expected edge health probes to default to TCP-only mode, got path %q", cfg.EdgeHealthProbePath)
+	if cfg.EdgeHealthProbePathsJSON != "" {
+		t.Fatalf("expected edge health probes to default to TCP-only mode, got path %q", cfg.EdgeHealthProbePathsJSON)
 	}
 }
 

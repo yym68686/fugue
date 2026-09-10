@@ -423,7 +423,8 @@ func TestProbeEdgeTargetDefaultsToTCPWithoutHTTP(t *testing.T) {
 
 func TestProbeEdgeTargetRejectsRootHTTPPath(t *testing.T) {
 	t.Parallel()
-	s := NewService(config.DNSConfig{EdgeHealthProbePath: "/"}, nil)
+	s := NewService(config.DNSConfig{}, nil)
+	s.edgeProbePaths["app.example.test"] = "/"
 	obs := s.probeEdgeTargetObservation(context.Background(), "app.example.test", "127.0.0.1")
 	if obs.Healthy || obs.HTTP != true {
 		t.Fatalf("expected root path to be rejected, got %+v", obs)
