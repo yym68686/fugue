@@ -60,8 +60,8 @@ func validateDatabaseMigrationTopology(ctx context.Context, client *kubeClient, 
 			}
 		}
 	}
-	if ready < requiredInstances {
-		return fmt.Errorf("target Longhorn storage class has only %d ready schedulable nodes, need at least %d for %d database instances", ready, requiredInstances, requiredInstances)
+	if ready < 1 {
+		return fmt.Errorf("target Longhorn storage class has no ready schedulable nodes")
 	}
 	return nil
 }
@@ -122,6 +122,7 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 		if err := validateDatabaseMigrationTopology(ctx, client, namespace, migration.TargetStorageClassName, cluster.Spec.Instances); err != nil {
 			return s.failDatabaseMigration(migration, err.Error())
 		}
+		migration.ResultMessage = "warning: target storage currently has one schedulable Longhorn node; PostgreSQL remains multi-instance but storage host redundancy is reduced"
 		migration.ClusterUID = cluster.Metadata.UID
 		migration.InitialInstances = cluster.Spec.Instances
 		migration.InitialSystemID = cluster.Status.SystemID
