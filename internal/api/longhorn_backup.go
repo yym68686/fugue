@@ -68,7 +68,6 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	if err != nil {
 		return nil, err
 	}
-	_ = pvc
 	longhornNS := firstNonEmptyString(strings.TrimSpace(getenv(longhornBackupNamespaceEnv)), "longhorn-system")
 	targetName := firstNonEmptyString(strings.TrimSpace(getenv(longhornBackupTargetEnv)), "default")
 	volume, err := longhornGet(ctx, client, longhornNS, "volumes", volumeName)
@@ -160,7 +159,7 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 		Metadata: map[string]string{
 			"backup_engine": "longhorn-snapshot", "backup_source": "longhorn-volume", "volume_name": volumeName,
 			"snapshot_name": snapshotName, "longhorn_backup_name": backupName, "longhorn_backup_url": status.URL,
-			"backup_target_name": targetName, "storage_class": longhornStringValue(pvc["spec"].(map[string]any)["storageClassName"]),
+			"backup_target_name": targetName, "storage_class": longhornPVCStorageClass(pvc),
 			"backup_target_url": backupTargetURL,
 			"local_staging":     "false", "database_replica": "false", "pg_dump": "false", "wal_required": "true",
 		}, CreatedAt: time.Now().UTC(),
@@ -209,12 +208,21 @@ func longhornSizeBytes(raw string) int64 {
 }
 
 func longhornPostgresVolume(ctx context.Context, client *kubeLogsClient, namespace, serviceName string) (map[string]any, string, error) {
-	query := url.Values{"labelSelector": []string{"cnpg.io/cluster=" + serviceName}}
+	// A CNPG cluster can have several PVCs while a switchover or storage
+	// migration is in progress. Backing up an arbitrary PVC could capture a
+	// stale replica, so require the single PVC explicitly marked primary.
+	query := url.Values{"labelSelector": []string{"cnpg.io/cluster=" + serviceName + ",cnpg.io/instanceRole=primary"}}
 	var list map[string]any
 	if err := client.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/persistentvolumeclaims?"+query.Encode(), &list); err != nil {
 		return nil, "", fmt.Errorf("list postgres PVCs: %w", err)
 	}
 	items, _ := list["items"].([]any)
+	if len(items) == 0 {
+		return nil, "", fmt.Errorf("%w: no primary CNPG PVC for cluster %s", errLonghornBackupUnavailable, serviceName)
+	}
+	if len(items) > 1 {
+		return nil, "", fmt.Errorf("%w: found %d primary CNPG PVCs for cluster %s", errLonghornBackupUnavailable, len(items), serviceName)
+	}
 	for _, raw := range items {
 		pvc, ok := raw.(map[string]any)
 		if !ok {
@@ -237,7 +245,12 @@ func longhornPostgresVolume(ctx context.Context, client *kubeLogsClient, namespa
 		}
 		return pvc, handle, nil
 	}
-	return nil, "", fmt.Errorf("%w: no CNPG PVC for cluster %s", errLonghornBackupUnavailable, serviceName)
+	return nil, "", fmt.Errorf("%w: primary CNPG PVC for cluster %s is not Longhorn-backed", errLonghornBackupUnavailable, serviceName)
+}
+
+func longhornPVCStorageClass(pvc map[string]any) string {
+	spec, _ := pvc["spec"].(map[string]any)
+	return longhornStringValue(spec["storageClassName"])
 }
 
 func longhornGet(ctx context.Context, client *kubeLogsClient, namespace, resource, name string) (map[string]any, error) {
