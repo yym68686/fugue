@@ -173,7 +173,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "fugue.fullname" . }}
+  name: {{ include "fugue.fullname" . }}-control-plane
 subjects:
   - kind: ServiceAccount
     name: {{ include "fugue.controlPlaneServiceAccountName" . }}
