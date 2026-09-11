@@ -139,11 +139,11 @@ func (store *KubeStore) LoadStableLKG(ctx context.Context, key Key, release decl
 	if err != nil {
 		return nil, err
 	}
-	_, artifact, prepared, monitor, forward, lkg, err := decodeStableRecord(recordMap.Data)
+	_, artifact, prepared, monitor, forward, _, err := decodeStableRecord(recordMap.Data)
 	if err != nil {
 		return nil, err
 	}
-	fields := []struct{ name, expected, observed string }{
+	for _, field := range []struct{ name, expected, observed string }{
 		{"component", release.ComponentID, monitor.Component},
 		{"prepared component", release.ComponentID, prepared.Component},
 		{"config SHA", release.ExpectedPreviousConfigSHA, monitor.ConfigSHA},
@@ -153,30 +153,12 @@ func (store *KubeStore) LoadStableLKG(ctx context.Context, key Key, release decl
 		{"image digest", release.ExpectedPreviousImageDigest, artifact.TopDigest},
 		{"image reference", release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest, prepared.Forward.ImageRef},
 		{"forward digest", monitor.ForwardManifestDigest, digest(forward)},
-	}
-	for _, field := range fields {
+	} {
 		if field.expected != field.observed {
-			if stableLKGRecoveryEligible(release, artifact, prepared, monitor, lkg) {
-				return append([]byte(nil), lkg...), nil
-			}
 			return nil, fmt.Errorf("stable Guardian LKG does not match the declared predecessor: %s expected %q, observed %q (record %s)", field.name, field.expected, field.observed, monitor.RecordDigest)
 		}
 	}
 	return append([]byte(nil), forward...), nil
-}
-
-// stableLKGRecoveryEligible permits a reviewed successor to recover from a
-// failed candidate that was incorrectly left in the stable monitor pointer.
-// The candidate must identify itself as the exact superseded atom and its
-// recorded LKG must match every predecessor field before any bytes are used.
-func stableLKGRecoveryEligible(release declarativerelease.PlanRelease, artifact declarativerelease.ArtifactReceipt, prepared declarativerelease.ExecutionPlan, monitor declarativerelease.MonitorRecord, lkg []byte) bool {
-	return release.SupersedesFailedConfigSHA != "" && release.SupersedesFailedConfigSHA == monitor.ConfigSHA &&
-		prepared.Forward.ConfigSHA == monitor.ConfigSHA && prepared.Forward.ManifestSHA == monitor.ConfigSHA &&
-		prepared.Forward.OCIRevision == monitor.ConfigSHA && prepared.Forward.ManifestDigest == monitor.ForwardManifestDigest &&
-		prepared.LKG.Present && prepared.LKG.ConfigSHA == release.ExpectedPreviousConfigSHA &&
-		prepared.LKG.ManifestSHA == release.ExpectedPreviousManifestSHA && prepared.LKG.OCIRevision == release.ExpectedPreviousOCIRevision &&
-		prepared.LKG.ImageRef == release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest &&
-		prepared.LKG.ManifestDigest == digest(lkg)
 }
 
 // Reading the positive LKG must not depend on a failed candidate or its status.

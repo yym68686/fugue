@@ -88,48 +88,6 @@ func TestLoadStableLKGIgnoresBrokenCandidateStateAndRejectsIdentityDrift(t *test
 	}
 }
 
-func TestLoadStableLKGRecoversRecordedLKGFromSupersededMonitorAtom(t *testing.T) {
-	key := Key{Component: "edge-control-test", Group: "test"}
-	now := time.Unix(100, 0).UTC()
-	stableData, _, stableArtifact, stableTarget := guardianStableFixture(t, key, now)
-	stableForward := []byte(stableData["forward.json"])
-	targetSHA := strings.Repeat("2", 40)
-	release := guardianPlanRelease(key, targetSHA, stableTarget.ConfigSHA, stableArtifact.TopDigest, &declarativerelease.Delivery{Writer: "guardian", Group: key.Group, DependencyService: "service"})
-	release.SupersedesFailedConfigSHA = targetSHA
-	plan := guardianPlan(t, stableTarget.ConfigSHA, targetSHA, release)
-	artifact := guardianArtifact(t, plan, "sha256:"+strings.Repeat("c", 64))
-	forward, _ := guardianManifests(t, plan, artifact)
-	prepared := guardianPrepared(t, plan, release, artifact,
-		declarativerelease.TargetIdentity{Present: true, ImageRef: artifact.ImmutableRef, ConfigSHA: targetSHA, ManifestSHA: targetSHA, OCIRevision: targetSHA, ManifestDigest: digest(forward)},
-		stableTarget, now)
-	terminal := declarativerelease.ExecutionResult{APIVersion: declarativerelease.ExecutionPlanAPIVersion, Kind: declarativerelease.ExecutionResultKind, Component: key.Component, ConfigSHA: targetSHA, ExecutionPlanDigest: prepared.PlanDigest, Status: "verified", Reason: "forward-verified", ForwardApplyCount: 1, Final: guardianObservation(prepared.Forward)}
-	terminalRaw, _ := declarativerelease.CanonicalJSON(terminal)
-	terminal.ReceiptDigest = digest(terminalRaw)
-	monitor, err := declarativerelease.NewMonitorRecord(plan, artifact, prepared, terminal, forward, stableForward)
-	if err != nil {
-		t.Fatalf("new failed monitor record: %v", err)
-	}
-	data := map[string]string{"forward.json": string(forward), "lkg.json": string(stableForward)}
-	for name, value := range map[string]any{"release-plan.json": plan, "artifact-receipt.json": artifact, "execution-plan.json": prepared, "record.json": monitor, "terminal-result.json": terminal} {
-		raw, _ := declarativerelease.CanonicalJSON(value)
-		data[name] = string(raw)
-	}
-	immutable := true
-	recordName := monitorRecordNameFromDigest(key.Component, monitor.RecordDigest)
-	client := fake.NewSimpleClientset(
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "fugue-release-monitor-" + key.Component, Namespace: "fugue-system"}, Data: map[string]string{"recordName": recordName}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: recordName, Namespace: "fugue-system"}, Immutable: &immutable, Data: data},
-	)
-	store, err := NewKubeStore(client, []TargetConfig{{Key: key, Namespace: "fugue-system", MonitorComponent: key.Component, DependencyService: "service"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := store.LoadStableLKG(context.Background(), key, release)
-	if err != nil || !bytes.Equal(got, bytes.TrimSpace(stableForward)) {
-		t.Fatalf("recorded LKG recovery failed: %v", err)
-	}
-}
-
 func TestCanaryResultIsImmutableRecordBoundAndFresh(t *testing.T) {
 	key := Key{Component: "edge-control-de", Group: "de"}
 	record, err := NewReleaseRecord(key, testSHA, testDigest, testDigest, otherDigest, testDigest)
