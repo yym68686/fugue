@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"fugue/internal/model"
 
@@ -13,9 +14,53 @@ import (
 
 func (c *CLI) newAdminControlPlaneCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "control-plane", Short: "Inspect control-plane readiness gates"}
+	database := &cobra.Command{Use: "database", Short: "Migrate the control-plane database storage"}
+	database.AddCommand(c.newAdminControlPlaneDatabaseMigrateCommand())
 	storeCmd := &cobra.Command{Use: "store", Short: "Inspect and gate control-plane store promotion"}
 	storeCmd.AddCommand(c.newAdminControlPlaneStoreStatusCommand(), c.newAdminControlPlaneStorePromoteCommand())
-	cmd.AddCommand(storeCmd)
+	cmd.AddCommand(storeCmd, database)
+	return cmd
+}
+
+func (c *CLI) newAdminControlPlaneDatabaseMigrateCommand() *cobra.Command {
+	opts := struct {
+		StorageClass, StorageSize string
+		Replicas                  int
+		Wait                      bool
+	}{Replicas: 1, Wait: true}
+	cmd := &cobra.Command{Use: "migrate-storage", Short: "Migrate the control-plane PostgreSQL storage online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		if opts.StorageClass == "" {
+			return fmt.Errorf("--storage-class is required")
+		}
+		client, err := c.newClient()
+		if err != nil {
+			return err
+		}
+		m, err := client.CreateDatabaseMigration(map[string]any{"kind": "managed-postgres", "resource_id": "control-plane-postgres", "target_storage_class_name": opts.StorageClass, "storage_size": opts.StorageSize, "temporary_replica_count": opts.Replicas})
+		if err != nil {
+			return err
+		}
+		if opts.Wait {
+			for {
+				m, err = client.GetDatabaseMigration(m.ID)
+				if err != nil {
+					return err
+				}
+				if m.Status == model.DatabaseMigrationStatusCompleted || m.Status == model.DatabaseMigrationStatusFailed {
+					break
+				}
+				time.Sleep(5 * time.Second)
+			}
+		}
+		if c.wantsJSON() {
+			return c.writeJSON(map[string]any{"migration": m})
+		}
+		return writeKeyValues(c.stdout, kvPair{Key: "migration_id", Value: m.ID}, kvPair{Key: "status", Value: m.Status}, kvPair{Key: "phase", Value: m.Phase}, kvPair{Key: "message", Value: firstNonEmpty(m.ResultMessage, m.ErrorMessage)})
+	}}
+	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Target storage class")
+	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Target volume size (optional)")
+	cmd.Flags().IntVar(&opts.Replicas, "temporary-replica-count", 1, "Temporary standby count")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", true, "Wait for migration completion")
 	return cmd
 }
 

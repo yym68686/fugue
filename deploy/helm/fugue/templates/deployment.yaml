@@ -77,6 +77,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: FUGUE_CONTROL_PLANE_RELEASE_INSTANCE
               value: {{ .Release.Name | quote }}
+            - name: FUGUE_CONTROL_PLANE_POSTGRES_CLUSTER_NAME
+              value: {{ include "fugue.controlPlanePostgresName" . | quote }}
             - name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME
               value: {{ printf "%s-control-plane-db-backup" (include "fugue.fullname" .) | quote }}
             - name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE

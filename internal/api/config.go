@@ -22,6 +22,7 @@ type ServerConfig struct {
 	DatabaseURL                            string
 	ControlPlaneNamespace                  string
 	ControlPlaneReleaseInstance            string
+	ControlPlanePostgresClusterName        string
 	BackupCoordination                     BackupCoordinationConfig
 	ControlPlaneCNPGBackupEnabled          bool
 	ControlPlaneCNPGBackupName             string

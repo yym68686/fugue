@@ -161,7 +161,6 @@ func TestBackupPolicyFromRequestValidatesSnapshotEngine(t *testing.T) {
 	}{
 		{name: "remote logical", req: backupPolicyRequest{Target: model.BackupTarget{Type: model.BackupTargetAppDatabase}, RemoteSnapshotRequired: true}, want: "remote_snapshot_required"},
 		{name: "unknown engine", req: backupPolicyRequest{Target: model.BackupTarget{Type: model.BackupTargetAppDatabase}, Engine: "unknown"}, want: "unsupported backup engine"},
-		{name: "longhorn control plane", req: backupPolicyRequest{Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}, Engine: model.BackupEngineLonghornSnapshot}, want: "supported only"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
@@ -171,9 +170,14 @@ func TestBackupPolicyFromRequestValidatesSnapshotEngine(t *testing.T) {
 			}
 		})
 	}
-
 	recorder := httptest.NewRecorder()
-	policy, ok := server.backupPolicyFromRequest(recorder, principal, backupPolicyRequest{
+	policy, ok := server.backupPolicyFromRequest(recorder, principal, backupPolicyRequest{Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}, Engine: model.BackupEngineLonghornSnapshot}, nil)
+	if !ok || policy.Engine != model.BackupEngineLonghornSnapshot || !policy.RemoteSnapshotRequired {
+		t.Fatalf("expected Longhorn control-plane policy, ok=%v policy=%+v body=%s", ok, policy, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	policy, ok = server.backupPolicyFromRequest(recorder, principal, backupPolicyRequest{
 		Target: model.BackupTarget{Type: model.BackupTargetAppDatabase}, Engine: model.BackupEngineLonghornSnapshot,
 	}, nil)
 	if !ok || policy.Engine != model.BackupEngineLonghornSnapshot || !policy.RemoteSnapshotRequired || !policy.Target.RemoteSnapshotRequired {

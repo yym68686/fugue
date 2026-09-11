@@ -316,6 +316,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("DELETE /v1/data/workspaces/{workspace_id}/snapshots/{snapshot_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteDataSnapshot)))
 	mux.Handle("POST /v1/data/workspaces/{workspace_id}/transfers/plan-download", s.auth.RequireAPI(http.HandlerFunc(s.handlePlanDataDownload)))
 	mux.Handle("POST /v1/data/workspaces/{workspace_id}/transfers/plan-upload", s.auth.RequireAPI(http.HandlerFunc(s.handlePlanDataUpload)))
+	mux.Handle("POST /v1/database-migrations", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateDatabaseMigration)))
+	mux.Handle("GET /v1/database-migrations/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetDatabaseMigration)))
 	mux.Handle("GET /v1/discovery/bundle", http.HandlerFunc(s.handleDiscoveryBundle))
 	mux.Handle("GET /v1/dns/acme-challenges", s.auth.RequireAPI(http.HandlerFunc(s.handleListDNSACMEChallenges)))
 	mux.Handle("POST /v1/dns/acme-challenges", s.auth.RequireAPI(http.HandlerFunc(s.handleUpsertDNSACMEChallenge)))

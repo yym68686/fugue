@@ -266,6 +266,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: FUGUE_CONTROL_PLANE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: FUGUE_CONTROL_PLANE_POSTGRES_CLUSTER_NAME
+              value: {{ include "fugue.controlPlanePostgresName" . | quote }}
             - name: FUGUE_CONTROLLER_LEADER_ELECTION_ENABLED
               value: {{ .Values.controller.leaderElection.enabled | quote }}
             - name: FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAME

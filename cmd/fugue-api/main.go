@@ -50,9 +50,10 @@ func main() {
 	authenticator.EdgeRouteIntentIdentityKeyring = edgeRouteIntentIdentityKeyringFromEnv()
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
-		DatabaseURL:                 cfg.DatabaseURL,
-		ControlPlaneNamespace:       cfg.ControlPlaneNamespace,
-		ControlPlaneReleaseInstance: cfg.ControlPlaneReleaseInstance,
+		DatabaseURL:                     cfg.DatabaseURL,
+		ControlPlaneNamespace:           cfg.ControlPlaneNamespace,
+		ControlPlaneReleaseInstance:     cfg.ControlPlaneReleaseInstance,
+		ControlPlanePostgresClusterName: cfg.ControlPlanePostgresClusterName,
 		BackupCoordination: api.BackupCoordinationConfig{
 			LeaseName:      cfg.BackupCoordination.LeaseName,
 			LeaseNamespace: cfg.BackupCoordination.LeaseNamespace,

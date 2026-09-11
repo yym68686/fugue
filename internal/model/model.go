@@ -160,18 +160,19 @@ const (
 	NodeUpdateTaskStatusFailed    = "failed"
 	NodeUpdateTaskStatusCanceled  = "canceled"
 
-	OperationTypeImport             = "import"
-	OperationTypeDeploy             = "deploy"
-	OperationTypeScale              = "scale"
-	OperationTypeMigrate            = "migrate"
-	OperationTypeFailover           = "failover"
-	OperationTypeDatabaseSwitchover = "database-switchover"
-	OperationTypeDatabaseLocalize   = "database-localize"
-	OperationTypeDatabaseSuspend    = "database-suspend"
-	OperationTypeDatabaseResume     = "database-resume"
-	OperationTypeDatabaseResize     = "database-resize"
-	OperationTypeDataPrewarm        = "data-prewarm"
-	OperationTypeDelete             = "delete"
+	OperationTypeImport                   = "import"
+	OperationTypeDeploy                   = "deploy"
+	OperationTypeScale                    = "scale"
+	OperationTypeMigrate                  = "migrate"
+	OperationTypeFailover                 = "failover"
+	OperationTypeDatabaseSwitchover       = "database-switchover"
+	OperationTypeDatabaseLocalize         = "database-localize"
+	OperationTypeDatabaseSuspend          = "database-suspend"
+	OperationTypeDatabaseResume           = "database-resume"
+	OperationTypeDatabaseResize           = "database-resize"
+	OperationTypeDatabaseStorageMigration = "database-storage-migration"
+	OperationTypeDataPrewarm              = "data-prewarm"
+	OperationTypeDelete                   = "delete"
 
 	OperationStatusPending      = "pending"
 	OperationStatusRunning      = "running"
@@ -2949,6 +2950,11 @@ type Operation struct {
 	RequestedByID            string                             `json:"requested_by_id"`
 	AppID                    string                             `json:"app_id"`
 	ServiceID                string                             `json:"service_id,omitempty"`
+	DatabaseKind             string                             `json:"database_kind,omitempty"`
+	DatabaseClusterName      string                             `json:"database_cluster_name,omitempty"`
+	SourceStorageClassName   string                             `json:"source_storage_class_name,omitempty"`
+	TargetStorageClassName   string                             `json:"target_storage_class_name,omitempty"`
+	TemporaryReplicaCount    int                                `json:"temporary_replica_count,omitempty"`
 	SourceRuntimeID          string                             `json:"source_runtime_id,omitempty"`
 	TargetRuntimeID          string                             `json:"target_runtime_id,omitempty"`
 	DesiredReplicas          *int                               `json:"desired_replicas,omitempty"`
@@ -3383,6 +3389,7 @@ func MachinePolicyDedicatedMode(policy MachinePolicy) string {
 }
 
 type State struct {
+	DatabaseMigrations         []DatabaseMigration            `json:"database_migrations,omitempty"`
 	SourceUploadSessions       []SourceUploadSession          `json:"source_upload_sessions,omitempty"`
 	Version                    string                         `json:"version"`
 	Tenants                    []Tenant                       `json:"tenants"`
@@ -3481,3 +3488,34 @@ type State struct {
 	DataWorkspaceAccessGrants []DataWorkspaceAccessGrant `json:"data_workspace_access_grants,omitempty"`
 	DataRuntimeCaches         []RuntimeDataCacheMetadata `json:"data_runtime_caches,omitempty"`
 }
+
+// DatabaseMigration is a provider-neutral, durable storage migration intent.
+// The controller selects an engine-specific driver (CNPG is the first one).
+type DatabaseMigration struct {
+	ID                     string     `json:"id"`
+	Kind                   string     `json:"kind"`
+	ResourceID             string     `json:"resource_id"`
+	Namespace              string     `json:"namespace"`
+	ClusterName            string     `json:"cluster_name"`
+	SourceStorageClassName string     `json:"source_storage_class_name"`
+	TargetStorageClassName string     `json:"target_storage_class_name"`
+	StorageSize            string     `json:"storage_size,omitempty"`
+	TemporaryReplicaCount  int        `json:"temporary_replica_count,omitempty"`
+	Status                 string     `json:"status"`
+	Phase                  string     `json:"phase,omitempty"`
+	ErrorMessage           string     `json:"error_message,omitempty"`
+	ResultMessage          string     `json:"result_message,omitempty"`
+	RequestedByType        string     `json:"requested_by_type,omitempty"`
+	RequestedByID          string     `json:"requested_by_id,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+	StartedAt              *time.Time `json:"started_at,omitempty"`
+	CompletedAt            *time.Time `json:"completed_at,omitempty"`
+}
+
+const (
+	DatabaseMigrationStatusPending   = "pending"
+	DatabaseMigrationStatusRunning   = "running"
+	DatabaseMigrationStatusCompleted = "completed"
+	DatabaseMigrationStatusFailed    = "failed"
+)

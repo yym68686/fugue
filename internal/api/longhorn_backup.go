@@ -44,6 +44,31 @@ type longhornSnapshotStatus struct {
 	Size       int64  `json:"size"`
 }
 
+// runControlPlaneLonghornBackup reuses the same provider-neutral volume
+// snapshot engine as app databases. The target is resolved from the
+// configured control-plane CNPG cluster; no SQL connection or dump is used.
+func (s *Server) runControlPlaneLonghornBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+	clusterName := firstNonEmptyString(strings.TrimSpace(s.controlPlanePostgresClusterName), "fugue-fugue-control-plane-postgres")
+	service := clusterName
+	synthetic := model.App{ID: "control-plane-postgres", Name: "fugue-control-plane", Spec: model.AppSpec{Postgres: &model.AppPostgresSpec{Database: "fugue", User: "fugue", Password: "control-plane-longhorn", RuntimeID: "control-plane", ServiceName: clusterName}}}
+	run.AppID = synthetic.ID
+	run.PolicyID = ""
+	run.Target.AppID = synthetic.ID
+	run.Target.Name = synthetic.Name
+	run.Target.ServiceName = service
+	run.Target.Database = "fugue"
+	backend, err := s.store.GetBackupBackendForUse(run.BackendID, "", true)
+	if err != nil {
+		return nil, err
+	}
+	artifacts, err := s.runAppDatabaseLonghornBackup(ctx, run, synthetic, backend)
+	for i := range artifacts {
+		artifacts[i].Target.Type = model.BackupTargetControlPlaneDatabase
+		artifacts[i].Manifest.Target.Type = model.BackupTargetControlPlaneDatabase
+	}
+	return artifacts, err
+}
+
 // runAppDatabaseLonghornBackup asks Longhorn to snapshot the managed Postgres
 // volume and upload the snapshot blocks to its configured R2 backup target.
 // It deliberately does not read the live PVC and never falls back to pg_dump.
@@ -64,6 +89,9 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	}
 	serviceName := firstNonEmptyString(postgres.ServiceName, run.Target.ServiceName)
 	namespace := runtimeNamespaceForApp(app)
+	if app.ID == "control-plane-postgres" {
+		namespace = firstNonEmptyString(strings.TrimSpace(s.controlPlaneNamespace), "fugue-system")
+	}
 	pvc, volumeName, err := longhornPostgresVolume(ctx, client, namespace, serviceName)
 	if err != nil {
 		return nil, err
@@ -140,7 +168,10 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	}
 	version := backupVersionLabel(run.Version)
 	target := model.NormalizeBackupTarget(run.Target)
-	target.Type, target.TenantID, target.ProjectID, target.AppID = model.BackupTargetAppDatabase, app.TenantID, app.ProjectID, app.ID
+	controlPlane := app.ID == "control-plane-postgres"
+	if !controlPlane {
+		target.Type, target.TenantID, target.ProjectID, target.AppID = model.BackupTargetAppDatabase, app.TenantID, app.ProjectID, app.ID
+	}
 	target.Name, target.ServiceName, target.Database = app.Name, serviceName, postgres.Database
 	baseKey := path.Join("apps", app.TenantID, app.ProjectID, app.ID, run.ID)
 	manifestKey := baseKey + "/manifest.json"

@@ -37,6 +37,7 @@ type Server struct {
 	controlPlaneDatabaseURL                string
 	controlPlaneNamespace                  string
 	controlPlaneReleaseInstance            string
+	controlPlanePostgresClusterName        string
 	backupCoordination                     BackupCoordinationConfig
 	controlPlaneCNPGBackupEnabled          bool
 	controlPlaneCNPGBackupName             string
@@ -198,13 +199,14 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
 	}
 	server := &Server{
-		store:                       store,
-		auth:                        authn,
-		log:                         logger,
-		metricsStartedAt:            time.Now().UTC(),
-		controlPlaneDatabaseURL:     strings.TrimSpace(cfg.DatabaseURL),
-		controlPlaneNamespace:       strings.TrimSpace(cfg.ControlPlaneNamespace),
-		controlPlaneReleaseInstance: strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
+		store:                           store,
+		auth:                            authn,
+		log:                             logger,
+		metricsStartedAt:                time.Now().UTC(),
+		controlPlaneDatabaseURL:         strings.TrimSpace(cfg.DatabaseURL),
+		controlPlaneNamespace:           strings.TrimSpace(cfg.ControlPlaneNamespace),
+		controlPlaneReleaseInstance:     strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
+		controlPlanePostgresClusterName: firstNonEmptyString(strings.TrimSpace(cfg.ControlPlanePostgresClusterName), "fugue-fugue-control-plane-postgres"),
 		backupCoordination: BackupCoordinationConfig{
 			LeaseName:      strings.TrimSpace(cfg.BackupCoordination.LeaseName),
 			LeaseNamespace: strings.TrimSpace(cfg.BackupCoordination.LeaseNamespace),

@@ -310,6 +310,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	triggerPendingOperationWorkers(foregroundImports...)
 	triggerPendingOperationWorkers(foregroundActivations...)
 	triggerBackgroundOps()
+	s.startDatabaseMigrationWorker(ctx)
 	stopSourceSync := s.startGitHubSourceSync(ctx, triggerBackgroundOps)
 	defer stopSourceSync()
 	if s.Config.HostJournaldPolicyEnabled {

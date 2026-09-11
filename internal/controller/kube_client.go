@@ -742,6 +742,11 @@ func (c *kubeClient) doJSON(ctx context.Context, method, apiPath string, body an
 	return resp.StatusCode, nil
 }
 
+func (c *kubeClient) patchCloudNativePGClusterSpec(ctx context.Context, namespace, name string, spec map[string]any) error {
+	_, err := c.doJSON(ctx, http.MethodPatch, "/apis/postgresql.cnpg.io/v1/namespaces/"+url.PathEscape(c.effectiveNamespace(namespace))+"/clusters/"+url.PathEscape(name), map[string]any{"spec": spec}, nil)
+	return err
+}
+
 func (c *kubeClient) doRaw(ctx context.Context, method, apiPath string, body io.Reader, contentType string) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, body)
 	if err != nil {

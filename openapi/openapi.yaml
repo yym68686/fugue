@@ -8772,6 +8772,48 @@ paths:
                 $ref: "#/components/schemas/ImageReplicationTaskResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/database-migrations:
+    post:
+      operationId: createDatabaseMigration
+      summary: Create a generic managed database storage migration
+      tags: [Admin]
+      x-fugue-handler: handleCreateDatabaseMigration
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DatabaseMigrationRequest"
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatabaseMigrationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/database-migrations/{id}:
+    get:
+      operationId: getDatabaseMigration
+      summary: Get a database storage migration
+      tags: [Admin]
+      x-fugue-handler: handleGetDatabaseMigration
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Migration status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatabaseMigrationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/operations:
     get:
       operationId: listOperations
@@ -19422,6 +19464,24 @@ components:
           type: array
           items:
             type: string
+    DatabaseMigrationRequest:
+      type: object
+      required: [target_storage_class_name]
+      properties:
+        kind: {type: string, default: managed-postgres}
+        resource_id: {type: string, default: control-plane-postgres}
+        namespace: {type: string}
+        cluster_name: {type: string}
+        target_storage_class_name: {type: string}
+        storage_size: {type: string}
+        temporary_replica_count: {type: integer, minimum: 1, default: 1}
+    DatabaseMigrationResponse:
+      type: object
+      required: [migration]
+      properties:
+        migration:
+          type: object
+          additionalProperties: true
     Operation:
       type: object
       additionalProperties: false

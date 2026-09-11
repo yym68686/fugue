@@ -2020,7 +2020,7 @@ func resolveBackupEngine(target model.BackupTarget, engine string, remoteSnapsho
 			return target, "", fmt.Errorf("remote_snapshot_required requires engine %q", model.BackupEngineLonghornSnapshot)
 		}
 	case model.BackupEngineLonghornSnapshot:
-		if target.Type != model.BackupTargetAppDatabase {
+		if target.Type != model.BackupTargetAppDatabase && target.Type != model.BackupTargetControlPlaneDatabase {
 			return target, "", fmt.Errorf("engine %q is supported only for %s targets", model.BackupEngineLonghornSnapshot, model.BackupTargetAppDatabase)
 		}
 		target.RemoteSnapshotRequired = true
@@ -2682,6 +2682,9 @@ func (s *Server) runBackup(ctx context.Context, run model.BackupRun) ([]model.Ba
 	}
 	switch model.NormalizeBackupTargetType(run.Target.Type) {
 	case model.BackupTargetControlPlaneDatabase:
+		if run.Target.Engine == model.BackupEngineLonghornSnapshot {
+			return s.runControlPlaneLonghornBackup(ctx, run)
+		}
 		return s.runControlPlaneDatabaseBackup(ctx, run)
 	case model.BackupTargetAppDatabase:
 		return s.runAppDatabaseBackup(ctx, run)
@@ -2912,7 +2915,12 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 		}.Encode(),
 	}).String()
 
-	backend, err := s.store.GetBackupBackendForUse(run.BackendID, app.TenantID, false)
+	backendTenantID := app.TenantID
+	platformBackup := app.ID == "control-plane-postgres"
+	if platformBackup {
+		backendTenantID = ""
+	}
+	backend, err := s.store.GetBackupBackendForUse(run.BackendID, backendTenantID, platformBackup)
 	if err != nil {
 		return nil, err
 	}
