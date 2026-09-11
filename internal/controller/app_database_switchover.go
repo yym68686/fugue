@@ -583,6 +583,13 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if err != nil {
 		return err
 	}
+	if alreadyLocalized && storageMigrationRequired {
+		storageReady, storageErr := s.managedPostgresPrimaryMatchesStorageTarget(ctx, client, namespace, clusterName, storageTarget)
+		if storageErr != nil {
+			return storageErr
+		}
+		alreadyLocalized = storageReady
+	}
 	if inPlaceStorageExpansionRequired {
 		targetPrimary = currentPrimary
 	} else if alreadyLocalized {
@@ -755,6 +762,13 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	currentPrimary, alreadyLocalized, err := s.managedPostgresPrimaryMatchesTarget(ctx, client, namespace, clusterName, targetRuntimeID, targetNodeName)
 	if err != nil {
 		return err
+	}
+	if alreadyLocalized && storageMigrationRequired {
+		storageReady, storageErr := s.managedPostgresPrimaryMatchesStorageTarget(ctx, client, namespace, clusterName, storageTarget)
+		if storageErr != nil {
+			return storageErr
+		}
+		alreadyLocalized = storageReady
 	}
 	if inPlaceStorageExpansionRequired {
 		targetPrimary = currentPrimary
@@ -2951,6 +2965,29 @@ func (s *Service) managedPostgresPrimaryMatchesTarget(
 		return currentPrimary, false, err
 	}
 	return currentPrimary, matchesRuntime, nil
+}
+
+func (s *Service) managedPostgresPrimaryMatchesStorageTarget(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName string,
+	target managedPostgresStorageTarget,
+) (bool, error) {
+	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, clusterName)
+	if err != nil {
+		return false, fmt.Errorf("read cloudnativepg cluster %s/%s for storage target: %w", namespace, clusterName, err)
+	}
+	if !found || strings.TrimSpace(cluster.Status.CurrentPrimary) == "" {
+		return false, nil
+	}
+	pod, found, err := client.getPod(ctx, namespace, cluster.Status.CurrentPrimary)
+	if err != nil {
+		return false, fmt.Errorf("read current postgres primary pod %s/%s for storage target: %w", namespace, cluster.Status.CurrentPrimary, err)
+	}
+	if !found {
+		return false, nil
+	}
+	return s.managedPostgresPodMatchesStorageTarget(ctx, client, namespace, pod, target)
 }
 
 // managedPostgresNodeMatchesRuntime treats a managed-shared runtime as a
