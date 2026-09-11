@@ -2328,6 +2328,7 @@ func edgeRequestSource(internalWarmup bool) string {
 	return "external"
 }
 
+// Internal probe and warmup markers are emitted as separate audit sources.
 func edgeRequestSourceForObservation(observed edgeProxyObservation) string {
 	if observed.HealthProbe {
 		return "health_probe"
