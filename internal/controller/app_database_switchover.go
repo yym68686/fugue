@@ -538,6 +538,18 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	// Durable app state may be updated before this executor resumes. Reconcile
+	// against the live CNPG PVCs as well, otherwise a failed or interrupted
+	// migration can be reported complete while the volume remains on the old
+	// storage class.
+	if !storageMigrationRequired {
+		liveMigrationRequired, liveErr := managedPostgresLiveStorageMigrationRequired(ctx, client, namespace, clusterName, desiredDatabase)
+		if liveErr != nil {
+			return liveErr
+		}
+		storageMigrationRequired = liveMigrationRequired
+		storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
+	}
 	targetNodeName := ""
 	if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
 		targetNodeName = strings.TrimSpace(op.DesiredSpec.Postgres.PrimaryNodeName)
@@ -703,6 +715,14 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	if !storageMigrationRequired {
+		liveMigrationRequired, liveErr := managedPostgresLiveStorageMigrationRequired(ctx, client, namespace, clusterName, desiredDatabase)
+		if liveErr != nil {
+			return liveErr
+		}
+		storageMigrationRequired = liveMigrationRequired
+		storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
+	}
 	targetNodeName := ""
 	if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
 		targetNodeName = strings.TrimSpace(op.DesiredSpec.Postgres.PrimaryNodeName)
@@ -884,6 +904,26 @@ func managedPostgresStorageMigrationRequired(current, desired *model.AppPostgres
 	}
 	return strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) ||
 		strings.TrimSpace(current.StorageSize) != strings.TrimSpace(desired.StorageSize)
+}
+
+func managedPostgresLiveStorageMigrationRequired(ctx context.Context, client *kubeClient, namespace, clusterName string, desired *model.AppPostgresSpec) (bool, error) {
+	if client == nil || desired == nil || strings.TrimSpace(desired.StorageClassName) == "" {
+		return false, nil
+	}
+	names, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(clusterName)+",cnpg.io/pvcRole=PG_DATA")
+	if err != nil {
+		return false, fmt.Errorf("list live postgres PVCs for storage migration %s/%s: %w", namespace, clusterName, err)
+	}
+	for _, name := range names {
+		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, name)
+		if err != nil {
+			return false, fmt.Errorf("read live postgres PVC %s/%s for storage migration: %w", namespace, name, err)
+		}
+		if found && strings.TrimSpace(pvc.Spec.StorageClassName) != strings.TrimSpace(desired.StorageClassName) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppPostgresSpec, sourceRuntimeID, targetRuntimeID, requestedTargetNodeName string) bool {
