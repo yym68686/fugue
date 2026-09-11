@@ -29,3 +29,33 @@ func TestLonghornBackupStatusRejectsWrongTarget(t *testing.T) {
 		t.Fatal("fixture must exercise target mismatch")
 	}
 }
+
+func TestResolveBackupEngineRejectsRemoteRequirementOnLogicalDump(t *testing.T) {
+	_, _, err := resolveBackupEngine(model.BackupTarget{Type: model.BackupTargetAppDatabase}, model.BackupEngineLogicalPGDump, true)
+	if err == nil {
+		t.Fatal("expected remote snapshot requirement to reject logical pg_dump")
+	}
+}
+
+func TestResolveBackupEngineMakesLonghornRemoteExplicit(t *testing.T) {
+	target, engine, err := resolveBackupEngine(model.BackupTarget{Type: model.BackupTargetAppDatabase}, model.BackupEngineLonghornSnapshot, false)
+	if err != nil {
+		t.Fatalf("resolve Longhorn engine: %v", err)
+	}
+	if engine != model.BackupEngineLonghornSnapshot || !target.RemoteSnapshotRequired || target.Engine != engine {
+		t.Fatalf("expected explicit remote Longhorn target, got engine=%q target=%+v", engine, target)
+	}
+}
+
+func TestResolveBackupEngineRejectsLonghornForNonDatabaseTarget(t *testing.T) {
+	_, _, err := resolveBackupEngine(model.BackupTarget{Type: model.BackupTargetPersistentStorage}, model.BackupEngineLonghornSnapshot, false)
+	if err == nil {
+		t.Fatal("expected Longhorn engine to reject non database target")
+	}
+}
+
+func TestLonghornObjectNameMalformedResponseDoesNotPanic(t *testing.T) {
+	if got := longhornObjectName(map[string]any{"metadata": "malformed"}); got != "" {
+		t.Fatalf("expected empty name, got %q", got)
+	}
+}

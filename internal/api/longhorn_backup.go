@@ -103,7 +103,10 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	if err := longhornCreate(ctx, client, longhornNS, "snapshots", snapshot, &createdSnapshot); err != nil {
 		return nil, fmt.Errorf("%w: create snapshot: %v", errLonghornBackupUnavailable, err)
 	}
-	snapshotName := longhornStringValue(createdSnapshot["metadata"].(map[string]any)["name"])
+	snapshotName := longhornObjectName(createdSnapshot)
+	if snapshotName == "" {
+		return nil, fmt.Errorf("%w: Longhorn snapshot response did not include metadata.name", errLonghornBackupUnavailable)
+	}
 	defer func() {
 		deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
@@ -123,7 +126,10 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	if err := longhornCreate(ctx, client, longhornNS, "backups", backup, &createdBackup); err != nil {
 		return nil, fmt.Errorf("%w: create backup: %v", errLonghornBackupUnavailable, err)
 	}
-	backupName := longhornStringValue(createdBackup["metadata"].(map[string]any)["name"])
+	backupName := longhornObjectName(createdBackup)
+	if backupName == "" {
+		return nil, fmt.Errorf("%w: Longhorn backup response did not include metadata.name", errLonghornBackupUnavailable)
+	}
 	status, err := waitForLonghornBackup(ctx, client, longhornNS, backupName, targetName)
 	if err != nil {
 		return nil, err
@@ -139,14 +145,18 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	target.Name, target.ServiceName, target.Database = app.Name, serviceName, postgres.Database
 	baseKey := path.Join("apps", app.TenantID, app.ProjectID, app.ID, run.ID)
 	manifestKey := baseKey + "/manifest.json"
-	logicalBytes, _ := strconv.ParseInt(strings.TrimSpace(status.VolumeSize), 10, 64)
+	logicalBytes := longhornSizeBytes(status.VolumeSize)
+	sizeBytes := longhornSizeBytes(status.NewlyUploadBytes)
+	if sizeBytes == 0 {
+		sizeBytes = logicalBytes
+	}
 	if logicalBytes < 0 {
 		logicalBytes = 0
 	}
 	manifest := model.NormalizeBackupManifest(model.BackupManifest{
 		RunID: run.ID, PolicyID: run.PolicyID, Target: target,
 		Kind: model.BackupArtifactKindLonghornSnapshot, Version: version, Format: "longhorn-remote-backup",
-		ManifestObjectKey: manifestKey, SizeBytes: logicalBytes, LogicalBytes: logicalBytes,
+		ManifestObjectKey: manifestKey, SizeBytes: sizeBytes, LogicalBytes: logicalBytes,
 		Metadata: map[string]string{
 			"backup_engine": "longhorn-snapshot", "backup_source": "longhorn-volume", "volume_name": volumeName,
 			"snapshot_name": snapshotName, "longhorn_backup_name": backupName, "longhorn_backup_url": status.URL,
@@ -165,7 +175,7 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
 		RunID: run.ID, PolicyID: run.PolicyID, TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID,
 		Target: target, BackendID: backend.ID, Kind: model.BackupArtifactKindLonghornSnapshot, Version: version,
-		ObjectKey: "", ManifestObjectKey: manifestKey, SizeBytes: logicalBytes, LogicalBytes: logicalBytes,
+		ObjectKey: "", ManifestObjectKey: manifestKey, SizeBytes: sizeBytes, LogicalBytes: logicalBytes,
 		Status: model.BackupArtifactStatusActive, Billable: backend.Billable, BillingClass: backupBillingClass(backend), Manifest: manifest,
 	}, run.LeaseOwner)
 	if err != nil {
@@ -184,6 +194,19 @@ func longhornBackupEnabled() bool {
 func getenv(key string) string { return strings.TrimSpace(os.Getenv(key)) }
 
 func longhornStringValue(v any) string { s, _ := v.(string); return strings.TrimSpace(s) }
+
+func longhornObjectName(obj map[string]any) string {
+	metadata, _ := obj["metadata"].(map[string]any)
+	return longhornStringValue(metadata["name"])
+}
+
+func longhornSizeBytes(raw string) int64 {
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
 
 func longhornPostgresVolume(ctx context.Context, client *kubeLogsClient, namespace, serviceName string) (map[string]any, string, error) {
 	query := url.Values{"labelSelector": []string{"cnpg.io/cluster=" + serviceName}}

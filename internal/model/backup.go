@@ -329,6 +329,9 @@ func NormalizeBackupTarget(target BackupTarget) BackupTarget {
 	target.Database = strings.TrimSpace(target.Database)
 	target.Component = strings.TrimSpace(target.Component)
 	target.Engine = strings.TrimSpace(strings.ToLower(target.Engine))
+	if target.Engine == BackupEngineLonghornSnapshot {
+		target.RemoteSnapshotRequired = true
+	}
 	return target
 }
 
@@ -477,6 +480,11 @@ func NormalizeBackupPolicy(policy BackupPolicy) BackupPolicy {
 	if policy.Engine == "" {
 		policy.Engine = BackupEngineLogicalPGDump
 	}
+	policy.Target.Engine = policy.Engine
+	if policy.Engine == BackupEngineLonghornSnapshot {
+		policy.RemoteSnapshotRequired = true
+	}
+	policy.Target.RemoteSnapshotRequired = policy.RemoteSnapshotRequired
 	policy.Status = strings.TrimSpace(strings.ToLower(policy.Status))
 	if policy.Status == "" {
 		if policy.Enabled {

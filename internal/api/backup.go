@@ -1898,6 +1898,14 @@ func (s *Server) backupPolicyFromRequest(w http.ResponseWriter, principal model.
 		policy.RemoteSnapshotRequired = req.RemoteSnapshotRequired
 		policy.Target.RemoteSnapshotRequired = req.RemoteSnapshotRequired
 	}
+	resolvedTarget, resolvedEngine, err := resolveBackupEngine(policy.Target, policy.Engine, policy.RemoteSnapshotRequired)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return model.BackupPolicy{}, false
+	}
+	policy.Target = resolvedTarget
+	policy.Engine = resolvedEngine
+	policy.RemoteSnapshotRequired = resolvedTarget.RemoteSnapshotRequired
 	if req.Enabled != nil {
 		policy.Enabled = *req.Enabled
 	} else if current == nil {
@@ -1995,6 +2003,32 @@ func backupTargetRequiresPlatformAdmin(targetType string) bool {
 	default:
 		return false
 	}
+}
+
+func resolveBackupEngine(target model.BackupTarget, engine string, remoteSnapshotRequired bool) (model.BackupTarget, string, error) {
+	target = model.NormalizeBackupTarget(target)
+	engine = strings.TrimSpace(strings.ToLower(engine))
+	if engine == "" {
+		engine = target.Engine
+	}
+	if engine == "" {
+		engine = model.BackupEngineLogicalPGDump
+	}
+	switch engine {
+	case model.BackupEngineLogicalPGDump:
+		if remoteSnapshotRequired || target.RemoteSnapshotRequired {
+			return target, "", fmt.Errorf("remote_snapshot_required requires engine %q", model.BackupEngineLonghornSnapshot)
+		}
+	case model.BackupEngineLonghornSnapshot:
+		if target.Type != model.BackupTargetAppDatabase {
+			return target, "", fmt.Errorf("engine %q is supported only for %s targets", model.BackupEngineLonghornSnapshot, model.BackupTargetAppDatabase)
+		}
+		target.RemoteSnapshotRequired = true
+	default:
+		return target, "", fmt.Errorf("unsupported backup engine %q", engine)
+	}
+	target.Engine = engine
+	return target, engine, nil
 }
 
 func (s *Server) authorizeTenantBackupPolicy(principal model.Principal, policy model.BackupPolicy) error {
@@ -2882,10 +2916,24 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	if err != nil {
 		return nil, err
 	}
+	policyEngine := strings.TrimSpace(run.Target.Engine)
+	remoteSnapshotRequired := run.Target.RemoteSnapshotRequired
 	if run.PolicyID != "" {
-		if policy, policyErr := s.store.GetBackupPolicy(run.PolicyID, app.TenantID, false); policyErr == nil && model.NormalizeBackupPolicy(policy).Engine == model.BackupEngineLonghornSnapshot {
-			return s.runAppDatabaseLonghornBackup(ctx, run, app, backend)
+		policy, policyErr := s.store.GetBackupPolicy(run.PolicyID, app.TenantID, false)
+		if policyErr != nil {
+			return nil, fmt.Errorf("backup_policy_unavailable: %w", policyErr)
 		}
+		policy = model.NormalizeBackupPolicy(policy)
+		policyEngine = policy.Engine
+		remoteSnapshotRequired = policy.RemoteSnapshotRequired
+	}
+	resolvedTarget, resolvedEngine, err := resolveBackupEngine(run.Target, policyEngine, remoteSnapshotRequired)
+	if err != nil {
+		return nil, err
+	}
+	run.Target = resolvedTarget
+	if resolvedEngine == model.BackupEngineLonghornSnapshot {
+		return s.runAppDatabaseLonghornBackup(ctx, run, app, backend)
 	}
 	objectBackend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(backend))
 	if err != nil {

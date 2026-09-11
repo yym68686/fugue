@@ -149,6 +149,38 @@ func TestBackupPolicyFromRequestValidatesSchedule(t *testing.T) {
 	}
 }
 
+func TestBackupPolicyFromRequestValidatesSnapshotEngine(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{}
+	principal := model.Principal{Scopes: map[string]struct{}{"platform.admin": {}}}
+	for _, tc := range []struct {
+		name string
+		req  backupPolicyRequest
+		want string
+	}{
+		{name: "remote logical", req: backupPolicyRequest{Target: model.BackupTarget{Type: model.BackupTargetAppDatabase}, RemoteSnapshotRequired: true}, want: "remote_snapshot_required"},
+		{name: "unknown engine", req: backupPolicyRequest{Target: model.BackupTarget{Type: model.BackupTargetAppDatabase}, Engine: "unknown"}, want: "unsupported backup engine"},
+		{name: "longhorn control plane", req: backupPolicyRequest{Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}, Engine: model.BackupEngineLonghornSnapshot}, want: "supported only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			_, ok := server.backupPolicyFromRequest(recorder, principal, tc.req, nil)
+			if ok || recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), tc.want) {
+				t.Fatalf("expected descriptive 400 containing %q, ok=%v code=%d body=%s", tc.want, ok, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+
+	recorder := httptest.NewRecorder()
+	policy, ok := server.backupPolicyFromRequest(recorder, principal, backupPolicyRequest{
+		Target: model.BackupTarget{Type: model.BackupTargetAppDatabase}, Engine: model.BackupEngineLonghornSnapshot,
+	}, nil)
+	if !ok || policy.Engine != model.BackupEngineLonghornSnapshot || !policy.RemoteSnapshotRequired || !policy.Target.RemoteSnapshotRequired {
+		t.Fatalf("expected Longhorn policy to require remote snapshot, ok=%v policy=%+v body=%s", ok, policy, recorder.Body.String())
+	}
+}
+
 func TestTenantCannotCreateOrRunPlatformBackupTargets(t *testing.T) {
 	t.Parallel()
 
