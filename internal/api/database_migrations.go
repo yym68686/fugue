@@ -40,7 +40,7 @@ func (s *Server) handleCreateDatabaseMigration(w http.ResponseWriter, r *http.Re
 	if strings.TrimSpace(req.ClusterName) == "" {
 		req.ClusterName = s.controlPlanePostgresClusterName
 	}
-	if req.ResourceID != "control-plane-postgres" || req.Kind != "managed-postgres" || req.Namespace != s.controlPlaneNamespace || req.ClusterName != s.controlPlanePostgresClusterName {
+	if req.ResourceID != "control-plane-postgres" || req.Kind != "managed-postgres" || req.Namespace != firstNonEmptyString(s.controlPlaneNamespace, "fugue-system") || req.ClusterName != s.controlPlanePostgresClusterName {
 		httpx.WriteError(w, http.StatusBadRequest, "database resource is not declared by the control-plane database catalog")
 		return
 	}

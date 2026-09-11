@@ -204,7 +204,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		log:                             logger,
 		metricsStartedAt:                time.Now().UTC(),
 		controlPlaneDatabaseURL:         strings.TrimSpace(cfg.DatabaseURL),
-		controlPlaneNamespace:           firstNonEmptyString(strings.TrimSpace(cfg.ControlPlaneNamespace), "fugue-system"),
+		controlPlaneNamespace:           strings.TrimSpace(cfg.ControlPlaneNamespace),
 		controlPlaneReleaseInstance:     strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
 		controlPlanePostgresClusterName: firstNonEmptyString(strings.TrimSpace(cfg.ControlPlanePostgresClusterName), "fugue-fugue-control-plane-postgres"),
 		backupCoordination: BackupCoordinationConfig{
