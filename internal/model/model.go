@@ -2950,11 +2950,6 @@ type Operation struct {
 	RequestedByID            string                             `json:"requested_by_id"`
 	AppID                    string                             `json:"app_id"`
 	ServiceID                string                             `json:"service_id,omitempty"`
-	DatabaseKind             string                             `json:"database_kind,omitempty"`
-	DatabaseClusterName      string                             `json:"database_cluster_name,omitempty"`
-	SourceStorageClassName   string                             `json:"source_storage_class_name,omitempty"`
-	TargetStorageClassName   string                             `json:"target_storage_class_name,omitempty"`
-	TemporaryReplicaCount    int                                `json:"temporary_replica_count,omitempty"`
 	SourceRuntimeID          string                             `json:"source_runtime_id,omitempty"`
 	TargetRuntimeID          string                             `json:"target_runtime_id,omitempty"`
 	DesiredReplicas          *int                               `json:"desired_replicas,omitempty"`
@@ -3497,6 +3492,9 @@ type DatabaseMigration struct {
 	ResourceID             string     `json:"resource_id"`
 	Namespace              string     `json:"namespace"`
 	ClusterName            string     `json:"cluster_name"`
+	ClusterUID             string     `json:"cluster_uid,omitempty"`
+	InitialInstances       int        `json:"initial_instances,omitempty"`
+	InitialSystemID        string     `json:"initial_system_id,omitempty"`
 	SourceStorageClassName string     `json:"source_storage_class_name"`
 	TargetStorageClassName string     `json:"target_storage_class_name"`
 	StorageSize            string     `json:"storage_size,omitempty"`

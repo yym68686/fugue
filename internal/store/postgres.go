@@ -1768,6 +1768,10 @@ var postgresSchemaStatements = []string{
 		completed_at TIMESTAMPTZ NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_database_migrations_status_created ON fugue_database_migrations(status, created_at)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_database_migrations_active_resource ON fugue_database_migrations(kind, resource_id) WHERE status IN ('pending','running')`,
+	`ALTER TABLE fugue_database_migrations ADD COLUMN IF NOT EXISTS cluster_uid TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_database_migrations ADD COLUMN IF NOT EXISTS initial_instances INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE fugue_database_migrations ADD COLUMN IF NOT EXISTS initial_system_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_operations ADD COLUMN IF NOT EXISTS service_id TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_status_created_at ON fugue_operations (status, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_assigned_runtime_status_created_at ON fugue_operations (assigned_runtime_id, status, created_at)`,

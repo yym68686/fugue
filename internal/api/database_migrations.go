@@ -11,8 +11,8 @@ import (
 
 func (s *Server) handleCreateDatabaseMigration(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(r)
-	if !p.IsPlatformAdmin() && !p.HasScope("app.migrate") {
-		httpx.WriteError(w, http.StatusForbidden, "missing app.migrate scope")
+	if !p.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "database storage migration requires platform administrator authorization")
 		return
 	}
 	var req struct {
@@ -40,6 +40,10 @@ func (s *Server) handleCreateDatabaseMigration(w http.ResponseWriter, r *http.Re
 	if strings.TrimSpace(req.ClusterName) == "" {
 		req.ClusterName = s.controlPlanePostgresClusterName
 	}
+	if req.ResourceID != "control-plane-postgres" || req.Kind != "managed-postgres" || req.Namespace != s.controlPlaneNamespace || req.ClusterName != s.controlPlanePostgresClusterName {
+		httpx.WriteError(w, http.StatusBadRequest, "database resource is not declared by the control-plane database catalog")
+		return
+	}
 	if strings.TrimSpace(req.TargetStorageClassName) == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "target_storage_class_name is required")
 		return
@@ -55,8 +59,8 @@ func (s *Server) handleCreateDatabaseMigration(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handleGetDatabaseMigration(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(r)
-	if !p.IsPlatformAdmin() && !p.HasScope("app.migrate") {
-		httpx.WriteError(w, http.StatusForbidden, "missing app.migrate scope")
+	if !p.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "database storage migration requires platform administrator authorization")
 		return
 	}
 	m, err := s.store.GetDatabaseMigration(r.PathValue("id"))

@@ -3,11 +3,68 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"fugue/internal/model"
 )
+
+func validateDatabaseMigrationTopology(ctx context.Context, client *kubeClient, namespace, storageClass string, requiredInstances int) error {
+	sc, found, err := client.getStorageClass(ctx, storageClass)
+	if err != nil {
+		return fmt.Errorf("read target storage class: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("target storage class %q not found", storageClass)
+	}
+	if sc.Provisioner != "driver.longhorn.io" {
+		return nil
+	}
+	var list struct {
+		Items []struct {
+			Spec struct {
+				AllowScheduling bool `json:"allowScheduling"`
+			} `json:"spec"`
+			Status struct {
+				DiskStatus map[string]struct {
+					Conditions []struct {
+						Type   string `json:"type"`
+						Status string `json:"status"`
+					} `json:"conditions"`
+				} `json:"diskStatus"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if _, err := client.doJSON(ctx, http.MethodGet, "/apis/longhorn.io/v1beta2/nodes", nil, &list); err != nil {
+		return fmt.Errorf("list Longhorn storage nodes: %w", err)
+	}
+	ready := 0
+	for _, node := range list.Items {
+		if !node.Spec.AllowScheduling {
+			continue
+		}
+		for _, disk := range node.Status.DiskStatus {
+			good, sched := false, false
+			for _, c := range disk.Conditions {
+				if c.Type == "Ready" && c.Status == "True" {
+					good = true
+				}
+				if c.Type == "Schedulable" && c.Status == "True" {
+					sched = true
+				}
+			}
+			if good && sched {
+				ready++
+				break
+			}
+		}
+	}
+	if ready < requiredInstances {
+		return fmt.Errorf("target Longhorn storage class has only %d ready schedulable nodes, need at least %d for %d database instances", ready, requiredInstances, requiredInstances)
+	}
+	return nil
+}
 
 const controlPlaneDatabaseMigrationKind = "managed-postgres"
 
@@ -58,7 +115,16 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 	if !found {
 		return s.failDatabaseMigration(migration, "CNPG cluster not found")
 	}
+	if migration.ClusterUID != "" && migration.ClusterUID != cluster.Metadata.UID {
+		return s.failDatabaseMigration(migration, "CNPG cluster identity changed during migration")
+	}
 	if migration.Status == model.DatabaseMigrationStatusPending {
+		if err := validateDatabaseMigrationTopology(ctx, client, namespace, migration.TargetStorageClassName, cluster.Spec.Instances); err != nil {
+			return s.failDatabaseMigration(migration, err.Error())
+		}
+		migration.ClusterUID = cluster.Metadata.UID
+		migration.InitialInstances = cluster.Spec.Instances
+		migration.InitialSystemID = cluster.Status.SystemID
 		if migration.SourceStorageClassName == "" {
 			migration.SourceStorageClassName = s.liveClusterStorageClass(ctx, client, namespace, clusterName)
 		}

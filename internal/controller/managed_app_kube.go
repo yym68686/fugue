@@ -150,6 +150,7 @@ type kubeCloudNativePGCluster struct {
 		CurrentPrimary         string                        `json:"currentPrimary,omitempty"`
 		TargetPrimary          string                        `json:"targetPrimary,omitempty"`
 		TargetPrimaryTimestamp string                        `json:"targetPrimaryTimestamp,omitempty"`
+		SystemID               string                        `json:"systemID,omitempty"`
 		Conditions             []runtime.ManagedAppCondition `json:"conditions,omitempty"`
 	} `json:"status"`
 }
