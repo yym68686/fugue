@@ -225,6 +225,11 @@ api:
     sessionToken: ""
     credentialEncryptionKey: ""
     presignTTL: 6h
+  longhornBackup:
+    enabled: false
+    namespace: longhorn-system
+    targetName: default
+    pollInterval: 5s
   importWorkDir: /var/lib/fugue/import
   metrics:
     enabled: true

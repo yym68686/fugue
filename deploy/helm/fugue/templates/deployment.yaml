@@ -173,6 +173,14 @@ spec:
                   optional: true
             - name: FUGUE_DATA_PRESIGN_TTL
               value: {{ .Values.api.dataBackend.presignTTL | quote }}
+            - name: FUGUE_BACKUP_LONGHORN_ENABLED
+              value: {{ .Values.api.longhornBackup.enabled | quote }}
+            - name: FUGUE_BACKUP_LONGHORN_NAMESPACE
+              value: {{ .Values.api.longhornBackup.namespace | quote }}
+            - name: FUGUE_BACKUP_LONGHORN_TARGET_NAME
+              value: {{ .Values.api.longhornBackup.targetName | quote }}
+            - name: FUGUE_BACKUP_LONGHORN_POLL_INTERVAL
+              value: {{ .Values.api.longhornBackup.pollInterval | quote }}
             - name: FUGUE_APP_BASE_DOMAIN
               value: {{ .Values.api.appBaseDomain | quote }}
             - name: FUGUE_API_PUBLIC_DOMAIN

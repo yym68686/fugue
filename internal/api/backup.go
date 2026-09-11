@@ -75,18 +75,20 @@ type backupBackendRequest struct {
 }
 
 type backupPolicyRequest struct {
-	ID          string                      `json:"id,omitempty"`
-	TenantID    string                      `json:"tenant_id,omitempty"`
-	ProjectID   string                      `json:"project_id,omitempty"`
-	AppID       string                      `json:"app_id,omitempty"`
-	Name        string                      `json:"name,omitempty"`
-	Target      model.BackupTarget          `json:"target"`
-	BackendID   string                      `json:"backend_id,omitempty"`
-	Enabled     *bool                       `json:"enabled,omitempty"`
-	Schedule    string                      `json:"schedule,omitempty"`
-	RetainCount int                         `json:"retain_count,omitempty"`
-	Retention   model.BackupRetentionPolicy `json:"retention,omitempty"`
-	Version     string                      `json:"version,omitempty"`
+	ID                     string                      `json:"id,omitempty"`
+	TenantID               string                      `json:"tenant_id,omitempty"`
+	ProjectID              string                      `json:"project_id,omitempty"`
+	AppID                  string                      `json:"app_id,omitempty"`
+	Name                   string                      `json:"name,omitempty"`
+	Target                 model.BackupTarget          `json:"target"`
+	BackendID              string                      `json:"backend_id,omitempty"`
+	Engine                 string                      `json:"engine,omitempty"`
+	RemoteSnapshotRequired bool                        `json:"remote_snapshot_required,omitempty"`
+	Enabled                *bool                       `json:"enabled,omitempty"`
+	Schedule               string                      `json:"schedule,omitempty"`
+	RetainCount            int                         `json:"retain_count,omitempty"`
+	Retention              model.BackupRetentionPolicy `json:"retention,omitempty"`
+	Version                string                      `json:"version,omitempty"`
 }
 
 type backupRunRequest struct {
@@ -1888,6 +1890,14 @@ func (s *Server) backupPolicyFromRequest(w http.ResponseWriter, principal model.
 	if req.BackendID != "" || current == nil {
 		policy.BackendID = strings.TrimSpace(req.BackendID)
 	}
+	if req.Engine != "" || current == nil {
+		policy.Engine = strings.TrimSpace(req.Engine)
+		policy.Target.Engine = strings.TrimSpace(req.Engine)
+	}
+	if req.RemoteSnapshotRequired || current == nil {
+		policy.RemoteSnapshotRequired = req.RemoteSnapshotRequired
+		policy.Target.RemoteSnapshotRequired = req.RemoteSnapshotRequired
+	}
 	if req.Enabled != nil {
 		policy.Enabled = *req.Enabled
 	} else if current == nil {
@@ -2871,6 +2881,11 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	backend, err := s.store.GetBackupBackendForUse(run.BackendID, app.TenantID, false)
 	if err != nil {
 		return nil, err
+	}
+	if run.PolicyID != "" {
+		if policy, policyErr := s.store.GetBackupPolicy(run.PolicyID, app.TenantID, false); policyErr == nil && model.NormalizeBackupPolicy(policy).Engine == model.BackupEngineLonghornSnapshot {
+			return s.runAppDatabaseLonghornBackup(ctx, run, app, backend)
+		}
 	}
 	objectBackend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(backend))
 	if err != nil {

@@ -12384,6 +12384,11 @@ components:
           description: For app-database targets, Fugue persists the current managed PostgreSQL database name rather than a stale caller-supplied value.
         component:
           type: string
+        engine:
+          type: string
+          enum: [logical-pgdump, longhorn-snapshot]
+        remote_snapshot_required:
+          type: boolean
     BackupRetentionPolicy:
       type: object
       additionalProperties: false
@@ -12417,6 +12422,13 @@ components:
           $ref: "#/components/schemas/BackupTarget"
         backend_id:
           type: string
+        engine:
+          type: string
+          enum: [logical-pgdump, longhorn-snapshot]
+          description: Database backup engine. longhorn-snapshot requires a Longhorn CSI volume and configured remote R2 backup target; it fails closed and never falls back to pg_dump.
+        remote_snapshot_required:
+          type: boolean
+          description: Require a remote storage snapshot and reject local staging or logical dump fallback.
         enabled:
           type: boolean
         status:
@@ -12473,6 +12485,11 @@ components:
           $ref: "#/components/schemas/BackupTarget"
         backend_id:
           type: string
+        engine:
+          type: string
+          enum: [logical-pgdump, longhorn-snapshot]
+        remote_snapshot_required:
+          type: boolean
         enabled:
           type: boolean
         schedule:

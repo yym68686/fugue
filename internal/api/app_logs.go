@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -415,6 +416,35 @@ func (c *kubeLogsClient) doJSON(ctx context.Context, method, apiPath string, out
 	}
 	if out != nil && len(body) > 0 {
 		if err := json.Unmarshal(body, out); err != nil {
+			return fmt.Errorf("decode kubernetes response: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *kubeLogsClient) doJSONBody(ctx context.Context, method, apiPath string, body any, out any) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encode kubernetes request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create kubernetes request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("kubernetes request %s %s: %w", method, apiPath, err)
+	}
+	defer resp.Body.Close()
+	responseBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return &kubeStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("kubernetes request %s %s failed: status=%d body=%s", method, apiPath, resp.StatusCode, strings.TrimSpace(string(responseBody)))}
+	}
+	if out != nil && len(responseBody) > 0 {
+		if err := json.Unmarshal(responseBody, out); err != nil {
 			return fmt.Errorf("decode kubernetes response: %w", err)
 		}
 	}

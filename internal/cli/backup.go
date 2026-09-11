@@ -484,21 +484,25 @@ func (c *CLI) newBackupPolicyDisableCommand() *cobra.Command {
 }
 
 type backupPolicyOptions struct {
-	Name        string
-	TargetType  string
-	BackendID   string
-	Schedule    string
-	RetainCount int
-	Version     string
-	AppID       string
-	ProjectID   string
-	WorkspaceID string
+	Name                   string
+	TargetType             string
+	BackendID              string
+	Engine                 string
+	RemoteSnapshotRequired bool
+	Schedule               string
+	RetainCount            int
+	Version                string
+	AppID                  string
+	ProjectID              string
+	WorkspaceID            string
 }
 
 func addBackupPolicyFlags(cmd *cobra.Command, opts *backupPolicyOptions) {
 	cmd.Flags().StringVar(&opts.Name, "name", "", "Policy name")
 	cmd.Flags().StringVar(&opts.TargetType, "target", opts.TargetType, "Target: control-plane-db, app-database, persistent-storage, data-workspace, registry")
 	cmd.Flags().StringVar(&opts.BackendID, "backend", "", "Backup backend id/name")
+	cmd.Flags().StringVar(&opts.Engine, "engine", "", "Backup engine: logical-pgdump or longhorn-snapshot")
+	cmd.Flags().BoolVar(&opts.RemoteSnapshotRequired, "remote-snapshot-required", false, "Require a remote storage snapshot and fail closed when unavailable")
 	cmd.Flags().StringVar(&opts.Schedule, "schedule", opts.Schedule, "Numeric five-field UTC cron schedule (or @hourly)")
 	cmd.Flags().IntVar(&opts.RetainCount, "retain-count", opts.RetainCount, "Number of successful artifacts to retain")
 	cmd.Flags().IntVar(&opts.RetainCount, "retain", opts.RetainCount, "Alias for --retain-count")
@@ -519,13 +523,15 @@ func backupPolicyRequestMap(opts backupPolicyOptions, enabled bool) (map[string]
 		"workspace_id": strings.TrimSpace(opts.WorkspaceID),
 	}
 	req := map[string]any{
-		"name":         strings.TrimSpace(opts.Name),
-		"target":       target,
-		"backend_id":   strings.TrimSpace(opts.BackendID),
-		"enabled":      enabled,
-		"schedule":     strings.TrimSpace(opts.Schedule),
-		"retain_count": opts.RetainCount,
-		"version":      strings.TrimSpace(opts.Version),
+		"name":                     strings.TrimSpace(opts.Name),
+		"target":                   target,
+		"backend_id":               strings.TrimSpace(opts.BackendID),
+		"engine":                   strings.TrimSpace(opts.Engine),
+		"remote_snapshot_required": opts.RemoteSnapshotRequired,
+		"enabled":                  enabled,
+		"schedule":                 strings.TrimSpace(opts.Schedule),
+		"retain_count":             opts.RetainCount,
+		"version":                  strings.TrimSpace(opts.Version),
 	}
 	return req, nil
 }

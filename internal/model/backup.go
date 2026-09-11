@@ -42,6 +42,7 @@ const (
 	BackupArtifactKindManifest           = "manifest"
 	BackupArtifactKindControlPlanePGDump = "control-plane-pg-dump"
 	BackupArtifactKindAppPGDump          = "app-pg-dump"
+	BackupArtifactKindLonghornSnapshot   = "longhorn-snapshot"
 	BackupArtifactKindFileArchive        = "file-archive"
 	BackupArtifactKindDataSnapshot       = "data-snapshot"
 	BackupArtifactKindRegistryArchive    = "registry-archive"
@@ -60,6 +61,9 @@ const (
 
 	BackupDefaultSchedule    = "0 * * * *"
 	BackupDefaultRetainCount = 3
+
+	BackupEngineLogicalPGDump    = "logical-pgdump"
+	BackupEngineLonghornSnapshot = "longhorn-snapshot"
 
 	BackupR2MarkupPercent = 5
 )
@@ -100,16 +104,18 @@ type BackupBackendSecret struct {
 }
 
 type BackupTarget struct {
-	Type        string `json:"type"`
-	TenantID    string `json:"tenant_id,omitempty"`
-	ProjectID   string `json:"project_id,omitempty"`
-	AppID       string `json:"app_id,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
-	RuntimeID   string `json:"runtime_id,omitempty"`
-	Name        string `json:"name,omitempty"`
-	ServiceName string `json:"service_name,omitempty"`
-	Database    string `json:"database,omitempty"`
-	Component   string `json:"component,omitempty"`
+	Type                   string `json:"type"`
+	TenantID               string `json:"tenant_id,omitempty"`
+	ProjectID              string `json:"project_id,omitempty"`
+	AppID                  string `json:"app_id,omitempty"`
+	WorkspaceID            string `json:"workspace_id,omitempty"`
+	RuntimeID              string `json:"runtime_id,omitempty"`
+	Name                   string `json:"name,omitempty"`
+	ServiceName            string `json:"service_name,omitempty"`
+	Database               string `json:"database,omitempty"`
+	Component              string `json:"component,omitempty"`
+	Engine                 string `json:"engine,omitempty"`
+	RemoteSnapshotRequired bool   `json:"remote_snapshot_required,omitempty"`
 }
 
 type BackupRetentionPolicy struct {
@@ -119,30 +125,32 @@ type BackupRetentionPolicy struct {
 }
 
 type BackupPolicy struct {
-	ID                  string                `json:"id"`
-	TenantID            string                `json:"tenant_id,omitempty"`
-	ProjectID           string                `json:"project_id,omitempty"`
-	AppID               string                `json:"app_id,omitempty"`
-	Name                string                `json:"name"`
-	Slug                string                `json:"slug"`
-	Scope               string                `json:"scope"`
-	Target              BackupTarget          `json:"target"`
-	BackendID           string                `json:"backend_id,omitempty"`
-	Enabled             bool                  `json:"enabled"`
-	Status              string                `json:"status"`
-	DisabledReason      string                `json:"disabled_reason,omitempty"`
-	Schedule            string                `json:"schedule,omitempty"`
-	RetainCount         int                   `json:"retain_count,omitempty"`
-	Retention           BackupRetentionPolicy `json:"retention,omitempty"`
-	Version             string                `json:"version,omitempty"`
-	LastRunID           string                `json:"last_run_id,omitempty"`
-	LastSuccessfulRunID string                `json:"last_successful_run_id,omitempty"`
-	LastRunAt           *time.Time            `json:"last_run_at,omitempty"`
-	LastSuccessfulAt    *time.Time            `json:"last_successful_at,omitempty"`
-	NextRunAt           *time.Time            `json:"next_run_at,omitempty"`
-	CreatedBy           string                `json:"created_by,omitempty"`
-	CreatedAt           time.Time             `json:"created_at"`
-	UpdatedAt           time.Time             `json:"updated_at"`
+	ID                     string                `json:"id"`
+	TenantID               string                `json:"tenant_id,omitempty"`
+	ProjectID              string                `json:"project_id,omitempty"`
+	AppID                  string                `json:"app_id,omitempty"`
+	Name                   string                `json:"name"`
+	Slug                   string                `json:"slug"`
+	Scope                  string                `json:"scope"`
+	Target                 BackupTarget          `json:"target"`
+	BackendID              string                `json:"backend_id,omitempty"`
+	Engine                 string                `json:"engine,omitempty"`
+	RemoteSnapshotRequired bool                  `json:"remote_snapshot_required,omitempty"`
+	Enabled                bool                  `json:"enabled"`
+	Status                 string                `json:"status"`
+	DisabledReason         string                `json:"disabled_reason,omitempty"`
+	Schedule               string                `json:"schedule,omitempty"`
+	RetainCount            int                   `json:"retain_count,omitempty"`
+	Retention              BackupRetentionPolicy `json:"retention,omitempty"`
+	Version                string                `json:"version,omitempty"`
+	LastRunID              string                `json:"last_run_id,omitempty"`
+	LastSuccessfulRunID    string                `json:"last_successful_run_id,omitempty"`
+	LastRunAt              *time.Time            `json:"last_run_at,omitempty"`
+	LastSuccessfulAt       *time.Time            `json:"last_successful_at,omitempty"`
+	NextRunAt              *time.Time            `json:"next_run_at,omitempty"`
+	CreatedBy              string                `json:"created_by,omitempty"`
+	CreatedAt              time.Time             `json:"created_at"`
+	UpdatedAt              time.Time             `json:"updated_at"`
 }
 
 type BackupRun struct {
@@ -320,6 +328,7 @@ func NormalizeBackupTarget(target BackupTarget) BackupTarget {
 	target.ServiceName = strings.TrimSpace(target.ServiceName)
 	target.Database = strings.TrimSpace(target.Database)
 	target.Component = strings.TrimSpace(target.Component)
+	target.Engine = strings.TrimSpace(strings.ToLower(target.Engine))
 	return target
 }
 
@@ -461,6 +470,13 @@ func NormalizeBackupPolicy(policy BackupPolicy) BackupPolicy {
 	policy.Target = NormalizeBackupTarget(policy.Target)
 	policy.Scope = NormalizeBackupScope(policy.Scope, policy.Target)
 	policy.BackendID = strings.TrimSpace(policy.BackendID)
+	policy.Engine = strings.TrimSpace(strings.ToLower(policy.Engine))
+	if policy.Engine == "" {
+		policy.Engine = policy.Target.Engine
+	}
+	if policy.Engine == "" {
+		policy.Engine = BackupEngineLogicalPGDump
+	}
 	policy.Status = strings.TrimSpace(strings.ToLower(policy.Status))
 	if policy.Status == "" {
 		if policy.Enabled {
@@ -560,6 +576,8 @@ func NormalizeBackupArtifactKind(raw string) string {
 		return BackupArtifactKindControlPlanePGDump
 	case BackupArtifactKindAppPGDump, "app-dump":
 		return BackupArtifactKindAppPGDump
+	case BackupArtifactKindLonghornSnapshot:
+		return BackupArtifactKindLonghornSnapshot
 	case BackupArtifactKindFileArchive, "files":
 		return BackupArtifactKindFileArchive
 	case BackupArtifactKindDataSnapshot, "data-workspace-snapshot":
