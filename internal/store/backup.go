@@ -4387,7 +4387,7 @@ RETURNING ` + backupRunReturningColumns()
 		query = `
 UPDATE fugue_backup_runs
 SET status = 'pending', lease_owner = '', locked_until = NULL, heartbeat_at = $8,
-    error_code = NULL, error_message = NULL, next_retry_at = $8, updated_at = $8, finished_at = NULL
+    error_code = '', error_message = '', next_retry_at = $8, updated_at = $8, finished_at = NULL
 WHERE id = $1
   AND status = $2
   AND lease_owner = $3
