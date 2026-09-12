@@ -480,7 +480,10 @@ func rewriteManagedPostgresURL(value string, spec model.AppPostgresSpec) (string
 	}
 	host := strings.TrimSpace(spec.ServiceName)
 	rwHost := model.PostgresRWServiceName(spec.ServiceName)
-	if !strings.EqualFold(parsed.Hostname(), host) && !strings.EqualFold(parsed.Hostname(), rwHost) {
+	// Keep accepting the pre-normalization host for apps created before this
+	// fix; new writes always use the canonical runtime Service name.
+	legacyHost := strings.TrimPrefix(host, "postgres-")
+	if !strings.EqualFold(parsed.Hostname(), host) && !strings.EqualFold(parsed.Hostname(), rwHost) && !strings.EqualFold(parsed.Hostname(), legacyHost) {
 		return value, false
 	}
 	port := parsed.Port()
