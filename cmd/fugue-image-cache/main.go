@@ -68,6 +68,7 @@ type imageCache struct {
 	proxySlots      chan struct{}
 	copyJobs        int
 	copyImageFn     func(context.Context, string, string) error
+	metrics         imageCacheMetrics
 	diskLimit       imageCacheDiskLimit
 	hydrateMu       sync.Mutex
 	hydrateCalls    map[string]*hydrateCall
@@ -217,6 +218,12 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 		return
 	}
+	if path == "/metrics" && r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		w.WriteHeader(http.StatusOK)
+		c.metrics.writePrometheus(w)
+		return
+	}
 	if strings.HasPrefix(path, "/fugue/cache/v1/") {
 		c.serveManagement(w, r)
 		return
@@ -348,6 +355,9 @@ func (c *imageCache) handleManagementInventory(w http.ResponseWriter, _ *http.Re
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if disk.OverHighWatermark || disk.BelowMinFree {
+		c.metrics.diskPressureTotal.Add(1)
+	}
 	unreferenced, err := c.managementUnreferencedBlobInventory()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -398,6 +408,15 @@ func (c *imageCache) handleManagementVerify(w http.ResponseWriter, r *http.Reque
 }
 
 func (c *imageCache) handleManagementReplicate(w http.ResponseWriter, r *http.Request) {
+	c.metrics.replicationTotal.Add(1)
+	succeeded := false
+	defer func() {
+		if succeeded {
+			c.metrics.replicationSuccess.Add(1)
+		} else {
+			c.metrics.replicationFailure.Add(1)
+		}
+	}()
 	var req struct {
 		ImageRef            string `json:"image_ref"`
 		Repo                string `json:"repo"`
@@ -450,6 +469,7 @@ func (c *imageCache) handleManagementReplicate(w http.ResponseWriter, r *http.Re
 		http.Error(w, fmt.Sprintf("report replicated image location: %v", err), http.StatusBadGateway)
 		return
 	}
+	succeeded = true
 	writeManagementJSON(w, http.StatusOK, map[string]any{
 		"repo":                  repo,
 		"target":                target,
@@ -2692,6 +2712,7 @@ func (c *imageCache) joinHydrate(key, repo, target string) *hydrateCall {
 		c.hydrateCalls = make(map[string]*hydrateCall)
 	}
 	if call := c.hydrateCalls[key]; call != nil {
+		c.metrics.hydrateWaitTotal.Add(1)
 		call.waiters++
 		return call
 	}
@@ -2744,6 +2765,7 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 		peerBase := trimRegistryBase(location.CacheEndpoint)
 		peerRef, _ := imageRef(peerBase, repo, target)
 		if err := c.copyImage(ctx, peerRef, localRef); err == nil {
+			c.metrics.peerHitTotal.Add(1)
 			if err := c.ensureLocalManifest(ctx, peerBase, repo, target); err != nil {
 				_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
 				return err
@@ -2771,6 +2793,7 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 	if c.upstreamBase != "" {
 		upstreamRef, _ := imageRef(c.upstreamBase, repo, target)
 		if err := c.copyImage(ctx, upstreamRef, localRef); err == nil {
+			c.metrics.upstreamHitTotal.Add(1)
 			if err := c.ensureLocalManifest(ctx, c.upstreamBase, repo, target); err != nil {
 				_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
 				return err
@@ -2796,6 +2819,7 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 }
 
 func (c *imageCache) copyImage(ctx context.Context, src, dst string) error {
+	c.metrics.copyInvocations.Add(1)
 	release, err := acquireSemaphore(ctx, c.hydrateSlots)
 	if err != nil {
 		return err

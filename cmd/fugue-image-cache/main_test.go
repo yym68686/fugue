@@ -43,6 +43,36 @@ func TestFilesystemUsageFromStatfsCountsReservedBlocksAsUnavailable(t *testing.T
 	}
 }
 
+func TestMetricsEndpointExposesReplicationAndHydrateCounters(t *testing.T) {
+	t.Parallel()
+
+	cache := &imageCache{}
+	cache.metrics.replicationTotal.Add(2)
+	cache.metrics.replicationSuccess.Add(1)
+	cache.metrics.replicationFailure.Add(1)
+	cache.metrics.bytesSkippedTotal.Add(123)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	cache.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain; version=0.0.4" {
+		t.Fatalf("metrics content type = %q", got)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"fugue_image_cache_replication_total 2",
+		"fugue_image_cache_replication_success_total 1",
+		"fugue_image_cache_replication_failure_total 1",
+		"fugue_image_cache_bytes_skipped_total 123",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics missing %q in %s", want, body)
+		}
+	}
+}
+
 func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	t.Parallel()
 
