@@ -197,6 +197,15 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	}
 	target.Name, target.ServiceName, target.Database = app.Name, serviceName, postgres.Database
 	baseKey := path.Join("apps", app.TenantID, app.ProjectID, app.ID, run.ID)
+	artifactAppID := app.ID
+	artifactTenantID := app.TenantID
+	artifactProjectID := app.ProjectID
+	if controlPlane {
+		// The control-plane target is a platform resource, not a tenant app;
+		// the synthetic resolver ID must never be written to the app FK.
+		baseKey = path.Join("control-plane", run.ID)
+		artifactAppID, artifactTenantID, artifactProjectID = "", "", ""
+	}
 	manifestKey := baseKey + "/manifest.json"
 	logicalBytes := longhornSizeBytes(status.VolumeSize)
 	sizeBytes := longhornSizeBytes(status.NewlyUploadBytes)
@@ -226,7 +235,7 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 		return nil, fmt.Errorf("upload Longhorn backup manifest: %w", err)
 	}
 	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
-		RunID: run.ID, PolicyID: run.PolicyID, TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID,
+		RunID: run.ID, PolicyID: run.PolicyID, TenantID: artifactTenantID, ProjectID: artifactProjectID, AppID: artifactAppID,
 		Target: target, BackendID: backend.ID, Kind: model.BackupArtifactKindLonghornSnapshot, Version: version,
 		ObjectKey: "", ManifestObjectKey: manifestKey, SizeBytes: sizeBytes, LogicalBytes: logicalBytes,
 		Status: model.BackupArtifactStatusActive, Billable: backend.Billable, BillingClass: backupBillingClass(backend), Manifest: manifest,
