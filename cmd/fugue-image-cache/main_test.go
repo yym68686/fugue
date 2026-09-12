@@ -130,6 +130,39 @@ func TestDigestAwarePeerReplicationSkipsExistingBlobs(t *testing.T) {
 	}
 }
 
+func TestReplicationBlobRequiresAuthAndSupportsRange(t *testing.T) {
+	t.Parallel()
+	storeDir := t.TempDir()
+	body := []byte("0123456789")
+	digest := "sha256:" + fmt.Sprintf("%x", sha256.Sum256(body))
+	path, err := imageCacheBlobStorePath(storeDir, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := &imageCache{storeDir: storeDir, managementToken: "secret"}
+	query := "?repo=demo&digest=" + url.QueryEscape(digest)
+	req := httptest.NewRequest(http.MethodGet, "/fugue/cache/v2/replication/blob"+query, nil)
+	req.RemoteAddr = "198.51.100.10:1234"
+	req.Header.Set("Range", "bytes=2-5")
+	rec := httptest.NewRecorder()
+	cache.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d", rec.Code)
+	}
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	cache.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPartialContent || rec.Body.String() != "2345" {
+		t.Fatalf("range response status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	t.Parallel()
 

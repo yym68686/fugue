@@ -48,35 +48,37 @@ const (
 )
 
 type imageCache struct {
-	apiBase         string
-	apiToken        string
-	reportPath      string
-	lookupPath      string
-	registryBase    string
-	localBase       string
-	upstreamBase    string
-	cacheEndpoint   string
-	clusterNode     string
-	storeDir        string
-	manifestDir     string
-	pinStorePath    string
-	managementToken string
-	httpClient      *http.Client
-	registry        http.Handler
-	hydrateTimeout  time.Duration
-	hydrateSlots    chan struct{}
-	proxySlots      chan struct{}
-	copyJobs        int
-	copyImageFn     func(context.Context, string, string) error
-	metrics         imageCacheMetrics
-	replicationMode string
-	legacyFallback  bool
-	diskLimit       imageCacheDiskLimit
-	hydrateMu       sync.Mutex
-	hydrateCalls    map[string]*hydrateCall
-	sourceMu        sync.RWMutex
-	sourceByTarget  map[string]sourceCacheEntry
-	sourceTTL       time.Duration
+	apiBase              string
+	apiToken             string
+	reportPath           string
+	lookupPath           string
+	registryBase         string
+	localBase            string
+	upstreamBase         string
+	cacheEndpoint        string
+	clusterNode          string
+	storeDir             string
+	manifestDir          string
+	pinStorePath         string
+	managementToken      string
+	httpClient           *http.Client
+	registry             http.Handler
+	hydrateTimeout       time.Duration
+	hydrateSlots         chan struct{}
+	proxySlots           chan struct{}
+	copyJobs             int
+	copyImageFn          func(context.Context, string, string) error
+	metrics              imageCacheMetrics
+	replicationMode      string
+	legacyFallback       bool
+	replicationChunkSize int64
+	directReplication    bool
+	diskLimit            imageCacheDiskLimit
+	hydrateMu            sync.Mutex
+	hydrateCalls         map[string]*hydrateCall
+	sourceMu             sync.RWMutex
+	sourceByTarget       map[string]sourceCacheEntry
+	sourceTTL            time.Duration
 }
 
 type imageCacheDiskLimit struct {
@@ -173,28 +175,30 @@ func main() {
 		}
 	}
 	cache := &imageCache{
-		apiBase:         strings.TrimRight(env("FUGUE_API_BASE", os.Getenv("FUGUE_API_URL")), "/"),
-		apiToken:        apiToken,
-		reportPath:      reportPath,
-		lookupPath:      lookupPath,
-		registryBase:    trimRegistryBase(env("FUGUE_IMAGE_CACHE_REGISTRY_BASE", "registry.fugue.internal:5000")),
-		localBase:       trimRegistryBase(env("FUGUE_IMAGE_CACHE_LOCAL_BASE", "127.0.0.1:5000")),
-		upstreamBase:    trimRegistryBase(os.Getenv("FUGUE_IMAGE_CACHE_UPSTREAM_BASE")),
-		cacheEndpoint:   strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
-		clusterNode:     clusterNode,
-		storeDir:        storeDir,
-		manifestDir:     filepath.Join(storeDir, "_manifests"),
-		pinStorePath:    env("FUGUE_IMAGE_CACHE_PIN_STORE", filepath.Join(filepath.Dir(storeDir), "pins.json")),
-		managementToken: strings.TrimSpace(env("FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN", apiToken)),
-		httpClient:      &http.Client{Timeout: 15 * time.Second},
-		registry:        registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
-		hydrateTimeout:  envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
-		hydrateSlots:    newSemaphore(envInt("FUGUE_IMAGE_CACHE_HYDRATE_CONCURRENCY", 1)),
-		proxySlots:      newSemaphore(envInt("FUGUE_IMAGE_CACHE_PROXY_CONCURRENCY", 4)),
-		copyJobs:        envInt("FUGUE_IMAGE_CACHE_COPY_JOBS", 1),
-		replicationMode: strings.ToLower(strings.TrimSpace(env("FUGUE_IMAGE_CACHE_REPLICATION_MODE", "digest"))),
-		legacyFallback:  envBool("FUGUE_IMAGE_CACHE_REPLICATION_LEGACY_FALLBACK", true),
-		sourceTTL:       envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
+		apiBase:              strings.TrimRight(env("FUGUE_API_BASE", os.Getenv("FUGUE_API_URL")), "/"),
+		apiToken:             apiToken,
+		reportPath:           reportPath,
+		lookupPath:           lookupPath,
+		registryBase:         trimRegistryBase(env("FUGUE_IMAGE_CACHE_REGISTRY_BASE", "registry.fugue.internal:5000")),
+		localBase:            trimRegistryBase(env("FUGUE_IMAGE_CACHE_LOCAL_BASE", "127.0.0.1:5000")),
+		upstreamBase:         trimRegistryBase(os.Getenv("FUGUE_IMAGE_CACHE_UPSTREAM_BASE")),
+		cacheEndpoint:        strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
+		clusterNode:          clusterNode,
+		storeDir:             storeDir,
+		manifestDir:          filepath.Join(storeDir, "_manifests"),
+		pinStorePath:         env("FUGUE_IMAGE_CACHE_PIN_STORE", filepath.Join(filepath.Dir(storeDir), "pins.json")),
+		managementToken:      strings.TrimSpace(env("FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN", apiToken)),
+		httpClient:           &http.Client{Timeout: 15 * time.Second},
+		registry:             registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		hydrateTimeout:       envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
+		hydrateSlots:         newSemaphore(envInt("FUGUE_IMAGE_CACHE_HYDRATE_CONCURRENCY", 1)),
+		proxySlots:           newSemaphore(envInt("FUGUE_IMAGE_CACHE_PROXY_CONCURRENCY", 4)),
+		copyJobs:             envInt("FUGUE_IMAGE_CACHE_COPY_JOBS", 1),
+		replicationMode:      strings.ToLower(strings.TrimSpace(env("FUGUE_IMAGE_CACHE_REPLICATION_MODE", "digest"))),
+		legacyFallback:       envBool("FUGUE_IMAGE_CACHE_REPLICATION_LEGACY_FALLBACK", true),
+		replicationChunkSize: envBytes("FUGUE_IMAGE_CACHE_REPLICATION_CHUNK_SIZE", 64*1024*1024),
+		directReplication:    envBool("FUGUE_IMAGE_CACHE_DIRECT_REPLICATION", false),
+		sourceTTL:            envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
 		diskLimit: imageCacheDiskLimit{
 			Enabled:              envBool("FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED", true),
 			HighWatermarkPercent: envFloat("FUGUE_IMAGE_CACHE_HIGH_WATERMARK_PERCENT", defaultImageCacheHighWatermarkPercent),
@@ -239,7 +243,7 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.metrics.writePrometheus(w)
 		return
 	}
-	if strings.HasPrefix(path, "/fugue/cache/v1/") {
+	if strings.HasPrefix(path, "/fugue/cache/v1/") || strings.HasPrefix(path, "/fugue/cache/v2/") {
 		c.serveManagement(w, r)
 		return
 	}
@@ -320,6 +324,8 @@ func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case path == "/fugue/cache/v2/replication/blob" && r.Method == http.MethodGet:
+		c.handleReplicationBlob(w, r)
 	case path == "/fugue/cache/v1/inventory" && r.Method == http.MethodGet:
 		c.handleManagementInventory(w, r)
 	case path == "/fugue/cache/v1/verify" && r.Method == http.MethodPost:
@@ -386,6 +392,43 @@ func (c *imageCache) handleManagementInventory(w http.ResponseWriter, _ *http.Re
 		"pins":               pins.Pins,
 		"disk":               disk,
 	})
+}
+
+// handleReplicationBlob serves one already-committed immutable blob to a
+// peer. The digest and repository are explicit query parameters so the
+// endpoint never exposes an arbitrary local path. http.ServeContent provides
+// single-range responses and lets interrupted peers resume safely.
+func (c *imageCache) handleReplicationBlob(w http.ResponseWriter, r *http.Request) {
+	repo := strings.Trim(strings.TrimSpace(r.URL.Query().Get("repo")), "/")
+	digest, err := strictImageCacheDigest(r.URL.Query().Get("digest"))
+	if repo == "" || strings.Contains(repo, "..") || err != nil {
+		http.Error(w, "invalid replication blob", http.StatusBadRequest)
+		return
+	}
+	blobPath, err := imageCacheBlobStorePath(c.storeDir, digest)
+	if err != nil {
+		http.Error(w, "invalid replication blob", http.StatusBadRequest)
+		return
+	}
+	file, err := os.Open(blobPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "read replication blob failed", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		http.Error(w, "replication blob is unavailable", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Docker-Content-Digest", digest)
+	w.Header().Set("X-Fugue-Blob-Digest", digest)
+	http.ServeContent(w, r, digest, info.ModTime(), file)
 }
 
 func (c *imageCache) handleManagementVerify(w http.ResponseWriter, r *http.Request) {
@@ -3271,15 +3314,36 @@ func (c *imageCache) ensureLocalBlobFromSourceWithStats(ctx context.Context, sou
 	if sourceBase == "" {
 		return errors.New("blob source is empty")
 	}
-	endpoint := "http://" + sourceBase + "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/blobs/" + digest
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
+	base := "http://" + sourceBase
+	endpoints := []string{base + "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/blobs/" + digest}
+	if c.directReplication {
+		endpoints = append([]string{base + "/fugue/cache/v2/replication/blob?repo=" + url.QueryEscape(strings.Trim(strings.TrimSpace(repo), "/")) + "&digest=" + url.QueryEscape(digest)}, endpoints...)
 	}
-	req.Header.Set(imageCacheLocalOnlyHeader, "1")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch blob %s from %s: %w", digest, sourceBase, err)
+	var resp *http.Response
+	for idx, endpoint := range endpoints {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if reqErr != nil {
+			return reqErr
+		}
+		req.Header.Set(imageCacheLocalOnlyHeader, "1")
+		if idx == 0 {
+			if token := strings.TrimSpace(c.managementToken); token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+		}
+		response, requestErr := http.DefaultClient.Do(req)
+		if requestErr != nil {
+			return fmt.Errorf("fetch blob %s from %s: %w", digest, sourceBase, requestErr)
+		}
+		if response.StatusCode == http.StatusNotFound && idx == 0 {
+			response.Body.Close()
+			continue
+		}
+		resp = response
+		break
+	}
+	if resp == nil {
+		return fmt.Errorf("fetch blob %s from %s status=%d", digest, sourceBase, http.StatusNotFound)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
