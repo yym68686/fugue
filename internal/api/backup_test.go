@@ -3411,8 +3411,8 @@ func TestRecoverStaleBackupRunMarksFailedAndSchedulesRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mark policy due: %v", err)
 	}
-	staleHeartbeat := time.Now().UTC().Add(-10 * time.Minute)
-	staleLock := time.Now().UTC().Add(-8 * time.Minute)
+	staleHeartbeat := time.Now().UTC().Add(-(backupRunLeaseTTL + 2*time.Minute))
+	staleLock := time.Now().UTC().Add(-(backupRunLeaseTTL + time.Minute))
 	run, err := stateStore.CreateBackupRun(model.BackupRun{
 		PolicyID:    policy.ID,
 		Target:      policy.Target,
@@ -3482,7 +3482,7 @@ func TestBackupRunIsStaleFailsPendingRetryAfterDueGrace(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	nextRetryAt := now.Add(-10 * time.Minute)
+	nextRetryAt := now.Add(-(backupRunLeaseTTL + time.Minute))
 	run := model.BackupRun{
 		Trigger:     model.BackupRunTriggerRetry,
 		Status:      model.BackupRunStatusPending,
