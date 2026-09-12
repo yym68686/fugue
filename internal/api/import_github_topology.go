@@ -71,6 +71,25 @@ type composeImportNamingStrategy struct {
 	MaxServiceNameLen int
 }
 
+// projectScopedManagedPostgresServiceName gives Compose imports a stable,
+// project-scoped database identity. App names are user-facing and can be
+// reused after a project is deleted, while the runtime may retain a managed
+// database cluster for recovery. Including the project ID prevents a new
+// project from accidentally attaching to that retained cluster.
+func projectScopedManagedPostgresServiceName(projectID string, service sourceimport.ComposeService, override *model.AppPostgresSpec) string {
+	if service.Postgres != nil && strings.TrimSpace(service.Postgres.ServiceName) != "" {
+		return ""
+	}
+	if override != nil && strings.TrimSpace(override.ServiceName) != "" {
+		return ""
+	}
+	aliasName := runtime.ComposeServiceAliasName(projectID, service.Name)
+	if aliasName == "" {
+		return ""
+	}
+	return model.NormalizePostgresServiceName(aliasName+"-postgres", "")
+}
+
 var defaultComposeImportNamingStrategy = composeImportNamingStrategy{
 	MaxAttempts:       8,
 	MaxServiceNameLen: 50,
@@ -387,6 +406,9 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 			return importedGitHubTopology{}, invalidComposeImport(specErr)
 		}
 		applyManagedPostgresOverrides(&spec, options.Postgres)
+		if serviceName := projectScopedManagedPostgresServiceName(options.ProjectID, backing.Service, options.Postgres); serviceName != "" {
+			spec.ServiceName = serviceName
+		}
 		deployment.ManagedPostgresByOwner[backing.OwnerService] = spec
 	}
 

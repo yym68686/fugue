@@ -35,6 +35,21 @@ func TestRewriteComposeEnvironmentRewritesInternalServiceHosts(t *testing.T) {
 	}
 }
 
+func TestProjectScopedManagedPostgresServiceNameAvoidsReusedProjectCollisions(t *testing.T) {
+	service := sourceimport.ComposeService{Name: "api"}
+	first := projectScopedManagedPostgresServiceName("project_123", service, nil)
+	second := projectScopedManagedPostgresServiceName("project_456", service, nil)
+	if first == "" || second == "" {
+		t.Fatalf("expected generated project-scoped service names, got %q and %q", first, second)
+	}
+	if first == second {
+		t.Fatalf("expected different projects to use different managed postgres services, both were %q", first)
+	}
+	if got := projectScopedManagedPostgresServiceName("project_123", service, &model.AppPostgresSpec{ServiceName: "custom-db"}); got != "" {
+		t.Fatalf("expected explicit postgres override to be preserved, generated %q", got)
+	}
+}
+
 func TestApplyManagedPostgresEnvironmentRewritesGeneratedDatabaseURL(t *testing.T) {
 	env := map[string]string{
 		"DATABASE_URL":      "postgresql+asyncpg://uniapi:@sample-api-web-api-db-postgres:5432/uniapi",
