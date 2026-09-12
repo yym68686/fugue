@@ -210,7 +210,7 @@ func ManagedPostgresSpec(service ComposeService, ownerAppName string) (model.App
 	// postgres-0-0-api-db-postgres). Persist and inject that same name so app
 	// DATABASE_URL values resolve to the Service Fugue actually creates. Keep
 	// this normalization at topology construction time so every importer path
-	// shares the same service identity.
+	// shares the same service identity and generated env values remain routable.
 	spec.ServiceName = model.NormalizePostgresServiceName(spec.ServiceName, ownerAppName+"-"+service.Name+"-postgres")
 	spec.Image = model.NormalizeManagedPostgresImage(spec.Image)
 	if spec.Database == "" {
