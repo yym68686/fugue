@@ -2216,6 +2216,54 @@ paths:
                 $ref: "#/components/schemas/PlatformArtifactResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/compile:
+    post:
+      operationId: compilePlatformConfig
+      summary: Compile Platform Intent And Policy
+      description: Deterministically compiles typed platform intent and policy into immutable intent, policy, route, DNS, TLS, and release-set artifacts. The operation does not promote serving traffic.
+      tags: [Admin]
+      x-fugue-handler: handleCompilePlatformConfig
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformConfigCompileRequest"
+      responses:
+        '201':
+          description: Immutable compiled artifacts created or reused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConfigCompileResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts/{artifact_id}/lineage:
+    get:
+      operationId: getPlatformArtifactLineage
+      summary: Get Platform Artifact Lineage
+      description: Returns the intent digest, policy digest, compiler version, and current verified LKG for a platform artifact.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformArtifactLineage
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Artifact lineage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactLineageResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/validate:
     post:
       operationId: validatePlatformArtifact
@@ -29814,6 +29862,175 @@ components:
         updated_at:
           type: string
           format: date-time
+    PlatformConfigRouteIntent:
+      type: object
+      additionalProperties: false
+      required: [hostname, upstream_url, enabled]
+      properties:
+        hostname:
+          type: string
+        upstream_url:
+          type: string
+        enabled:
+          type: boolean
+        edge_group_id:
+          type: string
+    PlatformConfigDNSIntent:
+      type: object
+      additionalProperties: false
+      required: [hostname, type, values, ttl]
+      properties:
+        hostname:
+          type: string
+        type:
+          type: string
+        values:
+          type: array
+          items:
+            type: string
+        ttl:
+          type: integer
+          format: int32
+    PlatformConfigTLSIntent:
+      type: object
+      additionalProperties: false
+      required: [hostname, policy]
+      properties:
+        hostname:
+          type: string
+        policy:
+          type: string
+    PlatformConfigIntent:
+      type: object
+      additionalProperties: false
+      required: [generation]
+      properties:
+        schema_version:
+          type: string
+        generation:
+          type: string
+        scope:
+          type: string
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformConfigRouteIntent"
+        dns:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformConfigDNSIntent"
+        tls:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformConfigTLSIntent"
+    PlatformConfigPolicySnapshot:
+      type: object
+      additionalProperties: false
+      required: [generation]
+      properties:
+        schema_version:
+          type: string
+        generation:
+          type: string
+        scope:
+          type: string
+        require_tls_ready:
+          type: boolean
+        require_route_ready:
+          type: boolean
+        minimum_healthy_edges:
+          type: integer
+          format: int32
+        max_stale_seconds:
+          type: integer
+          format: int32
+        canary_weights:
+          type: array
+          items:
+            type: integer
+            format: int32
+        dependency_order:
+          type: array
+          items:
+            type: string
+    PlatformConfigLineage:
+      type: object
+      additionalProperties: false
+      required: [intent_digest, policy_digest, compiler_version]
+      properties:
+        intent_digest:
+          type: string
+        policy_digest:
+          type: string
+        input_snapshot_digest:
+          type: string
+        compiler_version:
+          type: string
+    PlatformConfigReleaseSet:
+      type: object
+      additionalProperties: false
+      required: [schema_version, generation, scope, artifact_ids, artifact_kinds, lineage]
+      properties:
+        schema_version:
+          type: string
+        generation:
+          type: string
+        scope:
+          type: string
+        artifact_ids:
+          type: array
+          items:
+            type: string
+        artifact_kinds:
+          type: array
+          items:
+            type: string
+        lineage:
+          $ref: "#/components/schemas/PlatformConfigLineage"
+    PlatformConfigCompileRequest:
+      type: object
+      additionalProperties: false
+      required: [intent, policy]
+      properties:
+        intent:
+          $ref: "#/components/schemas/PlatformConfigIntent"
+        policy:
+          $ref: "#/components/schemas/PlatformConfigPolicySnapshot"
+        input_snapshot:
+          type: object
+          additionalProperties: true
+    PlatformConfigCompileResponse:
+      type: object
+      additionalProperties: false
+      required: [lineage, release_set, intent_artifact, policy_artifact, route_artifact, dns_artifact, tls_artifact, release_artifact]
+      properties:
+        lineage:
+          $ref: "#/components/schemas/PlatformConfigLineage"
+        release_set:
+          $ref: "#/components/schemas/PlatformConfigReleaseSet"
+        intent_artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        policy_artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        route_artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        dns_artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        tls_artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        release_artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+    PlatformArtifactLineageResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact, lineage]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        lineage:
+          $ref: "#/components/schemas/PlatformConfigLineage"
+        lkg:
+          $ref: "#/components/schemas/PlatformLKGSnapshot"
     PlatformArtifactCreateRequest:
       type: object
       additionalProperties: false

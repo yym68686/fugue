@@ -35,6 +35,9 @@ var validPlatformArtifactKinds = map[string]struct{}{
 	model.PlatformArtifactKindSubsystemFailureContracts: {},
 	model.PlatformArtifactKindGatePolicyRegistry:        {},
 	model.PlatformArtifactKindAutomaticActionContracts:  {},
+	model.PlatformArtifactKindPlatformIntent:            {},
+	model.PlatformArtifactKindPolicySnapshot:            {},
+	model.PlatformArtifactKindReleaseSet:                {},
 }
 
 func NormalizePlatformArtifactKind(raw string) string {
