@@ -1,6 +1,6 @@
 {{- if .Values.controlPlanePostgres.enabled }}
-{{- if lt (int .Values.controlPlanePostgres.instances) 2 }}
-  {{- fail "controlPlanePostgres.instances must be at least 2 when controlPlanePostgres.enabled=true" -}}
+{{- if lt (int .Values.controlPlanePostgres.instances) 1 }}
+  {{- fail "controlPlanePostgres.instances must be at least 1 when controlPlanePostgres.enabled=true" -}}
 {{- end }}
 {{- if and .Values.controlPlanePostgres.backup.enabled (eq .Values.controlPlanePostgres.backup.destinationPath "") }}
   {{- fail "controlPlanePostgres.backup.destinationPath is required when controlPlanePostgres.backup.enabled=true" -}}

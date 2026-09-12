@@ -232,10 +232,31 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 			return s.failDatabaseMigration(migration, err.Error())
 		}
 		affinity := appendDatabaseMigrationNodeAffinity(cluster.Spec.Affinity, nodeNames)
-		spec := map[string]any{"instances": cluster.Spec.Instances + max(1, migration.TemporaryReplicaCount), "storage": map[string]any{"size": firstNonEmpty(migration.StorageSize, cluster.Spec.Storage.Size), "storageClass": migration.TargetStorageClassName, "resizeInUseVolumes": true}, "affinity": affinity}
+		temporaryReplicas := migration.TemporaryReplicaCount
+		if temporaryReplicas < 0 {
+			temporaryReplicas = 0
+		}
+		spec := map[string]any{"instances": cluster.Spec.Instances + temporaryReplicas, "storage": map[string]any{"size": firstNonEmpty(migration.StorageSize, cluster.Spec.Storage.Size), "storageClass": migration.TargetStorageClassName, "resizeInUseVolumes": true}, "affinity": affinity}
 		if err := client.patchCloudNativePGClusterSpec(ctx, namespace, clusterName, spec); err != nil {
 			return s.failDatabaseMigration(migration, err.Error())
 		}
+	}
+	if migration.InitialInstances == 1 && migration.TemporaryReplicaCount == 0 && migration.Phase == "prepare-standby" {
+		migration.Phase = "single-instance-cutover"
+		migration.ResultMessage = "single-instance control-plane storage cutover pending"
+		if err := s.Store.UpdateDatabaseMigration(migration); err != nil {
+			return err
+		}
+	}
+	if migration.Phase == "single-instance-cutover" {
+		cluster, _, _ = client.getCloudNativePGCluster(ctx, namespace, clusterName)
+		if strings.TrimSpace(cluster.Status.CurrentPrimary) != "" && s.podStorageClass(ctx, client, namespace, cluster.Status.CurrentPrimary) == migration.TargetStorageClassName {
+			if migration.InitialSystemID != "" && cluster.Status.SystemID != "" && migration.InitialSystemID != cluster.Status.SystemID {
+				return s.failDatabaseMigration(migration, "PostgreSQL system identifier changed during migration")
+			}
+			return s.completeDatabaseMigration(migration, "single-instance control-plane database migrated to "+migration.TargetStorageClassName)
+		}
+		return nil
 	}
 	if migration.Phase == "prepare-standby" || migration.Phase == "" {
 		pods, _ := client.listPodsBySelector(ctx, namespace, "cnpg.io/cluster="+clusterName+",cnpg.io/instanceRole=replica")

@@ -3754,7 +3754,7 @@ func TestControlPlanePostgresCNPGCanDriveAPI(t *testing.T) {
 		t.Fatalf("rendered manifest missing control-plane CNPG cluster:\n%s", manifest)
 	}
 	for _, want := range []string{
-		"instances: 3",
+		"instances: 1",
 		"kind: Cluster",
 		"app.kubernetes.io/component: control-plane-postgres",
 		`storageClass: "fugue-postgres-rwo"`,

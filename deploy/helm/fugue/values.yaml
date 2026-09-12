@@ -1150,7 +1150,7 @@ controlPlanePostgres:
   useForAPI: false
   name: ""
   imageName: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie
-  instances: 3
+  instances: 1
   database: fugue
   username: fugue
   password: ""
