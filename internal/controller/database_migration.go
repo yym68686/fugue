@@ -292,14 +292,21 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 			if cluster.Status.ReadyInstances < migration.InitialInstances {
 				return nil
 			}
-			primary, primaryFound, primaryErr := client.getPod(ctx, namespace, cluster.Status.CurrentPrimary)
-			if primaryErr != nil || !primaryFound || !kubePodReady(primary) {
+			if !s.databaseMigrationPrimaryReady(ctx, client, namespace, cluster.Status.CurrentPrimary) {
 				return nil
 			}
 			return s.completeDatabaseMigration(migration, "control-plane database migrated to "+migration.TargetStorageClassName)
 		}
 	}
 	return nil
+}
+
+func (s *Service) databaseMigrationPrimaryReady(ctx context.Context, client *kubeClient, namespace, primary string) bool {
+	if strings.TrimSpace(primary) == "" {
+		return false
+	}
+	pod, found, err := client.getPod(ctx, namespace, primary)
+	return err == nil && found && kubePodReady(pod)
 }
 
 func (s *Service) failDatabaseMigration(m model.DatabaseMigration, msg string) error {
