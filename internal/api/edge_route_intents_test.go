@@ -53,6 +53,37 @@ func TestEdgeRouteIntentsRequireExactEdgeControlIdentity(t *testing.T) {
 	}
 }
 
+func TestEdgeRouteIntentUsesVerifiedRouteArtifactLKG(t *testing.T) {
+	t.Parallel()
+	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	create := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", platformAdminKey, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
+		Generation:   "route-artifact-lkg-1",
+		Content: map[string]any{"routes": []any{map[string]any{
+			"hostname": "artifact.fugue.pro", "upstream_url": "http://artifact:8080", "enabled": true,
+		}}},
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create route artifact: %d %s", create.Code, create.Body.String())
+	}
+	var created model.PlatformArtifactResponse
+	mustDecodeJSON(t, create, &created)
+	validate := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/validate", platformAdminKey, map[string]any{"dry_run": false})
+	if validate.Code != http.StatusOK {
+		t.Fatalf("validate route artifact: %d %s", validate.Code, validate.Body.String())
+	}
+	seedVerifiedPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	releaseAndVerifyFullPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	snapshot, found, err := server.edgeRouteIntentSnapshotFromVerifiedArtifact()
+	if err != nil || !found {
+		t.Fatalf("expected verified route artifact projection, found=%v err=%v", found, err)
+	}
+	if snapshot.Generation != created.Artifact.Generation || len(snapshot.Routes) != 1 || snapshot.Routes[0].Hostname != "artifact.fugue.pro" || snapshot.Routes[0].UpstreamURL != "http://artifact:8080" {
+		t.Fatalf("unexpected route artifact projection: %+v", snapshot)
+	}
+}
+
 func TestEdgeRouteIntentSourceCannotReadEdgeInventory(t *testing.T) {
 	t.Parallel()
 

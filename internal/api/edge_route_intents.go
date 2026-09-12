@@ -13,6 +13,7 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/store"
 )
@@ -38,6 +39,16 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusForbidden, "platform component identity is not authorized for edge route intents")
 		return
 	}
+	if snapshot, found, err := s.edgeRouteIntentSnapshotFromVerifiedArtifact(); err != nil {
+		s.writeStoreError(w, err)
+		return
+	} else if found {
+		w.Header().Set("ETag", edgeRouteBundleETag(snapshot.Generation))
+		w.Header().Set("Cache-Control", "private, no-cache")
+		w.Header().Set("X-Fugue-Route-Intent-Generation", snapshot.Generation)
+		httpx.WriteJSON(w, http.StatusOK, snapshot)
+		return
+	}
 	snapshot, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -47,6 +58,37 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("X-Fugue-Route-Intent-Generation", snapshot.Generation)
 	httpx.WriteJSON(w, http.StatusOK, snapshot)
+}
+
+// edgeRouteIntentSnapshotFromVerifiedArtifact projects the serving route
+// artifact into the component-specific RouteIntent wire shape. The legacy
+// business-table projection remains a fallback until a verified artifact is
+// available, but it is never consulted once the artifact path is active.
+func (s *Server) edgeRouteIntentSnapshotFromVerifiedArtifact() (model.EdgeRouteIntentSnapshot, bool, error) {
+	artifact, found, err := s.verifiedPlatformArtifactForScope(model.PlatformArtifactKindEdgeRouteBundle, "global")
+	if err != nil || !found {
+		return model.EdgeRouteIntentSnapshot{}, found, err
+	}
+	raw, err := json.Marshal(artifact.Content["routes"])
+	if err != nil {
+		return model.EdgeRouteIntentSnapshot{}, false, err
+	}
+	var routes []platformconfig.RouteIntent
+	if err := json.Unmarshal(raw, &routes); err != nil {
+		return model.EdgeRouteIntentSnapshot{}, false, fmt.Errorf("decode verified route artifact: %w", err)
+	}
+	intents := make([]model.EdgeRouteIntent, 0, len(routes))
+	for _, route := range routes {
+		intents = append(intents, model.EdgeRouteIntent{
+			Generation: artifact.Generation, Hostname: route.Hostname, RouteKind: model.EdgeRouteKindPlatform,
+			TargetGroupMode: model.EdgeRouteIntentGroupModeAllGroups, MinHealthyEdgeNodes: 1,
+			RoutePolicy: "platform", UpstreamKind: "url", UpstreamURL: route.UpstreamURL,
+			TLSPolicy: model.EdgeRouteTLSPolicyPlatform, OriginStatus: "unknown",
+			CreatedAt: artifact.CreatedAt, UpdatedAt: artifact.UpdatedAt,
+		})
+	}
+	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Generation: artifact.Generation, GeneratedAt: artifact.UpdatedAt, Routes: intents}
+	return snapshot, true, nil
 }
 
 func edgeRouteIntentClaimsAllowed(claims platformcontrol.PlatformComponentIdentityClaims) bool {
