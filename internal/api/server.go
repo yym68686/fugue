@@ -1788,6 +1788,8 @@ func (s *Server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {
 			message = strings.TrimSpace(req.Message)
 		}
 	}
+	// A running deployment is safe to stop when its desired state has been
+	// superseded; stateful operation types remain non-cancelable once claimed.
 	canceled, err := s.store.CancelOperation(op.ID, message)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
