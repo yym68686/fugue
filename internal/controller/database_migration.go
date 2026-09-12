@@ -60,10 +60,99 @@ func validateDatabaseMigrationTopology(ctx context.Context, client *kubeClient, 
 			}
 		}
 	}
-	if ready < 1 {
-		return fmt.Errorf("target Longhorn storage class has no ready schedulable nodes")
+	if requiredInstances < 1 {
+		requiredInstances = 1
+	}
+	if ready < requiredInstances {
+		return fmt.Errorf("target Longhorn storage has %d ready schedulable nodes, but the database requires %d; add Longhorn storage nodes before migrating", ready, requiredInstances)
 	}
 	return nil
+}
+
+func databaseMigrationLonghornNodes(ctx context.Context, client *kubeClient, requiredInstances int) ([]string, error) {
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				AllowScheduling bool `json:"allowScheduling"`
+			} `json:"spec"`
+			Status struct {
+				DiskStatus map[string]struct {
+					Conditions []struct {
+						Type   string `json:"type"`
+						Status string `json:"status"`
+					} `json:"conditions"`
+				} `json:"diskStatus"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if _, err := client.doJSON(ctx, http.MethodGet, "/apis/longhorn.io/v1beta2/nodes", nil, &list); err != nil {
+		return nil, err
+	}
+	if requiredInstances < 1 {
+		requiredInstances = 1
+	}
+	nodes := make([]string, 0, len(list.Items))
+	for _, node := range list.Items {
+		if !node.Spec.AllowScheduling {
+			continue
+		}
+		for _, disk := range node.Status.DiskStatus {
+			ready, sched := false, false
+			for _, c := range disk.Conditions {
+				if c.Type == "Ready" && c.Status == "True" {
+					ready = true
+				}
+				if c.Type == "Schedulable" && c.Status == "True" {
+					sched = true
+				}
+			}
+			if ready && sched {
+				nodes = append(nodes, node.Metadata.Name)
+				break
+			}
+		}
+	}
+	if len(nodes) < requiredInstances {
+		return nil, fmt.Errorf("only %d ready schedulable Longhorn nodes are available, but %d are required", len(nodes), requiredInstances)
+	}
+	return nodes, nil
+}
+
+func appendDatabaseMigrationNodeAffinity(existing map[string]any, nodeNames []string) map[string]any {
+	if existing == nil {
+		existing = map[string]any{}
+	}
+	copyMap := map[string]any{}
+	for k, v := range existing {
+		copyMap[k] = v
+	}
+	na, _ := copyMap["nodeAffinity"].(map[string]any)
+	if na == nil {
+		na = map[string]any{}
+	}
+	required, _ := na["requiredDuringSchedulingIgnoredDuringExecution"].(map[string]any)
+	if required == nil {
+		required = map[string]any{}
+	}
+	terms, _ := required["nodeSelectorTerms"].([]any)
+	expr := map[string]any{"key": "kubernetes.io/hostname", "operator": "In", "values": nodeNames}
+	if len(terms) == 0 {
+		terms = []any{map[string]any{"matchExpressions": []any{expr}}}
+	} else {
+		for _, raw := range terms {
+			if term, ok := raw.(map[string]any); ok {
+				expressions, _ := term["matchExpressions"].([]any)
+				term["matchExpressions"] = append(expressions, expr)
+			}
+		}
+	}
+	required["nodeSelectorTerms"] = terms
+	na["requiredDuringSchedulingIgnoredDuringExecution"] = required
+	copyMap["nodeAffinity"] = na
+	return copyMap
 }
 
 const controlPlaneDatabaseMigrationKind = "managed-postgres"
@@ -122,7 +211,6 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 		if err := validateDatabaseMigrationTopology(ctx, client, namespace, migration.TargetStorageClassName, cluster.Spec.Instances); err != nil {
 			return s.failDatabaseMigration(migration, err.Error())
 		}
-		migration.ResultMessage = "warning: target storage currently has one schedulable Longhorn node; PostgreSQL remains multi-instance but storage host redundancy is reduced"
 		migration.ClusterUID = cluster.Metadata.UID
 		migration.InitialInstances = cluster.Spec.Instances
 		migration.InitialSystemID = cluster.Status.SystemID
@@ -139,7 +227,12 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 		if err := s.Store.UpdateDatabaseMigration(migration); err != nil {
 			return err
 		}
-		spec := map[string]any{"instances": cluster.Spec.Instances + max(1, migration.TemporaryReplicaCount), "storage": map[string]any{"size": firstNonEmpty(migration.StorageSize, cluster.Spec.Storage.Size), "storageClass": migration.TargetStorageClassName, "resizeInUseVolumes": true}}
+		nodeNames, err := databaseMigrationLonghornNodes(ctx, client, cluster.Spec.Instances)
+		if err != nil {
+			return s.failDatabaseMigration(migration, err.Error())
+		}
+		affinity := appendDatabaseMigrationNodeAffinity(cluster.Spec.Affinity, nodeNames)
+		spec := map[string]any{"instances": cluster.Spec.Instances + max(1, migration.TemporaryReplicaCount), "storage": map[string]any{"size": firstNonEmpty(migration.StorageSize, cluster.Spec.Storage.Size), "storageClass": migration.TargetStorageClassName, "resizeInUseVolumes": true}, "affinity": affinity}
 		if err := client.patchCloudNativePGClusterSpec(ctx, namespace, clusterName, spec); err != nil {
 			return s.failDatabaseMigration(migration, err.Error())
 		}
@@ -179,8 +272,14 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 	if migration.Phase == "finalize" {
 		cluster, _, _ = client.getCloudNativePGCluster(ctx, namespace, clusterName)
 		if strings.TrimSpace(cluster.Status.CurrentPrimary) != "" && s.podStorageClass(ctx, client, namespace, cluster.Status.CurrentPrimary) == migration.TargetStorageClassName {
-			spec := map[string]any{"instances": 3, "storage": map[string]any{"size": firstNonEmpty(migration.StorageSize, cluster.Spec.Storage.Size), "storageClass": migration.TargetStorageClassName, "resizeInUseVolumes": true}}
-			if cluster.Spec.Instances != 3 {
+			if migration.InitialInstances < 1 {
+				migration.InitialInstances = cluster.Spec.Instances
+			}
+			if migration.InitialSystemID != "" && cluster.Status.SystemID != "" && migration.InitialSystemID != cluster.Status.SystemID {
+				return s.failDatabaseMigration(migration, "PostgreSQL system identifier changed during migration")
+			}
+			spec := map[string]any{"instances": migration.InitialInstances, "storage": map[string]any{"size": firstNonEmpty(migration.StorageSize, cluster.Spec.Storage.Size), "storageClass": migration.TargetStorageClassName, "resizeInUseVolumes": true}}
+			if cluster.Spec.Instances != migration.InitialInstances {
 				if err := client.patchCloudNativePGClusterSpec(ctx, namespace, clusterName, spec); err != nil {
 					return s.failDatabaseMigration(migration, err.Error())
 				}
@@ -190,7 +289,7 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 			if err != nil {
 				return err
 			}
-			if len(pvcNames) < 3 {
+			if len(pvcNames) < migration.InitialInstances {
 				return nil
 			}
 			for _, pvcName := range pvcNames {
