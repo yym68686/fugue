@@ -177,7 +177,7 @@ func TestReplicationCapabilitiesArePubliclyDiscoverable(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["protocol_version"] != "v2" || body["lazy_pull"] != true || body["zero_copy"] != false {
+	if body["protocol_version"] != "v2" || body["lazy_pull"] != true || body["p2p"] != true || body["zero_copy"] != false {
 		t.Fatalf("unexpected capabilities: %+v", body)
 	}
 }

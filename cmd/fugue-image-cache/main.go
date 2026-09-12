@@ -273,6 +273,9 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if targetKind == registryTargetBlob && c.proxyBlobFromKnownSource(w, r, repo, target) {
 		return
 	}
+	if targetKind == registryTargetBlob && c.proxyBlobFromPeerSources(w, r, repo, target) {
+		return
+	}
 	if targetKind == registryTargetBlob && c.proxyBlobFromUpstream(w, r, repo, target) {
 		return
 	}
@@ -326,7 +329,7 @@ func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
 			"range":            true,
 			"resume":           true,
 			"zero_copy":        false,
-			"p2p":              false,
+			"p2p":              true,
 			"lazy_pull":        true,
 			"node":             c.clusterNode,
 		})
@@ -3867,6 +3870,26 @@ func (c *imageCache) proxyBlobFromUpstream(w http.ResponseWriter, r *http.Reques
 		log.Printf("upstream blob proxy repo=%s digest=%s failed: %v", repo, digest, result.err)
 	} else if result.status != 0 {
 		log.Printf("upstream blob proxy repo=%s digest=%s status=%d", repo, digest, result.status)
+	}
+	return false
+}
+
+// proxyBlobFromPeerSources is the bounded built-in P2P fallback. The control
+// plane remains authoritative for present locations; this cache only streams a
+// requested blob from one eligible peer and never exposes arbitrary paths.
+func (c *imageCache) proxyBlobFromPeerSources(w http.ResponseWriter, r *http.Request, repo, digest string) bool {
+	logicalRef, _ := imageRef(c.registryBase, repo, digest)
+	for _, source := range c.remoteSources(r.Context(), logicalRef, digest) {
+		result := c.proxyRegistryPull(w, r, source.base)
+		if result.ok {
+			c.metrics.peerHitTotal.Add(1)
+			return true
+		}
+		if result.missing && source.location.CacheEndpoint != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_ = c.reportLocation(ctx, source.location, logicalRef, digest, "missing", fmt.Sprintf("proxy status=%d", result.status))
+			cancel()
+		}
 	}
 	return false
 }
