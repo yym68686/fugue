@@ -422,6 +422,15 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		}
 		suggestedEnv = mergeImportedEnv(suggestedEnv, options.Env)
 		suggestedEnv = mergeImportedEnv(suggestedEnv, options.ServiceEnv[service.Name])
+		// A newly provisioned managed Postgres cluster has no schema yet. Keep
+		// the source application's explicit migration mode when present, but
+		// default imported services to an idempotent startup migration so a
+		// single topology deployment can initialize its database.
+		if postgres != nil {
+			if _, configured := suggestedEnv["DB_SCHEMA_MIGRATION_MODE"]; !configured {
+				suggestedEnv["DB_SCHEMA_MIGRATION_MODE"] = "auto"
+			}
+		}
 		if err := sourceimport.ValidateNoMissingRequiredComposeEnv(service.Name, suggestedEnv); err != nil {
 			return importedGitHubTopology{}, invalidComposeImport(err)
 		}
