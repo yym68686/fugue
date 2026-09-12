@@ -214,8 +214,7 @@ func ManagedPostgresSpec(service ComposeService, ownerAppName string) (model.App
 		spec.ServiceName = model.Slugify(ownerAppName + "-" + service.Name + "-postgres")
 	}
 	// Runtime Kubernetes resources canonicalize managed Postgres names with a
-	// DNS-safe leading prefix (for example, 0-0-api-db-postgres becomes
-	// postgres-0-0-api-db-postgres). Persist and inject that same name so app
+	// DNS-safe leading prefix. Persist and inject that same name so app
 	// DATABASE_URL values resolve to the Service Fugue actually creates. Keep
 	// this normalization at topology construction time so every importer path
 	// shares the same service identity and generated env values remain routable
