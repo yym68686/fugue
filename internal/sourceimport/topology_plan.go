@@ -165,6 +165,9 @@ func ResolveTopologyServiceEnvironment(plan TopologyPlan, serviceName string, de
 		if !ok || strings.TrimSpace(spec.ServiceName) == "" {
 			continue
 		}
+		// Normalize legacy specs too, so retries of an import created before the
+		// DNS-safe naming fix converge on the same runtime Service name.
+		spec.ServiceName = model.NormalizePostgresServiceName(spec.ServiceName, "")
 		hosts[backingService] = strings.TrimSpace(spec.ServiceName)
 	}
 
@@ -172,6 +175,7 @@ func ResolveTopologyServiceEnvironment(plan TopologyPlan, serviceName string, de
 	rewritten := rewriteTopologyEnvironment(service.Environment, hosts)
 	inferenceReport := buildEnvRewriteInference(service.Name, original, rewritten)
 	if spec, ok := deployment.ManagedPostgresByOwner[service.Name]; ok {
+		spec.ServiceName = model.NormalizePostgresServiceName(spec.ServiceName, "")
 		managedEnv, managedInference := applyManagedPostgresBindingEnvironment(service.Name, rewritten, spec)
 		rewritten = managedEnv
 		inferenceReport = append(inferenceReport, managedInference...)
