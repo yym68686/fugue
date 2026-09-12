@@ -205,6 +205,11 @@ func ManagedPostgresSpec(service ComposeService, ownerAppName string) (model.App
 	if strings.TrimSpace(spec.ServiceName) == "" {
 		spec.ServiceName = model.Slugify(ownerAppName + "-" + service.Name + "-postgres")
 	}
+	// Runtime Kubernetes resources canonicalize managed Postgres names with a
+	// DNS-safe leading prefix (for example, 0-0-api-db-postgres becomes
+	// postgres-0-0-api-db-postgres). Persist and inject that same name so app
+	// DATABASE_URL values resolve to the Service Fugue actually creates.
+	spec.ServiceName = model.NormalizePostgresServiceName(spec.ServiceName, ownerAppName+"-"+service.Name+"-postgres")
 	spec.Image = model.NormalizeManagedPostgresImage(spec.Image)
 	if spec.Database == "" {
 		spec.Database = ownerAppName
