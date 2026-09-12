@@ -179,6 +179,10 @@ func ResolveTopologyServiceEnvironment(plan TopologyPlan, serviceName string, de
 		managedEnv, managedInference := applyManagedPostgresBindingEnvironment(service.Name, rewritten, spec)
 		rewritten = managedEnv
 		inferenceReport = append(inferenceReport, managedInference...)
+		if _, configured := rewritten["DB_SCHEMA_MIGRATION_MODE"]; !configured {
+			rewritten["DB_SCHEMA_MIGRATION_MODE"] = "auto"
+			inferenceReport = appendInference(inferenceReport, InferenceLevelInfo, "managed_migration", service.Name, "enabled automatic schema migration for a managed Postgres dependency")
+		}
 	}
 	if len(rewritten) == 0 {
 		return nil, inferenceReport, nil
