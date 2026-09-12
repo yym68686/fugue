@@ -906,7 +906,7 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 				if opts.Private {
 					visibility = "private"
 				}
-				request := importGitHubRequest{TenantID: tenantID, Project: &importProjectRequest{Name: args[0], Description: opts.Description}, RepoURL: normalizeGitHubRepoArg(opts.GitHubRepo), RepoVisibility: visibility, RepoAuthToken: token, Branch: opts.GitHubBranch, BuildStrategy: model.AppBuildStrategyDockerfile, IdempotencyKey: "project-create:" + model.Slugify(args[0]) + ":" + model.Slugify(opts.GitHubRepo)}
+				request := importGitHubRequest{TenantID: tenantID, Project: &importProjectRequest{Name: args[0], Description: opts.Description}, RepoURL: normalizeGitHubRepoArg(opts.GitHubRepo), RepoVisibility: visibility, RepoAuthToken: token, Branch: opts.GitHubBranch, BuildStrategy: model.AppBuildStrategyAuto, IdempotencyKey: "project-create:" + model.Slugify(args[0]) + ":" + model.Slugify(opts.GitHubRepo)}
 				if c.deployment == nil {
 					c.deployment = &deploymentCommandState{}
 				}

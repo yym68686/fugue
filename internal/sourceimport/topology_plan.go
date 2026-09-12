@@ -442,6 +442,23 @@ func rewriteManagedPostgresURL(value string, spec model.AppPostgresSpec) (string
 	if value == "" {
 		return value, false
 	}
+	// Compose interpolation marks an unavailable required variable with an
+	// internal sentinel before topology planning. A managed Postgres service
+	// owns these credentials, so resolve the sentinel before parsing the URL;
+	// otherwise DATABASE_URL would fail validation even though Fugue generated
+	// the replacement credentials.
+	value = replaceComposeRequiredSentinels(value, func(name string) string {
+		switch strings.ToUpper(strings.TrimSpace(name)) {
+		case "POSTGRES_PASSWORD", "DB_PASSWORD", "DATABASE_PASSWORD":
+			return spec.Password
+		case "POSTGRES_USER", "DB_USER", "DATABASE_USER":
+			return spec.User
+		case "POSTGRES_DB", "POSTGRES_DATABASE", "DB_NAME", "DATABASE_NAME", "DATABASE_DBNAME":
+			return spec.Database
+		default:
+			return ""
+		}
+	})
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
 		return value, false
@@ -464,6 +481,31 @@ func rewriteManagedPostgresURL(value string, spec model.AppPostgresSpec) (string
 		parsed.Path = "/" + strings.TrimPrefix(db, "/")
 	}
 	return parsed.String(), true
+}
+
+func replaceComposeRequiredSentinels(value string, resolve func(string) string) string {
+	for {
+		start := strings.Index(value, composeMissingRequiredEnvPrefix)
+		if start < 0 {
+			return value
+		}
+		rest := value[start+len(composeMissingRequiredEnvPrefix):]
+		end := strings.Index(rest, composeMissingRequiredEnvSuffix)
+		if end < 0 {
+			return value
+		}
+		raw := rest[:end]
+		name := strings.Fields(raw)
+		if len(name) == 0 {
+			return value
+		}
+		replacement := resolve(name[0])
+		if replacement == "" {
+			return value
+		}
+		end += start + len(composeMissingRequiredEnvPrefix) + len(composeMissingRequiredEnvSuffix)
+		value = value[:start] + replacement + value[end:]
+	}
 }
 
 func rewriteTopologyEnvValue(value string, hosts map[string]string) string {

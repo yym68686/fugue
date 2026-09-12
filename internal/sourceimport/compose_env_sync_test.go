@@ -124,6 +124,31 @@ func TestValidateNoMissingRequiredComposeEnvRejectsUnresolvedRequiredValue(t *te
 	}
 }
 
+func TestManagedPostgresRewritesRequiredInterpolationCredentials(t *testing.T) {
+	env := parseComposeEnvironment(map[string]any{
+		"DATABASE_URL": "postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@demo-postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}",
+	}, nil)
+	spec := model.AppPostgresSpec{ServiceName: "demo-postgres", Database: "demo", User: "demo", Password: "generated-password"}
+	if got := replaceComposeRequiredSentinels(env["DATABASE_URL"], func(name string) string {
+		if name == "POSTGRES_USER" {
+			return spec.User
+		}
+		if name == "POSTGRES_PASSWORD" {
+			return spec.Password
+		}
+		return spec.Database
+	}); got == env["DATABASE_URL"] {
+		t.Fatalf("expected sentinel replacement, got %q", got)
+	}
+	got, _ := applyManagedPostgresBindingEnvironment("api", env, spec)
+	if got["DATABASE_URL"] != "postgres://demo:generated-password@demo-postgres:5432/demo" {
+		t.Fatalf("expected required compose interpolation credentials to be rewritten, got %q", got["DATABASE_URL"])
+	}
+	if err := ValidateNoMissingRequiredComposeEnv("api", got); err != nil {
+		t.Fatalf("expected managed postgres credentials to satisfy required interpolation: %v", err)
+	}
+}
+
 func TestValidateNoMissingRequiredComposeEnvRejectsEmbeddedRequiredValue(t *testing.T) {
 	env := parseComposeEnvironment(map[string]any{
 		"API_URL": "https://${API_HOST:?API_HOST is required}/v1",
