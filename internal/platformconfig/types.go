@@ -52,16 +52,28 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
-	SchemaVersion       string    `json:"schema_version"`
-	Generation          string    `json:"generation"`
-	Scope               string    `json:"scope"`
-	RequireTLSReady     bool      `json:"require_tls_ready"`
-	RequireRouteReady   bool      `json:"require_route_ready"`
-	MinimumHealthyEdges int       `json:"minimum_healthy_edges"`
-	MaxStaleSeconds     int       `json:"max_stale_seconds"`
-	CanaryWeights       []int     `json:"canary_weights,omitempty"`
-	DependencyOrder     []string  `json:"dependency_order,omitempty"`
-	CreatedAt           time.Time `json:"created_at,omitempty"`
+	SchemaVersion       string          `json:"schema_version"`
+	Generation          string          `json:"generation"`
+	Scope               string          `json:"scope"`
+	RequireTLSReady     bool            `json:"require_tls_ready"`
+	RequireRouteReady   bool            `json:"require_route_ready"`
+	MinimumHealthyEdges int             `json:"minimum_healthy_edges"`
+	MaxStaleSeconds     int             `json:"max_stale_seconds"`
+	CanaryWeights       []int           `json:"canary_weights,omitempty"`
+	DependencyOrder     []string        `json:"dependency_order,omitempty"`
+	ConstraintGraph     ConstraintGraph `json:"constraint_graph,omitempty"`
+	CreatedAt           time.Time       `json:"created_at,omitempty"`
+}
+
+type ConstraintGraph struct {
+	Nodes []string         `json:"nodes,omitempty"`
+	Edges []ConstraintEdge `json:"edges,omitempty"`
+}
+
+type ConstraintEdge struct {
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Relation string `json:"relation"`
 }
 
 type Lineage struct {
@@ -231,6 +243,7 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	}
 	out.CanaryWeights = append([]int(nil), in.CanaryWeights...)
 	out.DependencyOrder = append([]string(nil), in.DependencyOrder...)
+	out.ConstraintGraph = normalizeConstraintGraph(in.ConstraintGraph)
 	return out
 }
 
@@ -263,7 +276,92 @@ func validatePolicy(in PolicySnapshot) error {
 			return fmt.Errorf("canary weight %d is outside 0..100", weight)
 		}
 	}
-	return validateDependencyOrder(in.DependencyOrder)
+	if err := validateDependencyOrder(in.DependencyOrder); err != nil {
+		return err
+	}
+	return validateConstraintGraph(in.ConstraintGraph)
+}
+
+func normalizeConstraintGraph(graph ConstraintGraph) ConstraintGraph {
+	out := ConstraintGraph{Nodes: append([]string(nil), graph.Nodes...), Edges: append([]ConstraintEdge(nil), graph.Edges...)}
+	for i := range out.Nodes {
+		out.Nodes[i] = strings.TrimSpace(out.Nodes[i])
+	}
+	for i := range out.Edges {
+		out.Edges[i].From = strings.TrimSpace(out.Edges[i].From)
+		out.Edges[i].To = strings.TrimSpace(out.Edges[i].To)
+		out.Edges[i].Relation = strings.TrimSpace(strings.ToLower(out.Edges[i].Relation))
+	}
+	sort.Strings(out.Nodes)
+	sort.Slice(out.Edges, func(i, j int) bool {
+		if out.Edges[i].From != out.Edges[j].From {
+			return out.Edges[i].From < out.Edges[j].From
+		}
+		if out.Edges[i].To != out.Edges[j].To {
+			return out.Edges[i].To < out.Edges[j].To
+		}
+		return out.Edges[i].Relation < out.Edges[j].Relation
+	})
+	return out
+}
+
+func validateConstraintGraph(graph ConstraintGraph) error {
+	allowed := map[string]bool{"requires": true, "blocks": true, "before": true, "produces": true, "rollback_to": true}
+	nodes := make(map[string]struct{}, len(graph.Nodes))
+	for _, node := range graph.Nodes {
+		if node == "" {
+			return fmt.Errorf("constraint graph contains an empty node")
+		}
+		if _, exists := nodes[node]; exists {
+			return fmt.Errorf("constraint graph contains duplicate node %q", node)
+		}
+		nodes[node] = struct{}{}
+	}
+	seenEdges := map[string]struct{}{}
+	adjacency := make(map[string][]string, len(nodes))
+	for _, edge := range graph.Edges {
+		if _, ok := nodes[edge.From]; !ok {
+			return fmt.Errorf("constraint graph edge references unknown node %q", edge.From)
+		}
+		if _, ok := nodes[edge.To]; !ok {
+			return fmt.Errorf("constraint graph edge references unknown node %q", edge.To)
+		}
+		if !allowed[edge.Relation] {
+			return fmt.Errorf("constraint graph relation %q is unsupported", edge.Relation)
+		}
+		key := edge.From + "\x00" + edge.To + "\x00" + edge.Relation
+		if _, exists := seenEdges[key]; exists {
+			return fmt.Errorf("constraint graph contains duplicate edge %q -> %q", edge.From, edge.To)
+		}
+		seenEdges[key] = struct{}{}
+		if edge.Relation != "rollback_to" {
+			adjacency[edge.From] = append(adjacency[edge.From], edge.To)
+		}
+	}
+	state := make(map[string]uint8, len(nodes))
+	var visit func(string) error
+	visit = func(node string) error {
+		switch state[node] {
+		case 1:
+			return fmt.Errorf("constraint graph contains a cycle at %q", node)
+		case 2:
+			return nil
+		}
+		state[node] = 1
+		for _, next := range adjacency[node] {
+			if err := visit(next); err != nil {
+				return err
+			}
+		}
+		state[node] = 2
+		return nil
+	}
+	for node := range nodes {
+		if err := visit(node); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateDependencyOrder(nodes []string) error {

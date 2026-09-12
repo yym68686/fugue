@@ -63,3 +63,27 @@ func TestCompileRejectsDuplicateRoutesAndInvalidDependencyOrder(t *testing.T) {
 		t.Fatalf("expected dependency rejection, got %v", err)
 	}
 }
+
+func TestCompileRejectsConstraintGraphCyclesAndUnknownNodes(t *testing.T) {
+	base := CompileRequest{
+		Intent: PlatformIntent{Generation: "intent-graph-0001"},
+		Policy: PolicySnapshot{
+			Generation: "policy-graph-0001",
+			ConstraintGraph: ConstraintGraph{
+				Nodes: []string{"route", "tls", "dns"},
+				Edges: []ConstraintEdge{{From: "route", To: "tls", Relation: "requires"}, {From: "tls", To: "dns", Relation: "before"}},
+			},
+		},
+	}
+	if _, err := Compile(base); err != nil {
+		t.Fatalf("valid constraint graph rejected: %v", err)
+	}
+	base.Policy.ConstraintGraph.Edges = append(base.Policy.ConstraintGraph.Edges, ConstraintEdge{From: "dns", To: "route", Relation: "requires"})
+	if _, err := Compile(base); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("expected graph cycle rejection, got %v", err)
+	}
+	base.Policy.ConstraintGraph.Edges = []ConstraintEdge{{From: "route", To: "unknown", Relation: "requires"}}
+	if _, err := Compile(base); err == nil || !strings.Contains(err.Error(), "unknown node") {
+		t.Fatalf("expected unknown node rejection, got %v", err)
+	}
+}
