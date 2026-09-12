@@ -101,3 +101,27 @@ func TestReleaseSetReferenceValidationRequiresExistingValidatedChildren(t *testi
 		t.Fatalf("expected missing child rejection, got %+v", result)
 	}
 }
+
+func TestReleaseSetPromotionRejectsMissingChildren(t *testing.T) {
+	stateStore, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	artifact, err := stateStore.CreatePlatformArtifact(model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindReleaseSet,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global", Key: "global"},
+		Generation:   "release-promotion-invalid-reference",
+		Content: map[string]any{
+			"artifact_ids":   []any{"missing-route"},
+			"artifact_kinds": []any{model.PlatformArtifactKindEdgeRouteBundle},
+		},
+		Metadata: map[string]string{"intent_digest": "sha256:intent", "policy_digest": "sha256:policy"},
+	})
+	if err != nil {
+		t.Fatalf("create release set artifact: %v", err)
+	}
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+artifact.ID+"/release", platformAdminKey, map[string]any{
+		"release_channel": "full",
+		"idempotency_key": "release-invalid-reference",
+	})
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "unknown artifact") {
+		t.Fatalf("expected missing child rejection at promotion, got %d body=%s", response.Code, response.Body.String())
+	}
+}

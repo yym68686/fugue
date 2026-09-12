@@ -235,6 +235,15 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 	if req.KernelBreakGlass == nil && !req.SoftOverride {
 		req.ForcePublish = false
 	}
+	if releaseArtifact, err := s.store.GetPlatformArtifact(r.PathValue("artifact_id")); err != nil {
+		s.writeStoreError(w, err)
+		return
+	} else if releaseArtifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+		if referenceResult := s.validateReleaseSetReferences(releaseArtifact); !referenceResult.Pass {
+			httpx.WriteError(w, http.StatusConflict, referenceResult.Message)
+			return
+		}
+	}
 	artifact, release, message, lkg, err := s.store.ReleasePlatformArtifact(r.PathValue("artifact_id"), req, principal)
 	if err != nil {
 		s.writeStoreError(w, err)
