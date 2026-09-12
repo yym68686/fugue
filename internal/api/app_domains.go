@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/store"
 )
 
@@ -454,6 +456,17 @@ func (s *Server) handleEdgeTLSAsk(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "domain is required")
 		return
 	}
+	if allowed, found, err := s.edgeTLSAskFromVerifiedArtifact(hostname); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "verified TLS artifact is unavailable")
+		return
+	} else if found {
+		if allowed {
+			writeEdgeTLSAskOK(w)
+			return
+		}
+		httpx.WriteError(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	domain, err := s.store.GetAppDomain(hostname)
 	if err != nil {
 		if err == store.ErrNotFound {
@@ -486,6 +499,27 @@ func (s *Server) handleEdgeTLSAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeEdgeTLSAskOK(w)
+}
+
+func (s *Server) edgeTLSAskFromVerifiedArtifact(hostname string) (allowed, found bool, err error) {
+	artifact, found, err := s.verifiedPlatformArtifactForScope(model.PlatformArtifactKindCaddyRouteConfig, "global")
+	if err != nil || !found {
+		return false, found, err
+	}
+	raw, err := json.Marshal(artifact.Content["certificates"])
+	if err != nil {
+		return false, true, err
+	}
+	var certificates []platformconfig.TLSIntent
+	if err := json.Unmarshal(raw, &certificates); err != nil {
+		return false, true, err
+	}
+	for _, certificate := range certificates {
+		if normalizeExternalAppDomain(certificate.Hostname) == hostname {
+			return true, true, nil
+		}
+	}
+	return false, true, nil
 }
 
 func writeEdgeTLSAskOK(w http.ResponseWriter) {
