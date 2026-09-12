@@ -22,8 +22,8 @@ const (
 	PlatformArtifactKindGatePolicyRegistry        = "gate_policy_registry"
 	PlatformArtifactKindAutomaticActionContracts  = "automatic_action_contracts"
 	PlatformArtifactKindPlatformIntent            = "platform_intent"
-	PlatformArtifactKindPolicySnapshot             = "policy_snapshot"
-	PlatformArtifactKindReleaseSet                 = "release_set"
+	PlatformArtifactKindPolicySnapshot            = "policy_snapshot"
+	PlatformArtifactKindReleaseSet                = "release_set"
 	// PlatformArtifactKindEdgeRouteIntent is a read-only component identity
 	// capability. It is intentionally not accepted by the platform artifact
 	// store: RouteIntent publication gets its own outbox and ledger boundary.
