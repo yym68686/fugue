@@ -69,6 +69,8 @@ type imageCache struct {
 	copyJobs        int
 	copyImageFn     func(context.Context, string, string) error
 	metrics         imageCacheMetrics
+	replicationMode string
+	legacyFallback  bool
 	diskLimit       imageCacheDiskLimit
 	hydrateMu       sync.Mutex
 	hydrateCalls    map[string]*hydrateCall
@@ -83,6 +85,17 @@ type imageCacheDiskLimit struct {
 	LowWatermarkPercent  float64
 	MinFreeBytes         int64
 	MaxDeleteBytesPerRun int64
+}
+
+func (c *imageCache) effectiveReplicationMode() string {
+	if c == nil {
+		return "legacy"
+	}
+	mode := strings.ToLower(strings.TrimSpace(c.replicationMode))
+	if mode == "" {
+		return "legacy"
+	}
+	return mode
 }
 
 type hydrateCall struct {
@@ -179,6 +192,8 @@ func main() {
 		hydrateSlots:    newSemaphore(envInt("FUGUE_IMAGE_CACHE_HYDRATE_CONCURRENCY", 1)),
 		proxySlots:      newSemaphore(envInt("FUGUE_IMAGE_CACHE_PROXY_CONCURRENCY", 4)),
 		copyJobs:        envInt("FUGUE_IMAGE_CACHE_COPY_JOBS", 1),
+		replicationMode: strings.ToLower(strings.TrimSpace(env("FUGUE_IMAGE_CACHE_REPLICATION_MODE", "digest"))),
+		legacyFallback:  envBool("FUGUE_IMAGE_CACHE_REPLICATION_LEGACY_FALLBACK", true),
 		sourceTTL:       envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
 		diskLimit: imageCacheDiskLimit{
 			Enabled:              envBool("FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED", true),
@@ -448,13 +463,29 @@ func (c *imageCache) handleManagementReplicate(w http.ResponseWriter, r *http.Re
 	if source := trimRegistryBase(req.SourceCacheEndpoint); source != "" {
 		peerRef, _ := imageRef(source, repo, target)
 		localRef, _ := imageRef(c.localBase, repo, target)
-		if err := c.copyImage(ctx, peerRef, localRef); err != nil {
-			fail(fmt.Errorf("copy image: %w", err))
-			return
-		}
-		if err := c.ensureLocalManifest(ctx, source, repo, target); err != nil {
-			fail(fmt.Errorf("persist local manifest: %w", err))
-			return
+		if c.effectiveReplicationMode() == "legacy" {
+			if err := c.copyImage(ctx, peerRef, localRef); err != nil {
+				fail(fmt.Errorf("copy image: %w", err))
+				return
+			}
+			if err := c.ensureLocalManifest(ctx, source, repo, target); err != nil {
+				fail(fmt.Errorf("persist local manifest: %w", err))
+				return
+			}
+		} else {
+			var stats replicationTransferStats
+			err := c.ensureLocalManifestTreeWithStats(ctx, source, repo, target, map[string]struct{}{}, &stats)
+			if err != nil && c.legacyFallback {
+				if copyErr := c.copyImage(ctx, peerRef, localRef); copyErr == nil {
+					err = c.ensureLocalManifest(ctx, source, repo, target)
+				}
+			}
+			c.metrics.bytesSkippedTotal.Add(uint64(maxInt64(stats.bytesSkipped)))
+			c.metrics.bytesTransferredTotal.Add(uint64(maxInt64(stats.bytesTransferred)))
+			if err != nil {
+				fail(fmt.Errorf("replicate image: %w", err))
+				return
+			}
 		}
 	} else if err := c.hydrate(ctx, repo, target); err != nil {
 		fail(fmt.Errorf("hydrate image: %w", err))
@@ -2764,6 +2795,23 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 		}
 		peerBase := trimRegistryBase(location.CacheEndpoint)
 		peerRef, _ := imageRef(peerBase, repo, target)
+		if c.effectiveReplicationMode() != "legacy" {
+			var stats replicationTransferStats
+			if err := c.ensureLocalManifestTreeWithStats(ctx, peerBase, repo, target, map[string]struct{}{}, &stats); err == nil {
+				c.metrics.bytesSkippedTotal.Add(uint64(maxInt64(stats.bytesSkipped)))
+				c.metrics.bytesTransferredTotal.Add(uint64(maxInt64(stats.bytesTransferred)))
+				c.metrics.peerHitTotal.Add(1)
+				if err := c.ensureLocalManifest(ctx, peerBase, repo, target); err != nil {
+					_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
+					return err
+				}
+				log.Printf("hydrated %s from peer %s", logicalRef, peerBase)
+				if err := c.report(ctx, logicalRef, digest, "present", ""); err != nil {
+					return fmt.Errorf("report hydrated peer image: %w", err)
+				}
+				return nil
+			}
+		}
 		if err := c.copyImage(ctx, peerRef, localRef); err == nil {
 			c.metrics.peerHitTotal.Add(1)
 			if err := c.ensureLocalManifest(ctx, peerBase, repo, target); err != nil {
@@ -3189,7 +3237,23 @@ func (c *imageCache) ensureLocalManifest(ctx context.Context, sourceBase, repo, 
 	return c.ensureLocalManifestTree(ctx, sourceBase, repo, target, map[string]struct{}{})
 }
 
+type replicationTransferStats struct {
+	bytesSkipped     int64
+	bytesTransferred int64
+}
+
+func maxInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
 func (c *imageCache) ensureLocalBlobFromSource(ctx context.Context, sourceBase, repo, digest string, expectedSize *int64) error {
+	return c.ensureLocalBlobFromSourceWithStats(ctx, sourceBase, repo, digest, expectedSize, nil)
+}
+
+func (c *imageCache) ensureLocalBlobFromSourceWithStats(ctx context.Context, sourceBase, repo, digest string, expectedSize *int64, stats *replicationTransferStats) error {
 	if c == nil || strings.TrimSpace(c.storeDir) == "" {
 		return errors.New("image cache blob store is unavailable")
 	}
@@ -3197,7 +3261,10 @@ func (c *imageCache) ensureLocalBlobFromSource(ctx context.Context, sourceBase, 
 	if err != nil {
 		return fmt.Errorf("invalid blob digest %q: %w", digest, err)
 	}
-	if _, err := c.checkLocalImageBlob(ctx, repo, digest, expectedSize, true); err == nil {
+	if size, err := c.checkLocalImageBlob(ctx, repo, digest, expectedSize, false); err == nil {
+		if stats != nil {
+			stats.bytesSkipped += size
+		}
 		return nil
 	}
 	sourceBase = trimRegistryBase(sourceBase)
@@ -3226,13 +3293,19 @@ func (c *imageCache) ensureLocalBlobFromSource(ctx context.Context, sourceBase, 
 		_ = c.deleteBlobUpload(upload.UUID)
 		return fmt.Errorf("store hydrated blob %s: %w", digest, err)
 	}
-	if _, err := c.checkLocalImageBlob(ctx, repo, digest, expectedSize, true); err != nil {
+	if size, err := c.checkLocalImageBlob(ctx, repo, digest, expectedSize, true); err != nil {
 		return fmt.Errorf("verify hydrated blob %s: %w", digest, err)
+	} else if stats != nil {
+		stats.bytesTransferred += size
 	}
 	return nil
 }
 
 func (c *imageCache) ensureLocalManifestTree(ctx context.Context, sourceBase, repo, target string, seen map[string]struct{}) error {
+	return c.ensureLocalManifestTreeWithStats(ctx, sourceBase, repo, target, seen, nil)
+}
+
+func (c *imageCache) ensureLocalManifestTreeWithStats(ctx context.Context, sourceBase, repo, target string, seen map[string]struct{}, stats *replicationTransferStats) error {
 	if c == nil || c.registry == nil {
 		return nil
 	}
@@ -3253,11 +3326,11 @@ func (c *imageCache) ensureLocalManifestTree(ctx context.Context, sourceBase, re
 	}
 	for _, descriptor := range manifestReferencedTargets(body) {
 		if descriptor.kind == registryTargetBlob {
-			if err := c.ensureLocalBlobFromSource(ctx, sourceBase, repo, descriptor.target, nil); err != nil {
+			if err := c.ensureLocalBlobFromSourceWithStats(ctx, sourceBase, repo, descriptor.target, descriptor.size, stats); err != nil {
 				return err
 			}
 		} else if descriptor.kind == registryTargetManifest {
-			if err := c.ensureLocalManifestTree(ctx, sourceBase, repo, descriptor.target, seen); err != nil {
+			if err := c.ensureLocalManifestTreeWithStats(ctx, sourceBase, repo, descriptor.target, seen, stats); err != nil {
 				return err
 			}
 		}
@@ -3883,6 +3956,7 @@ func (c *imageCache) rememberManifestSource(repo, target, sourceBase string, man
 type referencedRegistryTarget struct {
 	kind   registryTargetKind
 	target string
+	size   *int64
 }
 
 func manifestReferencedTargets(body []byte) []referencedRegistryTarget {
@@ -3902,11 +3976,11 @@ func manifestReferencedTargets(body []byte) []referencedRegistryTarget {
 	}
 	targets := make([]referencedRegistryTarget, 0, 1+len(decoded.Layers)+len(decoded.Manifests))
 	if decoded.Config != nil && strings.TrimSpace(decoded.Config.Digest) != "" {
-		targets = append(targets, referencedRegistryTarget{kind: registryTargetBlob, target: decoded.Config.Digest})
+		targets = append(targets, referencedRegistryTarget{kind: registryTargetBlob, target: decoded.Config.Digest, size: decoded.Config.Size})
 	}
 	for _, layer := range decoded.Layers {
 		if strings.TrimSpace(layer.Digest) != "" {
-			targets = append(targets, referencedRegistryTarget{kind: registryTargetBlob, target: layer.Digest})
+			targets = append(targets, referencedRegistryTarget{kind: registryTargetBlob, target: layer.Digest, size: layer.Size})
 		}
 	}
 	for _, layer := range decoded.FSLayers {

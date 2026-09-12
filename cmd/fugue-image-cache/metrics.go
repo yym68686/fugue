@@ -9,15 +9,16 @@ import (
 // imageCacheMetrics is process-local. The control plane remains authoritative
 // for replica state; these counters describe data-plane work by one cache.
 type imageCacheMetrics struct {
-	replicationTotal   atomic.Uint64
-	replicationSuccess atomic.Uint64
-	replicationFailure atomic.Uint64
-	copyInvocations    atomic.Uint64
-	hydrateWaitTotal   atomic.Uint64
-	peerHitTotal       atomic.Uint64
-	upstreamHitTotal   atomic.Uint64
-	bytesSkippedTotal  atomic.Uint64
-	diskPressureTotal  atomic.Uint64
+	replicationTotal      atomic.Uint64
+	replicationSuccess    atomic.Uint64
+	replicationFailure    atomic.Uint64
+	copyInvocations       atomic.Uint64
+	hydrateWaitTotal      atomic.Uint64
+	peerHitTotal          atomic.Uint64
+	upstreamHitTotal      atomic.Uint64
+	bytesSkippedTotal     atomic.Uint64
+	bytesTransferredTotal atomic.Uint64
+	diskPressureTotal     atomic.Uint64
 }
 
 func (m *imageCacheMetrics) writePrometheus(w io.Writer) {
@@ -35,5 +36,6 @@ func (m *imageCacheMetrics) writePrometheus(w io.Writer) {
 	write("fugue_image_cache_peer_hit_total", "Hydrates completed from a peer image-cache.", m.peerHitTotal.Load())
 	write("fugue_image_cache_upstream_hit_total", "Hydrates completed from the configured upstream registry.", m.upstreamHitTotal.Load())
 	write("fugue_image_cache_bytes_skipped_total", "Blob bytes skipped because the destination already had the required digest.", m.bytesSkippedTotal.Load())
+	write("fugue_image_cache_bytes_transferred_total", "Blob bytes received during digest-aware replication.", m.bytesTransferredTotal.Load())
 	write("fugue_image_cache_disk_pressure_total", "Inventory observations where the configured disk pressure guard was active.", m.diskPressureTotal.Load())
 }

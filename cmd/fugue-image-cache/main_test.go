@@ -73,6 +73,63 @@ func TestMetricsEndpointExposesReplicationAndHydrateCounters(t *testing.T) {
 	}
 }
 
+func TestDigestAwarePeerReplicationSkipsExistingBlobs(t *testing.T) {
+	t.Parallel()
+
+	configBody := []byte("{}")
+	configDigest := "sha256:" + fmt.Sprintf("%x", sha256.Sum256(configBody))
+	layerBody := []byte("new layer bytes")
+	layerDigest := "sha256:" + fmt.Sprintf("%x", sha256.Sum256(layerBody))
+	manifest := fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":%q,"size":%d},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":%q,"size":%d}]}`, configDigest, len(configBody), layerDigest, len(layerBody))
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/demo/manifests/latest":
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = io.WriteString(w, manifest)
+		case r.URL.Path == "/v2/demo/blobs/"+configDigest:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(configBody)
+		case r.URL.Path == "/v2/demo/blobs/"+layerDigest:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(layerBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(source.Close)
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "manifests"),
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+	}
+	configPath, err := imageCacheBlobStorePath(storeDir, configDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stats replicationTransferStats
+	if err := cache.ensureLocalManifestTreeWithStats(context.Background(), source.URL, "demo", "latest", map[string]struct{}{}, &stats); err != nil {
+		t.Fatalf("digest-aware replication: %v", err)
+	}
+	if stats.bytesSkipped != int64(len(configBody)) {
+		t.Fatalf("skipped bytes = %d, want %d", stats.bytesSkipped, len(configBody))
+	}
+	if stats.bytesTransferred != int64(len(layerBody)) {
+		t.Fatalf("transferred bytes = %d, want %d", stats.bytesTransferred, len(layerBody))
+	}
+	if _, err := cache.checkLocalImageGraph(context.Background(), "demo", "latest", true); err != nil {
+		t.Fatalf("replicated graph verification: %v", err)
+	}
+}
+
 func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	t.Parallel()
 
