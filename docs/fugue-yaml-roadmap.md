@@ -4,6 +4,8 @@ Fugue 现在的 `fugue.yaml` 更像“导入拓扑 manifest”，还不是完整
 
 下一阶段应该把它演进成一个能完整描述、重建、迁移一个真实应用的声明式文件，但必须保留当前 `version: 1` 的兼容路径，不能让老项目被迫一次性重写。
 
+当前实现状态：`version: 2` 已可用于 GitHub 导入和已有 GitHub 应用的自动同步。v2 已解析 `project`、`observability`、`release`、`intent` 元数据，并支持 `FUGUE_ENTRYPOINT_HOST:<name>` / `FUGUE_ENTRYPOINT_ORIGIN:<name>` 运行时引用；引用在路由分配后解析，适合 WebAuthn、OAuth 和回调地址等必须绑定实际公网入口的配置。v1 与未声明 manifest 的 Compose 导入保持兼容。
+
 ## 目标边界
 
 - `fugue.yaml` 只描述期望状态，不描述运行时瞬时状态。
