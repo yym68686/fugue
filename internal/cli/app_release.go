@@ -1060,6 +1060,7 @@ func (c *CLI) waitForAppRebuildOperation(client *Client, appID string, operation
 
 func (c *CLI) newAppReleaseDeployCommand() *cobra.Command {
 	opts := struct {
+		Port int
 		Wait bool
 	}{Wait: true}
 	cmd := &cobra.Command{
@@ -1075,8 +1076,23 @@ func (c *CLI) newAppReleaseDeployCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			var spec *model.AppSpec
+			if opts.Port != 0 {
+				if opts.Port < 1 || opts.Port > 65535 {
+					return fmt.Errorf("--port must be between 1 and 65535")
+				}
+				// Fetch the full desired spec before changing a single field so a
+				// corrective deploy preserves the app's existing configuration.
+				app, err = client.GetApp(app.ID)
+				if err != nil {
+					return err
+				}
+				updatedSpec := app.Spec
+				updatedSpec.Ports = []int{opts.Port}
+				spec = &updatedSpec
+			}
 			c.deployment = &deploymentCommandState{client: client, requestStarted: true}
-			response, err := client.DeployApp(app.ID, nil)
+			response, err := client.DeployApp(app.ID, spec)
 			if err != nil {
 				return err
 			}
@@ -1095,6 +1111,7 @@ func (c *CLI) newAppReleaseDeployCommand() *cobra.Command {
 			return c.renderAppCommandResult(result)
 		},
 	}
+	cmd.Flags().IntVar(&opts.Port, "port", 0, "Replace the app service port for this deployment")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
 	return cmd
 }

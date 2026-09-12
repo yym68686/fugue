@@ -4801,7 +4801,7 @@ func (s *Store) pgCancelOperation(id, message string) (model.Operation, error) {
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
-	if op.Status != model.OperationStatusPending {
+	if op.Status != model.OperationStatusPending && !(op.Status == model.OperationStatusRunning && op.Type == model.OperationTypeDeploy) {
 		return model.Operation{}, ErrConflict
 	}
 	now := time.Now().UTC()

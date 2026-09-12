@@ -562,6 +562,11 @@ func buildQueuedGitHubSource(repoURL, repoVisibility, repoAuthToken, branch, sou
 	if repoURL == "" {
 		return model.AppSource{}, fmt.Errorf("repo_url is required")
 	}
+	owner, name, err := sourceimport.ParseGitHubRepoURL(repoURL)
+	if err != nil {
+		return model.AppSource{}, err
+	}
+	repoURL = "https://github.com/" + owner + "/" + name
 	repoAuthToken = strings.TrimSpace(repoAuthToken)
 	normalizedVisibility := normalizeGitHubRepoVisibility(repoVisibility)
 	if normalizedVisibility == "" {

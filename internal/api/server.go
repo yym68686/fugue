@@ -1791,7 +1791,7 @@ func (s *Server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {
 	canceled, err := s.store.CancelOperation(op.ID, message)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			httpx.WriteError(w, http.StatusConflict, "operation is already running or terminal; only pending operations can be canceled")
+			httpx.WriteError(w, http.StatusConflict, "operation is already running or terminal; only pending operations or running deploys can be canceled")
 			return
 		}
 		s.writeStoreError(w, err)

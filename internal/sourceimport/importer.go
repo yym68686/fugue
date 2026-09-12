@@ -122,6 +122,11 @@ func ParseGitHubRepoURL(raw string) (string, string, error) {
 	if raw == "" {
 		return "", "", fmt.Errorf("repo_url is required")
 	}
+	if strings.HasPrefix(raw, "git@github.com:") {
+		raw = "https://github.com/" + strings.TrimPrefix(raw, "git@github.com:")
+	} else if !strings.Contains(raw, "://") {
+		raw = "https://github.com/" + strings.Trim(strings.TrimSuffix(raw, ".git"), "/")
+	}
 	const prefix = "https://github.com/"
 	if !strings.HasPrefix(raw, prefix) {
 		return "", "", fmt.Errorf("only https://github.com/<owner>/<repo> is supported in this MVP")

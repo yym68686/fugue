@@ -227,7 +227,11 @@ func appCreateServicePort(source model.AppSource, requested int, background bool
 			return 8080
 		case model.AppBuildStrategyNixpacks:
 			return 3000
-		case model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyAuto, "":
+		case model.AppBuildStrategyDockerfile, model.AppBuildStrategyAuto, "":
+			// Leave the port unset so the import worker can apply Dockerfile
+			// EXPOSE (or another detected runtime signal) after the source is built.
+			return 0
+		case model.AppBuildStrategyStaticSite:
 			return 80
 		default:
 			return 80

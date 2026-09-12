@@ -43,14 +43,14 @@ func TestCancelOperationOnlyCancelsPendingOperations(t *testing.T) {
 		t.Fatalf("expected terminal cancel retry conflict, got %v", err)
 	}
 
-	running, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeMigrate, TargetRuntimeID: runtimeObj.ID})
+	running, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeDeploy, TargetRuntimeID: runtimeObj.ID, DesiredSpec: &app.Spec})
 	if err != nil {
 		t.Fatalf("create second operation: %v", err)
 	}
 	if _, _, err := s.TryClaimPendingOperation(running.ID); err != nil {
 		t.Fatalf("claim second operation: %v", err)
 	}
-	if _, err := s.CancelOperation(running.ID, "too late"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("expected running cancel conflict, got %v", err)
+	if canceledRunning, err := s.CancelOperation(running.ID, "deploy superseded"); err != nil || canceledRunning.Status != model.OperationStatusCanceled {
+		t.Fatalf("expected running deploy cancellation, got op=%+v err=%v", canceledRunning, err)
 	}
 }

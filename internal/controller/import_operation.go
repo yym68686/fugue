@@ -255,7 +255,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	}
 	if model.AppUsesBackgroundNetwork(finalSpec) {
 		finalSpec.Ports = nil
-	} else if requestedPort := firstPositivePort(finalSpec.Ports); requestedPort > 0 {
+	} else if requestedPort := firstPositivePort(finalSpec.Ports); requestedPort > 0 && !(requestedPort == 80 && output.ImportResult.DetectedPort > 0 && output.ImportResult.DetectedPort != 80) {
 		finalSpec.Ports = []int{requestedPort}
 	} else if shouldAutoBackgroundImportedApp(*op.DesiredSource, output.ImportResult) {
 		finalSpec.NetworkMode = model.AppNetworkModeBackground

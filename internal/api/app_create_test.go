@@ -55,7 +55,7 @@ func TestCreateAppStagesGitHubSource(t *testing.T) {
 	if response.App.Source.Type != model.AppSourceTypeGitHubPublic {
 		t.Fatalf("expected github public source, got %+v", response.App.Source)
 	}
-	if response.App.Source.RepoURL != "example/worker" || response.App.Source.RepoBranch != "main" || response.App.Source.BuildStrategy != model.AppBuildStrategyBuildpacks {
+	if response.App.Source.RepoURL != "https://github.com/example/worker" || response.App.Source.RepoBranch != "main" || response.App.Source.BuildStrategy != model.AppBuildStrategyBuildpacks {
 		t.Fatalf("unexpected created source %+v", response.App.Source)
 	}
 

@@ -4184,7 +4184,7 @@ func (s *Store) CancelOperation(id, message string) (model.Operation, error) {
 		if index < 0 {
 			return ErrNotFound
 		}
-		if state.Operations[index].Status != model.OperationStatusPending {
+		if state.Operations[index].Status != model.OperationStatusPending && !(state.Operations[index].Status == model.OperationStatusRunning && state.Operations[index].Type == model.OperationTypeDeploy) {
 			return ErrConflict
 		}
 		now := time.Now().UTC()

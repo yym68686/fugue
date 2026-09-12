@@ -868,15 +868,20 @@ func (c *CLI) newProjectListCommand() *cobra.Command {
 
 func (c *CLI) newProjectCreateCommand() *cobra.Command {
 	opts := struct {
-		Description        string
-		DefaultRuntimeName string
-		DefaultRuntimeID   string
+		Description                         string
+		DefaultRuntimeName                  string
+		DefaultRuntimeID                    string
+		GitHubRepo, GitHubBranch, RepoToken string
+		Private, Public, Wait               bool
 	}{}
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Private && opts.Public {
+				return fmt.Errorf("--private and --public are mutually exclusive")
+			}
 			client, err := c.newClient()
 			if err != nil {
 				return err
@@ -888,6 +893,30 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 			defaultRuntimeID, err := resolveRuntimeSelection(client, opts.DefaultRuntimeID, opts.DefaultRuntimeName)
 			if err != nil {
 				return err
+			}
+			if strings.TrimSpace(opts.GitHubRepo) != "" {
+				token := strings.TrimSpace(opts.RepoToken)
+				if opts.Private {
+					token, err = resolveGitHubToken(c.context, token)
+					if err != nil {
+						return err
+					}
+				}
+				visibility := "public"
+				if opts.Private {
+					visibility = "private"
+				}
+				request := importGitHubRequest{TenantID: tenantID, Project: &importProjectRequest{Name: args[0], Description: opts.Description}, RepoURL: normalizeGitHubRepoArg(opts.GitHubRepo), RepoVisibility: visibility, RepoAuthToken: token, Branch: opts.GitHubBranch, RuntimeID: defaultRuntimeID, IdempotencyKey: "project-create:" + model.Slugify(args[0]) + ":" + model.Slugify(opts.GitHubRepo)}
+				if c.deployment == nil {
+					c.deployment = &deploymentCommandState{}
+				}
+				c.deployment.requestStarted = true
+				c.deployment.client = client
+				response, err := client.ImportGitHub(request)
+				if err != nil {
+					return err
+				}
+				return c.finishImportBundle(client, bundleFromGitHubResponse(response), opts.Wait)
 			}
 			project, err := client.CreateProject(tenantID, args[0], opts.Description, defaultRuntimeID)
 			if err != nil {
@@ -902,6 +931,12 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Description, "description", "", "Project description")
 	cmd.Flags().StringVar(&opts.DefaultRuntimeName, "default-runtime", "", "Default runtime name for new apps in this project")
 	cmd.Flags().StringVar(&opts.DefaultRuntimeID, "default-runtime-id", "", "Default runtime ID for new apps in this project")
+	cmd.Flags().StringVar(&opts.GitHubRepo, "github", "", "GitHub repository to import")
+	cmd.Flags().StringVar(&opts.GitHubBranch, "branch", "", "GitHub branch")
+	cmd.Flags().BoolVar(&opts.Private, "private", false, "Private GitHub repository")
+	cmd.Flags().BoolVar(&opts.Public, "public", false, "Public GitHub repository")
+	cmd.Flags().StringVar(&opts.RepoToken, "repo-token", "", "GitHub token")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", true, "Wait for imported operations")
 	_ = cmd.Flags().MarkHidden("default-runtime-id")
 	return cmd
 }
