@@ -30013,6 +30013,18 @@ components:
             type: string
         lineage:
           $ref: "#/components/schemas/PlatformConfigLineage"
+    PlatformRuntimeSnapshot:
+      type: object
+      additionalProperties: false
+      required: [intent_generation, policy_generation]
+      properties:
+        intent_generation:
+          type: string
+        policy_generation:
+          type: string
+        facts:
+          type: object
+          additionalProperties: true
     PlatformConfigCompileRequest:
       type: object
       additionalProperties: false
@@ -30022,6 +30034,8 @@ components:
           $ref: "#/components/schemas/PlatformConfigIntent"
         policy:
           $ref: "#/components/schemas/PlatformConfigPolicySnapshot"
+        runtime_snapshot:
+          $ref: "#/components/schemas/PlatformRuntimeSnapshot"
         input_snapshot:
           type: object
           additionalProperties: true

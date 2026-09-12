@@ -13,9 +13,10 @@ import (
 )
 
 type platformConfigCompileRequest struct {
-	Intent        platformconfig.PlatformIntent `json:"intent"`
-	Policy        platformconfig.PolicySnapshot `json:"policy"`
-	InputSnapshot map[string]any                `json:"input_snapshot,omitempty"`
+	Intent          platformconfig.PlatformIntent  `json:"intent"`
+	Policy          platformconfig.PolicySnapshot  `json:"policy"`
+	RuntimeSnapshot platformconfig.RuntimeSnapshot `json:"runtime_snapshot,omitempty"`
+	InputSnapshot   map[string]any                 `json:"input_snapshot,omitempty"`
 }
 
 type platformConfigCompileResponse struct {
@@ -47,10 +48,11 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{
-		Intent:        request.Intent,
-		Policy:        request.Policy,
-		InputSnapshot: request.InputSnapshot,
-		CreatedAt:     time.Now().UTC(),
+		Intent:          request.Intent,
+		Policy:          request.Policy,
+		RuntimeSnapshot: request.RuntimeSnapshot,
+		InputSnapshot:   request.InputSnapshot,
+		CreatedAt:       time.Now().UTC(),
 	})
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())

@@ -64,6 +64,17 @@ func TestCompileRejectsDuplicateRoutesAndInvalidDependencyOrder(t *testing.T) {
 	}
 }
 
+func TestCompileRejectsRuntimeSnapshotGenerationDrift(t *testing.T) {
+	_, err := Compile(CompileRequest{
+		Intent:          PlatformIntent{Generation: "intent-0001"},
+		Policy:          PolicySnapshot{Generation: "policy-0001"},
+		RuntimeSnapshot: RuntimeSnapshot{IntentGeneration: "intent-old", PolicyGeneration: "policy-0001", Facts: map[string]any{"edges": 2}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime snapshot generations") {
+		t.Fatalf("expected runtime snapshot generation mismatch, got %v", err)
+	}
+}
+
 func TestCompileRejectsConstraintGraphCyclesAndUnknownNodes(t *testing.T) {
 	base := CompileRequest{
 		Intent: PlatformIntent{Generation: "intent-graph-0001"},

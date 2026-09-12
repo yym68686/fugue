@@ -93,10 +93,21 @@ type ReleaseSet struct {
 }
 
 type CompileRequest struct {
-	Intent        PlatformIntent
-	Policy        PolicySnapshot
+	Intent          PlatformIntent
+	Policy          PolicySnapshot
+	RuntimeSnapshot RuntimeSnapshot
+	// InputSnapshot is retained as a wire compatibility fallback. New callers
+	// should use RuntimeSnapshot so generation binding is explicit.
 	InputSnapshot map[string]any
 	CreatedAt     time.Time
+}
+
+// RuntimeSnapshot is the immutable runtime fact view used by one compiler
+// invocation. It is input data, never serving configuration.
+type RuntimeSnapshot struct {
+	IntentGeneration string         `json:"intent_generation"`
+	PolicyGeneration string         `json:"policy_generation"`
+	Facts            map[string]any `json:"facts,omitempty"`
 }
 
 type CompileResult struct {
@@ -135,9 +146,22 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if err != nil {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
+	runtimeSnapshot := req.RuntimeSnapshot
+	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && req.InputSnapshot != nil {
+		runtimeSnapshot = RuntimeSnapshot{IntentGeneration: intent.Generation, PolicyGeneration: policy.Generation, Facts: req.InputSnapshot}
+	}
+	if runtimeSnapshot.IntentGeneration == "" {
+		runtimeSnapshot.IntentGeneration = intent.Generation
+	}
+	if runtimeSnapshot.PolicyGeneration == "" {
+		runtimeSnapshot.PolicyGeneration = policy.Generation
+	}
+	if runtimeSnapshot.IntentGeneration != intent.Generation || runtimeSnapshot.PolicyGeneration != policy.Generation {
+		return CompileResult{}, fmt.Errorf("runtime snapshot generations must match intent and policy")
+	}
 	snapshotDigest := ""
-	if req.InputSnapshot != nil {
-		snapshotDigest, err = Digest(req.InputSnapshot)
+	if runtimeSnapshot.Facts != nil || runtimeSnapshot.IntentGeneration != "" || runtimeSnapshot.PolicyGeneration != "" {
+		snapshotDigest, err = Digest(runtimeSnapshot)
 		if err != nil {
 			return CompileResult{}, fmt.Errorf("digest compiler input snapshot: %w", err)
 		}
