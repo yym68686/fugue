@@ -58,3 +58,21 @@ func TestCompilePlatformConfigPersistsLineageAndReleaseSet(t *testing.T) {
 		t.Fatalf("tenant key must not compile platform config, got %d body=%s", forbidden.Code, forbidden.Body.String())
 	}
 }
+
+func TestReleaseSetInvariantRequiresTrafficArtifactGroup(t *testing.T) {
+	valid := model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindReleaseSet,
+		Content: map[string]any{
+			"artifact_ids":   []any{"route-1", "dns-1", "tls-1"},
+			"artifact_kinds": []any{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig},
+			"lineage":        map[string]any{"intent_digest": "sha256:intent", "policy_digest": "sha256:policy"},
+		},
+	}
+	if result := platformArtifactInvariantValidation(valid); !result.Pass {
+		t.Fatalf("valid traffic release set rejected: %+v", result)
+	}
+	valid.Content["artifact_kinds"] = []any{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle}
+	if result := platformArtifactInvariantValidation(valid); result.Pass {
+		t.Fatalf("incomplete traffic release set unexpectedly passed: %+v", result)
+	}
+}

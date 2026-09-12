@@ -673,6 +673,23 @@ func platformArtifactInvariantValidation(artifact model.PlatformArtifact) model.
 		_, answers := artifact.Content["answers"]
 		pass = records || answers
 		message = "DNS artifacts must include records or answers"
+	case model.PlatformArtifactKindReleaseSet:
+		ids, idsOK := artifact.Content["artifact_ids"].([]any)
+		kinds, kindsOK := artifact.Content["artifact_kinds"].([]any)
+		lineage, lineageOK := artifact.Content["lineage"].(map[string]any)
+		seenKinds := map[string]bool{}
+		for _, value := range kinds {
+			if kind, ok := value.(string); ok {
+				seenKinds[kind] = true
+			}
+		}
+		pass = idsOK && kindsOK && lineageOK && len(ids) == len(kinds) && len(ids) >= 3 &&
+			seenKinds[model.PlatformArtifactKindEdgeRouteBundle] &&
+			seenKinds[model.PlatformArtifactKindDNSAnswerBundle] &&
+			seenKinds[model.PlatformArtifactKindCaddyRouteConfig] &&
+			strings.TrimSpace(fmt.Sprint(lineage["intent_digest"])) != "" &&
+			strings.TrimSpace(fmt.Sprint(lineage["policy_digest"])) != ""
+		message = "release sets must bind route, DNS, and TLS artifacts with lineage"
 	case model.PlatformArtifactKindReleaseGuardPolicy:
 		return releaseSignalPolicyValidationResult(artifact)
 	case model.PlatformArtifactKindGatePolicyRegistry:
