@@ -1263,11 +1263,13 @@ func parseComposePortString(raw string) (int, bool, bool) {
 
 func resolveComposeInterpolation(raw string, vars map[string]string) string {
 	result := raw
+	searchFrom := 0
 	for {
-		start := strings.Index(result, "${")
-		if start < 0 {
+		relativeStart := strings.Index(result[searchFrom:], "${")
+		if relativeStart < 0 {
 			return result
 		}
+		start := searchFrom + relativeStart
 		end := strings.Index(result[start+2:], "}")
 		if end < 0 {
 			return result
@@ -1275,8 +1277,16 @@ func resolveComposeInterpolation(raw string, vars map[string]string) string {
 		end += start + 2
 
 		expr := result[start+2 : end]
+		// Fugue runtime references are resolved after route allocation. Preserve
+		// them through Compose interpolation instead of treating their colon as
+		// a Compose fallback expression.
+		if strings.HasPrefix(strings.TrimSpace(expr), "FUGUE_ENTRYPOINT_") {
+			searchFrom = end + 1
+			continue
+		}
 		replacement := resolveComposeExpression(expr, vars)
 		result = result[:start] + replacement + result[end+1:]
+		searchFrom = start + len(replacement)
 	}
 }
 
