@@ -241,23 +241,6 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 			return s.failDatabaseMigration(migration, err.Error())
 		}
 	}
-	if migration.InitialInstances == 1 && migration.TemporaryReplicaCount == 0 && migration.Phase == "prepare-standby" {
-		migration.Phase = "single-instance-cutover"
-		migration.ResultMessage = "single-instance control-plane storage cutover pending"
-		if err := s.Store.UpdateDatabaseMigration(migration); err != nil {
-			return err
-		}
-	}
-	if migration.Phase == "single-instance-cutover" {
-		cluster, _, _ = client.getCloudNativePGCluster(ctx, namespace, clusterName)
-		if strings.TrimSpace(cluster.Status.CurrentPrimary) != "" && s.podStorageClass(ctx, client, namespace, cluster.Status.CurrentPrimary) == migration.TargetStorageClassName {
-			if migration.InitialSystemID != "" && cluster.Status.SystemID != "" && migration.InitialSystemID != cluster.Status.SystemID {
-				return s.failDatabaseMigration(migration, "PostgreSQL system identifier changed during migration")
-			}
-			return s.completeDatabaseMigration(migration, "single-instance control-plane database migrated to "+migration.TargetStorageClassName)
-		}
-		return nil
-	}
 	if migration.Phase == "prepare-standby" || migration.Phase == "" {
 		pods, _ := client.listPodsBySelector(ctx, namespace, "cnpg.io/cluster="+clusterName+",cnpg.io/instanceRole=replica")
 		for _, pod := range pods {
@@ -306,21 +289,12 @@ func (s *Service) executeDatabaseMigration(ctx context.Context, migration model.
 				}
 				return nil
 			}
-			pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+clusterName+",cnpg.io/pvcRole=PG_DATA")
-			if err != nil {
-				return err
-			}
-			if len(pvcNames) < migration.InitialInstances {
+			if cluster.Status.ReadyInstances < migration.InitialInstances {
 				return nil
 			}
-			for _, pvcName := range pvcNames {
-				pvc, ok, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
-				if err != nil {
-					return err
-				}
-				if !ok || strings.TrimSpace(pvc.Spec.StorageClassName) != migration.TargetStorageClassName {
-					return nil
-				}
+			primary, primaryFound, primaryErr := client.getPod(ctx, namespace, cluster.Status.CurrentPrimary)
+			if primaryErr != nil || !primaryFound || !kubePodReady(primary) {
+				return nil
 			}
 			return s.completeDatabaseMigration(migration, "control-plane database migrated to "+migration.TargetStorageClassName)
 		}
