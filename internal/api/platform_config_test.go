@@ -57,6 +57,10 @@ func TestCompilePlatformConfigPersistsLineageAndReleaseSet(t *testing.T) {
 	if lineage.Code != http.StatusOK {
 		t.Fatalf("expected lineage status %d, got %d body=%s", http.StatusOK, lineage.Code, lineage.Body.String())
 	}
+	releaseLineage := performJSONRequest(t, server, http.MethodGet, "/v1/admin/artifacts/"+response.ReleaseArtifact.ID+"/lineage", platformAdminKey, nil)
+	if releaseLineage.Code != http.StatusOK || !strings.Contains(releaseLineage.Body.String(), `"dependencies"`) {
+		t.Fatalf("release set lineage must expose child dependencies: %d %s", releaseLineage.Code, releaseLineage.Body.String())
+	}
 	if forbidden := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", tenantKey, request); forbidden.Code != http.StatusForbidden {
 		t.Fatalf("tenant key must not compile platform config, got %d body=%s", forbidden.Code, forbidden.Body.String())
 	}

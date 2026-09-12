@@ -30060,6 +30060,17 @@ components:
           $ref: "#/components/schemas/PlatformArtifact"
         release_artifact:
           $ref: "#/components/schemas/PlatformArtifact"
+    PlatformArtifactLineageDependency:
+      type: object
+      additionalProperties: false
+      required: [artifact, lineage]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        lineage:
+          $ref: "#/components/schemas/PlatformConfigLineage"
+        lkg:
+          $ref: "#/components/schemas/PlatformLKGSnapshot"
     PlatformArtifactLineageResponse:
       type: object
       additionalProperties: false
@@ -30071,6 +30082,10 @@ components:
           $ref: "#/components/schemas/PlatformConfigLineage"
         lkg:
           $ref: "#/components/schemas/PlatformLKGSnapshot"
+        dependencies:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformArtifactLineageDependency"
     PlatformArtifactCreateRequest:
       type: object
       additionalProperties: false

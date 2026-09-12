@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -31,6 +32,13 @@ type platformConfigCompileResponse struct {
 }
 
 type platformConfigLineageResponse struct {
+	Artifact     model.PlatformArtifact            `json:"artifact"`
+	Lineage      platformconfig.Lineage            `json:"lineage"`
+	LKG          *model.PlatformLKGSnapshot        `json:"lkg,omitempty"`
+	Dependencies []platformConfigLineageDependency `json:"dependencies,omitempty"`
+}
+
+type platformConfigLineageDependency struct {
 	Artifact model.PlatformArtifact     `json:"artifact"`
 	Lineage  platformconfig.Lineage     `json:"lineage"`
 	LKG      *model.PlatformLKGSnapshot `json:"lkg,omitempty"`
@@ -151,11 +159,41 @@ func (s *Server) handleGetPlatformArtifactLineage(w http.ResponseWriter, r *http
 		s.writeStoreError(w, lkgErr)
 		return
 	}
+	dependencies, dependencyErr := s.platformArtifactLineageDependencies(artifact)
+	if dependencyErr != nil {
+		httpx.WriteError(w, http.StatusConflict, dependencyErr.Error())
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, platformConfigLineageResponse{
-		Artifact: artifact,
-		Lineage:  platformconfig.LineageFromArtifact(artifact),
-		LKG:      lkg,
+		Artifact: artifact, Lineage: platformconfig.LineageFromArtifact(artifact), LKG: lkg, Dependencies: dependencies,
 	})
+}
+
+func (s *Server) platformArtifactLineageDependencies(artifact model.PlatformArtifact) ([]platformConfigLineageDependency, error) {
+	if artifact.ArtifactKind != model.PlatformArtifactKindReleaseSet {
+		return nil, nil
+	}
+	ids, ok := artifact.Content["artifact_ids"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("release set lineage dependencies are malformed")
+	}
+	dependencies := make([]platformConfigLineageDependency, 0, len(ids))
+	for _, rawID := range ids {
+		id, ok := rawID.(string)
+		if !ok || strings.TrimSpace(id) == "" {
+			return nil, fmt.Errorf("release set lineage dependency id is invalid")
+		}
+		child, err := s.store.GetPlatformArtifact(id)
+		if err != nil {
+			return nil, fmt.Errorf("release set lineage dependency %q is unavailable", id)
+		}
+		childLKG, lkgErr := s.store.GetPlatformLKG(child.ArtifactKind, child.ScopeKey)
+		if lkgErr != nil && !isStoreNotFound(lkgErr) {
+			return nil, lkgErr
+		}
+		dependencies = append(dependencies, platformConfigLineageDependency{Artifact: child, Lineage: platformconfig.LineageFromArtifact(child), LKG: childLKG})
+	}
+	return dependencies, nil
 }
 
 func isStoreNotFound(err error) bool {
