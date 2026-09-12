@@ -125,3 +125,47 @@ func TestReleaseSetPromotionRejectsMissingChildren(t *testing.T) {
 		t.Fatalf("expected missing child rejection at promotion, got %d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestCompilePlatformConfigFailurePreservesPreviousImmutableArtifacts(t *testing.T) {
+	stateStore, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	request := map[string]any{
+		"intent": map[string]any{
+			"generation": "compile-recovery-intent-1",
+			"scope":      "global",
+			"routes": []any{map[string]any{
+				"hostname": "stable.fugue.pro", "upstream_url": "http://stable:8080", "enabled": true,
+			}},
+		},
+		"policy": map[string]any{
+			"generation":            "compile-recovery-policy-1",
+			"scope":                 "global",
+			"require_tls_ready":     true,
+			"minimum_healthy_edges": 1,
+			"dependency_order":      []string{"route", "tls", "dns"},
+		},
+		"input_snapshot": map[string]any{"topology_revision": "compile-recovery-topology-1"},
+	}
+	first := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", platformAdminKey, request)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("initial compile failed: %d %s", first.Code, first.Body.String())
+	}
+	var firstResponse struct {
+		RouteArtifact model.PlatformArtifact `json:"route_artifact"`
+	}
+	mustDecodeJSON(t, first, &firstResponse)
+
+	request["intent"].(map[string]any)["routes"] = []any{map[string]any{
+		"hostname": "changed.fugue.pro", "upstream_url": "http://changed:8080", "enabled": true,
+	}}
+	failed := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", platformAdminKey, request)
+	if failed.Code != http.StatusConflict {
+		t.Fatalf("changed immutable generation must fail with conflict: %d %s", failed.Code, failed.Body.String())
+	}
+	retained, err := stateStore.GetPlatformArtifact(firstResponse.RouteArtifact.ID)
+	if err != nil {
+		t.Fatalf("load retained route artifact: %v", err)
+	}
+	if retained.Content["routes"].([]any)[0].(map[string]any)["hostname"] != "stable.fugue.pro" {
+		t.Fatalf("failed compile changed retained artifact: %+v", retained.Content)
+	}
+}
