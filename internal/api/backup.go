@@ -35,12 +35,10 @@ import (
 const (
 	backupSchedulerInterval = time.Minute
 	backupRunTimeout        = 30 * time.Minute
-	// Longhorn remote backups can upload a sparse 100GiB volume for longer than
-	// a normal API rollout. Keep the durable lease alive for the whole bounded
-	// backup execution window; the heartbeat still renews it every 30 seconds.
-	// This prevents a rolling API restart from misclassifying an active remote
-	// snapshot upload as a lost run.
-	backupRunLeaseTTL        = 2 * time.Hour
+	// The lease is deliberately short so a replacement API worker can reclaim
+	// a run after a rollout. Longhorn CRs are labelled by run ID and are reused
+	// by the successor worker, so reclaiming never creates a second R2 copy.
+	backupRunLeaseTTL        = 2 * time.Minute
 	backupRunHeartbeatPeriod = 30 * time.Second
 	backupBackendProbeTTL    = 30 * time.Second
 	backupRunMaxRetries      = 3

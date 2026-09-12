@@ -4397,7 +4397,11 @@ WHERE id = $1
   AND next_retry_at IS NOT DISTINCT FROM $7
 RETURNING ` + backupRunReturningColumns()
 	}
-	recovered, err := scanBackupRun(s.db.QueryRowContext(ctx, query, observed.ID, observed.Status, observed.LeaseOwner, observed.UpdatedAt, observed.LockedUntil, observed.HeartbeatAt, observed.NextRetryAt, now, backupRunLostErrorCode, backupRunLostErrorMessage))
+	args := []any{observed.ID, observed.Status, observed.LeaseOwner, observed.UpdatedAt, observed.LockedUntil, observed.HeartbeatAt, observed.NextRetryAt, now, backupRunLostErrorCode, backupRunLostErrorMessage}
+	if model.NormalizeBackupTarget(observed.Target).Engine == model.BackupEngineLonghornSnapshot {
+		args = args[:8]
+	}
+	recovered, err := scanBackupRun(s.db.QueryRowContext(ctx, query, args...))
 	if errors.Is(err, ErrNotFound) {
 		return model.BackupRun{}, ErrConflict
 	}

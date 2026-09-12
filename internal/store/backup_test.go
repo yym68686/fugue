@@ -901,6 +901,34 @@ func TestRecoverStaleBackupRunUsesObservedLeaseCAS(t *testing.T) {
 	})
 }
 
+func TestRecoverStaleLonghornBackupRunRequeuesWithoutFinishing(t *testing.T) {
+	stateStore, backend, policy := newBackupClaimTestStore(t)
+	policy.Engine = model.BackupEngineLonghornSnapshot
+	policy.Target.Engine = model.BackupEngineLonghornSnapshot
+	policy.Target.RemoteSnapshotRequired = true
+	policy, err := stateStore.UpsertBackupPolicy(policy)
+	if err != nil {
+		t.Fatalf("update Longhorn policy: %v", err)
+	}
+	staleHeartbeat := time.Now().UTC().Add(-10 * time.Minute)
+	staleLock := staleHeartbeat.Add(time.Minute)
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID: policy.ID, Target: policy.Target, BackendID: backend.ID,
+		Trigger: model.BackupRunTriggerManual, Status: model.BackupRunStatusRunning,
+		LeaseOwner: "worker-owner", LockedUntil: &staleLock, HeartbeatAt: &staleHeartbeat,
+	})
+	if err != nil {
+		t.Fatalf("create stale Longhorn run: %v", err)
+	}
+	recovered, err := stateStore.RecoverStaleBackupRun(run, time.Now().UTC(), 2*time.Minute)
+	if err != nil {
+		t.Fatalf("recover stale Longhorn run: %v", err)
+	}
+	if recovered.Status != model.BackupRunStatusPending || recovered.LeaseOwner != "" || recovered.FinishedAt != nil || recovered.ErrorCode != "" || recovered.NextRetryAt == nil {
+		t.Fatalf("Longhorn run was not safely requeued: %+v", recovered)
+	}
+}
+
 func TestCreateBackupArtifactForRunFencesLeaseAndDefersPolicySuccess(t *testing.T) {
 	t.Parallel()
 
