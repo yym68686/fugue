@@ -98,6 +98,10 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 		s.writeStoreError(w, storeErr)
 		return
 	}
+	if referenceResult := s.validateReleaseSetReferences(storedRelease); !referenceResult.Pass {
+		httpx.WriteError(w, http.StatusConflict, referenceResult.Message)
+		return
+	}
 	validatedRelease, validateErr := s.store.ValidatePlatformArtifact(storedRelease.ID, []model.PlatformArtifactValidationResult{{
 		Name:     "platform_config.release_set",
 		Pass:     true,

@@ -2,9 +2,12 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
+	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func TestCompilePlatformConfigPersistsLineageAndReleaseSet(t *testing.T) {
@@ -74,5 +77,27 @@ func TestReleaseSetInvariantRequiresTrafficArtifactGroup(t *testing.T) {
 	valid.Content["artifact_kinds"] = []any{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle}
 	if result := platformArtifactInvariantValidation(valid); result.Pass {
 		t.Fatalf("incomplete traffic release set unexpectedly passed: %+v", result)
+	}
+}
+
+func TestReleaseSetReferenceValidationRequiresExistingValidatedChildren(t *testing.T) {
+	s := store.New(t.TempDir() + "/store.json")
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	artifact := model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindReleaseSet,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global", Key: "global"},
+		Generation:   "release-invalid-reference",
+		Content: map[string]any{
+			"artifact_ids":   []any{"missing-route"},
+			"artifact_kinds": []any{model.PlatformArtifactKindEdgeRouteBundle},
+		},
+		Metadata: map[string]string{"intent_digest": "sha256:intent", "policy_digest": "sha256:policy"},
+	}
+	result := server.validateReleaseSetReferences(artifact)
+	if result.Pass || !strings.Contains(result.Message, "unknown artifact") {
+		t.Fatalf("expected missing child rejection, got %+v", result)
 	}
 }

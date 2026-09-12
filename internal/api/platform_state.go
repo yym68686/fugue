@@ -108,6 +108,9 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 		return
 	}
 	results := validatePlatformArtifactDraft(artifact)
+	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+		results = append(results, s.validateReleaseSetReferences(artifact))
+	}
 	pass := platformArtifactValidationPass(results)
 	if !req.DryRun {
 		artifact, err = s.store.ValidatePlatformArtifact(artifact.ID, results)
@@ -132,6 +135,42 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 		Pass:     pass,
 		DryRun:   req.DryRun,
 	})
+}
+
+func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {
+	ids, idsOK := artifact.Content["artifact_ids"].([]any)
+	kinds, kindsOK := artifact.Content["artifact_kinds"].([]any)
+	if !idsOK || !kindsOK || len(ids) == 0 || len(ids) != len(kinds) {
+		return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set artifact references must be parallel non-empty arrays"}
+	}
+	seen := map[string]struct{}{}
+	intentDigest := artifact.Metadata["intent_digest"]
+	policyDigest := artifact.Metadata["policy_digest"]
+	for index, rawID := range ids {
+		id, ok := rawID.(string)
+		if !ok || strings.TrimSpace(id) == "" {
+			return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set contains an invalid artifact id"}
+		}
+		if _, exists := seen[id]; exists {
+			return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set contains duplicate artifact ids", Evidence: map[string]string{"artifact_id": id}}
+		}
+		seen[id] = struct{}{}
+		child, err := s.store.GetPlatformArtifact(id)
+		if err != nil {
+			return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set references an unknown artifact", Evidence: map[string]string{"artifact_id": id}}
+		}
+		expectedKind, ok := kinds[index].(string)
+		if !ok || strings.TrimSpace(expectedKind) != child.ArtifactKind || child.Status != model.PlatformArtifactStatusValidated {
+			return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set child artifact kind or validation status does not match", Evidence: map[string]string{"artifact_id": id, "expected_kind": fmt.Sprint(expectedKind), "actual_kind": child.ArtifactKind, "status": child.Status}}
+		}
+		if intentDigest != "" && child.Metadata["intent_digest"] != "" && child.Metadata["intent_digest"] != intentDigest {
+			return model.PlatformArtifactValidationResult{Name: "release_set.lineage", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set child intent digest does not match", Evidence: map[string]string{"artifact_id": id}}
+		}
+		if policyDigest != "" && child.Metadata["policy_digest"] != "" && child.Metadata["policy_digest"] != policyDigest {
+			return model.PlatformArtifactValidationResult{Name: "release_set.lineage", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set child policy digest does not match", Evidence: map[string]string{"artifact_id": id}}
+		}
+	}
+	return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: true, Severity: model.RobustnessSeverityBlockPublish, Message: "all release set child artifacts exist, are validated, and match lineage"}
 }
 
 func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Request) {
