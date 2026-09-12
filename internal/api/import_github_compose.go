@@ -37,7 +37,7 @@ func shouldInspectComposeImport(req importGitHubRequest, buildStrategy string) b
 	if strings.TrimSpace(req.SourceDir) != "" || strings.TrimSpace(req.DockerfilePath) != "" || strings.TrimSpace(req.BuildContextDir) != "" {
 		return false
 	}
-	if strings.TrimSpace(req.ConfigContent) != "" || len(req.Files) > 0 || req.Postgres != nil {
+	if strings.TrimSpace(req.ConfigContent) != "" || len(req.Files) > 0 {
 		return false
 	}
 	return true
