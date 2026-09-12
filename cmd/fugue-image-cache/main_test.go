@@ -163,6 +163,25 @@ func TestReplicationBlobRequiresAuthAndSupportsRange(t *testing.T) {
 	}
 }
 
+func TestReplicationCapabilitiesArePubliclyDiscoverable(t *testing.T) {
+	t.Parallel()
+	cache := &imageCache{clusterNode: "node-a", managementToken: "secret"}
+	req := httptest.NewRequest(http.MethodGet, "/fugue/cache/v2/replication/capabilities", nil)
+	req.RemoteAddr = "198.51.100.10:1234"
+	rec := httptest.NewRecorder()
+	cache.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capabilities status = %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["protocol_version"] != "v2" || body["lazy_pull"] != true || body["zero_copy"] != false {
+		t.Fatalf("unexpected capabilities: %+v", body)
+	}
+}
+
 func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	t.Parallel()
 

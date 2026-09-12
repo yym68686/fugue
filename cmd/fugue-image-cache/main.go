@@ -319,6 +319,19 @@ func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if path == "/fugue/cache/v2/replication/capabilities" && r.Method == http.MethodGet {
+		writeManagementJSON(w, http.StatusOK, map[string]any{
+			"protocol_version": "v2",
+			"transports":       []string{"stream", "legacy-crane"},
+			"range":            true,
+			"resume":           true,
+			"zero_copy":        false,
+			"p2p":              false,
+			"lazy_pull":        true,
+			"node":             c.clusterNode,
+		})
+		return
+	}
 	if !c.authorizeManagement(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
