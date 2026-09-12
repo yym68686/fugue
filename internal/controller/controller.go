@@ -81,8 +81,8 @@ type sourceImporter interface {
 	ImportDockerImageSource(context.Context, sourceimport.DockerImageSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
 	ImportGitHubSource(context.Context, sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
 	ImportUploadedArchiveSource(context.Context, sourceimport.UploadSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
-	SuggestGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error)
-	SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (map[string]string, error)
+	SuggestGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error)
+	SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error)
 }
 
 type operationLane int

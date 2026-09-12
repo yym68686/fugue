@@ -128,12 +128,12 @@ func (i *blockingImporter) ImportUploadedArchiveSource(context.Context, sourceim
 	return sourceimport.GitHubSourceImportOutput{}, fmt.Errorf("unexpected upload import")
 }
 
-func (i *blockingImporter) SuggestGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error) {
-	return nil, nil
+func (i *blockingImporter) SuggestGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error) {
+	return sourceimport.ComposeServiceEnvSuggestion{}, nil
 }
 
-func (i *blockingImporter) SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (map[string]string, error) {
-	return nil, nil
+func (i *blockingImporter) SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error) {
+	return sourceimport.ComposeServiceEnvSuggestion{}, nil
 }
 
 type controlledImporter struct {
@@ -189,12 +189,12 @@ func (i *controlledImporter) ImportUploadedArchiveSource(context.Context, source
 	return sourceimport.GitHubSourceImportOutput{}, fmt.Errorf("unexpected upload import")
 }
 
-func (i *controlledImporter) SuggestGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error) {
-	return nil, nil
+func (i *controlledImporter) SuggestGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error) {
+	return sourceimport.ComposeServiceEnvSuggestion{}, nil
 }
 
-func (i *controlledImporter) SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (map[string]string, error) {
-	return nil, nil
+func (i *controlledImporter) SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error) {
+	return sourceimport.ComposeServiceEnvSuggestion{}, nil
 }
 
 func (i *controlledImporter) release(opID string) {

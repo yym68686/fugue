@@ -10,6 +10,11 @@ import (
 
 var ErrSourceTopologyNotFound = errors.New("source topology file not found")
 
+type ComposeServiceEnvSuggestion struct {
+	Env        map[string]string
+	SourceKind string
+}
+
 type GitHubComposeServiceEnvRequest struct {
 	RepoURL                string
 	RepoAuthToken          string
@@ -32,22 +37,22 @@ type UploadComposeServiceEnvRequest struct {
 	ManagedPostgresByOwner map[string]model.AppPostgresSpec
 }
 
-func (i *Importer) SuggestGitHubComposeServiceEnv(ctx context.Context, req GitHubComposeServiceEnvRequest) (map[string]string, error) {
+func (i *Importer) SuggestGitHubComposeServiceEnv(ctx context.Context, req GitHubComposeServiceEnvRequest) (ComposeServiceEnvSuggestion, error) {
 	if strings.TrimSpace(req.ComposeService) == "" {
-		return nil, nil
+		return ComposeServiceEnvSuggestion{}, nil
 	}
 	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-compose-env-*")
 	if err != nil {
-		return nil, err
+		return ComposeServiceEnvSuggestion{}, err
 	}
 	defer releaseClonedRepo(repo)
 
 	return suggestComposeServiceEnvFromRepo(repo, req.ComposeService, req.AppHosts, req.AppPublicHosts, req.ManagedPostgresByOwner)
 }
 
-func (i *Importer) SuggestUploadedComposeServiceEnv(_ context.Context, req UploadComposeServiceEnvRequest) (map[string]string, error) {
+func (i *Importer) SuggestUploadedComposeServiceEnv(_ context.Context, req UploadComposeServiceEnvRequest) (ComposeServiceEnvSuggestion, error) {
 	if strings.TrimSpace(req.ComposeService) == "" || len(req.ArchiveData) == 0 {
-		return nil, nil
+		return ComposeServiceEnvSuggestion{}, nil
 	}
 	src, err := i.extractUploadedArchive(UploadSourceImportRequest{
 		UploadID:         "compose-env-sync",
@@ -58,7 +63,7 @@ func (i *Importer) SuggestUploadedComposeServiceEnv(_ context.Context, req Uploa
 		AppName:          req.AppName,
 	})
 	if err != nil {
-		return nil, err
+		return ComposeServiceEnvSuggestion{}, err
 	}
 	defer releaseExtractedUploadSource(src)
 
@@ -68,12 +73,14 @@ func (i *Importer) SuggestUploadedComposeServiceEnv(_ context.Context, req Uploa
 	}, req.ComposeService, req.AppHosts, req.AppPublicHosts, req.ManagedPostgresByOwner)
 }
 
-func suggestComposeServiceEnvFromRepo(repo clonedGitHubRepo, composeService string, appHosts, appPublicHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (map[string]string, error) {
+func suggestComposeServiceEnvFromRepo(repo clonedGitHubRepo, composeService string, appHosts, appPublicHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (ComposeServiceEnvSuggestion, error) {
 	topology, err := inspectImportableTopologyFromRepo(repo)
 	if err != nil {
-		return nil, err
+		return ComposeServiceEnvSuggestion{}, err
 	}
-	return suggestComposeServiceEnvForTopology(topology, composeService, appHosts, appPublicHosts, managedPostgresByOwner)
+	suggestion, err := suggestComposeServiceEnvForTopology(topology, composeService, appHosts, appPublicHosts, managedPostgresByOwner)
+	suggestion.SourceKind = topology.SourceKind
+	return suggestion, err
 }
 
 func inspectImportableTopologyFromRepo(repo clonedGitHubRepo) (NormalizedTopology, error) {
@@ -96,14 +103,14 @@ func inspectImportableTopologyFromRepo(repo clonedGitHubRepo) (NormalizedTopolog
 	}
 }
 
-func suggestComposeServiceEnvForTopology(topology NormalizedTopology, composeService string, appHosts, appPublicHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (map[string]string, error) {
+func suggestComposeServiceEnvForTopology(topology NormalizedTopology, composeService string, appHosts, appPublicHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (ComposeServiceEnvSuggestion, error) {
 	composeService = slugifyOptional(composeService)
 	if composeService == "" {
-		return nil, nil
+		return ComposeServiceEnvSuggestion{}, nil
 	}
 	plan, err := AnalyzeNormalizedTopology(topology, "")
 	if err != nil {
-		return nil, err
+		return ComposeServiceEnvSuggestion{}, err
 	}
 	env, _, err := ResolveTopologyServiceEnvironment(plan, composeService, TopologyDeployment{
 		ServiceHosts:           cloneStringMapLocal(appHosts),
@@ -111,12 +118,9 @@ func suggestComposeServiceEnvForTopology(topology NormalizedTopology, composeSer
 		ManagedPostgresByOwner: cloneManagedPostgresMap(managedPostgresByOwner),
 	})
 	if err != nil {
-		return nil, err
+		return ComposeServiceEnvSuggestion{}, err
 	}
-	if len(env) == 0 {
-		return nil, nil
-	}
-	return env, nil
+	return ComposeServiceEnvSuggestion{Env: env}, nil
 }
 
 func cloneManagedPostgresMap(values map[string]model.AppPostgresSpec) map[string]model.AppPostgresSpec {

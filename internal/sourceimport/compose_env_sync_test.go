@@ -66,46 +66,46 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 		},
 	}
 
-	workerEnv, err := suggestComposeServiceEnvForTopology(topology, "worker", appHosts, nil, managedPostgresByOwner)
+	workerSuggestion, err := suggestComposeServiceEnvForTopology(topology, "worker", appHosts, nil, managedPostgresByOwner)
 	if err != nil {
 		t.Fatalf("suggest worker env: %v", err)
 	}
-	if got := workerEnv["API_BASE_URL"]; got != "http://demo-api:8000/v1" {
+	if got := workerSuggestion.Env["API_BASE_URL"]; got != "http://demo-api:8000/v1" {
 		t.Fatalf("expected worker API_BASE_URL rewrite, got %q", got)
 	}
-	if got := workerEnv["DATABASE_URL"]; got != "postgresql://demo:secret@demo-api-postgres:5432/demo" {
+	if got := workerSuggestion.Env["DATABASE_URL"]; got != "postgresql://demo:secret@demo-api-postgres:5432/demo" {
 		t.Fatalf("expected worker DATABASE_URL host rewrite, got %q", got)
 	}
-	if got := workerEnv["ARGUS_FUGUE_RUNTIME_COMPOSE_SERVICE"]; got != "api" {
+	if got := workerSuggestion.Env["ARGUS_FUGUE_RUNTIME_COMPOSE_SERVICE"]; got != "api" {
 		t.Fatalf("expected logical compose service selector to be preserved, got %q", got)
 	}
 
-	apiEnv, err := suggestComposeServiceEnvForTopology(topology, "api", appHosts, nil, managedPostgresByOwner)
+	apiSuggestion, err := suggestComposeServiceEnvForTopology(topology, "api", appHosts, nil, managedPostgresByOwner)
 	if err != nil {
 		t.Fatalf("suggest api env: %v", err)
 	}
-	if got := apiEnv["DB_HOST"]; got != "demo-api-postgres" {
+	if got := apiSuggestion.Env["DB_HOST"]; got != "demo-api-postgres" {
 		t.Fatalf("expected api DB_HOST rewrite, got %q", got)
 	}
-	if got := apiEnv["DATABASE_HOST"]; got != "demo-api-postgres" {
+	if got := apiSuggestion.Env["DATABASE_HOST"]; got != "demo-api-postgres" {
 		t.Fatalf("expected api DATABASE_HOST rewrite, got %q", got)
 	}
-	if got := apiEnv["DATABASE_PORT"]; got != "5432" {
+	if got := apiSuggestion.Env["DATABASE_PORT"]; got != "5432" {
 		t.Fatalf("expected api DATABASE_PORT rewrite, got %q", got)
 	}
-	if got := apiEnv["DATABASE_USER"]; got != "demo" {
+	if got := apiSuggestion.Env["DATABASE_USER"]; got != "demo" {
 		t.Fatalf("expected api DATABASE_USER rewrite, got %q", got)
 	}
-	if got := apiEnv["DATABASE_PASSWORD"]; got != "secret-pass" {
+	if got := apiSuggestion.Env["DATABASE_PASSWORD"]; got != "secret-pass" {
 		t.Fatalf("expected api DATABASE_PASSWORD rewrite, got %q", got)
 	}
-	if got := apiEnv["DATABASE_DBNAME"]; got != "demo" {
+	if got := apiSuggestion.Env["DATABASE_DBNAME"]; got != "demo" {
 		t.Fatalf("expected api DATABASE_DBNAME rewrite, got %q", got)
 	}
-	if got := apiEnv["DATABASE_URL"]; got != "postgresql://demo:secret-pass@demo-api-postgres:5432/demo" {
+	if got := apiSuggestion.Env["DATABASE_URL"]; got != "postgresql://demo:secret-pass@demo-api-postgres:5432/demo" {
 		t.Fatalf("expected api DATABASE_URL managed postgres rewrite, got %q", got)
 	}
-	if err := ValidateNoMissingRequiredComposeEnv("api", apiEnv); err != nil {
+	if err := ValidateNoMissingRequiredComposeEnv("api", apiSuggestion.Env); err != nil {
 		t.Fatalf("expected managed postgres rewrite to satisfy required DATABASE_PASSWORD: %v", err)
 	}
 }

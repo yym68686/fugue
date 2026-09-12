@@ -95,15 +95,16 @@ func (r *recordingImporter) ImportUploadedArchiveSource(_ context.Context, req s
 	return sourceimport.GitHubSourceImportOutput{}, fmt.Errorf("unexpected upload import")
 }
 
-func (r *recordingImporter) SuggestGitHubComposeServiceEnv(_ context.Context, req sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error) {
+func (r *recordingImporter) SuggestGitHubComposeServiceEnv(_ context.Context, req sourceimport.GitHubComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error) {
 	req.AppHosts = cloneStringMap(req.AppHosts)
+	req.AppPublicHosts = cloneStringMap(req.AppPublicHosts)
 	req.ManagedPostgresByOwner = clonePostgresSpecMap(req.ManagedPostgresByOwner)
 	r.githubComposeEnvReq = &req
-	return cloneStringMap(r.githubComposeEnv), nil
+	return sourceimport.ComposeServiceEnvSuggestion{Env: cloneStringMap(r.githubComposeEnv)}, nil
 }
 
-func (r *recordingImporter) SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (map[string]string, error) {
-	return nil, fmt.Errorf("unexpected upload compose env refresh")
+func (r *recordingImporter) SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error) {
+	return sourceimport.ComposeServiceEnvSuggestion{}, fmt.Errorf("unexpected upload compose env refresh")
 }
 
 func inspectManagedImageAlwaysExists(context.Context, string) (bool, map[string]int64, error) {

@@ -213,11 +213,11 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	timer.Mark("validate_import")
 	s.updateOperationProgress(op.ID, "import image built; preparing deploy spec")
 
-	composeSuggestedEnv, composeEnvErr := s.suggestComposeServiceEnv(importCtx, app, *op.DesiredSource)
+	composeSuggestion, composeEnvErr := s.suggestComposeServiceEnv(importCtx, app, *op.DesiredSource)
 	if composeEnvErr != nil && s.Logger != nil {
 		s.Logger.Printf("skip compose env refresh for app %s source=%s compose_service=%s: %v", app.ID, op.DesiredSource.Type, op.DesiredSource.ComposeService, composeEnvErr)
 	}
-	output.ImportResult.SuggestedEnv = mergeSuggestedImportEnv(output.ImportResult.SuggestedEnv, composeSuggestedEnv)
+	output.ImportResult.SuggestedEnv = mergeSuggestedImportEnv(output.ImportResult.SuggestedEnv, composeSuggestion.Env)
 	timer.Mark("suggest_env")
 
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
@@ -266,7 +266,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	} else if detectedPort := effectiveImportPort(output.ImportResult.DetectedPort, output.ImportResult.BuildStrategy); detectedPort > 0 {
 		finalSpec.Ports = []int{detectedPort}
 	}
-	finalSpec.Env = mergeImportEnv(finalSpec.Env, output.ImportResult.SuggestedEnv)
+	finalSpec.Env = mergeImportEnv(finalSpec.Env, output.ImportResult.SuggestedEnv, composeSuggestion.SourceKind == sourceimport.TopologySourceKindFugue)
 	finalSpec.Command = mergeImportCommand(finalSpec.Command, finalSpec.Args, output.ImportResult.SuggestedStartupCommand)
 	finalSpec.RestartToken = model.NewID("restart")
 	// Materialize the distributed image identity before publishing any
@@ -839,7 +839,7 @@ func firstPositivePort(ports []int) int {
 	return 0
 }
 
-func mergeImportEnv(current, suggested map[string]string) map[string]string {
+func mergeImportEnv(current, suggested map[string]string, authoritative bool) map[string]string {
 	if len(current) == 0 && len(suggested) == 0 {
 		return nil
 	}
@@ -848,7 +848,7 @@ func mergeImportEnv(current, suggested map[string]string) map[string]string {
 		merged[key] = value
 	}
 	for key, value := range suggested {
-		if strings.TrimSpace(merged[key]) != "" {
+		if !authoritative && strings.TrimSpace(merged[key]) != "" {
 			continue
 		}
 		merged[key] = value
@@ -1245,15 +1245,15 @@ func normalizeImportSourceRepoURL(raw string) string {
 	return lower
 }
 
-func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, source model.AppSource) (map[string]string, error) {
+func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, source model.AppSource) (sourceimport.ComposeServiceEnvSuggestion, error) {
 	composeService := strings.TrimSpace(source.ComposeService)
 	if composeService == "" {
-		return nil, nil
+		return sourceimport.ComposeServiceEnvSuggestion{}, nil
 	}
 
 	appHosts, appPublicHosts, managedPostgresByOwner, err := s.projectComposeServiceState(app)
 	if err != nil {
-		return nil, err
+		return sourceimport.ComposeServiceEnvSuggestion{}, err
 	}
 
 	switch strings.TrimSpace(source.Type) {
@@ -1269,11 +1269,11 @@ func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, s
 		})
 	case model.AppSourceTypeUpload:
 		if strings.TrimSpace(source.UploadID) == "" {
-			return nil, nil
+			return sourceimport.ComposeServiceEnvSuggestion{}, nil
 		}
 		upload, archiveBytes, err := s.Store.GetSourceUploadArchive(strings.TrimSpace(source.UploadID))
 		if err != nil {
-			return nil, fmt.Errorf("load source upload %s for compose env refresh: %w", source.UploadID, err)
+			return sourceimport.ComposeServiceEnvSuggestion{}, fmt.Errorf("load source upload %s for compose env refresh: %w", source.UploadID, err)
 		}
 		return s.importer.SuggestUploadedComposeServiceEnv(ctx, sourceimport.UploadComposeServiceEnvRequest{
 			ArchiveFilename:        upload.Filename,
@@ -1287,7 +1287,7 @@ func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, s
 			ManagedPostgresByOwner: managedPostgresByOwner,
 		})
 	default:
-		return nil, nil
+		return sourceimport.ComposeServiceEnvSuggestion{}, nil
 	}
 }
 
