@@ -121,41 +121,64 @@ func (s *Server) runAppDatabaseLonghornBackup(ctx context.Context, run model.Bac
 	}
 
 	namePrefix := "fugue-" + strings.Trim(strings.ReplaceAll(run.ID, "_", "-"), "-") + "-"
-	snapshot := map[string]any{
-		"apiVersion": "longhorn.io/v1beta2", "kind": "Snapshot",
-		"metadata": map[string]any{"generateName": namePrefix, "namespace": longhornNS, "labels": map[string]string{"fugue.pro/backup-run": run.ID}},
-		"spec":     map[string]any{"volume": volumeName, "createSnapshot": true},
+	// A worker can be restarted after the Snapshot/Backup CR has been created.
+	// Reuse that labelled CR instead of creating a second remote copy.
+	var existingBackup map[string]any
+	if existingBackup, err = findLonghornBackup(ctx, client, longhornNS, run.ID); err != nil {
+		return nil, fmt.Errorf("%w: find existing backup: %v", errLonghornBackupUnavailable, err)
 	}
-	var createdSnapshot map[string]any
-	if err := longhornCreate(ctx, client, longhornNS, "snapshots", snapshot, &createdSnapshot); err != nil {
-		return nil, fmt.Errorf("%w: create snapshot: %v", errLonghornBackupUnavailable, err)
+	var snapshotName string
+	var backupName string
+	createdSnapshot := false
+	if existingBackup != nil {
+		backupName = longhornObjectName(existingBackup)
+		status, _ := existingBackup["status"].(map[string]any)
+		snapshotName = longhornStringValue(status["snapshotName"])
+		if backupName == "" || snapshotName == "" {
+			return nil, fmt.Errorf("%w: existing Longhorn backup is missing names", errLonghornBackupUnavailable)
+		}
+	} else {
+		snapshot := map[string]any{
+			"apiVersion": "longhorn.io/v1beta2", "kind": "Snapshot",
+			"metadata": map[string]any{"generateName": namePrefix, "namespace": longhornNS, "labels": map[string]string{"fugue.pro/backup-run": run.ID}},
+			"spec":     map[string]any{"volume": volumeName, "createSnapshot": true},
+		}
+		var created map[string]any
+		if err := longhornCreate(ctx, client, longhornNS, "snapshots", snapshot, &created); err != nil {
+			return nil, fmt.Errorf("%w: create snapshot: %v", errLonghornBackupUnavailable, err)
+		}
+		snapshotName = longhornObjectName(created)
+		if snapshotName == "" {
+			return nil, fmt.Errorf("%w: Longhorn snapshot response did not include metadata.name", errLonghornBackupUnavailable)
+		}
+		createdSnapshot = true
 	}
-	snapshotName := longhornObjectName(createdSnapshot)
-	if snapshotName == "" {
-		return nil, fmt.Errorf("%w: Longhorn snapshot response did not include metadata.name", errLonghornBackupUnavailable)
+	if createdSnapshot {
+		defer func() {
+			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			_ = longhornDelete(deleteCtx, client, longhornNS, "snapshots", snapshotName)
+		}()
 	}
-	defer func() {
-		deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		_ = longhornDelete(deleteCtx, client, longhornNS, "snapshots", snapshotName)
-	}()
 	if err := waitForLonghornSnapshot(ctx, client, longhornNS, snapshotName); err != nil {
 		return nil, err
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	backup := map[string]any{
-		"apiVersion": "longhorn.io/v1beta2", "kind": "Backup",
-		"metadata": map[string]any{"generateName": namePrefix, "namespace": longhornNS, "labels": map[string]string{"fugue.pro/backup-run": run.ID}},
-		"spec":     map[string]any{"snapshotName": snapshotName, "backupMode": "incremental", "syncRequestedAt": now},
-	}
-	var createdBackup map[string]any
-	if err := longhornCreate(ctx, client, longhornNS, "backups", backup, &createdBackup); err != nil {
-		return nil, fmt.Errorf("%w: create backup: %v", errLonghornBackupUnavailable, err)
-	}
-	backupName := longhornObjectName(createdBackup)
 	if backupName == "" {
-		return nil, fmt.Errorf("%w: Longhorn backup response did not include metadata.name", errLonghornBackupUnavailable)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		backup := map[string]any{
+			"apiVersion": "longhorn.io/v1beta2", "kind": "Backup",
+			"metadata": map[string]any{"generateName": namePrefix, "namespace": longhornNS, "labels": map[string]string{"fugue.pro/backup-run": run.ID}},
+			"spec":     map[string]any{"snapshotName": snapshotName, "backupMode": "incremental", "syncRequestedAt": now},
+		}
+		var created map[string]any
+		if err := longhornCreate(ctx, client, longhornNS, "backups", backup, &created); err != nil {
+			return nil, fmt.Errorf("%w: create backup: %v", errLonghornBackupUnavailable, err)
+		}
+		backupName = longhornObjectName(created)
+		if backupName == "" {
+			return nil, fmt.Errorf("%w: Longhorn backup response did not include metadata.name", errLonghornBackupUnavailable)
+		}
 	}
 	status, err := waitForLonghornBackup(ctx, client, longhornNS, backupName, targetName)
 	if err != nil {
@@ -288,6 +311,30 @@ func longhornGet(ctx context.Context, client *kubeLogsClient, namespace, resourc
 	var out map[string]any
 	err := client.doJSON(ctx, http.MethodGet, "/apis/longhorn.io/v1beta2/namespaces/"+url.PathEscape(namespace)+"/"+resource+"/"+url.PathEscape(name), &out)
 	return out, err
+}
+
+func findLonghornBackup(ctx context.Context, client *kubeLogsClient, namespace, runID string) (map[string]any, error) {
+	query := url.Values{"labelSelector": []string{"fugue.pro/backup-run=" + runID}}
+	var list map[string]any
+	if err := client.doJSON(ctx, http.MethodGet, "/apis/longhorn.io/v1beta2/namespaces/"+url.PathEscape(namespace)+"/backups?"+query.Encode(), &list); err != nil {
+		return nil, err
+	}
+	items, _ := list["items"].([]any)
+	if len(items) == 0 {
+		return nil, nil
+	}
+	var found map[string]any
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("multiple Longhorn backups found for run %s", runID)
+		}
+		found = item
+	}
+	return found, nil
 }
 
 func longhornCreate(ctx context.Context, client *kubeLogsClient, namespace, resource string, body map[string]any, out *map[string]any) error {

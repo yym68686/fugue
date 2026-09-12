@@ -1175,12 +1175,30 @@ func (s *Store) RecoverStaleBackupRun(observed model.BackupRun, now time.Time, l
 		if !backupRunRecoveryObservationMatches(current, observed) || !BackupRunIsStale(current, now, leaseTTL) {
 			return ErrConflict
 		}
-		current.Status = model.BackupRunStatusFailed
+		if model.NormalizeBackupTarget(observed.Target).Engine == model.BackupEngineLonghornSnapshot {
+			// Longhorn owns the remote upload and it can outlive an API worker.
+			// Requeue the durable run so a successor worker can observe the
+			// existing Longhorn Backup CR and continue it by run label.
+			current.Status = model.BackupRunStatusPending
+			current.LeaseOwner = ""
+			current.LockedUntil = nil
+			current.ErrorCode = ""
+			current.ErrorMessage = ""
+			current.NextRetryAt = &now
+		} else {
+			current.Status = model.BackupRunStatusFailed
+		}
 		current.LockedUntil = nil
 		current.HeartbeatAt = &now
-		current.ErrorCode = backupRunLostErrorCode
-		current.ErrorMessage = backupRunLostErrorMessage
-		current.FinishedAt = &now
+		if current.Status == model.BackupRunStatusPending {
+			current.ErrorCode = ""
+			current.ErrorMessage = ""
+			current.FinishedAt = nil
+		} else {
+			current.ErrorCode = backupRunLostErrorCode
+			current.ErrorMessage = backupRunLostErrorMessage
+			current.FinishedAt = &now
+		}
 		current.UpdatedAt = now
 		state.BackupRuns[index] = model.NormalizeBackupRun(current)
 		recovered = state.BackupRuns[index]
@@ -4353,7 +4371,7 @@ RETURNING `+backupRunReturningColumns(), id, leaseOwner, lockedUntil, now))
 func (s *Store) pgRecoverStaleBackupRun(observed model.BackupRun, now time.Time) (model.BackupRun, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	recovered, err := scanBackupRun(s.db.QueryRowContext(ctx, `
+	query := `
 UPDATE fugue_backup_runs
 SET status = 'failed', locked_until = NULL, heartbeat_at = $8, error_code = $9, error_message = $10, updated_at = $8, finished_at = $8
 WHERE id = $1
@@ -4363,7 +4381,23 @@ WHERE id = $1
   AND locked_until IS NOT DISTINCT FROM $5
   AND heartbeat_at IS NOT DISTINCT FROM $6
   AND next_retry_at IS NOT DISTINCT FROM $7
-RETURNING `+backupRunReturningColumns(), observed.ID, observed.Status, observed.LeaseOwner, observed.UpdatedAt, observed.LockedUntil, observed.HeartbeatAt, observed.NextRetryAt, now, backupRunLostErrorCode, backupRunLostErrorMessage))
+
+RETURNING ` + backupRunReturningColumns()
+	if model.NormalizeBackupTarget(observed.Target).Engine == model.BackupEngineLonghornSnapshot {
+		query = `
+UPDATE fugue_backup_runs
+SET status = 'pending', lease_owner = NULL, locked_until = NULL, heartbeat_at = $8,
+    error_code = NULL, error_message = NULL, next_retry_at = $8, updated_at = $8, finished_at = NULL
+WHERE id = $1
+  AND status = $2
+  AND lease_owner = $3
+  AND updated_at = $4
+  AND locked_until IS NOT DISTINCT FROM $5
+  AND heartbeat_at IS NOT DISTINCT FROM $6
+  AND next_retry_at IS NOT DISTINCT FROM $7
+RETURNING ` + backupRunReturningColumns()
+	}
+	recovered, err := scanBackupRun(s.db.QueryRowContext(ctx, query, observed.ID, observed.Status, observed.LeaseOwner, observed.UpdatedAt, observed.LockedUntil, observed.HeartbeatAt, observed.NextRetryAt, now, backupRunLostErrorCode, backupRunLostErrorMessage))
 	if errors.Is(err, ErrNotFound) {
 		return model.BackupRun{}, ErrConflict
 	}
