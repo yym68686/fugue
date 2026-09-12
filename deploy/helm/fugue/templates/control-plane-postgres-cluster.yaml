@@ -37,11 +37,13 @@ spec:
       wal_level: logical
       wal_log_hints: "on"
       wal_keep_size: 512MB
+  {{- if gt (int .Values.controlPlanePostgres.instances) 1 }}
   replicationSlots:
     highAvailability:
       enabled: true
     synchronizeReplicas:
       enabled: true
+  {{- end }}
   {{- if .Values.controlPlanePostgres.backup.enabled }}
   backup:
     barmanObjectStore:

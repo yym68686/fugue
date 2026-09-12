@@ -3766,6 +3766,9 @@ func TestControlPlanePostgresCNPGCanDriveAPI(t *testing.T) {
 			t.Fatalf("control-plane CNPG cluster missing %q:\n%s", want, cluster)
 		}
 	}
+	if strings.Contains(cluster, "synchronizeReplicas:") || strings.Contains(cluster, "synchronous:") {
+		t.Fatalf("single-instance control-plane cluster must not render synchronous replication: %s", cluster)
+	}
 	if !strings.Contains(manifest, "FUGUE_DATABASE_URL: \"postgres://fugue:") ||
 		!strings.Contains(manifest, "@fugue-fugue-control-plane-postgres-rw.default.svc.cluster.local:5432/fugue?sslmode=disable\"") {
 		t.Fatalf("config secret should point API at control-plane CNPG rw service:\n%s", manifest)
