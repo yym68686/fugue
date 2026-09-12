@@ -607,7 +607,7 @@ func (s *Service) managedBackingServicesRolloutReady(
 			}
 			if len(pods) > 0 {
 				watchTargets = append(watchTargets, managedPostgresPodRolloutWatchTargets(namespace, deployment.ResourceName)...)
-				if failureMessage := managedAppPodFailureMessage(pods, nil); failureMessage != "" {
+				if failureMessage := managedPostgresPodFailureMessage(pods); failureMessage != "" {
 					return false, "", watchTargets, fmt.Errorf("backing service cluster %s/%s rollout failed: %s", namespace, deployment.ResourceName, failureMessage)
 				}
 			}
@@ -644,6 +644,31 @@ func (s *Service) managedBackingServicesRolloutReady(
 		}
 	}
 	return true, "", watchTargets, nil
+}
+
+// CloudNativePG creates short-lived initdb pods whose initdb container exits
+// successfully by design. The generic application failure detector treats a
+// completed service container as a failed long-running process, which used to
+// make every fresh managed database rollout fail before the primary existed.
+// Only inspect non-completed CNPG pods here; real non-zero exits and waiting
+// errors still use the normal failure evidence formatter.
+func managedPostgresPodFailureMessage(pods []kubePod) string {
+	active := make([]kubePod, 0, len(pods))
+	for _, pod := range pods {
+		if strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Succeeded") {
+			continue
+		}
+		filtered := pod
+		filtered.Status.ContainerStatuses = nil
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.State.Terminated != nil && managedAppServiceProcessExitedSuccessfully(*status.State.Terminated) {
+				continue
+			}
+			filtered.Status.ContainerStatuses = append(filtered.Status.ContainerStatuses, status)
+		}
+		active = append(active, filtered)
+	}
+	return managedAppPodFailureMessage(active, nil)
 }
 
 func managedBackingServiceClusterRolloutReady(clusterName string, cluster kubeCloudNativePGCluster, found bool) (bool, string) {

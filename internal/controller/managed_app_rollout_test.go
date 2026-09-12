@@ -2713,3 +2713,21 @@ func TestPrimaryFailingContainerStatusPrefersInitContainerFailure(t *testing.T) 
 		t.Fatalf("expected terminated evidence type, got %s", got)
 	}
 }
+
+func TestManagedPostgresPodFailureMessageIgnoresCompletedInitdb(t *testing.T) {
+	t.Parallel()
+	pod := kubePod{}
+	pod.Status.Phase = "Running"
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name: "initdb", State: kubeRuntimeState{Terminated: &kubeStateDetail{Reason: "Completed", ExitCode: 0}},
+	}}
+	if got := managedPostgresPodFailureMessage([]kubePod{pod}); got != "" {
+		t.Fatalf("expected completed CNPG initdb to be ignored, got %q", got)
+	}
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, kubeContainerStatus{
+		Name: "postgres", State: kubeRuntimeState{Waiting: &kubeStateDetail{Reason: "CrashLoopBackOff", Message: "failed"}},
+	})
+	if got := managedPostgresPodFailureMessage([]kubePod{pod}); got == "" {
+		t.Fatal("expected real postgres container failure to be reported")
+	}
+}
