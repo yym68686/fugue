@@ -309,6 +309,9 @@ func (s *Service) databaseMigrationPrimaryReady(ctx context.Context, client *kub
 	return err == nil && found && kubePodReady(pod)
 }
 
+// Historical CNPG PVCs may remain during rollback retention; only the active
+// primary proves that the storage cutover is serving traffic.
+
 func (s *Service) failDatabaseMigration(m model.DatabaseMigration, msg string) error {
 	m.Status = model.DatabaseMigrationStatusFailed
 	m.ErrorMessage = msg
