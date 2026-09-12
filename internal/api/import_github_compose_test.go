@@ -524,7 +524,8 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	if got := primaryApp.Spec.Env["REDIS_URL"]; got != "redis://"+runtime.ComposeServiceAliasName(project.ID, "redis")+":6379" {
 		t.Fatalf("expected REDIS_URL to target mirrored redis app, got %q", got)
 	}
-	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://claude_code_hub:postgres@claude-code-hub-postgres-postgres:5432/claude_code_hub" {
+	expectedPostgresHost := runtime.ComposeServiceAliasName(project.ID, "postgres") + "-postgres"
+	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://claude_code_hub:postgres@"+expectedPostgresHost+":5432/claude_code_hub" {
 		t.Fatalf("expected DSN rewrite to managed postgres host, got %q", got)
 	}
 	if primaryApp.Spec.PersistentStorage == nil || len(primaryApp.Spec.PersistentStorage.Mounts) != 2 {
