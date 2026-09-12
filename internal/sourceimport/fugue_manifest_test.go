@@ -107,6 +107,71 @@ services:
 	}
 }
 
+func TestInspectFugueManifestV2ParsesProjectPolicies(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 2
+project:
+  name: demo
+  description: v2 demo
+services:
+  web:
+    public: true
+    port: 3000
+    role: browser
+    build:
+      context: .
+      dockerfile: Dockerfile
+  api:
+    port: 8000
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env:
+      APP_PUBLIC_URL: ${FUGUE_ENTRYPOINT_ORIGIN:browser}
+      PASSKEY_RP_ID: ${FUGUE_ENTRYPOINT_HOST:browser}
+      PASSKEY_ORIGINS: ${FUGUE_ENTRYPOINT_ORIGIN:browser}
+entrypoints:
+  - name: browser
+    routes:
+      - path: /
+        service: web
+observability:
+  dataocean:
+    enabled: true
+release:
+  rollback:
+    auto: true
+intent:
+  availability: 99.9%
+  region_preference: [hk]
+  budget_monthly_usd: 20
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{RepoDir: repoDir, RepoOwner: "example", RepoName: "demo", Branch: "main", CommitSHA: "abcdef123456", DefaultAppName: "demo"})
+	if err != nil {
+		t.Fatalf("inspect v2 manifest: %v", err)
+	}
+	if parsed.Version != 2 || parsed.Project == nil || parsed.Project.Name != "demo" || parsed.Observability == nil || parsed.Release == nil || parsed.Intent == nil {
+		t.Fatalf("unexpected v2 metadata: %+v", parsed)
+	}
+	plan, err := AnalyzeNormalizedTopology(parsed.Topology(), "")
+	if err != nil {
+		t.Fatalf("analyze v2 topology: %v", err)
+	}
+	env, _, err := ResolveTopologyServiceEnvironment(plan, "api", TopologyDeployment{ServicePublicHosts: map[string]string{"web": "demo.fugue.pro"}})
+	if err != nil {
+		t.Fatalf("resolve v2 environment: %v", err)
+	}
+	if env["APP_PUBLIC_URL"] != "https://demo.fugue.pro" || env["PASSKEY_RP_ID"] != "demo.fugue.pro" || env["PASSKEY_ORIGINS"] != "https://demo.fugue.pro" {
+		t.Fatalf("unexpected v2 runtime references: %#v", env)
+	}
+}
+
 func TestInspectFugueManifestParsesGeneratedEnv(t *testing.T) {
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {

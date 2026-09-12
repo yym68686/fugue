@@ -1251,7 +1251,7 @@ func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, s
 		return nil, nil
 	}
 
-	appHosts, managedPostgresByOwner, err := s.projectComposeServiceState(app)
+	appHosts, appPublicHosts, managedPostgresByOwner, err := s.projectComposeServiceState(app)
 	if err != nil {
 		return nil, err
 	}
@@ -1264,6 +1264,7 @@ func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, s
 			Branch:                 strings.TrimSpace(source.RepoBranch),
 			ComposeService:         composeService,
 			AppHosts:               appHosts,
+			AppPublicHosts:         appPublicHosts,
 			ManagedPostgresByOwner: managedPostgresByOwner,
 		})
 	case model.AppSourceTypeUpload:
@@ -1282,6 +1283,7 @@ func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, s
 			AppName:                app.Name,
 			ComposeService:         composeService,
 			AppHosts:               appHosts,
+			AppPublicHosts:         appPublicHosts,
 			ManagedPostgresByOwner: managedPostgresByOwner,
 		})
 	default:
@@ -1289,13 +1291,14 @@ func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, s
 	}
 }
 
-func (s *Service) projectComposeServiceState(app model.App) (map[string]string, map[string]model.AppPostgresSpec, error) {
+func (s *Service) projectComposeServiceState(app model.App) (map[string]string, map[string]string, map[string]model.AppPostgresSpec, error) {
 	apps, err := s.Store.ListApps(app.TenantID, false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list project apps for compose env refresh: %w", err)
+		return nil, nil, nil, fmt.Errorf("list project apps for compose env refresh: %w", err)
 	}
 
 	appHosts := make(map[string]string)
+	appPublicHosts := make(map[string]string)
 	managedPostgresByOwner := make(map[string]model.AppPostgresSpec)
 	for _, candidate := range apps {
 		if candidate.ProjectID != app.ProjectID || candidate.Source == nil {
@@ -1310,6 +1313,9 @@ func (s *Service) projectComposeServiceState(app model.App) (map[string]string, 
 				appHosts[composeService] = aliasName
 			}
 		}
+		if candidate.Route != nil && strings.TrimSpace(candidate.Route.Hostname) != "" {
+			appPublicHosts[composeService] = strings.TrimSpace(candidate.Route.Hostname)
+		}
 		if postgres := appOwnedPostgresSpec(candidate); postgres != nil {
 			managedPostgresByOwner[composeService] = *postgres
 		}
@@ -1320,10 +1326,13 @@ func (s *Service) projectComposeServiceState(app model.App) (map[string]string, 
 	if len(managedPostgresByOwner) == 0 {
 		managedPostgresByOwner = nil
 	}
-	if appHosts == nil && managedPostgresByOwner == nil {
-		return nil, nil, nil
+	if len(appPublicHosts) == 0 {
+		appPublicHosts = nil
 	}
-	return appHosts, managedPostgresByOwner, nil
+	if appHosts == nil && appPublicHosts == nil && managedPostgresByOwner == nil {
+		return nil, nil, nil, nil
+	}
+	return appHosts, appPublicHosts, managedPostgresByOwner, nil
 }
 
 func appOwnedPostgresSpec(app model.App) *model.AppPostgresSpec {

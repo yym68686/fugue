@@ -105,6 +105,7 @@ type TopologyPlan struct {
 
 type TopologyDeployment struct {
 	ServiceHosts           map[string]string
+	ServicePublicHosts     map[string]string
 	ManagedPostgresByOwner map[string]model.AppPostgresSpec
 }
 

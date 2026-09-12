@@ -384,6 +384,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		return importedGitHubTopology{}, err
 	}
 	serviceHosts := make(map[string]string, len(appNames))
+	servicePublicHosts := make(map[string]string, len(routeAssignments))
 	for serviceName, appName := range appNames {
 		aliasName := runtime.ComposeServiceAliasName(options.ProjectID, serviceName)
 		if aliasName == "" {
@@ -391,9 +392,15 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		}
 		serviceHosts[serviceName] = aliasName
 	}
+	for serviceName, route := range routeAssignments {
+		if hostname := strings.TrimSpace(route.Hostname); hostname != "" {
+			servicePublicHosts[serviceName] = hostname
+		}
+	}
 
 	deployment := sourceimport.TopologyDeployment{
 		ServiceHosts:           cloneStringMap(serviceHosts),
+		ServicePublicHosts:     cloneStringMap(servicePublicHosts),
 		ManagedPostgresByOwner: map[string]model.AppPostgresSpec{},
 	}
 	for _, backing := range topologyPlan.ManagedBackings {

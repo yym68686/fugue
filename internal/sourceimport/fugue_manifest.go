@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ type GitHubFugueManifestInspectRequest struct {
 }
 
 type GitHubFugueManifest struct {
+	Version           int
 	RepoOwner         string
 	RepoName          string
 	Branch            string
@@ -43,16 +45,62 @@ type GitHubFugueManifest struct {
 	Template          *GitHubTemplateMetadata
 	Warnings          []string
 	InferenceReport   []TopologyInference
+	Project           *FugueManifestProject
+	Observability     *FugueManifestObservability
+	Release           *FugueManifestRelease
+	Intent            *FugueManifestIntent
 }
 
 type fugueManifestFile struct {
 	Version         any                             `yaml:"version"`
+	Project         *FugueManifestProject           `yaml:"project"`
 	PrimaryService  string                          `yaml:"primary_service"`
 	Domains         []fugueManifestDomain           `yaml:"domains"`
 	Entrypoints     []fugueManifestEntrypoint       `yaml:"entrypoints"`
 	Template        *fugueManifestTemplate          `yaml:"template"`
 	Services        map[string]fugueManifestService `yaml:"services"`
 	BackingServices map[string]fugueManifestService `yaml:"backing_services"`
+	Observability   *FugueManifestObservability     `yaml:"observability"`
+	Release         *FugueManifestRelease           `yaml:"release"`
+	Intent          *FugueManifestIntent            `yaml:"intent"`
+}
+
+// The v2 sections are declarative metadata and policy inputs. They are kept
+// separate from runtime observations so a manifest remains portable and safe
+// to commit alongside application source.
+type FugueManifestProject struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+}
+
+type FugueManifestObservability struct {
+	DataOcean *FugueManifestDataOcean `yaml:"dataocean"`
+}
+
+type FugueManifestDataOcean struct {
+	Enabled    bool   `yaml:"enabled"`
+	CollectURL string `yaml:"collect_url"`
+	ServerKey  string `yaml:"server_key"`
+}
+
+type FugueManifestRelease struct {
+	Preflight *FugueManifestPreflight `yaml:"preflight"`
+	Rollback  *FugueManifestRollback  `yaml:"rollback"`
+}
+
+type FugueManifestPreflight struct {
+	Shadow  bool            `yaml:"shadow"`
+	Compare map[string]bool `yaml:"compare"`
+}
+
+type FugueManifestRollback struct {
+	Auto bool `yaml:"auto"`
+}
+
+type FugueManifestIntent struct {
+	Availability     string   `yaml:"availability"`
+	RegionPreference []string `yaml:"region_preference"`
+	BudgetMonthlyUSD float64  `yaml:"budget_monthly_usd"`
 }
 
 type GitHubTemplateMetadata struct {
@@ -110,6 +158,7 @@ type fugueManifestTemplateVariable struct {
 type fugueManifestService struct {
 	Type              string                          `yaml:"type"`
 	ServiceType       string                          `yaml:"service_type"`
+	Role              string                          `yaml:"role"`
 	Public            bool                            `yaml:"public"`
 	NetworkMode       string                          `yaml:"network_mode"`
 	NetworkPolicy     *model.AppNetworkPolicySpec     `yaml:"network_policy"`
@@ -252,7 +301,8 @@ func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, e
 	if err := yaml.Unmarshal(data, &file); err != nil {
 		return GitHubFugueManifest{}, fmt.Errorf("parse fugue manifest %q: %w", manifestPath, err)
 	}
-	if err := validateFugueManifestVersion(file.Version); err != nil {
+	version, err := parseFugueManifestVersion(file.Version)
+	if err != nil {
 		return GitHubFugueManifest{}, fmt.Errorf("invalid fugue manifest %q: %w", manifestPath, err)
 	}
 	if len(file.Services) == 0 && len(file.BackingServices) == 0 {
@@ -284,6 +334,11 @@ func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, e
 		CommitCommittedAt: repo.CommitCommittedAt,
 		DefaultAppName:    repo.DefaultAppName,
 		ManifestPath:      manifestPath,
+		Version:           version,
+		Project:           cloneFugueManifestProject(file.Project),
+		Observability:     cloneFugueManifestObservability(file.Observability),
+		Release:           cloneFugueManifestRelease(file.Release),
+		Intent:            cloneFugueManifestIntent(file.Intent),
 		Services:          make([]ComposeService, 0, len(serviceNames)),
 	}
 
@@ -338,12 +393,61 @@ func findFugueManifestFile(repoDir string) (string, error) {
 	return "", ErrFugueManifestNotFound
 }
 
-func validateFugueManifestVersion(raw any) error {
+func parseFugueManifestVersion(raw any) (int, error) {
 	version := strings.TrimSpace(stringifyComposeValue(raw))
 	if version == "" || version == "1" {
+		return 1, nil
+	}
+	if version == "2" {
+		return 2, nil
+	}
+	return 0, fmt.Errorf("unsupported version %q", version)
+}
+
+func cloneFugueManifestProject(value *FugueManifestProject) *FugueManifestProject {
+	if value == nil {
 		return nil
 	}
-	return fmt.Errorf("unsupported version %q", version)
+	copy := *value
+	return &copy
+}
+
+func cloneFugueManifestObservability(value *FugueManifestObservability) *FugueManifestObservability {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	if value.DataOcean != nil {
+		dataOcean := *value.DataOcean
+		copy.DataOcean = &dataOcean
+	}
+	return &copy
+}
+
+func cloneFugueManifestRelease(value *FugueManifestRelease) *FugueManifestRelease {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	if value.Preflight != nil {
+		preflight := *value.Preflight
+		preflight.Compare = maps.Clone(value.Preflight.Compare)
+		copy.Preflight = &preflight
+	}
+	if value.Rollback != nil {
+		rollback := *value.Rollback
+		copy.Rollback = &rollback
+	}
+	return &copy
+}
+
+func cloneFugueManifestIntent(value *FugueManifestIntent) *FugueManifestIntent {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.RegionPreference = append([]string(nil), value.RegionPreference...)
+	return &copy
 }
 
 func normalizeFugueManifestNetworkPolicy(raw *model.AppNetworkPolicySpec) *model.AppNetworkPolicySpec {
@@ -465,6 +569,7 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 	}
 	service := ComposeService{
 		Name:        slugifyOptional(rawName),
+		Role:        strings.TrimSpace(raw.Role),
 		Image:       strings.TrimSpace(raw.Image),
 		NetworkMode: model.NormalizeAppNetworkMode(raw.NetworkMode),
 		NetworkPolicy: normalizeFugueManifestNetworkPolicy(

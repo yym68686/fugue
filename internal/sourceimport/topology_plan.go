@@ -184,10 +184,100 @@ func ResolveTopologyServiceEnvironment(plan TopologyPlan, serviceName string, de
 			inferenceReport = appendInference(inferenceReport, InferenceLevelInfo, "managed_migration", service.Name, "enabled automatic schema migration for a managed Postgres dependency")
 		}
 	}
+	if plan.Topology.SourceKind == TopologySourceKindFugue {
+		var err error
+		rewritten, err = resolveFugueManifestEnvironmentReferences(rewritten, plan.Topology, deployment.ServicePublicHosts)
+		if err != nil {
+			return nil, inferenceReport, err
+		}
+	}
 	if len(rewritten) == 0 {
 		return nil, inferenceReport, nil
 	}
 	return rewritten, inferenceReport, nil
+}
+
+// resolveFugueManifestEnvironmentReferences expands the small, typed set of
+// runtime references supported by Fugue manifest v2. These references are
+// resolved only after routes have been allocated, so a manifest can remain
+// portable while still binding browser-facing security settings to the actual
+// public origin selected for the project.
+func resolveFugueManifestEnvironmentReferences(env map[string]string, topology NormalizedTopology, publicHosts map[string]string) (map[string]string, error) {
+	if len(env) == 0 {
+		return env, nil
+	}
+	entrypoints := make(map[string]TopologyEntrypoint, len(topology.Entrypoints))
+	for _, entrypoint := range topology.Entrypoints {
+		if name := slugifyOptional(entrypoint.Name); name != "" {
+			entrypoints[name] = entrypoint
+		}
+	}
+	domains := make(map[string]TopologyDomain, len(topology.Domains))
+	for _, domain := range topology.Domains {
+		if name := slugifyOptional(domain.Name); name != "" {
+			domains[name] = domain
+		}
+	}
+	resolved := cloneStringMapLocal(env)
+	for key, value := range resolved {
+		updated, err := resolveFugueManifestEnvironmentValue(value, entrypoints, domains, publicHosts)
+		if err != nil {
+			return nil, fmt.Errorf("resolve fugue manifest environment %s: %w", key, err)
+		}
+		resolved[key] = updated
+	}
+	return resolved, nil
+}
+
+func resolveFugueManifestEnvironmentValue(value string, entrypoints map[string]TopologyEntrypoint, domains map[string]TopologyDomain, publicHosts map[string]string) (string, error) {
+	for {
+		start := strings.Index(value, "${FUGUE_ENTRYPOINT_")
+		if start < 0 {
+			return value, nil
+		}
+		end := strings.IndexByte(value[start:], '}')
+		if end < 0 {
+			return "", fmt.Errorf("unterminated runtime reference")
+		}
+		end += start
+		token := value[start+2 : end]
+		kind, ref, ok := strings.Cut(token, ":")
+		if !ok || strings.TrimSpace(ref) == "" {
+			return "", fmt.Errorf("invalid runtime reference %q", token)
+		}
+		entrypoint, exists := entrypoints[slugifyOptional(ref)]
+		if !exists {
+			return "", fmt.Errorf("entrypoint %q was not declared", ref)
+		}
+		host := ""
+		scheme := "https"
+		if domain, ok := domains[slugifyOptional(entrypoint.Domain)]; ok {
+			host = strings.TrimSpace(domain.Host)
+			if strings.EqualFold(strings.TrimSpace(domain.TLS), "disabled") || strings.EqualFold(strings.TrimSpace(domain.TLS), "none") || strings.EqualFold(strings.TrimSpace(domain.TLS), "http") {
+				scheme = "http"
+			}
+		}
+		if host == "" {
+			for _, route := range entrypoint.Routes {
+				if candidate := strings.TrimSpace(publicHosts[slugifyOptional(route.Service)]); candidate != "" {
+					host = candidate
+					break
+				}
+			}
+		}
+		if host == "" {
+			return "", fmt.Errorf("entrypoint %q has no resolved public host", ref)
+		}
+		replacement := host
+		switch strings.TrimSpace(kind) {
+		case "FUGUE_ENTRYPOINT_HOST":
+		case "FUGUE_ENTRYPOINT_ORIGIN":
+			replacement = scheme + "://" + host
+		default:
+			return "", fmt.Errorf("unsupported runtime reference %q", token)
+		}
+		value = value[:start] + replacement + value[end+1:]
+	}
 }
 
 func ManagedPostgresSpec(service ComposeService, ownerAppName string) (model.AppPostgresSpec, error) {

@@ -66,7 +66,7 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 		},
 	}
 
-	workerEnv, err := suggestComposeServiceEnvForTopology(topology, "worker", appHosts, managedPostgresByOwner)
+	workerEnv, err := suggestComposeServiceEnvForTopology(topology, "worker", appHosts, nil, managedPostgresByOwner)
 	if err != nil {
 		t.Fatalf("suggest worker env: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 		t.Fatalf("expected logical compose service selector to be preserved, got %q", got)
 	}
 
-	apiEnv, err := suggestComposeServiceEnvForTopology(topology, "api", appHosts, managedPostgresByOwner)
+	apiEnv, err := suggestComposeServiceEnvForTopology(topology, "api", appHosts, nil, managedPostgresByOwner)
 	if err != nil {
 		t.Fatalf("suggest api env: %v", err)
 	}

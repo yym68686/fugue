@@ -22,12 +22,19 @@ func (s *Server) importFugueManifestGitHubStack(principal model.Principal, tenan
 		"plan":       result.Plan,
 		"fugue_manifest": map[string]any{
 			"manifest_path":    manifest.ManifestPath,
+			"version":          manifest.Version,
 			"primary_service":  result.PrimaryService,
 			"domains":          sanitizeTopologyDomains(manifest.Domains),
 			"entrypoints":      sanitizeTopologyEntrypoints(manifest.Entrypoints),
 			"services":         result.ServiceDetails,
 			"warnings":         result.Warnings,
 			"inference_report": result.InferenceReport,
+			"v2": map[string]any{
+				"project":       manifest.Project != nil,
+				"observability": manifest.Observability != nil,
+				"release":       manifest.Release != nil,
+				"intent":        manifest.Intent != nil,
+			},
 		},
 	}, result.PrimaryApp, result.PrimaryOp, nil
 }

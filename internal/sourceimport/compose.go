@@ -77,6 +77,7 @@ type PersistentStorageSeedFile struct {
 
 type ComposeService struct {
 	Name                       string
+	Role                       string
 	Kind                       string
 	ServiceType                string
 	BackingService             bool
