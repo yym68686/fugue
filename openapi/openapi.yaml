@@ -258,6 +258,9 @@ paths:
         Returns Core's inventory-independent desired-route projection. Only the
         edge-control component identity with global edge_route_intent capability
         is accepted; tenant and platform-admin API keys are not accepted.
+        A verified global route artifact takes precedence over the legacy source.
+        An unusable artifact or LKG returns 503 so Edge Control retains its last
+        serving bundle rather than recompiling from mutable business tables.
       tags: [Edge]
       x-fugue-handler: handleEdgeRouteIntents
       security:
@@ -276,6 +279,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EdgeRouteIntentSnapshot"
+        '503':
+          description: Route artifact recovery state is unavailable or invalid; retain the current serving bundle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/ssh/routes:

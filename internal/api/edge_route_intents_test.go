@@ -79,8 +79,36 @@ func TestEdgeRouteIntentUsesVerifiedRouteArtifactLKG(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("expected verified route artifact projection, found=%v err=%v", found, err)
 	}
-	if snapshot.Generation != created.Artifact.Generation || len(snapshot.Routes) != 1 || snapshot.Routes[0].Hostname != "artifact.fugue.pro" || snapshot.Routes[0].UpstreamURL != "http://artifact:8080" {
+	if snapshot.Generation != created.Artifact.Generation || len(snapshot.Routes) != 1 || snapshot.Routes[0].Hostname != "artifact.fugue.pro" || snapshot.Routes[0].UpstreamURL != "http://artifact:8080" || snapshot.Routes[0].RoutePolicy != model.EdgeRoutePolicyEnabled || snapshot.Routes[0].UpstreamKind != model.EdgeRouteUpstreamKindKubernetesService || snapshot.Routes[0].UpstreamScope != model.EdgeRouteUpstreamScopeCluster || snapshot.Routes[0].OriginStatus != model.EdgeRouteStatusActive {
 		t.Fatalf("unexpected route artifact projection: %+v", snapshot)
+	}
+}
+
+func TestEdgeRouteIntentArtifactProjectionPreservesDisabledAndPinnedSemantics(t *testing.T) {
+	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	create := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", platformAdminKey, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"}, Generation: "route-semantics-1",
+		Content: map[string]any{"routes": []any{
+			map[string]any{"hostname": "disabled.example", "upstream_url": "http://disabled:8080", "enabled": false},
+			map[string]any{"hostname": "pinned.example", "upstream_url": "http://pinned:8080", "enabled": true, "edge_group_id": "edge-group-country-us"},
+		}},
+	})
+	var created model.PlatformArtifactResponse
+	mustDecodeJSON(t, create, &created)
+	performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/validate", platformAdminKey, map[string]any{"dry_run": false})
+	seedVerifiedPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	snapshot, found, err := server.edgeRouteIntentSnapshotFromVerifiedArtifact()
+	if err != nil || !found || len(snapshot.Routes) != 2 {
+		t.Fatalf("unexpected projection: found=%v err=%v snapshot=%+v", found, err, snapshot)
+	}
+	for _, route := range snapshot.Routes {
+		if route.Hostname == "disabled.example" && (route.OriginStatus != model.EdgeRouteStatusDisabled || route.UpstreamURL != "") {
+			t.Fatalf("disabled semantics lost: %+v", route)
+		}
+		if route.Hostname == "pinned.example" && (route.TargetGroupMode != model.EdgeRouteIntentGroupModePinnedGroup || route.PinnedEdgeGroupID != "edge-group-country-us") {
+			t.Fatalf("pinned semantics lost: %+v", route)
+		}
 	}
 }
 

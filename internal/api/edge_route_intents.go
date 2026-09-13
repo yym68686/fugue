@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformsafety"
 	"fugue/internal/store"
 )
 
@@ -40,7 +44,7 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if snapshot, found, err := s.edgeRouteIntentSnapshotFromVerifiedArtifact(); err != nil {
-		s.writeStoreError(w, err)
+		httpx.WriteError(w, http.StatusServiceUnavailable, "route artifact recovery state is unavailable; retain the current serving bundle")
 		return
 	} else if found {
 		w.Header().Set("ETag", edgeRouteBundleETag(snapshot.Generation))
@@ -65,30 +69,105 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 // business-table projection remains a fallback until a verified artifact is
 // available, but it is never consulted once the artifact path is active.
 func (s *Server) edgeRouteIntentSnapshotFromVerifiedArtifact() (model.EdgeRouteIntentSnapshot, bool, error) {
-	artifact, found, err := s.verifiedPlatformArtifactForScope(model.PlatformArtifactKindEdgeRouteBundle, "global")
-	if err != nil || !found {
-		return model.EdgeRouteIntentSnapshot{}, found, err
+	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindEdgeRouteBundle, "global")
+	if err != nil || lkg == nil {
+		return model.EdgeRouteIntentSnapshot{}, false, err
+	}
+	artifact, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
+	if err != nil {
+		return model.EdgeRouteIntentSnapshot{}, true, err
+	}
+	if artifact.Status != model.PlatformArtifactStatusValidated ||
+		!platformsafety.EvaluatePlatformLKGSnapshot(*lkg, artifact, s.bundleKeyring(), time.Now().UTC()).Pass {
+		return model.EdgeRouteIntentSnapshot{}, true, fmt.Errorf("global route LKG is not usable")
+	}
+	snapshot, err := projectPlatformRouteArtifact(artifact)
+	return snapshot, true, err
+}
+
+var platformRouteArtifactGroupID = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRouteIntentSnapshot, error) {
+	if schema, ok := artifact.Content["schema_version"]; ok && schema != platformconfig.SchemaVersion {
+		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("unsupported route artifact payload schema")
+	}
+	if artifact.Content["routes"] == nil {
+		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact routes are missing")
 	}
 	raw, err := json.Marshal(artifact.Content["routes"])
 	if err != nil {
-		return model.EdgeRouteIntentSnapshot{}, false, err
+		return model.EdgeRouteIntentSnapshot{}, err
 	}
-	var routes []platformconfig.RouteIntent
-	if err := json.Unmarshal(raw, &routes); err != nil {
-		return model.EdgeRouteIntentSnapshot{}, false, fmt.Errorf("decode verified route artifact: %w", err)
+	var routes []struct {
+		Hostname    string `json:"hostname"`
+		UpstreamURL string `json:"upstream_url"`
+		Enabled     *bool  `json:"enabled"`
+		EdgeGroupID string `json:"edge_group_id,omitempty"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&routes); err != nil {
+		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("decode verified route artifact: %w", err)
+	}
+	minimumHealthy := 1
+	if value, exists := artifact.Content["policy"]; exists {
+		rawPolicy, err := json.Marshal(value)
+		if err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
+		var policy platformconfig.PolicySnapshot
+		if err := json.Unmarshal(rawPolicy, &policy); err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
+		if err := platformconfig.ValidatePolicySnapshot(policy); err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
+		if policy.MinimumHealthyEdges > 0 {
+			minimumHealthy = policy.MinimumHealthyEdges
+		}
 	}
 	intents := make([]model.EdgeRouteIntent, 0, len(routes))
+	seen := make(map[string]bool, len(routes))
 	for _, route := range routes {
-		intents = append(intents, model.EdgeRouteIntent{
-			Generation: artifact.Generation, Hostname: route.Hostname, RouteKind: model.EdgeRouteKindPlatform,
-			TargetGroupMode: model.EdgeRouteIntentGroupModeAllGroups, MinHealthyEdgeNodes: 1,
-			RoutePolicy: "platform", UpstreamKind: "url", UpstreamURL: route.UpstreamURL,
-			TLSPolicy: model.EdgeRouteTLSPolicyPlatform, OriginStatus: "unknown",
-			CreatedAt: artifact.CreatedAt, UpdatedAt: artifact.UpdatedAt,
-		})
+		hostname := normalizeExternalAppDomain(route.Hostname)
+		if hostname == "" || route.Enabled == nil || seen[hostname] {
+			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact requires unique hostnames and explicit enabled state")
+		}
+		seen[hostname] = true
+		status := model.EdgeRouteStatusActive
+		policy := model.EdgeRoutePolicyEnabled
+		upstreamURL := strings.TrimSpace(route.UpstreamURL)
+		if *route.Enabled {
+			parsed, err := url.Parse(upstreamURL)
+			if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
+				return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("enabled route artifact has invalid HTTP upstream")
+			}
+		} else {
+			status = model.EdgeRouteStatusDisabled
+			policy = model.EdgeRoutePolicyRouteAOnly
+			upstreamURL = ""
+		}
+		targetMode := model.EdgeRouteIntentGroupModeAllGroups
+		pinnedGroup := ""
+		if strings.TrimSpace(route.EdgeGroupID) != "" {
+			targetMode = model.EdgeRouteIntentGroupModePinnedGroup
+			pinnedGroup = strings.ToLower(strings.TrimSpace(route.EdgeGroupID))
+			if !platformRouteArtifactGroupID.MatchString(pinnedGroup) {
+				return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact has invalid pinned edge group")
+			}
+		}
+		intent := model.EdgeRouteIntent{
+			Hostname: hostname, PathPrefix: "/", RouteKind: model.EdgeRouteKindPlatformRoute,
+			TargetGroupMode: targetMode, PinnedEdgeGroupID: pinnedGroup, MinHealthyEdgeNodes: minimumHealthy,
+			RoutePolicy: policy, UpstreamKind: model.EdgeRouteUpstreamKindKubernetesService, UpstreamScope: model.EdgeRouteUpstreamScopeCluster, UpstreamURL: upstreamURL,
+			TLSPolicy: model.EdgeRouteTLSPolicyPlatform, OriginStatus: status,
+		}
+		intent.Generation = edgeRouteIntentGeneration(intent)
+		intents = append(intents, intent)
 	}
-	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Generation: artifact.Generation, GeneratedAt: artifact.UpdatedAt, Routes: intents}
-	return snapshot, true, nil
+	sort.Slice(intents, func(i, j int) bool { return intents[i].Hostname < intents[j].Hostname })
+	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Generation: artifact.Generation, GeneratedAt: artifact.CreatedAt, Routes: intents, TLSAllowlist: []model.EdgeTLSAllowlistEntry{}}
+	return snapshot, nil
 }
 
 func edgeRouteIntentClaimsAllowed(claims platformcontrol.PlatformComponentIdentityClaims) bool {
