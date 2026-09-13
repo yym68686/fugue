@@ -329,7 +329,7 @@ func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
 			"range":               true,
 			"resume":              true,
 			"zero_copy":           c.directReplication,
-			"zero_copy_available": true,
+			"zero_copy_available": false,
 			"p2p":                 true,
 			"lazy_pull":           true,
 			"node":                c.clusterNode,
