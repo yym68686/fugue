@@ -3,6 +3,7 @@ package platformconfig
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCompileIsDeterministicAndCarriesLineage(t *testing.T) {
@@ -78,6 +79,35 @@ func TestCompileRejectsRuntimeSnapshotGenerationDrift(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "runtime snapshot generations") {
 		t.Fatalf("expected runtime snapshot generation mismatch, got %v", err)
+	}
+}
+
+func TestCompileFixedRuntimeSnapshotIsStableAcrossWallClockChanges(t *testing.T) {
+	request := CompileRequest{
+		Intent:          PlatformIntent{Generation: "intent-fixed-snapshot"},
+		Policy:          PolicySnapshot{Generation: "policy-fixed-snapshot"},
+		RuntimeSnapshot: RuntimeSnapshot{IntentGeneration: "intent-fixed-snapshot", PolicyGeneration: "policy-fixed-snapshot", Facts: map[string]any{"healthy_edges": 2}},
+		CreatedAt:       time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	first, err := Compile(request)
+	if err != nil {
+		t.Fatalf("compile first: %v", err)
+	}
+	request.CreatedAt = request.CreatedAt.Add(24 * time.Hour)
+	second, err := Compile(request)
+	if err != nil {
+		t.Fatalf("compile second: %v", err)
+	}
+	firstDigest, err := Digest(first.RouteArtifact.Content)
+	if err != nil {
+		t.Fatalf("first digest: %v", err)
+	}
+	secondDigest, err := Digest(second.RouteArtifact.Content)
+	if err != nil {
+		t.Fatalf("second digest: %v", err)
+	}
+	if firstDigest != secondDigest {
+		t.Fatalf("fixed runtime snapshot produced different artifact digest: %s != %s", firstDigest, secondDigest)
 	}
 }
 
