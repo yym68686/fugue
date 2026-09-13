@@ -143,6 +143,38 @@ func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) m
 	if !idsOK || !kindsOK || len(ids) == 0 || len(ids) != len(kinds) {
 		return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set artifact references must be parallel non-empty arrays"}
 	}
+	if dependencies, exists := artifact.Content["dependencies"].([]any); exists {
+		allowed := map[string]struct{}{}
+		for _, rawKind := range kinds {
+			if kind, ok := rawKind.(string); ok {
+				allowed[kind] = struct{}{}
+			}
+		}
+		seenEdges := map[string]struct{}{}
+		for _, rawDependency := range dependencies {
+			dependency, ok := rawDependency.(map[string]any)
+			if !ok {
+				return model.PlatformArtifactValidationResult{Name: "release_set.dependencies", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set dependency graph is malformed"}
+			}
+			from, fromOK := dependency["from"].(string)
+			to, toOK := dependency["to"].(string)
+			relation, relationOK := dependency["relation"].(string)
+			if !fromOK || !toOK || !relationOK || relation != "requires" {
+				return model.PlatformArtifactValidationResult{Name: "release_set.dependencies", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set dependency relation must be requires"}
+			}
+			if _, ok := allowed[from]; !ok {
+				return model.PlatformArtifactValidationResult{Name: "release_set.dependencies", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set dependency references an unknown source kind"}
+			}
+			if _, ok := allowed[to]; !ok {
+				return model.PlatformArtifactValidationResult{Name: "release_set.dependencies", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set dependency references an unknown target kind"}
+			}
+			key := from + "\x00" + to + "\x00" + relation
+			if _, exists := seenEdges[key]; exists {
+				return model.PlatformArtifactValidationResult{Name: "release_set.dependencies", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set dependency graph contains duplicate edges"}
+			}
+			seenEdges[key] = struct{}{}
+		}
+	}
 	seen := map[string]struct{}{}
 	intentDigest := artifact.Metadata["intent_digest"]
 	policyDigest := artifact.Metadata["policy_digest"]

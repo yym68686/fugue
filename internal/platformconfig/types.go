@@ -86,12 +86,19 @@ type Lineage struct {
 }
 
 type ReleaseSet struct {
-	SchemaVersion string   `json:"schema_version"`
-	Generation    string   `json:"generation"`
-	Scope         string   `json:"scope"`
-	ArtifactIDs   []string `json:"artifact_ids"`
-	ArtifactKinds []string `json:"artifact_kinds"`
-	Lineage       Lineage  `json:"lineage"`
+	SchemaVersion string               `json:"schema_version"`
+	Generation    string               `json:"generation"`
+	Scope         string               `json:"scope"`
+	ArtifactIDs   []string             `json:"artifact_ids"`
+	ArtifactKinds []string             `json:"artifact_kinds"`
+	Dependencies  []ArtifactDependency `json:"dependencies"`
+	Lineage       Lineage              `json:"lineage"`
+}
+
+type ArtifactDependency struct {
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Relation string `json:"relation"`
 }
 
 type CompileRequest struct {
@@ -227,6 +234,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 			model.PlatformArtifactKindEdgeRouteBundle,
 			model.PlatformArtifactKindDNSAnswerBundle,
 			model.PlatformArtifactKindCaddyRouteConfig,
+		},
+		Dependencies: []ArtifactDependency{
+			{From: model.PlatformArtifactKindDNSAnswerBundle, To: model.PlatformArtifactKindEdgeRouteBundle, Relation: "requires"},
+			{From: model.PlatformArtifactKindCaddyRouteConfig, To: model.PlatformArtifactKindEdgeRouteBundle, Relation: "requires"},
 		},
 		Lineage: lineage,
 	}

@@ -45,6 +45,9 @@ func TestCompileIsDeterministicAndCarriesLineage(t *testing.T) {
 	if first.RouteArtifact.Metadata["intent_digest"] != first.Lineage.IntentDigest {
 		t.Fatalf("route artifact did not retain intent lineage: %+v", first.RouteArtifact.Metadata)
 	}
+	if len(first.ReleaseSet.Dependencies) != 2 || first.ReleaseSet.Dependencies[0].Relation != "requires" {
+		t.Fatalf("release set dependency graph is incomplete: %+v", first.ReleaseSet.Dependencies)
+	}
 	if !strings.HasPrefix(first.ReleaseSet.Generation, "release-") {
 		t.Fatalf("unexpected release set generation: %s", first.ReleaseSet.Generation)
 	}
