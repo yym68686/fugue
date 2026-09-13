@@ -2872,6 +2872,30 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/consumers/identity:
+    post:
+      operationId: exchangePlatformConsumerIdentity
+      summary: Exchange a bound Kubernetes Pod token for a short-lived consumer identity
+      description: Requires a Pod-bound ServiceAccount token accepted by the Kubernetes API. Kubernetes SelfSubjectReview and a live Pod lookup determine the node identity. Only Pods in the configured control-plane namespace with an operator-managed typed fugue.pro/consumer-identity annotation may exchange credentials. The signed identity expires after two minutes. This operation does not report consumer health or change serving state.
+      tags: [Admin]
+      x-fugue-handler: handleExchangePlatformConsumerIdentity
+      security:
+        - KubernetesServiceAccountBearerAuth: []
+      responses:
+        '200':
+          description: Short-lived component credential with its server-derived claims.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConsumerIdentityResponse"
+        '401':
+          $ref: "#/components/responses/ErrorResponse"
+        '403':
+          $ref: "#/components/responses/ErrorResponse"
+        '503':
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/platform-state/consumers/assignment:
     get:
       operationId: getPlatformConsumerAssignment
@@ -12288,6 +12312,11 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque
+    KubernetesServiceAccountBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Pod-bound Kubernetes ServiceAccount token accepted by the Kubernetes API. Validated through SelfSubjectReview and live Pod lookup by the identity exchange handler.
     PlatformComponentBearerAuth:
       type: http
       scheme: bearer
@@ -30984,6 +31013,26 @@ components:
           $ref: "#/components/schemas/PlatformConsumerInstance"
         drift:
           type: boolean
+    PlatformConsumerIdentityResponse:
+      type: object
+      additionalProperties: false
+      required: [token, expires_at, component, node_id, scope_key, artifact_kinds]
+      properties:
+        token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        component:
+          type: string
+        node_id:
+          type: string
+        scope_key:
+          type: string
+        artifact_kinds:
+          type: array
+          items:
+            type: string
     PlatformConsumerAssignment:
       type: object
       additionalProperties: false
