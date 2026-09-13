@@ -275,6 +275,10 @@ paths:
             X-Fugue-Route-Intent-Generation:
               schema:
                 type: string
+            X-Fugue-Route-Intent-Source:
+              description: Serving source for the route projection. Present when the verified route artifact path is active.
+              schema:
+                type: string
           content:
             application/json:
               schema:
