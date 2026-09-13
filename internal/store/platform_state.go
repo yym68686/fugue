@@ -707,6 +707,30 @@ func (s *Store) GetActivePlatformArtifact(kind, scopeKey, channel string) (model
 	return artifact, release, found, err
 }
 
+// GetPlatformArtifactRelease returns an immutable release ledger entry by ID.
+// Consumers use this read-only lookup to bind runtime evidence to the exact
+// fencing token selected by the release controller.
+func (s *Store) GetPlatformArtifactRelease(id string) (model.PlatformArtifactRelease, error) {
+	id = strings.TrimSpace(id)
+	if s == nil || id == "" {
+		return model.PlatformArtifactRelease{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgGetPlatformArtifactReleaseByID(id)
+	}
+	var out model.PlatformArtifactRelease
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, release := range state.PlatformArtifactReleases {
+			if release.ID == id {
+				out = release
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+	return out, err
+}
+
 func (s *Store) VerifyPlatformArtifactIntegrity(artifact model.PlatformArtifact) error {
 	if s == nil {
 		return ErrInvalidInput

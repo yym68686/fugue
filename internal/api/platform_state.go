@@ -934,6 +934,67 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 	})
 }
 
+// handleGetPlatformConsumerAssignment exposes only server-derived expected
+// assignments for the authenticated component identity. It is deliberately
+// read-only: a consumer must still submit a signed trusted heartbeat after it
+// has applied and probed the artifact.
+func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
+		return
+	}
+	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{Limit: 200})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	assignments := make([]model.PlatformConsumerAssignment, 0, len(sets))
+	for _, set := range sets {
+		release, releaseErr := s.store.GetPlatformArtifactRelease(set.ArtifactReleaseID)
+		if releaseErr != nil {
+			if errors.Is(releaseErr, store.ErrNotFound) {
+				continue
+			}
+			s.writeStoreError(w, releaseErr)
+			return
+		}
+		for _, expected := range set.Consumers {
+			if expected.ConsumerID != claims.Component+":"+claims.NodeID ||
+				expected.Component != claims.Component || expected.NodeID != claims.NodeID ||
+				expected.ScopeKey != claims.ScopeKey || expected.ArtifactKind == "" ||
+				!containsPlatformArtifactKind(claims.ArtifactKinds, expected.ArtifactKind) {
+				continue
+			}
+			assignments = append(assignments, model.PlatformConsumerAssignment{
+				ExpectedConsumerSetID: set.ID, ReleaseSetID: set.ReleaseSetID,
+				ArtifactReleaseID: set.ArtifactReleaseID, ArtifactKind: set.ArtifactKind,
+				ScopeKey: set.ScopeKey, ExpectedGeneration: set.ExpectedGeneration, Revision: set.Revision,
+				FencingToken:              release.FencingToken,
+				ExpectedProtocolVersion:   expected.ExpectedProtocolVersion,
+				ExpectedSchemaVersion:     expected.ExpectedSchemaVersion,
+				CompatibilityCapabilities: append([]string(nil), expected.CompatibilityCapabilities...),
+				HeartbeatDeadline:         set.HeartbeatDeadline, ConvergenceDeadline: set.ConvergenceDeadline,
+			})
+		}
+	}
+	if len(assignments) == 0 {
+		httpx.WriteError(w, http.StatusNotFound, "no expected consumer assignment found")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, model.PlatformConsumerAssignmentResponse{Assignments: assignments, GeneratedAt: time.Now().UTC()})
+}
+
+func containsPlatformArtifactKind(kinds []string, wanted string) bool {
+	wanted = store.NormalizePlatformArtifactKind(wanted)
+	for _, kind := range kinds {
+		if store.NormalizePlatformArtifactKind(kind) == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrInvalidInput):

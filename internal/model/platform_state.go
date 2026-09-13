@@ -465,6 +465,30 @@ type PlatformConsumerHeartbeatResponse struct {
 	Drift    bool                     `json:"drift"`
 }
 
+// PlatformConsumerAssignment is the server-owned ReleaseSet assignment for
+// one verified consumer identity. Consumers use it to bind their apply and
+// probe evidence to the exact expected generation and fencing token.
+type PlatformConsumerAssignment struct {
+	ExpectedConsumerSetID     string    `json:"expected_consumer_set_id"`
+	ReleaseSetID              string    `json:"release_set_id"`
+	ArtifactReleaseID         string    `json:"artifact_release_id,omitempty"`
+	ArtifactKind              string    `json:"artifact_kind"`
+	ScopeKey                  string    `json:"scope_key"`
+	ExpectedGeneration        string    `json:"expected_generation"`
+	Revision                  int64     `json:"revision"`
+	FencingToken              int64     `json:"fencing_token"`
+	ExpectedProtocolVersion   string    `json:"expected_protocol_version"`
+	ExpectedSchemaVersion     string    `json:"expected_schema_version"`
+	CompatibilityCapabilities []string  `json:"compatibility_capabilities,omitempty"`
+	HeartbeatDeadline         time.Time `json:"heartbeat_deadline"`
+	ConvergenceDeadline       time.Time `json:"convergence_deadline"`
+}
+
+type PlatformConsumerAssignmentResponse struct {
+	Assignments []PlatformConsumerAssignment `json:"assignments"`
+	GeneratedAt time.Time                    `json:"generated_at"`
+}
+
 type FailureMode struct {
 	ID          string `json:"id"`
 	Description string `json:"description"`

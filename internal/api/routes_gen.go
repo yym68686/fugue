@@ -412,6 +412,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/operations/{id}/evidence", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperationEvidence)))
 	mux.Handle("GET /v1/operations/{id}/timeline", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperationTimeline)))
 	mux.Handle("GET /v1/platform-state/artifacts/{artifact_kind}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformStateArtifact)))
+	mux.Handle("GET /v1/platform-state/consumers/assignment", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerAssignment)))
 	mux.Handle("POST /v1/platform-state/consumers/heartbeat", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformConsumerHeartbeat)))
 	mux.Handle("POST /v1/platform-state/consumers/trusted-heartbeat", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleTrustedPlatformConsumerHeartbeat)))
 	mux.Handle("GET /v1/projects", s.auth.RequireAPI(http.HandlerFunc(s.handleListProjects)))

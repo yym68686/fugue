@@ -2872,6 +2872,27 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/consumers/assignment:
+    get:
+      operationId: getPlatformConsumerAssignment
+      summary: Get the expected ReleaseSet assignments for a trusted consumer
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformConsumerAssignment
+      security:
+        - PlatformComponentBearerAuth: []
+      responses:
+        '200':
+          description: Assignments bound to the verified component identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConsumerAssignmentResponse"
+        '401':
+          $ref: "#/components/responses/ErrorResponse"
+        '404':
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/failure-contracts:
     get:
       operationId: listSubsystemFailureContracts
@@ -30922,6 +30943,55 @@ components:
           $ref: "#/components/schemas/PlatformConsumerInstance"
         drift:
           type: boolean
+    PlatformConsumerAssignment:
+      type: object
+      additionalProperties: false
+      required: [expected_consumer_set_id, release_set_id, artifact_kind, scope_key, expected_generation, revision, fencing_token, expected_protocol_version, expected_schema_version]
+      properties:
+        expected_consumer_set_id:
+          type: string
+        release_set_id:
+          type: string
+        artifact_release_id:
+          type: string
+        artifact_kind:
+          type: string
+        scope_key:
+          type: string
+        expected_generation:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        fencing_token:
+          type: integer
+          format: int64
+        expected_protocol_version:
+          type: string
+        expected_schema_version:
+          type: string
+        compatibility_capabilities:
+          type: array
+          items:
+            type: string
+        heartbeat_deadline:
+          type: string
+          format: date-time
+        convergence_deadline:
+          type: string
+          format: date-time
+    PlatformConsumerAssignmentResponse:
+      type: object
+      additionalProperties: false
+      required: [assignments, generated_at]
+      properties:
+        assignments:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformConsumerAssignment"
+        generated_at:
+          type: string
+          format: date-time
     FailureMode:
       type: object
       additionalProperties: false

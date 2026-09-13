@@ -169,6 +169,60 @@ func TestTrustedPlatformConsumerHeartbeatEndpointBindsIdentityAndRejectsReplay(t
 	}
 }
 
+func TestPlatformConsumerAssignmentEndpointBindsVerifiedIdentity(t *testing.T) {
+	storeState, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	keyring := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "component-key-assignment", Keys: map[string]string{"component-key-assignment": "component-assignment-secret"}}
+	server.auth.PlatformComponentIdentityKeyring = keyring
+	now := time.Now().UTC().Truncate(time.Second)
+	created := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
+		Generation:   "assignment-generation",
+		Content:      map[string]any{"weights": map[string]any{"latency": 1}},
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create assignment artifact: %d %s", created.Code, created.Body.String())
+	}
+	var createdArtifact model.PlatformArtifactResponse
+	mustDecodeJSON(t, created, &createdArtifact)
+	validated := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+createdArtifact.Artifact.ID+"/validate", admin, model.PlatformArtifactValidateRequest{DryRun: false})
+	if validated.Code != http.StatusOK {
+		t.Fatalf("validate assignment artifact: %d %s", validated.Code, validated.Body.String())
+	}
+	released := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+createdArtifact.Artifact.ID+"/release", admin, model.PlatformArtifactReleaseRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelShadow, IdempotencyKey: "assignment-release", Reason: "assignment test"})
+	if released.Code != http.StatusOK {
+		t.Fatalf("release assignment artifact: %d %s", released.Code, released.Body.String())
+	}
+	var releasedArtifact model.PlatformArtifactReleaseResponse
+	mustDecodeJSON(t, released, &releasedArtifact)
+	set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{
+		ReleaseSetID: "assignment-release-set", ArtifactReleaseID: releasedArtifact.Release.ID, ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+		Scope: model.PlatformArtifactScope{ScopeType: "global"}, ScopeKey: "global", Generation: "assignment-generation", Revision: 1, PreparedAt: now,
+		Topology: platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "assignment-node", EdgeGroupID: "assignment-group", Country: "US"}}},
+	})
+	if err != nil {
+		t.Fatalf("build assignment set: %v", err)
+	}
+	if _, err := storeState.CreatePlatformExpectedConsumerSet(set); err != nil {
+		t.Fatalf("persist assignment set: %v", err)
+	}
+	token, err := platformcontrol.IssuePlatformComponentIdentity(keyring, platformcontrol.PlatformComponentIdentityClaims{
+		CredentialID: "assignment-credential", Component: model.PlatformConsumerComponentEdgeWorker, NodeID: "assignment-node", ScopeKey: "global", ArtifactKinds: []string{model.PlatformArtifactKindEdgeRankingPolicy},
+	}, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("issue assignment identity: %v", err)
+	}
+	response := performJSONRequest(t, server, http.MethodGet, "/v1/platform-state/consumers/assignment", token, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("assignment endpoint: %d %s", response.Code, response.Body.String())
+	}
+	var body model.PlatformConsumerAssignmentResponse
+	mustDecodeJSON(t, response, &body)
+	if len(body.Assignments) != 1 || body.Assignments[0].ExpectedConsumerSetID != set.ID || body.Assignments[0].FencingToken != releasedArtifact.Release.FencingToken || body.Assignments[0].Revision != set.Revision {
+		t.Fatalf("unexpected assignment response: %+v", body)
+	}
+}
+
 func TestTrustedPlatformConsumerHeartbeatEndpointRejectsFutureAndGenerationRollback(t *testing.T) {
 	t.Parallel()
 

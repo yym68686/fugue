@@ -791,6 +791,12 @@ WHERE id = $1`
 	return release, nil
 }
 
+func (s *Store) pgGetPlatformArtifactReleaseByID(id string) (model.PlatformArtifactRelease, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return pgGetPlatformArtifactRelease(ctx, s.db, id, false)
+}
+
 func pgGetPlatformArtifactReleaseByIdempotency(ctx context.Context, db platformStateDB, laneKey, idempotencyKey string) (model.PlatformArtifactRelease, bool, error) {
 	release, err := scanPlatformArtifactRelease(db.QueryRowContext(ctx, `
 SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
