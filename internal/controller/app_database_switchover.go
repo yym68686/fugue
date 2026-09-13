@@ -538,14 +538,12 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
-	// Internal runtimes may expose heterogeneous storage providers. Prefer the
-	// target node's portable Longhorn class when the legacy source class has no
-	// capacity there; this keeps localization a single declarative operation.
 	if targetRuntime, runtimeErr := s.Store.GetRuntime(targetRuntimeID); runtimeErr == nil && model.RuntimeIsInternal(targetRuntime) && strings.EqualFold(strings.TrimSpace(desiredDatabase.StorageClassName), "fugue-postgres-rwo") {
 		if sc, found, scErr := client.getStorageClass(ctx, "fugue-longhorn-rwo"); scErr == nil && found && sc.Provisioner == "driver.longhorn.io" {
 			desiredDatabase.StorageClassName = "fugue-longhorn-rwo"
 		}
 	}
+
 	// Durable app state may be updated before this executor resumes. Reconcile
 	// against the live CNPG PVCs as well, otherwise a failed or interrupted
 	// migration can be reported complete while the volume remains on the old
