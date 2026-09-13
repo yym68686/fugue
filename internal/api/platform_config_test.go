@@ -184,3 +184,14 @@ func TestPolicyArtifactValidationUsesTypedPolicySchema(t *testing.T) {
 		t.Fatalf("expected typed policy validation failure, got %v", err)
 	}
 }
+
+func TestPlatformIntentArtifactValidationUsesTypedIntentSchema(t *testing.T) {
+	artifact := model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindPlatformIntent,
+		Content:      map[string]any{"generation": "intent-invalid", "routes": []any{map[string]any{"hostname": "duplicate", "upstream_url": "http://one"}, map[string]any{"hostname": "duplicate", "upstream_url": "http://two"}}},
+		Metadata:     map[string]string{},
+	}
+	if err := validatePlatformIntentArtifact(artifact); err == nil || !strings.Contains(err.Error(), "platform intent is invalid") {
+		t.Fatalf("expected typed intent validation failure, got %v", err)
+	}
+}

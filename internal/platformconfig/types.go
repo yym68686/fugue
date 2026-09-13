@@ -305,6 +305,12 @@ func validateIntent(in PlatformIntent) error {
 	return nil
 }
 
+// ValidatePlatformIntent validates a normalized, strongly typed platform
+// intent for callers outside the compiler (for example artifact gates).
+func ValidatePlatformIntent(in PlatformIntent) error {
+	return validateIntent(normalizeIntent(in))
+}
+
 func validatePolicy(in PolicySnapshot) error {
 	if in.SchemaVersion != SchemaVersion || strings.TrimSpace(in.Generation) == "" {
 		return fmt.Errorf("policy snapshot requires schema_version %q and generation", SchemaVersion)

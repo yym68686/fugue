@@ -114,6 +114,12 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindPlatformIntent {
+		if err := validatePlatformIntentArtifact(artifact); err != nil {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
 	results := validatePlatformArtifactDraft(artifact)
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
 		results = append(results, s.validateReleaseSetReferences(artifact))
@@ -162,6 +168,28 @@ func validatePlatformPolicyArtifact(artifact model.PlatformArtifact) error {
 	}
 	if expected := strings.TrimSpace(artifact.Metadata["policy_digest"]); expected != "" && expected != digest {
 		return fmt.Errorf("policy snapshot digest does not match metadata")
+	}
+	return nil
+}
+
+func validatePlatformIntentArtifact(artifact model.PlatformArtifact) error {
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return fmt.Errorf("platform intent content is not JSON: %w", err)
+	}
+	var intent platformconfig.PlatformIntent
+	if err := json.Unmarshal(raw, &intent); err != nil {
+		return fmt.Errorf("platform intent schema is invalid: %w", err)
+	}
+	intentDigest, err := platformconfig.Digest(intent)
+	if err != nil {
+		return fmt.Errorf("platform intent digest failed: %w", err)
+	}
+	if err := platformconfig.ValidatePlatformIntent(intent); err != nil {
+		return fmt.Errorf("platform intent is invalid: %w", err)
+	}
+	if expected := strings.TrimSpace(artifact.Metadata["intent_digest"]); expected != "" && expected != intentDigest {
+		return fmt.Errorf("platform intent digest does not match metadata")
 	}
 	return nil
 }
