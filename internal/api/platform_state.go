@@ -12,6 +12,7 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 	"fugue/internal/store"
@@ -107,6 +108,12 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 		s.writeStoreError(w, err)
 		return
 	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindPolicySnapshot {
+		if err := validatePlatformPolicyArtifact(artifact); err != nil {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
 	results := validatePlatformArtifactDraft(artifact)
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
 		results = append(results, s.validateReleaseSetReferences(artifact))
@@ -135,6 +142,28 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 		Pass:     pass,
 		DryRun:   req.DryRun,
 	})
+}
+
+func validatePlatformPolicyArtifact(artifact model.PlatformArtifact) error {
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return fmt.Errorf("policy snapshot content is not JSON: %w", err)
+	}
+	var policy platformconfig.PolicySnapshot
+	if err := json.Unmarshal(raw, &policy); err != nil {
+		return fmt.Errorf("policy snapshot schema is invalid: %w", err)
+	}
+	if err := platformconfig.ValidatePolicySnapshot(policy); err != nil {
+		return fmt.Errorf("policy snapshot is invalid: %w", err)
+	}
+	digest, err := platformconfig.Digest(policy)
+	if err != nil {
+		return fmt.Errorf("policy snapshot digest failed: %w", err)
+	}
+	if expected := strings.TrimSpace(artifact.Metadata["policy_digest"]); expected != "" && expected != digest {
+		return fmt.Errorf("policy snapshot digest does not match metadata")
+	}
+	return nil
 }
 
 func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {

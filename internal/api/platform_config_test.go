@@ -173,3 +173,14 @@ func TestCompilePlatformConfigFailurePreservesPreviousImmutableArtifacts(t *test
 		t.Fatalf("failed compile changed retained artifact: %+v", retained.Content)
 	}
 }
+
+func TestPolicyArtifactValidationUsesTypedPolicySchema(t *testing.T) {
+	artifact := model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindPolicySnapshot,
+		Content:      map[string]any{"generation": "policy-invalid", "dependency_order": []any{"route", "route"}},
+		Metadata:     map[string]string{},
+	}
+	if err := validatePlatformPolicyArtifact(artifact); err == nil || !strings.Contains(err.Error(), "policy snapshot is invalid") {
+		t.Fatalf("expected typed policy validation failure, got %v", err)
+	}
+}

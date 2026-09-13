@@ -323,6 +323,12 @@ func validatePolicy(in PolicySnapshot) error {
 	return validateConstraintGraph(in.ConstraintGraph)
 }
 
+// ValidatePolicySnapshot validates a normalized, strongly typed policy
+// snapshot for callers outside the compiler (for example artifact gates).
+func ValidatePolicySnapshot(in PolicySnapshot) error {
+	return validatePolicy(normalizePolicy(in))
+}
+
 func normalizeConstraintGraph(graph ConstraintGraph) ConstraintGraph {
 	out := ConstraintGraph{Nodes: append([]string(nil), graph.Nodes...), Edges: append([]ConstraintEdge(nil), graph.Edges...)}
 	for i := range out.Nodes {
