@@ -52,7 +52,7 @@ func buildVisibleClusterNodesFromResolved(
 			}
 		}
 
-		if principal.IsPlatformAdmin() || ok {
+		if principal.IsPlatformAdmin() || (ok && !model.RuntimeIsInternal(runtimeObj)) {
 			filtered = append(filtered, node)
 			continue
 		}
