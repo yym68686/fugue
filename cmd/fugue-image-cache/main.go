@@ -324,14 +324,15 @@ func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "/fugue/cache/v2/replication/capabilities" && r.Method == http.MethodGet {
 		writeManagementJSON(w, http.StatusOK, map[string]any{
-			"protocol_version": "v2",
-			"transports":       []string{"stream", "legacy-crane"},
-			"range":            true,
-			"resume":           true,
-			"zero_copy":        false,
-			"p2p":              true,
-			"lazy_pull":        true,
-			"node":             c.clusterNode,
+			"protocol_version":    "v2",
+			"transports":          []string{"stream", "sendfile", "legacy-crane"},
+			"range":               true,
+			"resume":              true,
+			"zero_copy":           c.directReplication,
+			"zero_copy_available": true,
+			"p2p":                 true,
+			"lazy_pull":           true,
+			"node":                c.clusterNode,
 		})
 		return
 	}
