@@ -2257,7 +2257,7 @@ paths:
     post:
       operationId: compilePlatformConfigFromArtifacts
       summary: Compile Platform Artifacts
-      description: Replays validated immutable PlatformIntent and PolicySnapshot artifacts into a deterministic ReleaseSet. Inline serving configuration and business tables are not read.
+      description: Verifies both stored artifacts before replaying them into a deterministic ReleaseSet. Signed content, artifact kind, validation state, generation, scope and typed schema must agree. Rejected inputs produce no output artifacts. Inline serving configuration and business tables are not read.
       tags: [Admin]
       x-fugue-handler: handleCompilePlatformConfigFromArtifacts
       security:
@@ -2273,8 +2273,10 @@ paths:
               properties:
                 intent_artifact_id:
                   type: string
+                  minLength: 1
                 policy_artifact_id:
                   type: string
+                  minLength: 1
                 runtime_snapshot:
                   $ref: "#/components/schemas/PlatformRuntimeSnapshot"
       responses:
@@ -2284,6 +2286,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PlatformConfigCompileResponse"
+        '400':
+          description: Missing artifact IDs or malformed request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '404':
+          description: An input artifact ID does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '409':
+          description: Untrusted, incompatible or inconsistent input artifacts; no compilation outputs are written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: Input artifact storage is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-config/import-env/preview:

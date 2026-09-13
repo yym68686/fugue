@@ -316,6 +316,22 @@ func TestCompilePlatformConfigFromValidatedArtifactsOnly(t *testing.T) {
 	if firstReplay.RouteArtifact.ID != secondReplay.RouteArtifact.ID || firstReplay.DNSArtifact.ID != secondReplay.DNSArtifact.ID || firstReplay.ReleaseArtifact.ID != secondReplay.ReleaseArtifact.ID {
 		t.Fatalf("replay created mutable duplicate artifacts: %s/%s vs %s/%s", firstReplay.RouteArtifact.ID, firstReplay.ReleaseArtifact.ID, secondReplay.RouteArtifact.ID, secondReplay.ReleaseArtifact.ID)
 	}
+	server.bundleRevokedKeyIDs = append(server.bundleRevokedKeyIDs, intent.Artifact.Provenance.KeyID)
+	before, err := server.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile-from-artifacts", admin, map[string]any{
+		"intent_artifact_id": intent.Artifact.ID, "policy_artifact_id": policy.Artifact.ID,
+		"runtime_snapshot": map[string]any{"intent_generation": intent.Artifact.Generation, "policy_generation": policy.Artifact.Generation, "facts": map[string]any{"topology_revision": "revoked-input-must-not-compile"}},
+	})
+	if revoked.Code != http.StatusConflict {
+		t.Fatalf("revoked artifact signature must be rejected: %d %s", revoked.Code, revoked.Body.String())
+	}
+	after, err := server.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 100})
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("rejected inputs created artifacts: %d -> %d, %v", len(before), len(after), err)
+	}
 	draft := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{ArtifactKind: model.PlatformArtifactKindPlatformIntent, Scope: model.PlatformArtifactScope{ScopeType: "global"}, Generation: "intent-draft-input-1", Content: map[string]any{"schema_version": "fugue.platform.config/v1", "generation": "intent-draft-input-1"}})
 	var draftResponse model.PlatformArtifactResponse
 	mustDecodeJSON(t, draft, &draftResponse)

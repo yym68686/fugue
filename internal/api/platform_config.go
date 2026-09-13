@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformsafety"
 	"fugue/internal/store"
 )
 
@@ -164,19 +166,39 @@ func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if strings.TrimSpace(request.IntentArtifactID) == "" || strings.TrimSpace(request.PolicyArtifactID) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "intent_artifact_id and policy_artifact_id are required")
+		return
+	}
 	intentArtifact, err := s.store.GetPlatformArtifact(request.IntentArtifactID)
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "intent artifact not found")
+		if errors.Is(err, store.ErrNotFound) {
+			httpx.WriteError(w, http.StatusNotFound, "intent artifact not found")
+		} else {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "intent artifact storage unavailable")
+		}
 		return
 	}
 	policyArtifact, err := s.store.GetPlatformArtifact(request.PolicyArtifactID)
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "policy artifact not found")
+		if errors.Is(err, store.ErrNotFound) {
+			httpx.WriteError(w, http.StatusNotFound, "policy artifact not found")
+		} else {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "policy artifact storage unavailable")
+		}
+		return
+	}
+	if intentArtifact.ID != request.IntentArtifactID || policyArtifact.ID != request.PolicyArtifactID {
+		httpx.WriteError(w, http.StatusNotFound, "exact artifact IDs are required")
 		return
 	}
 	if intentArtifact.ArtifactKind != model.PlatformArtifactKindPlatformIntent || policyArtifact.ArtifactKind != model.PlatformArtifactKindPolicySnapshot ||
 		intentArtifact.Status != model.PlatformArtifactStatusValidated || policyArtifact.Status != model.PlatformArtifactStatusValidated {
 		httpx.WriteError(w, http.StatusConflict, "compile inputs must be validated platform intent and policy artifacts")
+		return
+	}
+	if !platformsafety.EvaluateArtifactIntegrity(intentArtifact, s.bundleKeyring()).Pass || !platformsafety.EvaluateArtifactIntegrity(policyArtifact, s.bundleKeyring()).Pass {
+		httpx.WriteError(w, http.StatusConflict, "compile inputs must have trusted signatures and matching content digests")
 		return
 	}
 	if err := validatePlatformIntentArtifact(intentArtifact); err != nil {
@@ -193,15 +215,13 @@ func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusConflict, "compile artifacts must declare the current platform config schema")
 		return
 	}
-	intentRaw, _ := json.Marshal(intentArtifact.Content)
-	policyRaw, _ := json.Marshal(policyArtifact.Content)
 	var intent platformconfig.PlatformIntent
 	var policy platformconfig.PolicySnapshot
-	if err := json.Unmarshal(intentRaw, &intent); err != nil {
+	if err := decodeCompilerArtifactContent(intentArtifact, &intent); err != nil {
 		httpx.WriteError(w, http.StatusConflict, "intent artifact content cannot be decoded")
 		return
 	}
-	if err := json.Unmarshal(policyRaw, &policy); err != nil {
+	if err := decodeCompilerArtifactContent(policyArtifact, &policy); err != nil {
 		httpx.WriteError(w, http.StatusConflict, "policy artifact content cannot be decoded")
 		return
 	}
@@ -211,6 +231,12 @@ func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter,
 	}
 	intent = platformconfig.NormalizePlatformIntent(intent)
 	policy = platformconfig.NormalizePolicySnapshot(policy)
+	intentScope, _ := store.NormalizePlatformArtifactScope(model.PlatformArtifactScope{ScopeType: "global", Key: intent.Scope})
+	policyScope, _ := store.NormalizePlatformArtifactScope(model.PlatformArtifactScope{ScopeType: "global", Key: policy.Scope})
+	if intentScope != intentArtifact.Scope || policyScope != policyArtifact.Scope {
+		httpx.WriteError(w, http.StatusConflict, "artifact scope does not match typed content")
+		return
+	}
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: request.RuntimeSnapshot, CreatedAt: time.Now().UTC()})
 	if err != nil {
 		httpx.WriteError(w, http.StatusConflict, err.Error())
@@ -268,6 +294,16 @@ func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter,
 		RouteArtifact: compiled.RouteArtifact, DNSArtifact: compiled.DNSArtifact,
 		TLSArtifact: compiled.TLSArtifact, ReleaseArtifact: compiled.ReleaseArtifact,
 	})
+}
+
+func decodeCompilerArtifactContent(artifact model.PlatformArtifact, output any) error {
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(output)
 }
 
 func (s *Server) handlePlatformConfigEnvironmentImportPreview(w http.ResponseWriter, r *http.Request) {
