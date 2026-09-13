@@ -276,6 +276,44 @@ func TestEnvironmentImportPersistsValidatedIntentWithoutPromotion(t *testing.T) 
 	}
 }
 
+func TestCompilePlatformConfigFromValidatedArtifactsOnly(t *testing.T) {
+	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	intentResponse := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindPlatformIntent, Scope: model.PlatformArtifactScope{ScopeType: "global"}, Generation: "intent-artifact-input-1",
+		Content: map[string]any{"schema_version": "fugue.platform.config/v1", "generation": "intent-artifact-input-1", "scope": "global", "routes": []any{map[string]any{"hostname": "artifact-input.example", "upstream_url": "http://origin:8080", "enabled": true}}},
+	})
+	policyResponse := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global"}, Generation: "policy-artifact-input-1",
+		Content: map[string]any{"schema_version": "fugue.platform.config/v1", "generation": "policy-artifact-input-1", "scope": "global", "minimum_healthy_edges": 1, "max_stale_seconds": 86400, "dependency_order": []any{"route", "tls", "dns"}},
+	})
+	var intent, policy model.PlatformArtifactResponse
+	mustDecodeJSON(t, intentResponse, &intent)
+	mustDecodeJSON(t, policyResponse, &policy)
+	for _, artifact := range []model.PlatformArtifactResponse{intent, policy} {
+		validated := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+artifact.Artifact.ID+"/validate", admin, map[string]any{"dry_run": false})
+		if validated.Code != http.StatusOK {
+			t.Fatalf("validate input: %d %s", validated.Code, validated.Body.String())
+		}
+	}
+	if err := validatePlatformIntentArtifact(intent.Artifact); err != nil {
+		t.Fatalf("typed intent artifact: %v", err)
+	}
+	if err := validatePlatformPolicyArtifact(policy.Artifact); err != nil {
+		t.Fatalf("typed policy artifact: %v", err)
+	}
+	compiled := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile-from-artifacts", admin, map[string]any{"intent_artifact_id": intent.Artifact.ID, "policy_artifact_id": policy.Artifact.ID})
+	if compiled.Code != http.StatusCreated || !strings.Contains(compiled.Body.String(), "artifact-input.example") {
+		t.Fatalf("artifact compiler failed: %d %s", compiled.Code, compiled.Body.String())
+	}
+	draft := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{ArtifactKind: model.PlatformArtifactKindPlatformIntent, Scope: model.PlatformArtifactScope{ScopeType: "global"}, Generation: "intent-draft-input-1", Content: map[string]any{"schema_version": "fugue.platform.config/v1", "generation": "intent-draft-input-1"}})
+	var draftResponse model.PlatformArtifactResponse
+	mustDecodeJSON(t, draft, &draftResponse)
+	failed := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile-from-artifacts", admin, map[string]any{"intent_artifact_id": draftResponse.Artifact.ID, "policy_artifact_id": policy.Artifact.ID})
+	if failed.Code != http.StatusConflict {
+		t.Fatalf("draft intent must be rejected: %d %s", failed.Code, failed.Body.String())
+	}
+}
+
 func TestPlatformIntentArtifactValidationUsesTypedIntentSchema(t *testing.T) {
 	artifact := model.PlatformArtifact{
 		ArtifactKind: model.PlatformArtifactKindPlatformIntent,

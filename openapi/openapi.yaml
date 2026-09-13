@@ -2253,6 +2253,39 @@ paths:
                 $ref: "#/components/schemas/PlatformConfigCompileResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/compile-from-artifacts:
+    post:
+      operationId: compilePlatformConfigFromArtifacts
+      summary: Compile Platform Artifacts
+      description: Replays validated immutable PlatformIntent and PolicySnapshot artifacts into a deterministic ReleaseSet. Inline serving configuration and business tables are not read.
+      tags: [Admin]
+      x-fugue-handler: handleCompilePlatformConfigFromArtifacts
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [intent_artifact_id, policy_artifact_id]
+              additionalProperties: false
+              properties:
+                intent_artifact_id:
+                  type: string
+                policy_artifact_id:
+                  type: string
+                runtime_snapshot:
+                  $ref: "#/components/schemas/PlatformRuntimeSnapshot"
+      responses:
+        '201':
+          description: Deterministically compiled artifacts and ReleaseSet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConfigCompileResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-config/import-env/preview:
     get:
       operationId: previewPlatformConfigEnvironmentImport

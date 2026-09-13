@@ -327,6 +327,10 @@ func ValidatePlatformIntent(in PlatformIntent) error {
 	return validateIntent(normalizeIntent(in))
 }
 
+// NormalizePlatformIntent returns the canonical representation used for
+// artifact digests and compiler replay.
+func NormalizePlatformIntent(in PlatformIntent) PlatformIntent { return normalizeIntent(in) }
+
 func validatePolicy(in PolicySnapshot) error {
 	if in.SchemaVersion != SchemaVersion || strings.TrimSpace(in.Generation) == "" {
 		return fmt.Errorf("policy snapshot requires schema_version %q and generation", SchemaVersion)
@@ -350,6 +354,10 @@ func validatePolicy(in PolicySnapshot) error {
 func ValidatePolicySnapshot(in PolicySnapshot) error {
 	return validatePolicy(normalizePolicy(in))
 }
+
+// NormalizePolicySnapshot returns the canonical representation used for
+// artifact digests and compiler replay.
+func NormalizePolicySnapshot(in PolicySnapshot) PolicySnapshot { return normalizePolicy(in) }
 
 func normalizeConstraintGraph(graph ConstraintGraph) ConstraintGraph {
 	out := ConstraintGraph{Nodes: append([]string(nil), graph.Nodes...), Edges: append([]ConstraintEdge(nil), graph.Edges...)}

@@ -144,6 +144,86 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+type platformConfigCompileArtifactsRequest struct {
+	IntentArtifactID string                         `json:"intent_artifact_id"`
+	PolicyArtifactID string                         `json:"policy_artifact_id"`
+	RuntimeSnapshot  platformconfig.RuntimeSnapshot `json:"runtime_snapshot,omitempty"`
+}
+
+// handleCompilePlatformConfigFromArtifacts compiles only immutable validated
+// artifacts. It deliberately does not read business tables or accept inline
+// serving configuration, so a caller can replay the exact stored inputs.
+func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
+		return
+	}
+	var request platformConfigCompileArtifactsRequest
+	if err := httpx.DecodeJSON(r, &request); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	intentArtifact, err := s.store.GetPlatformArtifact(request.IntentArtifactID)
+	if err != nil {
+		httpx.WriteError(w, http.StatusNotFound, "intent artifact not found")
+		return
+	}
+	policyArtifact, err := s.store.GetPlatformArtifact(request.PolicyArtifactID)
+	if err != nil {
+		httpx.WriteError(w, http.StatusNotFound, "policy artifact not found")
+		return
+	}
+	if intentArtifact.ArtifactKind != model.PlatformArtifactKindPlatformIntent || policyArtifact.ArtifactKind != model.PlatformArtifactKindPolicySnapshot ||
+		intentArtifact.Status != model.PlatformArtifactStatusValidated || policyArtifact.Status != model.PlatformArtifactStatusValidated {
+		httpx.WriteError(w, http.StatusConflict, "compile inputs must be validated platform intent and policy artifacts")
+		return
+	}
+	if err := validatePlatformIntentArtifact(intentArtifact); err != nil {
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err := validatePlatformPolicyArtifact(policyArtifact); err != nil {
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+		return
+	}
+	intentSchema, _ := intentArtifact.Content["schema_version"].(string)
+	policySchema, _ := policyArtifact.Content["schema_version"].(string)
+	if strings.TrimSpace(intentSchema) != platformconfig.SchemaVersion || strings.TrimSpace(policySchema) != platformconfig.SchemaVersion {
+		httpx.WriteError(w, http.StatusConflict, "compile artifacts must declare the current platform config schema")
+		return
+	}
+	intentRaw, _ := json.Marshal(intentArtifact.Content)
+	policyRaw, _ := json.Marshal(policyArtifact.Content)
+	var intent platformconfig.PlatformIntent
+	var policy platformconfig.PolicySnapshot
+	if err := json.Unmarshal(intentRaw, &intent); err != nil {
+		httpx.WriteError(w, http.StatusConflict, "intent artifact content cannot be decoded")
+		return
+	}
+	if err := json.Unmarshal(policyRaw, &policy); err != nil {
+		httpx.WriteError(w, http.StatusConflict, "policy artifact content cannot be decoded")
+		return
+	}
+	if intent.Generation != intentArtifact.Generation || policy.Generation != policyArtifact.Generation {
+		httpx.WriteError(w, http.StatusConflict, "artifact generation does not match typed content")
+		return
+	}
+	intent = platformconfig.NormalizePlatformIntent(intent)
+	policy = platformconfig.NormalizePolicySnapshot(policy)
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: request.RuntimeSnapshot, CreatedAt: time.Now().UTC()})
+	if err != nil {
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, platformConfigCompileResponse{
+		Lineage: compiled.Lineage, ReleaseSet: compiled.ReleaseSet,
+		IntentArtifact: intentArtifact, PolicyArtifact: policyArtifact,
+		RouteArtifact: compiled.RouteArtifact, DNSArtifact: compiled.DNSArtifact,
+		TLSArtifact: compiled.TLSArtifact, ReleaseArtifact: compiled.ReleaseArtifact,
+	})
+}
+
 func (s *Server) handlePlatformConfigEnvironmentImportPreview(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() {
