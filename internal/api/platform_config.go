@@ -216,6 +216,52 @@ func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 		return
 	}
+	compiledArtifacts := []*model.PlatformArtifact{&compiled.RouteArtifact, &compiled.DNSArtifact, &compiled.TLSArtifact}
+	for _, artifact := range compiledArtifacts {
+		artifact.CreatedByType = principal.ActorType
+		artifact.CreatedByID = principal.ActorID
+		stored, _, storeErr := s.store.EnsurePlatformArtifact(*artifact)
+		if storeErr != nil {
+			s.writeStoreError(w, storeErr)
+			return
+		}
+		*artifact = stored
+		validated, validateErr := s.store.ValidatePlatformArtifact(stored.ID, []model.PlatformArtifactValidationResult{{
+			Name: "platform_config.artifact_replay", Pass: true,
+			Severity: model.RobustnessSeverityBlockPublish,
+			Message:  "deterministic artifact replay passed",
+			Evidence: map[string]string{"intent_artifact": intentArtifact.ID, "policy_artifact": policyArtifact.ID},
+		}})
+		if validateErr != nil {
+			s.writeStoreError(w, validateErr)
+			return
+		}
+		*artifact = validated
+	}
+	compiled.ReleaseSet.ArtifactIDs = []string{compiled.RouteArtifact.ID, compiled.DNSArtifact.ID, compiled.TLSArtifact.ID}
+	compiled.ReleaseArtifact = platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, compiled.ReleaseSet.ArtifactIDs, time.Now().UTC())
+	compiled.ReleaseArtifact.CreatedByType = principal.ActorType
+	compiled.ReleaseArtifact.CreatedByID = principal.ActorID
+	storedRelease, _, storeErr := s.store.EnsurePlatformArtifact(compiled.ReleaseArtifact)
+	if storeErr != nil {
+		s.writeStoreError(w, storeErr)
+		return
+	}
+	compiled.ReleaseArtifact = storedRelease
+	if referenceResult := s.validateReleaseSetReferences(storedRelease); !referenceResult.Pass {
+		httpx.WriteError(w, http.StatusConflict, referenceResult.Message)
+		return
+	}
+	validatedRelease, validateErr := s.store.ValidatePlatformArtifact(storedRelease.ID, []model.PlatformArtifactValidationResult{{
+		Name: "platform_config.release_set_replay", Pass: true,
+		Severity: model.RobustnessSeverityBlockPublish,
+		Message:  "deterministic release set replay passed",
+	}})
+	if validateErr != nil {
+		s.writeStoreError(w, validateErr)
+		return
+	}
+	compiled.ReleaseArtifact = validatedRelease
 	httpx.WriteJSON(w, http.StatusCreated, platformConfigCompileResponse{
 		Lineage: compiled.Lineage, ReleaseSet: compiled.ReleaseSet,
 		IntentArtifact: intentArtifact, PolicyArtifact: policyArtifact,

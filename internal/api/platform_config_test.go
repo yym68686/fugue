@@ -305,6 +305,17 @@ func TestCompilePlatformConfigFromValidatedArtifactsOnly(t *testing.T) {
 	if compiled.Code != http.StatusCreated || !strings.Contains(compiled.Body.String(), "artifact-input.example") {
 		t.Fatalf("artifact compiler failed: %d %s", compiled.Code, compiled.Body.String())
 	}
+	var firstReplay platformConfigCompileResponse
+	mustDecodeJSON(t, compiled, &firstReplay)
+	repeated := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile-from-artifacts", admin, map[string]any{"intent_artifact_id": intent.Artifact.ID, "policy_artifact_id": policy.Artifact.ID})
+	if repeated.Code != http.StatusCreated {
+		t.Fatalf("replaying immutable inputs failed: %d %s", repeated.Code, repeated.Body.String())
+	}
+	var secondReplay platformConfigCompileResponse
+	mustDecodeJSON(t, repeated, &secondReplay)
+	if firstReplay.RouteArtifact.ID != secondReplay.RouteArtifact.ID || firstReplay.DNSArtifact.ID != secondReplay.DNSArtifact.ID || firstReplay.ReleaseArtifact.ID != secondReplay.ReleaseArtifact.ID {
+		t.Fatalf("replay created mutable duplicate artifacts: %s/%s vs %s/%s", firstReplay.RouteArtifact.ID, firstReplay.ReleaseArtifact.ID, secondReplay.RouteArtifact.ID, secondReplay.ReleaseArtifact.ID)
+	}
 	draft := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{ArtifactKind: model.PlatformArtifactKindPlatformIntent, Scope: model.PlatformArtifactScope{ScopeType: "global"}, Generation: "intent-draft-input-1", Content: map[string]any{"schema_version": "fugue.platform.config/v1", "generation": "intent-draft-input-1"}})
 	var draftResponse model.PlatformArtifactResponse
 	mustDecodeJSON(t, draft, &draftResponse)
