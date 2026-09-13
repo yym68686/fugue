@@ -117,9 +117,11 @@ type kubeTaint struct {
 
 type kubePersistentVolumeClaim struct {
 	Metadata struct {
-		Name        string            `json:"name"`
-		Annotations map[string]string `json:"annotations,omitempty"`
-		Labels      map[string]string `json:"labels,omitempty"`
+		UID             string            `json:"uid,omitempty"`
+		ResourceVersion string            `json:"resourceVersion,omitempty"`
+		Name            string            `json:"name"`
+		Annotations     map[string]string `json:"annotations,omitempty"`
+		Labels          map[string]string `json:"labels,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		VolumeName       string `json:"volumeName,omitempty"`
@@ -129,6 +131,7 @@ type kubePersistentVolumeClaim struct {
 		} `json:"resources,omitempty"`
 	} `json:"spec"`
 	Status struct {
+		Phase                     string            `json:"phase,omitempty"`
 		Capacity                  map[string]string `json:"capacity,omitempty"`
 		AllocatedResources        map[string]string `json:"allocatedResources,omitempty"`
 		AllocatedResourceStatuses map[string]string `json:"allocatedResourceStatuses,omitempty"`

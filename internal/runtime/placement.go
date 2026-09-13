@@ -99,7 +99,11 @@ func SchedulingForRuntime(runtimeObj model.Runtime) SchedulingConstraints {
 	switch runtimeObj.Type {
 	case model.RuntimeTypeManagedOwned:
 		if model.RuntimeIsInternal(runtimeObj) {
-			return SchedulingConstraints{NodeSelector: ManagedSharedNodeSelector(runtimeObj)}
+			// Internal membership removes tenant isolation, but an explicit
+			// physical runtime still selects that server rather than the pool.
+			selector := ManagedSharedNodeSelector(runtimeObj)
+			selector[RuntimeIDLabelKey] = runtimeObj.ID
+			return SchedulingConstraints{NodeSelector: selector}
 		}
 		constraints := SchedulingConstraints{
 			NodeSelector: map[string]string{

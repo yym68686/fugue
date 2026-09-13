@@ -41,7 +41,7 @@ func TestSchedulingForRuntimeManagedOwnedSharedPoolDropsTenantTaint(t *testing.T
 		PoolMode: model.RuntimePoolModeInternalShared,
 	})
 
-	wantSelector := map[string]string{SharedPoolLabelKey: SharedPoolLabelValue}
+	wantSelector := map[string]string{SharedPoolLabelKey: SharedPoolLabelValue, RuntimeIDLabelKey: "runtime_owned"}
 	if !reflect.DeepEqual(got.NodeSelector, wantSelector) {
 		t.Fatalf("expected node selector %v, got %v", wantSelector, got.NodeSelector)
 	}

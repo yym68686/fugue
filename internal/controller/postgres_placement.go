@@ -117,7 +117,7 @@ func (s *Service) managedPostgresPrimaryPlacement(
 	}
 
 	primaryPlacement := runtimepkg.SchedulingForRuntime(runtimeObj)
-	if !model.RuntimeIsInternal(runtimeObj) {
+	if runtimeObj.Type != model.RuntimeTypeManagedShared {
 		return primaryPlacement, nil
 	}
 

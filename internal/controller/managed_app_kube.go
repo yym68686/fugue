@@ -139,7 +139,8 @@ type kubeCloudNativePGCluster struct {
 		Instances int            `json:"instances,omitempty"`
 		Affinity  map[string]any `json:"affinity,omitempty"`
 		Storage   struct {
-			Size string `json:"size,omitempty"`
+			Size         string `json:"size,omitempty"`
+			StorageClass string `json:"storageClass,omitempty"`
 		} `json:"storage,omitempty"`
 	} `json:"spec"`
 	Status struct {

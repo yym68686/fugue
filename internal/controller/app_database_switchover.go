@@ -543,6 +543,8 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 			desiredDatabase.StorageClassName = "fugue-longhorn-rwo"
 		}
 	}
+	storageMigrationRequired = managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
+	storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 
 	// Durable app state may be updated before this executor resumes. Reconcile
 	// against the live CNPG PVCs as well, otherwise a failed or interrupted
@@ -728,6 +730,13 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	if targetRuntime, runtimeErr := s.Store.GetRuntime(targetRuntimeID); runtimeErr == nil && model.RuntimeIsInternal(targetRuntime) && strings.EqualFold(strings.TrimSpace(desiredDatabase.StorageClassName), "fugue-postgres-rwo") {
+		if sc, found, scErr := client.getStorageClass(ctx, "fugue-longhorn-rwo"); scErr == nil && found && sc.Provisioner == "driver.longhorn.io" {
+			desiredDatabase.StorageClassName = "fugue-longhorn-rwo"
+		}
+	}
+	storageMigrationRequired = managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
+	storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 	if !storageMigrationRequired {
 		liveMigrationRequired, liveErr := managedPostgresLiveStorageMigrationRequired(ctx, client, namespace, clusterName, desiredDatabase)
 		if liveErr != nil {
@@ -1332,6 +1341,18 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	plans := make([]managedPostgresPVCExpansionPlan, 0, len(pvcNames))
 	for _, pvcName := range pvcNames {
 		pvc := pvcsByName[pvcName]
+		if target.StorageClassName != "" && strings.TrimSpace(pvc.Spec.StorageClassName) != strings.TrimSpace(target.StorageClassName) {
+			if requireExistingDataPVC {
+				return fmt.Errorf("postgres PVC %s/%s uses storage class %q, expected %q for in-place expansion", namespace, pvcName, pvc.Spec.StorageClassName, target.StorageClassName)
+			}
+			// Class changes create replacement replicas. The source PVC must
+			// remain intact while replication and switchover take place.
+			continue
+		}
+		if !requireExistingDataPVC && pvc.Spec.VolumeName == "" && pvc.Status.Phase == "Pending" {
+			// Provisioning a new replica is not an expansion of an existing volume.
+			continue
+		}
 		if resizeErr := managedPostgresPVCResizeError(pvc); resizeErr != "" {
 			return fmt.Errorf("postgres PVC %s/%s reports resize error: %s", namespace, pvcName, resizeErr)
 		}
@@ -1380,8 +1401,9 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 			pvcNames[0],
 		)
 	}
-	for _, pvcName := range pvcNames {
-		if actualStorageClass := strings.TrimSpace(pvcsByName[pvcName].Spec.StorageClassName); actualStorageClass != storageClassName {
+	for _, plan := range plans {
+		pvcName := plan.Name
+		if actualStorageClass := strings.TrimSpace(plan.PVC.Spec.StorageClassName); actualStorageClass != storageClassName {
 			return fmt.Errorf(
 				"postgres PVC %s/%s uses storage class %q, expected %q for in-place expansion",
 				namespace,
@@ -1610,7 +1632,7 @@ func (s *Service) resolveDatabaseLocalizeTargetNode(
 	if err != nil {
 		return "", fmt.Errorf("load database localize target runtime %s: %w", targetRuntimeID, err)
 	}
-	if !model.RuntimeIsInternal(targetRuntime) {
+	if targetRuntime.Type != model.RuntimeTypeManagedShared {
 		return strings.TrimSpace(requestedNodeName), nil
 	}
 
@@ -1699,6 +1721,11 @@ func (s *Service) waitForManagedPostgresReplicaOnRuntime(
 		if err != nil {
 			return "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
 		}
+		if found {
+			if err := recoverUnboundPostgresMigrationReplicas(waitCtx, client, namespace, clusterName, cluster, firstStorageTarget(storageTargets)); err != nil {
+				return "", err
+			}
+		}
 		if !found {
 			lastMessage = fmt.Sprintf("waiting for cluster %s to be created", clusterName)
 		} else if !managedBackingServiceClusterReady(cluster, found) {
@@ -1767,6 +1794,11 @@ func (s *Service) waitForManagedPostgresReplicaOnNode(
 		cluster, found, err := client.getCloudNativePGCluster(waitCtx, namespace, clusterName)
 		if err != nil {
 			return "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
+		}
+		if found {
+			if err := recoverUnboundPostgresMigrationReplicas(waitCtx, client, namespace, clusterName, cluster, firstStorageTarget(storageTargets)); err != nil {
+				return "", err
+			}
 		}
 		if !found {
 			lastMessage = fmt.Sprintf("waiting for cluster %s to be created", clusterName)
@@ -3014,7 +3046,7 @@ func (s *Service) managedPostgresNodeMatchesRuntime(
 	if err != nil {
 		return false, fmt.Errorf("load postgres target runtime %s: %w", targetRuntimeID, err)
 	}
-	if model.RuntimeIsInternal(targetRuntime) {
+	if targetRuntime.Type == model.RuntimeTypeManagedShared {
 		_, found, err := managedSharedNodeMatchingSelector(ctx, client, nodeName, runtime.ManagedSharedNodeSelector(targetRuntime))
 		return found, err
 	}
