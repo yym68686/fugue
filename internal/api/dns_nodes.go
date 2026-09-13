@@ -166,6 +166,7 @@ func (s *Server) handleDNSHeartbeat(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	s.recordLegacyConsumerFacts(req.DNSNodeID, req.EdgeGroupID, "", req.DNSBundleVersion, "", req.LKGGeneration, req.Healthy, "")
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":     node,
 		"accepted": true,
