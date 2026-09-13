@@ -146,6 +146,7 @@ func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) m
 	seen := map[string]struct{}{}
 	intentDigest := artifact.Metadata["intent_digest"]
 	policyDigest := artifact.Metadata["policy_digest"]
+	releaseSetGeneration := strings.TrimSpace(artifact.Generation)
 	for index, rawID := range ids {
 		id, ok := rawID.(string)
 		if !ok || strings.TrimSpace(id) == "" {
@@ -168,6 +169,9 @@ func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) m
 		}
 		if policyDigest != "" && child.Metadata["policy_digest"] != "" && child.Metadata["policy_digest"] != policyDigest {
 			return model.PlatformArtifactValidationResult{Name: "release_set.lineage", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set child policy digest does not match", Evidence: map[string]string{"artifact_id": id}}
+		}
+		if child.Metadata["release_set_generation"] != releaseSetGeneration {
+			return model.PlatformArtifactValidationResult{Name: "release_set.lineage", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set child release generation does not match", Evidence: map[string]string{"artifact_id": id, "expected_release_set_generation": releaseSetGeneration, "actual_release_set_generation": child.Metadata["release_set_generation"]}}
 		}
 	}
 	return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: true, Severity: model.RobustnessSeverityBlockPublish, Message: "all release set child artifacts exist, are validated, and match lineage"}

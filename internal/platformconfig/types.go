@@ -207,6 +207,8 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		"lineage":        lineage,
 	}
 	metadata := lineageMetadata(lineage)
+	releaseSetGeneration := "release-" + configurationGeneration
+	metadata["release_set_generation"] = releaseSetGeneration
 	intentArtifact := buildArtifact(model.PlatformArtifactKindPlatformIntent, intent.Scope, intent.Generation, intent, map[string]string{"intent_digest": intentDigest}, now)
 	policyArtifact := buildArtifact(model.PlatformArtifactKindPolicySnapshot, policy.Scope, policy.Generation, policy, map[string]string{"policy_digest": policyDigest}, now)
 	routeArtifact := buildArtifact(model.PlatformArtifactKindEdgeRouteBundle, intent.Scope, "route-"+configurationGeneration, routePayload, metadata, now)
@@ -215,7 +217,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 
 	releaseSet := ReleaseSet{
 		SchemaVersion: SchemaVersion,
-		Generation:    "release-" + configurationGeneration,
+		Generation:    releaseSetGeneration,
 		Scope:         firstNonEmpty(intent.Scope, GlobalScopeKey),
 		ArtifactKinds: []string{
 			model.PlatformArtifactKindEdgeRouteBundle,
