@@ -2578,6 +2578,33 @@ paths:
                 $ref: "#/components/schemas/PlatformExpectedConsumerSetListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/release-set/prepare-consumers:
+    post:
+      operationId: preparePlatformReleaseSetConsumers
+      summary: Prepare ReleaseSet Consumer Expectations
+      tags: [Admin]
+      x-fugue-handler: handlePreparePlatformReleaseSetConsumers
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [release_set_id, artifact_release_id]
+              additionalProperties: false
+              properties:
+                release_set_id: {type: string, minLength: 1}
+                artifact_release_id: {type: string, minLength: 1}
+      responses:
+        '201':
+          description: Expected consumer sets created or reused for each ReleaseSet child artifact.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-state/convergence:
     get:
       operationId: listPlatformConsumerConvergence

@@ -71,6 +71,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/admin/platform-config/import-env", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformConfigEnvironmentImport)))
 	mux.Handle("GET /v1/admin/platform-config/import-env/preview", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformConfigEnvironmentImportPreview)))
 	mux.Handle("GET /v1/admin/platform-config/policy-lkg", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformPolicyLKG)))
+	mux.Handle("POST /v1/admin/platform-config/release-set/prepare-consumers", s.auth.RequireAPI(http.HandlerFunc(s.handlePreparePlatformReleaseSetConsumers)))
 	mux.Handle("GET /v1/admin/platform-state/convergence", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformConsumerConvergence)))
 	mux.Handle("GET /v1/admin/platform-state/runtime-facts", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformRuntimeFacts)))
 	mux.Handle("GET /v1/admin/platform/autonomy/status", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformAutonomyStatus)))

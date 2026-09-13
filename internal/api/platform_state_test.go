@@ -65,6 +65,45 @@ func TestPlatformExpectedConsumerSetListAPIIsReadOnlyAndAdminScoped(t *testing.T
 	}
 }
 
+func TestPreparePlatformReleaseSetConsumersBindsAllTrafficArtifacts(t *testing.T) {
+	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	compiled := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, map[string]any{
+		"intent": map[string]any{"generation": "consumer-intent", "scope": "global", "routes": []any{map[string]any{"hostname": "consumer.example", "upstream_url": "http://origin:8080", "enabled": true}}},
+		"policy": map[string]any{"generation": "consumer-policy", "scope": "global", "minimum_healthy_edges": 1, "max_stale_seconds": 86400, "dependency_order": []string{"route", "tls", "dns"}},
+	})
+	if compiled.Code != http.StatusCreated {
+		t.Fatalf("compile: %d %s", compiled.Code, compiled.Body.String())
+	}
+	var result platformConfigCompileResponse
+	mustDecodeJSON(t, compiled, &result)
+	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+result.ReleaseArtifact.ID+"/release", admin, model.PlatformArtifactReleaseRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelShadow, IdempotencyKey: "consumer-shadow", Reason: "prepare consumer expectations"})
+	if release.Code != http.StatusOK {
+		t.Fatalf("shadow release: %d %s", release.Code, release.Body.String())
+	}
+	var released model.PlatformArtifactReleaseResponse
+	mustDecodeJSON(t, release, &released)
+	prepared := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/release-set/prepare-consumers", admin, map[string]any{"release_set_id": result.ReleaseArtifact.ID, "artifact_release_id": released.Release.ID})
+	if prepared.Code != http.StatusCreated || !strings.Contains(prepared.Body.String(), "expected_consumer_sets") {
+		t.Fatalf("prepare: %d %s", prepared.Code, prepared.Body.String())
+	}
+	var body struct {
+		Expected []model.PlatformExpectedConsumerSet `json:"expected_consumer_sets"`
+	}
+	mustDecodeJSON(t, prepared, &body)
+	if len(body.Expected) != 3 {
+		t.Fatalf("expected route, DNS and TLS sets, got %d", len(body.Expected))
+	}
+	for _, set := range body.Expected {
+		if set.ReleaseSetID != result.ReleaseArtifact.ID || set.ArtifactReleaseID != released.Release.ID || set.ExpectedGeneration == "" {
+			t.Fatalf("unbound expected set: %+v", set)
+		}
+	}
+	repeated := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/release-set/prepare-consumers", admin, map[string]any{"release_set_id": result.ReleaseArtifact.ID, "artifact_release_id": released.Release.ID})
+	if repeated.Code != http.StatusCreated {
+		t.Fatalf("idempotent prepare: %d %s", repeated.Code, repeated.Body.String())
+	}
+}
+
 func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 	t.Parallel()
 

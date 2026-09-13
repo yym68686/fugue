@@ -561,6 +561,101 @@ func (s *Server) handleListPlatformExpectedConsumerSets(w http.ResponseWriter, r
 	})
 }
 
+func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() || !principal.HasScope("artifact.release_shadow") {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin with artifact.release_shadow scope required")
+		return
+	}
+	var request struct {
+		ReleaseSetID      string `json:"release_set_id"`
+		ArtifactReleaseID string `json:"artifact_release_id"`
+	}
+	if err := httpx.DecodeJSON(r, &request); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	releaseSet, err := s.store.GetPlatformArtifact(request.ReleaseSetID)
+	if err != nil || releaseSet.ArtifactKind != model.PlatformArtifactKindReleaseSet {
+		httpx.WriteError(w, http.StatusNotFound, "release set not found")
+		return
+	}
+	if releaseSet.Status != model.PlatformArtifactStatusValidated {
+		httpx.WriteError(w, http.StatusConflict, "release set must be validated")
+		return
+	}
+	if strings.TrimSpace(request.ArtifactReleaseID) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "artifact_release_id is required")
+		return
+	}
+	edges, _, err := s.store.ListEdgeNodes("")
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	dns, err := s.store.ListDNSNodes("")
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	updaters, err := s.store.ListNodeUpdaters("", true)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	runtimes, err := s.store.ListRuntimes("", true)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	topology := platformcontrol.ExpectedConsumerTopology{EdgeNodes: edges, DNSNodes: dns, NodeUpdaters: updaters, Runtimes: runtimes}
+	ids, okIDs := releaseSet.Content["artifact_ids"].([]any)
+	kinds, okKinds := releaseSet.Content["artifact_kinds"].([]any)
+	if !okIDs || !okKinds || len(ids) != len(kinds) {
+		httpx.WriteError(w, http.StatusConflict, "release set references are invalid")
+		return
+	}
+	sets := make([]model.PlatformExpectedConsumerSet, 0, len(kinds))
+	for i, rawKind := range kinds {
+		kind, ok := rawKind.(string)
+		if !ok {
+			httpx.WriteError(w, http.StatusConflict, "release set artifact kind is invalid")
+			return
+		}
+		artifactID, ok := ids[i].(string)
+		if !ok {
+			httpx.WriteError(w, http.StatusConflict, "release set artifact ID is invalid")
+			return
+		}
+		child, childErr := s.store.GetPlatformArtifact(artifactID)
+		if childErr != nil {
+			s.writeStoreError(w, childErr)
+			return
+		}
+		set, buildErr := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: releaseSet.ID, ArtifactReleaseID: request.ArtifactReleaseID, ArtifactKind: kind, Scope: child.Scope, ScopeKey: child.ScopeKey, Generation: child.Generation, Revision: int64(i + 1), PreparedAt: time.Now().UTC(), Topology: topology})
+		if buildErr != nil {
+			httpx.WriteError(w, http.StatusConflict, buildErr.Error())
+			return
+		}
+		created, createErr := s.store.CreatePlatformExpectedConsumerSet(set)
+		if createErr != nil {
+			if errors.Is(createErr, store.ErrConflict) {
+				existing, listErr := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: releaseSet.ID, ArtifactKind: kind, Limit: 20})
+				if listErr != nil || len(existing) != 1 || existing[0].ArtifactReleaseID != request.ArtifactReleaseID {
+					httpx.WriteError(w, http.StatusConflict, "expected consumer set already exists with conflicting identity")
+					return
+				}
+				created = existing[0]
+			} else {
+				s.writeStoreError(w, createErr)
+				return
+			}
+		}
+		sets = append(sets, created)
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"release_set_id": releaseSet.ID, "artifact_release_id": request.ArtifactReleaseID, "expected_consumer_sets": sets, "generated_at": time.Now().UTC()})
+}
+
 func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() || !principal.HasScope("artifact.read") {
