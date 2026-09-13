@@ -1926,7 +1926,7 @@ func (s *Store) SetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string
 		if state.Runtimes[index].TenantID != ownerTenantID || state.Runtimes[index].TenantID == "" {
 			return ErrNotFound
 		}
-		if state.Runtimes[index].Type == model.RuntimeTypeManagedShared {
+		if model.RuntimeIsInternal(state.Runtimes[index]) {
 			return ErrInvalidInput
 		}
 		state.Runtimes[index].AccessMode = normalizeRuntimeAccessMode(state.Runtimes[index].Type, accessMode)
@@ -1999,7 +1999,16 @@ func (s *Store) SetRuntimePoolMode(runtimeID, poolMode string) (model.Runtime, e
 		if state.Runtimes[index].Type != model.RuntimeTypeManagedOwned || state.Runtimes[index].TenantID == "" {
 			return ErrInvalidInput
 		}
+		wasInternal := model.RuntimeIsInternal(state.Runtimes[index])
 		state.Runtimes[index].PoolMode = model.NormalizeRuntimePoolMode(state.Runtimes[index].Type, poolMode)
+		if state.Runtimes[index].PoolMode == model.RuntimePoolModeInternalShared {
+			state.Runtimes[index].AccessMode = model.RuntimeAccessModePlatformShared
+			state.RuntimeGrants = deleteRuntimeAccessGrantsByRuntime(state.RuntimeGrants, state.Runtimes[index].ID)
+		}
+		if wasInternal && !model.RuntimeIsInternal(state.Runtimes[index]) {
+			state.Runtimes[index].AccessMode = model.RuntimeAccessModePrivate
+		}
+		state.Runtimes[index].ApplyNormalizedScope()
 		state.Runtimes[index].UpdatedAt = now
 		runtime = state.Runtimes[index]
 		_ = upsertMachineForRuntimeState(state, runtime, now)
@@ -4859,6 +4868,7 @@ func backfillRuntimeMetadata(runtime *model.Runtime, machine model.Machine) {
 	}
 	runtime.AccessMode = normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode)
 	runtime.PoolMode = model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode)
+	runtime.ApplyNormalizedScope()
 	if runtime.MachineName == "" {
 		if strings.TrimSpace(machine.Name) != "" {
 			runtime.MachineName = machine.Name
@@ -6151,7 +6161,7 @@ func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool
 	if runtime.TenantID != "" && runtime.TenantID == tenantID {
 		return true
 	}
-	if runtime.Type == model.RuntimeTypeManagedShared {
+	if model.RuntimeIsInternal(runtime) {
 		return true
 	}
 	switch normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode) {

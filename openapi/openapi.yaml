@@ -5036,6 +5036,56 @@ paths:
                 $ref: "#/components/schemas/RuntimePublicOfferResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}/scope:
+    post:
+      operationId: setRuntimeScope
+      summary: Set runtime cluster scope
+      tags: [Runtimes]
+      x-fugue-handler: handleSetRuntimeScope
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRuntimeScopeRequest"
+      responses:
+        '200':
+          description: Scope applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimePoolModeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}/byovps-sharing:
+    post:
+      operationId: setRuntimeSharing
+      summary: Set BYOVPS sharing
+      tags: [Runtimes]
+      x-fugue-handler: handleSetRuntimeSharing
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRuntimeSharingRequest"
+      responses:
+        '200':
+          description: Sharing applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeAccessModeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/runtimes/{id}/pool-mode:
     post:
       operationId: setRuntimePoolMode
@@ -19044,6 +19094,13 @@ components:
           $ref: "#/components/schemas/RuntimePublicOffer"
         pool_mode:
           type: string
+        cluster_scope:
+          type: string
+          enum: [internal, byovps]
+        sharing:
+          type: string
+          nullable: true
+          enum: [private, public]
         connection_mode:
           type: string
         status:
@@ -24524,6 +24581,22 @@ components:
       properties:
         runtime:
           $ref: "#/components/schemas/Runtime"
+    SetRuntimeScopeRequest:
+      type: object
+      additionalProperties: false
+      required: [cluster_scope]
+      properties:
+        cluster_scope:
+          type: string
+          enum: [internal, byovps]
+    SetRuntimeSharingRequest:
+      type: object
+      additionalProperties: false
+      required: [sharing]
+      properties:
+        sharing:
+          type: string
+          enum: [private, public]
     SetRuntimePoolModeRequest:
       type: object
       additionalProperties: false

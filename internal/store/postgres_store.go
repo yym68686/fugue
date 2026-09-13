@@ -1695,7 +1695,7 @@ FROM fugue_runtimes AS r
 		sharedTypeArg := tenantArg + 1
 		platformSharedArg := sharedTypeArg + 1
 		publicArg := platformSharedArg + 1
-		clauses = append(clauses, fmt.Sprintf("(r.tenant_id = $%d OR r.type = $%d OR r.access_mode IN ($%d, $%d) OR EXISTS (SELECT 1 FROM fugue_runtime_access_grants AS g WHERE g.runtime_id = r.id AND g.tenant_id = $%d))", tenantArg, sharedTypeArg, platformSharedArg, publicArg, tenantArg))
+		clauses = append(clauses, fmt.Sprintf("(r.tenant_id = $%d OR r.type = $%d OR (r.type = 'managed-owned' AND r.pool_mode = 'internal-shared') OR r.access_mode IN ($%d, $%d) OR EXISTS (SELECT 1 FROM fugue_runtime_access_grants AS g WHERE g.runtime_id = r.id AND g.tenant_id = $%d))", tenantArg, sharedTypeArg, platformSharedArg, publicArg, tenantArg))
 		args = append(args, tenantID, model.RuntimeTypeManagedShared, model.RuntimeAccessModePlatformShared, model.RuntimeAccessModePublic)
 	}
 	if len(clauses) > 0 {
@@ -5407,7 +5407,7 @@ func (s *Store) pgRuntimeVisibleToTenantTx(ctx context.Context, tx *sql.Tx, runt
 	var accessMode string
 	var owner sql.NullString
 	if err := tx.QueryRowContext(ctx, `
-SELECT type, access_mode, tenant_id
+	SELECT type, access_mode, tenant_id
 FROM fugue_runtimes
 WHERE id = $1
 `, runtimeID).Scan(&runtimeType, &accessMode, &owner); err != nil {
@@ -5586,7 +5586,7 @@ func (s *Store) pgGrantRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID s
 	if runtimeObj.TenantID == "" || runtimeObj.TenantID != ownerTenantID {
 		return model.RuntimeAccessGrant{}, ErrNotFound
 	}
-	if runtimeObj.Type == model.RuntimeTypeManagedShared {
+	if model.RuntimeIsInternal(runtimeObj) {
 		return model.RuntimeAccessGrant{}, ErrInvalidInput
 	}
 	if granteeTenantID == runtimeObj.TenantID {
@@ -5676,7 +5676,7 @@ func (s *Store) pgSetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode stri
 	if runtimeObj.TenantID == "" || runtimeObj.TenantID != ownerTenantID {
 		return model.Runtime{}, ErrNotFound
 	}
-	if runtimeObj.Type == model.RuntimeTypeManagedShared {
+	if model.RuntimeIsInternal(runtimeObj) {
 		return model.Runtime{}, ErrInvalidInput
 	}
 
@@ -5748,7 +5748,18 @@ func (s *Store) pgSetRuntimePoolMode(runtimeID, poolMode string) (model.Runtime,
 		return model.Runtime{}, ErrInvalidInput
 	}
 
+	wasInternal := model.RuntimeIsInternal(runtimeObj)
 	runtimeObj.PoolMode = model.NormalizeRuntimePoolMode(runtimeObj.Type, poolMode)
+	if runtimeObj.PoolMode == model.RuntimePoolModeInternalShared {
+		runtimeObj.AccessMode = model.RuntimeAccessModePlatformShared
+		if err := s.pgDeleteRuntimeAccessGrantsTx(ctx, tx, runtimeObj.ID); err != nil {
+			return model.Runtime{}, err
+		}
+	}
+	if wasInternal && !model.RuntimeIsInternal(runtimeObj) {
+		runtimeObj.AccessMode = model.RuntimeAccessModePrivate
+	}
+	runtimeObj.ApplyNormalizedScope()
 	runtimeObj.UpdatedAt = time.Now().UTC()
 	if err := s.pgUpdateRuntimeTx(ctx, tx, runtimeObj); err != nil {
 		return model.Runtime{}, err
@@ -6060,6 +6071,7 @@ func scanRuntime(scanner sqlScanner) (model.Runtime, error) {
 		runtime.PublicOffer = cloneRuntimePublicOffer(&publicOffer)
 	}
 	runtime.PoolMode = model.NormalizeRuntimePoolMode(runtime.Type, poolMode.String)
+	runtime.ApplyNormalizedScope()
 	runtime.ConnectionMode = connectionMode.String
 	runtime.Endpoint = endpoint.String
 	runtime.NodeKeyID = nodeKeyID.String

@@ -515,6 +515,7 @@ func (c *CLI) newAdminRuntimeCommand() *cobra.Command {
 		c.newAdminRuntimeShowCommand(),
 		c.newRuntimeAccessCommand(),
 		c.newRuntimePoolCommand(),
+		c.newRuntimeScopeCommand(),
 		c.newRuntimeOfferCommand(),
 		c.newAdminRuntimeCreateCommand(),
 		c.newRuntimeDeleteCommand(),

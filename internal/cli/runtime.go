@@ -26,7 +26,60 @@ func (c *CLI) newRuntimeCommand() *cobra.Command {
 		c.newRuntimeShowCommand(),
 		c.newRuntimeEnrollCommand(),
 		c.newRuntimeDoctorCommand(),
+		c.newRuntimeSharingCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newRuntimeSharingCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "sharing", Short: "Manage sharing of your BYOVPS"}
+	cmd.AddCommand(&cobra.Command{
+		Use: "set <runtime> <private|public>", Short: "Set BYOVPS sharing", Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
+			if err != nil {
+				return err
+			}
+			var response runtimeAccessModeResponse
+			if err := client.doJSON("POST", "/v1/runtimes/"+runtimeObj.ID+"/byovps-sharing", map[string]string{"sharing": args[1]}, &response); err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return c.writeJSON(response)
+			}
+			return c.renderRuntimeDetail(client, response.Runtime)
+		},
+	})
+	return cmd
+}
+
+func (c *CLI) newRuntimeScopeCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "scope", Short: "Manage internal cluster membership (platform admin)"}
+	cmd.AddCommand(&cobra.Command{
+		Use: "set <runtime> <internal|byovps>", Short: "Set internal cluster membership", Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
+			if err != nil {
+				return err
+			}
+			var response runtimePoolModeResponse
+			if err := client.doJSON("POST", "/v1/runtimes/"+runtimeObj.ID+"/scope", map[string]string{"cluster_scope": args[1]}, &response); err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return c.writeJSON(response)
+			}
+			return c.renderRuntimeDetail(client, response.Runtime)
+		},
+	})
 	return cmd
 }
 

@@ -98,6 +98,9 @@ func JoinNodeTaints(runtimeObj model.Runtime) []string {
 func SchedulingForRuntime(runtimeObj model.Runtime) SchedulingConstraints {
 	switch runtimeObj.Type {
 	case model.RuntimeTypeManagedOwned:
+		if model.RuntimeIsInternal(runtimeObj) {
+			return SchedulingConstraints{NodeSelector: ManagedSharedNodeSelector(runtimeObj)}
+		}
 		constraints := SchedulingConstraints{
 			NodeSelector: map[string]string{
 				RuntimeIDLabelKey: runtimeObj.ID,

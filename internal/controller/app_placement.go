@@ -27,7 +27,7 @@ func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app mo
 	if err != nil {
 		return runtimepkg.SchedulingConstraints{}, fmt.Errorf("load app runtime %s: %w", app.Spec.RuntimeID, err)
 	}
-	if runtimeObj.Type != model.RuntimeTypeManagedShared {
+	if !model.RuntimeIsInternal(runtimeObj) {
 		return base, nil
 	}
 	if nodeName, found, err := s.managedSharedPersistentStorageNode(ctx, app); err != nil {

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
@@ -8,9 +9,13 @@ import (
 )
 
 const (
-	RuntimeTypeManagedShared = "managed-shared"
-	RuntimeTypeManagedOwned  = "managed-owned"
-	RuntimeTypeExternalOwned = "external-owned"
+	RuntimeClusterScopeInternal = "internal"
+	RuntimeClusterScopeBYOVPS   = "byovps"
+	RuntimeBYOVPSSharingPrivate = "private"
+	RuntimeBYOVPSSharingPublic  = "public"
+	RuntimeTypeManagedShared    = "managed-shared"
+	RuntimeTypeManagedOwned     = "managed-owned"
+	RuntimeTypeExternalOwned    = "external-owned"
 
 	RuntimeAccessModePrivate        = "private"
 	RuntimeAccessModePublic         = "public"
@@ -637,6 +642,8 @@ type Runtime struct {
 	AccessMode        string                `json:"access_mode,omitempty"`
 	PublicOffer       *RuntimePublicOffer   `json:"public_offer,omitempty"`
 	PoolMode          string                `json:"pool_mode,omitempty"`
+	ClusterScope      string                `json:"cluster_scope,omitempty"`
+	Sharing           string                `json:"sharing,omitempty"`
 	ConnectionMode    string                `json:"connection_mode,omitempty"`
 	Status            string                `json:"status"`
 	Endpoint          string                `json:"endpoint,omitempty"`
@@ -652,6 +659,39 @@ type Runtime struct {
 	LastHeartbeatAt   *time.Time            `json:"last_heartbeat_at,omitempty"`
 	CreatedAt         time.Time             `json:"created_at"`
 	UpdatedAt         time.Time             `json:"updated_at"`
+}
+
+func RuntimeIsInternal(runtime Runtime) bool {
+	return runtime.Type == RuntimeTypeManagedShared || NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode) == RuntimePoolModeInternalShared
+}
+
+func (r *Runtime) ApplyNormalizedScope() {
+	if r == nil {
+		return
+	}
+	if RuntimeIsInternal(*r) {
+		r.ClusterScope, r.Sharing = RuntimeClusterScopeInternal, ""
+	} else if r.AccessMode == RuntimeAccessModePublic {
+		r.ClusterScope, r.Sharing = RuntimeClusterScopeBYOVPS, RuntimeBYOVPSSharingPublic
+	} else {
+		r.ClusterScope, r.Sharing = RuntimeClusterScopeBYOVPS, RuntimeBYOVPSSharingPrivate
+	}
+}
+
+// MarshalJSON projects the legacy persistence representation into the public
+// membership model. Scope is never an independently writable duplicate.
+func (r Runtime) MarshalJSON() ([]byte, error) {
+	type legacy Runtime
+	r.ApplyNormalizedScope()
+	var sharing *string
+	if r.Sharing != "" {
+		sharing = &r.Sharing
+	}
+	return json.Marshal(struct {
+		legacy
+		ClusterScope string  `json:"cluster_scope"`
+		Sharing      *string `json:"sharing"`
+	}{legacy: legacy(r), ClusterScope: r.ClusterScope, Sharing: sharing})
 }
 
 type RuntimePublicOffer struct {

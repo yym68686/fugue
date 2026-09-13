@@ -76,6 +76,37 @@ func (s *Server) handleSetRuntimePoolMode(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func (s *Server) handleSetRuntimeScope(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "only platform admin can change runtime cluster scope")
+		return
+	}
+	var req struct {
+		ClusterScope string `json:"cluster_scope"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	mode := ""
+	switch strings.TrimSpace(req.ClusterScope) {
+	case model.RuntimeClusterScopeInternal:
+		mode = model.RuntimePoolModeInternalShared
+	case model.RuntimeClusterScopeBYOVPS:
+		mode = model.RuntimePoolModeDedicated
+	default:
+		httpx.WriteError(w, http.StatusBadRequest, "cluster_scope must be internal or byovps")
+		return
+	}
+	// Both entry points use the same reconciliation and rollback behavior.
+	raw, _ := json.Marshal(map[string]string{"pool_mode": mode})
+	request := r.Clone(r.Context())
+	request.Body = io.NopCloser(bytes.NewReader(raw))
+	request.ContentLength = int64(len(raw))
+	s.handleSetRuntimePoolMode(w, request)
+}
+
 func (s *Server) reconcileRuntimeClusterNode(ctx context.Context, runtimeObj model.Runtime) (bool, error) {
 	return s.reconcileRuntimeClusterNodeWithMachinePolicy(ctx, runtimeObj, nil)
 }

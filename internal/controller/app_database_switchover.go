@@ -538,6 +538,14 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	// Internal runtimes may expose heterogeneous storage providers. Prefer the
+	// target node's portable Longhorn class when the legacy source class has no
+	// capacity there; this keeps localization a single declarative operation.
+	if targetRuntime, runtimeErr := s.Store.GetRuntime(targetRuntimeID); runtimeErr == nil && model.RuntimeIsInternal(targetRuntime) && strings.EqualFold(strings.TrimSpace(desiredDatabase.StorageClassName), "fugue-postgres-rwo") {
+		if sc, found, scErr := client.getStorageClass(ctx, "fugue-longhorn-rwo"); scErr == nil && found && sc.Provisioner == "driver.longhorn.io" {
+			desiredDatabase.StorageClassName = "fugue-longhorn-rwo"
+		}
+	}
 	// Durable app state may be updated before this executor resumes. Reconcile
 	// against the live CNPG PVCs as well, otherwise a failed or interrupted
 	// migration can be reported complete while the volume remains on the old
@@ -1604,7 +1612,7 @@ func (s *Service) resolveDatabaseLocalizeTargetNode(
 	if err != nil {
 		return "", fmt.Errorf("load database localize target runtime %s: %w", targetRuntimeID, err)
 	}
-	if targetRuntime.Type != model.RuntimeTypeManagedShared {
+	if !model.RuntimeIsInternal(targetRuntime) {
 		return strings.TrimSpace(requestedNodeName), nil
 	}
 
@@ -3008,7 +3016,7 @@ func (s *Service) managedPostgresNodeMatchesRuntime(
 	if err != nil {
 		return false, fmt.Errorf("load postgres target runtime %s: %w", targetRuntimeID, err)
 	}
-	if targetRuntime.Type == model.RuntimeTypeManagedShared {
+	if model.RuntimeIsInternal(targetRuntime) {
 		_, found, err := managedSharedNodeMatchingSelector(ctx, client, nodeName, runtime.ManagedSharedNodeSelector(targetRuntime))
 		return found, err
 	}

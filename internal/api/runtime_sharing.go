@@ -36,6 +36,10 @@ func (s *Server) handleGrantRuntimeAccess(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	if model.RuntimeIsInternal(runtimeObj) {
+		httpx.WriteError(w, http.StatusBadRequest, "sharing is not applicable to internal runtimes")
+		return
+	}
 
 	var req struct {
 		TenantID string `json:"tenant_id"`
@@ -66,6 +70,10 @@ func (s *Server) handleRevokeRuntimeAccess(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if model.RuntimeIsInternal(runtimeObj) {
+		httpx.WriteError(w, http.StatusBadRequest, "sharing is not applicable to internal runtimes")
+		return
+	}
 
 	granteeTenantID := strings.TrimSpace(r.PathValue("tenant_id"))
 	removed, err := s.store.RevokeRuntimeAccess(runtimeObj.ID, runtimeObj.TenantID, granteeTenantID)
@@ -89,6 +97,10 @@ func (s *Server) handleSetRuntimeAccessMode(w http.ResponseWriter, r *http.Reque
 	}
 	runtimeObj, ok := s.runtimeSharingOwner(w, principal, r.PathValue("id"))
 	if !ok {
+		return
+	}
+	if model.RuntimeIsInternal(runtimeObj) {
+		httpx.WriteError(w, http.StatusBadRequest, "sharing is not applicable to internal runtimes")
 		return
 	}
 
@@ -120,6 +132,44 @@ func (s *Server) handleSetRuntimeAccessMode(w http.ResponseWriter, r *http.Reque
 		"access_mode": runtimeObj.AccessMode,
 	})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"runtime": runtimeObj})
+}
+
+func (s *Server) handleSetRuntimeSharing(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("runtime.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing runtime.write scope")
+		return
+	}
+	runtimeObj, ok := s.runtimeSharingOwner(w, principal, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if runtimeObj.Type == model.RuntimeTypeManagedShared || runtimeObj.PoolMode == model.RuntimePoolModeInternalShared {
+		httpx.WriteError(w, http.StatusBadRequest, "sharing is not applicable to internal runtimes")
+		return
+	}
+	var req struct {
+		Sharing string `json:"sharing"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	mode := model.RuntimeAccessModePrivate
+	if strings.EqualFold(strings.TrimSpace(req.Sharing), model.RuntimeBYOVPSSharingPublic) {
+		mode = model.RuntimeAccessModePublic
+	} else if !strings.EqualFold(strings.TrimSpace(req.Sharing), model.RuntimeBYOVPSSharingPrivate) {
+		httpx.WriteError(w, http.StatusBadRequest, "sharing must be private or public")
+		return
+	}
+	updated, err := s.store.SetRuntimeAccessMode(runtimeObj.ID, runtimeObj.TenantID, mode)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	updated.ApplyNormalizedScope()
+	s.appendAudit(principal, "runtime.sharing.set", "runtime", updated.ID, updated.TenantID, map[string]string{"sharing": updated.Sharing})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"runtime": updated})
 }
 
 func (s *Server) runtimeSharingOwner(w http.ResponseWriter, principal model.Principal, runtimeID string) (model.Runtime, bool) {

@@ -383,8 +383,8 @@ func TestSyncGitHubAppsQueuesImportWhenCurrentRuntimeIsHiddenInternalShared(t *t
 	if err != nil {
 		t.Fatalf("check runtime visibility: %v", err)
 	}
-	if visible {
-		t.Fatal("expected internal shared runtime to remain hidden from the app tenant")
+	if !visible {
+		t.Fatal("expected internal runtime to be visible to every app tenant")
 	}
 
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
