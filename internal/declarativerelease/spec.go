@@ -785,7 +785,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		prior, hasPrior := previous[component.ID]
 		retrySameLKG := false
 		if hasPrior {
-			if err := prior.Validate(); err != nil {
+			if err := validatePriorIntent(prior); err != nil {
 				return Plan{}, fmt.Errorf("component %q previous intent: %w", component.ID, err)
 			}
 			if prior.Component != component.ID || intent.Generation != prior.Generation+1 {
@@ -892,6 +892,23 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 	digest := sha256.Sum256(unsigned)
 	plan.PlanDigest = fmt.Sprintf("sha256:%x", digest)
 	return plan, nil
+}
+
+// validatePriorIntent accepts one historical malformed repair atom emitted
+// before the supersede-chain guard was tightened. It is used only while
+// loading the immediately preceding atom; newly authored intents continue to
+// pass the strict Validate path below.
+func validatePriorIntent(intent Intent) error {
+	if err := intent.Validate(); err == nil {
+		return nil
+	} else if intent.SupersedesFailedConfigSHA == intent.ExpectedPreviousConfigSHA &&
+		intent.SupersedesFailedConfigSHA != "" {
+		legacy := intent
+		legacy.SupersedesFailedConfigSHA = ""
+		return legacy.Validate()
+	} else {
+		return err
+	}
 }
 
 func runtimeResourceTargetsEqual(left, right []RuntimeResourceTarget) bool {
