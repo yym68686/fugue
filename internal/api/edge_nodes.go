@@ -616,7 +616,6 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.recordEdgeRouteSourceHeartbeat(req.RouteBundleSource)
-	s.recordLegacyConsumerFacts(req.EdgeID, req.EdgeGroupID, req.RouteBundleVersion, req.DNSBundleVersion, req.CaddyAppliedVersion, req.LKGGeneration, req.Healthy, req.TLSStatus)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":             instance.Node,
 		"instance":         instance,
