@@ -3,6 +3,8 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -92,6 +94,35 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 	if assignment.ExpectedConsumerSetID != set.ID || assignment.ReleaseSetID != compiled.ReleaseArtifact.ID || assignment.ArtifactID != compiled.RouteArtifact.ID || assignment.ContentHash != compiled.RouteArtifact.ContentHash || assignment.GenerationSequence != compiled.RouteArtifact.GenerationSequence || assignment.ExpectedGeneration != compiled.RouteArtifact.Generation || assignment.FencingToken != released.FencingToken || assignment.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
 		t.Fatalf("unbound assignment: %+v", assignment)
 	}
+	pull := func(credential, artifactID, setID string, status int) {
+		t.Helper()
+		response := performJSONRequest(t, server, http.MethodGet, "/v1/platform-state/consumers/artifacts/"+artifactID+"?expected_consumer_set_id="+setID, credential, nil)
+		if response.Code != status {
+			t.Fatalf("artifact pull: want %d got %d %s", status, response.Code, response.Body.String())
+		}
+		if status == http.StatusOK {
+			var body consumerArtifactLookup
+			mustDecodeJSON(t, response, &body)
+			stored, err := state.GetPlatformArtifact(artifactID)
+			if err != nil || !reflect.DeepEqual(body.Artifact, stored) || body.Assignment.ExpectedConsumerSetID != setID || body.Assignment.ArtifactReleaseID != body.Release.ID || body.Assignment.FencingToken != body.Release.FencingToken {
+				t.Fatalf("download must preserve signed content and release binding: %+v %v", body, err)
+			}
+			if response.Header().Get("ETag") != strconv.Quote(stored.ContentHash) || response.Header().Get("Cache-Control") != "private, no-store" {
+				t.Fatalf("unexpected download headers: %+v", response.Header())
+			}
+		}
+	}
+	pull(token, assignment.ArtifactID, set.ID, http.StatusOK)
+	pull(admin, assignment.ArtifactID, set.ID, http.StatusUnauthorized)
+	pull(tenant, assignment.ArtifactID, set.ID, http.StatusUnauthorized)
+	pull(token, assignment.ArtifactID, "", http.StatusBadRequest)
+	pull(token, assignment.ArtifactID, set.ID+"&expected_consumer_set_id="+set.ID, http.StatusBadRequest)
+	pull(token, assignment.ArtifactID, "unknown-set", http.StatusNotFound)
+	pull(token, compiled.DNSArtifact.ID, set.ID, http.StatusNotFound)
+	pull(token, "unknown-artifact", set.ID, http.StatusNotFound)
+	pull(issue(model.PlatformConsumerComponentEdgeWorker, "other-node", "global", assignment.ArtifactKind), assignment.ArtifactID, set.ID, http.StatusNotFound)
+	pull(issue(model.PlatformConsumerComponentEdgeWorker, "assignment-node", "other-scope", assignment.ArtifactKind), assignment.ArtifactID, set.ID, http.StatusNotFound)
+
 	consumers, err := state.ListPlatformConsumers(compiled.RouteArtifact.ArtifactKind, "global")
 	if err != nil || len(consumers) != 0 {
 		t.Fatalf("assignment must not write runtime facts: %+v %v", consumers, err)
@@ -105,6 +136,7 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 	// Superseded release records cannot continue assigning their artifact.
 	next := compile("assignment-intent-two")
 	nextRelease := release(next.ReleaseArtifact)
+	pull(token, compiled.RouteArtifact.ID, set.ID, http.StatusNotFound)
 	get(token, http.StatusNotFound)
 	nextSet := buildSet(next, nextRelease, 1, "assignment-node")
 	persist(nextSet)
@@ -114,6 +146,7 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 	}
 	// Removing this node in the latest revision must not resurrect revision 1.
 	persist(buildSet(next, nextRelease, 2, "replacement-node"))
+	pull(token, next.RouteArtifact.ID, nextSet.ID, http.StatusNotFound)
 	get(token, http.StatusNotFound)
 	// A matching identity with a stale child generation must fail closed.
 	invalid := buildSet(next, nextRelease, 3, "assignment-node")
@@ -123,6 +156,7 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 	}
 	persist(invalid)
 	get(token, http.StatusServiceUnavailable)
+	pull(token, next.RouteArtifact.ID, invalid.ID, http.StatusServiceUnavailable)
 	// Preparation cannot associate this ReleaseSet with its predecessor's release.
 	rejected := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/release-set/prepare-consumers", admin, map[string]any{"release_set_id": next.ReleaseArtifact.ID, "artifact_release_id": released.ID})
 	if rejected.Code != http.StatusConflict {

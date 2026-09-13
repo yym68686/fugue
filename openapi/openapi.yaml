@@ -2896,6 +2896,44 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/consumers/artifacts/{artifact_id}:
+    get:
+      operationId: getPlatformConsumerArtifact
+      summary: Pull an artifact assigned to a trusted consumer
+      description: Returns a validated, signed child artifact only when the verified component identity is currently present in the active ReleaseSet expected topology. The endpoint is read-only and never records runtime facts.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformConsumerArtifact
+      security:
+        - PlatformComponentBearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: expected_consumer_set_id
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Assigned artifact and its release binding.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConsumerArtifactResponse"
+        '401':
+          $ref: "#/components/responses/ErrorResponse"
+        '404':
+          $ref: "#/components/responses/ErrorResponse"
+        '400':
+          $ref: "#/components/responses/ErrorResponse"
+        '503':
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/failure-contracts:
     get:
       operationId: listSubsystemFailureContracts
@@ -31007,6 +31045,17 @@ components:
         generated_at:
           type: string
           format: date-time
+    PlatformConsumerArtifactResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact, assignment, release]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        assignment:
+          $ref: "#/components/schemas/PlatformConsumerAssignment"
+        release:
+          $ref: "#/components/schemas/PlatformArtifactRelease"
     FailureMode:
       type: object
       additionalProperties: false

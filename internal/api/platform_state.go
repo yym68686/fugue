@@ -949,19 +949,20 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 	})
 }
 
-// Assignments describe desired artifacts, never observed apply/probe results.
-func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *http.Request) {
-	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
-	if !ok {
-		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
-		return
-	}
-	assignments := make([]model.PlatformConsumerAssignment, 0)
+type consumerArtifactLookup struct {
+	Artifact   model.PlatformArtifact           `json:"artifact"`
+	Assignment model.PlatformConsumerAssignment `json:"assignment"`
+	Release    model.PlatformArtifactRelease    `json:"release"`
+}
+
+// Both discovery and download enforce the same active release and topology
+// binding. Desired assignments never count as observed apply/probe results.
+func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.PlatformComponentIdentityClaims) ([]consumerArtifactLookup, error) {
+	assignments := make([]consumerArtifactLookup, 0)
 	for _, channel := range []string{model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull} {
 		releaseSet, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel)
 		if err != nil {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "consumer release assignment unavailable")
-			return
+			return nil, errors.New("consumer release assignment unavailable")
 		}
 		if !found {
 			continue
@@ -971,8 +972,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 			release.Generation != releaseSet.Generation || release.ScopeKey != claims.ScopeKey || release.FencingToken <= 0 ||
 			releaseSet.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(releaseSet) != nil ||
 			!s.validateReleaseSetReferences(releaseSet).Pass {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "consumer release assignment is inconsistent")
-			return
+			return nil, errors.New("consumer release assignment is inconsistent")
 		}
 		// Query the active release and authorized scope, rather than taking a
 		// global top-N window that can silently hide this consumer's assignment.
@@ -981,8 +981,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 				ReleaseSetID: releaseSet.ID, ArtifactReleaseID: release.ID, ArtifactKind: kind, ScopeKey: claims.ScopeKey,
 			})
 			if err != nil {
-				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer expectation unavailable")
-				return
+				return nil, errors.New("consumer expectation unavailable")
 			}
 			var latest *model.PlatformExpectedConsumerSet
 			for i := range sets {
@@ -1003,10 +1002,9 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 				child, err := s.consumerAssignmentChild(releaseSet, kind)
 				if err != nil || child.ScopeKey != claims.ScopeKey || child.Generation != latest.ExpectedGeneration ||
 					child.Generation != expected.ExpectedGeneration || s.store.VerifyPlatformArtifactIntegrity(child) != nil {
-					httpx.WriteError(w, http.StatusServiceUnavailable, "consumer artifact assignment is inconsistent")
-					return
+					return nil, errors.New("consumer artifact assignment is inconsistent")
 				}
-				assignments = append(assignments, model.PlatformConsumerAssignment{
+				assignments = append(assignments, consumerArtifactLookup{Artifact: child, Release: release, Assignment: model.PlatformConsumerAssignment{
 					ExpectedConsumerSetID: latest.ID, ReleaseSetID: releaseSet.ID, ArtifactReleaseID: release.ID,
 					ArtifactKind: kind, ScopeKey: claims.ScopeKey, ExpectedGeneration: child.Generation, Revision: latest.Revision,
 					ArtifactID: child.ID, ContentHash: child.ContentHash, GenerationSequence: child.GenerationSequence,
@@ -1014,15 +1012,61 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 					ExpectedProtocolVersion: expected.ExpectedProtocolVersion, ExpectedSchemaVersion: expected.ExpectedSchemaVersion,
 					CompatibilityCapabilities: append([]string(nil), expected.CompatibilityCapabilities...),
 					HeartbeatDeadline:         expected.HeartbeatDeadline, ConvergenceDeadline: expected.ConvergenceDeadline,
-				})
+				}})
 			}
 		}
 	}
-	if len(assignments) == 0 {
+	return assignments, nil
+}
+
+func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
+		return
+	}
+	resolved, err := s.resolvePlatformConsumerAssignments(claims)
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	if len(resolved) == 0 {
 		httpx.WriteError(w, http.StatusNotFound, "no expected consumer assignment found")
 		return
 	}
+	assignments := make([]model.PlatformConsumerAssignment, 0, len(resolved))
+	for _, result := range resolved {
+		assignments = append(assignments, result.Assignment)
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformConsumerAssignmentResponse{Assignments: assignments, GeneratedAt: time.Now().UTC()})
+}
+
+func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
+		return
+	}
+	setIDs := r.URL.Query()["expected_consumer_set_id"]
+	if len(setIDs) != 1 || strings.TrimSpace(setIDs[0]) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "one expected_consumer_set_id is required")
+		return
+	}
+	resolved, err := s.resolvePlatformConsumerAssignments(claims)
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	for _, result := range resolved {
+		if result.Artifact.ID == r.PathValue("artifact_id") && result.Assignment.ExpectedConsumerSetID == setIDs[0] {
+			w.Header().Set("Cache-Control", "private, no-store")
+			w.Header().Set("ETag", strconv.Quote(result.Artifact.ContentHash))
+			httpx.WriteJSON(w, http.StatusOK, result)
+			return
+		}
+	}
+	httpx.WriteError(w, http.StatusNotFound, "consumer artifact assignment not found")
 }
 
 func (s *Server) consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string) (model.PlatformArtifact, error) {
