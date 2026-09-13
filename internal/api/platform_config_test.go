@@ -219,3 +219,10 @@ func TestReleaseSetConvergenceBlocksRequiredConsumers(t *testing.T) {
 		t.Fatalf("expected convergence block, got %+v", result)
 	}
 }
+
+func TestPlatformArtifactContentContainsHostname(t *testing.T) {
+	content := map[string]any{"routes": []any{map[string]any{"hostname": "Example.Fugue.Pro."}}, "nested": map[string]any{"certificates": []any{map[string]any{"hostname": "tls.fugue.pro"}}}}
+	if !platformArtifactContentContainsHostname(content, "example.fugue.pro") || !platformArtifactContentContainsHostname(content, "tls.fugue.pro") || platformArtifactContentContainsHostname(content, "missing.fugue.pro") {
+		t.Fatalf("hostname lineage content scan returned an unexpected result")
+	}
+}

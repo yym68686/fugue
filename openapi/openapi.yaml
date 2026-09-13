@@ -2500,6 +2500,30 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/hostname-lineage:
+    get:
+      operationId: getPlatformHostnameLineage
+      summary: Get Platform Hostname Lineage
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformHostnameLineage
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: hostname
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Validated route, DNS and TLS artifacts for one hostname
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/lkg:
     get:
       operationId: getPlatformArtifactLKG

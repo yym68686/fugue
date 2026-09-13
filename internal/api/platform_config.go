@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -167,6 +168,78 @@ func (s *Server) handleGetPlatformArtifactLineage(w http.ResponseWriter, r *http
 	httpx.WriteJSON(w, http.StatusOK, platformConfigLineageResponse{
 		Artifact: artifact, Lineage: platformconfig.LineageFromArtifact(artifact), LKG: lkg, Dependencies: dependencies,
 	})
+}
+
+func (s *Server) handleGetPlatformHostnameLineage(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
+		return
+	}
+	hostname := normalizeExternalAppDomain(r.URL.Query().Get("hostname"))
+	if hostname == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
+		return
+	}
+	entries := []platformConfigLineageDependency{}
+	for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig} {
+		artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{ArtifactKind: kind, Status: model.PlatformArtifactStatusValidated, Limit: 200})
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		for _, artifact := range artifacts {
+			if !platformArtifactContentContainsHostname(artifact.Content, hostname) {
+				continue
+			}
+			lkg, lkgErr := s.store.GetPlatformLKG(artifact.ArtifactKind, artifact.ScopeKey)
+			if lkgErr != nil && !isStoreNotFound(lkgErr) {
+				s.writeStoreError(w, lkgErr)
+				return
+			}
+			entries = append(entries, platformConfigLineageDependency{Artifact: artifact, Lineage: platformconfig.LineageFromArtifact(artifact), LKG: lkg})
+		}
+	}
+	slices.SortFunc(entries, func(left, right platformConfigLineageDependency) int {
+		if left.Artifact.ArtifactKind < right.Artifact.ArtifactKind {
+			return -1
+		}
+		if left.Artifact.ArtifactKind > right.Artifact.ArtifactKind {
+			return 1
+		}
+		return strings.Compare(left.Artifact.Generation, right.Artifact.Generation)
+	})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"hostname": hostname, "artifacts": entries, "generated_at": time.Now().UTC()})
+}
+
+func platformArtifactContentContainsHostname(content map[string]any, hostname string) bool {
+	if content == nil {
+		return false
+	}
+	var visit func(any) bool
+	visit = func(value any) bool {
+		switch typed := value.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				if strings.Contains(strings.ToLower(key), "hostname") {
+					if candidate, ok := child.(string); ok && normalizeExternalAppDomain(candidate) == hostname {
+						return true
+					}
+				}
+				if visit(child) {
+					return true
+				}
+			}
+		case []any:
+			for _, child := range typed {
+				if visit(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return visit(content)
 }
 
 func (s *Server) platformArtifactLineageDependencies(artifact model.PlatformArtifact) ([]platformConfigLineageDependency, error) {
