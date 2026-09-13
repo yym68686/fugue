@@ -2592,6 +2592,42 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/policy-lkg:
+    get:
+      operationId: getPlatformPolicyLKG
+      summary: Get Verified Platform Policy LKG
+      description: Returns the verified global PolicySnapshot LKG. An unavailable or invalid LKG is reported as 503 so callers preserve their current policy.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformPolicyLKG
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Verified policy snapshot and its artifact lineage
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [artifact, lkg]
+                properties:
+                  artifact:
+                    $ref: "#/components/schemas/PlatformArtifact"
+                  lkg:
+                    $ref: "#/components/schemas/PlatformLKGSnapshot"
+        '404':
+          description: No verified policy LKG exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: The stored policy LKG is unavailable or failed integrity verification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/lkg:
     get:
       operationId: getPlatformArtifactLKG

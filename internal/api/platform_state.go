@@ -647,6 +647,38 @@ func (s *Server) handleGetPlatformArtifactLKG(w http.ResponseWriter, r *http.Req
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformArtifactLKGResponse{LKG: lkg})
 }
 
+func (s *Server) handleGetPlatformPolicyLKG(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() || !principal.HasScope("artifact.read") {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin artifact.read scope required")
+		return
+	}
+	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindPolicySnapshot, "global")
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if lkg == nil {
+		httpx.WriteError(w, http.StatusNotFound, "verified platform policy LKG not found")
+		return
+	}
+	artifact, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if artifact.Status != model.PlatformArtifactStatusValidated ||
+		!platformsafety.EvaluatePlatformLKGSnapshot(*lkg, artifact, s.bundleKeyring(), time.Now().UTC()).Pass {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "verified platform policy LKG is invalid")
+		return
+	}
+	if err := validatePlatformPolicyArtifact(artifact); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"artifact": artifact, "lkg": lkg})
+}
+
 func (s *Server) verifiedPlatformArtifactForScope(kind, scopeKey string) (model.PlatformArtifact, bool, error) {
 	lkg, err := s.store.GetPlatformLKG(kind, scopeKey)
 	if err != nil {

@@ -186,6 +186,39 @@ func TestPolicyArtifactValidationUsesTypedPolicySchema(t *testing.T) {
 	}
 }
 
+func TestPlatformPolicyLKGBindsVerifiedTypedArtifact(t *testing.T) {
+	t.Parallel()
+	_, server, tenantKey, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	create := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", platformAdminKey, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindPolicySnapshot,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
+		Generation:   "policy-lkg-api-1",
+		Content: map[string]any{
+			"generation": "policy-lkg-api-1", "scope": "global", "require_route_ready": true,
+			"minimum_healthy_edges": 1, "dependency_order": []any{"route", "tls", "dns"},
+		},
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create policy artifact: %d %s", create.Code, create.Body.String())
+	}
+	var created model.PlatformArtifactResponse
+	mustDecodeJSON(t, create, &created)
+	validated := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/validate", platformAdminKey, map[string]any{"dry_run": false})
+	if validated.Code != http.StatusOK {
+		t.Fatalf("validate policy artifact: %d %s", validated.Code, validated.Body.String())
+	}
+	seedVerifiedPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	releaseAndVerifyFullPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	response := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/policy-lkg", platformAdminKey, nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), created.Artifact.ID) || !strings.Contains(response.Body.String(), "policy-lkg-api-1") {
+		t.Fatalf("unexpected policy LKG response: %d %s", response.Code, response.Body.String())
+	}
+	forbidden := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/policy-lkg", tenantKey, nil)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("tenant key must not read platform policy LKG, got %d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+}
+
 func TestPlatformIntentArtifactValidationUsesTypedIntentSchema(t *testing.T) {
 	artifact := model.PlatformArtifact{
 		ArtifactKind: model.PlatformArtifactKindPlatformIntent,
