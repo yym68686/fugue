@@ -128,6 +128,22 @@ func TestImportEnvironmentBuildsAuditableIntent(t *testing.T) {
 	}
 }
 
+func TestImportEnvironmentAcceptsLegacyEnvelopesAndPreservesRouteState(t *testing.T) {
+	result, err := ImportEnvironment(map[string]string{
+		"FUGUE_PLATFORM_ROUTES_JSON":    `{"routes":[{"hostname":"Active.Example.","upstream_url":"http://active:8080"},{"hostname":"Disabled.Example.","upstream_url":"http://disabled:8080","status":"disabled","edge_group_id":"edge-group-country-us"}]}`,
+		"FUGUE_DNS_STATIC_RECORDS_JSON": `{"records":[{"name":"Active.Example.","type":"A","values":["203.0.113.10"],"ttl":60}]}`,
+	}, "env-envelope-1")
+	if err != nil {
+		t.Fatalf("import legacy envelopes: %v", err)
+	}
+	if len(result.Intent.Routes) != 2 || len(result.Intent.DNS) != 1 {
+		t.Fatalf("legacy envelope records were lost: %+v", result.Intent)
+	}
+	if !result.Intent.Routes[0].Enabled || result.Intent.Routes[1].Enabled || result.Intent.Routes[1].EdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("legacy route state was not preserved: %+v", result.Intent.Routes)
+	}
+}
+
 func TestCompileRejectsConstraintGraphCyclesAndUnknownNodes(t *testing.T) {
 	base := CompileRequest{
 		Intent: PlatformIntent{Generation: "intent-graph-0001"},

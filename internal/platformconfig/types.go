@@ -148,16 +148,37 @@ func ImportEnvironment(env map[string]string, generation string) (EnvironmentImp
 		var routes []struct {
 			Hostname    string `json:"hostname"`
 			UpstreamURL string `json:"upstream_url"`
-			Enabled     bool   `json:"enabled"`
+			Enabled     *bool  `json:"enabled"`
+			EdgeGroupID string `json:"edge_group_id,omitempty"`
+			Status      string `json:"status,omitempty"`
 		}
 		if err := json.Unmarshal([]byte(raw), &routes); err != nil {
-			return EnvironmentImportResult{}, fmt.Errorf("parse platform routes environment: %w", err)
+			var envelope struct {
+				Routes []struct {
+					Hostname    string `json:"hostname"`
+					UpstreamURL string `json:"upstream_url"`
+					Enabled     *bool  `json:"enabled"`
+					EdgeGroupID string `json:"edge_group_id,omitempty"`
+					Status      string `json:"status,omitempty"`
+				} `json:"routes"`
+			}
+			if envelopeErr := json.Unmarshal([]byte(raw), &envelope); envelopeErr != nil {
+				return EnvironmentImportResult{}, fmt.Errorf("parse platform routes environment: %w", err)
+			}
+			routes = envelope.Routes
 		}
 		for _, route := range routes {
 			if strings.TrimSpace(route.Hostname) == "" || strings.TrimSpace(route.UpstreamURL) == "" {
 				continue
 			}
-			intent.Routes = append(intent.Routes, RouteIntent{Hostname: strings.ToLower(strings.TrimSuffix(strings.TrimSpace(route.Hostname), ".")), UpstreamURL: strings.TrimSpace(route.UpstreamURL), Enabled: route.Enabled})
+			enabled := true
+			if route.Enabled != nil {
+				enabled = *route.Enabled
+			}
+			if strings.EqualFold(strings.TrimSpace(route.Status), "disabled") {
+				enabled = false
+			}
+			intent.Routes = append(intent.Routes, RouteIntent{Hostname: strings.ToLower(strings.TrimSuffix(strings.TrimSpace(route.Hostname), ".")), UpstreamURL: strings.TrimSpace(route.UpstreamURL), Enabled: enabled, EdgeGroupID: strings.TrimSpace(route.EdgeGroupID)})
 		}
 		imported = append(imported, "FUGUE_PLATFORM_ROUTES_JSON")
 	}
@@ -170,7 +191,19 @@ func ImportEnvironment(env map[string]string, generation string) (EnvironmentImp
 			TTL    int      `json:"ttl"`
 		}
 		if err := json.Unmarshal([]byte(raw), &records); err != nil {
-			return EnvironmentImportResult{}, fmt.Errorf("parse static DNS environment: %w", err)
+			var envelope struct {
+				Records []struct {
+					Name   string   `json:"name"`
+					Type   string   `json:"type"`
+					Values []string `json:"values"`
+					Value  string   `json:"value"`
+					TTL    int      `json:"ttl"`
+				} `json:"records"`
+			}
+			if envelopeErr := json.Unmarshal([]byte(raw), &envelope); envelopeErr != nil {
+				return EnvironmentImportResult{}, fmt.Errorf("parse static DNS environment: %w", err)
+			}
+			records = envelope.Records
 		}
 		for _, record := range records {
 			name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(record.Name), "."))
