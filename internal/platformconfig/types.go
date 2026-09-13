@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"sort"
 	"strings"
 	"time"
@@ -15,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v1"
+	CompilerVersion = "platform-config-compiler/v2"
 	GlobalScopeKey  = "global"
 )
 
@@ -32,17 +31,33 @@ type PlatformIntent struct {
 }
 
 type RouteIntent struct {
-	Hostname    string `json:"hostname"`
-	UpstreamURL string `json:"upstream_url"`
-	Enabled     bool   `json:"enabled"`
-	EdgeGroupID string `json:"edge_group_id,omitempty"`
+	Hostname      string `json:"hostname"`
+	Kind          string `json:"kind,omitempty"`
+	UpstreamKind  string `json:"upstream_kind,omitempty"`
+	UpstreamScope string `json:"upstream_scope,omitempty"`
+	UpstreamURL   string `json:"upstream_url"`
+	TLSPolicy     string `json:"tls_policy,omitempty"`
+	RoutePolicy   string `json:"route_policy,omitempty"`
+	EdgeGroupMode string `json:"edge_group_mode,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	EdgeGroupID   string `json:"edge_group_id,omitempty"`
+	TTL           int    `json:"ttl,omitempty"`
+	Status        string `json:"status,omitempty"`
+	StatusReason  string `json:"status_reason,omitempty"`
 }
 
 type DNSIntent struct {
-	Hostname string   `json:"hostname"`
-	Type     string   `json:"type"`
-	Values   []string `json:"values"`
-	TTL      int      `json:"ttl"`
+	Hostname            string   `json:"hostname"`
+	Type                string   `json:"type"`
+	Values              []string `json:"values"`
+	TTL                 int      `json:"ttl"`
+	RecordKind          string   `json:"record_kind,omitempty"`
+	Status              string   `json:"status,omitempty"`
+	StatusReason        string   `json:"status_reason,omitempty"`
+	AppID               string   `json:"app_id,omitempty"`
+	TenantID            string   `json:"tenant_id,omitempty"`
+	EdgeGroupID         string   `json:"edge_group_id,omitempty"`
+	FallbackEdgeGroupID string   `json:"fallback_edge_group_id,omitempty"`
 }
 
 type TLSIntent struct {
@@ -118,115 +133,6 @@ type RuntimeSnapshot struct {
 	IntentGeneration string         `json:"intent_generation"`
 	PolicyGeneration string         `json:"policy_generation"`
 	Facts            map[string]any `json:"facts,omitempty"`
-}
-
-type EnvironmentImportResult struct {
-	Intent       PlatformIntent `json:"intent"`
-	SourceDigest string         `json:"source_digest"`
-	ImportedKeys []string       `json:"imported_keys"`
-}
-
-// ImportEnvironment converts the legacy serving environment subset into a
-// versioned PlatformIntent. It deliberately ignores credentials and runtime
-// knobs; callers must review the returned intent before compiling it.
-func ImportEnvironment(env map[string]string, generation string) (EnvironmentImportResult, error) {
-	if strings.TrimSpace(generation) == "" {
-		return EnvironmentImportResult{}, fmt.Errorf("environment import generation is required")
-	}
-	keys := []string{"FUGUE_PLATFORM_ROUTES_JSON", "FUGUE_DNS_STATIC_RECORDS_JSON"}
-	canonical := map[string]string{}
-	for _, key := range keys {
-		canonical[key] = strings.TrimSpace(env[key])
-	}
-	sourceDigest, err := Digest(canonical)
-	if err != nil {
-		return EnvironmentImportResult{}, fmt.Errorf("digest environment source: %w", err)
-	}
-	intent := PlatformIntent{SchemaVersion: SchemaVersion, Generation: generation, Scope: GlobalScopeKey}
-	imported := []string{}
-	if raw := canonical["FUGUE_PLATFORM_ROUTES_JSON"]; raw != "" {
-		var routes []struct {
-			Hostname    string `json:"hostname"`
-			UpstreamURL string `json:"upstream_url"`
-			Enabled     *bool  `json:"enabled"`
-			EdgeGroupID string `json:"edge_group_id,omitempty"`
-			Status      string `json:"status,omitempty"`
-		}
-		if err := json.Unmarshal([]byte(raw), &routes); err != nil {
-			var envelope struct {
-				Routes []struct {
-					Hostname    string `json:"hostname"`
-					UpstreamURL string `json:"upstream_url"`
-					Enabled     *bool  `json:"enabled"`
-					EdgeGroupID string `json:"edge_group_id,omitempty"`
-					Status      string `json:"status,omitempty"`
-				} `json:"routes"`
-			}
-			if envelopeErr := json.Unmarshal([]byte(raw), &envelope); envelopeErr != nil {
-				return EnvironmentImportResult{}, fmt.Errorf("parse platform routes environment: %w", err)
-			}
-			routes = envelope.Routes
-		}
-		for _, route := range routes {
-			if strings.TrimSpace(route.Hostname) == "" || strings.TrimSpace(route.UpstreamURL) == "" {
-				continue
-			}
-			enabled := true
-			if route.Enabled != nil {
-				enabled = *route.Enabled
-			}
-			if strings.EqualFold(strings.TrimSpace(route.Status), "disabled") {
-				enabled = false
-			}
-			intent.Routes = append(intent.Routes, RouteIntent{Hostname: strings.ToLower(strings.TrimSuffix(strings.TrimSpace(route.Hostname), ".")), UpstreamURL: strings.TrimSpace(route.UpstreamURL), Enabled: enabled, EdgeGroupID: strings.TrimSpace(route.EdgeGroupID)})
-		}
-		imported = append(imported, "FUGUE_PLATFORM_ROUTES_JSON")
-	}
-	if raw := canonical["FUGUE_DNS_STATIC_RECORDS_JSON"]; raw != "" {
-		var records []struct {
-			Name   string   `json:"name"`
-			Type   string   `json:"type"`
-			Values []string `json:"values"`
-			Value  string   `json:"value"`
-			TTL    int      `json:"ttl"`
-		}
-		if err := json.Unmarshal([]byte(raw), &records); err != nil {
-			var envelope struct {
-				Records []struct {
-					Name   string   `json:"name"`
-					Type   string   `json:"type"`
-					Values []string `json:"values"`
-					Value  string   `json:"value"`
-					TTL    int      `json:"ttl"`
-				} `json:"records"`
-			}
-			if envelopeErr := json.Unmarshal([]byte(raw), &envelope); envelopeErr != nil {
-				return EnvironmentImportResult{}, fmt.Errorf("parse static DNS environment: %w", err)
-			}
-			records = envelope.Records
-		}
-		for _, record := range records {
-			name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(record.Name), "."))
-			typ := strings.ToUpper(strings.TrimSpace(record.Type))
-			values := append([]string(nil), record.Values...)
-			if strings.TrimSpace(record.Value) != "" {
-				values = append(values, record.Value)
-			}
-			if name == "" || (typ != "A" && typ != "AAAA" && typ != "CNAME") || len(values) == 0 {
-				continue
-			}
-			for _, value := range values {
-				if typ == "A" || typ == "AAAA" {
-					if net.ParseIP(strings.TrimSpace(value)) == nil {
-						continue
-					}
-				}
-				intent.DNS = append(intent.DNS, DNSIntent{Hostname: name, Type: typ, Values: []string{strings.TrimSpace(value)}, TTL: record.TTL})
-			}
-		}
-		imported = append(imported, "FUGUE_DNS_STATIC_RECORDS_JSON")
-	}
-	return EnvironmentImportResult{Intent: normalizeIntent(intent), SourceDigest: sourceDigest, ImportedKeys: imported}, nil
 }
 
 type CompileResult struct {

@@ -100,10 +100,8 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 		return model.EdgeRouteIntentSnapshot{}, err
 	}
 	var routes []struct {
-		Hostname    string `json:"hostname"`
-		UpstreamURL string `json:"upstream_url"`
-		Enabled     *bool  `json:"enabled"`
-		EdgeGroupID string `json:"edge_group_id,omitempty"`
+		platformconfig.RouteIntent
+		Enabled *bool `json:"enabled"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -135,34 +133,35 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact requires unique hostnames and explicit enabled state")
 		}
 		seen[hostname] = true
-		status := model.EdgeRouteStatusActive
-		policy := model.EdgeRoutePolicyEnabled
-		upstreamURL := strings.TrimSpace(route.UpstreamURL)
+		legacy := model.PlatformRoute{
+			Hostname: hostname, Kind: route.Kind, UpstreamKind: route.UpstreamKind,
+			UpstreamScope: route.UpstreamScope, UpstreamURL: strings.TrimSpace(route.UpstreamURL),
+			TLSPolicy: route.TLSPolicy, RoutePolicy: route.RoutePolicy, EdgeGroupMode: route.EdgeGroupMode,
+			EdgeGroupID: route.EdgeGroupID, Status: route.Status, StatusReason: route.StatusReason, TTL: route.TTL,
+		}
+		// Earlier compiler payloads represented pinned placement by ID alone.
+		if legacy.EdgeGroupMode == "" && legacy.EdgeGroupID != "" {
+			legacy.EdgeGroupMode = model.PlatformRouteEdgeGroupModePinned
+		}
+		if !*route.Enabled {
+			legacy.Status = model.EdgeRouteStatusDisabled
+			legacy.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+		}
+		legacy, ok := normalizePlatformRoute(legacy)
+		if !ok {
+			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact has invalid platform route semantics")
+		}
+		if legacy.EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned && !platformRouteArtifactGroupID.MatchString(legacy.EdgeGroupID) {
+			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact has invalid pinned edge group")
+		}
 		if *route.Enabled {
-			parsed, err := url.Parse(upstreamURL)
+			parsed, err := url.Parse(legacy.UpstreamURL)
 			if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
 				return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("enabled route artifact has invalid HTTP upstream")
 			}
-		} else {
-			status = model.EdgeRouteStatusDisabled
-			policy = model.EdgeRoutePolicyRouteAOnly
-			upstreamURL = ""
 		}
-		targetMode := model.EdgeRouteIntentGroupModeAllGroups
-		pinnedGroup := ""
-		if strings.TrimSpace(route.EdgeGroupID) != "" {
-			targetMode = model.EdgeRouteIntentGroupModePinnedGroup
-			pinnedGroup = strings.ToLower(strings.TrimSpace(route.EdgeGroupID))
-			if !platformRouteArtifactGroupID.MatchString(pinnedGroup) {
-				return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact has invalid pinned edge group")
-			}
-		}
-		intent := model.EdgeRouteIntent{
-			Hostname: hostname, PathPrefix: "/", RouteKind: model.EdgeRouteKindPlatformRoute,
-			TargetGroupMode: targetMode, PinnedEdgeGroupID: pinnedGroup, MinHealthyEdgeNodes: minimumHealthy,
-			RoutePolicy: policy, UpstreamKind: model.EdgeRouteUpstreamKindKubernetesService, UpstreamScope: model.EdgeRouteUpstreamScopeCluster, UpstreamURL: upstreamURL,
-			TLSPolicy: model.EdgeRouteTLSPolicyPlatform, OriginStatus: status,
-		}
+		intent := edgeRouteIntentFromPlatformRoute(legacy)
+		intent.MinHealthyEdgeNodes = minimumHealthy
 		intent.Generation = edgeRouteIntentGeneration(intent)
 		intents = append(intents, intent)
 	}

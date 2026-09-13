@@ -30124,6 +30124,28 @@ components:
           type: boolean
         edge_group_id:
           type: string
+        kind:
+          type: string
+        upstream_kind:
+          type: string
+        upstream_scope:
+          type: string
+        tls_policy:
+          type: string
+        route_policy:
+          type: string
+          enum: [route_a_only, edge_canary, edge_enabled]
+        edge_group_mode:
+          type: string
+          enum: [all_healthy, region_aware, pinned]
+        status:
+          type: string
+          enum: [active, disabled, unavailable]
+        status_reason:
+          type: string
+        ttl:
+          type: integer
+          format: int32
     PlatformConfigDNSIntent:
       type: object
       additionalProperties: false
@@ -30140,6 +30162,21 @@ components:
         ttl:
           type: integer
           format: int32
+        record_kind:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, unavailable]
+        status_reason:
+          type: string
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        edge_group_id:
+          type: string
+        fallback_edge_group_id:
+          type: string
     PlatformConfigTLSIntent:
       type: object
       additionalProperties: false
