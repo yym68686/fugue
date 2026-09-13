@@ -39,6 +39,9 @@ func TestCompileIsDeterministicAndCarriesLineage(t *testing.T) {
 	if first.Lineage.IntentDigest == "" || first.Lineage.PolicyDigest == "" || first.Lineage.CompilerVersion == "" {
 		t.Fatalf("lineage is incomplete: %+v", first.Lineage)
 	}
+	if first.Lineage.IntentGeneration != request.Intent.Generation || first.Lineage.PolicyGeneration != request.Policy.Generation {
+		t.Fatalf("lineage generation binding is incomplete: %+v", first.Lineage)
+	}
 	if first.RouteArtifact.Metadata["intent_digest"] != first.Lineage.IntentDigest {
 		t.Fatalf("route artifact did not retain intent lineage: %+v", first.RouteArtifact.Metadata)
 	}

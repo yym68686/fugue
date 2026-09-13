@@ -30030,8 +30030,12 @@ components:
     PlatformConfigLineage:
       type: object
       additionalProperties: false
-      required: [intent_digest, policy_digest, compiler_version]
+      required: [intent_generation, policy_generation, intent_digest, policy_digest, compiler_version]
       properties:
+        intent_generation:
+          type: string
+        policy_generation:
+          type: string
         intent_digest:
           type: string
         policy_digest:

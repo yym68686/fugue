@@ -77,6 +77,8 @@ type ConstraintEdge struct {
 }
 
 type Lineage struct {
+	IntentGeneration    string `json:"intent_generation"`
+	PolicyGeneration    string `json:"policy_generation"`
 	IntentDigest        string `json:"intent_digest"`
 	PolicyDigest        string `json:"policy_digest"`
 	InputSnapshotDigest string `json:"input_snapshot_digest,omitempty"`
@@ -167,6 +169,8 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		}
 	}
 	lineage := Lineage{
+		IntentGeneration:    intent.Generation,
+		PolicyGeneration:    policy.Generation,
 		IntentDigest:        intentDigest,
 		PolicyDigest:        policyDigest,
 		InputSnapshotDigest: snapshotDigest,
@@ -416,6 +420,8 @@ func Digest(value any) (string, error) {
 
 func LineageFromArtifact(artifact model.PlatformArtifact) Lineage {
 	return Lineage{
+		IntentGeneration:    artifact.Metadata["intent_generation"],
+		PolicyGeneration:    artifact.Metadata["policy_generation"],
 		IntentDigest:        artifact.Metadata["intent_digest"],
 		PolicyDigest:        artifact.Metadata["policy_digest"],
 		InputSnapshotDigest: artifact.Metadata["input_snapshot_digest"],
@@ -445,6 +451,8 @@ func buildArtifact(kind, scope, generation string, content any, metadata map[str
 
 func lineageMetadata(lineage Lineage) map[string]string {
 	return map[string]string{
+		"intent_generation":     lineage.IntentGeneration,
+		"policy_generation":     lineage.PolicyGeneration,
 		"intent_digest":         lineage.IntentDigest,
 		"policy_digest":         lineage.PolicyDigest,
 		"input_snapshot_digest": lineage.InputSnapshotDigest,
