@@ -66,6 +66,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/node-health", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodeDeepHealth)))
 	mux.Handle("GET /v1/admin/node-health/{node_updater_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetNodeDeepHealth)))
 	mux.Handle("POST /v1/admin/platform-config/compile", s.auth.RequireAPI(http.HandlerFunc(s.handleCompilePlatformConfig)))
+	mux.Handle("GET /v1/admin/platform-state/convergence", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformConsumerConvergence)))
 	mux.Handle("GET /v1/admin/platform/autonomy/status", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformAutonomyStatus)))
 	mux.Handle("POST /v1/admin/platform/failure-drills", s.auth.RequireAPI(http.HandlerFunc(s.handleRunPlatformFailureDrill)))
 	mux.Handle("GET /v1/admin/release-guard/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetReleaseGuardStatus)))

@@ -46,6 +46,10 @@ func TestPlatformExpectedConsumerSetListAPIIsReadOnlyAndAdminScoped(t *testing.T
 	if len(listed.ExpectedConsumerSets) != 1 || listed.ExpectedConsumerSets[0].ID != set.ID || listed.GeneratedAt.IsZero() {
 		t.Fatalf("unexpected expected consumer set response: %+v", listed)
 	}
+	convergence := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-state/convergence?release_set_id=release-set-api-test&limit=1", platformAdminKey, nil)
+	if convergence.Code != http.StatusOK || !strings.Contains(convergence.Body.String(), `"convergence"`) || !strings.Contains(convergence.Body.String(), set.ID) {
+		t.Fatalf("unexpected convergence response: %d %s", convergence.Code, convergence.Body.String())
+	}
 	invalidLimit := performJSONRequest(t, server, http.MethodGet, "/v1/admin/expected-consumer-sets?limit=0", platformAdminKey, nil)
 	if invalidLimit.Code != http.StatusBadRequest {
 		t.Fatalf("invalid limit must be rejected, got %d body=%s", invalidLimit.Code, invalidLimit.Body.String())

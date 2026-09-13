@@ -444,6 +444,35 @@ func (s *Server) handleListPlatformExpectedConsumerSets(w http.ResponseWriter, r
 	})
 }
 
+func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() || !principal.HasScope("artifact.read") {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin with artifact.read scope required")
+		return
+	}
+	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{
+		ReleaseSetID:      r.URL.Query().Get("release_set_id"),
+		ArtifactReleaseID: r.URL.Query().Get("artifact_release_id"),
+		ArtifactKind:      r.URL.Query().Get("artifact_kind"),
+		ScopeKey:          r.URL.Query().Get("scope_key"),
+		Limit:             queryIntDefault(r, "limit", 50),
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	statuses := make([]model.PlatformConsumerConvergenceStatus, 0, len(sets))
+	for _, set := range sets {
+		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
+		if consumerErr != nil {
+			s.writeStoreError(w, consumerErr)
+			return
+		}
+		statuses = append(statuses, platformcontrol.EvaluateConsumerConvergence(set, consumers, time.Now().UTC()))
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"convergence": statuses, "generated_at": time.Now().UTC()})
+}
+
 func (s *Server) handleGetPlatformArtifactLKG(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.HasScope("artifact.read") {
