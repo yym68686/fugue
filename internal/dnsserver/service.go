@@ -61,9 +61,12 @@ type edgeDNSLiveHealthFunc func(string, string) bool
 type edgeDNSPeerHealthFunc func(model.EdgeDNSAnswerCandidate) string
 
 type Service struct {
-	Config     config.DNSConfig
-	HTTPClient *http.Client
-	Logger     *log.Logger
+	PlatformTokenFile  string
+	platformConsumerMu sync.Mutex
+	platformCandidate  PlatformCandidateStatus
+	Config             config.DNSConfig
+	HTTPClient         *http.Client
+	Logger             *log.Logger
 
 	mu          sync.Mutex
 	snapshot    Status
@@ -98,29 +101,30 @@ type Service struct {
 }
 
 type Status struct {
-	Status                 string     `json:"status"`
-	Healthy                bool       `json:"healthy"`
-	DNSNodeID              string     `json:"dns_node_id,omitempty"`
-	EdgeGroupID            string     `json:"edge_group_id,omitempty"`
-	Zone                   string     `json:"zone,omitempty"`
-	BundleVersion          string     `json:"bundle_version,omitempty"`
-	ServingGeneration      string     `json:"serving_generation,omitempty"`
-	LKGGeneration          string     `json:"lkg_generation,omitempty"`
-	LastGoodGeneration     string     `json:"last_good_generation,omitempty"`
-	CacheCorruptGeneration string     `json:"cache_corrupt_generation,omitempty"`
-	BundleValidUntil       *time.Time `json:"bundle_valid_until,omitempty"`
-	RecordCount            int        `json:"record_count"`
-	LastSyncAt             *time.Time `json:"last_sync_at,omitempty"`
-	LastSuccessAt          *time.Time `json:"last_success_at,omitempty"`
-	LastError              string     `json:"last_error,omitempty"`
-	DegradedReason         string     `json:"degraded_reason,omitempty"`
-	StaleCache             bool       `json:"stale_cache"`
-	MaxStaleExceeded       bool       `json:"max_stale_exceeded,omitempty"`
-	CachePath              string     `json:"cache_path,omitempty"`
-	ListenAddr             string     `json:"listen_addr,omitempty"`
-	UDPAddr                string     `json:"udp_addr,omitempty"`
-	TCPAddr                string     `json:"tcp_addr,omitempty"`
-	Zones                  []Status   `json:"zones,omitempty"`
+	PlatformCandidate      *PlatformCandidateStatus `json:"platform_candidate,omitempty"`
+	Status                 string                   `json:"status"`
+	Healthy                bool                     `json:"healthy"`
+	DNSNodeID              string                   `json:"dns_node_id,omitempty"`
+	EdgeGroupID            string                   `json:"edge_group_id,omitempty"`
+	Zone                   string                   `json:"zone,omitempty"`
+	BundleVersion          string                   `json:"bundle_version,omitempty"`
+	ServingGeneration      string                   `json:"serving_generation,omitempty"`
+	LKGGeneration          string                   `json:"lkg_generation,omitempty"`
+	LastGoodGeneration     string                   `json:"last_good_generation,omitempty"`
+	CacheCorruptGeneration string                   `json:"cache_corrupt_generation,omitempty"`
+	BundleValidUntil       *time.Time               `json:"bundle_valid_until,omitempty"`
+	RecordCount            int                      `json:"record_count"`
+	LastSyncAt             *time.Time               `json:"last_sync_at,omitempty"`
+	LastSuccessAt          *time.Time               `json:"last_success_at,omitempty"`
+	LastError              string                   `json:"last_error,omitempty"`
+	DegradedReason         string                   `json:"degraded_reason,omitempty"`
+	StaleCache             bool                     `json:"stale_cache"`
+	MaxStaleExceeded       bool                     `json:"max_stale_exceeded,omitempty"`
+	CachePath              string                   `json:"cache_path,omitempty"`
+	ListenAddr             string                   `json:"listen_addr,omitempty"`
+	UDPAddr                string                   `json:"udp_addr,omitempty"`
+	TCPAddr                string                   `json:"tcp_addr,omitempty"`
+	Zones                  []Status                 `json:"zones,omitempty"`
 }
 
 type cacheFile struct {
@@ -608,6 +612,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	s.startHeartbeatLoop(ctx)
 	s.startTrafficOverrideLoop(ctx)
+	go s.runPlatformShadowConsumer(ctx)
 	defer s.stopZoneServiceLoops()
 
 	ticker := time.NewTicker(s.syncInterval())
@@ -982,6 +987,10 @@ func (s *Service) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.snapshot
+	if s.PlatformTokenFile != "" {
+		candidate := s.platformCandidate
+		status.PlatformCandidate = &candidate
+	}
 	for _, child := range s.childZoneServices() {
 		childStatus := child.Status()
 		childStatus.Zones = nil

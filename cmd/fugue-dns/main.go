@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -19,6 +20,7 @@ func main() {
 	defer stop()
 
 	service := dnsserver.NewService(cfg, logger)
+	service.PlatformTokenFile = os.Getenv("FUGUE_DNS_PLATFORM_TOKEN_FILE")
 	if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Fatalf("dns exited: %v", err)
 	}
