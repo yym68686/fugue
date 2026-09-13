@@ -655,7 +655,7 @@ func (s *Server) handleGetPlatformPolicyLKG(w http.ResponseWriter, r *http.Reque
 	}
 	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindPolicySnapshot, "global")
 	if err != nil {
-		s.writeStoreError(w, err)
+		httpx.WriteError(w, http.StatusServiceUnavailable, "verified platform policy LKG is unavailable")
 		return
 	}
 	if lkg == nil {
@@ -664,7 +664,7 @@ func (s *Server) handleGetPlatformPolicyLKG(w http.ResponseWriter, r *http.Reque
 	}
 	artifact, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
 	if err != nil {
-		s.writeStoreError(w, err)
+		httpx.WriteError(w, http.StatusServiceUnavailable, "verified platform policy LKG artifact is unavailable")
 		return
 	}
 	if artifact.Status != model.PlatformArtifactStatusValidated ||

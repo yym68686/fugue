@@ -188,7 +188,11 @@ func TestPolicyArtifactValidationUsesTypedPolicySchema(t *testing.T) {
 
 func TestPlatformPolicyLKGBindsVerifiedTypedArtifact(t *testing.T) {
 	t.Parallel()
-	_, server, tenantKey, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	_, server, tenantKey, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	missing := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/policy-lkg", platformAdminKey, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("no policy LKG must return 404: %d %s", missing.Code, missing.Body.String())
+	}
 	create := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", platformAdminKey, model.PlatformArtifactCreateRequest{
 		ArtifactKind: model.PlatformArtifactKindPolicySnapshot,
 		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
@@ -216,6 +220,32 @@ func TestPlatformPolicyLKGBindsVerifiedTypedArtifact(t *testing.T) {
 	forbidden := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/policy-lkg", tenantKey, nil)
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("tenant key must not read platform policy LKG, got %d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+	candidate := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", platformAdminKey, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindPolicySnapshot,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
+		Generation:   "policy-lkg-api-2",
+		Content: map[string]any{
+			"generation": "policy-lkg-api-2", "scope": "global", "dependency_order": []any{"route", "route"},
+		},
+	})
+	if candidate.Code != http.StatusCreated {
+		t.Fatalf("create candidate: %d %s", candidate.Code, candidate.Body.String())
+	}
+	var draft model.PlatformArtifactResponse
+	mustDecodeJSON(t, candidate, &draft)
+	rejected := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+draft.Artifact.ID+"/validate", platformAdminKey, map[string]any{"dry_run": false})
+	if rejected.Code != http.StatusConflict {
+		t.Fatalf("invalid policy candidate must be rejected: %d %s", rejected.Code, rejected.Body.String())
+	}
+	retained := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/policy-lkg", platformAdminKey, nil)
+	if retained.Code != http.StatusOK || retained.Body.String() != response.Body.String() {
+		t.Fatalf("failed candidate changed verified policy: %d %s", retained.Code, retained.Body.String())
+	}
+	server.bundleRevokedKeyIDs = append(server.bundleRevokedKeyIDs, created.Artifact.Provenance.KeyID)
+	untrusted := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/policy-lkg", platformAdminKey, nil)
+	if untrusted.Code != http.StatusServiceUnavailable {
+		t.Fatalf("revoked signing key must return 503: %d %s", untrusted.Code, untrusted.Body.String())
 	}
 }
 
