@@ -666,9 +666,14 @@ func (s *Server) edgeDNSBundleArtifactForOptions(options edgeDNSBundleOptions, n
 		return model.EdgeDNSBundle{}, false, err
 	}
 	if !found {
-		return model.EdgeDNSBundle{}, false, nil
+		return s.edgeDNSBundleVerifiedLKGForOptions(options, now)
 	}
 	if err := s.validateEdgeDNSFullRelease(artifact, release); err != nil {
+		if fallback, fallbackFound, fallbackErr := s.edgeDNSBundleVerifiedLKGForOptions(options, now); fallbackErr != nil {
+			return model.EdgeDNSBundle{}, false, fallbackErr
+		} else if fallbackFound {
+			return fallback, true, nil
+		}
 		return model.EdgeDNSBundle{}, false, fmt.Errorf("validate immutable full release: %w", err)
 	}
 	projected, err := edgeDNSBundleArtifactFromPlatformArtifact(artifact)
@@ -679,6 +684,21 @@ func (s *Server) edgeDNSBundleArtifactForOptions(options edgeDNSBundleOptions, n
 	projected.UpdatedAt = release.UpdatedAt
 	if err := s.validateEdgeDNSBundleArtifact(projected, options, now); err != nil {
 		return model.EdgeDNSBundle{}, false, fmt.Errorf("validate activated immutable edge DNS artifact: %w", err)
+	}
+	return projected.Bundle, true, nil
+}
+
+func (s *Server) edgeDNSBundleVerifiedLKGForOptions(options edgeDNSBundleOptions, now time.Time) (model.EdgeDNSBundle, bool, error) {
+	artifact, found, err := s.verifiedPlatformArtifactForScope(model.PlatformArtifactKindDNSAnswerBundle, edgeDNSBundleArtifactScopeKey(options))
+	if err != nil || !found {
+		return model.EdgeDNSBundle{}, found, err
+	}
+	projected, err := edgeDNSBundleArtifactFromPlatformArtifact(artifact)
+	if err != nil {
+		return model.EdgeDNSBundle{}, true, fmt.Errorf("decode verified DNS LKG artifact: %w", err)
+	}
+	if err := s.validateEdgeDNSBundleArtifact(projected, options, now); err != nil {
+		return model.EdgeDNSBundle{}, true, fmt.Errorf("validate verified DNS LKG artifact: %w", err)
 	}
 	return projected.Bundle, true, nil
 }
