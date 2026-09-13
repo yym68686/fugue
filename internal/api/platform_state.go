@@ -336,6 +336,12 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 			httpx.WriteError(w, http.StatusConflict, referenceResult.Message)
 			return
 		}
+		if req.ReleaseChannel == model.PlatformArtifactReleaseChannelFull {
+			if convergenceResult := s.validateReleaseSetConvergence(releaseArtifact); !convergenceResult.Pass {
+				httpx.WriteError(w, http.StatusConflict, convergenceResult.Message)
+				return
+			}
+		}
 	}
 	artifact, release, message, lkg, err := s.store.ReleasePlatformArtifact(r.PathValue("artifact_id"), req, principal)
 	if err != nil {
@@ -360,6 +366,24 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 		Message:  message,
 		LKG:      lkg,
 	})
+}
+
+func (s *Server) validateReleaseSetConvergence(artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {
+	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: artifact.ID, Limit: 200})
+	if err != nil {
+		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
+	}
+	for _, set := range sets {
+		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
+		if consumerErr != nil {
+			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
+		}
+		status := platformcontrol.EvaluateConsumerConvergence(set, consumers, time.Now().UTC())
+		if set.RequiresConsumers && !status.Pass {
+			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "required release set consumers have not converged", Evidence: map[string]string{"expected_consumer_set_id": set.ID, "state": status.State, "required_passing": fmt.Sprintf("%d", status.RequiredPassing), "required_expected": fmt.Sprintf("%d", status.RequiredExpected)}}
+		}
+	}
+	return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: true, Severity: model.RobustnessSeverityBlockPublish, Message: "required release set consumers have converged"}
 }
 
 func (s *Server) handleRollbackPlatformArtifact(w http.ResponseWriter, r *http.Request) {

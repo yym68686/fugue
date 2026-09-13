@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/store"
 )
 
@@ -193,5 +194,28 @@ func TestPlatformIntentArtifactValidationUsesTypedIntentSchema(t *testing.T) {
 	}
 	if err := validatePlatformIntentArtifact(artifact); err == nil || !strings.Contains(err.Error(), "platform intent is invalid") {
 		t.Fatalf("expected typed intent validation failure, got %v", err)
+	}
+}
+
+func TestReleaseSetConvergenceBlocksRequiredConsumers(t *testing.T) {
+	s := store.New(t.TempDir() + "/store.json")
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{
+		ReleaseSetID: "release-set-convergence", ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle,
+		Scope: model.PlatformArtifactScope{ScopeType: "global"}, ScopeKey: "global", Generation: "route-1", Revision: 1,
+		Topology: platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "edge-1", EdgeGroupID: "group-1", Country: "US"}}},
+	})
+	if err != nil {
+		t.Fatalf("build expected set: %v", err)
+	}
+	if _, err := s.CreatePlatformExpectedConsumerSet(set); err != nil {
+		t.Fatalf("create expected set: %v", err)
+	}
+	result := server.validateReleaseSetConvergence(model.PlatformArtifact{ID: "release-set-convergence"})
+	if result.Pass || !strings.Contains(result.Message, "have not converged") {
+		t.Fatalf("expected convergence block, got %+v", result)
 	}
 }
