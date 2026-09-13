@@ -65,6 +65,18 @@ func TestPlatformExpectedConsumerSetListAPIIsReadOnlyAndAdminScoped(t *testing.T
 	}
 }
 
+func TestReleaseSetFullPromotionRequiresExpectedConsumerSets(t *testing.T) {
+	state, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	artifact := model.PlatformArtifact{ID: "release-without-consumers", ArtifactKind: model.PlatformArtifactKindReleaseSet, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: "global"}, ScopeKey: "global", Status: model.PlatformArtifactStatusValidated, Content: map[string]any{}}
+	if _, err := state.CreatePlatformArtifact(artifact); err != nil {
+		t.Fatal(err)
+	}
+	result := server.validateReleaseSetConvergence(artifact)
+	if result.Pass || !strings.Contains(result.Message, "expected consumer sets are missing") {
+		t.Fatalf("missing expected consumers must block full promotion: %+v", result)
+	}
+}
+
 func TestPreparePlatformReleaseSetConsumersBindsAllTrafficArtifacts(t *testing.T) {
 	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	compiled := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, map[string]any{

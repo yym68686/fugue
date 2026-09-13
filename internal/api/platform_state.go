@@ -373,6 +373,9 @@ func (s *Server) validateReleaseSetConvergence(artifact model.PlatformArtifact) 
 	if err != nil {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
 	}
+	if len(sets) == 0 {
+		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set expected consumer sets are missing"}
+	}
 	for _, set := range sets {
 		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
 		if consumerErr != nil {
