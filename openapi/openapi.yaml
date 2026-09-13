@@ -2876,6 +2876,7 @@ paths:
     get:
       operationId: getPlatformConsumerAssignment
       summary: Get the expected ReleaseSet assignments for a trusted consumer
+      description: Returns the latest expected set revision for each authorized artifact kind in each active ReleaseSet channel. Assignments are bound to the signed child artifact and the active release fencing token. Shadow assignments authorize validation only and must not replace serving state. Superseded releases and unrelated topology are excluded.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerAssignment
       security:
@@ -2890,6 +2891,8 @@ paths:
         '401':
           $ref: "#/components/responses/ErrorResponse"
         '404':
+          $ref: "#/components/responses/ErrorResponse"
+        '503':
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
@@ -30946,7 +30949,7 @@ components:
     PlatformConsumerAssignment:
       type: object
       additionalProperties: false
-      required: [expected_consumer_set_id, release_set_id, artifact_kind, scope_key, expected_generation, revision, fencing_token, expected_protocol_version, expected_schema_version]
+      required: [expected_consumer_set_id, release_set_id, artifact_kind, scope_key, expected_generation, artifact_id, content_hash, generation_sequence, release_channel, revision, fencing_token, expected_protocol_version, expected_schema_version]
       properties:
         expected_consumer_set_id:
           type: string
@@ -30963,6 +30966,18 @@ components:
         revision:
           type: integer
           format: int64
+        artifact_id:
+          type: string
+        content_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        generation_sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        release_channel:
+          type: string
+          enum: [shadow, gray, full]
         fencing_token:
           type: integer
           format: int64

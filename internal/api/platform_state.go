@@ -591,6 +591,21 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusBadRequest, "artifact_release_id is required")
 		return
 	}
+	release, err := s.store.GetPlatformArtifactRelease(request.ArtifactReleaseID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if release.ArtifactID != releaseSet.ID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet ||
+		release.ScopeKey != releaseSet.ScopeKey || release.Generation != releaseSet.Generation ||
+		release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken <= 0 {
+		httpx.WriteError(w, http.StatusConflict, "artifact release does not match the active release set")
+		return
+	}
+	if s.store.VerifyPlatformArtifactIntegrity(releaseSet) != nil || !s.validateReleaseSetReferences(releaseSet).Pass {
+		httpx.WriteError(w, http.StatusConflict, "release set references or integrity are invalid")
+		return
+	}
 	edges, _, err := s.store.ListEdgeNodes("")
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -934,48 +949,73 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 	})
 }
 
-// handleGetPlatformConsumerAssignment exposes only server-derived expected
-// assignments for the authenticated component identity. It is deliberately
-// read-only: a consumer must still submit a signed trusted heartbeat after it
-// has applied and probed the artifact.
+// Assignments describe desired artifacts, never observed apply/probe results.
 func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
 	if !ok {
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
 		return
 	}
-	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{Limit: 200})
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	assignments := make([]model.PlatformConsumerAssignment, 0, len(sets))
-	for _, set := range sets {
-		release, releaseErr := s.store.GetPlatformArtifactRelease(set.ArtifactReleaseID)
-		if releaseErr != nil {
-			if errors.Is(releaseErr, store.ErrNotFound) {
-				continue
-			}
-			s.writeStoreError(w, releaseErr)
+	assignments := make([]model.PlatformConsumerAssignment, 0)
+	for _, channel := range []string{model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull} {
+		releaseSet, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel)
+		if err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "consumer release assignment unavailable")
 			return
 		}
-		for _, expected := range set.Consumers {
-			if expected.ConsumerID != claims.Component+":"+claims.NodeID ||
-				expected.Component != claims.Component || expected.NodeID != claims.NodeID ||
-				expected.ScopeKey != claims.ScopeKey || expected.ArtifactKind == "" ||
-				!containsPlatformArtifactKind(claims.ArtifactKinds, expected.ArtifactKind) {
+		if !found {
+			continue
+		}
+		if release.ArtifactID != releaseSet.ID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet ||
+			release.Status != model.PlatformArtifactReleaseStatusActive || release.ReleaseChannel != channel ||
+			release.Generation != releaseSet.Generation || release.ScopeKey != claims.ScopeKey || release.FencingToken <= 0 ||
+			releaseSet.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(releaseSet) != nil ||
+			!s.validateReleaseSetReferences(releaseSet).Pass {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "consumer release assignment is inconsistent")
+			return
+		}
+		// Query the active release and authorized scope, rather than taking a
+		// global top-N window that can silently hide this consumer's assignment.
+		for _, kind := range claims.ArtifactKinds {
+			sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{
+				ReleaseSetID: releaseSet.ID, ArtifactReleaseID: release.ID, ArtifactKind: kind, ScopeKey: claims.ScopeKey,
+			})
+			if err != nil {
+				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer expectation unavailable")
+				return
+			}
+			var latest *model.PlatformExpectedConsumerSet
+			for i := range sets {
+				if latest == nil || sets[i].Revision > latest.Revision {
+					latest = &sets[i]
+				}
+			}
+			if latest == nil {
 				continue
 			}
-			assignments = append(assignments, model.PlatformConsumerAssignment{
-				ExpectedConsumerSetID: set.ID, ReleaseSetID: set.ReleaseSetID,
-				ArtifactReleaseID: set.ArtifactReleaseID, ArtifactKind: set.ArtifactKind,
-				ScopeKey: set.ScopeKey, ExpectedGeneration: set.ExpectedGeneration, Revision: set.Revision,
-				FencingToken:              release.FencingToken,
-				ExpectedProtocolVersion:   expected.ExpectedProtocolVersion,
-				ExpectedSchemaVersion:     expected.ExpectedSchemaVersion,
-				CompatibilityCapabilities: append([]string(nil), expected.CompatibilityCapabilities...),
-				HeartbeatDeadline:         set.HeartbeatDeadline, ConvergenceDeadline: set.ConvergenceDeadline,
-			})
+			// A newer topology may remove the consumer. Never resurrect its old
+			// assignment by filtering consumer membership before revision selection.
+			for _, expected := range latest.Consumers {
+				if expected.ConsumerID != claims.Component+":"+claims.NodeID || expected.Component != claims.Component ||
+					expected.NodeID != claims.NodeID || expected.ScopeKey != claims.ScopeKey || expected.ArtifactKind != kind {
+					continue
+				}
+				child, err := s.consumerAssignmentChild(releaseSet, kind)
+				if err != nil || child.ScopeKey != claims.ScopeKey || child.Generation != latest.ExpectedGeneration ||
+					child.Generation != expected.ExpectedGeneration || s.store.VerifyPlatformArtifactIntegrity(child) != nil {
+					httpx.WriteError(w, http.StatusServiceUnavailable, "consumer artifact assignment is inconsistent")
+					return
+				}
+				assignments = append(assignments, model.PlatformConsumerAssignment{
+					ExpectedConsumerSetID: latest.ID, ReleaseSetID: releaseSet.ID, ArtifactReleaseID: release.ID,
+					ArtifactKind: kind, ScopeKey: claims.ScopeKey, ExpectedGeneration: child.Generation, Revision: latest.Revision,
+					ArtifactID: child.ID, ContentHash: child.ContentHash, GenerationSequence: child.GenerationSequence,
+					ReleaseChannel: channel, FencingToken: release.FencingToken,
+					ExpectedProtocolVersion: expected.ExpectedProtocolVersion, ExpectedSchemaVersion: expected.ExpectedSchemaVersion,
+					CompatibilityCapabilities: append([]string(nil), expected.CompatibilityCapabilities...),
+					HeartbeatDeadline:         expected.HeartbeatDeadline, ConvergenceDeadline: expected.ConvergenceDeadline,
+				})
+			}
 		}
 	}
 	if len(assignments) == 0 {
@@ -985,14 +1025,23 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformConsumerAssignmentResponse{Assignments: assignments, GeneratedAt: time.Now().UTC()})
 }
 
-func containsPlatformArtifactKind(kinds []string, wanted string) bool {
-	wanted = store.NormalizePlatformArtifactKind(wanted)
-	for _, kind := range kinds {
-		if store.NormalizePlatformArtifactKind(kind) == wanted {
-			return true
-		}
+func (s *Server) consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string) (model.PlatformArtifact, error) {
+	ids, idsOK := releaseSet.Content["artifact_ids"].([]any)
+	kinds, kindsOK := releaseSet.Content["artifact_kinds"].([]any)
+	if !idsOK || !kindsOK || len(ids) != len(kinds) {
+		return model.PlatformArtifact{}, store.ErrConflict
 	}
-	return false
+	for i, rawKind := range kinds {
+		if rawKind != kind {
+			continue
+		}
+		id, ok := ids[i].(string)
+		if !ok {
+			return model.PlatformArtifact{}, store.ErrConflict
+		}
+		return s.store.GetPlatformArtifact(id)
+	}
+	return model.PlatformArtifact{}, store.ErrNotFound
 }
 
 func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error) {

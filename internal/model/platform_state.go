@@ -476,6 +476,10 @@ type PlatformConsumerAssignment struct {
 	ScopeKey                  string    `json:"scope_key"`
 	ExpectedGeneration        string    `json:"expected_generation"`
 	Revision                  int64     `json:"revision"`
+	ArtifactID                string    `json:"artifact_id"`
+	ContentHash               string    `json:"content_hash"`
+	GenerationSequence        int64     `json:"generation_sequence"`
+	ReleaseChannel            string    `json:"release_channel"`
 	FencingToken              int64     `json:"fencing_token"`
 	ExpectedProtocolVersion   string    `json:"expected_protocol_version"`
 	ExpectedSchemaVersion     string    `json:"expected_schema_version"`
