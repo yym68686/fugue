@@ -590,6 +590,44 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"convergence": statuses, "generated_at": time.Now().UTC()})
 }
 
+func (s *Server) handleListPlatformRuntimeFacts(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() || !principal.HasScope("artifact.read") {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin with artifact.read scope required")
+		return
+	}
+	limit := queryIntDefault(r, "limit", 200)
+	if limit > 1000 {
+		httpx.WriteError(w, http.StatusBadRequest, "limit cannot exceed 1000")
+		return
+	}
+	events, err := s.store.ListAuditEvents("", true, limit)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	consumerID := strings.TrimSpace(r.URL.Query().Get("consumer_id"))
+	releaseSetID := strings.TrimSpace(r.URL.Query().Get("release_set_id"))
+	artifactKind := strings.TrimSpace(r.URL.Query().Get("artifact_kind"))
+	facts := make([]model.AuditEvent, 0, len(events))
+	for _, event := range events {
+		if event.Action != "platform_consumer.heartbeat_accepted" && !strings.HasPrefix(event.Action, "platform_artifact.") {
+			continue
+		}
+		if consumerID != "" && event.TargetID != consumerID && event.Metadata["consumer_id"] != consumerID {
+			continue
+		}
+		if releaseSetID != "" && event.Metadata["release_set_id"] != releaseSetID {
+			continue
+		}
+		if artifactKind != "" && event.Metadata["artifact_kind"] != artifactKind {
+			continue
+		}
+		facts = append(facts, event)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"runtime_facts": facts, "generated_at": time.Now().UTC()})
+}
+
 func (s *Server) handleGetPlatformArtifactLKG(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.HasScope("artifact.read") {

@@ -69,6 +69,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/platform-config/hostname-lineage", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformHostnameLineage)))
 	mux.Handle("GET /v1/admin/platform-config/import-env/preview", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformConfigEnvironmentImportPreview)))
 	mux.Handle("GET /v1/admin/platform-state/convergence", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformConsumerConvergence)))
+	mux.Handle("GET /v1/admin/platform-state/runtime-facts", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformRuntimeFacts)))
 	mux.Handle("GET /v1/admin/platform/autonomy/status", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformAutonomyStatus)))
 	mux.Handle("POST /v1/admin/platform/failure-drills", s.auth.RequireAPI(http.HandlerFunc(s.handleRunPlatformFailureDrill)))
 	mux.Handle("GET /v1/admin/release-guard/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetReleaseGuardStatus)))

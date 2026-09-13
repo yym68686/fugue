@@ -2548,6 +2548,37 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-state/runtime-facts:
+    get:
+      operationId: listPlatformRuntimeFacts
+      summary: List Platform Runtime Facts
+      tags: [Admin]
+      x-fugue-handler: handleListPlatformRuntimeFacts
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: consumer_id
+          schema: {type: string}
+        - in: query
+          name: release_set_id
+          schema: {type: string}
+        - in: query
+          name: artifact_kind
+          schema: {type: string}
+        - in: query
+          name: limit
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 200}
+      responses:
+        '200':
+          description: Runtime fact event projection from the platform audit log
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/lkg:
     get:
       operationId: getPlatformArtifactLKG

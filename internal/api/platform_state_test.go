@@ -50,6 +50,10 @@ func TestPlatformExpectedConsumerSetListAPIIsReadOnlyAndAdminScoped(t *testing.T
 	if convergence.Code != http.StatusOK || !strings.Contains(convergence.Body.String(), `"convergence"`) || !strings.Contains(convergence.Body.String(), set.ID) {
 		t.Fatalf("unexpected convergence response: %d %s", convergence.Code, convergence.Body.String())
 	}
+	facts := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-state/runtime-facts?artifact_kind=caddy_route_config", platformAdminKey, nil)
+	if facts.Code != http.StatusOK || !strings.Contains(facts.Body.String(), `"runtime_facts"`) {
+		t.Fatalf("unexpected runtime facts response: %d %s", facts.Code, facts.Body.String())
+	}
 	invalidLimit := performJSONRequest(t, server, http.MethodGet, "/v1/admin/expected-consumer-sets?limit=0", platformAdminKey, nil)
 	if invalidLimit.Code != http.StatusBadRequest {
 		t.Fatalf("invalid limit must be rejected, got %d body=%s", invalidLimit.Code, invalidLimit.Body.String())
