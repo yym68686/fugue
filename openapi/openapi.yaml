@@ -2277,6 +2277,36 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/import-env:
+    post:
+      operationId: importPlatformEnvironment
+      summary: Import Legacy Serving Environment
+      description: Validates legacy serving environment values and persists one immutable validated PlatformIntent draft tagged with env-migration. The operation never promotes serving traffic.
+      tags: [Admin]
+      x-fugue-handler: handlePlatformConfigEnvironmentImport
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [generation]
+              additionalProperties: false
+              properties:
+                generation:
+                  type: string
+      responses:
+        '201':
+          description: Immutable validated PlatformIntent draft
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/lineage:
     get:
       operationId: getPlatformArtifactLineage

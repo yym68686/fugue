@@ -249,6 +249,33 @@ func TestPlatformPolicyLKGBindsVerifiedTypedArtifact(t *testing.T) {
 	}
 }
 
+func TestEnvironmentImportPersistsValidatedIntentWithoutPromotion(t *testing.T) {
+	state, server, tenantKey, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	t.Setenv("FUGUE_PLATFORM_ROUTES_JSON", `{"routes":[{"hostname":"import.example","upstream_url":"http://import:8080"}]}`)
+	t.Setenv("FUGUE_DNS_STATIC_RECORDS_JSON", `{"records":[{"name":"import.example","type":"A","values":["192.0.2.20"]}]}`)
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/import-env", admin, map[string]any{"generation": "env-import-api-1"})
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), "env-migration") {
+		t.Fatalf("expected immutable import draft, got %d %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Artifact model.PlatformArtifact `json:"artifact"`
+	}
+	mustDecodeJSON(t, response, &result)
+	if result.Artifact.Status != model.PlatformArtifactStatusValidated || result.Artifact.ArtifactKind != model.PlatformArtifactKindPlatformIntent {
+		t.Fatalf("import draft was not validated platform intent: %+v", result.Artifact)
+	}
+	if _, err := state.GetPlatformLKG(model.PlatformArtifactKindPlatformIntent, "global"); err != nil {
+		t.Fatal(err)
+	}
+	if lkg, _ := state.GetPlatformLKG(model.PlatformArtifactKindPlatformIntent, "global"); lkg != nil {
+		t.Fatal("import must not promote a PlatformIntent LKG")
+	}
+	forbidden := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/import-env", tenantKey, map[string]any{"generation": "env-import-api-tenant"})
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("tenant import must be forbidden: %d", forbidden.Code)
+	}
+}
+
 func TestPlatformIntentArtifactValidationUsesTypedIntentSchema(t *testing.T) {
 	artifact := model.PlatformArtifact{
 		ArtifactKind: model.PlatformArtifactKindPlatformIntent,

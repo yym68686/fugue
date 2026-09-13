@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -167,6 +168,86 @@ func (s *Server) handlePlatformConfigEnvironmentImportPreview(w http.ResponseWri
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, result)
+}
+
+type platformConfigEnvironmentImportRequest struct {
+	Generation string `json:"generation"`
+}
+
+func (s *Server) handlePlatformConfigEnvironmentImport(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
+		return
+	}
+	var request platformConfigEnvironmentImportRequest
+	if err := httpx.DecodeJSON(r, &request); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	env := map[string]string{}
+	for _, item := range os.Environ() {
+		key, value, ok := strings.Cut(item, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	result, err := platformconfig.ImportEnvironment(env, request.Generation)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	now := time.Now().UTC()
+	artifact := model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindPlatformIntent,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
+		Generation:   result.Intent.Generation,
+		Content:      mustPlatformIntentContent(result.Intent),
+		Metadata: map[string]string{
+			"intent_digest": resultIntentDigest(result.Intent),
+			"source":        "env-migration",
+			"source_digest": result.SourceDigest,
+			"migrated_at":   now.Format(time.RFC3339Nano),
+			"migrated_by":   strings.TrimSpace(principal.ActorID),
+		},
+		CreatedByType: principal.ActorType,
+		CreatedByID:   principal.ActorID,
+	}
+	created, _, err := s.store.EnsurePlatformArtifact(artifact)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if err := validatePlatformIntentArtifact(created); err != nil {
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+		return
+	}
+	validated, err := s.store.ValidatePlatformArtifact(created.ID, []model.PlatformArtifactValidationResult{{
+		Name: "platform_config.environment_import", Pass: true,
+		Severity: model.RobustnessSeverityBlockPublish,
+		Message:  "legacy serving environment imported into immutable PlatformIntent draft",
+		Evidence: map[string]string{"source": "env-migration", "source_digest": result.SourceDigest},
+	}})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "platform_config.environment_imported", "platform_artifact", validated.ID, "", map[string]string{
+		"source": "env-migration", "source_digest": result.SourceDigest, "generation": result.Intent.Generation,
+	})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"artifact": validated, "source_digest": result.SourceDigest, "imported_keys": result.ImportedKeys})
+}
+
+func mustPlatformIntentContent(intent platformconfig.PlatformIntent) map[string]any {
+	raw, _ := json.Marshal(intent)
+	content := map[string]any{}
+	_ = json.Unmarshal(raw, &content)
+	return content
+}
+
+func resultIntentDigest(intent platformconfig.PlatformIntent) string {
+	digest, _ := platformconfig.Digest(intent)
+	return digest
 }
 
 func (s *Server) handleGetPlatformArtifactLineage(w http.ResponseWriter, r *http.Request) {
