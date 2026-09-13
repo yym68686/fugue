@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -140,6 +141,32 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 		TLSArtifact:     compiled.TLSArtifact,
 		ReleaseArtifact: compiled.ReleaseArtifact,
 	})
+}
+
+func (s *Server) handlePlatformConfigEnvironmentImportPreview(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
+		return
+	}
+	generation := strings.TrimSpace(r.URL.Query().Get("generation"))
+	if generation == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "generation is required")
+		return
+	}
+	env := map[string]string{}
+	for _, item := range os.Environ() {
+		key, value, ok := strings.Cut(item, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	result, err := platformconfig.ImportEnvironment(env, generation)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleGetPlatformArtifactLineage(w http.ResponseWriter, r *http.Request) {

@@ -111,6 +111,23 @@ func TestCompileFixedRuntimeSnapshotIsStableAcrossWallClockChanges(t *testing.T)
 	}
 }
 
+func TestImportEnvironmentBuildsAuditableIntent(t *testing.T) {
+	result, err := ImportEnvironment(map[string]string{
+		"FUGUE_PLATFORM_ROUTES_JSON":    `[{"hostname":"App.Example.","upstream_url":"http://app:8080","enabled":true}]`,
+		"FUGUE_DNS_STATIC_RECORDS_JSON": `[{"name":"App.Example.","type":"A","values":["203.0.113.10"],"ttl":60}]`,
+		"FUGUE_BUNDLE_SIGNING_KEY":      "must-not-be-imported",
+	}, "env-import-1")
+	if err != nil {
+		t.Fatalf("import environment: %v", err)
+	}
+	if result.SourceDigest == "" || len(result.ImportedKeys) != 2 || len(result.Intent.Routes) != 1 || len(result.Intent.DNS) != 1 {
+		t.Fatalf("unexpected import result: %+v", result)
+	}
+	if result.Intent.Routes[0].Hostname != "app.example" || result.Intent.DNS[0].Type != "A" {
+		t.Fatalf("environment values were not normalized: %+v", result.Intent)
+	}
+}
+
 func TestCompileRejectsConstraintGraphCyclesAndUnknownNodes(t *testing.T) {
 	base := CompileRequest{
 		Intent: PlatformIntent{Generation: "intent-graph-0001"},

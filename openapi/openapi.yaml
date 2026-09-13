@@ -2240,6 +2240,30 @@ paths:
                 $ref: "#/components/schemas/PlatformConfigCompileResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/import-env/preview:
+    get:
+      operationId: previewPlatformConfigEnvironmentImport
+      summary: Preview Legacy Environment Import
+      tags: [Admin]
+      x-fugue-handler: handlePlatformConfigEnvironmentImportPreview
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: generation
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Auditable PlatformIntent generated from legacy serving environment values
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/lineage:
     get:
       operationId: getPlatformArtifactLineage
