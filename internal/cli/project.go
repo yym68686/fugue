@@ -486,7 +486,10 @@ func appMoveSkippedForDatabaseDependency(item projectMoveSkippedApp, impacts []m
 		return false
 	}
 	for _, blocker := range impact.Blockers {
-		if strings.Contains(strings.ToLower(blocker), "managed postgres must be localized") {
+		lower := strings.ToLower(blocker)
+		if strings.Contains(lower, "managed postgres must be localized") ||
+			strings.Contains(lower, "managed postgres restore evidence") ||
+			strings.Contains(lower, "managed postgres grant evidence") {
 			continue
 		}
 		return false
