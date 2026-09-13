@@ -49,6 +49,7 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 	} else if found {
 		w.Header().Set("ETag", edgeRouteBundleETag(snapshot.Generation))
 		w.Header().Set("Cache-Control", "private, no-cache")
+		w.Header().Set("X-Fugue-Route-Intent-Source", "verified-artifact")
 		w.Header().Set("X-Fugue-Route-Intent-Generation", snapshot.Generation)
 		httpx.WriteJSON(w, http.StatusOK, snapshot)
 		return

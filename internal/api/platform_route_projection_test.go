@@ -112,6 +112,9 @@ func readArtifactRouteProjection(t *testing.T, server *Server) model.EdgeRouteIn
 	if response.Header().Get("X-Fugue-Route-Intent-Generation") != snapshot.Generation {
 		t.Fatal("transport identity mismatch")
 	}
+	if response.Header().Get("X-Fugue-Route-Intent-Source") != "verified-artifact" {
+		t.Fatalf("route intent source is not explicit: %q", response.Header().Get("X-Fugue-Route-Intent-Source"))
+	}
 	return snapshot
 }
 
