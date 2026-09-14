@@ -91,6 +91,10 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	}
 	projection.BusinessSnapshotRevision = business.Revision
 	projection.BusinessSnapshotAt = business.CapturedAt
+	if err := projectPlatformEntryDNS(&projection, s.platformRoutes, s.dnsStaticRecords, []string{s.appBaseDomain, s.customDomainBaseDomain}); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "platform DNS entry migration configuration invalid")
+		return
+	}
 	if err := projectACMEChallengeIntents(&projection, business.ACMEChallenges); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "ACME migration configuration invalid")
 		return
