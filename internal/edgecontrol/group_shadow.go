@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/routebinding"
 )
 
 const (
@@ -538,27 +539,9 @@ func compileGroupRouteBinding(intent model.EdgeRouteIntent, routeIntentGeneratio
 	if healthyCount == 0 {
 		return model.EdgeRouteBinding{}, false, nil
 	}
-	status := strings.TrimSpace(intent.OriginStatus)
-	if status == "" {
-		status = model.EdgeRouteStatusActive
-	}
-	binding := model.EdgeRouteBinding{
-		Hostname: hostname, PathPrefix: model.NormalizeAppRoutePathPrefix(intent.PathPrefix), RouteKind: strings.TrimSpace(intent.RouteKind),
-		AppID: strings.TrimSpace(intent.AppID), TenantID: strings.TrimSpace(intent.TenantID), RuntimeID: strings.TrimSpace(intent.RuntimeID),
-		RuntimeType: strings.TrimSpace(intent.RuntimeType), RuntimeEdgeGroup: strings.TrimSpace(intent.RuntimeEdgeGroupID),
-		RuntimeEdgeGroupID: strings.TrimSpace(intent.RuntimeEdgeGroupID), RuntimeClusterNode: strings.TrimSpace(intent.RuntimeClusterNode),
-		SelectedEdgeGroup: groupID, EdgeGroupID: groupID,
-		ExcludedEdgeIDs: normalizeIdentitySlice(intent.ExcludedEdgeIDs), ExcludedEdgeGroupIDs: normalizeGroupIDSlice(intent.ExcludedEdgeGroupIDs),
-		ExclusionReason: strings.TrimSpace(intent.ExclusionReason), ExclusionExpiresAt: intent.ExclusionExpiresAt,
-		MinHealthyEdgeNodes: intent.MinHealthyEdgeNodes, HealthyEdgeNodeCount: healthyCount,
-		RoutePolicy: policy, SelectionReason: "active epoch inventory is healthy; exclusions drain DNS traffic only",
-		UpstreamKind: strings.TrimSpace(intent.UpstreamKind), UpstreamScope: strings.TrimSpace(intent.UpstreamScope),
-		UpstreamURL: strings.TrimSpace(intent.UpstreamURL), Upstreams: cloneRouteUpstreams(intent.Upstreams), ServicePort: intent.ServicePort,
-		TLSPolicy: strings.TrimSpace(intent.TLSPolicy), CachePolicyID: strings.TrimSpace(intent.CachePolicyID),
-		CacheNamespace: strings.TrimSpace(intent.CacheNamespace), DeploymentGeneration: strings.TrimSpace(intent.DeploymentGeneration),
-		RequestBodyPolicies: model.CloneEdgeRequestBodyPolicies(intent.RequestBodyPolicies), Streaming: intent.Streaming,
-		Status: status, StatusReason: strings.TrimSpace(intent.OriginStatusReason), CreatedAt: intent.CreatedAt, UpdatedAt: intent.UpdatedAt,
-	}
+	binding := routebinding.FromIntent(intent, groupID)
+	binding.HealthyEdgeNodeCount = healthyCount
+	binding.SelectionReason = "active epoch inventory is healthy; exclusions drain DNS traffic only"
 	binding.EdgeRedundancyStatus = "ok"
 	if binding.MinHealthyEdgeNodes > 0 && healthyCount < binding.MinHealthyEdgeNodes {
 		binding.EdgeRedundancyStatus = "at_risk"

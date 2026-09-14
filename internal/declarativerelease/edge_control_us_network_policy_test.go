@@ -117,12 +117,14 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	const lkgSHA = "7c3d2b47d1ab17187de9e5f87d42ec95fac7ee61"
-	if intent.Generation != 54 || intent.ExpectedPreviousConfigSHA != lkgSHA ||
+	// Runtime predecessors advance on every release. Validate the binding
+	// contract here; the exact commit/image CAS is checked by the release plan
+	// and Guardian against production, not a frozen historical test constant.
+	if intent.Generation <= 0 || !shaPattern.MatchString(intent.ExpectedPreviousConfigSHA) || !intent.ExpectedPreviousPresent ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:7621bb804ead18ca033a21cd1b4e6adf9deca87efc5c6d9374a702f178504352" ||
+		!digestPattern.MatchString(intent.ExpectedPreviousImageDigest) ||
 		intent.SupersedesFailedConfigSHA != "" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
-		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
+		t.Fatalf("US Edge Control intent does not bind a complete production predecessor: %+v", intent)
 	}
 	registry, err := MergeEdgeGroupRegistry(base, edge)
 	if err != nil {
@@ -133,6 +135,7 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
+	lkgSHA := intent.ExpectedPreviousConfigSHA
 	prior.Generation = intent.Generation - 1
 	failed := intent
 	failed.Generation = 32
