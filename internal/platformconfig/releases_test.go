@@ -21,6 +21,15 @@ func releaseCompileFixture() CompileRequest {
 	}
 }
 
+func TestSingleReleaseIgnoresUnusedStickyConsumerRequirement(t *testing.T) {
+	now := time.Now().UTC()
+	r := CompileRequest{Intent: PlatformIntent{Generation: "sticky-single", Routes: []RouteIntent{{Hostname: "single.example", AppID: "app-a", TenantID: "tenant-a", UpstreamURL: "http://origin", Enabled: true}}}, Policy: PolicySnapshot{Generation: "sticky-policy", TrafficConstraints: []TrafficPolicyConstraint{{ID: "traffic", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "stable", StableWeight: 100, CandidateWeight: 0, StickyCookie: "Fugue-Release-Stickiness"}}}, RuntimeSnapshot: RuntimeSnapshot{CapturedAt: &now, Releases: []ReleaseObservation{{ID: "stable", AppID: "app-a", TenantID: "tenant-a", RuntimeID: "runtime-a", DeploymentGeneration: "deploy-a", ObservedAt: now, Status: model.EdgeRouteStatusActive, UpstreamURL: "http://origin"}}}}
+	result, err := Compile(r)
+	if err != nil || len(result.RouteArtifact.Content) == 0 {
+		t.Fatalf("single stable release with unused sticky requirement rejected: %v", err)
+	}
+}
+
 func compiledReleaseRoutes(t *testing.T, result CompileResult) []CompiledRoute {
 	t.Helper()
 	raw, err := json.Marshal(result.RouteArtifact.Content["routes"])

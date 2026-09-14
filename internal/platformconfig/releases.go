@@ -45,9 +45,6 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 	}
 	byApp := make(map[string]TrafficPolicyConstraint, len(policy.TrafficConstraints))
 	for _, rule := range policy.TrafficConstraints {
-		if rule.StickyHeader != "" || rule.StickyCookie != "" {
-			return nil, fmt.Errorf("sticky release routing requires consumer support; compilation refused")
-		}
 		byApp[rule.AppID] = rule
 	}
 	matched := make(map[string]bool, len(byApp))
@@ -68,6 +65,9 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 		stableWeight, candidateWeight := rule.StableWeight, rule.CandidateWeight
 		if rule.Mode == model.AppTrafficModeSingle || rule.Mode == model.AppTrafficModePaused {
 			stableWeight, candidateWeight = 100, 0
+		}
+		if candidateWeight > 0 && (rule.StickyHeader != "" || rule.StickyCookie != "") {
+			return nil, fmt.Errorf("sticky release routing requires consumer support; compilation refused")
 		}
 		resolve := func(id string) (ReleaseObservation, error) {
 			release, ok := byID[id]
