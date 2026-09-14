@@ -259,7 +259,6 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 	for _, record := range dnsRecords {
 		if _, ok := zoneByID[record.ZoneID]; !ok {
 			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_zone_missing"})
-			continue
 		}
 		host := normalizeExternalAppDomain(record.FQDN)
 		if host == "" {
@@ -272,6 +271,15 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		left, right := intent.DNS[i], intent.DNS[j]
 		return left.Hostname+"\x00"+left.Type+"\x00"+strings.Join(left.Values, "\x00") < right.Hostname+"\x00"+right.Type+"\x00"+strings.Join(right.Values, "\x00")
 	})
+	if len(intent.DNS) > 0 {
+		filtered := result.Issues[:0]
+		for _, issue := range result.Issues {
+			if issue.Code != "dns_not_projected" {
+				filtered = append(filtered, issue)
+			}
+		}
+		result.Issues = filtered
+	}
 	// TLS policy is desired route configuration and can be projected without
 	// copying certificate readiness or other runtime facts.
 	tlsByHost := make(map[string]platformconfig.TLSIntent, len(intent.Routes))
