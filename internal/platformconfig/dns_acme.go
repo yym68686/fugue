@@ -59,8 +59,8 @@ func DNSRecordsAt(records []DNSIntent, now time.Time) ([]DNSIntent, error) {
 		if now.IsZero() {
 			return nil, fmt.Errorf("leased DNS values require an explicit time")
 		}
-		if record.Type != "TXT" {
-			return nil, fmt.Errorf("DNS value leases require TXT records")
+		if record.Type != "TXT" && record.Type != "A" && record.Type != "AAAA" {
+			return nil, fmt.Errorf("DNS value leases require TXT, A or AAAA records")
 		}
 		if record.TTL < 1 || record.TTL > 2147483647 {
 			return nil, fmt.Errorf("leased DNS record requires a valid TTL")

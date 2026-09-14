@@ -1981,7 +1981,7 @@ func (s *Service) edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, index *
 		peerHealth = s.peerHealthFilterReason
 	}
 	answers, nameExists, audits := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth, peerHealth, index)
-	if qtype == miekgdns.TypeTXT {
+	if qtype == miekgdns.TypeTXT || qtype == miekgdns.TypeA || qtype == miekgdns.TypeAAAA {
 		s.recordDNSValueExpiryWAL(bundle, index, name, time.Now().UTC())
 	}
 	s.recordDNSScopeResolution(audits)
@@ -2459,6 +2459,9 @@ func rrForEdgeDNSRecord(record model.EdgeDNSRecord, ownerName string) []miekgdns
 func filterDNSRecordValues(record model.EdgeDNSRecord, now time.Time) (model.EdgeDNSRecord, error) {
 	if len(record.ValueExpirations) == 0 {
 		return record, nil
+	}
+	if len(record.Candidates) > 0 || len(record.ScopedCandidates) > 0 {
+		return model.EdgeDNSRecord{}, errors.New("leased DNS records cannot contain dynamic candidates")
 	}
 	filtered, err := platformconfig.DNSRecordsAt([]platformconfig.DNSIntent{{Hostname: record.Name, Type: record.Type, Values: record.Values, TTL: record.TTL, ValueExpirations: record.ValueExpirations}}, now)
 	if err != nil {

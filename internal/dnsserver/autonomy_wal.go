@@ -26,12 +26,12 @@ func (s *Service) recordDNSValueExpiryWAL(bundle *model.EdgeDNSBundle, index *dn
 			continue
 		}
 		generation := edgeDNSCacheGeneration(*bundle)
-		identity := fmt.Sprintf("%s|%s|%s|expired:%d", generation, record.Name, record.RecordGeneration, expired)
+		identity := fmt.Sprintf("%s|%s|%s|%s|expired:%d", generation, record.Name, record.Type, record.RecordGeneration, expired)
 		if !s.reserveTemporaryFilterWAL(identity, now) {
 			continue
 		}
 		sum := sha256.Sum256([]byte(identity))
-		fact, err := localwal.NewRecord("dns-server", firstNonEmpty(s.Config.PhysicalNodeID, s.Config.DNSNodeID), "dns_value_expired", map[string]string{"record_name": record.Name, "record_generation": record.RecordGeneration, "expired_value_count": fmt.Sprint(expired), "evidence_digest": fmt.Sprintf("sha256:%x", sum)}, generation, nil, now)
+		fact, err := localwal.NewRecord("dns-server", firstNonEmpty(s.Config.PhysicalNodeID, s.Config.DNSNodeID), "dns_value_expired", map[string]string{"record_name": record.Name, "record_type": record.Type, "record_generation": record.RecordGeneration, "expired_value_count": fmt.Sprint(expired), "evidence_digest": fmt.Sprintf("sha256:%x", sum)}, generation, nil, now)
 		if err != nil {
 			s.logAutonomyWALError("DNS value expiration", err)
 			continue

@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v11"
+	CompilerVersion = "platform-config-compiler/v12"
 	GlobalScopeKey  = "global"
 )
 
@@ -168,13 +168,14 @@ type CompileRequest struct {
 // RuntimeSnapshot is the immutable runtime fact view used by one compiler
 // invocation. It is input data, never serving configuration.
 type RuntimeSnapshot struct {
-	DNSFlatten       []DNSFlattenObservation `json:"dns_flatten,omitempty"`
-	IntentGeneration string                  `json:"intent_generation"`
-	PolicyGeneration string                  `json:"policy_generation"`
-	Facts            map[string]any          `json:"facts,omitempty"`
-	CapturedAt       *time.Time              `json:"captured_at,omitempty"`
-	Origins          []OriginObservation     `json:"origins,omitempty"`
-	Releases         []ReleaseObservation    `json:"releases,omitempty"`
+	DNSPlacements    []DNSPlacementObservation `json:"dns_placements,omitempty"`
+	DNSFlatten       []DNSFlattenObservation   `json:"dns_flatten,omitempty"`
+	IntentGeneration string                    `json:"intent_generation"`
+	PolicyGeneration string                    `json:"policy_generation"`
+	Facts            map[string]any            `json:"facts,omitempty"`
+	CapturedAt       *time.Time                `json:"captured_at,omitempty"`
+	Origins          []OriginObservation       `json:"origins,omitempty"`
+	Releases         []ReleaseObservation      `json:"releases,omitempty"`
 }
 
 // ReleaseObservation is a fixed runtime fact used to resolve a desired
@@ -229,7 +230,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
-	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && req.InputSnapshot != nil {
+	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && len(runtimeSnapshot.DNSPlacements) == 0 && req.InputSnapshot != nil {
 		runtimeSnapshot = RuntimeSnapshot{IntentGeneration: intent.Generation, PolicyGeneration: policy.Generation, Facts: req.InputSnapshot}
 	}
 	if runtimeSnapshot.IntentGeneration == "" {
@@ -246,14 +247,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	sort.Slice(runtimeSnapshot.Origins, func(i, j int) bool { return runtimeSnapshot.Origins[i].Ref < runtimeSnapshot.Origins[j].Ref })
 	sort.Slice(runtimeSnapshot.Releases, func(i, j int) bool { return runtimeSnapshot.Releases[i].ID < runtimeSnapshot.Releases[j].ID })
 	runtimeSnapshot.DNSFlatten = normalizeDNSFlattenObservations(runtimeSnapshot.DNSFlatten)
-	compiledDNS, err := ResolveDNSFlatten(intent.DNS, runtimeSnapshot, policy)
-	if err != nil {
-		return CompileResult{}, err
-	}
-	compiledDNS, err = CompileACMEChallenges(compiledDNS, intent.ACMEChallenges, runtimeSnapshot.CapturedAt)
-	if err != nil {
-		return CompileResult{}, err
-	}
+	runtimeSnapshot.DNSPlacements = normalizeDNSPlacementObservations(runtimeSnapshot.DNSPlacements)
 	compiledRoutes, err := ResolveRouteOrigins(intent.Routes, runtimeSnapshot, policy)
 	if err != nil {
 		return CompileResult{}, err
@@ -263,6 +257,18 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, err
 	}
 	compiledRoutes, err = ApplyTrafficPolicyConstraints(compiledRoutes, policy, runtimeSnapshot)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	compiledDNS, err := ResolveDNSPlacements(intent, compiledRoutes, runtimeSnapshot, policy)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	compiledDNS, err = ResolveDNSFlatten(compiledDNS, runtimeSnapshot, policy)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	compiledDNS, err = CompileACMEChallenges(compiledDNS, intent.ACMEChallenges, runtimeSnapshot.CapturedAt)
 	if err != nil {
 		return CompileResult{}, err
 	}

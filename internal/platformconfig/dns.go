@@ -24,8 +24,8 @@ func ValidateDNSIntents(records []DNSIntent) error {
 			return fmt.Errorf("DNS application configuration requires placement resolution before wire encoding")
 		}
 		if len(record.ValueExpirations) > 0 {
-			if record.Type != "TXT" {
-				return fmt.Errorf("DNS value expirations require TXT")
+			if record.Type != "TXT" && record.Type != "A" && record.Type != "AAAA" {
+				return fmt.Errorf("DNS value expirations require TXT, A or AAAA")
 			}
 			for value, expiry := range record.ValueExpirations {
 				found := false

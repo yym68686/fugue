@@ -17382,7 +17382,7 @@ components:
         value_expirations:
           type: object
           additionalProperties: {type: string, format: date-time}
-          description: Signed absolute expiry per TXT value. DNS consumers remove expired values and cap response TTL at query time, including after cache reload and LKG fallback.
+          description: Signed absolute expiry per TXT, A or AAAA value. DNS consumers remove expired values and cap response TTL at query time, including after cache reload and LKG fallback. Leased records cannot also contain dynamic candidates or scoped candidates.
         name:
           type: string
         type:
@@ -30503,14 +30503,14 @@ components:
         value_expirations:
           type: object
           additionalProperties: {type: string, format: date-time}
-          description: Absolute expiration per TXT value. Values not in this map remain permanent. Compiler requires a fixed captured_at; consumers must filter expired values and cap TTL at each query. Empty resulting RRsets are omitted.
+          description: Absolute expiration per TXT, A or AAAA value. Values not in this map remain permanent. Compiler requires a fixed captured_at; consumers must filter expired values and cap TTL at each query. Empty resulting RRsets are omitted. Application placement addresses always have expirations.
         flatten:
           $ref: "#/components/schemas/PlatformDNSFlattenIntent"
         hostname:
           type: string
         type:
           type: string
-          description: Wire DNS types, ALIAS/ANAME with typed flatten configuration, or FUGUE_APP with typed application configuration. FUGUE_APP requires app_id, tenant_id, values containing that exact app_id, and an owned route at the same hostname. Application configuration may be validated and versioned, but compilation remains rejected until placement resolution is supported.
+          description: Wire DNS types, ALIAS/ANAME with typed flatten configuration, or FUGUE_APP with typed application configuration. FUGUE_APP requires app_id, tenant_id, values containing that exact app_id, owned routes at the same hostname, and fixed dns_placements evidence bound to the DNS configuration, compiled routes and policy.
         values:
           type: array
           items:
@@ -30870,6 +30870,11 @@ components:
       additionalProperties: false
       required: [intent_generation, policy_generation]
       properties:
+        dns_placements:
+          type: array
+          maxItems: 10000
+          items:
+            $ref: "#/components/schemas/PlatformDNSPlacementObservation"
         captured_at:
           type: string
           format: date-time
@@ -30944,6 +30949,36 @@ components:
         value: {type: string}
         ttl: {type: integer, minimum: 1, maximum: 3600}
         expires_at: {type: string, format: date-time}
+    PlatformDNSPlacementObservation:
+      type: object
+      additionalProperties: false
+      required: [input_digest, checked_at, status, target_ttl, candidates]
+      description: Fixed application DNS evidence. input_digest is the canonical digest of {dns, routes, policy}, with compiled routes restricted to the DNS hostname, sorted by normalized path, including resolved origin and release upstreams and exclusions. Candidate health and readiness must come from the corresponding serving observations. Compilation binds data and checks freshness; a caller submitting runtime facts is responsible for their authenticity. A stale observation is usable only with stale_if_error. Missing evidence and insufficient eligible edges reject compilation; disabled routes produce no application DNS answers. Ready route and TLS evidence are mandatory for every published address regardless of optional policy flags.
+      properties:
+        input_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        checked_at: {type: string, format: date-time}
+        status: {type: string, enum: [resolved, stale]}
+        target_ttl: {type: integer, minimum: 0, maximum: 2147483647}
+        candidates:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: "#/components/schemas/PlatformDNSPlacementCandidate"
+    PlatformDNSPlacementCandidate:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id, serving_generation, observed_at, valid_until, healthy, route_ready, tls_ready]
+      properties:
+        edge_id: {type: string, minLength: 1}
+        edge_group_id: {type: string, minLength: 1}
+        serving_generation: {type: string, minLength: 1}
+        observed_at: {type: string, format: date-time}
+        valid_until: {type: string, format: date-time}
+        healthy: {type: boolean}
+        route_ready: {type: boolean}
+        tls_ready: {type: boolean}
+        a: {type: array, maxItems: 16, items: {type: string, format: ipv4}}
+        aaaa: {type: array, maxItems: 16, items: {type: string, format: ipv6}}
     PlatformDNSFlattenObservation:
       type: object
       additionalProperties: false

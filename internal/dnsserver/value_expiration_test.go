@@ -86,7 +86,8 @@ func TestDNSValueExpirationRejectsMalformedSignedBundle(t *testing.T) {
 	const key = "synthetic-dns-expiry-signing-key"
 	s := NewService(config.DNSConfig{BundleSigningKey: key, BundleSigningKeyID: "key"}, log.New(io.Discard, "", 0))
 	for _, record := range []model.EdgeDNSRecord{
-		{Name: "app.example", Type: "A", Values: []string{"192.0.2.1"}, TTL: 60, ValueExpirations: map[string]time.Time{"192.0.2.1": now.Add(time.Minute)}},
+		{Name: "app.example", Type: "CNAME", Values: []string{"target.example"}, TTL: 60, ValueExpirations: map[string]time.Time{"target.example": now.Add(time.Minute)}},
+		{Name: "app.example", Type: "A", Values: []string{"192.0.2.1"}, TTL: 60, ValueExpirations: map[string]time.Time{"192.0.2.1": now.Add(time.Minute)}, Candidates: []model.EdgeDNSAnswerCandidate{{IP: "192.0.2.1"}}},
 		{Name: "app.example", Type: "TXT", Values: []string{"one"}, TTL: 60, ValueExpirations: map[string]time.Time{"unknown": now.Add(time.Minute)}},
 		{Name: "app.example", Type: "TXT", Values: []string{"one"}, TTL: 0, ValueExpirations: map[string]time.Time{"one": now.Add(time.Minute)}},
 	} {
@@ -94,5 +95,44 @@ func TestDNSValueExpirationRejectsMalformedSignedBundle(t *testing.T) {
 		if err := s.verifyBundle(b, now); err == nil {
 			t.Fatal("malformed signed expiry accepted")
 		}
+	}
+}
+
+func TestAddressLeasesExpireAfterSignedLKGReload(t *testing.T) {
+	now := time.Now().UTC()
+	const key = "synthetic-address-lease-key"
+	cfg := config.DNSConfig{Zone: "lease.example.test", TTL: 60, DNSNodeID: "test-node", CachePath: filepath.Join(t.TempDir(), "cache.json"), AutonomyWALPath: filepath.Join(t.TempDir(), "facts.jsonl"), BundleSigningKey: key, BundleSigningKeyID: "key", MaxStale: time.Hour}
+	s := NewService(cfg, log.New(io.Discard, "", 0))
+	records := []model.EdgeDNSRecord{
+		{Name: "app.lease.example.test", Type: "A", Values: []string{"93.184.216.34"}, TTL: 60, ValueExpirations: map[string]time.Time{"93.184.216.34": now.Add(-time.Second)}},
+		{Name: "app.lease.example.test", Type: "AAAA", Values: []string{"2606:4700:4700::1111"}, TTL: 60, ValueExpirations: map[string]time.Time{"2606:4700:4700::1111": now.Add(-time.Second)}},
+	}
+	for _, record := range records {
+		live := rrForEdgeDNSRecordAt(record, record.Name, now.Add(-11*time.Second))
+		if len(live) != 1 || live[0].Header().Ttl != 10 {
+			t.Fatal("address lease was not applied", live)
+		}
+	}
+	bundle := bundleauth.SignEdgeDNSBundle(model.EdgeDNSBundle{Version: "leased-lkg", Generation: "leased-lkg", Zone: cfg.Zone, GeneratedAt: now.Add(-2 * time.Minute), Records: records}, key, "key", time.Minute)
+	if err := s.writeCache(cacheFile{Version: cacheFileVersion, Bundle: bundle, CachedAt: now.Add(-2 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(cfg.CachePath)
+	if err := s.LoadCache(); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		msg := dnsQuery(t, s, records[0].Name, kind)
+		if len(msg.Answer) != 0 || msg.Rcode != dns.RcodeSuccess || !msg.Authoritative || len(msg.Ns) != 1 {
+			t.Fatal("expired address served or authority lost", msg)
+		}
+	}
+	facts, err := localwal.ReadAll(cfg.AutonomyWALPath)
+	if err != nil || len(facts) != 2 {
+		t.Fatal("missing address expiry facts", facts, err)
+	}
+	after, _ := os.ReadFile(cfg.CachePath)
+	if !bytes.Equal(before, after) {
+		t.Fatal("queries mutated signed LKG")
 	}
 }
