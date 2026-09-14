@@ -415,6 +415,20 @@ func PlatformIntentGeneration(in PlatformIntent) (string, error) {
 	return "intent_" + strings.TrimPrefix(digest, "sha256:"), nil
 }
 
+// PolicySnapshotGeneration returns a stable identifier for policy content.
+// Version metadata and creation time are excluded so runtime observation
+// refreshes cannot create a new policy generation.
+func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
+	canonical := NormalizePolicySnapshot(in)
+	canonical.Generation = ""
+	canonical.CreatedAt = time.Time{}
+	digest, err := Digest(canonical)
+	if err != nil {
+		return "", err
+	}
+	return "policy_" + strings.TrimPrefix(digest, "sha256:"), nil
+}
+
 func validatePolicy(in PolicySnapshot) error {
 	if in.SchemaVersion != SchemaVersion || strings.TrimSpace(in.Generation) == "" {
 		return fmt.Errorf("policy snapshot requires schema_version %q and generation", SchemaVersion)

@@ -279,7 +279,11 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		a, b := result.Issues[i], result.Issues[j]
 		return a.Code+"\x00"+a.Hostname+"\x00"+a.PathPrefix < b.Code+"\x00"+b.Hostname+"\x00"+b.PathPrefix
 	})
-	policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}, routePolicies, trafficPolicies, "policy-"+snapshot.Generation)
+	policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}, routePolicies, trafficPolicies, "policy-draft")
+	if err != nil {
+		return result, err
+	}
+	policy.Generation, err = platformconfig.PolicySnapshotGeneration(policy)
 	if err != nil {
 		return result, err
 	}

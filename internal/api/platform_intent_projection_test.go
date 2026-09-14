@@ -75,6 +75,9 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 	if first.MigrationReady || !first.RuntimeSnapshot.Origins[0].ObservedAt.Equal(observedAt) || !first.Intent.Routes[0].Enabled {
 		t.Fatal("draft renewed stale evidence or changed intent")
 	}
+	if first.Policy.Generation == "" {
+		t.Fatal("policy generation missing")
+	}
 	snapshot.GeneratedAt = captured.Add(time.Minute)
 	snapshot.Routes[0].OriginStatus = model.EdgeRouteStatusDisabled
 	snapshot.Routes[0].UpstreamURL = ""
@@ -86,6 +89,9 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 	}
 	if !reflect.DeepEqual(first.Intent, second.Intent) || !second.RuntimeSnapshot.Origins[0].ObservedAt.Equal(observedAt) {
 		t.Fatal("observed availability changed desired configuration or evidence time")
+	}
+	if first.Policy.Generation != second.Policy.Generation {
+		t.Fatalf("runtime observation changed policy generation: %q != %q", first.Policy.Generation, second.Policy.Generation)
 	}
 	if second.RuntimeSnapshot.Origins[0].RuntimeID != "runtime-observed-other" {
 		t.Fatal("runtime mismatch was hidden")
