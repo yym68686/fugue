@@ -30498,7 +30498,7 @@ components:
           type: string
         type:
           type: string
-          description: Only wire DNS types can be compiled. Symbolic FUGUE_APP, ALIAS and ANAME records require a resolver and are rejected.
+          description: Wire DNS types or ALIAS/ANAME with typed flatten configuration and matching fixed observations. FUGUE_APP still requires placement resolution.
         values:
           type: array
           items:
@@ -30527,14 +30527,15 @@ components:
       type: object
       additionalProperties: false
       required: [mode, target, ipv4_policy, ipv6_policy, ttl_policy, fallback_policy]
-      description: Desired flatten configuration. Compilation requires a flatten resolver; unresolved configuration is rejected.
+      description: Desired flatten configuration, resolved only from matching fixed runtime observations. Apex mode requires zone to equal the record hostname. Empty-noerror remains unsupported until consumers can preserve empty authoritative names.
       properties:
-        mode: {type: string}
+        mode: {type: string, enum: [always, apex]}
         target: {type: string}
-        ipv4_policy: {type: string}
-        ipv6_policy: {type: string}
-        ttl_policy: {type: string}
-        fallback_policy: {type: string}
+        zone: {type: string}
+        ipv4_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
+        ipv6_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
+        ttl_policy: {type: string, enum: [record, target, min, bounded]}
+        fallback_policy: {type: string, enum: [fail_closed, stale_if_error, empty_noerror]}
     PlatformConfigTLSIntent:
       type: object
       additionalProperties: false
@@ -30855,6 +30856,11 @@ components:
           maxItems: 10000
           items:
             $ref: "#/components/schemas/PlatformReleaseObservation"
+        dns_flatten:
+          type: array
+          maxItems: 10000
+          items:
+            $ref: "#/components/schemas/PlatformDNSFlattenObservation"
         intent_generation:
           type: string
         policy_generation:
@@ -30899,6 +30905,20 @@ components:
           type: string
         runtime_cluster_node:
           type: string
+    PlatformDNSFlattenObservation:
+      type: object
+      additionalProperties: false
+      required: [input_digest, tenant_id, checked_at, observed_at, status, target_ttl]
+      description: Fixed DNS resolution facts. input_digest binds the complete normalized DNSIntent. checked_at is the last query time and observed_at is the last successful result time, never renewed after a failed query. target_ttl is the original answer TTL, or zero when unavailable; non-record TTL policies require it.
+      properties:
+        input_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        tenant_id: {type: string}
+        checked_at: {type: string, format: date-time}
+        observed_at: {type: string, format: date-time}
+        status: {type: string, enum: [resolved, stale, error]}
+        a: {type: array, maxItems: 4096, items: {type: string}}
+        aaaa: {type: array, maxItems: 4096, items: {type: string}}
+        target_ttl: {type: integer, minimum: 0, maximum: 2147483647}
     PlatformReleaseObservation:
       type: object
       additionalProperties: false

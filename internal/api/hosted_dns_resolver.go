@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 
 	miekgdns "github.com/miekg/dns"
 )
@@ -136,8 +137,16 @@ func hostedDNSFlattenRecordEqual(left, right model.DNSRecord) bool {
 		strings.EqualFold(left.FlattenStatus, right.FlattenStatus) &&
 		strings.TrimSpace(left.ResolveError) == strings.TrimSpace(right.ResolveError) &&
 		strings.TrimSpace(left.LastMessage) == strings.TrimSpace(right.LastMessage) &&
+		timesEqual(left.LastResolvedAt, right.LastResolvedAt) &&
 		hostedDNSStringSlicesEqual(left.FlattenedA, right.FlattenedA) &&
 		hostedDNSStringSlicesEqual(left.FlattenedAAAA, right.FlattenedAAAA)
+}
+
+func timesEqual(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
 }
 
 type hostedDNSFlattenResolver struct {
@@ -179,7 +188,9 @@ func (r hostedDNSFlattenResolver) resolve(ctx context.Context, target string, re
 	aaaa, aaaaTTL, cnameAAAA, errAAAA := r.query(ctx, target, miekgdns.TypeAAAA)
 	cname := firstNonEmpty(cnameA, cnameAAAA)
 	if len(a) == 0 && len(aaaa) == 0 && cname != "" {
-		return r.resolveCNAMEChain(ctx, cname, record, map[string]bool{target: true}, 1)
+		result := r.resolveCNAMEChain(ctx, cname, record, map[string]bool{target: true}, 1)
+		result.TTL = minPositiveTTL(result.TTL, aTTL, aaaaTTL)
+		return result
 	}
 	if errA != nil && errAAAA != nil && len(a) == 0 && len(aaaa) == 0 {
 		return hostedDNSFlattenResult{Err: fmt.Errorf("resolve %s: A=%v AAAA=%v", target, errA, errAAAA)}
@@ -203,7 +214,9 @@ func (r hostedDNSFlattenResolver) resolveCNAMEChain(ctx context.Context, name st
 	aaaa, aaaaTTL, cnameAAAA, errAAAA := r.query(ctx, name, miekgdns.TypeAAAA)
 	cname := firstNonEmpty(cnameA, cnameAAAA)
 	if len(a) == 0 && len(aaaa) == 0 && cname != "" {
-		return r.resolveCNAMEChain(ctx, cname, record, seen, depth+1)
+		result := r.resolveCNAMEChain(ctx, cname, record, seen, depth+1)
+		result.TTL = minPositiveTTL(result.TTL, aTTL, aaaaTTL)
+		return result
 	}
 	if errA != nil && errAAAA != nil && len(a) == 0 && len(aaaa) == 0 {
 		return hostedDNSFlattenResult{Err: fmt.Errorf("resolve %s: A=%v AAAA=%v", name, errA, errAAAA)}
@@ -291,45 +304,7 @@ func finalizeHostedDNSFlattenIPs(a, aaaa []string, ttl int, record model.DNSReco
 
 func publicRoutableHostedDNSIP(raw string) bool {
 	addr, err := netip.ParseAddr(strings.TrimSpace(raw))
-	if err != nil || !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
-		return false
-	}
-	for _, prefix := range hostedDNSReservedIPPrefixes() {
-		if prefix.Contains(addr) {
-			return false
-		}
-	}
-	return true
-}
-
-func hostedDNSReservedIPPrefixes() []netip.Prefix {
-	raw := []string{
-		"0.0.0.0/8",
-		"100.64.0.0/10",
-		"127.0.0.0/8",
-		"169.254.0.0/16",
-		"192.0.0.0/24",
-		"192.0.2.0/24",
-		"198.18.0.0/15",
-		"198.51.100.0/24",
-		"203.0.113.0/24",
-		"224.0.0.0/4",
-		"240.0.0.0/4",
-		"::/128",
-		"::1/128",
-		"64:ff9b:1::/48",
-		"100::/64",
-		"2001:db8::/32",
-		"fc00::/7",
-		"fe80::/10",
-	}
-	out := make([]netip.Prefix, 0, len(raw))
-	for _, value := range raw {
-		if prefix, err := netip.ParsePrefix(value); err == nil {
-			out = append(out, prefix)
-		}
-	}
-	return out
+	return err == nil && platformconfig.PublicDNSFlattenIP(addr)
 }
 
 func minPositiveTTL(values ...int) int {

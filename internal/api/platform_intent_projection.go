@@ -91,6 +91,8 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	}
 	projection.BusinessSnapshotRevision = business.Revision
 	projection.BusinessSnapshotAt = business.CapturedAt
+	resolver := newHostedDNSFlattenResolver()
+	captureDNSFlattenFacts(r.Context(), &projection, resolver.resolve)
 	issues := projection.Issues[:0]
 	for _, issue := range projection.Issues {
 		if issue.Code != "transaction_snapshot_not_frozen" {
