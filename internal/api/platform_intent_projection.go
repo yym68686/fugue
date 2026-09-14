@@ -312,6 +312,24 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 	if err != nil {
 		return result, err
 	}
+	// Freeze legacy per-route redundancy defaults into desired policy during
+	// migration. Runtime counts and readiness never become policy parameters.
+	constraints := map[string]bool{}
+	for _, rule := range policy.RouteConstraints {
+		constraints[rule.Hostname] = true
+	}
+	for _, route := range intent.Routes {
+		if constraints[route.Hostname] {
+			continue
+		}
+		minimum := defaultMinHealthyEdgeNodesForBinding(model.EdgeRouteBinding{RouteKind: route.Kind})
+		if minimum <= policy.MinimumHealthyEdges {
+			continue
+		}
+		policy.RouteConstraints = append(policy.RouteConstraints, platformconfig.RoutePolicyConstraint{ID: "migration-default:" + route.Hostname, Hostname: route.Hostname, AppID: route.AppID, TenantID: route.TenantID, MinHealthyEdgeNodes: minimum, RoutePolicy: route.RoutePolicy, Enabled: route.Enabled})
+		constraints[route.Hostname] = true
+	}
+	policy = platformconfig.NormalizePolicySnapshot(policy)
 	policy.Generation, err = platformconfig.PolicySnapshotGeneration(policy)
 	if err != nil {
 		return result, err
