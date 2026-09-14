@@ -24,7 +24,8 @@ func TestConsoleWarmPublishesCompleteObservationBeforePageRequest(t *testing.T) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s.startConsoleObservationWarmLoop(ctx)
+	warmersDone := s.startConsoleObservationWarmLoop(ctx)
+	defer func() { cancel(); <-warmersDone }()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if snapshot, ok, expired := s.managedAppStatusCache.getObservedList(); ok && !expired {

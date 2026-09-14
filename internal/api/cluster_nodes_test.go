@@ -1624,7 +1624,8 @@ func TestStartBackgroundWarmersPreloadsClusterNodeInventory(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server.StartBackgroundWarmers(ctx)
+	warmersDone := server.StartBackgroundWarmers(ctx)
+	defer func() { cancel(); <-warmersDone }()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

@@ -258,11 +258,11 @@ func buildCurrentResourceUsageOverlayWithPolicies(
 	return overlay
 }
 
-func (s *Server) startResourceUsageSamplingLoop(ctx context.Context) {
+func (s *Server) startResourceUsageSamplingLoop(ctx context.Context) <-chan struct{} {
 	if s == nil || ctx == nil || s.store == nil {
-		return
+		return joinWarmerTasks()
 	}
-	go func() {
+	return startWarmerTask(ctx, func() {
 		timer := time.NewTimer(15 * time.Second)
 		defer timer.Stop()
 		for {
@@ -276,7 +276,7 @@ func (s *Server) startResourceUsageSamplingLoop(ctx context.Context) {
 				timer.Reset(resourceUsageSampleInterval)
 			}
 		}
-	}()
+	})
 }
 
 func (s *Server) recordCurrentResourceUsageSamples(ctx context.Context) error {

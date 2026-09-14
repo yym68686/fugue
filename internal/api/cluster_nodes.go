@@ -305,15 +305,19 @@ func (s *Server) loadClusterNodeInventory(ctx context.Context) ([]clusterNodeSna
 	return snapshots, nil
 }
 
-func (s *Server) StartBackgroundWarmers(ctx context.Context) {
-	if s == nil || ctx == nil || !s.shouldWarmClusterNodeInventory() {
-		return
+func (s *Server) StartBackgroundWarmers(ctx context.Context) <-chan struct{} {
+	if s == nil || ctx == nil || ctx.Err() != nil || !s.shouldWarmClusterNodeInventory() {
+		done := make(chan struct{})
+		close(done)
+		return done
 	}
-	s.startClusterNodeInventoryWarmLoop(ctx)
-	s.startConsoleObservationWarmLoop(ctx)
-	s.startResourceUsageSamplingLoop(ctx)
-	s.startRightSizingAutoApplyLoop(ctx)
-	s.startOOMRightSizingLoop(ctx)
+	return joinWarmerTasks(
+		s.startClusterNodeInventoryWarmLoop(ctx),
+		s.startConsoleObservationWarmLoop(ctx),
+		s.startResourceUsageSamplingLoop(ctx),
+		s.startRightSizingAutoApplyLoop(ctx),
+		s.startOOMRightSizingLoop(ctx),
+	)
 }
 
 func (s *Server) shouldWarmClusterNodeInventory() bool {
@@ -327,10 +331,11 @@ func (s *Server) shouldWarmClusterNodeInventory() bool {
 		strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT")) != ""
 }
 
-func (s *Server) startClusterNodeInventoryWarmLoop(ctx context.Context) {
-	s.refreshClusterNodeInventoryAsync()
-
-	go func() {
+func (s *Server) startClusterNodeInventoryWarmLoop(ctx context.Context) <-chan struct{} {
+	// Start the singleflight before the other warmers can read inventory.
+	first := s.refreshClusterNodeInventoryWithContextAsync(ctx)
+	return startWarmerTask(context.Background(), func() {
+		<-first
 		ticker := time.NewTicker(clusterNodeInventoryWarmInterval)
 		defer ticker.Stop()
 
@@ -339,10 +344,12 @@ func (s *Server) startClusterNodeInventoryWarmLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.refreshClusterNodeInventoryAsync()
+				if ctx.Err() == nil {
+					<-s.refreshClusterNodeInventoryWithContextAsync(ctx)
+				}
 			}
 		}
-	}()
+	})
 }
 
 func (s *Server) clusterNodeInventoryRefreshContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -380,12 +387,18 @@ func (s *Server) refreshClusterNodeInventory(ctx context.Context) ([]clusterNode
 }
 
 func (s *Server) refreshClusterNodeInventoryAsync() {
+	s.refreshClusterNodeInventoryWithContextAsync(context.Background())
+}
+
+func (s *Server) refreshClusterNodeInventoryWithContextAsync(ctx context.Context) <-chan struct{} {
 	if s == nil {
-		return
+		done := make(chan struct{})
+		close(done)
+		return done
 	}
 
 	ch := s.clusterNodeInventoryCache.group.DoChan(clusterNodeInventoryCacheKey, func() (any, error) {
-		value, err := s.fetchClusterNodeInventory(context.Background())
+		value, err := s.fetchClusterNodeInventory(ctx)
 		if err != nil {
 			var zero []clusterNodeSnapshot
 			return zero, err
@@ -412,13 +425,13 @@ func (s *Server) refreshClusterNodeInventoryAsync() {
 		return value, nil
 	})
 
-	go func() {
+	return startWarmerTask(context.Background(), func() {
 		result, ok := <-ch
 		if !ok || result.Err == nil || s.log == nil {
 			return
 		}
 		s.log.Printf("cluster inventory background refresh error: %v", result.Err)
-	}()
+	})
 }
 
 func (s *Server) reconcileLegacyBuildTierLabelsFromSnapshots(snapshots []clusterNodeSnapshot) ([]clusterNodeSnapshot, bool, error) {

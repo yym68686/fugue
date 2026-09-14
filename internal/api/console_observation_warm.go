@@ -9,9 +9,10 @@ import (
 // Runtime observations already expire after 15 seconds. Refresh ahead of that
 // deadline so a page can use the same complete, fresh evidence without waiting
 // for a cluster-wide read. Failed refreshes never replace the previous snapshot.
-func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) {
+func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) <-chan struct{} {
+	tasks := []<-chan struct{}{}
 	startLoop := func(interval time.Duration, refresh func()) {
-		go func() {
+		tasks = append(tasks, startWarmerTask(ctx, func() {
 			for {
 				if ctx.Err() != nil {
 					return
@@ -28,7 +29,7 @@ func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) {
 				case <-timer.C:
 				}
 			}
-		}()
+		}))
 	}
 	startLoop(max(s.managedAppStatusCache.cacheTTL()/2, time.Second), func() {
 		if _, err := s.refreshManagedAppStatuses(ctx); err != nil && ctx.Err() == nil && s.log != nil {
@@ -36,7 +37,9 @@ func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) {
 		}
 	})
 	startLoop(30*time.Second, func() {
-		if snapshots, err := s.loadClusterNodeInventory(ctx); err == nil {
+		// Join inventory refresh instead of launching detached stale refreshes
+		// from this owned background task.
+		if snapshots, err := s.refreshClusterNodeInventory(ctx); err == nil {
 			// The first runtime-list request should not have to materialize
 			// locations that the inventory observer has already discovered.
 			// This is the same hash-guarded reconciliation retained by GET.
@@ -59,4 +62,5 @@ func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) {
 			}
 		})
 	}
+	return joinWarmerTasks(tasks...)
 }

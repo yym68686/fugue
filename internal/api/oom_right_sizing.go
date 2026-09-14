@@ -28,11 +28,11 @@ type oomRightSizingTarget struct {
 	eventKeys []string
 }
 
-func (s *Server) startOOMRightSizingLoop(ctx context.Context) {
+func (s *Server) startOOMRightSizingLoop(ctx context.Context) <-chan struct{} {
 	if s == nil || s.store == nil || ctx == nil {
-		return
+		return joinWarmerTasks()
 	}
-	go func() {
+	return startWarmerTask(ctx, func() {
 		timer := time.NewTimer(oomRightSizingInitialDelay)
 		defer timer.Stop()
 		for {
@@ -44,7 +44,7 @@ func (s *Server) startOOMRightSizingLoop(ctx context.Context) {
 				timer.Reset(oomRightSizingInterval)
 			}
 		}
-	}()
+	})
 }
 
 func (s *Server) applyOOMRightSizingOnce(ctx context.Context) {

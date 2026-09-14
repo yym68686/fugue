@@ -128,7 +128,17 @@ func main() {
 	if err := livediagnostics.StartRuntimeEndpoint(ctx, "api"); err != nil {
 		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
 	}
-	server.StartBackgroundWarmers(ctx)
+	warmersDone := server.StartBackgroundWarmers(ctx)
+	defer func() {
+		stop()
+		timer := time.NewTimer(cfg.ShutdownTimeout)
+		defer timer.Stop()
+		select {
+		case <-warmersDone:
+		case <-timer.C:
+			logger.Printf("background warmer shutdown deadline exceeded")
+		}
+	}()
 	go server.StartBackgroundEdgeQualityRollups(ctx)
 	go server.StartBackgroundEdgeDNSArtifacts(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)

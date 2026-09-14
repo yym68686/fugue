@@ -610,11 +610,11 @@ func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec, dow
 	return &target
 }
 
-func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) {
+func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) <-chan struct{} {
 	if s == nil || s.store == nil || ctx == nil {
-		return
+		return joinWarmerTasks()
 	}
-	go func() {
+	return startWarmerTask(ctx, func() {
 		timer := time.NewTimer(2 * time.Minute)
 		defer timer.Stop()
 		for {
@@ -626,7 +626,7 @@ func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) {
 				timer.Reset(rightSizingAutoApplyInterval)
 			}
 		}
-	}()
+	})
 }
 
 func (s *Server) applyAutoRightSizingOnce() {
