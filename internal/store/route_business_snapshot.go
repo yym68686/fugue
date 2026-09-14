@@ -23,6 +23,8 @@ type RouteBusinessSnapshot struct {
 	RoutePolicies   []model.EdgeRoutePolicy   `json:"route_policies"`
 	Releases        []model.AppRelease        `json:"releases"`
 	TrafficPolicies []model.AppTrafficPolicy  `json:"traffic_policies"`
+	HostedZones     []model.HostedZone        `json:"hosted_zones"`
+	DNSRecords      []model.DNSRecord         `json:"dns_records"`
 }
 
 func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusinessSnapshot, error) {
@@ -34,7 +36,7 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 	}
 	var snapshot RouteBusinessSnapshot
 	err := s.withLockedState(false, func(state *model.State) error {
-		snapshot = RouteBusinessSnapshot{CapturedAt: time.Now().UTC(), Apps: state.Apps, Domains: state.AppDomains, RouteTables: state.ProjectRouteTables, Runtimes: state.Runtimes, RoutePolicies: state.EdgeRoutePolicies, Releases: state.AppReleases, TrafficPolicies: state.AppTrafficPolicies}
+		snapshot = RouteBusinessSnapshot{CapturedAt: time.Now().UTC(), Apps: state.Apps, Domains: state.AppDomains, RouteTables: state.ProjectRouteTables, Runtimes: state.Runtimes, RoutePolicies: state.EdgeRoutePolicies, Releases: state.AppReleases, TrafficPolicies: state.AppTrafficPolicies, HostedZones: state.HostedZones, DNSRecords: state.DNSRecords}
 		raw, err := json.Marshal(snapshot)
 		if err != nil {
 			return err
@@ -89,4 +91,30 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 	}
 	sort.Slice(snapshot.Releases, func(i, j int) bool { return snapshot.Releases[i].ID < snapshot.Releases[j].ID })
 	sort.Slice(snapshot.TrafficPolicies, func(i, j int) bool { return snapshot.TrafficPolicies[i].AppID < snapshot.TrafficPolicies[j].AppID })
+	filteredZones := snapshot.HostedZones[:0]
+	for _, zone := range snapshot.HostedZones {
+		zone = normalizeHostedZoneForRead(zone)
+		if zone.Status != model.HostedZoneStatusDeleted {
+			filteredZones = append(filteredZones, zone)
+		}
+	}
+	snapshot.HostedZones = filteredZones
+	for i := range snapshot.DNSRecords {
+		snapshot.DNSRecords[i] = normalizeDNSRecordForRead(snapshot.DNSRecords[i])
+	}
+	snapshot.DNSRecords = filterAndSortDNSRecords(snapshot.DNSRecords)
+}
+
+func filterAndSortDNSRecords(records []model.DNSRecord) []model.DNSRecord {
+	out := records[:0]
+	for _, record := range records {
+		if record.Status == model.DNSRecordStatusDisabled || record.Status == model.DNSRecordStatusConflict {
+			continue
+		}
+		out = append(out, record)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].FQDN+"\x00"+out[i].Type+"\x00"+out[i].Source+"\x00"+out[i].SourceRefID < out[j].FQDN+"\x00"+out[j].Type+"\x00"+out[j].Source+"\x00"+out[j].SourceRefID
+	})
+	return out
 }
