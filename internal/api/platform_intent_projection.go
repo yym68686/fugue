@@ -13,6 +13,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 type platformProjectionIssue struct {
@@ -22,14 +23,16 @@ type platformProjectionIssue struct {
 }
 
 type platformIntentProjectionResponse struct {
-	Intent               platformconfig.PlatformIntent  `json:"intent"`
-	RuntimeSnapshot      platformconfig.RuntimeSnapshot `json:"runtime_snapshot"`
-	SourceGeneration     string                         `json:"source_generation"`
-	CapturedAt           time.Time                      `json:"captured_at"`
-	RouteCount           int                            `json:"route_count"`
-	OmittedRuntimeFields []string                       `json:"omitted_runtime_fields"`
-	MigrationReady       bool                           `json:"migration_ready"`
-	Issues               []platformProjectionIssue      `json:"issues"`
+	Intent                   platformconfig.PlatformIntent  `json:"intent"`
+	RuntimeSnapshot          platformconfig.RuntimeSnapshot `json:"runtime_snapshot"`
+	SourceGeneration         string                         `json:"source_generation"`
+	CapturedAt               time.Time                      `json:"captured_at"`
+	RouteCount               int                            `json:"route_count"`
+	OmittedRuntimeFields     []string                       `json:"omitted_runtime_fields"`
+	MigrationReady           bool                           `json:"migration_ready"`
+	Issues                   []platformProjectionIssue      `json:"issues"`
+	BusinessSnapshotRevision string                         `json:"business_snapshot_revision"`
+	BusinessSnapshotAt       time.Time                      `json:"business_snapshot_at"`
 }
 
 type platformProjectionSource struct {
@@ -63,7 +66,12 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
 		return
 	}
-	source := &platformProjectionSource{edgeRouteIntentSource: s.store}
+	business, err := s.store.CaptureRouteBusinessSnapshot(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "business route snapshot unavailable")
+		return
+	}
+	source := &platformProjectionSource{edgeRouteIntentSource: routeBusinessSource{business}}
 	observed := map[string]model.App{}
 	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithObservations(r, source, func(apps []model.App) {
 		for _, app := range apps {
@@ -79,8 +87,80 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, "business route draft cannot be captured")
 		return
 	}
+	projection.BusinessSnapshotRevision = business.Revision
+	projection.BusinessSnapshotAt = business.CapturedAt
+	issues := projection.Issues[:0]
+	for _, issue := range projection.Issues {
+		if issue.Code != "transaction_snapshot_not_frozen" {
+			issues = append(issues, issue)
+		}
+	}
+	projection.Issues = issues
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, projection)
+}
+
+// Only the captured data is visible through this adapter. The compiler-side
+// projection cannot accidentally read a newer business row between methods.
+type routeBusinessSource struct{ store.RouteBusinessSnapshot }
+
+func (source routeBusinessSource) EdgeRoutePolicyTime() (time.Time, error) {
+	return source.CapturedAt, nil
+}
+func (source routeBusinessSource) ListAppsMetadata(tenant string, admin bool) ([]model.App, error) {
+	if !admin || tenant != "" {
+		return nil, store.ErrInvalidInput
+	}
+	return source.Apps, nil
+}
+func (source routeBusinessSource) ListVerifiedAppDomains() ([]model.AppDomain, error) {
+	return source.Domains, nil
+}
+func (source routeBusinessSource) ListProjectRouteTables(tenant string, admin bool) ([]model.ProjectRouteTable, error) {
+	if !admin || tenant != "" {
+		return nil, store.ErrInvalidInput
+	}
+	return source.RouteTables, nil
+}
+func (source routeBusinessSource) ListRuntimes(tenant string, admin bool) ([]model.Runtime, error) {
+	if !admin || tenant != "" {
+		return nil, store.ErrInvalidInput
+	}
+	return source.Runtimes, nil
+}
+func (source routeBusinessSource) ListEdgeRoutePolicies() ([]model.EdgeRoutePolicy, error) {
+	return source.RoutePolicies, nil
+}
+func (source routeBusinessSource) ListAppTrafficPolicies(tenant string, admin bool) ([]model.AppTrafficPolicy, error) {
+	if !admin || tenant != "" {
+		return nil, store.ErrInvalidInput
+	}
+	return source.TrafficPolicies, nil
+}
+func (source routeBusinessSource) ListAppReleases(filter model.AppReleaseFilter) ([]model.AppRelease, error) {
+	if !filter.PlatformAdmin || filter.TenantID != "" || filter.AppID != "" || filter.Role != "" {
+		return nil, store.ErrInvalidInput
+	}
+	releases := make([]model.AppRelease, 0, len(source.Releases))
+	for _, release := range source.Releases {
+		if !filter.IncludeRetired && release.Role == model.AppReleaseRoleRetired {
+			continue
+		}
+		if filter.ActiveOnly {
+			switch release.Role {
+			case model.AppReleaseRoleStable, model.AppReleaseRoleCandidate, model.AppReleaseRolePrevious:
+			default:
+				continue
+			}
+			switch release.Status {
+			case model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining:
+			default:
+				continue
+			}
+		}
+		releases = append(releases, release)
+	}
+	return releases, nil
 }
 
 // This diagnostic does not turn runtime-selected targets into desired intent.

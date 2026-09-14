@@ -39,6 +39,14 @@ func TestPlatformIntentProjectionRequiresPlatformAdmin(t *testing.T) {
 	if projection.Intent.Routes[0].EdgeGroupMode != model.PlatformRouteEdgeGroupModeAllHealthy {
 		t.Fatal("invalid group mode mapping")
 	}
+	if projection.BusinessSnapshotRevision == "" || projection.BusinessSnapshotAt.IsZero() {
+		t.Fatal("business snapshot provenance missing")
+	}
+	for _, issue := range projection.Issues {
+		if issue.Code == "transaction_snapshot_not_frozen" {
+			t.Fatal("transactional business snapshot not used")
+		}
+	}
 	after, err := state.ListPlatformArtifacts(model.PlatformArtifactFilter{})
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatal("projection modified artifacts")
