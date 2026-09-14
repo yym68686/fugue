@@ -169,7 +169,7 @@ func (source routeBusinessSource) ListAppReleases(filter model.AppReleaseFilter)
 // business/constraint/fact snapshot can be frozen and compared.
 func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy) (platformIntentProjectionResponse, error) {
 	result := platformIntentProjectionResponse{SourceGeneration: snapshot.Generation, CapturedAt: snapshot.GeneratedAt,
-		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "constraint_policy_not_projected"}, {Code: "dns_tls_not_projected"}},
+		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "constraint_policy_not_projected"}, {Code: "dns_not_projected"}},
 		OmittedRuntimeFields: []string{"selected_edge_group", "decision_id", "exclusion_evidence"},
 	}
 	addIssue := func(code string, route model.EdgeRouteIntent) {
@@ -252,6 +252,19 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		intent.Routes = append(intent.Routes, route)
 	}
 	intent = platformconfig.NormalizePlatformIntent(intent)
+	// TLS policy is desired route configuration and can be projected without
+	// copying certificate readiness or other runtime facts.
+	tlsByHost := make(map[string]platformconfig.TLSIntent, len(intent.Routes))
+	for _, route := range intent.Routes {
+		if strings.TrimSpace(route.TLSPolicy) == "" {
+			continue
+		}
+		tlsByHost[route.Hostname] = platformconfig.TLSIntent{Hostname: route.Hostname, Policy: strings.TrimSpace(route.TLSPolicy)}
+	}
+	for _, tls := range tlsByHost {
+		intent.TLS = append(intent.TLS, tls)
+	}
+	sort.Slice(intent.TLS, func(i, j int) bool { return intent.TLS[i].Hostname < intent.TLS[j].Hostname })
 	generation, err := platformconfig.PlatformIntentGeneration(intent)
 	if err != nil {
 		return result, err
