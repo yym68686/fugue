@@ -2312,6 +2312,55 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/routes/compare:
+    get:
+      operationId: comparePlatformRouteMigration
+      summary: Compare Business Route Projection with a Signed Artifact
+      description: Read-only migration diagnostic for platform administrators. Captures the current legacy business projection and compares its route semantics, TLS allowlist and cache policies with one exact validated global route artifact. This is not a serving verification, an atomic business database snapshot, or authorization to promote. No artifacts, releases, LKG or business records are written.
+      tags: [Admin]
+      x-fugue-handler: handleComparePlatformRouteMigration
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Semantic comparison of the captured business projection and verified artifact projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformRouteMigrationComparison"
+        '400':
+          description: An exact artifact ID is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '404':
+          description: Artifact not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '409':
+          description: Artifact is untrusted, incompatible, or not a validated global route artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: Storage or the business projection is unavailable or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-config/import-env/preview:
     get:
       operationId: previewPlatformConfigEnvironmentImport
@@ -30526,6 +30575,56 @@ components:
         relation:
           type: string
           enum: [requires]
+    PlatformRouteMigrationComparison:
+      type: object
+      additionalProperties: false
+      required: [artifact_id, artifact_digest, artifact_generation, source_generation, captured_at, source_route_count, artifact_route_count, matching_route_count, equivalent, differences, snapshot_differences]
+      properties:
+        artifact_id:
+          type: string
+        artifact_digest:
+          type: string
+        artifact_generation:
+          type: string
+        source_generation:
+          type: string
+        captured_at:
+          type: string
+          format: date-time
+        source_route_count:
+          type: integer
+          minimum: 0
+        artifact_route_count:
+          type: integer
+          minimum: 0
+        matching_route_count:
+          type: integer
+          minimum: 0
+        equivalent:
+          type: boolean
+        differences:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [hostname, path_prefix, kind, fields]
+            properties:
+              hostname:
+                type: string
+              path_prefix:
+                type: string
+              kind:
+                type: string
+                enum: [missing_from_artifact, extra_in_artifact, changed]
+              fields:
+                type: array
+                items:
+                  type: string
+        snapshot_differences:
+          type: array
+          items:
+            type: string
+            enum: [tls_allowlist, cache_policies]
     PlatformRuntimeSnapshot:
       type: object
       additionalProperties: false
