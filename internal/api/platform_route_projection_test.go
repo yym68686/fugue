@@ -163,3 +163,48 @@ func TestInvalidRouteLKGDoesNotFallBackToBusinessProjection(t *testing.T) {
 		t.Fatalf("invalid LKG fell back to mutable sources: %d %s", failed.Code, failed.Body.String())
 	}
 }
+
+func TestCompiledRoutePathsPreservePortAndExplicitStreaming(t *testing.T) {
+	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	streaming := false
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
+		Intent: platformconfig.PlatformIntent{Generation: "route-paths", Routes: []platformconfig.RouteIntent{
+			{Hostname: "app.example.test", PathPrefix: "/api", UpstreamURL: "http://api:9000", ServicePort: 9000, Enabled: true, Streaming: &streaming},
+			{Hostname: "app.example.test", UpstreamURL: "http://web:8080", Enabled: true},
+		}}, Policy: platformconfig.PolicySnapshot{Generation: "route-path-policy"},
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("compile: %d %s", response.Code, response.Body.String())
+	}
+	var compiled platformConfigCompileResponse
+	mustDecodeJSON(t, response, &compiled)
+	projection, err := projectPlatformRouteArtifact(compiled.RouteArtifact)
+	if err != nil || len(projection.Routes) != 2 {
+		t.Fatalf("projection: %+v %v", projection, err)
+	}
+	root, apiRoute := projection.Routes[0], projection.Routes[1]
+	if root.PathPrefix != "/" || !root.Streaming || root.ServicePort != 0 || apiRoute.PathPrefix != "/api" || apiRoute.Streaming || apiRoute.ServicePort != 9000 {
+		t.Fatalf("path/port/streaming lost: %+v", projection.Routes)
+	}
+	for _, route := range projection.Routes {
+		if route.Generation != edgeRouteIntentGeneration(route) {
+			t.Fatal("path route generation does not bind all semantics")
+		}
+	}
+	now := time.Now().UTC()
+	ledger := edgecontrol.NewMemoryGroupShadowLedger()
+	compiler := edgecontrol.GroupShadowCompiler{Inventory: projectionInventory{now}, Ledger: ledger, Now: func() time.Time { return now }}
+	batch, err := compiler.Reconcile(context.Background(), projection, []string{"edge-group-test-a"})
+	if err != nil || batch.Succeeded != 1 {
+		t.Fatalf("Edge Control failed to materialize paths: %+v %v", batch, err)
+	}
+	head, found, err := ledger.Head(context.Background(), "edge-group-test-a")
+	if err != nil || !found || head.Bundle == nil || len(head.Bundle.Routes) != 2 {
+		t.Fatalf("Edge Control lost a path: %+v %v", head, err)
+	}
+	for _, route := range head.Bundle.Routes {
+		if route.PathPrefix == "/api" && (route.ServicePort != 9000 || route.Streaming || route.UpstreamURL != "http://api:9000") {
+			t.Fatalf("materialized semantics changed: %+v", route)
+		}
+	}
+}

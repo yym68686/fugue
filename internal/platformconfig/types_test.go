@@ -1,10 +1,57 @@
 package platformconfig
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRoutePathCompilerPreservesLegacyIntentDigest(t *testing.T) {
+	legacy := []byte(`{"schema_version":"fugue.platform.config/v1","generation":"legacy","scope":"global","routes":[{"hostname":"app.example","upstream_url":"http://origin","enabled":true}],"created_at":"0001-01-01T00:00:00Z"}`)
+	var input PlatformIntent
+	if err := json.Unmarshal(legacy, &input); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(NormalizePlatformIntent(input))
+	if err != nil || string(encoded) != string(legacy) {
+		t.Fatalf("legacy intent digest input changed: %s, error: %v", encoded, err)
+	}
+}
+
+func TestRoutePathCompilerDeterminismAndValidation(t *testing.T) {
+	disabledStreaming := false
+	input := CompileRequest{
+		Intent: PlatformIntent{Generation: "paths", Routes: []RouteIntent{
+			{Hostname: "app.example", PathPrefix: "/api", UpstreamURL: "http://api:9000", Enabled: true, ServicePort: 9000, Streaming: &disabledStreaming},
+			{Hostname: "app.example", UpstreamURL: "http://web:8080", Enabled: true},
+		}}, Policy: PolicySnapshot{Generation: "paths-policy"},
+	}
+	first, err := Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Intent.Routes[0], input.Intent.Routes[1] = input.Intent.Routes[1], input.Intent.Routes[0]
+	second, err := Compile(input)
+	if err != nil || !reflect.DeepEqual(first.RouteArtifact.Content, second.RouteArtifact.Content) {
+		t.Fatal("path route ordering changed compiler output", err)
+	}
+	for name, bad := range map[string]RouteIntent{
+		"root alias":    {Hostname: "APP.example.", PathPrefix: "/", UpstreamURL: "http://dup"},
+		"path":          {Hostname: "other.example", PathPrefix: "api", UpstreamURL: "http://origin"},
+		"negative port": {Hostname: "other.example", ServicePort: -1, UpstreamURL: "http://origin"},
+		"large port":    {Hostname: "other.example", ServicePort: 65536, UpstreamURL: "http://origin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := input
+			invalid.Intent.Routes = append(append([]RouteIntent(nil), input.Intent.Routes...), bad)
+			if _, err := Compile(invalid); err == nil {
+				t.Fatal("invalid route accepted")
+			}
+		})
+	}
+}
 
 func TestCompileIsDeterministicAndCarriesLineage(t *testing.T) {
 	request := CompileRequest{

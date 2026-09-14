@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v2"
+	CompilerVersion = "platform-config-compiler/v3"
 	GlobalScopeKey  = "global"
 )
 
@@ -44,6 +44,9 @@ type RouteIntent struct {
 	TTL           int    `json:"ttl,omitempty"`
 	Status        string `json:"status,omitempty"`
 	StatusReason  string `json:"status_reason,omitempty"`
+	PathPrefix    string `json:"path_prefix,omitempty"`
+	ServicePort   int    `json:"service_port,omitempty"`
+	Streaming     *bool  `json:"streaming,omitempty"`
 }
 
 type DNSIntent struct {
@@ -278,7 +281,18 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 	out.Routes = append([]RouteIntent(nil), in.Routes...)
 	out.DNS = append([]DNSIntent(nil), in.DNS...)
 	out.TLS = append([]TLSIntent(nil), in.TLS...)
-	sort.Slice(out.Routes, func(i, j int) bool { return out.Routes[i].Hostname < out.Routes[j].Hostname })
+	for i := range out.Routes {
+		if out.Routes[i].Streaming != nil {
+			value := *out.Routes[i].Streaming
+			out.Routes[i].Streaming = &value
+		}
+	}
+	sort.Slice(out.Routes, func(i, j int) bool {
+		if out.Routes[i].Hostname != out.Routes[j].Hostname {
+			return out.Routes[i].Hostname < out.Routes[j].Hostname
+		}
+		return model.NormalizeAppRoutePathPrefix(out.Routes[i].PathPrefix) < model.NormalizeAppRoutePathPrefix(out.Routes[j].PathPrefix)
+	})
 	sort.Slice(out.DNS, func(i, j int) bool { return out.DNS[i].Hostname < out.DNS[j].Hostname })
 	sort.Slice(out.TLS, func(i, j int) bool { return out.TLS[i].Hostname < out.TLS[j].Hostname })
 	for i := range out.DNS {
@@ -313,10 +327,18 @@ func validateIntent(in PlatformIntent) error {
 		if strings.TrimSpace(route.Hostname) == "" || strings.TrimSpace(route.UpstreamURL) == "" {
 			return fmt.Errorf("route intent requires hostname and upstream_url")
 		}
-		if _, ok := seen[route.Hostname]; ok {
-			return fmt.Errorf("duplicate route hostname %q", route.Hostname)
+		path := model.NormalizeAppRoutePathPrefix(route.PathPrefix)
+		if route.PathPrefix != "" && route.PathPrefix != path {
+			return fmt.Errorf("route intent requires a canonical path_prefix")
 		}
-		seen[route.Hostname] = struct{}{}
+		if route.ServicePort < 0 || route.ServicePort > 65535 {
+			return fmt.Errorf("route intent service_port is outside 0..65535")
+		}
+		key := strings.Trim(strings.ToLower(strings.TrimSpace(route.Hostname)), ".") + "\x00" + path
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("duplicate route hostname/path %q %q", route.Hostname, path)
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }

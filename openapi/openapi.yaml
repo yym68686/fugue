@@ -30374,8 +30374,20 @@ components:
       properties:
         hostname:
           type: string
+        path_prefix:
+          type: string
+          description: Canonical route path, defaults to /. Different paths on the same hostname are distinct routes.
         upstream_url:
           type: string
+        service_port:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          description: Explicit service port; zero preserves the legacy projection default.
+        streaming:
+          type: boolean
+          description: Explicit streaming preference; omitted preserves legacy streaming behavior.
         enabled:
           type: boolean
         edge_group_id:

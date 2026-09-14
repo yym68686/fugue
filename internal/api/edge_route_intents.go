@@ -129,10 +129,15 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 	seen := make(map[string]bool, len(routes))
 	for _, route := range routes {
 		hostname := normalizeExternalAppDomain(route.Hostname)
-		if hostname == "" || route.Enabled == nil || seen[hostname] {
-			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact requires unique hostnames and explicit enabled state")
+		path := model.NormalizeAppRoutePathPrefix(route.PathPrefix)
+		key := hostname + "\x00" + path
+		if hostname == "" || route.Enabled == nil || seen[key] {
+			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact requires unique hostname/path and explicit enabled state")
 		}
-		seen[hostname] = true
+		if route.PathPrefix != "" && route.PathPrefix != path || route.ServicePort < 0 || route.ServicePort > 65535 {
+			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact has invalid path or service port")
+		}
+		seen[key] = true
 		legacy := model.PlatformRoute{
 			Hostname: hostname, Kind: route.Kind, UpstreamKind: route.UpstreamKind,
 			UpstreamScope: route.UpstreamScope, UpstreamURL: strings.TrimSpace(route.UpstreamURL),
@@ -161,11 +166,21 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 			}
 		}
 		intent := edgeRouteIntentFromPlatformRoute(legacy)
+		intent.PathPrefix = path
+		intent.ServicePort = route.ServicePort
+		if route.Streaming != nil {
+			intent.Streaming = *route.Streaming
+		}
 		intent.MinHealthyEdgeNodes = minimumHealthy
 		intent.Generation = edgeRouteIntentGeneration(intent)
 		intents = append(intents, intent)
 	}
-	sort.Slice(intents, func(i, j int) bool { return intents[i].Hostname < intents[j].Hostname })
+	sort.Slice(intents, func(i, j int) bool {
+		if intents[i].Hostname != intents[j].Hostname {
+			return intents[i].Hostname < intents[j].Hostname
+		}
+		return intents[i].PathPrefix < intents[j].PathPrefix
+	})
 	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Generation: artifact.Generation, GeneratedAt: artifact.CreatedAt, Routes: intents, TLSAllowlist: []model.EdgeTLSAllowlistEntry{}}
 	return snapshot, nil
 }
