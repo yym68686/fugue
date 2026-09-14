@@ -2365,14 +2365,14 @@ paths:
     get:
       operationId: projectPlatformIntent
       summary: Project Business Routes into PlatformIntent
-      description: Read-only migration projection of current business routes into a canonical PlatformIntent and fixed runtime origin observations. Writes no serving state.
+      description: Read-only migration draft from captured business routes. Returns explicit migration issues; migration_ready remains false until policy, DNS, TLS and transaction snapshot support is complete. Origin observation timestamps are retained from the captured runtime evidence and may be zero when evidence is absent. This draft is not authorization to compile or promote serving traffic. Writes no serving state.
       tags: [Admin]
       x-fugue-handler: handleProjectPlatformIntent
       security:
         - BearerAuth: []
       responses:
         '200':
-          description: Projected PlatformIntent and RuntimeSnapshot.
+          description: Draft intent, captured origin observations and unresolved migration issues.
           content:
             application/json:
               schema:
@@ -30718,8 +30718,24 @@ components:
     PlatformIntentProjectionResponse:
       type: object
       additionalProperties: false
-      required: [intent, runtime_snapshot, source_generation, captured_at, route_count, omitted_runtime_fields]
+      required: [intent, runtime_snapshot, source_generation, captured_at, route_count, omitted_runtime_fields, migration_ready, issues]
       properties:
+        migration_ready:
+          type: boolean
+          enum: [false]
+        issues:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code]
+            properties:
+              code:
+                type: string
+              hostname:
+                type: string
+              path_prefix:
+                type: string
         intent:
           $ref: "#/components/schemas/PlatformConfigIntent"
         runtime_snapshot:

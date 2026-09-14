@@ -230,6 +230,12 @@ func edgeRouteIntentClaimsAllowed(claims platformcontrol.PlatformComponentIdenti
 }
 
 func (s *Server) deriveEdgeRouteIntentSnapshot(r *http.Request, source edgeRouteIntentSource) (model.EdgeRouteIntentSnapshot, error) {
+	return s.deriveEdgeRouteIntentSnapshotWithObservations(r, source, nil)
+}
+
+// The migration reader captures the same observations used by the legacy
+// projection; a second cache read could incorrectly renew or mix evidence.
+func (s *Server) deriveEdgeRouteIntentSnapshotWithObservations(r *http.Request, source edgeRouteIntentSource, capture func([]model.App)) (model.EdgeRouteIntentSnapshot, error) {
 	apps, err := source.ListAppsMetadata("", true)
 	if err != nil {
 		return model.EdgeRouteIntentSnapshot{}, err
@@ -269,6 +275,9 @@ func (s *Server) deriveEdgeRouteIntentSnapshot(r *http.Request, source edgeRoute
 	}
 	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(r.Context())
 	apps, _ = s.overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps, runtimeByID)
+	if capture != nil {
+		capture(apps)
+	}
 	sort.Slice(apps, func(i, j int) bool { return strings.TrimSpace(apps[i].ID) < strings.TrimSpace(apps[j].ID) })
 	sort.Slice(domains, func(i, j int) bool {
 		left, right := normalizeExternalAppDomain(domains[i].Hostname), normalizeExternalAppDomain(domains[j].Hostname)
