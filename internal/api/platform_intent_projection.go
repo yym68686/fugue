@@ -95,7 +95,7 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, "platform DNS entry migration configuration invalid")
 		return
 	}
-	if err := projectDefaultAppDNS(&projection, s.appBaseDomain); err != nil {
+	if err := projectDefaultAppDNS(&projection, s.appBaseDomain, s.dnsBundleTTL); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "application DNS route migration configuration invalid")
 		return
 	}

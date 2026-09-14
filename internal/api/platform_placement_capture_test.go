@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,5 +211,109 @@ func TestPlacementCaptureExcludesStaleInventoryAndNeverDropsHostPolicy(t *testin
 	}
 	if r.Issues[len(r.Issues)-1].Code != "dns_placement_route_inputs_invalid" {
 		t.Fatal(r.Issues)
+	}
+}
+
+func TestPlacementCaptureRunsBeyondLegacyProbeLimitWithBoundedConcurrency(t *testing.T) {
+	r, nodes, _ := placementCaptureFixture(t)
+	template := r.Intent
+	r.Intent.Routes, r.Intent.DNS, r.Issues = nil, nil, nil
+	for i := 0; i < 200; i++ {
+		host := fmt.Sprintf("app-%03d.example.test", i)
+		for _, route := range template.Routes {
+			route.Hostname = host
+			r.Intent.Routes = append(r.Intent.Routes, route)
+		}
+		record := template.DNS[0]
+		record.Hostname = host
+		r.Intent.DNS = append(r.Intent.DNS, record)
+	}
+	_, projected, err := placementHostnameRoutes(r, "app-000.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]model.EdgeRouteBinding{}
+	for _, route := range projected {
+		byPath[route.PathPrefix] = routebinding.FromIntent(route, nodes[0].EdgeGroupID)
+	}
+	var active, maxActive, calls atomic.Int32
+	gate := make(chan struct{})
+	started := make(chan struct{}, 8)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, host, path, address string) (placementRouteProof, error) {
+			n := active.Add(1)
+			defer active.Add(-1)
+			for old := maxActive.Load(); n > old && !maxActive.CompareAndSwap(old, n); old = maxActive.Load() {
+			}
+			if calls.Add(1) <= 8 {
+				started <- struct{}{}
+			}
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return placementRouteProof{}, ctx.Err()
+			}
+			route := byPath[path]
+			route.Hostname = host
+			digest, _ := routeproof.Digest(route)
+			return placementRouteProof{Digest: digest, Version: nodes[0].RouteBundleVersion, EdgeID: nodes[0].ID, GroupID: nodes[0].EdgeGroupID, ValidUntil: time.Now().Add(time.Minute)}, nil
+		})
+	}()
+	for range 8 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			close(gate)
+			<-done
+			t.Fatal("collector did not use eight workers")
+		}
+	}
+	close(gate)
+	<-done
+	if maxActive.Load() != 8 || active.Load() != 0 || calls.Load() != 800 {
+		t.Fatalf("collector bound/workload=%d/%d/%d", maxActive.Load(), active.Load(), calls.Load())
+	}
+	if len(r.Issues) != 0 || len(r.RuntimeSnapshot.DNSPlacements) != 200 {
+		t.Fatal("valid facts incomplete", len(r.RuntimeSnapshot.DNSPlacements), r.Issues)
+	}
+	for _, fact := range r.RuntimeSnapshot.DNSPlacements {
+		if len(fact.Candidates) != 1 {
+			t.Fatal("successful proof lost")
+		}
+	}
+}
+
+func TestPlacementCaptureCancellationJoinsWorkers(t *testing.T) {
+	r, nodes, _ := placementCaptureFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	started, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		captureDNSPlacementFacts(ctx, &r, nodes, func(ctx context.Context, host, path, address string) (placementRouteProof, error) {
+			close(started)
+			<-ctx.Done()
+			return placementRouteProof{}, ctx.Err()
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("probe did not start")
+	}
+	cancel()
+	<-done
+	if len(r.RuntimeSnapshot.DNSPlacements) != 1 || len(r.RuntimeSnapshot.DNSPlacements[0].Candidates) != 0 {
+		t.Fatal("canceled capture produced positive evidence")
+	}
+	found := false
+	for _, issue := range r.Issues {
+		found = found || issue.Code == "dns_placement_capture_limit"
+	}
+	if !found {
+		t.Fatal("missing cancellation diagnostic")
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"slices"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"fugue/internal/model"
@@ -38,7 +40,7 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 	issue := func(code, host string) {
 		result.Issues = append(result.Issues, platformProjectionIssue{Code: code, Hostname: host})
 	}
-	if len(nodes) > 4096 {
+	if len(nodes) > 4096 || len(result.Intent.DNS) > 10000 {
 		issue("dns_placement_inventory_limit", "")
 		return
 	}
@@ -54,9 +56,6 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 		}
 		seenIDs[node.ID] = true
 		for _, value := range []string{node.PublicIPv4, node.PublicIPv6} {
-			if value == "" {
-				continue
-			}
 			ip, err := netip.ParseAddr(value)
 			if err != nil {
 				continue
@@ -68,140 +67,150 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 			seenAddresses[ip.String()] = true
 		}
 	}
+	// Workers read one detached snapshot. Only the caller merges their facts
+	// and issues, preserving intent order irrespective of network completion.
+	snapshot := *result
+	snapshot.CapturedAt = captured
+	snapshot.RuntimeSnapshot.CapturedAt = &snapshot.CapturedAt
+	records := []platformconfig.DNSIntent{}
+	for _, record := range result.Intent.DNS {
+		if platformconfig.DNSPlacementOptions(record) != nil {
+			records = append(records, record)
+		}
+	}
+	type observation struct {
+		fact       platformconfig.DNSPlacementObservation
+		inputError bool
+		limited    bool
+	}
+	observations := make([]observation, len(records))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	var budget atomic.Int64
+	budget.Store(4096)
+	for range min(8, len(records)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				fact, limited, err := captureDNSPlacementRecord(ctx, snapshot, records[index], nodes, probe, &budget)
+				observations[index] = observation{fact: fact, limited: limited, inputError: err != nil}
+			}
+		}()
+	}
+	for index := range records {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
+
 	result.CapturedAt = time.Now().UTC()
 	result.RuntimeSnapshot.CapturedAt = &result.CapturedAt
-	probes := 0
-	for _, record := range result.Intent.DNS {
-		if platformconfig.DNSPlacementOptions(record) == nil {
-			continue
-		}
-		compiled, projected, err := placementRecordRoutes(*result, record)
-		if err != nil {
+	result.RuntimeSnapshot.DNSPlacements = nil
+	for index, record := range records {
+		observation := observations[index]
+		if observation.inputError {
 			issue("dns_placement_route_inputs_invalid", record.Hostname)
 			continue
 		}
-		digest, err := platformconfig.DNSPlacementInputDigest(record, compiled, result.Policy)
-		if err != nil {
-			issue("dns_placement_route_inputs_invalid", record.Hostname)
-			continue
-		}
-		fact := platformconfig.DNSPlacementObservation{InputDigest: digest, Status: "resolved", TargetTTL: record.TTL, Candidates: []platformconfig.DNSPlacementCandidate{}}
-		for _, node := range nodes {
-			now := time.Now().UTC()
-			// LastSeenAt is not a health observation and cannot renew readiness.
-			if !placementInventoryEligible(node, result.Policy, now) {
-				continue
-			}
-			expires := node.LastHeartbeatAt.Add(platformNodeHeartbeatStaleAfter)
-			if limit := node.LastHeartbeatAt.Add(time.Duration(result.Policy.MaxStaleSeconds) * time.Second); limit.Before(expires) {
-				expires = limit
-			}
-			if expires.Sub(now) < time.Second {
-				continue
-			}
-			candidate := platformconfig.DNSPlacementCandidate{EdgeID: node.ID, EdgeGroupID: node.EdgeGroupID, ObservedAt: *node.LastHeartbeatAt, ValidUntil: expires, ServingGeneration: node.RouteBundleVersion, Healthy: true, RouteReady: true, TLSReady: true}
-			if !placementGroupEligible(record, compiled, node) {
-				continue
-			}
-			for _, family := range []struct {
-				value string
-				v4    bool
-			}{{node.PublicIPv4, true}, {node.PublicIPv6, false}} {
-				if family.value == "" {
-					continue
-				}
-				ip, err := netip.ParseAddr(family.value)
-				if err != nil || ip.Is4() != family.v4 || !platformconfig.PublicDNSFlattenIP(ip) {
-					continue
-				}
-				valid := true
-				addressExpiry := candidate.ValidUntil
-				for _, route := range projected {
-					if probes >= 256 || ctx.Err() != nil {
-						valid = false
-						break
-					}
-					probes++
-					expected, err := routeproof.Digest(routebinding.FromIntent(route, node.EdgeGroupID))
-					if err != nil {
-						valid = false
-						break
-					}
-					proof, err := probe(ctx, route.Hostname, model.NormalizeAppRoutePathPrefix(route.PathPrefix), ip.String())
-					if err != nil || proof.Digest != expected || proof.Version != node.RouteBundleVersion || proof.EdgeID != node.ID || proof.GroupID != node.EdgeGroupID || !proof.ValidUntil.After(time.Now()) {
-						valid = false
-						break
-					}
-					if proof.ValidUntil.Before(addressExpiry) {
-						addressExpiry = proof.ValidUntil
-					}
-				}
-				if !valid {
-					continue
-				}
-				if addressExpiry.Before(candidate.ValidUntil) {
-					candidate.ValidUntil = addressExpiry
-				}
-				if family.v4 {
-					candidate.A = append(candidate.A, ip.String())
-				} else {
-					candidate.AAAA = append(candidate.AAAA, ip.String())
-				}
-			}
-			if len(candidate.A)+len(candidate.AAAA) > 0 {
-				fact.Candidates = append(fact.Candidates, candidate)
-			}
-		}
-		fact.CheckedAt = time.Now().UTC()
-		result.CapturedAt = fact.CheckedAt
+		fact := observation.fact
 		result.RuntimeSnapshot.DNSPlacements = append(result.RuntimeSnapshot.DNSPlacements, fact)
-		filtered := result.Issues[:0]
-		for _, existing := range result.Issues {
-			if existing.Code != "dns_app_placement_not_projected" || existing.Hostname != record.Hostname {
-				filtered = append(filtered, existing)
-			}
+		result.Issues = slices.DeleteFunc(result.Issues, func(existing platformProjectionIssue) bool {
+			return existing.Code == "dns_app_placement_not_projected" && existing.Hostname == record.Hostname
+		})
+		// Compilation and evidence freshness are rechecked at the final fixed
+		// time. A slow peer cannot silently extend an earlier hostname's lease.
+		compiled, _, err := placementRecordRoutes(*result, record)
+		if err == nil {
+			_, err = platformconfig.ResolveDNSPlacements(platformconfig.PlatformIntent{DNS: []platformconfig.DNSIntent{record}}, compiled, platformconfig.RuntimeSnapshot{CapturedAt: &result.CapturedAt, DNSPlacements: []platformconfig.DNSPlacementObservation{fact}}, result.Policy)
 		}
-		result.Issues = filtered
-		if _, err := platformconfig.ResolveDNSPlacements(platformconfig.PlatformIntent{DNS: []platformconfig.DNSIntent{record}}, compiled, platformconfig.RuntimeSnapshot{CapturedAt: &result.CapturedAt, DNSPlacements: []platformconfig.DNSPlacementObservation{fact}}, result.Policy); err != nil {
+		if err != nil {
 			issue("dns_placement_evidence_requires_repair", record.Hostname)
 		}
-		if probes >= 256 || ctx.Err() != nil {
+		if observation.limited {
 			issue("dns_placement_capture_limit", record.Hostname)
 		}
 	}
 	sort.Slice(result.RuntimeSnapshot.DNSPlacements, func(i, j int) bool {
 		return result.RuntimeSnapshot.DNSPlacements[i].InputDigest < result.RuntimeSnapshot.DNSPlacements[j].InputDigest
 	})
-	// Later network probes may consume an earlier hostname's remaining lease.
-	// Re-evaluate all facts at the final fixed snapshot time without recapture.
-	for _, record := range result.Intent.DNS {
-		if platformconfig.DNSPlacementOptions(record) == nil {
+}
+
+func captureDNSPlacementRecord(ctx context.Context, snapshot platformIntentProjectionResponse, record platformconfig.DNSIntent, nodes []model.EdgeNode, probe placementRouteProbe, budget *atomic.Int64) (platformconfig.DNSPlacementObservation, bool, error) {
+	compiled, projected, err := placementRecordRoutes(snapshot, record)
+	if err != nil {
+		return platformconfig.DNSPlacementObservation{}, false, err
+	}
+	digest, err := platformconfig.DNSPlacementInputDigest(record, compiled, snapshot.Policy)
+	if err != nil {
+		return platformconfig.DNSPlacementObservation{}, false, err
+	}
+	fact := platformconfig.DNSPlacementObservation{InputDigest: digest, Status: "resolved", TargetTTL: record.TTL, Candidates: []platformconfig.DNSPlacementCandidate{}}
+	limited := false
+	for _, node := range nodes {
+		now := time.Now().UTC()
+		// LastSeenAt is not a health observation and cannot renew readiness.
+		if !placementInventoryEligible(node, snapshot.Policy, now) || !placementGroupEligible(record, compiled, node) {
 			continue
 		}
-		compiled, _, err := placementRecordRoutes(*result, record)
-		if err == nil {
-			digest, digestErr := platformconfig.DNSPlacementInputDigest(record, compiled, result.Policy)
-			if digestErr != nil {
-				err = digestErr
-			} else {
-				facts := []platformconfig.DNSPlacementObservation{}
-				for _, fact := range result.RuntimeSnapshot.DNSPlacements {
-					if fact.InputDigest == digest {
-						facts = append(facts, fact)
-					}
+		expires := node.LastHeartbeatAt.Add(platformNodeHeartbeatStaleAfter)
+		if limit := node.LastHeartbeatAt.Add(time.Duration(snapshot.Policy.MaxStaleSeconds) * time.Second); limit.Before(expires) {
+			expires = limit
+		}
+		if expires.Sub(now) < time.Second {
+			continue
+		}
+		candidate := platformconfig.DNSPlacementCandidate{EdgeID: node.ID, EdgeGroupID: node.EdgeGroupID, ObservedAt: *node.LastHeartbeatAt, ValidUntil: expires, ServingGeneration: node.RouteBundleVersion, Healthy: true, RouteReady: true, TLSReady: true}
+		for _, family := range []struct {
+			value string
+			v4    bool
+		}{{node.PublicIPv4, true}, {node.PublicIPv6, false}} {
+			ip, err := netip.ParseAddr(family.value)
+			if err != nil || ip.Is4() != family.v4 || !platformconfig.PublicDNSFlattenIP(ip) {
+				continue
+			}
+			valid := true
+			addressExpiry := candidate.ValidUntil
+			for _, route := range projected {
+				if ctx.Err() != nil || budget.Add(-1) < 0 {
+					limited, valid = true, false
+					break
 				}
-				_, err = platformconfig.ResolveDNSPlacements(platformconfig.PlatformIntent{DNS: []platformconfig.DNSIntent{record}}, compiled, platformconfig.RuntimeSnapshot{CapturedAt: &result.CapturedAt, DNSPlacements: facts}, result.Policy)
+				expected, err := routeproof.Digest(routebinding.FromIntent(route, node.EdgeGroupID))
+				if err != nil {
+					valid = false
+					break
+				}
+				proof, err := probe(ctx, route.Hostname, model.NormalizeAppRoutePathPrefix(route.PathPrefix), ip.String())
+				if err != nil || proof.Digest != expected || proof.Version != node.RouteBundleVersion || proof.EdgeID != node.ID || proof.GroupID != node.EdgeGroupID || !proof.ValidUntil.After(time.Now()) {
+					valid = false
+					if ctx.Err() != nil {
+						limited = true
+					}
+					break
+				}
+				if proof.ValidUntil.Before(addressExpiry) {
+					addressExpiry = proof.ValidUntil
+				}
+			}
+			if !valid {
+				continue
+			}
+			if addressExpiry.Before(candidate.ValidUntil) {
+				candidate.ValidUntil = addressExpiry
+			}
+			if family.v4 {
+				candidate.A = append(candidate.A, ip.String())
+			} else {
+				candidate.AAAA = append(candidate.AAAA, ip.String())
 			}
 		}
-		if err != nil {
-			existing := slices.ContainsFunc(result.Issues, func(issue platformProjectionIssue) bool {
-				return issue.Hostname == record.Hostname && (issue.Code == "dns_placement_route_inputs_invalid" || issue.Code == "dns_placement_evidence_requires_repair")
-			})
-			if !existing {
-				issue("dns_placement_evidence_requires_repair", record.Hostname)
-			}
+		if len(candidate.A)+len(candidate.AAAA) > 0 {
+			fact.Candidates = append(fact.Candidates, candidate)
 		}
 	}
+	fact.CheckedAt = time.Now().UTC()
+	return fact, limited, nil
 }
 
 func placementInventoryEligible(node model.EdgeNode, policy platformconfig.PolicySnapshot, now time.Time) bool {
