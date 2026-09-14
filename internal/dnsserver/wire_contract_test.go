@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"io"
 	"log"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -89,6 +90,7 @@ func TestAuthoritativeNODATAIncludesSOA(t *testing.T) {
 		kind  uint16
 		rcode int
 	}{
+		{"negative.example.test.", dns.TypeTXT, dns.RcodeSuccess},
 		{"existing.negative.example.test.", dns.TypeAAAA, dns.RcodeSuccess},
 		{"existing.negative.example.test.", dns.TypeSRV, dns.RcodeSuccess},
 		{"existing.negative.example.test.", dns.TypePTR, dns.RcodeSuccess},
@@ -102,6 +104,47 @@ func TestAuthoritativeNODATAIncludesSOA(t *testing.T) {
 			}
 			if _, ok := answer.Ns[0].(*dns.SOA); !ok {
 				t.Fatalf("missing authority SOA: %s", answer)
+			}
+		})
+	}
+}
+
+type publishingDNSResponseWriter struct {
+	captureDNSResponseWriter
+	publish func()
+}
+
+func (w *publishingDNSResponseWriter) RemoteAddr() net.Addr {
+	if w.publish != nil {
+		publish := w.publish
+		w.publish = nil
+		publish()
+	}
+	return w.captureDNSResponseWriter.RemoteAddr()
+}
+
+func TestDNSQueryKeepsBundleAndIndexFromSameSnapshot(t *testing.T) {
+	for _, kind := range []uint16{dns.TypeA, dns.TypeTXT} {
+		t.Run(dns.TypeToString[kind], func(t *testing.T) {
+			s := NewService(config.DNSConfig{Zone: "snapshot.example.test", TTL: 60, AutonomyWALPath: filepath.Join(t.TempDir(), "facts.jsonl")}, log.New(io.Discard, "", 0))
+			old := model.EdgeDNSRecord{Name: "app.snapshot.example.test", Type: dns.TypeToString[kind], TTL: 60, Values: []string{"192.0.2.1"}}
+			next := old
+			next.Values = []string{"192.0.2.2"}
+			unrelated := old
+			unrelated.Name = "other.snapshot.example.test"
+			s.setBundle(model.EdgeDNSBundle{Zone: s.Config.Zone, Generation: "old", Records: []model.EdgeDNSRecord{old}}, "", false, "")
+			writer := &publishingDNSResponseWriter{publish: func() {
+				s.setBundle(model.EdgeDNSBundle{Zone: s.Config.Zone, Generation: "next", Records: []model.EdgeDNSRecord{unrelated, next}}, "", false, "")
+			}}
+			query := new(dns.Msg)
+			query.SetQuestion(old.Name+".", kind)
+			s.ServeDNS(writer, query)
+			if writer.msg == nil || len(writer.msg.Answer) != 1 || !strings.Contains(writer.msg.Answer[0].String(), "192.0.2.1") {
+				t.Fatalf("query mixed published snapshots: %s", writer.msg)
+			}
+			fresh := dnsQuery(t, s, old.Name+".", kind)
+			if len(fresh.Answer) != 1 || !strings.Contains(fresh.Answer[0].String(), "192.0.2.2") {
+				t.Fatalf("next query did not advance: %s", fresh)
 			}
 		})
 	}

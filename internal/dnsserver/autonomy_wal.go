@@ -10,11 +10,11 @@ import (
 	"fugue/internal/model"
 )
 
-func (s *Service) recordDNSValueExpiryWAL(bundle *model.EdgeDNSBundle, name string, now time.Time) {
+func (s *Service) recordDNSValueExpiryWAL(bundle *model.EdgeDNSBundle, index *dnsRecordIndex, name string, now time.Time) {
 	if bundle == nil || strings.TrimSpace(s.Config.AutonomyWALPath) == "" {
 		return
 	}
-	matching, _ := edgeDNSMatchingRecordsIndexed(bundle, name, s.bundleIndex)
+	matching, _ := edgeDNSMatchingRecordsIndexed(bundle, name, index)
 	for _, record := range matching {
 		expired := 0
 		for _, until := range record.ValueExpirations {

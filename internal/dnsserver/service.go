@@ -839,7 +839,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		selected.ServeDNS(w, r)
 		return
 	}
-	snapshot := s.currentBundle()
+	snapshot, index := s.currentBundleWithIndex()
 	zone := normalizeName(s.Config.Zone)
 	if snapshot != nil && normalizeName(snapshot.Zone) != "" {
 		zone = normalizeName(snapshot.Zone)
@@ -882,7 +882,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
 	case miekgdns.TypeNS:
-		records, nameExists := s.edgeDNSRecordsForQuestion(context.Background(), snapshot, name, question.Qtype, r, w)
+		records, nameExists := s.edgeDNSRecordsForQuestion(snapshot, index, name, question.Qtype, r, w)
 		if len(records) > 0 {
 			resp.Answer = append(resp.Answer, records...)
 		} else if name == zone {
@@ -894,10 +894,10 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
 	case miekgdns.TypeA, miekgdns.TypeAAAA, miekgdns.TypeCAA, miekgdns.TypeCNAME, miekgdns.TypeMX, miekgdns.TypeSRV, miekgdns.TypeTXT:
-		records, nameExists := s.edgeDNSRecordsForQuestion(context.Background(), snapshot, name, question.Qtype, r, w)
+		records, nameExists := s.edgeDNSRecordsForQuestion(snapshot, index, name, question.Qtype, r, w)
 		if len(records) > 0 {
 			resp.Answer = append(resp.Answer, records...)
-		} else if !nameExists {
+		} else if !nameExists && name != zone {
 			resp.Rcode = miekgdns.RcodeNameError
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		} else {
@@ -1025,15 +1025,22 @@ func (s *Service) metricSnapshot() metricSnapshot {
 }
 
 func (s *Service) currentBundle() *model.EdgeDNSBundle {
+	bundle, _ := s.currentBundleWithIndex()
+	return bundle
+}
+
+// The index is immutable once published. Copy the bundle and acquire its index
+// under one lock so a refresh cannot substitute offsets from another bundle.
+func (s *Service) currentBundleWithIndex() (*model.EdgeDNSBundle, *dnsRecordIndex) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.bundle == nil {
-		return nil
+		return nil, nil
 	}
 	bundle := *s.bundle
 	bundle.HostedZones = append([]string(nil), s.bundle.HostedZones...)
 	bundle.Records = append([]model.EdgeDNSRecord(nil), s.bundle.Records...)
-	return &bundle
+	return &bundle, s.bundleIndex
 }
 
 func (s *Service) hasBundle() bool {
@@ -1964,7 +1971,7 @@ func (s *Service) ttl() int {
 	return s.Config.TTL
 }
 
-func (s *Service) edgeDNSRecordsForQuestion(_ context.Context, bundle *model.EdgeDNSBundle, name string, qtype uint16, msg *miekgdns.Msg, writer miekgdns.ResponseWriter) ([]miekgdns.RR, bool) {
+func (s *Service) edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, index *dnsRecordIndex, name string, qtype uint16, msg *miekgdns.Msg, writer miekgdns.ResponseWriter) ([]miekgdns.RR, bool) {
 	var liveHealth edgeDNSLiveHealthFunc
 	if s.Config.EdgeHealthProbeEnabled {
 		liveHealth = s.edgeTargetHealthy
@@ -1973,9 +1980,9 @@ func (s *Service) edgeDNSRecordsForQuestion(_ context.Context, bundle *model.Edg
 	if s.hasPeerHealthDecisions() {
 		peerHealth = s.peerHealthFilterReason
 	}
-	answers, nameExists, audits := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth, peerHealth, s.bundleIndex)
+	answers, nameExists, audits := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth, peerHealth, index)
 	if qtype == miekgdns.TypeTXT {
-		s.recordDNSValueExpiryWAL(bundle, name, time.Now().UTC())
+		s.recordDNSValueExpiryWAL(bundle, index, name, time.Now().UTC())
 	}
 	s.recordDNSScopeResolution(audits)
 	s.logDNSAnswerAudits(bundle, name, qtype, audits)
