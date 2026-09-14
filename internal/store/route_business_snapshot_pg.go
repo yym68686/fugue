@@ -62,11 +62,11 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	if err != nil {
 		return out, fmt.Errorf("capture traffic policies: %w", err)
 	}
-	out.HostedZones, err = readRouteBusinessRows(ctx, tx, `SELECT id, tenant_id, project_id, zone_name, status, delegation_status, parent_nameservers_json, expected_nameservers_json, created_by, last_checked_at, last_message, created_at, updated_at FROM fugue_dns_zones WHERE status <> 'deleted'`, scanHostedZone)
+	out.HostedZones, err = readRouteBusinessRows(ctx, tx, hostedZoneSelect(), scanHostedZone)
 	if err != nil {
 		return out, fmt.Errorf("capture hosted dns zones: %w", err)
 	}
-	out.DNSRecords, err = readRouteBusinessRows(ctx, tx, `SELECT id, zone_id, tenant_id, name, fqdn, type, values_json, ttl, flatten_mode, flatten_target, flatten_ipv4_policy, flatten_ipv6_policy, flatten_ttl_policy, flatten_fallback_policy, flatten_status, flattened_a_json, flattened_aaaa_json, last_resolved_at, resolve_error, source, source_ref_type, source_ref_id, status, created_by, last_published_at, last_message, created_at, updated_at FROM fugue_dns_records WHERE status NOT IN ('disabled', 'conflict')`, scanDNSRecord)
+	out.DNSRecords, err = readRouteBusinessRows(ctx, tx, dnsRecordSelect()+` WHERE status NOT IN ('disabled', 'conflict')`, scanDNSRecord)
 	if err != nil {
 		return out, fmt.Errorf("capture hosted dns records: %w", err)
 	}

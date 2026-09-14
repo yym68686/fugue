@@ -68,7 +68,7 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 		Upstreams: []model.EdgeRouteUpstream{{Weight: 100, UpstreamURL: "http://observed-target:8080"}},
 	}
 	snapshot := model.EdgeRouteIntentSnapshot{GeneratedAt: captured, Routes: []model.EdgeRouteIntent{route}}
-	first, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil, nil, nil, nil)
+	first, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 	snapshot.Routes[0].UpstreamURL = ""
 	snapshot.Routes[0].Upstreams = nil
 	snapshot.Routes[0].RuntimeID = "runtime-observed-other"
-	second, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil, nil, nil, nil)
+	second, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 	extra := route
 	extra.Hostname = "earlier.example"
 	snapshot.Routes = append([]model.EdgeRouteIntent{extra}, snapshot.Routes...)
-	third, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil, nil, nil, nil)
+	third, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 func TestBusinessRouteDraftPreservesConfiguredPlatformMaintenance(t *testing.T) {
 	route := model.EdgeRouteIntent{Hostname: "platform.example", PathPrefix: "/", TargetGroupMode: model.EdgeRouteIntentGroupModePinnedGroup, PinnedEdgeGroupID: "edge-group-test", OriginStatus: model.EdgeRouteStatusUnavailable}
 	configured := model.PlatformRoute{Hostname: route.Hostname, UpstreamURL: "http://configured:8080", Status: model.EdgeRouteStatusUnavailable, StatusReason: "planned maintenance"}
-	result, err := projectBusinessRouteDraft(model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{route}}, nil, nil, []model.PlatformRoute{configured}, nil, nil, nil, nil, nil)
+	result, err := projectBusinessRouteDraft(model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{route}}, nil, nil, []model.PlatformRoute{configured}, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

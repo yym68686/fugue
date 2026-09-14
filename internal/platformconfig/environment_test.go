@@ -13,6 +13,7 @@ func TestImportEnvironmentPreservesAllStaticDNSRecords(t *testing.T) {
 	for i, kind := range types {
 		rows[i] = map[string]any{"name": "records.example", "type": kind, "values": []string{values[i]}, "ttl": 300, "record_kind": "protected", "status": "active"}
 	}
+	rows[3]["name"] = "alias.example" // CNAME cannot coexist with other RRsets.
 	rows[0]["values"] = []string{"192.0.2.4", "192.0.2.5"}
 	for _, envelope := range []bool{false, true} {
 		var input any = rows

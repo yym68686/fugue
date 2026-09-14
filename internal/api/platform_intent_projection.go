@@ -23,6 +23,7 @@ type platformProjectionIssue struct {
 }
 
 type platformIntentProjectionResponse struct {
+	DNSExclusions            []platformDNSExclusion         `json:"dns_exclusions"`
 	Intent                   platformconfig.PlatformIntent  `json:"intent"`
 	Policy                   platformconfig.PolicySnapshot  `json:"policy"`
 	RuntimeSnapshot          platformconfig.RuntimeSnapshot `json:"runtime_snapshot"`
@@ -83,7 +84,7 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, "business route projection unavailable")
 		return
 	}
-	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, s.platformRoutes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords)
+	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, s.platformRoutes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords, s.dnsStaticRecords)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "business route draft cannot be captured")
 		return
@@ -167,9 +168,9 @@ func (source routeBusinessSource) ListAppReleases(filter model.AppReleaseFilter)
 // This diagnostic does not turn runtime-selected targets into desired intent.
 // Unsupported migration semantics are explicit issues until a complete
 // business/constraint/fact snapshot can be frozen and compared.
-func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, releases []model.AppRelease, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord) (platformIntentProjectionResponse, error) {
+func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, releases []model.AppRelease, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord, staticRecords []model.EdgeDNSRecord) (platformIntentProjectionResponse, error) {
 	result := platformIntentProjectionResponse{SourceGeneration: snapshot.Generation, CapturedAt: snapshot.GeneratedAt,
-		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "dns_not_projected"}},
+		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "dns_route_placement_not_projected"}, {Code: "dns_acme_not_projected"}},
 		OmittedRuntimeFields: []string{"selected_edge_group", "decision_id", "exclusion_evidence"},
 	}
 	addIssue := func(code string, route model.EdgeRouteIntent) {
@@ -268,34 +269,7 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		intent.Routes = append(intent.Routes, route)
 	}
 	intent = platformconfig.NormalizePlatformIntent(intent)
-	zoneByID := make(map[string]model.HostedZone, len(hostedZones))
-	for _, zone := range hostedZones {
-		zoneByID[zone.ID] = zone
-	}
-	for _, record := range dnsRecords {
-		if _, ok := zoneByID[record.ZoneID]; !ok {
-			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_zone_missing"})
-		}
-		host := normalizeExternalAppDomain(record.FQDN)
-		if host == "" {
-			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_record_invalid"})
-			continue
-		}
-		intent.DNS = append(intent.DNS, platformconfig.DNSIntent{Hostname: host, Type: strings.ToUpper(strings.TrimSpace(record.Type)), Values: append([]string(nil), record.Values...), TTL: record.TTL, RecordKind: strings.TrimSpace(record.Source), AppID: strings.TrimSpace(record.SourceRefID), TenantID: strings.TrimSpace(record.TenantID)})
-	}
-	sort.Slice(intent.DNS, func(i, j int) bool {
-		left, right := intent.DNS[i], intent.DNS[j]
-		return left.Hostname+"\x00"+left.Type+"\x00"+strings.Join(left.Values, "\x00") < right.Hostname+"\x00"+right.Type+"\x00"+strings.Join(right.Values, "\x00")
-	})
-	if len(intent.DNS) > 0 {
-		filtered := result.Issues[:0]
-		for _, issue := range result.Issues {
-			if issue.Code != "dns_not_projected" {
-				filtered = append(filtered, issue)
-			}
-		}
-		result.Issues = filtered
-	}
+	intent.DNS, result.DNSExclusions = projectBusinessDNSDraft(&result, apps, hostedZones, dnsRecords, staticRecords)
 	// TLS policy is desired route configuration and can be projected without
 	// copying certificate readiness or other runtime facts.
 	tlsByHost := make(map[string]platformconfig.TLSIntent, len(intent.Routes))

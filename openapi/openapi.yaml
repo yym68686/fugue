@@ -30492,10 +30492,13 @@ components:
       additionalProperties: false
       required: [hostname, type, values, ttl]
       properties:
+        flatten:
+          $ref: "#/components/schemas/PlatformDNSFlattenIntent"
         hostname:
           type: string
         type:
           type: string
+          description: Only wire DNS types can be compiled. Symbolic FUGUE_APP, ALIAS and ANAME records require a resolver and are rejected.
         values:
           type: array
           items:
@@ -30503,6 +30506,8 @@ components:
         ttl:
           type: integer
           format: int32
+          minimum: 1
+          maximum: 2147483647
         record_kind:
           type: string
         status:
@@ -30518,6 +30523,18 @@ components:
           type: string
         fallback_edge_group_id:
           type: string
+    PlatformDNSFlattenIntent:
+      type: object
+      additionalProperties: false
+      required: [mode, target, ipv4_policy, ipv6_policy, ttl_policy, fallback_policy]
+      description: Desired flatten configuration. Compilation requires a flatten resolver; unresolved configuration is rejected.
+      properties:
+        mode: {type: string}
+        target: {type: string}
+        ipv4_policy: {type: string}
+        ipv6_policy: {type: string}
+        ttl_policy: {type: string}
+        fallback_policy: {type: string}
     PlatformConfigTLSIntent:
       type: object
       additionalProperties: false
@@ -30767,8 +30784,20 @@ components:
     PlatformIntentProjectionResponse:
       type: object
       additionalProperties: false
-      required: [intent, policy, runtime_snapshot, source_generation, captured_at, route_count, omitted_runtime_fields, migration_ready, issues, business_snapshot_revision, business_snapshot_at]
+      required: [intent, policy, runtime_snapshot, source_generation, captured_at, route_count, omitted_runtime_fields, migration_ready, issues, business_snapshot_revision, business_snapshot_at, dns_exclusions]
       properties:
+        dns_exclusions:
+          type: array
+          description: Captured source rows excluded from the draft, with identities and reasons. Deleted or suspended zones never re-enter serving intent.
+          items:
+            type: object
+            additionalProperties: false
+            required: [record_id, zone_id, hostname, reason]
+            properties:
+              record_id: {type: string}
+              zone_id: {type: string}
+              hostname: {type: string}
+              reason: {type: string}
         business_snapshot_revision:
           type: string
         business_snapshot_at:

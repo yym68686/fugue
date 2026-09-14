@@ -21,6 +21,8 @@ func TestRouteBusinessSnapshotFileIsDetachedAndConsistent(t *testing.T) {
 		state.AppDomains = []model.AppDomain{{Hostname: "verified.example", Status: model.AppDomainStatusVerified}, {Hostname: "pending.example", Status: model.AppDomainStatusPending}}
 		state.AppReleases = []model.AppRelease{{ID: "release", AppID: "app", UpstreamURL: "http://old"}}
 		state.AppTrafficPolicies = []model.AppTrafficPolicy{{ID: "traffic", AppID: "app", StableReleaseID: "release", StableWeight: 100}}
+		state.HostedZones = []model.HostedZone{{ID: "zone-live", TenantID: "tenant", ZoneName: "example", Status: model.HostedZoneStatusActive}, {ID: "zone-deleted", TenantID: "tenant", ZoneName: "deleted.example", Status: model.HostedZoneStatusDeleted}}
+		state.DNSRecords = []model.DNSRecord{{ID: "dns", ZoneID: "zone-deleted", TenantID: "tenant", FQDN: "deleted.example", Type: "A", Status: model.DNSRecordStatusActive, Values: []string{"192.0.2.1"}}}
 		return nil
 	})
 	if err != nil {
@@ -34,9 +36,16 @@ func TestRouteBusinessSnapshotFileIsDetachedAndConsistent(t *testing.T) {
 		t.Fatalf("incomplete snapshot: %+v", first)
 	}
 	first.Apps[0].Spec.Env["CONFIG"] = "mutated"
+	if len(first.HostedZones) != 2 || first.HostedZones[0].Status != model.HostedZoneStatusDeleted || len(first.DNSRecords) != 1 {
+		t.Fatal("DNS source tombstone was lost")
+	}
+	first.DNSRecords[0].Values[0] = "192.0.2.99"
 	second, err := s.CaptureRouteBusinessSnapshot(context.Background())
 	if err != nil || second.Apps[0].Spec.Env["CONFIG"] != "old" || second.Revision != first.Revision {
 		t.Fatal("snapshot aliases stored configuration", err)
+	}
+	if second.DNSRecords[0].Values[0] != "192.0.2.1" {
+		t.Fatal("DNS snapshot aliases store state")
 	}
 	err = s.withLockedState(true, func(state *model.State) error {
 		state.Apps[0].Spec.Env["CONFIG"] = "new"

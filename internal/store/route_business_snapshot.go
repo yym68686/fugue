@@ -91,14 +91,12 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 	}
 	sort.Slice(snapshot.Releases, func(i, j int) bool { return snapshot.Releases[i].ID < snapshot.Releases[j].ID })
 	sort.Slice(snapshot.TrafficPolicies, func(i, j int) bool { return snapshot.TrafficPolicies[i].AppID < snapshot.TrafficPolicies[j].AppID })
-	filteredZones := snapshot.HostedZones[:0]
-	for _, zone := range snapshot.HostedZones {
-		zone = normalizeHostedZoneForRead(zone)
-		if zone.Status != model.HostedZoneStatusDeleted {
-			filteredZones = append(filteredZones, zone)
-		}
+	// Keep tombstones in the migration snapshot to distinguish deleted zones
+	// from genuinely orphaned records. Projection decides serving eligibility.
+	for i := range snapshot.HostedZones {
+		snapshot.HostedZones[i] = normalizeHostedZoneForRead(snapshot.HostedZones[i])
 	}
-	snapshot.HostedZones = filteredZones
+	sort.Slice(snapshot.HostedZones, func(i, j int) bool { return snapshot.HostedZones[i].ID < snapshot.HostedZones[j].ID })
 	for i := range snapshot.DNSRecords {
 		snapshot.DNSRecords[i] = normalizeDNSRecordForRead(snapshot.DNSRecords[i])
 	}

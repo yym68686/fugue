@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v8"
+	CompilerVersion = "platform-config-compiler/v9"
 	GlobalScopeKey  = "global"
 )
 
@@ -60,17 +60,27 @@ type RouteIntent struct {
 }
 
 type DNSIntent struct {
-	Hostname            string   `json:"hostname"`
-	Type                string   `json:"type"`
-	Values              []string `json:"values"`
-	TTL                 int      `json:"ttl"`
-	RecordKind          string   `json:"record_kind,omitempty"`
-	Status              string   `json:"status,omitempty"`
-	StatusReason        string   `json:"status_reason,omitempty"`
-	AppID               string   `json:"app_id,omitempty"`
-	TenantID            string   `json:"tenant_id,omitempty"`
-	EdgeGroupID         string   `json:"edge_group_id,omitempty"`
-	FallbackEdgeGroupID string   `json:"fallback_edge_group_id,omitempty"`
+	Flatten             *DNSFlattenIntent `json:"flatten,omitempty"`
+	Hostname            string            `json:"hostname"`
+	Type                string            `json:"type"`
+	Values              []string          `json:"values"`
+	TTL                 int               `json:"ttl"`
+	RecordKind          string            `json:"record_kind,omitempty"`
+	Status              string            `json:"status,omitempty"`
+	StatusReason        string            `json:"status_reason,omitempty"`
+	AppID               string            `json:"app_id,omitempty"`
+	TenantID            string            `json:"tenant_id,omitempty"`
+	EdgeGroupID         string            `json:"edge_group_id,omitempty"`
+	FallbackEdgeGroupID string            `json:"fallback_edge_group_id,omitempty"`
+}
+
+type DNSFlattenIntent struct {
+	Mode           string `json:"mode"`
+	Target         string `json:"target"`
+	IPv4Policy     string `json:"ipv4_policy"`
+	IPv6Policy     string `json:"ipv6_policy"`
+	TTLPolicy      string `json:"ttl_policy"`
+	FallbackPolicy string `json:"fallback_policy"`
 }
 
 type TLSIntent struct {
@@ -346,12 +356,19 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 		}
 		return model.NormalizeAppRoutePathPrefix(out.Routes[i].PathPrefix) < model.NormalizeAppRoutePathPrefix(out.Routes[j].PathPrefix)
 	})
-	sort.Slice(out.DNS, func(i, j int) bool { return out.DNS[i].Hostname < out.DNS[j].Hostname })
 	sort.Slice(out.TLS, func(i, j int) bool { return out.TLS[i].Hostname < out.TLS[j].Hostname })
 	for i := range out.DNS {
+		if out.DNS[i].Flatten != nil {
+			value := *out.DNS[i].Flatten
+			out.DNS[i].Flatten = &value
+		}
+		out.DNS[i].Hostname = normalizedImportHostname(out.DNS[i].Hostname)
 		out.DNS[i].Type = strings.ToUpper(strings.TrimSpace(out.DNS[i].Type))
-		out.DNS[i].Values = uniqueSorted(out.DNS[i].Values)
+		out.DNS[i].Values = normalizeDNSValues(out.DNS[i].Type, out.DNS[i].Values)
 	}
+	sort.Slice(out.DNS, func(i, j int) bool {
+		return out.DNS[i].Hostname+"\x00"+out.DNS[i].Type < out.DNS[j].Hostname+"\x00"+out.DNS[j].Type
+	})
 	return out
 }
 
@@ -410,6 +427,9 @@ func validateIntent(in PlatformIntent) error {
 		if err := ValidateUpstreamIntents(route.Upstreams); err != nil {
 			return err
 		}
+	}
+	if err := ValidateDNSIntents(in.DNS); err != nil {
+		return err
 	}
 	return ValidateRouteBehavior(in.Routes, in.CachePolicies)
 }
