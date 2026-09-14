@@ -53,6 +53,9 @@ func TestBusinessDNSProjectionPreservesDesiredBindingsAndStaticInputs(t *testing
 	if first[1].AppID != "app-id" {
 		t.Fatal("source_ref hostname used as app identity")
 	}
+	if first[1].Application == nil || first[1].Application.IPv4Policy != "auto" || first[1].Application.TTLPolicy != "bounded" {
+		t.Fatal("application DNS behavior was lost")
+	}
 	if first[0].Flatten == nil || first[0].Flatten.Target != "external.example" {
 		t.Fatal("flatten intent lost")
 	}
@@ -69,5 +72,21 @@ func TestBusinessDNSProjectionPreservesDesiredBindingsAndStaticInputs(t *testing
 	static[0].Values[0] = "changed"
 	if first[2].Values[0] != "ns.example" {
 		t.Fatal("static values alias input")
+	}
+}
+
+func TestBusinessDNSProjectionResolvesNamesToStableOwnedApplicationIDs(t *testing.T) {
+	zones := []model.HostedZone{{ID: "zone", ZoneName: "example.test", TenantID: "tenant", Status: model.HostedZoneStatusActive}}
+	apps := map[string]model.App{"id-a": {ID: "id-a", TenantID: "tenant", Name: "display-name"}}
+	records := []model.DNSRecord{{ID: "dns", ZoneID: "zone", TenantID: "tenant", FQDN: "app.example.test", Type: "FUGUE_APP", Values: []string{"display-name"}, TTL: 60, FlattenIPv4Policy: "ipv4_only", FlattenTTLPolicy: "min", FlattenFallbackPolicy: "stale_if_error"}}
+	result := platformIntentProjectionResponse{}
+	projected, _ := projectBusinessDNSDraft(&result, apps, zones, records, nil)
+	if len(projected) != 1 || projected[0].AppID != "id-a" || !reflect.DeepEqual(projected[0].Values, []string{"id-a"}) || projected[0].Application.IPv4Policy != "ipv4_only" || projected[0].Application.TTLPolicy != "min" || projected[0].Application.FallbackPolicy != "stale_if_error" {
+		t.Fatalf("application desired configuration lost: %+v", projected)
+	}
+	apps["id-b"] = model.App{ID: "id-b", TenantID: "tenant", Name: "display-name"}
+	ambiguous, _ := projectBusinessDNSDraft(&result, apps, zones, records, nil)
+	if ambiguous[0].AppID != "" {
+		t.Fatal("ambiguous name silently selected an app")
 	}
 }

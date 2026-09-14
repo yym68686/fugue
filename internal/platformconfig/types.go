@@ -61,19 +61,29 @@ type RouteIntent struct {
 }
 
 type DNSIntent struct {
-	ValueExpirations    map[string]time.Time `json:"value_expirations,omitempty"`
-	Flatten             *DNSFlattenIntent    `json:"flatten,omitempty"`
-	Hostname            string               `json:"hostname"`
-	Type                string               `json:"type"`
-	Values              []string             `json:"values"`
-	TTL                 int                  `json:"ttl"`
-	RecordKind          string               `json:"record_kind,omitempty"`
-	Status              string               `json:"status,omitempty"`
-	StatusReason        string               `json:"status_reason,omitempty"`
-	AppID               string               `json:"app_id,omitempty"`
-	TenantID            string               `json:"tenant_id,omitempty"`
-	EdgeGroupID         string               `json:"edge_group_id,omitempty"`
-	FallbackEdgeGroupID string               `json:"fallback_edge_group_id,omitempty"`
+	Application         *DNSApplicationIntent `json:"application,omitempty"`
+	ValueExpirations    map[string]time.Time  `json:"value_expirations,omitempty"`
+	Flatten             *DNSFlattenIntent     `json:"flatten,omitempty"`
+	Hostname            string                `json:"hostname"`
+	Type                string                `json:"type"`
+	Values              []string              `json:"values"`
+	TTL                 int                   `json:"ttl"`
+	RecordKind          string                `json:"record_kind,omitempty"`
+	Status              string                `json:"status,omitempty"`
+	StatusReason        string                `json:"status_reason,omitempty"`
+	AppID               string                `json:"app_id,omitempty"`
+	TenantID            string                `json:"tenant_id,omitempty"`
+	EdgeGroupID         string                `json:"edge_group_id,omitempty"`
+	FallbackEdgeGroupID string                `json:"fallback_edge_group_id,omitempty"`
+}
+
+// DNSApplicationIntent preserves desired policies for a symbolic app binding.
+// Selected addresses and readiness must be captured separately as runtime facts.
+type DNSApplicationIntent struct {
+	IPv4Policy     string `json:"ipv4_policy"`
+	IPv6Policy     string `json:"ipv6_policy"`
+	TTLPolicy      string `json:"ttl_policy"`
+	FallbackPolicy string `json:"fallback_policy"`
 }
 
 type DNSFlattenIntent struct {
@@ -373,6 +383,10 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 	})
 	sort.Slice(out.TLS, func(i, j int) bool { return out.TLS[i].Hostname < out.TLS[j].Hostname })
 	for i := range out.DNS {
+		if out.DNS[i].Application != nil {
+			value := *out.DNS[i].Application
+			out.DNS[i].Application = &value
+		}
 		if out.DNS[i].ValueExpirations != nil {
 			out.DNS[i].ValueExpirations = cloneDNSExpirations(out.DNS[i].ValueExpirations)
 		}
@@ -447,6 +461,9 @@ func validateIntent(in PlatformIntent) error {
 		}
 	}
 	if err := validateDNSConfiguration(in.DNS); err != nil {
+		return err
+	}
+	if err := validateDNSApplicationOwners(in.DNS, in.Routes); err != nil {
 		return err
 	}
 	if err := ValidateACMEChallenges(in.ACMEChallenges); err != nil {

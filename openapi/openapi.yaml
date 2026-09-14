@@ -30498,6 +30498,8 @@ components:
       additionalProperties: false
       required: [hostname, type, values, ttl]
       properties:
+        application:
+          $ref: "#/components/schemas/PlatformDNSApplicationIntent"
         value_expirations:
           type: object
           additionalProperties: {type: string, format: date-time}
@@ -30508,7 +30510,7 @@ components:
           type: string
         type:
           type: string
-          description: Wire DNS types or ALIAS/ANAME with typed flatten configuration and matching fixed observations. FUGUE_APP still requires placement resolution.
+          description: Wire DNS types, ALIAS/ANAME with typed flatten configuration, or FUGUE_APP with typed application configuration. FUGUE_APP requires app_id, tenant_id, values containing that exact app_id, and an owned route at the same hostname. Application configuration may be validated and versioned, but compilation remains rejected until placement resolution is supported.
         values:
           type: array
           items:
@@ -30533,6 +30535,16 @@ components:
           type: string
         fallback_edge_group_id:
           type: string
+    PlatformDNSApplicationIntent:
+      type: object
+      additionalProperties: false
+      required: [ipv4_policy, ipv6_policy, ttl_policy, fallback_policy]
+      description: Desired application DNS behavior; no selected IP addresses, route readiness or TLS readiness. Only valid for a FUGUE_APP record. Requires placement resolution before compilation.
+      properties:
+        ipv4_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
+        ipv6_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
+        ttl_policy: {type: string, enum: [record, target, min, bounded]}
+        fallback_policy: {type: string, enum: [fail_closed, stale_if_error, empty_noerror]}
     PlatformDNSFlattenIntent:
       type: object
       additionalProperties: false

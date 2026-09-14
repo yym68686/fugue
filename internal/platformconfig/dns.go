@@ -20,6 +20,9 @@ func ValidateDNSIntents(records []DNSIntent) error {
 	seen := make(map[string]bool, len(records))
 	typesByHost := make(map[string]map[string]bool, len(records))
 	for _, record := range records {
+		if record.Application != nil {
+			return fmt.Errorf("DNS application configuration requires placement resolution before wire encoding")
+		}
 		if len(record.ValueExpirations) > 0 {
 			if record.Type != "TXT" {
 				return fmt.Errorf("DNS value expirations require TXT")

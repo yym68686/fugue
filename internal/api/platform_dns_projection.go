@@ -103,8 +103,15 @@ func projectBusinessDNSDraft(result *platformIntentProjectionResponse, apps map[
 		}
 		desired := platformconfig.DNSIntent{Hostname: host, Type: record.Type, Values: append([]string(nil), record.Values...), TTL: record.TTL, RecordKind: model.EdgeDNSRecordKindHosted, TenantID: record.TenantID}
 		if record.Type == model.DNSRecordTypeFUGUEAPP {
+			desired.Application = &platformconfig.DNSApplicationIntent{
+				IPv4Policy:     model.NormalizeDNSRecordFlattenIPPolicy(record.FlattenIPv4Policy),
+				IPv6Policy:     model.NormalizeDNSRecordFlattenIPPolicy(record.FlattenIPv6Policy),
+				TTLPolicy:      model.NormalizeDNSRecordFlattenTTLPolicy(record.FlattenTTLPolicy),
+				FallbackPolicy: model.NormalizeDNSRecordFlattenFallbackPolicy(record.FlattenFallbackPolicy),
+			}
 			if app, ok := resolveDNSIntentApp(record, apps); ok {
 				desired.AppID = app.ID
+				desired.Values = []string{app.ID}
 			} else {
 				issue("dns_app_reference_unresolved", host)
 			}

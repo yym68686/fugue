@@ -59,6 +59,12 @@ func validateDNSConfiguration(records []DNSIntent) error {
 			return fmt.Errorf("duplicate DNS input")
 		}
 		seen[key] = true
+		if record.Application != nil || record.Type == "FUGUE_APP" {
+			if err := validateDNSApplicationConfiguration(record); err != nil {
+				return err
+			}
+			continue
+		}
 		f := record.Flatten
 		if f == nil {
 			wire = append(wire, record)
@@ -113,6 +119,15 @@ func validateDNSConfiguration(records []DNSIntent) error {
 			return err
 		}
 	}
+	for _, record := range records {
+		if record.Application != nil {
+			for _, kind := range []string{"A", "AAAA", "CNAME", "ALIAS", "ANAME"} {
+				if seen[record.Hostname+"\x00"+kind] {
+					return fmt.Errorf("DNS application binding conflicts with another address source")
+				}
+			}
+		}
+	}
 	return ValidateDNSIntents(wire)
 }
 
@@ -122,6 +137,11 @@ func validateDNSConfiguration(records []DNSIntent) error {
 func ResolveDNSFlatten(records []DNSIntent, snapshot RuntimeSnapshot, policy PolicySnapshot) ([]DNSIntent, error) {
 	if err := validateDNSConfiguration(records); err != nil {
 		return nil, err
+	}
+	for _, record := range records {
+		if record.Application != nil {
+			return nil, fmt.Errorf("DNS application bindings require fixed placement resolution before compilation")
+		}
 	}
 	if len(snapshot.DNSFlatten) > 10000 {
 		return nil, fmt.Errorf("too many flatten observations")
