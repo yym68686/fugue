@@ -19,6 +19,7 @@ func main() {
 	defer stop()
 
 	service := edge.NewServiceWithEdgeSources(cfg, edge.RouteBundleSourceFromEnv(), edge.InventoryProducerConfigFromEnv(), logger)
+	service.PlatformTokenFile = cfg.PlatformTokenFile
 	if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Fatalf("edge exited: %v", err)
 	}

@@ -66,6 +66,7 @@ const (
 
 type Service struct {
 	Config            config.EdgeConfig
+	PlatformTokenFile string
 	RouteBundleSource RouteBundleSourceConfig
 	// requireEdgeControlRouteSource is false only for package-local unit
 	// fixtures. Production constructors always set it to true.
@@ -108,46 +109,49 @@ type Service struct {
 	activeProxyRequests   int64
 	walMu                 sync.Mutex
 	walActionLast         map[string]time.Time
+	platformConsumerMu    sync.Mutex
+	platformCandidate     PlatformCandidateStatus
 }
 
 type Status struct {
-	Status                       string     `json:"status"`
-	Healthy                      bool       `json:"healthy"`
-	EdgeID                       string     `json:"edge_id,omitempty"`
-	EdgeGroupID                  string     `json:"edge_group_id,omitempty"`
-	BundleVersion                string     `json:"bundle_version,omitempty"`
-	RouteBundleSource            string     `json:"route_bundle_source,omitempty"`
-	PublicationSequence          uint64     `json:"publication_sequence,omitempty"`
-	RecoveryEpoch                uint64     `json:"recovery_epoch,omitempty"`
-	ServingGeneration            string     `json:"serving_generation,omitempty"`
-	LKGGeneration                string     `json:"lkg_generation,omitempty"`
-	LastGoodGeneration           string     `json:"last_good_generation,omitempty"`
-	CacheCorruptGeneration       string     `json:"cache_corrupt_generation,omitempty"`
-	BundleValidUntil             *time.Time `json:"bundle_valid_until,omitempty"`
-	RouteCount                   int        `json:"route_count"`
-	TLSAllowlistCount            int        `json:"tls_allowlist_count"`
-	LastSyncAt                   *time.Time `json:"last_sync_at,omitempty"`
-	LastSuccessAt                *time.Time `json:"last_success_at,omitempty"`
-	LastError                    string     `json:"last_error,omitempty"`
-	DegradedReason               string     `json:"degraded_reason,omitempty"`
-	StaleCache                   bool       `json:"stale_cache"`
-	MaxStaleExceeded             bool       `json:"max_stale_exceeded,omitempty"`
-	FailureClass                 string     `json:"failure_class,omitempty"`
-	CachePath                    string     `json:"cache_path,omitempty"`
-	CaddyEnabled                 bool       `json:"caddy_enabled,omitempty"`
-	CaddyListenAddr              string     `json:"caddy_listen_addr,omitempty"`
-	CaddyTLSMode                 string     `json:"caddy_tls_mode,omitempty"`
-	CaddyAppliedVersion          string     `json:"caddy_applied_version,omitempty"`
-	CaddyLastApplyAt             *time.Time `json:"caddy_last_apply_at,omitempty"`
-	CaddyLastError               string     `json:"caddy_last_error,omitempty"`
-	InventoryProducerActive      bool       `json:"inventory_producer_active,omitempty"`
-	InventoryHeartbeatAt         *time.Time `json:"inventory_heartbeat_at,omitempty"`
-	InventoryHeartbeatGeneration uint64     `json:"inventory_heartbeat_generation,omitempty"`
-	InventoryHeartbeatError      string     `json:"inventory_heartbeat_error,omitempty"`
-	CandidateBundleLoaded        bool       `json:"candidate_bundle_loaded,omitempty"`
-	CandidateRecordDigest        string     `json:"candidate_record_digest,omitempty"`
-	CandidateReleaseRecordDigest string     `json:"candidate_release_record_digest,omitempty"`
-	CandidateWorkerSlot          string     `json:"candidate_worker_slot,omitempty"`
+	Status                       string                  `json:"status"`
+	Healthy                      bool                    `json:"healthy"`
+	EdgeID                       string                  `json:"edge_id,omitempty"`
+	EdgeGroupID                  string                  `json:"edge_group_id,omitempty"`
+	BundleVersion                string                  `json:"bundle_version,omitempty"`
+	RouteBundleSource            string                  `json:"route_bundle_source,omitempty"`
+	PublicationSequence          uint64                  `json:"publication_sequence,omitempty"`
+	RecoveryEpoch                uint64                  `json:"recovery_epoch,omitempty"`
+	ServingGeneration            string                  `json:"serving_generation,omitempty"`
+	LKGGeneration                string                  `json:"lkg_generation,omitempty"`
+	LastGoodGeneration           string                  `json:"last_good_generation,omitempty"`
+	CacheCorruptGeneration       string                  `json:"cache_corrupt_generation,omitempty"`
+	BundleValidUntil             *time.Time              `json:"bundle_valid_until,omitempty"`
+	RouteCount                   int                     `json:"route_count"`
+	TLSAllowlistCount            int                     `json:"tls_allowlist_count"`
+	LastSyncAt                   *time.Time              `json:"last_sync_at,omitempty"`
+	LastSuccessAt                *time.Time              `json:"last_success_at,omitempty"`
+	LastError                    string                  `json:"last_error,omitempty"`
+	DegradedReason               string                  `json:"degraded_reason,omitempty"`
+	StaleCache                   bool                    `json:"stale_cache"`
+	MaxStaleExceeded             bool                    `json:"max_stale_exceeded,omitempty"`
+	FailureClass                 string                  `json:"failure_class,omitempty"`
+	CachePath                    string                  `json:"cache_path,omitempty"`
+	CaddyEnabled                 bool                    `json:"caddy_enabled,omitempty"`
+	CaddyListenAddr              string                  `json:"caddy_listen_addr,omitempty"`
+	CaddyTLSMode                 string                  `json:"caddy_tls_mode,omitempty"`
+	CaddyAppliedVersion          string                  `json:"caddy_applied_version,omitempty"`
+	CaddyLastApplyAt             *time.Time              `json:"caddy_last_apply_at,omitempty"`
+	CaddyLastError               string                  `json:"caddy_last_error,omitempty"`
+	InventoryProducerActive      bool                    `json:"inventory_producer_active,omitempty"`
+	InventoryHeartbeatAt         *time.Time              `json:"inventory_heartbeat_at,omitempty"`
+	InventoryHeartbeatGeneration uint64                  `json:"inventory_heartbeat_generation,omitempty"`
+	InventoryHeartbeatError      string                  `json:"inventory_heartbeat_error,omitempty"`
+	CandidateBundleLoaded        bool                    `json:"candidate_bundle_loaded,omitempty"`
+	CandidateRecordDigest        string                  `json:"candidate_record_digest,omitempty"`
+	CandidateReleaseRecordDigest string                  `json:"candidate_release_record_digest,omitempty"`
+	CandidateWorkerSlot          string                  `json:"candidate_worker_slot,omitempty"`
+	PlatformCandidate            PlatformCandidateStatus `json:"platform_candidate,omitempty"`
 }
 
 type edgeDesiredStateEnvelope struct {
@@ -607,6 +611,7 @@ func (s *Service) Run(ctx context.Context) error {
 	_ = s.SyncOnce(ctx)
 	s.startHeartbeatLoop(ctx)
 	s.startInventoryProducerLoop(ctx)
+	go s.runPlatformShadowConsumer(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()
@@ -953,7 +958,9 @@ func (s *Service) ProxyHandler() http.Handler {
 func (s *Service) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.snapshot
+	out := s.snapshot
+	out.PlatformCandidate = s.platformCandidate
+	return out
 }
 
 func (s *Service) Bundle() (model.EdgeRouteBundle, bool) {

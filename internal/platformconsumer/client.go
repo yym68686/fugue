@@ -84,6 +84,16 @@ func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string)
 	return id, *chosen, envelope.Artifact, envelope.Release, nil
 }
 
+func (c Client) PostJSON(ctx context.Context, path, token string, in, out any) error {
+	base, err := url.Parse(strings.TrimSpace(c.BaseURL))
+	if err != nil {
+		return errors.New("platform API endpoint is invalid")
+	}
+	base.RawQuery, base.Fragment = "", ""
+	base.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(path, "/")
+	return c.json(ctx, base.String(), token, http.MethodPost, in, out)
+}
+
 func (c Client) json(ctx context.Context, endpoint, token, method string, in, out any) error {
 	var body io.Reader
 	if in != nil {

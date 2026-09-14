@@ -282,6 +282,7 @@ type EdgeConfig struct {
 	BundleSigningPreviousKey        string
 	BundleSigningPreviousKeyID      string
 	BundleRevokedKeyIDs             []string
+	PlatformTokenFile               string
 }
 
 type DNSConfig struct {
@@ -686,6 +687,7 @@ func EdgeFromEnv() EdgeConfig {
 		BundleSigningPreviousKey:   strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
 		BundleSigningPreviousKeyID: strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
 		BundleRevokedKeyIDs:        getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
+		PlatformTokenFile:          strings.TrimSpace(os.Getenv("FUGUE_EDGE_PLATFORM_TOKEN_FILE")),
 	}
 }
 
