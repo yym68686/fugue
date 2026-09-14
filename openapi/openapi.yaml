@@ -30374,6 +30374,16 @@ components:
       properties:
         hostname:
           type: string
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        runtime_id:
+          type: string
+          description: Desired runtime identity, bound to an origin observation when origin_ref is provided.
+        origin_ref:
+          type: string
+          description: Reference to an explicit origin observation in the fixed runtime snapshot. Inline status does not supply the observation.
         path_prefix:
           type: string
           description: Canonical route path, defaults to /. Different paths on the same hostname are distinct routes.
@@ -30692,6 +30702,14 @@ components:
       additionalProperties: false
       required: [intent_generation, policy_generation]
       properties:
+        captured_at:
+          type: string
+          format: date-time
+          description: Fixed freshness reference for origin observations, required when origins are present. Compiler wall clock is never used.
+        origins:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformOriginObservation"
         intent_generation:
           type: string
         policy_generation:
@@ -30713,6 +30731,29 @@ components:
         input_snapshot:
           type: object
           additionalProperties: true
+    PlatformOriginObservation:
+      type: object
+      additionalProperties: false
+      required: [ref, observed_at, status]
+      properties:
+        ref:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [active, disabled, unavailable]
+        status_reason:
+          type: string
+        runtime_id:
+          type: string
+        runtime_type:
+          type: string
+        runtime_edge_group_id:
+          type: string
+        runtime_cluster_node:
+          type: string
     PlatformConfigCompileResponse:
       type: object
       additionalProperties: false

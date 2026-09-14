@@ -100,7 +100,7 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 		return model.EdgeRouteIntentSnapshot{}, err
 	}
 	var routes []struct {
-		platformconfig.RouteIntent
+		platformconfig.CompiledRoute
 		Enabled *bool `json:"enabled"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -192,6 +192,8 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 			}
 		}
 		intent := edgeRouteIntentFromPlatformRoute(legacy)
+		intent.AppID, intent.TenantID, intent.RuntimeID = route.AppID, route.TenantID, route.RuntimeID
+		intent.RuntimeType, intent.RuntimeEdgeGroupID, intent.RuntimeClusterNode = route.RuntimeType, route.RuntimeEdgeGroupID, route.RuntimeClusterNode
 		if intent.OriginStatus == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(intent.RoutePolicy) {
 			intent.Upstreams = platformconfig.ProjectUpstreamIntents(route.Upstreams)
 		}

@@ -235,3 +235,49 @@ func TestCompiledWeightedUpstreamsProjectWithoutRuntimeFacts(t *testing.T) {
 		t.Fatalf("weighted intent mixed runtime facts or changed order: %+v", upstreams)
 	}
 }
+
+func TestCompiledOriginObservationPreservesDisabledTrafficAndIdentity(t *testing.T) {
+	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	captured := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, status := range []string{model.EdgeRouteStatusActive, model.EdgeRouteStatusUnavailable, model.EdgeRouteStatusDisabled} {
+		t.Run(status, func(t *testing.T) {
+			response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
+				Intent: platformconfig.PlatformIntent{Generation: "origin-test-intent", Routes: []platformconfig.RouteIntent{{
+					Hostname: "origin.example.test", AppID: "app-test", TenantID: "tenant-test", RuntimeID: "runtime-test", OriginRef: "origin-test",
+					UpstreamURL: "http://service:8080", Enabled: true,
+					Upstreams: []platformconfig.UpstreamIntent{{Weight: 100, UpstreamURL: "http://service:8080"}},
+				}}},
+				Policy: platformconfig.PolicySnapshot{Generation: "origin-test-policy", MaxStaleSeconds: 60},
+				RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &captured, Origins: []platformconfig.OriginObservation{{
+					Ref: "origin-test", ObservedAt: captured, Status: status, RuntimeID: "runtime-test", RuntimeType: "managed", RuntimeEdgeGroupID: "edge-group-test", RuntimeClusterNode: "node-test",
+				}}},
+			})
+			if response.Code != http.StatusCreated {
+				t.Fatalf("compile: %d %s", response.Code, response.Body.String())
+			}
+			var compiled platformConfigCompileResponse
+			mustDecodeJSON(t, response, &compiled)
+			projection, err := projectPlatformRouteArtifact(compiled.RouteArtifact)
+			if err != nil || len(projection.Routes) != 1 {
+				t.Fatalf("projection: %+v %v", projection, err)
+			}
+			route := projection.Routes[0]
+			if route.AppID != "app-test" || route.TenantID != "tenant-test" || route.RuntimeID != "runtime-test" || route.RuntimeClusterNode != "node-test" || route.RuntimeEdgeGroupID != "edge-group-test" {
+				t.Fatalf("origin identity lost: %+v", route)
+			}
+			if route.OriginStatus != status {
+				t.Fatalf("origin status lost: %+v", route)
+			}
+			if status == model.EdgeRouteStatusActive {
+				if route.UpstreamURL != "http://service:8080" || len(route.Upstreams) != 1 {
+					t.Fatal("active origin cannot serve")
+				}
+			} else if route.UpstreamURL != "" || len(route.Upstreams) != 0 {
+				t.Fatal("unavailable/disabled origin regained traffic")
+			}
+			if routes := compiled.IntentArtifact.Content["routes"].([]any); routes[0].(map[string]any)["status"] != nil {
+				t.Fatal("origin status was stored as intent")
+			}
+		})
+	}
+}

@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v5"
+	CompilerVersion = "platform-config-compiler/v6"
 	GlobalScopeKey  = "global"
 )
 
@@ -53,6 +53,10 @@ type RouteIntent struct {
 	CacheNamespace       string                        `json:"cache_namespace,omitempty"`
 	DeploymentGeneration string                        `json:"deployment_generation,omitempty"`
 	RequestBodyPolicies  []model.EdgeRequestBodyPolicy `json:"request_body_policies,omitempty"`
+	AppID                string                        `json:"app_id,omitempty"`
+	TenantID             string                        `json:"tenant_id,omitempty"`
+	RuntimeID            string                        `json:"runtime_id,omitempty"`
+	OriginRef            string                        `json:"origin_ref,omitempty"`
 }
 
 type DNSIntent struct {
@@ -139,9 +143,11 @@ type CompileRequest struct {
 // RuntimeSnapshot is the immutable runtime fact view used by one compiler
 // invocation. It is input data, never serving configuration.
 type RuntimeSnapshot struct {
-	IntentGeneration string         `json:"intent_generation"`
-	PolicyGeneration string         `json:"policy_generation"`
-	Facts            map[string]any `json:"facts,omitempty"`
+	IntentGeneration string              `json:"intent_generation"`
+	PolicyGeneration string              `json:"policy_generation"`
+	Facts            map[string]any      `json:"facts,omitempty"`
+	CapturedAt       *time.Time          `json:"captured_at,omitempty"`
+	Origins          []OriginObservation `json:"origins,omitempty"`
 }
 
 type CompileResult struct {
@@ -181,7 +187,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
-	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && req.InputSnapshot != nil {
+	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && req.InputSnapshot != nil {
 		runtimeSnapshot = RuntimeSnapshot{IntentGeneration: intent.Generation, PolicyGeneration: policy.Generation, Facts: req.InputSnapshot}
 	}
 	if runtimeSnapshot.IntentGeneration == "" {
@@ -192,6 +198,12 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	}
 	if runtimeSnapshot.IntentGeneration != intent.Generation || runtimeSnapshot.PolicyGeneration != policy.Generation {
 		return CompileResult{}, fmt.Errorf("runtime snapshot generations must match intent and policy")
+	}
+	runtimeSnapshot.Origins = append([]OriginObservation(nil), runtimeSnapshot.Origins...)
+	sort.Slice(runtimeSnapshot.Origins, func(i, j int) bool { return runtimeSnapshot.Origins[i].Ref < runtimeSnapshot.Origins[j].Ref })
+	compiledRoutes, err := ResolveRouteOrigins(intent.Routes, runtimeSnapshot, policy)
+	if err != nil {
+		return CompileResult{}, err
 	}
 	snapshotDigest := ""
 	if runtimeSnapshot.Facts != nil || runtimeSnapshot.IntentGeneration != "" || runtimeSnapshot.PolicyGeneration != "" {
@@ -224,7 +236,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	routePayload := map[string]any{
 		"schema_version": SchemaVersion,
 		"generation":     intent.Generation,
-		"routes":         intent.Routes,
+		"routes":         compiledRoutes,
 		"policy":         policy,
 		"lineage":        lineage,
 	}
@@ -346,6 +358,9 @@ func validateIntent(in PlatformIntent) error {
 		}
 		if route.ServicePort < 0 || route.ServicePort > 65535 {
 			return fmt.Errorf("route intent service_port is outside 0..65535")
+		}
+		if route.OriginRef != "" && (route.OriginRef != strings.TrimSpace(route.OriginRef) || strings.TrimSpace(route.RuntimeID) == "") {
+			return fmt.Errorf("route origin_ref requires a canonical reference and explicit runtime_id")
 		}
 		key := strings.Trim(strings.ToLower(strings.TrimSpace(route.Hostname)), ".") + "\x00" + path
 		if _, ok := seen[key]; ok {

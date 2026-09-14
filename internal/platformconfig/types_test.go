@@ -20,6 +20,66 @@ func TestRoutePathCompilerPreservesLegacyIntentDigest(t *testing.T) {
 	}
 }
 
+func TestCompileOriginsAreFixedFactsAndNeverMutateIntent(t *testing.T) {
+	captured := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	request := CompileRequest{
+		Intent:          PlatformIntent{Generation: "intent-origin", Routes: []RouteIntent{{Hostname: "origin.example", UpstreamURL: "http://service:8080", Enabled: true, RuntimeID: "runtime-a", OriginRef: "origin-a"}}},
+		Policy:          PolicySnapshot{Generation: "policy-origin", MaxStaleSeconds: 60},
+		RuntimeSnapshot: RuntimeSnapshot{CapturedAt: &captured, Origins: []OriginObservation{{Ref: "origin-a", ObservedAt: captured.Add(-time.Second), Status: "unavailable", StatusReason: "endpoint pending", RuntimeID: "runtime-a", RuntimeType: "managed", RuntimeEdgeGroupID: "edge-group-test", RuntimeClusterNode: "node-test"}}},
+	}
+	failed, err := Compile(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Intent.Routes[0].Status != "" || !request.Intent.Routes[0].Enabled {
+		t.Fatal("runtime facts mutated intent")
+	}
+	readRoutes := func(artifact map[string]any) []CompiledRoute {
+		raw, _ := json.Marshal(artifact["routes"])
+		var routes []CompiledRoute
+		if err := json.Unmarshal(raw, &routes); err != nil {
+			t.Fatal(err)
+		}
+		return routes
+	}
+	if route := readRoutes(failed.RouteArtifact.Content)[0]; route.Status != "unavailable" || route.RuntimeClusterNode != "node-test" {
+		t.Fatalf("fixed observation lost: %+v", route)
+	}
+	request.CreatedAt = captured.Add(time.Hour)
+	replay, err := Compile(request)
+	if err != nil || !reflect.DeepEqual(failed.RouteArtifact.Content, replay.RouteArtifact.Content) {
+		t.Fatal("wall clock changed origin compilation", err)
+	}
+	request.RuntimeSnapshot.Origins[0].Status = "active"
+	healthy, err := Compile(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthy.Lineage.IntentDigest != failed.Lineage.IntentDigest || healthy.Lineage.PolicyDigest != failed.Lineage.PolicyDigest || healthy.Lineage.InputSnapshotDigest == failed.Lineage.InputSnapshotDigest || reflect.DeepEqual(healthy.RouteArtifact.Content, failed.RouteArtifact.Content) {
+		t.Fatal("origin facts did not remain separate in lineage")
+	}
+	if readRoutes(healthy.RouteArtifact.Content)[0].Status != "" {
+		t.Fatal("origin recovery did not restore declared state")
+	}
+	for _, mutate := range []func(*CompileRequest){
+		func(r *CompileRequest) { r.RuntimeSnapshot.Origins = nil },
+		func(r *CompileRequest) { r.RuntimeSnapshot.CapturedAt = nil },
+		func(r *CompileRequest) { r.RuntimeSnapshot.Origins[0].ObservedAt = captured.Add(-61 * time.Second) },
+		func(r *CompileRequest) { r.RuntimeSnapshot.Origins[0].ObservedAt = captured.Add(time.Second) },
+		func(r *CompileRequest) { r.RuntimeSnapshot.Origins[0].RuntimeID = "runtime-other" },
+		func(r *CompileRequest) {
+			r.RuntimeSnapshot.Origins = append(r.RuntimeSnapshot.Origins, r.RuntimeSnapshot.Origins[0])
+		},
+	} {
+		invalid := request
+		invalid.RuntimeSnapshot.Origins = append([]OriginObservation(nil), request.RuntimeSnapshot.Origins...)
+		mutate(&invalid)
+		if _, err := Compile(invalid); err == nil {
+			t.Fatal("invalid origin facts accepted")
+		}
+	}
+}
+
 func TestRoutePathCompilerDeterminismAndValidation(t *testing.T) {
 	disabledStreaming := false
 	input := CompileRequest{
