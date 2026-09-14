@@ -23,6 +23,7 @@ import (
 	"fugue/internal/failover"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
@@ -30,6 +31,7 @@ import (
 )
 
 type Server struct {
+	newObjectStorageClient                 func(string, string) *objectstorage.Client
 	store                                  *store.Store
 	auth                                   *auth.Authenticator
 	log                                    *log.Logger

@@ -11302,6 +11302,247 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/object-storage:
+    get:
+      operationId: getObjectStorageConfig
+      summary: getObjectStorageConfig
+      description: Platform administrators only. Returns configuration status without credentials.
+      tags: [Object Storage]
+      x-fugue-handler: handleGetObjectStorageConfig
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStorageConfigStatus"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: configureObjectStorage
+      summary: configureObjectStorage
+      description: Platform administrators only. Verifies Cloudflare account permissions then encrypts the management token. Existing account identity cannot change while resources exist.
+      tags: [Object Storage]
+      x-fugue-handler: handleConfigureObjectStorage
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObjectStorageConfigRequest"
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStorageConfigStatus"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/object-stores:
+    get:
+      operationId: listObjectStores
+      summary: listObjectStores
+      description: List stores belonging to the caller tenant and permitted project. Requires storage.read or storage.admin.
+      tags: [Object Storage]
+      x-fugue-handler: handleListObjectStores
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          schema: {type: string}
+        - in: query
+          name: project_id
+          schema: {type: string}
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStoreList"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createObjectStore
+      summary: createObjectStore
+      description: Explicitly provision a private independent R2 bucket. Requires storage.admin. Name is unique within the project; retries resume provisioning. No backup objects are used.
+      tags: [Object Storage]
+      x-fugue-handler: handleCreateObjectStore
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObjectStoreCreateRequest"
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStoreEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/object-stores/{store_id}:
+    get:
+      operationId: getObjectStore
+      summary: getObjectStore
+      description: getObjectStore
+      tags: [Object Storage]
+      x-fugue-handler: handleGetObjectStore
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: store_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStoreEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      operationId: updateObjectStore
+      summary: updateObjectStore
+      description: Requires storage.admin. Disabling revokes all issued credentials before marking disabled and retains every object. Enabling does not restore revoked credentials. Quota is a measured soft budget.
+      tags: [Object Storage]
+      x-fugue-handler: handleUpdateObjectStore
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: store_id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObjectStoreUpdateRequest"
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStoreEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/object-stores/{store_id}/credentials:
+    get:
+      operationId: listObjectStoreCredentials
+      summary: listObjectStoreCredentials
+      description: listObjectStoreCredentials
+      tags: [Object Storage]
+      x-fugue-handler: handleListObjectStoreCredentials
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: store_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStorageCredentialList"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createObjectStoreCredential
+      summary: createObjectStoreCredential
+      description: Requires storage.admin. Create a bucket-scoped read-only or read-write credential for an explicit application in the same tenant. Returned secret must not be logged. Different projects require explicit tenant-level authorization.
+      tags: [Object Storage]
+      x-fugue-handler: handleCreateObjectStoreCredential
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: store_id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObjectStorageCredentialRequest"
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStorageConnection"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/object-stores/{store_id}/credentials/{credential_id}:
+    delete:
+      operationId: revokeObjectStoreCredential
+      summary: revokeObjectStoreCredential
+      description: Requires storage.admin. Revokes the upstream credential before reporting revoked; failure remains retryable.
+      tags: [Object Storage]
+      x-fugue-handler: handleRevokeObjectStoreCredential
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: store_id
+          required: true
+          schema: {type: string}
+        - in: path
+          name: credential_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStorageCredentialEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/object-stores/{store_id}/usage:
+    post:
+      operationId: measureObjectStoreUsage
+      summary: measureObjectStoreUsage
+      description: Requires storage.read or storage.admin. Measures current bucket object bytes and object count, with timestamp. Does not claim real-time hard quotas or exact billable request counts.
+      tags: [Object Storage]
+      x-fugue-handler: handleMeasureObjectStoreUsage
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: store_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStoreEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/data/backends:
     get:
       operationId: listDataBackends
@@ -13984,6 +14225,109 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DataTransferPart"
+    ObjectStorageConfigRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, api_token]
+      properties:
+        account_id: {type: string, pattern: '^[a-f0-9]{32}$'}
+        api_token: {type: string, minLength: 20, writeOnly: true}
+    ObjectStorageConfigStatus:
+      type: object
+      required: [configured]
+      properties:
+        configured: {type: boolean}
+        account_id: {type: string}
+        updated_at: {type: string, format: date-time}
+    ObjectStoreCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [project_id, name]
+      properties:
+        tenant_id: {type: string}
+        project_id: {type: string}
+        name: {type: string, pattern: '^[a-z0-9][a-z0-9-]{0,47}$'}
+        quota_bytes: {type: integer, format: int64, minimum: 0}
+    ObjectStoreUpdateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled: {type: boolean}
+        quota_bytes: {type: integer, format: int64, minimum: 0}
+    ObjectStore:
+      type: object
+      required: [id, tenant_id, project_id, name, provider, bucket, endpoint, region, status, quota_bytes, created_at, updated_at]
+      properties:
+        id: {type: string}
+        tenant_id: {type: string}
+        project_id: {type: string}
+        name: {type: string}
+        provider: {type: string, enum: [cloudflare-r2]}
+        bucket: {type: string}
+        endpoint: {type: string}
+        region: {type: string}
+        status: {type: string, enum: [provisioning, active, disabling, disabled]}
+        quota_bytes: {type: integer, format: int64}
+        used_bytes: {type: integer, format: int64}
+        object_count: {type: integer, format: int64}
+        usage_measured_at: {type: string, format: date-time}
+        quota_mode: {type: string, enum: [soft]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ObjectStoreEnvelope:
+      type: object
+      required: [store]
+      properties:
+        store: {$ref: '#/components/schemas/ObjectStore'}
+    ObjectStoreList:
+      type: object
+      required: [stores]
+      properties:
+        stores:
+          type: array
+          items: {$ref: '#/components/schemas/ObjectStore'}
+    ObjectStorageCredentialRequest:
+      type: object
+      additionalProperties: false
+      required: [app_id, name, permission]
+      properties:
+        app_id: {type: string}
+        name: {type: string, pattern: '^[a-z0-9][a-z0-9-]{0,47}$'}
+        permission: {type: string, enum: [read-only, read-write]}
+    ObjectStorageCredential:
+      type: object
+      required: [id, store_id, app_id, name, permission, status, created_at]
+      properties:
+        id: {type: string}
+        store_id: {type: string}
+        app_id: {type: string}
+        name: {type: string}
+        permission: {type: string, enum: [read-only, read-write]}
+        status: {type: string, enum: [provisioning, active, revoking, revoked]}
+        access_key_id: {type: string}
+        created_at: {type: string, format: date-time}
+    ObjectStorageCredentialEnvelope:
+      type: object
+      required: [credential]
+      properties:
+        credential: {$ref: '#/components/schemas/ObjectStorageCredential'}
+    ObjectStorageCredentialList:
+      type: object
+      required: [credentials]
+      properties:
+        credentials:
+          type: array
+          items: {$ref: '#/components/schemas/ObjectStorageCredential'}
+    ObjectStorageConnection:
+      type: object
+      required: [credential, endpoint, region, bucket, access_key_id, secret_access_key]
+      properties:
+        credential: {$ref: '#/components/schemas/ObjectStorageCredential'}
+        endpoint: {type: string}
+        region: {type: string}
+        bucket: {type: string}
+        access_key_id: {type: string}
+        secret_access_key: {type: string}
     DataBackendCredentials:
       type: object
       additionalProperties: false

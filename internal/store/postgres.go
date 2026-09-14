@@ -1360,6 +1360,7 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_source_uploads_tenant_created_at ON fugue_source_uploads (tenant_id, created_at DESC)`,
 	schemamigrate.SourceUploadSessionsSQL,
+	schemamigrate.ObjectStorageSQL,
 	`CREATE TABLE IF NOT EXISTS fugue_data_backends (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

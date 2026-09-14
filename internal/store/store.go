@@ -317,6 +317,11 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		if index < 0 {
 			return ErrNotFound
 		}
+		for _, objectStore := range state.ObjectStorage.Stores {
+			if objectStore.TenantID == id {
+				return ErrConflict
+			}
+		}
 		tenant = state.Tenants[index]
 		state.Tenants = append(state.Tenants[:index], state.Tenants[index+1:]...)
 

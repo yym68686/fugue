@@ -3424,6 +3424,7 @@ func MachinePolicyDedicatedMode(policy MachinePolicy) string {
 }
 
 type State struct {
+	ObjectStorage              ObjectStorageState             `json:"object_storage,omitempty"`
 	DatabaseMigrations         []DatabaseMigration            `json:"database_migrations,omitempty"`
 	SourceUploadSessions       []SourceUploadSession          `json:"source_upload_sessions,omitempty"`
 	Version                    string                         `json:"version"`

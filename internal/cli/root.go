@@ -326,6 +326,7 @@ Environment variables:
 		c.newRuntimeCommand(),
 		c.newServiceCommand(),
 		c.newDataCommand(),
+		c.newObjectStorageCommand(),
 		c.newImageCommand(),
 		c.newBackupCommand(),
 		c.newDNSCommand(),
