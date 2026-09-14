@@ -20,6 +20,23 @@ func ValidateDNSIntents(records []DNSIntent) error {
 	seen := make(map[string]bool, len(records))
 	typesByHost := make(map[string]map[string]bool, len(records))
 	for _, record := range records {
+		if len(record.ValueExpirations) > 0 {
+			if record.Type != "TXT" {
+				return fmt.Errorf("DNS value expirations require TXT")
+			}
+			for value, expiry := range record.ValueExpirations {
+				found := false
+				for _, v := range record.Values {
+					if v == value {
+						found = true
+						break
+					}
+				}
+				if !found || expiry.IsZero() {
+					return fmt.Errorf("DNS value expiration does not identify a valid value")
+				}
+			}
+		}
 		if record.Flatten != nil {
 			return fmt.Errorf("DNS flatten policy requires a resolver before compilation")
 		}

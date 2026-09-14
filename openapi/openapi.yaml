@@ -2492,6 +2492,7 @@ paths:
       summary: Release Platform Artifact
       description: >-
         Platform administrators may use the normal artifact release policy.
+        DNS artifacts containing per-value expiration and ReleaseSets containing them are restricted to shadow until DNS consumers support absolute value leases. Soft overrides cannot bypass this compatibility restriction.
       tags: [Admin]
       x-fugue-handler: handleReleasePlatformArtifact
       security:
@@ -2519,6 +2520,7 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/rollback:
     post:
+      description: Rollback targets containing leased DNS values remain restricted to shadow until DNS consumer expiration support is available.
       operationId: rollbackPlatformArtifact
       summary: Roll Back Platform Artifact
       tags: [Admin]
@@ -30492,6 +30494,10 @@ components:
       additionalProperties: false
       required: [hostname, type, values, ttl]
       properties:
+        value_expirations:
+          type: object
+          additionalProperties: {type: string, format: date-time}
+          description: Absolute expiration per TXT value. Values not in this map remain permanent. Compiler requires a fixed captured_at; consumers must filter expired values and cap TTL at each query. Empty resulting RRsets are omitted.
         flatten:
           $ref: "#/components/schemas/PlatformDNSFlattenIntent"
         hostname:
@@ -30564,6 +30570,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PlatformConfigDNSIntent"
+        acme_challenges:
+          type: array
+          maxItems: 10000
+          items:
+            $ref: "#/components/schemas/PlatformACMEChallengeIntent"
         tls:
           type: array
           items:
@@ -30905,6 +30916,18 @@ components:
           type: string
         runtime_cluster_node:
           type: string
+    PlatformACMEChallengeIntent:
+      type: object
+      additionalProperties: false
+      required: [id, zone, hostname, value, ttl, expires_at]
+      description: Desired temporary TXT record. Expiration is part of intent; a fixed compilation time decides eligibility without changing intent or policy.
+      properties:
+        id: {type: string}
+        zone: {type: string}
+        hostname: {type: string}
+        value: {type: string}
+        ttl: {type: integer, minimum: 1, maximum: 3600}
+        expires_at: {type: string, format: date-time}
     PlatformDNSFlattenObservation:
       type: object
       additionalProperties: false

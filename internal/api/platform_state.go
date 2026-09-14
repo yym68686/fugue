@@ -328,10 +328,29 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 	if req.KernelBreakGlass == nil && !req.SoftOverride {
 		req.ForcePublish = false
 	}
-	if releaseArtifact, err := s.store.GetPlatformArtifact(r.PathValue("artifact_id")); err != nil {
+	releaseArtifact, err := s.store.GetPlatformArtifact(r.PathValue("artifact_id"))
+	if err != nil {
 		s.writeStoreError(w, err)
 		return
-	} else if releaseArtifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+	}
+	if req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
+		if releaseArtifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+			if result := s.validateReleaseSetReferences(releaseArtifact); !result.Pass {
+				httpx.WriteError(w, http.StatusConflict, result.Message)
+				return
+			}
+		}
+		leased, err := s.platformArtifactHasDNSLeases(releaseArtifact)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if leased {
+			httpx.WriteError(w, http.StatusConflict, "DNS value expiration requires consumer support before traffic promotion")
+			return
+		}
+	}
+	if releaseArtifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
 		if referenceResult := s.validateReleaseSetReferences(releaseArtifact); !referenceResult.Pass {
 			httpx.WriteError(w, http.StatusConflict, referenceResult.Message)
 			return
@@ -438,6 +457,38 @@ func (s *Server) handleRollbackPlatformArtifact(w http.ResponseWriter, r *http.R
 	}
 	if req.SoftOverride {
 		req.ForcePublish = false
+	}
+	current, err := s.store.GetPlatformArtifact(r.PathValue("artifact_id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
+		artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{ArtifactKind: current.ArtifactKind, ScopeKey: current.ScopeKey})
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		var target model.PlatformArtifact
+		for _, artifact := range artifacts {
+			if artifact.Generation == strings.TrimSpace(req.ToGeneration) {
+				target = artifact
+				break
+			}
+		}
+		if target.ID == "" {
+			httpx.WriteError(w, http.StatusNotFound, "rollback target artifact not found")
+			return
+		}
+		leased, err := s.platformArtifactHasDNSLeases(target)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if leased {
+			httpx.WriteError(w, http.StatusConflict, "DNS value expiration requires consumer support before traffic rollback")
+			return
+		}
 	}
 	artifact, release, message, lkg, err := s.store.RollbackPlatformArtifact(r.PathValue("artifact_id"), req, principal)
 	if err != nil {

@@ -91,6 +91,10 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	}
 	projection.BusinessSnapshotRevision = business.Revision
 	projection.BusinessSnapshotAt = business.CapturedAt
+	if err := projectACMEChallengeIntents(&projection, business.ACMEChallenges); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "ACME migration configuration invalid")
+		return
+	}
 	resolver := newHostedDNSFlattenResolver()
 	captureDNSFlattenFacts(r.Context(), &projection, resolver.resolve)
 	issues := projection.Issues[:0]

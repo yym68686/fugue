@@ -14,21 +14,22 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v10"
+	CompilerVersion = "platform-config-compiler/v11"
 	GlobalScopeKey  = "global"
 )
 
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
-	SchemaVersion string              `json:"schema_version"`
-	Generation    string              `json:"generation"`
-	Scope         string              `json:"scope"`
-	Routes        []RouteIntent       `json:"routes,omitempty"`
-	DNS           []DNSIntent         `json:"dns,omitempty"`
-	TLS           []TLSIntent         `json:"tls,omitempty"`
-	CachePolicies []model.CachePolicy `json:"cache_policies,omitempty"`
-	CreatedAt     time.Time           `json:"created_at,omitempty"`
+	ACMEChallenges []ACMEChallengeIntent `json:"acme_challenges,omitempty"`
+	SchemaVersion  string                `json:"schema_version"`
+	Generation     string                `json:"generation"`
+	Scope          string                `json:"scope"`
+	Routes         []RouteIntent         `json:"routes,omitempty"`
+	DNS            []DNSIntent           `json:"dns,omitempty"`
+	TLS            []TLSIntent           `json:"tls,omitempty"`
+	CachePolicies  []model.CachePolicy   `json:"cache_policies,omitempty"`
+	CreatedAt      time.Time             `json:"created_at,omitempty"`
 }
 
 type RouteIntent struct {
@@ -60,18 +61,19 @@ type RouteIntent struct {
 }
 
 type DNSIntent struct {
-	Flatten             *DNSFlattenIntent `json:"flatten,omitempty"`
-	Hostname            string            `json:"hostname"`
-	Type                string            `json:"type"`
-	Values              []string          `json:"values"`
-	TTL                 int               `json:"ttl"`
-	RecordKind          string            `json:"record_kind,omitempty"`
-	Status              string            `json:"status,omitempty"`
-	StatusReason        string            `json:"status_reason,omitempty"`
-	AppID               string            `json:"app_id,omitempty"`
-	TenantID            string            `json:"tenant_id,omitempty"`
-	EdgeGroupID         string            `json:"edge_group_id,omitempty"`
-	FallbackEdgeGroupID string            `json:"fallback_edge_group_id,omitempty"`
+	ValueExpirations    map[string]time.Time `json:"value_expirations,omitempty"`
+	Flatten             *DNSFlattenIntent    `json:"flatten,omitempty"`
+	Hostname            string               `json:"hostname"`
+	Type                string               `json:"type"`
+	Values              []string             `json:"values"`
+	TTL                 int                  `json:"ttl"`
+	RecordKind          string               `json:"record_kind,omitempty"`
+	Status              string               `json:"status,omitempty"`
+	StatusReason        string               `json:"status_reason,omitempty"`
+	AppID               string               `json:"app_id,omitempty"`
+	TenantID            string               `json:"tenant_id,omitempty"`
+	EdgeGroupID         string               `json:"edge_group_id,omitempty"`
+	FallbackEdgeGroupID string               `json:"fallback_edge_group_id,omitempty"`
 }
 
 type DNSFlattenIntent struct {
@@ -238,6 +240,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if err != nil {
 		return CompileResult{}, err
 	}
+	compiledDNS, err = CompileACMEChallenges(compiledDNS, intent.ACMEChallenges, runtimeSnapshot.CapturedAt)
+	if err != nil {
+		return CompileResult{}, err
+	}
 	compiledRoutes, err := ResolveRouteOrigins(intent.Routes, runtimeSnapshot, policy)
 	if err != nil {
 		return CompileResult{}, err
@@ -345,6 +351,8 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 	out.SchemaVersion = firstNonEmpty(strings.TrimSpace(in.SchemaVersion), SchemaVersion)
 	out.Scope = firstNonEmpty(strings.TrimSpace(in.Scope), GlobalScopeKey)
 	out.Routes = append([]RouteIntent(nil), in.Routes...)
+	out.ACMEChallenges = append([]ACMEChallengeIntent(nil), in.ACMEChallenges...)
+	sort.Slice(out.ACMEChallenges, func(i, j int) bool { return out.ACMEChallenges[i].ID < out.ACMEChallenges[j].ID })
 	out.DNS = append([]DNSIntent(nil), in.DNS...)
 	out.TLS = append([]TLSIntent(nil), in.TLS...)
 	out.CachePolicies = CloneCachePolicies(in.CachePolicies)
@@ -365,6 +373,9 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 	})
 	sort.Slice(out.TLS, func(i, j int) bool { return out.TLS[i].Hostname < out.TLS[j].Hostname })
 	for i := range out.DNS {
+		if out.DNS[i].ValueExpirations != nil {
+			out.DNS[i].ValueExpirations = cloneDNSExpirations(out.DNS[i].ValueExpirations)
+		}
 		if out.DNS[i].Flatten != nil {
 			value := *out.DNS[i].Flatten
 			out.DNS[i].Flatten = &value
@@ -436,6 +447,9 @@ func validateIntent(in PlatformIntent) error {
 		}
 	}
 	if err := validateDNSConfiguration(in.DNS); err != nil {
+		return err
+	}
+	if err := ValidateACMEChallenges(in.ACMEChallenges); err != nil {
 		return err
 	}
 	return ValidateRouteBehavior(in.Routes, in.CachePolicies)

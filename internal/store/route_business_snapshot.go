@@ -14,6 +14,7 @@ import (
 // RouteBusinessSnapshot is a detached, consistent read of the business inputs
 // needed by route migration. Kubernetes observations are captured separately.
 type RouteBusinessSnapshot struct {
+	ACMEChallenges  []model.DNSACMEChallenge  `json:"acme_challenges"`
 	CapturedAt      time.Time                 `json:"captured_at"`
 	Revision        string                    `json:"revision"`
 	Apps            []model.App               `json:"apps"`
@@ -36,7 +37,7 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 	}
 	var snapshot RouteBusinessSnapshot
 	err := s.withLockedState(false, func(state *model.State) error {
-		snapshot = RouteBusinessSnapshot{CapturedAt: time.Now().UTC(), Apps: state.Apps, Domains: state.AppDomains, RouteTables: state.ProjectRouteTables, Runtimes: state.Runtimes, RoutePolicies: state.EdgeRoutePolicies, Releases: state.AppReleases, TrafficPolicies: state.AppTrafficPolicies, HostedZones: state.HostedZones, DNSRecords: state.DNSRecords}
+		snapshot = RouteBusinessSnapshot{CapturedAt: time.Now().UTC(), Apps: state.Apps, Domains: state.AppDomains, RouteTables: state.ProjectRouteTables, Runtimes: state.Runtimes, RoutePolicies: state.EdgeRoutePolicies, Releases: state.AppReleases, TrafficPolicies: state.AppTrafficPolicies, HostedZones: state.HostedZones, DNSRecords: state.DNSRecords, ACMEChallenges: state.DNSACMEChallenges}
 		raw, err := json.Marshal(snapshot)
 		if err != nil {
 			return err
@@ -63,6 +64,10 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 }
 
 func (snapshot *RouteBusinessSnapshot) normalize() {
+	for i := range snapshot.ACMEChallenges {
+		normalizeDNSACMEChallengeForRead(&snapshot.ACMEChallenges[i])
+	}
+	sortDNSACMEChallenges(snapshot.ACMEChallenges)
 	apps := make([]model.App, 0, len(snapshot.Apps))
 	for _, app := range snapshot.Apps {
 		normalizeAppStatusForRead(&app)

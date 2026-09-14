@@ -21,6 +21,7 @@ func TestRouteBusinessSnapshotFileIsDetachedAndConsistent(t *testing.T) {
 		state.AppDomains = []model.AppDomain{{Hostname: "verified.example", Status: model.AppDomainStatusVerified}, {Hostname: "pending.example", Status: model.AppDomainStatusPending}}
 		state.AppReleases = []model.AppRelease{{ID: "release", AppID: "app", UpstreamURL: "http://old"}}
 		state.AppTrafficPolicies = []model.AppTrafficPolicy{{ID: "traffic", AppID: "app", StableReleaseID: "release", StableWeight: 100}}
+		state.DNSACMEChallenges = []model.DNSACMEChallenge{{ID: "challenge", Zone: "example", Name: "_acme-challenge.example", Value: "old", TTL: 60}}
 		state.HostedZones = []model.HostedZone{{ID: "zone-live", TenantID: "tenant", ZoneName: "example", Status: model.HostedZoneStatusActive}, {ID: "zone-deleted", TenantID: "tenant", ZoneName: "deleted.example", Status: model.HostedZoneStatusDeleted}}
 		state.DNSRecords = []model.DNSRecord{{ID: "dns", ZoneID: "zone-deleted", TenantID: "tenant", FQDN: "deleted.example", Type: "A", Status: model.DNSRecordStatusActive, Values: []string{"192.0.2.1"}}}
 		return nil
@@ -36,6 +37,10 @@ func TestRouteBusinessSnapshotFileIsDetachedAndConsistent(t *testing.T) {
 		t.Fatalf("incomplete snapshot: %+v", first)
 	}
 	first.Apps[0].Spec.Env["CONFIG"] = "mutated"
+	if len(first.ACMEChallenges) != 1 {
+		t.Fatal("ACME input missing from business snapshot")
+	}
+	first.ACMEChallenges[0].Value = "modified"
 	if len(first.HostedZones) != 2 || first.HostedZones[0].Status != model.HostedZoneStatusDeleted || len(first.DNSRecords) != 1 {
 		t.Fatal("DNS source tombstone was lost")
 	}
@@ -46,6 +51,9 @@ func TestRouteBusinessSnapshotFileIsDetachedAndConsistent(t *testing.T) {
 	}
 	if second.DNSRecords[0].Values[0] != "192.0.2.1" {
 		t.Fatal("DNS snapshot aliases store state")
+	}
+	if second.ACMEChallenges[0].Value != "old" {
+		t.Fatal("ACME snapshot aliases storage")
 	}
 	err = s.withLockedState(true, func(state *model.State) error {
 		state.Apps[0].Spec.Env["CONFIG"] = "new"

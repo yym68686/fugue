@@ -70,6 +70,10 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	if err != nil {
 		return out, fmt.Errorf("capture hosted dns records: %w", err)
 	}
+	out.ACMEChallenges, err = readRouteBusinessRows(ctx, tx, `SELECT id, zone, name, value, ttl, owner, created_by, expires_at, created_at, updated_at FROM fugue_dns_acme_challenges`, scanDNSACMEChallenge)
+	if err != nil {
+		return out, fmt.Errorf("capture ACME challenges: %w", err)
+	}
 	return out, nil
 }
 
