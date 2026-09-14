@@ -860,8 +860,7 @@
             "annotations": {
               "fugue.io/edge-heartbeat-fenced": "false",
               "fugue.pro/edge-worker-manifest-state": "materialization-ready",
-              "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1",
-              "fugue.pro/consumer-identity": "{\"version\":\"v1\",\"component\":\"edge-worker\",\"scope_key\":\"global\",\"artifact_kinds\":[\"edge_route_bundle\"]}"
+              "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
             },
             "labels": {
               "app.kubernetes.io/component": "@@WORKER_B_COMPONENT@@",
@@ -1018,10 +1017,6 @@
                   {
                     "name": "FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE",
                     "value": "/etc/caddy/static-tls/tls.key"
-                  },
-                  {
-                    "name": "FUGUE_EDGE_PLATFORM_TOKEN_FILE",
-                    "value": "/var/run/secrets/fugue-platform-consumer/token"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
@@ -1114,11 +1109,6 @@
                   {
                     "name": "caddy-static-tls",
                     "mountPath": "/etc/caddy/static-tls",
-                    "readOnly": true
-                  },
-                  {
-                    "name": "platform-consumer-identity",
-                    "mountPath": "/var/run/secrets/fugue-platform-consumer",
                     "readOnly": true
                   }
                 ]
@@ -1404,20 +1394,6 @@
                 "secret": {
                   "secretName": "fugue-app-wildcard-tls",
                   "optional": false
-                }
-              },
-              {
-                "name": "platform-consumer-identity",
-                "projected": {
-                  "defaultMode": 256,
-                  "sources": [
-                    {
-                      "serviceAccountToken": {
-                        "path": "token",
-                        "expirationSeconds": 600
-                      }
-                    }
-                  ]
                 }
               }
             ]

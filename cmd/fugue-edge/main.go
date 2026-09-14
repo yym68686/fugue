@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -19,7 +20,7 @@ func main() {
 	defer stop()
 
 	service := edge.NewServiceWithEdgeSources(cfg, edge.RouteBundleSourceFromEnv(), edge.InventoryProducerConfigFromEnv(), logger)
-	service.PlatformTokenFile = cfg.PlatformTokenFile
+	service.PlatformTokenFile = os.Getenv("FUGUE_EDGE_PLATFORM_TOKEN_FILE")
 	if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Fatalf("edge exited: %v", err)
 	}
