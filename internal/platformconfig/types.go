@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v7"
+	CompilerVersion = "platform-config-compiler/v8"
 	GlobalScopeKey  = "global"
 )
 
@@ -145,11 +145,27 @@ type CompileRequest struct {
 // RuntimeSnapshot is the immutable runtime fact view used by one compiler
 // invocation. It is input data, never serving configuration.
 type RuntimeSnapshot struct {
-	IntentGeneration string              `json:"intent_generation"`
-	PolicyGeneration string              `json:"policy_generation"`
-	Facts            map[string]any      `json:"facts,omitempty"`
-	CapturedAt       *time.Time          `json:"captured_at,omitempty"`
-	Origins          []OriginObservation `json:"origins,omitempty"`
+	IntentGeneration string               `json:"intent_generation"`
+	PolicyGeneration string               `json:"policy_generation"`
+	Facts            map[string]any       `json:"facts,omitempty"`
+	CapturedAt       *time.Time           `json:"captured_at,omitempty"`
+	Origins          []OriginObservation  `json:"origins,omitempty"`
+	Releases         []ReleaseObservation `json:"releases,omitempty"`
+}
+
+// ReleaseObservation is a fixed runtime fact used to resolve a desired
+// traffic policy. Release identity and weights stay in PolicySnapshot;
+// readiness and concrete upstream addresses stay here.
+type ReleaseObservation struct {
+	ObservedAt           time.Time `json:"observed_at"`
+	TenantID             string    `json:"tenant_id"`
+	StatusReason         string    `json:"status_reason,omitempty"`
+	ID                   string    `json:"id"`
+	AppID                string    `json:"app_id"`
+	Status               string    `json:"status"`
+	UpstreamURL          string    `json:"upstream_url"`
+	RuntimeID            string    `json:"runtime_id,omitempty"`
+	DeploymentGeneration string    `json:"deployment_generation,omitempty"`
 }
 
 type CompileResult struct {
@@ -189,7 +205,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
-	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && req.InputSnapshot != nil {
+	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && req.InputSnapshot != nil {
 		runtimeSnapshot = RuntimeSnapshot{IntentGeneration: intent.Generation, PolicyGeneration: policy.Generation, Facts: req.InputSnapshot}
 	}
 	if runtimeSnapshot.IntentGeneration == "" {
@@ -202,12 +218,18 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("runtime snapshot generations must match intent and policy")
 	}
 	runtimeSnapshot.Origins = append([]OriginObservation(nil), runtimeSnapshot.Origins...)
+	runtimeSnapshot.Releases = append([]ReleaseObservation(nil), runtimeSnapshot.Releases...)
 	sort.Slice(runtimeSnapshot.Origins, func(i, j int) bool { return runtimeSnapshot.Origins[i].Ref < runtimeSnapshot.Origins[j].Ref })
+	sort.Slice(runtimeSnapshot.Releases, func(i, j int) bool { return runtimeSnapshot.Releases[i].ID < runtimeSnapshot.Releases[j].ID })
 	compiledRoutes, err := ResolveRouteOrigins(intent.Routes, runtimeSnapshot, policy)
 	if err != nil {
 		return CompileResult{}, err
 	}
 	compiledRoutes, err = ApplyRoutePolicyConstraints(compiledRoutes, policy)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	compiledRoutes, err = ApplyTrafficPolicyConstraints(compiledRoutes, policy, runtimeSnapshot)
 	if err != nil {
 		return CompileResult{}, err
 	}

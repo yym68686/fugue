@@ -83,7 +83,7 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, "business route projection unavailable")
 		return
 	}
-	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, s.platformRoutes, business.RoutePolicies, business.TrafficPolicies, business.HostedZones, business.DNSRecords)
+	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, s.platformRoutes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "business route draft cannot be captured")
 		return
@@ -167,7 +167,7 @@ func (source routeBusinessSource) ListAppReleases(filter model.AppReleaseFilter)
 // This diagnostic does not turn runtime-selected targets into desired intent.
 // Unsupported migration semantics are explicit issues until a complete
 // business/constraint/fact snapshot can be frozen and compared.
-func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord) (platformIntentProjectionResponse, error) {
+func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, releases []model.AppRelease, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord) (platformIntentProjectionResponse, error) {
 	result := platformIntentProjectionResponse{SourceGeneration: snapshot.Generation, CapturedAt: snapshot.GeneratedAt,
 		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "dns_not_projected"}},
 		OmittedRuntimeFields: []string{"selected_edge_group", "decision_id", "exclusion_evidence"},
@@ -181,6 +181,25 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 	}
 	intent := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, CachePolicies: platformconfig.CloneCachePolicies(snapshot.CachePolicies)}
 	facts := platformconfig.RuntimeSnapshot{CapturedAt: &result.CapturedAt}
+	referencedReleases := make(map[string]bool)
+	for _, traffic := range trafficPolicies {
+		for _, id := range []string{traffic.StableReleaseID, traffic.CandidateReleaseID} {
+			if id != "" {
+				referencedReleases[id] = true
+			}
+		}
+	}
+	for _, release := range releases {
+		if !referencedReleases[release.ID] {
+			continue
+		}
+		status := model.EdgeRouteStatusUnavailable
+		if release.Status == model.AppReleaseStatusReady || release.Status == model.AppReleaseStatusServing {
+			status = model.EdgeRouteStatusActive
+		}
+		facts.Releases = append(facts.Releases, platformconfig.ReleaseObservation{ID: release.ID, AppID: release.AppID, TenantID: release.TenantID, ObservedAt: release.UpdatedAt, Status: status, StatusReason: release.StatusReason, UpstreamURL: release.UpstreamURL, RuntimeID: release.RuntimeID, DeploymentGeneration: firstNonEmpty(release.ResolvedImageRef, release.SourceRef)})
+	}
+	sort.Slice(facts.Releases, func(i, j int) bool { return facts.Releases[i].ID < facts.Releases[j].ID })
 	for _, source := range snapshot.Routes {
 		host, path := normalizeExternalAppDomain(source.Hostname), model.NormalizeAppRoutePathPrefix(source.PathPrefix)
 		if host == "" {
@@ -236,9 +255,6 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 			}
 			if source.UpstreamURL != "" && source.UpstreamURL != route.UpstreamURL {
 				addIssue("resolved_upstream_differs", source)
-			}
-			if len(source.Upstreams) > 0 {
-				addIssue("release_weights_not_projected", source)
 			}
 			facts.Origins = append(facts.Origins, observation)
 		} else {
@@ -314,6 +330,18 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 	policy.Generation, err = platformconfig.PolicySnapshotGeneration(policy)
 	if err != nil {
 		return result, err
+	}
+	facts.PolicyGeneration = policy.Generation
+	if len(policy.TrafficConstraints) > 0 {
+		// Capturing facts is not equivalent to proving the legacy serving output.
+		result.Issues = append(result.Issues, platformProjectionIssue{Code: "release_target_equivalence_not_verified"})
+		compiled := make([]platformconfig.CompiledRoute, len(intent.Routes))
+		for i, route := range intent.Routes {
+			compiled[i].RouteIntent = route
+		}
+		if _, err := platformconfig.ApplyTrafficPolicyConstraints(compiled, policy, facts); err != nil {
+			result.Issues = append(result.Issues, platformProjectionIssue{Code: "release_observations_require_repair"})
+		}
 	}
 	result.Intent, result.Policy, result.RuntimeSnapshot, result.RouteCount = intent, policy, facts, len(intent.Routes)
 	return result, nil

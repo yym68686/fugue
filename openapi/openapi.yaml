@@ -2365,7 +2365,7 @@ paths:
     get:
       operationId: projectPlatformIntent
       summary: Project Business Routes into PlatformIntent
-      description: Read-only migration draft from one consistent business snapshot. PostgreSQL uses a read-only repeatable-read transaction; file storage reads under one lock. Returns the business snapshot revision/time and explicit migration issues. Runtime observations retain their own evidence timestamps and are not part of the database transaction. migration_ready remains false until policy, DNS, TLS and release target projection is complete. Writes no serving state.
+      description: Read-only migration draft from one consistent business snapshot. PostgreSQL uses a read-only repeatable-read transaction; file storage reads under one lock. Returns the business snapshot revision/time and explicit migration issues. Runtime observations retain their own evidence timestamps and are not part of the database transaction. Desired release references and weights are projected into policy; release addresses and readiness retain their original observation timestamps in runtime_snapshot.releases. migration_ready remains false until all serving inputs, policy execution, DNS/TLS readiness and output equivalence are verified. Writes no serving state.
       tags: [Admin]
       x-fugue-handler: handleProjectPlatformIntent
       security:
@@ -30595,7 +30595,7 @@ components:
         traffic_constraints:
           type: array
           maxItems: 4096
-          description: Draft release constraints. Compilation refuses nonempty traffic constraints until the release fact resolver is available; they are never silently ignored.
+          description: Desired release references and weights. Compilation requires matching fresh release observations. Unsupported sticky routing is rejected, never silently ignored.
           items:
             $ref: "#/components/schemas/PlatformTrafficPolicyConstraint"
     PlatformRoutePolicyConstraint:
@@ -30624,6 +30624,11 @@ components:
       properties:
         id: {type: string}
         app_id: {type: string}
+        tenant_id: {type: string}
+        unavailable_candidate:
+          type: string
+          enum: [reject, stable]
+          description: Defaults to reject. Stable explicitly permits fallback to a fresh active stable release when the candidate is unavailable.
         mode: {type: string, enum: [single, canary, weighted, paused]}
         stable_release_id: {type: string}
         candidate_release_id: {type: string}
@@ -30811,11 +30816,16 @@ components:
         captured_at:
           type: string
           format: date-time
-          description: Fixed freshness reference for origin observations, required when origins are present. Compiler wall clock is never used.
+          description: Fixed freshness reference for origin and release observations, required when either is present. Compiler wall clock is never used.
         origins:
           type: array
           items:
             $ref: "#/components/schemas/PlatformOriginObservation"
+        releases:
+          type: array
+          maxItems: 10000
+          items:
+            $ref: "#/components/schemas/PlatformReleaseObservation"
         intent_generation:
           type: string
         policy_generation:
@@ -30860,6 +30870,20 @@ components:
           type: string
         runtime_cluster_node:
           type: string
+    PlatformReleaseObservation:
+      type: object
+      additionalProperties: false
+      required: [id, app_id, tenant_id, observed_at, status, upstream_url]
+      properties:
+        id: {type: string}
+        app_id: {type: string}
+        tenant_id: {type: string}
+        observed_at: {type: string, format: date-time}
+        status: {type: string, enum: [active, unavailable, disabled]}
+        status_reason: {type: string}
+        upstream_url: {type: string}
+        runtime_id: {type: string}
+        deployment_generation: {type: string}
     PlatformConfigCompileResponse:
       type: object
       additionalProperties: false

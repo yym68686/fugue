@@ -24,15 +24,17 @@ type RoutePolicyConstraint struct {
 }
 
 type TrafficPolicyConstraint struct {
-	ID                 string `json:"id"`
-	AppID              string `json:"app_id"`
-	Mode               string `json:"mode"`
-	StableReleaseID    string `json:"stable_release_id,omitempty"`
-	CandidateReleaseID string `json:"candidate_release_id,omitempty"`
-	StableWeight       int    `json:"stable_weight"`
-	CandidateWeight    int    `json:"candidate_weight"`
-	StickyHeader       string `json:"sticky_header,omitempty"`
-	StickyCookie       string `json:"sticky_cookie,omitempty"`
+	TenantID             string `json:"tenant_id,omitempty"`
+	UnavailableCandidate string `json:"unavailable_candidate,omitempty"`
+	ID                   string `json:"id"`
+	AppID                string `json:"app_id"`
+	Mode                 string `json:"mode"`
+	StableReleaseID      string `json:"stable_release_id,omitempty"`
+	CandidateReleaseID   string `json:"candidate_release_id,omitempty"`
+	StableWeight         int    `json:"stable_weight"`
+	CandidateWeight      int    `json:"candidate_weight"`
+	StickyHeader         string `json:"sticky_header,omitempty"`
+	StickyCookie         string `json:"sticky_cookie,omitempty"`
 }
 
 func ProjectPolicySnapshot(base PolicySnapshot, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, generation string) (PolicySnapshot, error) {
@@ -44,7 +46,7 @@ func ProjectPolicySnapshot(base PolicySnapshot, routePolicies []model.EdgeRouteP
 		out.RouteConstraints = append(out.RouteConstraints, RoutePolicyConstraint{ID: p.ID, Hostname: strings.Trim(strings.ToLower(strings.TrimSpace(p.Hostname)), "."), AppID: p.AppID, TenantID: p.TenantID, EdgeGroupID: p.EdgeGroupID, ExcludedEdgeIDs: append([]string(nil), p.ExcludedEdgeIDs...), ExcludedEdgeGroupIDs: append([]string(nil), p.ExcludedEdgeGroupIDs...), ExclusionReason: p.ExclusionReason, ExclusionExpiresAt: p.ExclusionExpiresAt, MinHealthyEdgeNodes: p.MinHealthyEdgeNodes, RoutePolicy: p.RoutePolicy, Enabled: p.Enabled})
 	}
 	for _, p := range trafficPolicies {
-		out.TrafficConstraints = append(out.TrafficConstraints, TrafficPolicyConstraint{ID: p.ID, AppID: p.AppID, Mode: p.Mode, StableReleaseID: p.StableReleaseID, CandidateReleaseID: p.CandidateReleaseID, StableWeight: p.StableWeight, CandidateWeight: p.CandidateWeight, StickyHeader: p.StickyHeader, StickyCookie: p.StickyCookie})
+		out.TrafficConstraints = append(out.TrafficConstraints, TrafficPolicyConstraint{TenantID: p.TenantID, UnavailableCandidate: "stable", ID: p.ID, AppID: p.AppID, Mode: p.Mode, StableReleaseID: p.StableReleaseID, CandidateReleaseID: p.CandidateReleaseID, StableWeight: p.StableWeight, CandidateWeight: p.CandidateWeight, StickyHeader: p.StickyHeader, StickyCookie: p.StickyCookie})
 	}
 	out = NormalizePolicySnapshot(out)
 	if err := ValidatePolicySnapshot(out); err != nil {
@@ -77,8 +79,14 @@ func validatePolicyRules(in PolicySnapshot) error {
 	}
 	apps := map[string]bool{}
 	for _, rule := range in.TrafficConstraints {
-		if rule.ID == "" || rule.AppID == "" || apps[rule.AppID] {
+		if rule.ID == "" || rule.AppID == "" || rule.ID != strings.TrimSpace(rule.ID) || rule.AppID != strings.TrimSpace(rule.AppID) || rule.TenantID != strings.TrimSpace(rule.TenantID) || apps[rule.AppID] {
 			return fmt.Errorf("traffic policy constraint identity is invalid")
+		}
+		if rule.UnavailableCandidate != "" && rule.UnavailableCandidate != "reject" && rule.UnavailableCandidate != "stable" {
+			return fmt.Errorf("unavailable candidate policy is invalid")
+		}
+		if rule.StableReleaseID != "" && rule.StableReleaseID == rule.CandidateReleaseID {
+			return fmt.Errorf("stable and candidate release identities must differ")
 		}
 		apps[rule.AppID] = true
 		switch rule.Mode {
@@ -94,9 +102,6 @@ func validatePolicyRules(in PolicySnapshot) error {
 }
 
 func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot) ([]CompiledRoute, error) {
-	if len(policy.TrafficConstraints) > 0 {
-		return nil, fmt.Errorf("traffic constraints require a release fact resolver; compilation refused")
-	}
 	routes = append([]CompiledRoute(nil), routes...)
 	for i := range routes {
 		routes[i].Upstreams = append([]UpstreamIntent(nil), routes[i].Upstreams...)
