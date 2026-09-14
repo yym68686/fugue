@@ -47,7 +47,9 @@ response is lost, Fugue revokes credentials matching the persisted grant ID
 before retrying, so unknown credentials cannot escape later revocation.
 
 Storage metadata requires storage.read or storage.admin. Mutations and issuing
-credentials require storage.admin. All routes enforce tenant and project
+credentials require storage.admin. Existing workspace-owner keys with data.admin
+also retain access to tenant object storage; this never bypasses tenant/project
+authorization. All routes enforce tenant and project
 scope. Cross-project application binding requires an explicitly selected app
 in the same tenant and a principal authorized for both projects. Each issued
 credential is restricted to one bucket and either object read-only or object

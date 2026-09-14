@@ -52,7 +52,7 @@ func objectStorageScope(w http.ResponseWriter, r *http.Request, write bool) bool
 		httpx.WriteError(w, 403, "tenant identity required")
 		return false
 	}
-	if p.HasScope("storage.admin") || (!write && p.HasScope("storage.read")) {
+	if p.HasScope("storage.admin") || p.HasScope("data.admin") || (!write && p.HasScope("storage.read")) {
 		return true
 	}
 	httpx.WriteError(w, http.StatusForbidden, "missing object storage scope")

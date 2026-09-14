@@ -11347,7 +11347,7 @@ paths:
     get:
       operationId: listObjectStores
       summary: listObjectStores
-      description: List stores belonging to the caller tenant and permitted project. Requires storage.read or storage.admin.
+      description: List stores belonging to the caller tenant and permitted project. Requires storage.read, storage.admin, or the existing tenant data.admin scope.
       tags: [Object Storage]
       x-fugue-handler: handleListObjectStores
       security:
@@ -11371,7 +11371,7 @@ paths:
     post:
       operationId: createObjectStore
       summary: createObjectStore
-      description: Explicitly provision a private independent R2 bucket. Requires storage.admin. Name is unique within the project; retries resume provisioning. No backup objects are used.
+      description: Explicitly provision a private independent R2 bucket. Requires storage.admin or the existing tenant data.admin scope. Name is unique within the project; retries resume provisioning. No backup objects are used.
       tags: [Object Storage]
       x-fugue-handler: handleCreateObjectStore
       security:
@@ -11417,7 +11417,7 @@ paths:
     patch:
       operationId: updateObjectStore
       summary: updateObjectStore
-      description: Requires storage.admin. Disabling revokes all issued credentials before marking disabled and retains every object. Enabling does not restore revoked credentials. Quota is a measured soft budget.
+      description: Requires storage.admin or the existing tenant data.admin scope. Disabling revokes all issued credentials before marking disabled and retains every object. Enabling does not restore revoked credentials. Quota is a measured soft budget.
       tags: [Object Storage]
       x-fugue-handler: handleUpdateObjectStore
       security:
@@ -11468,7 +11468,7 @@ paths:
     post:
       operationId: createObjectStoreCredential
       summary: createObjectStoreCredential
-      description: Requires storage.admin. Create a bucket-scoped read-only or read-write credential for an explicit application in the same tenant. Returned secret must not be logged. Different projects require explicit tenant-level authorization.
+      description: Requires storage.admin or the existing tenant data.admin scope. Create a bucket-scoped read-only or read-write credential for an explicit application in the same tenant. Returned secret must not be logged. Different projects require explicit tenant-level authorization.
       tags: [Object Storage]
       x-fugue-handler: handleCreateObjectStoreCredential
       security:
@@ -11497,7 +11497,7 @@ paths:
     delete:
       operationId: revokeObjectStoreCredential
       summary: revokeObjectStoreCredential
-      description: Requires storage.admin. Revokes the upstream credential before reporting revoked; failure remains retryable.
+      description: Requires storage.admin or the existing tenant data.admin scope. Revokes the upstream credential before reporting revoked; failure remains retryable.
       tags: [Object Storage]
       x-fugue-handler: handleRevokeObjectStoreCredential
       security:
@@ -11524,7 +11524,7 @@ paths:
     post:
       operationId: measureObjectStoreUsage
       summary: measureObjectStoreUsage
-      description: Requires storage.read or storage.admin. Measures current bucket object bytes and object count, with timestamp. Does not claim real-time hard quotas or exact billable request counts.
+      description: Requires storage.read, storage.admin, or the existing tenant data.admin scope. Measures current bucket object bytes and object count, with timestamp. Does not claim real-time hard quotas or exact billable request counts.
       tags: [Object Storage]
       x-fugue-handler: handleMeasureObjectStoreUsage
       security:
