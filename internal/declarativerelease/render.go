@@ -519,6 +519,14 @@ func patchWorkloadIdentity(value map[string]any, configSHA, manifestSHA, ociRevi
 		templateAnnotations["fugue.pro/release-plan-digest"] = planDigest
 		templateAnnotations["fugue.pro/artifact-receipt-digest"] = receiptDigest
 		templateAnnotations["fugue.pro/artifact-image"] = image
+	} else {
+		// Git templates can retain receipt annotations from an older release.
+		// They do not attest the reconstructed predecessor. Its exact image,
+		// source commit and OCI revision remain bound above and on containers;
+		// only the independently generated receipt hints must be omitted.
+		delete(templateAnnotations, "fugue.pro/release-plan-digest")
+		delete(templateAnnotations, "fugue.pro/artifact-receipt-digest")
+		delete(templateAnnotations, "fugue.pro/artifact-image")
 	}
 	return nil
 }
