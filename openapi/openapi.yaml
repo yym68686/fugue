@@ -17266,7 +17266,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [static-assets, disabled]
+          enum: [static-assets, html-documents, disabled]
         hostname_scope:
           type: string
         path_patterns:
@@ -30388,6 +30388,16 @@ components:
         streaming:
           type: boolean
           description: Explicit streaming preference; omitted preserves legacy streaming behavior.
+        cache_policy_id:
+          type: string
+        cache_namespace:
+          type: string
+        deployment_generation:
+          type: string
+        request_body_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeRequestBodyPolicy"
         upstreams:
           type: array
           maxItems: 16
@@ -30512,6 +30522,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PlatformConfigTLSIntent"
+        cache_policies:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/CachePolicy"
     PlatformConfigPolicySnapshot:
       type: object
       additionalProperties: false

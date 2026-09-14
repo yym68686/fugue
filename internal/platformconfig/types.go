@@ -14,40 +14,45 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v4"
+	CompilerVersion = "platform-config-compiler/v5"
 	GlobalScopeKey  = "global"
 )
 
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
-	SchemaVersion string        `json:"schema_version"`
-	Generation    string        `json:"generation"`
-	Scope         string        `json:"scope"`
-	Routes        []RouteIntent `json:"routes,omitempty"`
-	DNS           []DNSIntent   `json:"dns,omitempty"`
-	TLS           []TLSIntent   `json:"tls,omitempty"`
-	CreatedAt     time.Time     `json:"created_at,omitempty"`
+	SchemaVersion string              `json:"schema_version"`
+	Generation    string              `json:"generation"`
+	Scope         string              `json:"scope"`
+	Routes        []RouteIntent       `json:"routes,omitempty"`
+	DNS           []DNSIntent         `json:"dns,omitempty"`
+	TLS           []TLSIntent         `json:"tls,omitempty"`
+	CachePolicies []model.CachePolicy `json:"cache_policies,omitempty"`
+	CreatedAt     time.Time           `json:"created_at,omitempty"`
 }
 
 type RouteIntent struct {
-	Hostname      string           `json:"hostname"`
-	Kind          string           `json:"kind,omitempty"`
-	UpstreamKind  string           `json:"upstream_kind,omitempty"`
-	UpstreamScope string           `json:"upstream_scope,omitempty"`
-	UpstreamURL   string           `json:"upstream_url"`
-	TLSPolicy     string           `json:"tls_policy,omitempty"`
-	RoutePolicy   string           `json:"route_policy,omitempty"`
-	EdgeGroupMode string           `json:"edge_group_mode,omitempty"`
-	Enabled       bool             `json:"enabled"`
-	EdgeGroupID   string           `json:"edge_group_id,omitempty"`
-	TTL           int              `json:"ttl,omitempty"`
-	Status        string           `json:"status,omitempty"`
-	StatusReason  string           `json:"status_reason,omitempty"`
-	PathPrefix    string           `json:"path_prefix,omitempty"`
-	ServicePort   int              `json:"service_port,omitempty"`
-	Streaming     *bool            `json:"streaming,omitempty"`
-	Upstreams     []UpstreamIntent `json:"upstreams,omitempty"`
+	Hostname             string                        `json:"hostname"`
+	Kind                 string                        `json:"kind,omitempty"`
+	UpstreamKind         string                        `json:"upstream_kind,omitempty"`
+	UpstreamScope        string                        `json:"upstream_scope,omitempty"`
+	UpstreamURL          string                        `json:"upstream_url"`
+	TLSPolicy            string                        `json:"tls_policy,omitempty"`
+	RoutePolicy          string                        `json:"route_policy,omitempty"`
+	EdgeGroupMode        string                        `json:"edge_group_mode,omitempty"`
+	Enabled              bool                          `json:"enabled"`
+	EdgeGroupID          string                        `json:"edge_group_id,omitempty"`
+	TTL                  int                           `json:"ttl,omitempty"`
+	Status               string                        `json:"status,omitempty"`
+	StatusReason         string                        `json:"status_reason,omitempty"`
+	PathPrefix           string                        `json:"path_prefix,omitempty"`
+	ServicePort          int                           `json:"service_port,omitempty"`
+	Streaming            *bool                         `json:"streaming,omitempty"`
+	Upstreams            []UpstreamIntent              `json:"upstreams,omitempty"`
+	CachePolicyID        string                        `json:"cache_policy_id,omitempty"`
+	CacheNamespace       string                        `json:"cache_namespace,omitempty"`
+	DeploymentGeneration string                        `json:"deployment_generation,omitempty"`
+	RequestBodyPolicies  []model.EdgeRequestBodyPolicy `json:"request_body_policies,omitempty"`
 }
 
 type DNSIntent struct {
@@ -223,6 +228,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		"policy":         policy,
 		"lineage":        lineage,
 	}
+	if len(intent.CachePolicies) > 0 {
+		routePayload["cache_policies"] = intent.CachePolicies
+	}
 	dnsPayload := map[string]any{
 		"schema_version": SchemaVersion,
 		"generation":     intent.Generation,
@@ -282,12 +290,15 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 	out.Routes = append([]RouteIntent(nil), in.Routes...)
 	out.DNS = append([]DNSIntent(nil), in.DNS...)
 	out.TLS = append([]TLSIntent(nil), in.TLS...)
+	out.CachePolicies = CloneCachePolicies(in.CachePolicies)
+	sort.Slice(out.CachePolicies, func(i, j int) bool { return out.CachePolicies[i].ID < out.CachePolicies[j].ID })
 	for i := range out.Routes {
 		if out.Routes[i].Streaming != nil {
 			value := *out.Routes[i].Streaming
 			out.Routes[i].Streaming = &value
 		}
 		out.Routes[i].Upstreams = append([]UpstreamIntent(nil), out.Routes[i].Upstreams...)
+		out.Routes[i].RequestBodyPolicies = model.CloneEdgeRequestBodyPolicies(out.Routes[i].RequestBodyPolicies)
 	}
 	sort.Slice(out.Routes, func(i, j int) bool {
 		if out.Routes[i].Hostname != out.Routes[j].Hostname {
@@ -345,7 +356,7 @@ func validateIntent(in PlatformIntent) error {
 			return err
 		}
 	}
-	return nil
+	return ValidateRouteBehavior(in.Routes, in.CachePolicies)
 }
 
 // ValidatePlatformIntent validates a normalized, strongly typed platform

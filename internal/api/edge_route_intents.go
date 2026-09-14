@@ -108,6 +108,29 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 	if err := decoder.Decode(&routes); err != nil {
 		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("decode verified route artifact: %w", err)
 	}
+	var cachePolicies []model.CachePolicy
+	if content, exists := artifact.Content["cache_policies"]; exists {
+		raw, err := json.Marshal(content)
+		if err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&cachePolicies); err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
+	}
+	typedRoutes := make([]platformconfig.RouteIntent, 0, len(routes))
+	for _, route := range routes {
+		typedRoutes = append(typedRoutes, route.RouteIntent)
+	}
+	if err := platformconfig.ValidateRouteBehavior(typedRoutes, cachePolicies); err != nil {
+		return model.EdgeRouteIntentSnapshot{}, err
+	}
+	disabledCacheIDs := map[string]bool{}
+	for _, policy := range cachePolicies {
+		disabledCacheIDs[strings.ToLower(policy.ID)] = policy.Kind == model.CachePolicyKindDisabled
+	}
 	minimumHealthy := 1
 	if value, exists := artifact.Content["policy"]; exists {
 		rawPolicy, err := json.Marshal(value)
@@ -172,6 +195,12 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 		if intent.OriginStatus == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(intent.RoutePolicy) {
 			intent.Upstreams = platformconfig.ProjectUpstreamIntents(route.Upstreams)
 		}
+		intent.CachePolicyID, intent.CacheNamespace = route.CachePolicyID, route.CacheNamespace
+		if disabledCacheIDs[strings.ToLower(route.CachePolicyID)] {
+			intent.CachePolicyID = ""
+		}
+		intent.DeploymentGeneration = route.DeploymentGeneration
+		intent.RequestBodyPolicies = model.CloneEdgeRequestBodyPolicies(route.RequestBodyPolicies)
 		intent.PathPrefix = path
 		intent.ServicePort = route.ServicePort
 		if route.Streaming != nil {
@@ -187,7 +216,7 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 		}
 		return intents[i].PathPrefix < intents[j].PathPrefix
 	})
-	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Generation: artifact.Generation, GeneratedAt: artifact.CreatedAt, Routes: intents, TLSAllowlist: []model.EdgeTLSAllowlistEntry{}}
+	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Generation: artifact.Generation, GeneratedAt: artifact.CreatedAt, Routes: intents, TLSAllowlist: []model.EdgeTLSAllowlistEntry{}, CachePolicies: cachePolicies}
 	return snapshot, nil
 }
 
