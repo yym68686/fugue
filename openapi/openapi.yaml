@@ -7,6 +7,42 @@ info:
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
 servers:
   - url: /
+x-fugue-edge-route-probe:
+  version: 1
+  transport: HTTPS to an inventory candidate IP with the desired hostname as TLS SNI and HTTP Host
+  request:
+    method: HEAD
+    path: The desired route path prefix
+    headers:
+      X-Fugue-Route-Probe: '1'
+      X-Fugue-Route-Probe-Nonce: 32 lowercase hexadecimal characters from a fresh random nonce
+  response:
+    success: 204
+    headers:
+      X-Fugue-Route-Proof: sha256 digest of the loaded route under fugue.edge.route-proof/v1 canonicalization
+      X-Fugue-Route-Probe-Nonce: The request nonce
+      X-Fugue-Route-Bundle-Version: Loaded immutable bundle version
+      X-Fugue-Route-Valid-Until: Original signed bundle expiry in RFC3339Nano
+      X-Fugue-Route-Edge-Id: Loaded worker identity
+      X-Fugue-Route-Edge-Group: Loaded worker group identity
+    errors: Invalid probe requests return 400; missing routes return 404; inactive, foreign-group, expired, or excluded routes return 503. Errors contain no proof headers.
+  semantics: |-
+    This protocol runs on the Edge proxy listener, not the control API. It reads one
+    immutable route index snapshot and never proxies to an origin or peer. Responses
+    are no-store. Proof covers route behavior and ownership, not origin health or
+    future availability. The client must validate TLS, nonce, expected route digest,
+    inventory identity and original expiry; HTTP success alone is not placement evidence.
+    No upstream address, credential, or route payload is returned. Ordinary requests
+    without X-Fugue-Route-Probe retain normal proxy behavior.
+    Digest material is Go encoding/json of {schema,route}, with schema set to
+    fugue.edge.route-proof/v1 and route in EdgeRouteBinding field order. Hostname is
+    lowercase without a trailing dot and path uses NormalizeAppRoutePathPrefix.
+    RouteGeneration, DecisionID, CreatedAt, UpdatedAt, StatusReason, SelectionReason,
+    FallbackReason, ExclusionReason, HealthyEdgeNodeCount, EdgeRedundancyStatus and
+    EdgeRedundancyReason are zeroed. ExcludedEdgeIDs and ExcludedEdgeGroupIDs are
+    sorted and deduplicated. Upstream StatusReason is zeroed; upstream order is
+    preserved. New behavioral fields require a new proof version when changing
+    this canonical representation. A client uses the shared routeproof package.
 tags:
   - name: System
     description: Health checks, install helpers, and contract endpoints.

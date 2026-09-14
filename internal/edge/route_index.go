@@ -2,6 +2,7 @@ package edge
 
 import (
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -11,6 +12,7 @@ import (
 // contend with bundle lifecycle or telemetry updates.
 type edgeRouteIndex struct {
 	bundleVersion string
+	validUntil    time.Time
 	edgeGroupID   string
 	publication   routePublicationMetadata
 	byHost        map[string][]edgeIndexedRoute
@@ -24,6 +26,7 @@ type edgeIndexedRoute struct {
 func buildEdgeRouteIndex(bundle model.EdgeRouteBundle, edgeGroupID string, publication routePublicationMetadata) *edgeRouteIndex {
 	index := &edgeRouteIndex{
 		bundleVersion: strings.TrimSpace(bundle.Version),
+		validUntil:    bundle.ValidUntil,
 		edgeGroupID:   strings.TrimSpace(edgeGroupID),
 		publication:   publication,
 		byHost:        make(map[string][]edgeIndexedRoute),

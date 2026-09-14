@@ -33,6 +33,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/routeproof"
 	"fugue/internal/tcpdiag"
 	"fugue/internal/weightedselector"
 )
@@ -1142,6 +1143,10 @@ func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding) bool {
 }
 
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
+	if _, requested := r.Header[http.CanonicalHeaderKey(routeproof.RequestHeader)]; requested {
+		s.handleRouteProof(w, r)
+		return
+	}
 	atomic.AddInt64(&s.activeProxyRequests, 1)
 	defer atomic.AddInt64(&s.activeProxyRequests, -1)
 	startedAt := time.Now()
