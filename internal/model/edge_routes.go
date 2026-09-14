@@ -922,6 +922,7 @@ type EdgeDNSBundle struct {
 }
 
 type EdgeDNSRecord struct {
+	ValueExpirations    map[string]time.Time            `json:"value_expirations,omitempty"`
 	Name                string                          `json:"name"`
 	Type                string                          `json:"type"`
 	Values              []string                        `json:"values"`

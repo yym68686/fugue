@@ -29,6 +29,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/weightedselector"
 )
 
@@ -1858,6 +1859,13 @@ func (s *Service) verifyBundle(bundle model.EdgeDNSBundle, now time.Time) error 
 	if strings.TrimSpace(bundle.Version) == "" {
 		return fmt.Errorf("dns bundle version is required")
 	}
+	for _, record := range bundle.Records {
+		if len(record.ValueExpirations) > 0 {
+			if _, err := filterDNSRecordValues(record, now); err != nil {
+				return fmt.Errorf("invalid DNS value expiration: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1964,6 +1972,9 @@ func (s *Service) edgeDNSRecordsForQuestion(_ context.Context, bundle *model.Edg
 		peerHealth = s.peerHealthFilterReason
 	}
 	answers, nameExists, audits := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth, peerHealth, s.bundleIndex)
+	if qtype == miekgdns.TypeTXT {
+		s.recordDNSValueExpiryWAL(bundle, name, time.Now().UTC())
+	}
 	s.recordDNSScopeResolution(audits)
 	s.logDNSAnswerAudits(bundle, name, qtype, audits)
 	if qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA {
@@ -2433,6 +2444,31 @@ func edgeDNSWildcardName(name string) string {
 }
 
 func rrForEdgeDNSRecord(record model.EdgeDNSRecord, ownerName string) []miekgdns.RR {
+	return rrForEdgeDNSRecordAt(record, ownerName, time.Now().UTC())
+}
+
+func filterDNSRecordValues(record model.EdgeDNSRecord, now time.Time) (model.EdgeDNSRecord, error) {
+	if len(record.ValueExpirations) == 0 {
+		return record, nil
+	}
+	filtered, err := platformconfig.DNSRecordsAt([]platformconfig.DNSIntent{{Hostname: record.Name, Type: record.Type, Values: record.Values, TTL: record.TTL, ValueExpirations: record.ValueExpirations}}, now)
+	if err != nil {
+		return model.EdgeDNSRecord{}, err
+	}
+	if len(filtered) == 0 {
+		record.Values = nil
+		return record, nil
+	}
+	record.Values, record.TTL = filtered[0].Values, filtered[0].TTL
+	return record, nil
+}
+
+func rrForEdgeDNSRecordAt(record model.EdgeDNSRecord, ownerName string, now time.Time) []miekgdns.RR {
+	var err error
+	record, err = filterDNSRecordValues(record, now)
+	if err != nil {
+		return nil
+	}
 	ttl := uint32(record.TTL)
 	if ttl == 0 {
 		ttl = 60

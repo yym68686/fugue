@@ -219,7 +219,23 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	if dec.Decode(&payload) != nil || payload.Schema != platformconfig.SchemaVersion || payload.Generation != c.Artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
 		return 0, errors.New("DNS candidate schema invalid")
 	}
-	for _, record := range payload.Records {
+	if err := platformconfig.ValidateDNSIntents(payload.Records); err != nil {
+		return 0, errors.New("DNS candidate intent semantics invalid")
+	}
+	policyDigest, err := platformconfig.Digest(payload.Policy)
+	if err != nil || payload.Policy.Scope != a.ScopeKey || payload.Lineage.PolicyDigest != policyDigest || payload.Lineage.IntentGeneration != payload.Generation || payload.Lineage.PolicyGeneration != payload.Policy.Generation {
+		return 0, errors.New("DNS candidate policy lineage invalid")
+	}
+	for key, value := range platformconfig.LineageMetadata(payload.Lineage) {
+		if value == "" || c.Artifact.Metadata[key] != value {
+			return 0, errors.New("DNS candidate lineage binding invalid")
+		}
+	}
+	active, err := platformconfig.DNSRecordsAt(payload.Records, time.Now().UTC())
+	if err != nil {
+		return 0, errors.New("DNS candidate expiry invalid")
+	}
+	for _, record := range active {
 		if record.Hostname == "" || record.TTL <= 0 || record.TTL > 2147483647 || len(record.Values) == 0 {
 			return 0, errors.New("DNS candidate record is incomplete")
 		}
@@ -233,7 +249,7 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 			return 0, errors.New("DNS candidate record cannot be encoded")
 		}
 	}
-	return len(payload.Records), nil
+	return len(active), nil
 }
 
 func readPlatformCandidateFile(path string, limit int64) ([]byte, error) {

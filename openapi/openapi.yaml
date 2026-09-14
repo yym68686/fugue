@@ -17379,6 +17379,10 @@ components:
         - status
         - record_generation
       properties:
+        value_expirations:
+          type: object
+          additionalProperties: {type: string, format: date-time}
+          description: Signed absolute expiry per TXT value. DNS consumers remove expired values and cap response TTL at query time, including after cache reload and LKG fallback.
         name:
           type: string
         type:

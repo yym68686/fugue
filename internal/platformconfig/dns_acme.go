@@ -62,6 +62,9 @@ func DNSRecordsAt(records []DNSIntent, now time.Time) ([]DNSIntent, error) {
 		if record.Type != "TXT" {
 			return nil, fmt.Errorf("DNS value leases require TXT records")
 		}
+		if record.TTL < 1 || record.TTL > 2147483647 {
+			return nil, fmt.Errorf("leased DNS record requires a valid TTL")
+		}
 		for value, expires := range record.ValueExpirations {
 			if expires.IsZero() || !slices.Contains(record.Values, value) {
 				return nil, fmt.Errorf("DNS expiration references an invalid value")

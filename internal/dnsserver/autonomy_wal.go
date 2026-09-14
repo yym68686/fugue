@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -8,6 +9,39 @@ import (
 	"fugue/internal/localwal"
 	"fugue/internal/model"
 )
+
+func (s *Service) recordDNSValueExpiryWAL(bundle *model.EdgeDNSBundle, name string, now time.Time) {
+	if bundle == nil || strings.TrimSpace(s.Config.AutonomyWALPath) == "" {
+		return
+	}
+	matching, _ := edgeDNSMatchingRecordsIndexed(bundle, name, s.bundleIndex)
+	for _, record := range matching {
+		expired := 0
+		for _, until := range record.ValueExpirations {
+			if until.Sub(now) < time.Second {
+				expired++
+			}
+		}
+		if expired == 0 {
+			continue
+		}
+		generation := edgeDNSCacheGeneration(*bundle)
+		identity := fmt.Sprintf("%s|%s|%s|expired:%d", generation, record.Name, record.RecordGeneration, expired)
+		if !s.reserveTemporaryFilterWAL(identity, now) {
+			continue
+		}
+		sum := sha256.Sum256([]byte(identity))
+		fact, err := localwal.NewRecord("dns-server", firstNonEmpty(s.Config.PhysicalNodeID, s.Config.DNSNodeID), "dns_value_expired", map[string]string{"record_name": record.Name, "record_generation": record.RecordGeneration, "expired_value_count": fmt.Sprint(expired), "evidence_digest": fmt.Sprintf("sha256:%x", sum)}, generation, nil, now)
+		if err != nil {
+			s.logAutonomyWALError("DNS value expiration", err)
+			continue
+		}
+		fact.Subject = record.Name
+		if err := localwal.Append(s.Config.AutonomyWALPath, fact); err != nil {
+			s.logAutonomyWALError("DNS value expiration", err)
+		}
+	}
+}
 
 func (s *Service) recordDNSTemporaryFilterWAL(bundle *model.EdgeDNSBundle, queryName string, qtype uint16, audit edgeDNSAnswerAudit, filtered edgeDNSFilteredCandidate, now time.Time) {
 	if s == nil {
