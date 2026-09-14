@@ -102,6 +102,17 @@ func validatePolicyRules(in PolicySnapshot) error {
 }
 
 func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot) ([]CompiledRoute, error) {
+	return applyRoutePolicyConstraints(routes, policy, true)
+}
+
+// ApplyRoutePolicyConstraintsForPlacement materializes route ownership and
+// edge-group constraints before DNS placement resolves runtime health. The
+// final serving compiler still uses the strict variant above.
+func ApplyRoutePolicyConstraintsForPlacement(routes []CompiledRoute, policy PolicySnapshot) ([]CompiledRoute, error) {
+	return applyRoutePolicyConstraints(routes, policy, false)
+}
+
+func applyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot, rejectEdgeGroup bool) ([]CompiledRoute, error) {
 	routes = append([]CompiledRoute(nil), routes...)
 	for i := range routes {
 		routes[i].Upstreams = append([]UpstreamIntent(nil), routes[i].Upstreams...)
@@ -109,7 +120,7 @@ func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot) 
 	}
 	byHost := make(map[string]RoutePolicyConstraint, len(policy.RouteConstraints))
 	for _, rule := range policy.RouteConstraints {
-		if rule.EdgeGroupID != "" {
+		if rule.EdgeGroupID != "" && rejectEdgeGroup {
 			return nil, fmt.Errorf("edge-group constraints require DNS placement resolution; compilation refused")
 		}
 		byHost[strings.ToLower(strings.Trim(strings.TrimSpace(rule.Hostname), "."))] = rule
@@ -127,6 +138,10 @@ func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot) 
 		routes[i].MinHealthyEdgeNodes = rule.MinHealthyEdgeNodes
 		routes[i].ExcludedEdgeIDs = append([]string(nil), rule.ExcludedEdgeIDs...)
 		routes[i].ExcludedEdgeGroupIDs = append([]string(nil), rule.ExcludedEdgeGroupIDs...)
+		if rule.EdgeGroupID != "" {
+			routes[i].EdgeGroupMode = model.PlatformRouteEdgeGroupModePinned
+			routes[i].EdgeGroupID = rule.EdgeGroupID
+		}
 		routes[i].ExclusionReason, routes[i].ExclusionExpiresAt = rule.ExclusionReason, rule.ExclusionExpiresAt
 		routes[i].RoutePolicy = model.NormalizeEdgeRoutePolicy(rule.RoutePolicy)
 		if !rule.Enabled || !model.EdgeRoutePolicyAllowsTraffic(routes[i].RoutePolicy) {

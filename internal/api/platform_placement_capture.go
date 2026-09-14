@@ -283,7 +283,7 @@ func placementHostnameRoutes(result platformIntentProjectionResponse, host strin
 	if err != nil {
 		return nil, nil, err
 	}
-	compiled, err = platformconfig.ApplyRoutePolicyConstraints(compiled, filteredPolicy)
+	compiled, err = platformconfig.ApplyRoutePolicyConstraintsForPlacement(compiled, filteredPolicy)
 	if err != nil {
 		return nil, nil, err
 	}

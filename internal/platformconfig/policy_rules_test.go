@@ -58,3 +58,18 @@ func TestApplyRoutePolicyConstraintsChangesArtifactOnly(t *testing.T) {
 		t.Fatal("policy application mutated caller route")
 	}
 }
+
+func TestApplyRoutePolicyConstraintsForPlacementMaterializesEdgeGroup(t *testing.T) {
+	routes := []CompiledRoute{{RouteIntent: RouteIntent{Hostname: "app.example", UpstreamURL: "http://origin", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}}}
+	policy := PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{{ID: "route", Hostname: "app.example", EdgeGroupID: "edge-group-a", MinHealthyEdgeNodes: 2, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}}
+	got, err := ApplyRoutePolicyConstraintsForPlacement(routes, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].EdgeGroupMode != model.PlatformRouteEdgeGroupModePinned || got[0].EdgeGroupID != "edge-group-a" || got[0].MinHealthyEdgeNodes != 2 {
+		t.Fatalf("placement constraint was not materialized: %+v", got[0])
+	}
+	if _, err := ApplyRoutePolicyConstraints(routes, policy); err == nil {
+		t.Fatal("strict serving compiler accepted unresolved edge-group constraint")
+	}
+}
