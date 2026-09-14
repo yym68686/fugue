@@ -277,13 +277,6 @@ func resolvePreviousConfigSHA(baseSHA, intentPath string, current, previous decl
 		return previousIntentSHA
 	}
 	declaredIntent, err := loadGitIntentAt(declared, intentPath)
-	// A failed preflight can leave the live Guardian LKG at an older exact
-	// production atom while the source branch contains several failed intent
-	// atoms. Keep the declared LKG predecessor when it is an exact ancestor;
-	// deployment still performs the authoritative Guardian LKG/image CAS check.
-	if err == nil && isExactIntentAtomOrMerge(declared, intentPath) && declaredIntent.Component == current.Component && declaredIntent.Generation < current.Generation {
-		return declared
-	}
 	declaredBytes, declaredErr := declarativerelease.CanonicalJSON(declaredIntent)
 	previousBytes, previousErr := declarativerelease.CanonicalJSON(previous)
 	if err != nil || declaredErr != nil || previousErr != nil || !bytes.Equal(declaredBytes, previousBytes) {
