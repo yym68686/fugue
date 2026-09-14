@@ -11,13 +11,14 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
 	"fugue/internal/model"
 )
 
-// Client is the small, read-only transport shared by artifact consumers. It
+// Client provides assignment reads and runtime fact submission for consumers. It
 // deliberately has no serving or business-database behavior.
 type Client struct {
 	BaseURL    string
@@ -41,7 +42,7 @@ func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string)
 	}
 	base.RawQuery, base.Fragment = "", ""
 	base.Path = strings.TrimRight(base.Path, "/")
-	raw, err := os.ReadFile(c.TokenFile)
+	raw, err := ReadFile(c.TokenFile, 32768)
 	if err != nil || len(raw) == 0 || len(raw) > 32768 {
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform Pod credential unavailable")
 	}
@@ -49,7 +50,7 @@ func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string)
 	if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/identity", strings.TrimSpace(string(raw)), http.MethodPost, nil, &id); err != nil {
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
-	if id.Token == "" || id.Component != component || id.NodeID != nodeID || id.ScopeKey != scope || !id.ExpiresAt.After(time.Now().Add(10*time.Second)) {
+	if id.Token == "" || id.Component != component || id.NodeID != nodeID || id.ScopeKey != scope || !slices.Contains(id.ArtifactKinds, kind) || !id.ExpiresAt.After(time.Now().Add(10*time.Second)) {
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform credential identity mismatch")
 	}
 	var assignments model.PlatformConsumerAssignmentResponse
@@ -86,7 +87,7 @@ func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string)
 
 func (c Client) PostJSON(ctx context.Context, path, token string, in, out any) error {
 	base, err := url.Parse(strings.TrimSpace(c.BaseURL))
-	if err != nil {
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil {
 		return errors.New("platform API endpoint is invalid")
 	}
 	base.RawQuery, base.Fragment = "", ""
@@ -126,9 +127,26 @@ func (c Client) json(ctx context.Context, endpoint, token, method string, in, ou
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("platform request rejected: HTTP %d", resp.StatusCode)
 	}
-	dec := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
+	if err != nil || len(raw) > 8<<20 {
+		return errors.New("platform response exceeds limit or is incomplete")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	if dec.Decode(out) != nil || dec.Decode(&struct{}{}) != io.EOF {
 		return errors.New("platform response invalid")
 	}
 	return nil
+}
+
+func ReadFile(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || int64(len(raw)) > limit {
+		return nil, errors.New("platform file exceeds limit or is incomplete")
+	}
+	return raw, nil
 }

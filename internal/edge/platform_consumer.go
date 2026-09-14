@@ -7,7 +7,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"math"
 	"os"
+	"strings"
 	"time"
 
 	"fugue/internal/bundleauth"
@@ -64,15 +67,27 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
-	if active, known := s.servingActiveForHeartbeat(); known && !active {
+	// A missing/corrupt activation file cannot authorize either A/B worker.
+	selection, err := s.selectRouteBundleSource()
+	if err != nil {
+		return errors.New("edge platform reporting activation unavailable")
+	}
+	if selection.candidate {
+		s.mu.Lock()
+		s.platformCandidate.State = "inactive"
+		s.platformCandidate.ReportedAt = time.Time{}
+		s.mu.Unlock()
 		return nil
+	}
+	if strings.TrimSpace(s.Config.CachePath) == "" {
+		return errors.New("edge platform candidate cache path is required")
 	}
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
 	id, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
 	}
-	if artifact.ID != assignment.ArtifactID || artifact.Status != model.PlatformArtifactStatusValidated || artifact.ContentHash != assignment.ContentHash || artifact.Generation != assignment.ExpectedGeneration || release.ID != assignment.ArtifactReleaseID || release.ArtifactID != assignment.ReleaseSetID || release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken != assignment.FencingToken || artifact.Metadata["release_set_generation"] != release.Generation {
+	if assignment.ExpectedConsumerSetID == "" || assignment.ReleaseSetID == "" || assignment.ArtifactReleaseID == "" || assignment.GenerationSequence <= 0 || assignment.FencingToken <= 0 || artifact.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || artifact.ScopeKey != assignment.ScopeKey || artifact.GenerationSequence != assignment.GenerationSequence || artifact.ID != assignment.ArtifactID || artifact.Status != model.PlatformArtifactStatusValidated || artifact.ContentHash != assignment.ContentHash || artifact.Generation != assignment.ExpectedGeneration || release.ID != assignment.ArtifactReleaseID || release.ArtifactID != assignment.ReleaseSetID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet || release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken != assignment.FencingToken || release.Generation == "" || artifact.Metadata["release_set_generation"] != release.Generation {
 		return errors.New("edge platform candidate binding mismatch")
 	}
 	if !platformsafety.EvaluateArtifactIntegrity(artifact, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)).Pass {
@@ -85,26 +100,44 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		Policy     platformconfig.PolicySnapshot `json:"policy"`
 		Lineage    platformconfig.Lineage        `json:"lineage"`
 	}
-	raw, _ := json.Marshal(artifact.Content)
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return errors.New("edge platform candidate content invalid")
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&payload) != nil || payload.Schema != platformconfig.SchemaVersion || payload.Generation != artifact.Metadata["intent_generation"] || len(payload.Routes) == 0 || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
+	if dec.Decode(&payload) != nil || dec.Decode(&struct{}{}) != io.EOF || payload.Schema != platformconfig.SchemaVersion || payload.Generation != artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
 		return errors.New("edge platform candidate schema invalid")
+	}
+	if platformconfig.ValidatePlatformIntent(platformconfig.PlatformIntent{SchemaVersion: payload.Schema, Generation: payload.Generation, Scope: assignment.ScopeKey, Routes: payload.Routes}) != nil {
+		return errors.New("edge platform candidate routes invalid")
+	}
+	policyDigest, err := platformconfig.Digest(payload.Policy)
+	if err != nil || payload.Policy.Scope != assignment.ScopeKey || payload.Lineage.IntentGeneration != payload.Generation || payload.Lineage.PolicyGeneration != payload.Policy.Generation || payload.Lineage.PolicyDigest != policyDigest {
+		return errors.New("edge platform candidate policy lineage invalid")
+	}
+	for key, value := range map[string]string{"intent_generation": payload.Lineage.IntentGeneration, "policy_generation": payload.Lineage.PolicyGeneration, "intent_digest": payload.Lineage.IntentDigest, "policy_digest": payload.Lineage.PolicyDigest, "input_snapshot_digest": payload.Lineage.InputSnapshotDigest, "compiler_version": payload.Lineage.CompilerVersion} {
+		if value == "" || artifact.Metadata[key] != value {
+			return errors.New("edge platform candidate lineage binding mismatch")
+		}
 	}
 	path := s.Config.CachePath + ".platform-shadow.json"
 	var prev edgePlatformCandidate
-	if b, e := os.ReadFile(path); e == nil {
-		if json.Unmarshal(b, &prev) != nil || prev.Sequence <= 0 {
+	if b, e := platformconsumer.ReadFile(path, 8<<20); e == nil {
+		if json.Unmarshal(b, &prev) != nil || prev.Sequence <= 0 || prev.Sequence == math.MaxInt64 {
 			return errors.New("edge platform candidate cursor is corrupt")
 		}
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return errors.New("edge platform candidate cursor unavailable")
 	}
-	c := edgePlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release, Sequence: prev.Sequence + 1, VerifiedAt: time.Now().UTC()}
-	if c.Sequence <= 0 {
-		c.Sequence = time.Now().UnixNano()
+	if prev.Assignment.FencingToken > assignment.FencingToken || prev.Assignment.GenerationSequence > assignment.GenerationSequence {
+		return errors.New("edge platform candidate replay rejected")
 	}
-	b, _ := json.Marshal(c)
+	c := edgePlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release, Sequence: max(prev.Sequence+1, time.Now().UnixNano()), VerifiedAt: time.Now().UTC()}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return errors.New("encode edge platform candidate failed")
+	}
 	if err := lkgcache.AtomicWriteFile(path, b, 0600); err != nil {
 		return errors.New("persist edge platform candidate failed")
 	}
@@ -119,6 +152,10 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return err
 	}
 	var receipt model.PlatformConsumerHeartbeatResponse
+	currentSelection, err := s.selectRouteBundleSource()
+	if err != nil || currentSelection != selection {
+		return errors.New("edge platform reporting activation changed")
+	}
 	if err = client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id.Token, h, &receipt); err != nil {
 		return err
 	}
