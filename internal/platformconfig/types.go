@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v12"
+	CompilerVersion = "platform-config-compiler/v13"
 	GlobalScopeKey  = "global"
 )
 
@@ -61,6 +61,7 @@ type RouteIntent struct {
 }
 
 type DNSIntent struct {
+	Route               *DNSRouteIntent       `json:"route,omitempty"`
 	Application         *DNSApplicationIntent `json:"application,omitempty"`
 	ValueExpirations    map[string]time.Time  `json:"value_expirations,omitempty"`
 	Flatten             *DNSFlattenIntent     `json:"flatten,omitempty"`
@@ -84,6 +85,13 @@ type DNSApplicationIntent struct {
 	IPv6Policy     string `json:"ipv6_policy"`
 	TTLPolicy      string `json:"ttl_policy"`
 	FallbackPolicy string `json:"fallback_policy"`
+}
+
+// DNSRouteIntent declares the routes required by an address RRset, including
+// aliases whose DNS owner differs from the HTTP/TLS hostnames they represent.
+type DNSRouteIntent struct {
+	DNSApplicationIntent
+	Hostnames []string `json:"hostnames"`
 }
 
 type DNSFlattenIntent struct {
@@ -389,6 +397,15 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 	})
 	sort.Slice(out.TLS, func(i, j int) bool { return out.TLS[i].Hostname < out.TLS[j].Hostname })
 	for i := range out.DNS {
+		if out.DNS[i].Route != nil {
+			value := *out.DNS[i].Route
+			value.Hostnames = append([]string(nil), value.Hostnames...)
+			for j := range value.Hostnames {
+				value.Hostnames[j] = normalizedImportHostname(value.Hostnames[j])
+			}
+			sort.Strings(value.Hostnames)
+			out.DNS[i].Route = &value
+		}
 		if out.DNS[i].Application != nil {
 			value := *out.DNS[i].Application
 			out.DNS[i].Application = &value
@@ -403,6 +420,9 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 		out.DNS[i].Hostname = normalizedImportHostname(out.DNS[i].Hostname)
 		out.DNS[i].Type = strings.ToUpper(strings.TrimSpace(out.DNS[i].Type))
 		out.DNS[i].Values = normalizeDNSValues(out.DNS[i].Type, out.DNS[i].Values)
+		if out.DNS[i].Type == "FUGUE_ROUTE" && out.DNS[i].Values == nil {
+			out.DNS[i].Values = []string{}
+		}
 	}
 	sort.Slice(out.DNS, func(i, j int) bool {
 		return out.DNS[i].Hostname+"\x00"+out.DNS[i].Type < out.DNS[j].Hostname+"\x00"+out.DNS[j].Type

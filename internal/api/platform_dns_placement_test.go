@@ -67,3 +67,32 @@ func TestDNSPlacementCompilationPreservesReleaseAndRejectsUnreadyEvidence(t *tes
 		}
 	}
 }
+
+func TestDNSRouteAliasCompilationAndPromotionGate(t *testing.T) {
+	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	now := time.Now().UTC()
+	intent := platformconfig.NormalizePlatformIntent(platformconfig.PlatformIntent{Generation: "platform-route-dns", Routes: []platformconfig.RouteIntent{{Hostname: "api.example.test", Enabled: true, UpstreamURL: "http://origin:8080"}}, DNS: []platformconfig.DNSIntent{{Hostname: "target.example.test", Type: "FUGUE_ROUTE", Values: []string{}, TTL: 60, Route: &platformconfig.DNSRouteIntent{Hostnames: []string{"api.example.test"}, DNSApplicationIntent: platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}}}})
+	policy := platformconfig.NormalizePolicySnapshot(platformconfig.PolicySnapshot{Generation: "route-dns-policy", MaxStaleSeconds: 90})
+	digest, err := platformconfig.DNSPlacementInputDigest(intent.DNS[0], []platformconfig.CompiledRoute{{RouteIntent: intent.Routes[0]}}, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := platformConfigCompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSPlacements: []platformconfig.DNSPlacementObservation{{InputDigest: digest, CheckedAt: now, Status: "resolved", TargetTTL: 60, Candidates: []platformconfig.DNSPlacementCandidate{{EdgeID: "edge-a", EdgeGroupID: "edge-group-test-a", ServingGeneration: "loaded-a", ObservedAt: now.Add(-time.Second), ValidUntil: now.Add(30 * time.Second), Healthy: true, RouteReady: true, TLSReady: true, A: []string{"93.184.216.34"}}}}}}}
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, request)
+	if response.Code != http.StatusCreated {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	var result platformConfigCompileResponse
+	mustDecodeJSON(t, response, &result)
+	for _, artifact := range []model.PlatformArtifact{result.DNSArtifact, result.ReleaseArtifact} {
+		response = performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+artifact.ID+"/release", admin, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full"})
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "DNS value expiration requires consumer support") {
+			t.Fatal("route alias bypassed leased DNS rollout guard", response.Code, response.Body.String())
+		}
+	}
+	request.Intent.DNS[0].Route.Hostnames = []string{"absent.example.test"}
+	response = performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatal("absent route accepted", response.Code, response.Body.String())
+	}
+}

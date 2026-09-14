@@ -156,6 +156,29 @@ func TestPlacementCaptureChecksEveryPathAndAddress(t *testing.T) {
 	}
 }
 
+func TestPlacementCaptureProbesReferencedHostInsteadOfDNSTarget(t *testing.T) {
+	r, nodes, probe := placementCaptureFixture(t)
+	options := *r.Intent.DNS[0].Application
+	r.Intent.DNS[0].Application = nil
+	r.Intent.DNS[0].Route = &platformconfig.DNSRouteIntent{DNSApplicationIntent: options, Hostnames: []string{"app.example.test"}}
+	r.Intent.DNS[0].Type, r.Intent.DNS[0].Hostname, r.Intent.DNS[0].Values = "FUGUE_ROUTE", "target.example.test", []string{}
+	called := 0
+	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a string) (placementRouteProof, error) {
+		if h != "app.example.test" {
+			t.Fatal("probed DNS alias instead of route hostname", h)
+		}
+		called++
+		return probe(ctx, h, p, a)
+	})
+	if called != 4 || len(r.RuntimeSnapshot.DNSPlacements) != 1 || len(r.RuntimeSnapshot.DNSPlacements[0].Candidates) != 1 {
+		t.Fatal("route alias not captured", r.Issues)
+	}
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: r.Intent, Policy: r.Policy, RuntimeSnapshot: r.RuntimeSnapshot})
+	if err != nil || compiled.DNSArtifact.Content == nil {
+		t.Fatal("captured alias could not compile", err)
+	}
+}
+
 func TestPlacementCaptureExcludesStaleInventoryAndNeverDropsHostPolicy(t *testing.T) {
 	r, nodes, probe := placementCaptureFixture(t)
 	stale := nodes[0]

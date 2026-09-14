@@ -30536,6 +30536,8 @@ components:
       properties:
         application:
           $ref: "#/components/schemas/PlatformDNSApplicationIntent"
+        route:
+          $ref: "#/components/schemas/PlatformDNSRouteIntent"
         value_expirations:
           type: object
           additionalProperties: {type: string, format: date-time}
@@ -30546,7 +30548,7 @@ components:
           type: string
         type:
           type: string
-          description: Wire DNS types, ALIAS/ANAME with typed flatten configuration, or FUGUE_APP with typed application configuration. FUGUE_APP requires app_id, tenant_id, values containing that exact app_id, owned routes at the same hostname, and fixed dns_placements evidence bound to the DNS configuration, compiled routes and policy.
+          description: Wire DNS types, ALIAS/ANAME with typed flatten configuration, FUGUE_APP with typed application configuration, or FUGUE_ROUTE with typed route references. FUGUE_APP requires app_id, tenant_id, values containing that exact app_id and owned routes at the same hostname. FUGUE_ROUTE requires empty values and explicit owned route hostnames. Both require fixed dns_placements evidence bound to the DNS configuration, compiled routes and policy.
         values:
           type: array
           items:
@@ -30577,6 +30579,22 @@ components:
       required: [ipv4_policy, ipv6_policy, ttl_policy, fallback_policy]
       description: Desired application DNS behavior; no selected IP addresses, route readiness or TLS readiness. Only valid for a FUGUE_APP record. Requires placement resolution before compilation.
       properties:
+        ipv4_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
+        ipv6_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
+        ttl_policy: {type: string, enum: [record, target, min, bounded]}
+        fallback_policy: {type: string, enum: [fail_closed, stale_if_error, empty_noerror]}
+    PlatformDNSRouteIntent:
+      type: object
+      additionalProperties: false
+      required: [hostnames, ipv4_policy, ipv6_policy, ttl_policy, fallback_policy]
+      description: Symbolic FUGUE_ROUTE address source with an empty values array. Each referenced hostname must have routes with the same app/tenant owner as the DNS record; platform routes use empty app/tenant IDs. Every path at every referenced hostname must be proved on a candidate edge. References may differ from the DNS owner name for managed custom-domain targets. Selected addresses and readiness are runtime facts, never intent.
+      properties:
+        hostnames:
+          type: array
+          minItems: 1
+          maxItems: 128
+          uniqueItems: true
+          items: {type: string}
         ipv4_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
         ipv6_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
         ttl_policy: {type: string, enum: [record, target, min, bounded]}

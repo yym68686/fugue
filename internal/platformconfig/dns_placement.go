@@ -48,14 +48,15 @@ func normalizeDNSPlacementObservations(in []DNSPlacementObservation) []DNSPlacem
 	return out
 }
 
-// DNSPlacementInputDigest binds one record, every path at its hostname and
-// the policy. Routes include resolved origins and weighted upstreams. Changes
+// DNSPlacementInputDigest binds one record, every path at its referenced
+// hostnames and the policy. Routes include resolved origins and weighted upstreams. Changes
 // to ownership, runtime placement or constraints invalidate old readiness facts.
 func DNSPlacementInputDigest(record DNSIntent, routes []CompiledRoute, policy PolicySnapshot) (string, error) {
 	normalized := NormalizePlatformIntent(PlatformIntent{DNS: []DNSIntent{record}})
 	hostRoutes := []CompiledRoute{}
+	hostnames := DNSPlacementHostnames(normalized.DNS[0])
 	for _, route := range routes {
-		if normalizedImportHostname(route.Hostname) == normalized.DNS[0].Hostname {
+		if slices.Contains(hostnames, normalizedImportHostname(route.Hostname)) {
 			route.RouteIntent = NormalizePlatformIntent(PlatformIntent{Routes: []RouteIntent{route.RouteIntent}}).Routes[0]
 			route.ExcludedEdgeIDs = uniqueSorted(route.ExcludedEdgeIDs)
 			route.ExcludedEdgeGroupIDs = uniqueSorted(route.ExcludedEdgeGroupIDs)
@@ -63,6 +64,9 @@ func DNSPlacementInputDigest(record DNSIntent, routes []CompiledRoute, policy Po
 		}
 	}
 	sort.Slice(hostRoutes, func(i, j int) bool {
+		if hostRoutes[i].Hostname != hostRoutes[j].Hostname {
+			return hostRoutes[i].Hostname < hostRoutes[j].Hostname
+		}
 		return model.NormalizeAppRoutePathPrefix(hostRoutes[i].PathPrefix) < model.NormalizeAppRoutePathPrefix(hostRoutes[j].PathPrefix)
 	})
 	raw, err := json.Marshal(map[string]any{"dns": normalized.DNS[0], "routes": hostRoutes, "policy": NormalizePolicySnapshot(policy)})
@@ -151,16 +155,23 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 	out := make([]DNSIntent, 0, len(intent.DNS))
 	matched := map[string]bool{}
 	for _, record := range intent.DNS {
-		if record.Application == nil {
+		if record.Application == nil && record.Route == nil {
 			out = append(out, record)
 			continue
 		}
-		if err := validateDNSApplicationConfiguration(record); err != nil {
+		if record.Route != nil {
+			if err := validateDNSRouteConfiguration(record); err != nil {
+				return nil, err
+			}
+		} else if err := validateDNSApplicationConfiguration(record); err != nil {
 			return nil, err
 		}
-		owners := byHost[record.Hostname]
-		if len(owners) == 0 {
-			return nil, fmt.Errorf("DNS placement requires hostname routes")
+		owners := []CompiledRoute{}
+		for _, host := range DNSPlacementHostnames(record) {
+			if len(byHost[host]) == 0 {
+				return nil, fmt.Errorf("DNS placement requires every referenced hostname route")
+			}
+			owners = append(owners, byHost[host]...)
 		}
 		digest, err := DNSPlacementInputDigest(record, routes, policy)
 		if err != nil {
@@ -185,7 +196,7 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 		if !ready {
 			continue
 		}
-		p := record.Application
+		p := DNSPlacementOptions(record)
 		if fact.Status == "stale" && p.FallbackPolicy != "stale_if_error" {
 			return nil, fmt.Errorf("DNS placement stale observation is not permitted by fallback policy")
 		}
@@ -275,6 +286,7 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 			}
 			resolved := record
 			resolved.Application = nil
+			resolved.Route = nil
 			resolved.Type = family.kind
 			resolved.Values = family.values
 			resolved.ValueExpirations = family.expires

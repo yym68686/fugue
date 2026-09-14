@@ -17,7 +17,7 @@ import (
 func (s *Server) capturePlatformPlacements(rctx context.Context, result *platformIntentProjectionResponse) {
 	found := false
 	for _, record := range result.Intent.DNS {
-		found = found || record.Application != nil
+		found = found || platformconfig.DNSPlacementOptions(record) != nil
 	}
 	if !found {
 		return
@@ -72,10 +72,10 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 	result.RuntimeSnapshot.CapturedAt = &result.CapturedAt
 	probes := 0
 	for _, record := range result.Intent.DNS {
-		if record.Application == nil {
+		if platformconfig.DNSPlacementOptions(record) == nil {
 			continue
 		}
-		compiled, projected, err := placementHostnameRoutes(*result, record.Hostname)
+		compiled, projected, err := placementRecordRoutes(*result, record)
 		if err != nil {
 			issue("dns_placement_route_inputs_invalid", record.Hostname)
 			continue
@@ -127,7 +127,7 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 						valid = false
 						break
 					}
-					proof, err := probe(ctx, record.Hostname, model.NormalizeAppRoutePathPrefix(route.PathPrefix), ip.String())
+					proof, err := probe(ctx, route.Hostname, model.NormalizeAppRoutePathPrefix(route.PathPrefix), ip.String())
 					if err != nil || proof.Digest != expected || proof.Version != node.RouteBundleVersion || proof.EdgeID != node.ID || proof.GroupID != node.EdgeGroupID || !proof.ValidUntil.After(time.Now()) {
 						valid = false
 						break
@@ -175,10 +175,10 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 	// Later network probes may consume an earlier hostname's remaining lease.
 	// Re-evaluate all facts at the final fixed snapshot time without recapture.
 	for _, record := range result.Intent.DNS {
-		if record.Application == nil {
+		if platformconfig.DNSPlacementOptions(record) == nil {
 			continue
 		}
-		compiled, _, err := placementHostnameRoutes(*result, record.Hostname)
+		compiled, _, err := placementRecordRoutes(*result, record)
 		if err == nil {
 			digest, digestErr := platformconfig.DNSPlacementInputDigest(record, compiled, result.Policy)
 			if digestErr != nil {
@@ -284,4 +284,18 @@ func placementHostnameRoutes(result platformIntentProjectionResponse, host strin
 	}
 	projection, err := projectPlatformRouteArtifact(model.PlatformArtifact{Generation: result.SourceGeneration, Content: map[string]any{"routes": compiled, "policy": policy, "cache_policies": intent.CachePolicies}})
 	return compiled, projection.Routes, err
+}
+
+func placementRecordRoutes(result platformIntentProjectionResponse, record platformconfig.DNSIntent) ([]platformconfig.CompiledRoute, []model.EdgeRouteIntent, error) {
+	compiled := []platformconfig.CompiledRoute{}
+	projected := []model.EdgeRouteIntent{}
+	for _, host := range platformconfig.DNSPlacementHostnames(record) {
+		c, p, err := placementHostnameRoutes(result, host)
+		if err != nil {
+			return nil, nil, err
+		}
+		compiled = append(compiled, c...)
+		projected = append(projected, p...)
+	}
+	return compiled, projected, nil
 }

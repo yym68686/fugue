@@ -7,12 +7,22 @@ import (
 
 func validateDNSApplicationConfiguration(record DNSIntent) error {
 	policy := record.Application
-	if record.Type != "FUGUE_APP" || policy == nil || record.Flatten != nil || len(record.ValueExpirations) != 0 {
+	if record.Type != "FUGUE_APP" || policy == nil || record.Route != nil || record.Flatten != nil || len(record.ValueExpirations) != 0 {
 		return fmt.Errorf("DNS application configuration requires an exclusive FUGUE_APP binding")
 	}
 	if record.AppID == "" || record.TenantID == "" || strings.TrimSpace(record.AppID) != record.AppID || strings.TrimSpace(record.TenantID) != record.TenantID || len(record.Values) != 1 || record.Values[0] != record.AppID {
 		return fmt.Errorf("FUGUE_APP requires a canonical app_id, tenant_id and an exact value reference")
 	}
+	if err := validateDNSPlacementOptions(*policy); err != nil {
+		return err
+	}
+	// Validate common owner-name, TTL and status syntax without resolving IPs.
+	header := record
+	header.Application, header.Type = nil, "TXT"
+	return ValidateDNSIntents([]DNSIntent{header})
+}
+
+func validateDNSPlacementOptions(policy DNSApplicationIntent) error {
 	for _, family := range []string{policy.IPv4Policy, policy.IPv6Policy} {
 		switch family {
 		case "auto", "ipv4_only", "ipv6_only", "dual_stack_required":
@@ -36,11 +46,7 @@ func validateDNSApplicationConfiguration(record DNSIntent) error {
 	default:
 		return fmt.Errorf("DNS application fallback policy is invalid")
 	}
-	// Validate the common owner-name, TTL and status syntax. This temporary
-	// record is only a syntax check; it is never returned as a compiled RRset.
-	header := record
-	header.Application, header.Type = nil, "TXT"
-	return ValidateDNSIntents([]DNSIntent{header})
+	return nil
 }
 
 func validateDNSApplicationOwners(records []DNSIntent, routes []RouteIntent) error {
@@ -49,16 +55,18 @@ func validateDNSApplicationOwners(records []DNSIntent, routes []RouteIntent) err
 		byHost[normalizedImportHostname(route.Hostname)] = append(byHost[normalizedImportHostname(route.Hostname)], route)
 	}
 	for _, record := range records {
-		if record.Application == nil {
+		if record.Application == nil && record.Route == nil {
 			continue
 		}
-		owners := byHost[record.Hostname]
-		if len(owners) == 0 {
-			return fmt.Errorf("DNS application binding requires a route at its hostname")
-		}
-		for _, route := range owners {
-			if route.AppID != record.AppID || route.TenantID != record.TenantID {
-				return fmt.Errorf("DNS application binding and route ownership differ")
+		for _, host := range DNSPlacementHostnames(record) {
+			owners := byHost[host]
+			if len(owners) == 0 {
+				return fmt.Errorf("DNS placement binding requires routes at every referenced hostname")
+			}
+			for _, route := range owners {
+				if route.AppID != record.AppID || route.TenantID != record.TenantID {
+					return fmt.Errorf("DNS placement binding and route ownership differ")
+				}
 			}
 		}
 	}
