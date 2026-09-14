@@ -53,6 +53,39 @@ func TestRoutePathCompilerDeterminismAndValidation(t *testing.T) {
 	}
 }
 
+func TestRouteIntentWeightedUpstreamsAreCanonicalAndBounded(t *testing.T) {
+	input := CompileRequest{
+		Intent: PlatformIntent{Generation: "weighted", Routes: []RouteIntent{{Hostname: "weighted.example", UpstreamURL: "http://fallback", Enabled: true, Upstreams: []UpstreamIntent{
+			{Role: "canary", ReleaseID: "release-b", Weight: 20, UpstreamURL: "http://b"},
+			{Role: "stable", ReleaseID: "release-a", Weight: 80, UpstreamURL: "http://a"},
+		}}}},
+		Policy: PolicySnapshot{Generation: "weighted-policy"},
+	}
+	first, err := Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Intent.Routes[0].Upstreams[0], input.Intent.Routes[0].Upstreams[1] = input.Intent.Routes[0].Upstreams[1], input.Intent.Routes[0].Upstreams[0]
+	second, err := Compile(input)
+	if err != nil || reflect.DeepEqual(first.RouteArtifact.Content, second.RouteArtifact.Content) {
+		t.Fatal("upstream order must remain part of traffic semantics", err)
+	}
+	raw, _ := json.Marshal(first.RouteArtifact.Content["routes"])
+	var routes []RouteIntent
+	if err := json.Unmarshal(raw, &routes); err != nil || len(routes) != 1 || len(routes[0].Upstreams) != 2 {
+		t.Fatalf("upstreams missing: %v", err)
+	}
+	for _, total := range []int{99, 101} {
+		invalid := input
+		invalid.Intent.Routes = append([]RouteIntent(nil), input.Intent.Routes...)
+		invalid.Intent.Routes[0].Upstreams = append([]UpstreamIntent(nil), input.Intent.Routes[0].Upstreams...)
+		invalid.Intent.Routes[0].Upstreams[0].Weight = total - invalid.Intent.Routes[0].Upstreams[1].Weight
+		if _, err := Compile(invalid); err == nil {
+			t.Fatalf("weight total %d accepted", total)
+		}
+	}
+}
+
 func TestCompileIsDeterministicAndCarriesLineage(t *testing.T) {
 	request := CompileRequest{
 		Intent: PlatformIntent{

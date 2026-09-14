@@ -137,6 +137,9 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 		if route.PathPrefix != "" && route.PathPrefix != path || route.ServicePort < 0 || route.ServicePort > 65535 {
 			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("route artifact has invalid path or service port")
 		}
+		if err := platformconfig.ValidateUpstreamIntents(route.Upstreams); err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
 		seen[key] = true
 		legacy := model.PlatformRoute{
 			Hostname: hostname, Kind: route.Kind, UpstreamKind: route.UpstreamKind,
@@ -166,6 +169,9 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 			}
 		}
 		intent := edgeRouteIntentFromPlatformRoute(legacy)
+		if intent.OriginStatus == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(intent.RoutePolicy) {
+			intent.Upstreams = platformconfig.ProjectUpstreamIntents(route.Upstreams)
+		}
 		intent.PathPrefix = path
 		intent.ServicePort = route.ServicePort
 		if route.Streaming != nil {

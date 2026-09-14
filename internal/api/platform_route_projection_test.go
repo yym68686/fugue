@@ -208,3 +208,30 @@ func TestCompiledRoutePathsPreservePortAndExplicitStreaming(t *testing.T) {
 		}
 	}
 }
+
+func TestCompiledWeightedUpstreamsProjectWithoutRuntimeFacts(t *testing.T) {
+	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
+		Intent: platformconfig.PlatformIntent{Generation: "weighted-route", Routes: []platformconfig.RouteIntent{{
+			Hostname: "weighted.example.test", UpstreamURL: "http://stable:8080", Enabled: true,
+			Upstreams: []platformconfig.UpstreamIntent{
+				{Role: "stable", ReleaseID: "release-stable", Weight: 80, UpstreamURL: "http://stable:8080", ServicePort: 8080},
+				{Role: "canary", ReleaseID: "release-canary", Weight: 20, UpstreamURL: "http://canary:8080", ServicePort: 8080},
+			},
+		}}},
+		Policy: platformconfig.PolicySnapshot{Generation: "weighted-route-policy"},
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("compile: %d %s", response.Code, response.Body.String())
+	}
+	var compiled platformConfigCompileResponse
+	mustDecodeJSON(t, response, &compiled)
+	projection, err := projectPlatformRouteArtifact(compiled.RouteArtifact)
+	if err != nil || len(projection.Routes) != 1 || len(projection.Routes[0].Upstreams) != 2 {
+		t.Fatalf("weighted projection: %+v %v", projection, err)
+	}
+	upstreams := projection.Routes[0].Upstreams
+	if upstreams[0].ReleaseID != "release-stable" || upstreams[0].Weight != 80 || upstreams[1].ReleaseID != "release-canary" || upstreams[1].Weight != 20 || upstreams[0].Status != "" {
+		t.Fatalf("weighted intent mixed runtime facts or changed order: %+v", upstreams)
+	}
+}

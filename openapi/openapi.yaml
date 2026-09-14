@@ -30388,6 +30388,12 @@ components:
         streaming:
           type: boolean
           description: Explicit streaming preference; omitted preserves legacy streaming behavior.
+        upstreams:
+          type: array
+          maxItems: 16
+          description: Ordered desired weighted targets. Weights are percentages and must total 100. The existing upstream_url remains the explicit fallback. Observed health/status is not accepted as intent.
+          items:
+            $ref: "#/components/schemas/PlatformConfigUpstreamIntent"
         enabled:
           type: boolean
         edge_group_id:
@@ -30414,6 +30420,35 @@ components:
         ttl:
           type: integer
           format: int32
+    PlatformConfigUpstreamIntent:
+      type: object
+      additionalProperties: false
+      required: [weight, upstream_url]
+      properties:
+        role:
+          type: string
+        release_id:
+          type: string
+        weight:
+          type: integer
+          minimum: 0
+          maximum: 100
+        upstream_kind:
+          type: string
+          enum: [kubernetes-service, mesh]
+        upstream_scope:
+          type: string
+          enum: [local-service, cluster, mesh]
+        upstream_url:
+          type: string
+        service_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        runtime_id:
+          type: string
+        deployment_generation:
+          type: string
     PlatformConfigDNSIntent:
       type: object
       additionalProperties: false

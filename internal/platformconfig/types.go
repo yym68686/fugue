@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v3"
+	CompilerVersion = "platform-config-compiler/v4"
 	GlobalScopeKey  = "global"
 )
 
@@ -31,22 +31,23 @@ type PlatformIntent struct {
 }
 
 type RouteIntent struct {
-	Hostname      string `json:"hostname"`
-	Kind          string `json:"kind,omitempty"`
-	UpstreamKind  string `json:"upstream_kind,omitempty"`
-	UpstreamScope string `json:"upstream_scope,omitempty"`
-	UpstreamURL   string `json:"upstream_url"`
-	TLSPolicy     string `json:"tls_policy,omitempty"`
-	RoutePolicy   string `json:"route_policy,omitempty"`
-	EdgeGroupMode string `json:"edge_group_mode,omitempty"`
-	Enabled       bool   `json:"enabled"`
-	EdgeGroupID   string `json:"edge_group_id,omitempty"`
-	TTL           int    `json:"ttl,omitempty"`
-	Status        string `json:"status,omitempty"`
-	StatusReason  string `json:"status_reason,omitempty"`
-	PathPrefix    string `json:"path_prefix,omitempty"`
-	ServicePort   int    `json:"service_port,omitempty"`
-	Streaming     *bool  `json:"streaming,omitempty"`
+	Hostname      string           `json:"hostname"`
+	Kind          string           `json:"kind,omitempty"`
+	UpstreamKind  string           `json:"upstream_kind,omitempty"`
+	UpstreamScope string           `json:"upstream_scope,omitempty"`
+	UpstreamURL   string           `json:"upstream_url"`
+	TLSPolicy     string           `json:"tls_policy,omitempty"`
+	RoutePolicy   string           `json:"route_policy,omitempty"`
+	EdgeGroupMode string           `json:"edge_group_mode,omitempty"`
+	Enabled       bool             `json:"enabled"`
+	EdgeGroupID   string           `json:"edge_group_id,omitempty"`
+	TTL           int              `json:"ttl,omitempty"`
+	Status        string           `json:"status,omitempty"`
+	StatusReason  string           `json:"status_reason,omitempty"`
+	PathPrefix    string           `json:"path_prefix,omitempty"`
+	ServicePort   int              `json:"service_port,omitempty"`
+	Streaming     *bool            `json:"streaming,omitempty"`
+	Upstreams     []UpstreamIntent `json:"upstreams,omitempty"`
 }
 
 type DNSIntent struct {
@@ -286,6 +287,7 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 			value := *out.Routes[i].Streaming
 			out.Routes[i].Streaming = &value
 		}
+		out.Routes[i].Upstreams = append([]UpstreamIntent(nil), out.Routes[i].Upstreams...)
 	}
 	sort.Slice(out.Routes, func(i, j int) bool {
 		if out.Routes[i].Hostname != out.Routes[j].Hostname {
@@ -339,6 +341,9 @@ func validateIntent(in PlatformIntent) error {
 			return fmt.Errorf("duplicate route hostname/path %q %q", route.Hostname, path)
 		}
 		seen[key] = struct{}{}
+		if err := ValidateUpstreamIntents(route.Upstreams); err != nil {
+			return err
+		}
 	}
 	return nil
 }
