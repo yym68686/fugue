@@ -30762,7 +30762,7 @@ components:
     PlatformIntentProjectionResponse:
       type: object
       additionalProperties: false
-      required: [intent, runtime_snapshot, source_generation, captured_at, route_count, omitted_runtime_fields, migration_ready, issues, business_snapshot_revision, business_snapshot_at]
+      required: [intent, policy, runtime_snapshot, source_generation, captured_at, route_count, omitted_runtime_fields, migration_ready, issues, business_snapshot_revision, business_snapshot_at]
       properties:
         business_snapshot_revision:
           type: string
@@ -30787,6 +30787,8 @@ components:
                 type: string
         intent:
           $ref: "#/components/schemas/PlatformConfigIntent"
+        policy:
+          $ref: "#/components/schemas/PlatformConfigPolicySnapshot"
         runtime_snapshot:
           $ref: "#/components/schemas/PlatformRuntimeSnapshot"
         source_generation:

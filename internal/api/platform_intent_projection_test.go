@@ -36,6 +36,9 @@ func TestPlatformIntentProjectionRequiresPlatformAdmin(t *testing.T) {
 	if projection.MigrationReady || len(projection.Issues) == 0 || len(projection.Intent.Routes) != 1 || projection.RouteCount != 1 || projection.RuntimeSnapshot.IntentGeneration != projection.Intent.Generation || response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("invalid draft: %+v", projection)
 	}
+	if projection.Policy.SchemaVersion != platformconfig.SchemaVersion || projection.Policy.Scope != platformconfig.GlobalScopeKey || projection.Policy.Generation == "" {
+		t.Fatalf("policy projection missing: %+v", projection.Policy)
+	}
 	if projection.Intent.Routes[0].EdgeGroupMode != model.PlatformRouteEdgeGroupModeAllHealthy {
 		t.Fatal("invalid group mode mapping")
 	}
@@ -65,7 +68,7 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 		Upstreams: []model.EdgeRouteUpstream{{Weight: 100, UpstreamURL: "http://observed-target:8080"}},
 	}
 	snapshot := model.EdgeRouteIntentSnapshot{GeneratedAt: captured, Routes: []model.EdgeRouteIntent{route}}
-	first, err := projectBusinessRouteDraft(snapshot, apps, observed, nil)
+	first, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +80,7 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 	snapshot.Routes[0].UpstreamURL = ""
 	snapshot.Routes[0].Upstreams = nil
 	snapshot.Routes[0].RuntimeID = "runtime-observed-other"
-	second, err := projectBusinessRouteDraft(snapshot, apps, observed, nil)
+	second, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +94,7 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 	extra := route
 	extra.Hostname = "earlier.example"
 	snapshot.Routes = append([]model.EdgeRouteIntent{extra}, snapshot.Routes...)
-	third, err := projectBusinessRouteDraft(snapshot, apps, observed, nil)
+	third, err := projectBusinessRouteDraft(snapshot, apps, observed, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +111,7 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 func TestBusinessRouteDraftPreservesConfiguredPlatformMaintenance(t *testing.T) {
 	route := model.EdgeRouteIntent{Hostname: "platform.example", PathPrefix: "/", TargetGroupMode: model.EdgeRouteIntentGroupModePinnedGroup, PinnedEdgeGroupID: "edge-group-test", OriginStatus: model.EdgeRouteStatusUnavailable}
 	configured := model.PlatformRoute{Hostname: route.Hostname, UpstreamURL: "http://configured:8080", Status: model.EdgeRouteStatusUnavailable, StatusReason: "planned maintenance"}
-	result, err := projectBusinessRouteDraft(model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{route}}, nil, nil, []model.PlatformRoute{configured})
+	result, err := projectBusinessRouteDraft(model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{route}}, nil, nil, []model.PlatformRoute{configured}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

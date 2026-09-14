@@ -24,6 +24,7 @@ type platformProjectionIssue struct {
 
 type platformIntentProjectionResponse struct {
 	Intent                   platformconfig.PlatformIntent  `json:"intent"`
+	Policy                   platformconfig.PolicySnapshot  `json:"policy"`
 	RuntimeSnapshot          platformconfig.RuntimeSnapshot `json:"runtime_snapshot"`
 	SourceGeneration         string                         `json:"source_generation"`
 	CapturedAt               time.Time                      `json:"captured_at"`
@@ -82,7 +83,7 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, "business route projection unavailable")
 		return
 	}
-	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, s.platformRoutes)
+	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, s.platformRoutes, business.RoutePolicies, business.TrafficPolicies)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "business route draft cannot be captured")
 		return
@@ -166,7 +167,7 @@ func (source routeBusinessSource) ListAppReleases(filter model.AppReleaseFilter)
 // This diagnostic does not turn runtime-selected targets into desired intent.
 // Unsupported migration semantics are explicit issues until a complete
 // business/constraint/fact snapshot can be frozen and compared.
-func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute) (platformIntentProjectionResponse, error) {
+func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy) (platformIntentProjectionResponse, error) {
 	result := platformIntentProjectionResponse{SourceGeneration: snapshot.Generation, CapturedAt: snapshot.GeneratedAt,
 		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "constraint_policy_not_projected"}, {Code: "dns_tls_not_projected"}},
 		OmittedRuntimeFields: []string{"selected_edge_group", "decision_id", "exclusion_evidence"},
@@ -265,6 +266,10 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		a, b := result.Issues[i], result.Issues[j]
 		return a.Code+"\x00"+a.Hostname+"\x00"+a.PathPrefix < b.Code+"\x00"+b.Hostname+"\x00"+b.PathPrefix
 	})
-	result.Intent, result.RuntimeSnapshot, result.RouteCount = intent, facts, len(intent.Routes)
+	policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}, routePolicies, trafficPolicies, "policy-"+snapshot.Generation)
+	if err != nil {
+		return result, err
+	}
+	result.Intent, result.Policy, result.RuntimeSnapshot, result.RouteCount = intent, policy, facts, len(intent.Routes)
 	return result, nil
 }
