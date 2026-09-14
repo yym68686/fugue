@@ -893,19 +893,21 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		} else {
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
-	case miekgdns.TypeA, miekgdns.TypeAAAA, miekgdns.TypeCAA, miekgdns.TypeCNAME, miekgdns.TypeMX, miekgdns.TypeTXT:
+	case miekgdns.TypeA, miekgdns.TypeAAAA, miekgdns.TypeCAA, miekgdns.TypeCNAME, miekgdns.TypeMX, miekgdns.TypeSRV, miekgdns.TypeTXT:
 		records, nameExists := s.edgeDNSRecordsForQuestion(context.Background(), snapshot, name, question.Qtype, r, w)
 		if len(records) > 0 {
 			resp.Answer = append(resp.Answer, records...)
 		} else if !nameExists {
 			resp.Rcode = miekgdns.RcodeNameError
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
+		} else {
+			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
 	default:
 		if !edgeDNSNameExists(snapshot, name) && name != zone {
 			resp.Rcode = miekgdns.RcodeNameError
-			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
+		resp.Ns = append(resp.Ns, s.soaRecord(zone))
 	}
 	rcode = miekgdns.RcodeToString[resp.Rcode]
 	if rcode == "" {
@@ -3187,8 +3189,7 @@ func parseEdgeDNSMX(value string) (*miekgdns.MX, bool) {
 			exchange = fields[1]
 		}
 	}
-	exchange = normalizeName(exchange)
-	if exchange == "" {
+	if normalizeName(exchange) == "" && exchange != "." {
 		return nil, false
 	}
 	return &miekgdns.MX{Preference: preference, Mx: fqdn(exchange)}, true
@@ -3211,8 +3212,8 @@ func parseEdgeDNSSRV(value string) (*miekgdns.SRV, bool) {
 	if err != nil {
 		return nil, false
 	}
-	target := normalizeName(fields[3])
-	if target == "" {
+	target := fields[3]
+	if normalizeName(target) == "" && target != "." {
 		return nil, false
 	}
 	return &miekgdns.SRV{
@@ -3249,7 +3250,7 @@ func parseEdgeDNSCAA(value string) (*miekgdns.CAA, bool) {
 }
 
 func edgeDNSTXTChunks(value string) []string {
-	value = strings.TrimSpace(value)
+	// TXT RDATA is an opaque byte string. Trimming it changes signed content.
 	if value == "" {
 		return nil
 	}
