@@ -30587,6 +30587,50 @@ components:
             type: string
         constraint_graph:
           $ref: "#/components/schemas/PlatformConstraintGraph"
+        route_constraints:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: "#/components/schemas/PlatformRoutePolicyConstraint"
+        traffic_constraints:
+          type: array
+          maxItems: 4096
+          description: Draft release constraints. Compilation refuses nonempty traffic constraints until the release fact resolver is available; they are never silently ignored.
+          items:
+            $ref: "#/components/schemas/PlatformTrafficPolicyConstraint"
+    PlatformRoutePolicyConstraint:
+      type: object
+      additionalProperties: false
+      required: [id, hostname, route_policy, enabled]
+      properties:
+        id: {type: string}
+        hostname: {type: string}
+        app_id: {type: string}
+        tenant_id: {type: string}
+        edge_group_id:
+          type: string
+          description: Compilation refuses nonempty placement constraints until DNS placement resolution is available.
+        excluded_edge_ids: {type: array, items: {type: string}}
+        excluded_edge_group_ids: {type: array, items: {type: string}}
+        exclusion_reason: {type: string}
+        exclusion_expires_at: {type: string, format: date-time, nullable: true}
+        min_healthy_edge_nodes: {type: integer, minimum: 0}
+        route_policy: {type: string, enum: [route_a_only, edge_canary, edge_enabled]}
+        enabled: {type: boolean}
+    PlatformTrafficPolicyConstraint:
+      type: object
+      additionalProperties: false
+      required: [id, app_id, mode, stable_weight, candidate_weight]
+      properties:
+        id: {type: string}
+        app_id: {type: string}
+        mode: {type: string, enum: [single, canary, weighted, paused]}
+        stable_release_id: {type: string}
+        candidate_release_id: {type: string}
+        stable_weight: {type: integer, minimum: 0, maximum: 100}
+        candidate_weight: {type: integer, minimum: 0, maximum: 100}
+        sticky_header: {type: string}
+        sticky_cookie: {type: string}
     PlatformConstraintGraph:
       type: object
       additionalProperties: false

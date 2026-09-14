@@ -209,6 +209,12 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 			intent.Streaming = *route.Streaming
 		}
 		intent.MinHealthyEdgeNodes = minimumHealthy
+		intent.ExcludedEdgeIDs = append([]string(nil), route.ExcludedEdgeIDs...)
+		intent.ExcludedEdgeGroupIDs = append([]string(nil), route.ExcludedEdgeGroupIDs...)
+		intent.ExclusionReason, intent.ExclusionExpiresAt = route.ExclusionReason, route.ExclusionExpiresAt
+		if route.MinHealthyEdgeNodes > 0 {
+			intent.MinHealthyEdgeNodes = route.MinHealthyEdgeNodes
+		}
 		intent.Generation = edgeRouteIntentGeneration(intent)
 		intents = append(intents, intent)
 	}

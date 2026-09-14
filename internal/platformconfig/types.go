@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v6"
+	CompilerVersion = "platform-config-compiler/v7"
 	GlobalScopeKey  = "global"
 )
 
@@ -81,17 +81,19 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
-	SchemaVersion       string          `json:"schema_version"`
-	Generation          string          `json:"generation"`
-	Scope               string          `json:"scope"`
-	RequireTLSReady     bool            `json:"require_tls_ready"`
-	RequireRouteReady   bool            `json:"require_route_ready"`
-	MinimumHealthyEdges int             `json:"minimum_healthy_edges"`
-	MaxStaleSeconds     int             `json:"max_stale_seconds"`
-	CanaryWeights       []int           `json:"canary_weights,omitempty"`
-	DependencyOrder     []string        `json:"dependency_order,omitempty"`
-	ConstraintGraph     ConstraintGraph `json:"constraint_graph,omitempty"`
-	CreatedAt           time.Time       `json:"created_at,omitempty"`
+	SchemaVersion       string                    `json:"schema_version"`
+	Generation          string                    `json:"generation"`
+	Scope               string                    `json:"scope"`
+	RequireTLSReady     bool                      `json:"require_tls_ready"`
+	RequireRouteReady   bool                      `json:"require_route_ready"`
+	MinimumHealthyEdges int                       `json:"minimum_healthy_edges"`
+	MaxStaleSeconds     int                       `json:"max_stale_seconds"`
+	CanaryWeights       []int                     `json:"canary_weights,omitempty"`
+	DependencyOrder     []string                  `json:"dependency_order,omitempty"`
+	ConstraintGraph     ConstraintGraph           `json:"constraint_graph,omitempty"`
+	RouteConstraints    []RoutePolicyConstraint   `json:"route_constraints,omitempty"`
+	TrafficConstraints  []TrafficPolicyConstraint `json:"traffic_constraints,omitempty"`
+	CreatedAt           time.Time                 `json:"created_at,omitempty"`
 }
 
 type ConstraintGraph struct {
@@ -202,6 +204,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	runtimeSnapshot.Origins = append([]OriginObservation(nil), runtimeSnapshot.Origins...)
 	sort.Slice(runtimeSnapshot.Origins, func(i, j int) bool { return runtimeSnapshot.Origins[i].Ref < runtimeSnapshot.Origins[j].Ref })
 	compiledRoutes, err := ResolveRouteOrigins(intent.Routes, runtimeSnapshot, policy)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	compiledRoutes, err = ApplyRoutePolicyConstraints(compiledRoutes, policy)
 	if err != nil {
 		return CompileResult{}, err
 	}
@@ -340,6 +346,18 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out.CanaryWeights = append([]int(nil), in.CanaryWeights...)
 	out.DependencyOrder = append([]string(nil), in.DependencyOrder...)
 	out.ConstraintGraph = normalizeConstraintGraph(in.ConstraintGraph)
+	out.RouteConstraints = append([]RoutePolicyConstraint(nil), in.RouteConstraints...)
+	for i := range out.RouteConstraints {
+		out.RouteConstraints[i].ExcludedEdgeIDs = uniqueSorted(in.RouteConstraints[i].ExcludedEdgeIDs)
+		out.RouteConstraints[i].ExcludedEdgeGroupIDs = uniqueSorted(in.RouteConstraints[i].ExcludedEdgeGroupIDs)
+		if in.RouteConstraints[i].ExclusionExpiresAt != nil {
+			value := *in.RouteConstraints[i].ExclusionExpiresAt
+			out.RouteConstraints[i].ExclusionExpiresAt = &value
+		}
+	}
+	out.TrafficConstraints = append([]TrafficPolicyConstraint(nil), in.TrafficConstraints...)
+	sort.Slice(out.RouteConstraints, func(i, j int) bool { return out.RouteConstraints[i].Hostname < out.RouteConstraints[j].Hostname })
+	sort.Slice(out.TrafficConstraints, func(i, j int) bool { return out.TrafficConstraints[i].AppID < out.TrafficConstraints[j].AppID })
 	return out
 }
 
@@ -412,7 +430,10 @@ func validatePolicy(in PolicySnapshot) error {
 	if err := validateDependencyOrder(in.DependencyOrder); err != nil {
 		return err
 	}
-	return validateConstraintGraph(in.ConstraintGraph)
+	if err := validateConstraintGraph(in.ConstraintGraph); err != nil {
+		return err
+	}
+	return validatePolicyRules(in)
 }
 
 // ValidatePolicySnapshot validates a normalized, strongly typed policy
