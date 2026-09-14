@@ -215,6 +215,7 @@ func captureDNSPlacementRecord(ctx context.Context, snapshot platformIntentProje
 }
 
 func placementProofBinding(route model.EdgeRouteIntent, compiled []platformconfig.CompiledRoute) model.EdgeRouteIntent {
+	// Keep the proof input aligned with the immutable serving artifact.
 	for _, compiledRoute := range compiled {
 		if compiledRoute.Hostname == route.Hostname && model.NormalizeAppRoutePathPrefix(compiledRoute.PathPrefix) == model.NormalizeAppRoutePathPrefix(route.PathPrefix) {
 			route.MinHealthyEdgeNodes = compiledRoute.MinHealthyEdgeNodes
