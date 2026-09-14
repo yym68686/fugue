@@ -384,6 +384,19 @@ func ValidatePlatformIntent(in PlatformIntent) error {
 // artifact digests and compiler replay.
 func NormalizePlatformIntent(in PlatformIntent) PlatformIntent { return normalizeIntent(in) }
 
+// PlatformIntentGeneration returns the deterministic generation for a
+// canonical intent. Runtime observations are excluded from this digest.
+func PlatformIntentGeneration(in PlatformIntent) (string, error) {
+	canonical := NormalizePlatformIntent(in)
+	canonical.Generation = ""
+	canonical.CreatedAt = time.Time{}
+	digest, err := Digest(canonical)
+	if err != nil {
+		return "", err
+	}
+	return "intent_" + strings.TrimPrefix(digest, "sha256:"), nil
+}
+
 func validatePolicy(in PolicySnapshot) error {
 	if in.SchemaVersion != SchemaVersion || strings.TrimSpace(in.Generation) == "" {
 		return fmt.Errorf("policy snapshot requires schema_version %q and generation", SchemaVersion)

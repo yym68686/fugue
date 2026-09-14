@@ -2361,6 +2361,24 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/routes/project:
+    get:
+      operationId: projectPlatformIntent
+      summary: Project Business Routes into PlatformIntent
+      description: Read-only migration projection of current business routes into a canonical PlatformIntent and fixed runtime origin observations. Writes no serving state.
+      tags: [Admin]
+      x-fugue-handler: handleProjectPlatformIntent
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Projected PlatformIntent and RuntimeSnapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformIntentProjectionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-config/import-env/preview:
     get:
       operationId: previewPlatformConfigEnvironmentImport
@@ -30697,6 +30715,27 @@ components:
           items:
             type: string
             enum: [tls_allowlist, cache_policies]
+    PlatformIntentProjectionResponse:
+      type: object
+      additionalProperties: false
+      required: [intent, runtime_snapshot, source_generation, captured_at, route_count, omitted_runtime_fields]
+      properties:
+        intent:
+          $ref: "#/components/schemas/PlatformConfigIntent"
+        runtime_snapshot:
+          $ref: "#/components/schemas/PlatformRuntimeSnapshot"
+        source_generation:
+          type: string
+        captured_at:
+          type: string
+          format: date-time
+        route_count:
+          type: integer
+          minimum: 0
+        omitted_runtime_fields:
+          type: array
+          items:
+            type: string
     PlatformRuntimeSnapshot:
       type: object
       additionalProperties: false
