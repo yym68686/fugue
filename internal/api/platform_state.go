@@ -662,6 +662,12 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 		s.writeStoreError(w, err)
 		return
 	}
+	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), mustPrincipal(r)); policyErr == nil {
+		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
+	}
+	// Use the same fresh active inventory as the edge read model. Historical
+	// rows must not keep decommissioned nodes required forever.
+	edges = freshEdgeNodes(edges, time.Now().UTC())
 	dns, err := s.store.ListDNSNodes("")
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -748,6 +754,10 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 		s.writeStoreError(w, err)
 		return
 	}
+	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), mustPrincipal(r)); policyErr == nil {
+		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
+	}
+	edges = freshEdgeNodes(edges, time.Now().UTC())
 	dns, err := s.store.ListDNSNodes("")
 	if err != nil {
 		s.writeStoreError(w, err)
