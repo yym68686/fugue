@@ -67,7 +67,7 @@ func projectManagedCustomDomainDNS(result *platformIntentProjectionResponse, dom
 	}
 	for _, domain := range domains {
 		host := normalizeExternalAppDomain(domain.Hostname)
-		if host == "" || domain.Status != model.AppDomainStatusVerified || domain.DNSMode != model.AppDomainDNSModeManaged {
+		if host == "" || domain.Status != model.AppDomainStatusVerified || model.NormalizeAppDomainDNSMode(domain.DNSMode) != model.AppDomainDNSModeManaged {
 			continue
 		}
 		app, ok := apps[strings.TrimSpace(domain.AppID)]
