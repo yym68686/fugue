@@ -39,7 +39,9 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 	active := map[string]bool{}
 	for _, node := range topology.EdgeNodes {
 		active[model.PlatformConsumerComponentEdgeWorker+":"+strings.TrimSpace(node.ID)] = true
-		active[model.PlatformConsumerComponentCaddyEdgeFront+":"+strings.TrimSpace(node.ID)] = true
+		if normalizeExpectedConsumerArtifactKind(set.ArtifactKind) != model.PlatformArtifactKindEdgeRouteBundle {
+			active[model.PlatformConsumerComponentCaddyEdgeFront+":"+strings.TrimSpace(node.ID)] = true
+		}
 	}
 	for _, node := range topology.DNSNodes {
 		active[model.PlatformConsumerComponentDNSServer+":"+strings.TrimSpace(node.ID)] = true
@@ -53,12 +55,36 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 		id := firstNonEmptyExpected(strings.TrimSpace(runtimeObj.ClusterNodeName), strings.TrimSpace(runtimeObj.ID))
 		active[model.PlatformConsumerComponentRuntimeAgent+":"+id] = true
 	}
+	legacyCaddy := normalizeExpectedConsumerArtifactKind(set.ArtifactKind) == model.PlatformArtifactKindEdgeRouteBundle
+	legacyCaddyNodes := map[string]bool{}
+	if legacyCaddy {
+		for _, consumer := range set.Consumers {
+			if consumer.Component != model.PlatformConsumerComponentCaddyEdgeFront {
+				continue
+			}
+			for _, node := range topology.EdgeNodes {
+				if strings.TrimSpace(node.ID) == strings.TrimSpace(consumer.NodeID) {
+					legacyCaddyNodes[consumer.NodeID] = true
+					break
+				}
+			}
+		}
+	}
 	out := set
 	out.Consumers = make([]model.PlatformExpectedConsumer, 0, len(set.Consumers))
 	for _, consumer := range set.Consumers {
-		if active[consumer.ConsumerID] {
-			out.Consumers = append(out.Consumers, consumer)
+		if !active[consumer.ConsumerID] {
+			continue
 		}
+		if legacyCaddy && consumer.Component == model.PlatformConsumerComponentCaddyEdgeFront {
+			// Caddy is now an edge-worker sidecar. Its old expected row is
+			// retained in immutable lineage but projected to the worker owner.
+			continue
+		}
+		if legacyCaddy && consumer.Component == model.PlatformConsumerComponentEdgeWorker && legacyCaddyNodes[consumer.NodeID] {
+			consumer.CompatibilityCapabilities = appendUniqueExpected(consumer.CompatibilityCapabilities, "caddy_apply_probe")
+		}
+		out.Consumers = append(out.Consumers, consumer)
 	}
 	out.RequiredCardinality, out.OptionalCardinality = 0, 0
 	for _, consumer := range out.Consumers {
@@ -70,6 +96,15 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 	}
 	out.RequiresConsumers = len(out.Consumers) > 0
 	return out
+}
+
+func appendUniqueExpected(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.PlatformExpectedConsumerSet, error) {

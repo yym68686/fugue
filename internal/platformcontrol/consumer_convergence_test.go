@@ -301,3 +301,25 @@ func passingConsumer(expected model.PlatformExpectedConsumer, observedAt time.Ti
 		UpdatedAt:                 observedAt,
 	}
 }
+
+func TestProjectExpectedConsumerSetProjectsLegacyCaddyOwnerToWorker(t *testing.T) {
+	now := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	set := model.PlatformExpectedConsumerSet{
+		ArtifactKind:        model.PlatformArtifactKindEdgeRouteBundle,
+		RequiredCardinality: 2,
+		RequiresConsumers:   true,
+		Consumers: []model.PlatformExpectedConsumer{
+			{ConsumerID: "edge-worker:edge-1", Component: model.PlatformConsumerComponentEdgeWorker, NodeID: "edge-1", Required: true},
+			{ConsumerID: "caddy-edge-front:edge-1", Component: model.PlatformConsumerComponentCaddyEdgeFront, NodeID: "edge-1", Required: true},
+		},
+	}
+	projected := ProjectExpectedConsumerSetToTopology(set, ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "edge-1"}}})
+	if len(projected.Consumers) != 1 || projected.Consumers[0].Component != model.PlatformConsumerComponentEdgeWorker ||
+		len(projected.Consumers[0].CompatibilityCapabilities) != 1 || projected.Consumers[0].CompatibilityCapabilities[0] != "caddy_apply_probe" {
+		t.Fatalf("legacy caddy owner was not projected to worker capability: %+v", projected)
+	}
+	if len(set.Consumers) != 2 || set.RequiredCardinality != 2 || now.IsZero() {
+		// Keep the persisted input untouched; now only documents deterministic test time.
+		t.Fatalf("legacy expected set was mutated: %+v", set)
+	}
+}
