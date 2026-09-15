@@ -521,7 +521,8 @@ func (s *Service) syncManagedAppObservedStatus(
 				if podsErr != nil {
 					return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("list backing service cluster %s pods: %w", serviceDeployment.ResourceName, podsErr))
 				}
-				if failure := managedBackingServicePodFailureMessage(pods); failure != "" {
+				if failure := managedBackingServicePodFailureMessage(pods); failure != "" &&
+					!strings.EqualFold(strings.TrimSpace(backingStatus.Phase), model.ManagedPostgresRuntimePhaseActive) {
 					backingStatus.Phase = model.ManagedPostgresRuntimePhaseError
 					backingStatus.Message = failure
 				}
