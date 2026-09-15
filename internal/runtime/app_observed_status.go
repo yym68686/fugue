@@ -62,16 +62,15 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		source = AppObservationSourceKubernetesAPI
 	}
 	status := model.AppObservedStatus{
-		Phase:            "unknown",
-		RuntimeID:        strings.TrimSpace(app.Spec.RuntimeID),
-		ServingReleaseID: strings.TrimSpace(evidence.ServingReleaseID),
-		DesiredReplicas:  app.Spec.Replicas,
-		Fresh:            evidence.Complete && evidence.Fresh,
-		ObservedAt:       observedAt,
-		ClusterID:        strings.TrimSpace(evidence.ClusterID),
-		EvidenceSource:   source,
-		EvidenceSources:  append([]string(nil), evidence.EvidenceSources...),
-		Reason:           AppObservationReasonRuntimeObservationNotReady,
+		Phase:           "unknown",
+		RuntimeID:       strings.TrimSpace(app.Spec.RuntimeID),
+		DesiredReplicas: app.Spec.Replicas,
+		Fresh:           evidence.Complete && evidence.Fresh,
+		ObservedAt:      observedAt,
+		ClusterID:       strings.TrimSpace(evidence.ClusterID),
+		EvidenceSource:  source,
+		EvidenceSources: append([]string(nil), evidence.EvidenceSources...),
+		Reason:          AppObservationReasonRuntimeObservationNotReady,
 	}
 	if len(status.EvidenceSources) == 0 {
 		status.EvidenceSources = []string{source}
@@ -213,6 +212,17 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		status.Phase = "unavailable"
 		status.Reason = AppObservationReasonRuntimeObservationNotReady
 		status.Message = firstObservedStatusMessage(status.Message, strings.Join(status.InvariantViolations, "; "))
+	}
+	// A traffic-policy reference is not a serving claim until the same fresh
+	// observation proves the current cohort. Early returns deliberately omit it.
+	if status.Phase == "deployed" && status.Fresh && len(status.InvariantViolations) == 0 &&
+		boolPointerIsTrue(status.NamespacePresent) && boolPointerIsTrue(status.ImagePresent) &&
+		intPointerAtLeast(status.ReadyReplicas, app.Spec.Replicas) &&
+		intPointerAtLeast(status.PhysicalReplicas, app.Spec.Replicas) &&
+		intPointerAtLeast(status.PhysicalDesired, app.Spec.Replicas) &&
+		(!(model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec)) ||
+			(boolPointerIsTrue(status.ServicePresent) && boolPointerIsTrue(status.EndpointPresent) && boolPointerIsTrue(status.EndpointReady))) {
+		status.ServingReleaseID = strings.TrimSpace(evidence.ServingReleaseID)
 	}
 	return status
 }

@@ -211,29 +211,26 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		if !referencedReleases[release.ID] {
 			continue
 		}
-		observedAt := release.UpdatedAt
-		releaseIdentityVerified := false
-		if app, ok := observed[release.AppID]; ok && app.ObservedStatus != nil && app.ObservedStatus.ServingReleaseID == release.ID && app.ObservedStatus.Fresh && app.ObservedStatus.RuntimeID == release.RuntimeID && app.ObservedStatus.ImageRef != "" && app.ObservedStatus.ImageRef == release.ResolvedImageRef && slices.Contains(app.ObservedStatus.EvidenceSources, "app_release_traffic_policy") && !app.ObservedStatus.ObservedAt.IsZero() {
-			releaseIdentityVerified = true
-			if app.ObservedStatus.ObservedAt.After(observedAt) {
-				observedAt = app.ObservedStatus.ObservedAt
-			}
-		}
+		var observedAt time.Time
 		status := model.EdgeRouteStatusUnavailable
-		if release.Status == model.AppReleaseStatusReady || release.Status == model.AppReleaseStatusServing {
-			if releaseIdentityVerified {
-				status = model.EdgeRouteStatusActive
+		reason := "exact healthy serving release evidence is unavailable"
+		if app, ok := observed[release.AppID]; ok && app.ID == release.AppID && app.TenantID == release.TenantID &&
+			appObservedReadyForServing(app, snapshot.GeneratedAt) &&
+			app.ObservedStatus.ServingReleaseID == release.ID && release.RuntimeID != "" &&
+			app.ObservedStatus.RuntimeID == release.RuntimeID && release.ResolvedImageRef != "" &&
+			app.ObservedStatus.ImageRef == release.ResolvedImageRef &&
+			slices.Contains(app.ObservedStatus.EvidenceSources, "app_release_traffic_policy") &&
+			!app.ObservedStatus.ObservedAt.After(snapshot.GeneratedAt) {
+			// Business-row UpdatedAt is never a runtime observation, even when
+			// it is newer than the independently captured health evidence.
+			observedAt = app.ObservedStatus.ObservedAt
+			if release.Status == model.AppReleaseStatusReady || release.Status == model.AppReleaseStatusServing {
+				status, reason = model.EdgeRouteStatusActive, ""
 			} else {
-				releaseStatusReason := strings.TrimSpace(release.StatusReason)
-				if releaseStatusReason == "" {
-					releaseStatusReason = "exact serving release identity is unavailable"
-				} else {
-					releaseStatusReason += "; exact serving release identity is unavailable"
-				}
-				release.StatusReason = releaseStatusReason
+				reason = "release lifecycle does not permit traffic"
 			}
 		}
-		facts.Releases = append(facts.Releases, platformconfig.ReleaseObservation{ID: release.ID, AppID: release.AppID, TenantID: release.TenantID, ObservedAt: observedAt, Status: status, StatusReason: release.StatusReason, UpstreamURL: release.UpstreamURL, RuntimeID: release.RuntimeID, DeploymentGeneration: firstNonEmpty(release.ResolvedImageRef, release.SourceRef)})
+		facts.Releases = append(facts.Releases, platformconfig.ReleaseObservation{ID: release.ID, AppID: release.AppID, TenantID: release.TenantID, ObservedAt: observedAt, Status: status, StatusReason: reason, UpstreamURL: release.UpstreamURL, RuntimeID: release.RuntimeID, DeploymentGeneration: firstNonEmpty(release.ResolvedImageRef, release.SourceRef)})
 	}
 	sort.Slice(facts.Releases, func(i, j int) bool { return facts.Releases[i].ID < facts.Releases[j].ID })
 	for _, source := range snapshot.Routes {

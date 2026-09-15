@@ -19170,7 +19170,7 @@ components:
           type: string
         serving_release_id:
           type: string
-          description: Exact release identity proven by the serving traffic policy and runtime observation.
+          description: Release identity from the serving traffic policy, emitted only when a fresh current-cohort runtime observation proves healthy serving. Omitted for unknown, stale or unhealthy observations.
         desired_replicas:
           type: integer
           format: int32
@@ -31400,6 +31400,7 @@ components:
     PlatformReleaseObservation:
       type: object
       additionalProperties: false
+      description: Fixed release evidence. Migration drafts require matching owner, release, runtime, image and healthy serving evidence before reporting active. observed_at is the original runtime evidence time, never a business-row update time; absent evidence has zero observed_at and blocks compilation.
       required: [id, app_id, tenant_id, observed_at, status, upstream_url]
       properties:
         id: {type: string}

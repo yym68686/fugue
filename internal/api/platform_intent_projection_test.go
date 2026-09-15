@@ -57,34 +57,65 @@ func TestPlatformIntentProjectionRequiresPlatformAdmin(t *testing.T) {
 	}
 }
 
-func TestBusinessRouteDraftUsesMatchedServingRuntimeEvidence(t *testing.T) {
-	now := time.Now().UTC()
-	old := now.Add(-48 * time.Hour)
-	app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{Replicas: 1}, ObservedStatus: &model.AppObservedStatus{RuntimeID: "runtime-a", ServingReleaseID: "release-a", ImageRef: "image-a", Fresh: true, ObservedAt: now, EvidenceSources: []string{"app_release_traffic_policy"}}}
-	release := model.AppRelease{ID: "release-a", AppID: app.ID, TenantID: app.TenantID, Status: model.AppReleaseStatusServing, RuntimeID: "runtime-a", ResolvedImageRef: "image-a", UpdatedAt: old, UpstreamURL: "http://app:80"}
-	traffic := model.AppTrafficPolicy{ID: "traffic-a", AppID: app.ID, TenantID: app.TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100}
-	route := model.EdgeRouteIntentSnapshot{GeneratedAt: now, Routes: []model.EdgeRouteIntent{{Hostname: "app.example.test", PathPrefix: "/", AppID: app.ID, TenantID: app.TenantID, RuntimeID: "runtime-a", ServicePort: 80}}}
-	result, err := projectBusinessRouteDraft(route, map[string]model.App{app.ID: app}, map[string]model.App{app.ID: app}, nil, nil, []model.AppTrafficPolicy{traffic}, []model.AppRelease{release}, nil, nil, nil)
-	if err != nil || len(result.RuntimeSnapshot.Releases) != 1 || !result.RuntimeSnapshot.Releases[0].ObservedAt.Equal(now) {
-		t.Fatalf("matched runtime evidence was not used: err=%v facts=%+v", err, result.RuntimeSnapshot.Releases)
-	}
-}
-
-func TestBusinessRouteDraftDoesNotPromoteReleaseWithoutExactServingIdentity(t *testing.T) {
-	now := time.Now().UTC()
-	release := model.AppRelease{ID: "release-a", AppID: "app-a", TenantID: "tenant-a", Status: model.AppReleaseStatusServing, RuntimeID: "runtime-a", ResolvedImageRef: "image-a", UpdatedAt: now.Add(-time.Hour), UpstreamURL: "http://app:80"}
-	traffic := model.AppTrafficPolicy{ID: "traffic-a", AppID: release.AppID, TenantID: release.TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100}
-	route := model.EdgeRouteIntentSnapshot{GeneratedAt: now, Routes: []model.EdgeRouteIntent{{Hostname: "app.example.test", PathPrefix: "/", AppID: release.AppID, TenantID: release.TenantID, RuntimeID: release.RuntimeID, ServicePort: 80}}}
-	app := model.App{ID: release.AppID, TenantID: release.TenantID, Spec: model.AppSpec{Replicas: 1}}
-	result, err := projectBusinessRouteDraft(route, map[string]model.App{app.ID: app}, map[string]model.App{}, nil, nil, []model.AppTrafficPolicy{traffic}, []model.AppRelease{release}, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.RuntimeSnapshot.Releases) != 1 || result.RuntimeSnapshot.Releases[0].Status != model.EdgeRouteStatusUnavailable {
-		t.Fatalf("release without exact identity was promoted: %+v", result.RuntimeSnapshot.Releases)
-	}
-	if !strings.Contains(result.RuntimeSnapshot.Releases[0].StatusReason, "exact serving release identity") {
-		t.Fatalf("missing identity diagnostic: %+v", result.RuntimeSnapshot.Releases[0])
+func TestBusinessRouteDraftRequiresHealthyExactReleaseEvidence(t *testing.T) {
+	captured := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	observationTime := captured.Add(-10 * time.Second)
+	for _, test := range []struct {
+		name   string
+		mutate func(*model.App, *model.AppRelease)
+		active bool
+	}{
+		{"healthy exact release", func(*model.App, *model.AppRelease) {}, true},
+		{"newer business write", func(_ *model.App, r *model.AppRelease) { r.UpdatedAt = captured }, true},
+		{"no observation", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus = nil }, false},
+		{"missing release identity", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.ServingReleaseID = "" }, false},
+		{"other release same image", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.ServingReleaseID = "release-b" }, false},
+		{"other tenant", func(a *model.App, _ *model.AppRelease) { a.TenantID = "tenant-b" }, false},
+		{"other app", func(a *model.App, _ *model.AppRelease) { a.ID = "app-b" }, false},
+		{"other runtime", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.RuntimeID = "runtime-b" }, false},
+		{"other image", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.ImageRef = "image-b" }, false},
+		{"missing source", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.EvidenceSources = nil }, false},
+		{"stale flag", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.Fresh = false }, false},
+		{"old evidence", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.ObservedAt = captured.Add(-2 * time.Minute) }, false},
+		{"future evidence", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.ObservedAt = captured.Add(time.Second) }, false},
+		{"missing time", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.ObservedAt = time.Time{} }, false},
+		{"endpoint unknown", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.EndpointReady = nil }, false},
+		{"endpoint unready", func(a *model.App, _ *model.AppRelease) { v := false; a.ObservedStatus.EndpointReady = &v }, false},
+		{"generation lag", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.ObservedGeneration = 0 }, false},
+		{"missing cluster", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.ClusterID = "" }, false},
+		{"unhealthy phase", func(a *model.App, _ *model.AppRelease) { a.ObservedStatus.Phase = "unavailable" }, false},
+		{"invariant failure", func(a *model.App, _ *model.AppRelease) {
+			a.ObservedStatus.InvariantViolations = []string{"image_mismatch"}
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			present, replicas := true, 1
+			app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{Replicas: 1, Ports: []int{80}, RuntimeID: "runtime-a"}, ObservedStatus: &model.AppObservedStatus{
+				Phase: "deployed", RuntimeID: "runtime-a", ServingReleaseID: "release-a", ImageRef: "image-a", Fresh: true,
+				ObservedAt: observationTime, ClusterID: "cluster-a", Generation: 1, ObservedGeneration: 1,
+				EvidenceSource: "kubernetes_api", EvidenceSources: []string{"app_release_traffic_policy"},
+				DesiredReplicas: 1, ReadyReplicas: &replicas, PhysicalReplicas: &replicas, PhysicalDesired: &replicas,
+				RuntimeObjectPresent: &present, NamespacePresent: &present, ServicePresent: &present,
+				EndpointPresent: &present, EndpointReady: &present, ImagePresent: &present,
+			}}
+			desired := app
+			release := model.AppRelease{ID: "release-a", AppID: app.ID, TenantID: app.TenantID, Status: model.AppReleaseStatusServing, RuntimeID: "runtime-a", ResolvedImageRef: "image-a", UpdatedAt: captured.Add(-48 * time.Hour), UpstreamURL: "http://app:80"}
+			traffic := model.AppTrafficPolicy{ID: "traffic-a", AppID: app.ID, TenantID: app.TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100}
+			routes := model.EdgeRouteIntentSnapshot{GeneratedAt: captured, Routes: []model.EdgeRouteIntent{{Hostname: "app.example.test", PathPrefix: "/", AppID: app.ID, TenantID: app.TenantID, RuntimeID: "runtime-a", ServicePort: 80}}}
+			test.mutate(&app, &release)
+			result, err := projectBusinessRouteDraft(routes, map[string]model.App{desired.ID: desired}, map[string]model.App{desired.ID: app}, nil, nil, []model.AppTrafficPolicy{traffic}, []model.AppRelease{release}, nil, nil, nil)
+			if err != nil || len(result.RuntimeSnapshot.Releases) != 1 {
+				t.Fatalf("projection failed: %v", err)
+			}
+			fact := result.RuntimeSnapshot.Releases[0]
+			if test.active {
+				if fact.Status != model.EdgeRouteStatusActive || !fact.ObservedAt.Equal(observationTime) {
+					t.Fatalf("healthy evidence time changed: %+v", fact)
+				}
+			} else if fact.Status != model.EdgeRouteStatusUnavailable || !fact.ObservedAt.IsZero() || !strings.Contains(fact.StatusReason, "evidence is unavailable") {
+				t.Fatalf("unverified release was authorized: %+v", fact)
+			}
+		})
 	}
 }
 

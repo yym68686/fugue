@@ -1438,7 +1438,7 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 				deployment.Status.AvailableReplicas,
 			)
 			if servingReleaseFound {
-				deploymentImageMatches = s.observedRuntimeImageRefsEquivalent(app, servingRelease.ResolvedImageRef, firstDeploymentContainerImage(deployment))
+				deploymentImageMatches = deploymentCurrentCohortComplete(deployment) && s.observedRuntimeImageRefsEquivalent(app, servingRelease.ResolvedImageRef, firstDeploymentContainerImage(deployment))
 			}
 		}
 		if !deploymentExists || !deploymentCurrentCohortComplete(deployment) {
@@ -1503,7 +1503,7 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 			}
 		}
 	}
-	if servingReleaseFound && deploymentImageMatches &&
+	if servingReleaseFound && found && app.Spec.Replicas > 0 && namespacePresent && deploymentImageMatches &&
 		evidence.physicalDesiredReplicas != nil && *evidence.physicalDesiredReplicas >= app.Spec.Replicas &&
 		evidence.physicalReplicas != nil && *evidence.physicalReplicas >= app.Spec.Replicas &&
 		(!serviceRequired || (boolPointerTrue(evidence.servicePresent) && boolPointerTrue(evidence.endpointReady))) {
