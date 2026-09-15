@@ -47,6 +47,18 @@ func TestBuildExpectedConsumerSetIsDeterministicAndScoped(t *testing.T) {
 	}
 }
 
+func TestProjectExpectedConsumerSetToTopologyDropsRemovedNodesWithoutMutatingSet(t *testing.T) {
+	now := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	set := mustBuildExpectedConsumerSet(t, ExpectedConsumerSetBuildRequest{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: "global", Generation: "route-gen", PreparedAt: now, Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "old", EdgeGroupID: "group"}, {ID: "current", EdgeGroupID: "group"}}}})
+	projected := ProjectExpectedConsumerSetToTopology(set, ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "current", EdgeGroupID: "group"}}})
+	if len(set.Consumers) != 4 || len(projected.Consumers) != 2 || projected.RequiredCardinality != 2 {
+		t.Fatalf("removed topology was not projected safely: persisted=%+v projected=%+v", set, projected)
+	}
+	if len(set.Consumers) != 4 || set.RequiredCardinality != 4 {
+		t.Fatal("persisted expected set was mutated")
+	}
+}
+
 func TestEvaluateConsumerConvergenceRequiresAllExpectedConsumers(t *testing.T) {
 	t.Parallel()
 

@@ -743,7 +743,29 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 		return
 	}
 	statuses := make([]model.PlatformConsumerConvergenceStatus, 0, len(sets))
+	edges, _, err := s.store.ListEdgeNodes("")
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	dns, err := s.store.ListDNSNodes("")
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	updaters, err := s.store.ListNodeUpdaters("", true)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	runtimes, err := s.store.ListRuntimes("", true)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	topology := platformcontrol.ExpectedConsumerTopology{EdgeNodes: edges, DNSNodes: dns, NodeUpdaters: updaters, Runtimes: runtimes}
 	for _, set := range sets {
+		set = platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
 		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
 		if consumerErr != nil {
 			s.writeStoreError(w, consumerErr)

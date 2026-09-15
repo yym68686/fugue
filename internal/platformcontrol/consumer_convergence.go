@@ -31,6 +31,47 @@ type ExpectedConsumerSetBuildRequest struct {
 	Topology          ExpectedConsumerTopology
 }
 
+// ProjectExpectedConsumerSetToTopology removes consumers whose node/runtime
+// no longer exists in the current authoritative inventory. The persisted set
+// remains immutable for lineage; convergence is evaluated against the live
+// topology so decommissioned nodes do not block a release forever.
+func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet, topology ExpectedConsumerTopology) model.PlatformExpectedConsumerSet {
+	active := map[string]bool{}
+	for _, node := range topology.EdgeNodes {
+		active[model.PlatformConsumerComponentEdgeWorker+":"+strings.TrimSpace(node.ID)] = true
+		active[model.PlatformConsumerComponentCaddyEdgeFront+":"+strings.TrimSpace(node.ID)] = true
+	}
+	for _, node := range topology.DNSNodes {
+		active[model.PlatformConsumerComponentDNSServer+":"+strings.TrimSpace(node.ID)] = true
+	}
+	for _, updater := range topology.NodeUpdaters {
+		id := firstNonEmptyExpected(strings.TrimSpace(updater.ClusterNodeName), strings.TrimSpace(updater.MachineID), strings.TrimSpace(updater.ID))
+		active[model.PlatformConsumerComponentNodeUpdater+":"+id] = true
+		active[model.PlatformConsumerComponentNodeGuardian+":"+id] = true
+	}
+	for _, runtimeObj := range topology.Runtimes {
+		id := firstNonEmptyExpected(strings.TrimSpace(runtimeObj.ClusterNodeName), strings.TrimSpace(runtimeObj.ID))
+		active[model.PlatformConsumerComponentRuntimeAgent+":"+id] = true
+	}
+	out := set
+	out.Consumers = make([]model.PlatformExpectedConsumer, 0, len(set.Consumers))
+	for _, consumer := range set.Consumers {
+		if active[consumer.ConsumerID] {
+			out.Consumers = append(out.Consumers, consumer)
+		}
+	}
+	out.RequiredCardinality, out.OptionalCardinality = 0, 0
+	for _, consumer := range out.Consumers {
+		if consumer.Required {
+			out.RequiredCardinality++
+		} else {
+			out.OptionalCardinality++
+		}
+	}
+	out.RequiresConsumers = len(out.Consumers) > 0
+	return out
+}
+
 func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.PlatformExpectedConsumerSet, error) {
 	now := req.PreparedAt.UTC()
 	if now.IsZero() {
