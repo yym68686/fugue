@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -210,10 +211,7 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 			continue
 		}
 		observedAt := release.UpdatedAt
-		// Release rows describe desired/control-plane history. Prefer the
-		// app's point-in-time runtime observation when available so a stable
-		// release is not treated as stale merely because its row is old.
-		if app, ok := observed[release.AppID]; ok && app.ObservedStatus != nil && strings.TrimSpace(app.ObservedStatus.RuntimeID) != "" && strings.TrimSpace(app.ObservedStatus.RuntimeID) == strings.TrimSpace(release.RuntimeID) && !app.ObservedStatus.ObservedAt.IsZero() && app.ObservedStatus.ObservedAt.After(observedAt) {
+		if app, ok := observed[release.AppID]; ok && app.ObservedStatus != nil && app.ObservedStatus.Fresh && app.ObservedStatus.RuntimeID == release.RuntimeID && app.ObservedStatus.ImageRef != "" && app.ObservedStatus.ImageRef == release.ResolvedImageRef && slices.Contains(app.ObservedStatus.EvidenceSources, "app_release_traffic_policy") && !app.ObservedStatus.ObservedAt.IsZero() && app.ObservedStatus.ObservedAt.After(observedAt) {
 			observedAt = app.ObservedStatus.ObservedAt
 		}
 		status := model.EdgeRouteStatusUnavailable
