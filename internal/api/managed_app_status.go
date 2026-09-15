@@ -1509,7 +1509,7 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 		(!serviceRequired || (boolPointerTrue(evidence.servicePresent) && boolPointerTrue(evidence.endpointReady))) {
 		evidence.servingReleaseReady = true
 		evidence.servingReleaseID = strings.TrimSpace(servingRelease.ID)
-	evidence.evidenceSources = append(evidence.evidenceSources, "app_release_traffic_policy")
+		evidence.evidenceSources = append(evidence.evidenceSources, "app_release_traffic_policy")
 	}
 
 	// Record contradictions as explicit invariant evidence. The calculator
