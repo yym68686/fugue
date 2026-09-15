@@ -171,6 +171,24 @@ func (s *Server) applyManagedPostgresDefaultsForDeploy(app model.App, spec model
 	return out
 }
 
+func (s *Server) applyPersistentStorageDefaultsForDeploy(current, spec model.AppSpec) model.AppSpec {
+	storage := spec.PersistentStorage
+	if storage == nil || strings.TrimSpace(storage.StorageClassName) != "" ||
+		model.AppPersistentStorageSpecUsesSharedProjectRWX(storage) || strings.TrimSpace(storage.ClaimName) != "" {
+		return spec
+	}
+	out := cloneAppSpec(spec)
+	switch {
+	case current.PersistentStorage != nil:
+		out.PersistentStorage.StorageClassName = current.PersistentStorage.StorageClassName
+	case current.Workspace != nil:
+		out.PersistentStorage.StorageClassName = current.Workspace.StorageClassName
+	default:
+		out.PersistentStorage.StorageClassName = s.effectiveDefaultMovableRWOStorageClassName()
+	}
+	return out
+}
+
 func (s *Server) applyManagedPostgresDefaultsToBackingServiceSpec(spec model.BackingServiceSpec) model.BackingServiceSpec {
 	if spec.Postgres == nil {
 		return spec

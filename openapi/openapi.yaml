@@ -18840,6 +18840,12 @@ components:
           type: string
         storage_class_name:
           type: string
+          description: >-
+            Explicit Kubernetes StorageClass. When creating an app or first enabling
+            an app-owned RWO volume through deploy, omission uses the platform's
+            configured app storage class. Updates preserve an existing volume's
+            class (including a legacy omitted class). An explicit claim_name
+            keeps its existing binding and does not receive a default class.
         claim_name:
           type: string
         shared_sub_path:

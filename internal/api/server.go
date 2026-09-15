@@ -1299,6 +1299,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Spec = s.applyManagedPostgresDefaultsToAppSpec(req.Spec)
+	req.Spec = s.applyPersistentStorageDefaultsForDeploy(model.AppSpec{}, req.Spec)
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another tenant")
@@ -1410,6 +1411,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		spec.Workspace = &workspace
 	}
 	spec = s.applyManagedPostgresDefaultsForDeploy(app, spec)
+	spec = s.applyPersistentStorageDefaultsForDeploy(recoveredSpec, spec)
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
