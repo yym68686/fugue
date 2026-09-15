@@ -752,6 +752,9 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 		Spec: runtime.ManagedAppSpec{
 			Scheduling: runtime.SchedulingConstraints{},
 		},
+		Status: runtime.ManagedAppStatus{
+			PendingReleaseKey: "superseded-release",
+		},
 	}
 	deployment := kubeDeployment{}
 	deployment.Metadata.Generation = 2

@@ -1541,6 +1541,12 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	if allowPodFailure {
 		podFailureMessage = managedAppPodFailureMessage(pods, podFailureCutoff)
 		podSchedulingBlockMessage = managedAppPodSchedulingBlockMessage(pods, podFailureCutoff)
+	} else if deployment.Status.Replicas == 0 {
+		// A stale pending-release marker must not hide a live failure when the
+		// Deployment has no registered replicas. This is the fail-closed
+		// recovery path for long-lived CrashLoopBackOff pods left behind by a
+		// failed rollout; the old cutoff remains in force for healthy replicas.
+		podFailureMessage = managedAppPodFailureMessage(pods, nil)
 	}
 
 	switch {
