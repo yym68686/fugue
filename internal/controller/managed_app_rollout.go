@@ -169,6 +169,7 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	lastMessage := ""
 	schedulingBlock := rolloutSchedulingBlockTracker{}
+	volumeBlock := rolloutVolumeBlockTracker{}
 	waitForNextSignal := func(targets []kubeWatchTarget) error {
 		if err := client.waitForAnyObjectEvent(waitCtx, targets, interval); err != nil {
 			if lastMessage != "" {
@@ -194,6 +195,7 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 		}
 		watchTargets := rolloutWatchTargets(namespace, expectedName, deployment, found)
 		blockingMessage := ""
+		volumePod, volumeMessage := "", ""
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
 			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppRevisionPodLabelSelector(app, revision))
 			if err != nil {
@@ -204,6 +206,7 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 			}
 			if len(pods) > 0 {
 				watchTargets = append(watchTargets, managedAppRevisionPodRolloutWatchTargets(namespace, app, revision)...)
+				volumePod, volumeMessage = deploymentVolumeBlockMessage(waitCtx, client, namespace, pods, deployment, s.rolloutObservationTime())
 				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
 					primaryEvidenceID := s.captureDeploymentRolloutFailureEvidence(waitCtx, client, app, operationID, namespace, deployment, pods, failureMessage)
 					if strings.TrimSpace(primaryEvidenceID) != "" {
@@ -215,6 +218,13 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 					message = blockingMessage
 				}
 			}
+		}
+		if err := volumeBlock.observe(s.rolloutObservationTime(), volumePod, volumeMessage); err != nil {
+			s.captureKubernetesEventsEvidence(waitCtx, client, app, operationID, namespace, "Pod", volumeBlock.podName)
+			return err
+		}
+		if volumeMessage != "" {
+			message = volumeMessage
 		}
 		if err := schedulingBlock.observe(s.rolloutObservationTime(), blockingMessage); err != nil {
 			return fmt.Errorf("candidate revision %s/%s rollout failed: %w", namespace, expectedName, err)
@@ -264,6 +274,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 	}
 	lastMessage := ""
 	schedulingBlock := rolloutSchedulingBlockTracker{}
+	volumeBlock := rolloutVolumeBlockTracker{}
 	waitForNextSignal := func(targets []kubeWatchTarget) error {
 		if err := client.waitForAnyObjectEvent(waitCtx, targets, interval); err != nil {
 			if lastMessage != "" {
@@ -310,6 +321,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 		watchTargets = append(watchTargets, managedAppRolloutWatchTargets(namespace, managedAppName, managed, foundManagedApp)...)
 		managedReady, managedMessage := managedAppRuntimeSchedulingReady(managed, foundManagedApp, app, scheduling, expectedManagedAppSpecHash)
 		blockingMessage := ""
+		volumePod, volumeMessage := "", ""
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
 			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppPodLabelSelector(app))
 			if err != nil {
@@ -320,6 +332,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 			}
 			if len(pods) > 0 {
 				watchTargets = append(watchTargets, managedAppPodRolloutWatchTargets(namespace, app)...)
+				volumePod, volumeMessage = deploymentVolumeBlockMessage(waitCtx, client, namespace, pods, deployment, s.rolloutObservationTime())
 				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
 					primaryEvidenceID := s.captureDeploymentRolloutFailureEvidence(waitCtx, client, app, operationID, namespace, deployment, pods, failureMessage)
 					if strings.TrimSpace(primaryEvidenceID) != "" {
@@ -331,6 +344,13 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 					message = blockingMessage
 				}
 			}
+		}
+		if err := volumeBlock.observe(s.rolloutObservationTime(), volumePod, volumeMessage); err != nil {
+			s.captureKubernetesEventsEvidence(waitCtx, client, app, operationID, namespace, "Pod", volumeBlock.podName)
+			return err
+		}
+		if volumeMessage != "" {
+			message = volumeMessage
 		}
 		if err := schedulingBlock.observe(s.rolloutObservationTime(), blockingMessage); err != nil {
 			return fmt.Errorf("managed app %s/%s rollout failed: %w", namespace, managedAppName, err)

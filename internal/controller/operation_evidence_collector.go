@@ -401,7 +401,7 @@ func classifyKubernetesEventEvidenceType(event kubeEvent) string {
 	switch {
 	case reason == "failedscheduling" || strings.Contains(message, "failedscheduling"):
 		return model.OperationEvidenceTypeSchedulerFailure
-	case reason == "failedmount" || strings.Contains(message, "failedmount") || strings.Contains(message, "mount"):
+	case reason == "failedmount" || reason == "failedattachvolume" || strings.Contains(message, "failedmount") || strings.Contains(message, "failedattachvolume") || strings.Contains(message, "unable to attach or mount volumes") || strings.Contains(message, "mount"):
 		return model.OperationEvidenceTypeVolumeMountFailure
 	case reason == "errimagepull" || reason == "imagepullbackoff" || strings.Contains(message, "imagepullbackoff") || strings.Contains(message, "errimagepull"):
 		return model.OperationEvidenceTypeImagePullFailure

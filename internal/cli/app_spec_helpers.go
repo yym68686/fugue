@@ -155,13 +155,14 @@ func (c *CLI) waitForAppSpecMutation(client *Client, appID string, response appP
 	if !wait || response.Operation == nil {
 		return response, nil
 	}
-	finalApp, err := c.waitForSingleApp(client, appID, *response.Operation, true)
+	finalApp, finalOp, err := c.waitForSingleAppOperation(client, appID, *response.Operation, true)
 	if err != nil {
 		return appPatchResponse{}, err
 	}
 	if finalApp != nil {
 		response.App = *finalApp
 	}
+	response.Operation = finalOp
 	return response, nil
 }
 

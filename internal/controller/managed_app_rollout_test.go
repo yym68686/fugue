@@ -122,6 +122,12 @@ func TestRefreshManagedAppStatusPublishesReadyWhileOperationIsActive(t *testing.
 	}
 }
 
+func TestClassifyKubernetesEventEvidenceTypeDetectsAttachFailure(t *testing.T) {
+	if got := classifyKubernetesEventEvidenceType(kubeEvent{Reason: "FailedAttachVolume"}); got != model.OperationEvidenceTypeVolumeMountFailure {
+		t.Fatalf("expected volume mount failure evidence, got %q", got)
+	}
+}
+
 func TestWaitForManagedAppRolloutPublishesReadyBeforeGatingOnObservedStatus(t *testing.T) {
 	t.Parallel()
 

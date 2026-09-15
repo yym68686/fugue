@@ -447,7 +447,10 @@ func (c *CLI) waitForOptionalOperation(client *Client, op *model.Operation, wait
 	if op == nil || !wait {
 		return nil
 	}
-	_, err := c.waitForOperations(client, []model.Operation{*op})
+	finalOps, err := c.waitForOperations(client, []model.Operation{*op})
+	if err == nil && len(finalOps) > 0 {
+		*op = finalOps[0]
+	}
 	return err
 }
 

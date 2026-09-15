@@ -281,12 +281,15 @@ local file.
 			}
 			finalApp := app
 			if opts.Wait {
-				waitedApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				waitedApp, finalOp, err := c.waitForSingleAppOperation(client, app.ID, response.Operation, true)
 				if err != nil {
 					return err
 				}
 				if waitedApp != nil {
 					finalApp = *waitedApp
+				}
+				if finalOp != nil {
+					response.Operation = *finalOp
 				}
 			} else {
 				finalApp.Spec = spec
@@ -348,12 +351,15 @@ func (c *CLI) newAppStorageResetCommand() *cobra.Command {
 			}
 			finalApp := app
 			if opts.Wait {
-				waitedApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				waitedApp, finalOp, err := c.waitForSingleAppOperation(client, app.ID, response.Operation, true)
 				if err != nil {
 					return err
 				}
 				if waitedApp != nil {
 					finalApp = *waitedApp
+				}
+				if finalOp != nil {
+					response.Operation = *finalOp
 				}
 			} else {
 				finalApp.Spec = spec
@@ -400,12 +406,15 @@ func (c *CLI) newAppStorageDisableCommand() *cobra.Command {
 			}
 			finalApp := app
 			if opts.Wait {
-				waitedApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				waitedApp, finalOp, err := c.waitForSingleAppOperation(client, app.ID, response.Operation, true)
 				if err != nil {
 					return err
 				}
 				if waitedApp != nil {
 					finalApp = *waitedApp
+				}
+				if finalOp != nil {
+					response.Operation = *finalOp
 				}
 			} else {
 				finalApp.Spec = spec

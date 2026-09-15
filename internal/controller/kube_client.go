@@ -331,6 +331,7 @@ type kubeContainerStatus struct {
 }
 
 type kubeRuntimeState struct {
+	Running    *kubeStateDetail `json:"running,omitempty"`
 	Waiting    *kubeStateDetail `json:"waiting,omitempty"`
 	Terminated *kubeStateDetail `json:"terminated,omitempty"`
 }
