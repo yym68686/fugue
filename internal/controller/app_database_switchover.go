@@ -931,7 +931,7 @@ func managedPostgresStorageMigrationRequired(current, desired *model.AppPostgres
 	if current == nil || desired == nil {
 		return false
 	}
-	return strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) ||
+	return !managedPostgresStorageClassesEquivalent(current.StorageClassName, desired.StorageClassName) ||
 		strings.TrimSpace(current.StorageSize) != strings.TrimSpace(desired.StorageSize)
 }
 
@@ -965,7 +965,7 @@ func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppP
 		strings.TrimSpace(requestedTargetNodeName) != "" {
 		return false
 	}
-	if strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) {
+	if !managedPostgresStorageClassesEquivalent(current.StorageClassName, desired.StorageClassName) {
 		return false
 	}
 	currentSize := strings.TrimSpace(current.StorageSize)
@@ -982,6 +982,22 @@ func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppP
 		return false
 	}
 	return desiredQuantity.Cmp(currentQuantity) > 0
+}
+
+// The managed shared runtime exposes fugue-postgres-rwo as its logical class,
+// while the controller may resolve that class to the Longhorn provisioner
+// class before preparing the Kubernetes PVC. A same-runtime size increase is
+// still an in-place expansion; treating the implementation alias as a class
+// migration creates a deadlock when the app is down because the migration
+// path waits for a ready app pod before it can expand the existing database.
+func managedPostgresStorageClassesEquivalent(current, desired string) bool {
+	current = strings.TrimSpace(current)
+	desired = strings.TrimSpace(desired)
+	if current == desired {
+		return true
+	}
+	return (current == "fugue-postgres-rwo" && desired == "fugue-longhorn-rwo") ||
+		(current == "fugue-longhorn-rwo" && desired == "fugue-postgres-rwo")
 }
 
 func databaseLocalizeStorageTarget(required bool, postgres *model.AppPostgresSpec) managedPostgresStorageTarget {
