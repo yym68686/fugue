@@ -176,6 +176,7 @@ func captureDNSPlacementRecord(ctx context.Context, snapshot platformIntentProje
 					limited, valid = true, false
 					break
 				}
+				// Hash the route intent exactly as the serving artifact currently does.
 				expected, err := routeproof.Digest(routebinding.FromIntent(route, node.EdgeGroupID))
 				if err != nil {
 					valid = false
