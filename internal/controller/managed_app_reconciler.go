@@ -1805,7 +1805,7 @@ func parseManagedAppStatusTimestamp(raw string) *time.Time {
 
 func managedAppPodFailureMessage(pods []kubePod, notBefore *time.Time) string {
 	for _, pod := range pods {
-		if notBefore != nil && pod.Metadata.CreationTimestamp.Before(notBefore.UTC()) {
+		if notBefore != nil && pod.Metadata.CreationTimestamp.Before(notBefore.UTC().Add(-5*time.Second)) {
 			continue
 		}
 		if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
@@ -1820,7 +1820,7 @@ func managedAppPodFailureMessage(pods []kubePod, notBefore *time.Time) string {
 
 func managedAppPodSchedulingBlockMessage(pods []kubePod, notBefore *time.Time) string {
 	for _, pod := range pods {
-		if notBefore != nil && pod.Metadata.CreationTimestamp.Before(notBefore.UTC()) {
+		if notBefore != nil && pod.Metadata.CreationTimestamp.Before(notBefore.UTC().Add(-5*time.Second)) {
 			continue
 		}
 		if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
