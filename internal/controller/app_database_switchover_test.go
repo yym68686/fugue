@@ -749,6 +749,7 @@ func TestManagedPostgresInPlaceStorageExpansionRequired(t *testing.T) {
 	current := &model.AppPostgresSpec{
 		StorageSize:      "5Gi",
 		StorageClassName: "fugue-postgres-rwo",
+		PrimaryNodeName:  "node-a",
 	}
 	desired := &model.AppPostgresSpec{
 		StorageSize:      "10Gi",
@@ -768,8 +769,11 @@ func TestManagedPostgresInPlaceStorageExpansionRequired(t *testing.T) {
 	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_b", "") {
 		t.Fatal("expected cross-runtime storage growth to fall back to migration path")
 	}
-	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-a") {
-		t.Fatal("expected explicit target node to remain a placement localize")
+	if !managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-a") {
+		t.Fatal("expected explicit current target node to remain an in-place expansion")
+	}
+	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-b") {
+		t.Fatal("expected different explicit target node to remain a placement localize")
 	}
 	desired.StorageClassName = "fugue-longhorn-rwo"
 	if !managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "") {

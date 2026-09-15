@@ -961,8 +961,11 @@ func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppP
 	}
 	if strings.TrimSpace(sourceRuntimeID) == "" ||
 		strings.TrimSpace(targetRuntimeID) == "" ||
-		strings.TrimSpace(sourceRuntimeID) != strings.TrimSpace(targetRuntimeID) ||
-		strings.TrimSpace(requestedTargetNodeName) != "" {
+		strings.TrimSpace(sourceRuntimeID) != strings.TrimSpace(targetRuntimeID) {
+		return false
+	}
+	if requestedNode := strings.TrimSpace(requestedTargetNodeName); requestedNode != "" &&
+		strings.TrimSpace(current.PrimaryNodeName) != requestedNode {
 		return false
 	}
 	if !managedPostgresStorageClassesEquivalent(current.StorageClassName, desired.StorageClassName) {
