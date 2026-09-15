@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -387,6 +388,30 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 	})
 }
 
+func (s *Server) platformConsumerTopology(ctx context.Context, principal model.Principal) (platformcontrol.ExpectedConsumerTopology, error) {
+	edges, _, err := s.store.ListEdgeNodes("")
+	if err != nil {
+		return platformcontrol.ExpectedConsumerTopology{}, err
+	}
+	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal); policyErr == nil {
+		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
+	}
+	edges = freshEdgeNodes(edges, time.Now().UTC())
+	dns, err := s.store.ListDNSNodes("")
+	if err != nil {
+		return platformcontrol.ExpectedConsumerTopology{}, err
+	}
+	updaters, err := s.store.ListNodeUpdaters("", true)
+	if err != nil {
+		return platformcontrol.ExpectedConsumerTopology{}, err
+	}
+	runtimes, err := s.store.ListRuntimes("", true)
+	if err != nil {
+		return platformcontrol.ExpectedConsumerTopology{}, err
+	}
+	return platformcontrol.ExpectedConsumerTopology{EdgeNodes: edges, DNSNodes: dns, NodeUpdaters: updaters, Runtimes: runtimes}, nil
+}
+
 func (s *Server) validateReleaseSetConvergence(artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {
 	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: artifact.ID, Limit: 200})
 	if err != nil {
@@ -395,7 +420,12 @@ func (s *Server) validateReleaseSetConvergence(artifact model.PlatformArtifact) 
 	if len(sets) == 0 {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set expected consumer sets are missing"}
 	}
+	topology, topologyErr := s.platformConsumerTopology(context.Background(), model.Principal{})
+	if topologyErr != nil {
+		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer topology could not be evaluated"}
+	}
 	for _, set := range sets {
+		set = platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
 		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
 		if consumerErr != nil {
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
@@ -749,31 +779,11 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 		return
 	}
 	statuses := make([]model.PlatformConsumerConvergenceStatus, 0, len(sets))
-	edges, _, err := s.store.ListEdgeNodes("")
-	if err != nil {
-		s.writeStoreError(w, err)
+	topology, topologyErr := s.platformConsumerTopology(r.Context(), principal)
+	if topologyErr != nil {
+		s.writeStoreError(w, topologyErr)
 		return
 	}
-	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), mustPrincipal(r)); policyErr == nil {
-		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
-	}
-	edges = freshEdgeNodes(edges, time.Now().UTC())
-	dns, err := s.store.ListDNSNodes("")
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	updaters, err := s.store.ListNodeUpdaters("", true)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	runtimes, err := s.store.ListRuntimes("", true)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	topology := platformcontrol.ExpectedConsumerTopology{EdgeNodes: edges, DNSNodes: dns, NodeUpdaters: updaters, Runtimes: runtimes}
 	for _, set := range sets {
 		set = platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
 		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)

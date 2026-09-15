@@ -94,7 +94,9 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 			out.OptionalCardinality++
 		}
 	}
-	out.RequiresConsumers = len(out.Consumers) > 0
+	// Keep the original requirement bit: an empty live topology is unknown,
+	// not proof that a required consumer-backed artifact needs no consumers.
+	out.RequiresConsumers = set.RequiresConsumers
 	return out
 }
 
