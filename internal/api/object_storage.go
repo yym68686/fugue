@@ -21,6 +21,15 @@ var objectStoreAccount = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
 const objectStorageLock = "object-storage-management"
 
+const defaultObjectStorageUsageTimeout = 2 * time.Minute
+
+func normalizeObjectStorageUsageTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return defaultObjectStorageUsageTimeout
+	}
+	return timeout
+}
+
 func (s *Server) objectStorageProvider(cfg model.ObjectStorageConfig) (*objectstorage.Client, error) {
 	secret, err := s.store.OpenObjectStorageSecret(cfg.Secret)
 	if err != nil {
@@ -478,7 +487,7 @@ func (s *Server) handleMeasureObjectStoreUsage(w http.ResponseWriter, r *http.Re
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), normalizeObjectStorageUsageTimeout(s.objectStorageUsageTimeout))
 		defer cancel()
 		pager := s3.NewListObjectsV2Paginator(b.client, &s3.ListObjectsV2Input{Bucket: aws.String(v.Bucket)})
 		var used, count int64

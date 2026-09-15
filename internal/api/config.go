@@ -20,6 +20,7 @@ func imageStoreMinimumReplicasFromEnv() int {
 
 type ServerConfig struct {
 	DatabaseURL                            string
+	ObjectStorageUsageTimeout              time.Duration
 	ControlPlaneNamespace                  string
 	ControlPlaneReleaseInstance            string
 	ControlPlanePostgresClusterName        string

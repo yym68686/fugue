@@ -51,6 +51,7 @@ func main() {
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
 		DatabaseURL:                     cfg.DatabaseURL,
+		ObjectStorageUsageTimeout:       cfg.ObjectStorageUsageTimeout,
 		ControlPlaneNamespace:           cfg.ControlPlaneNamespace,
 		ControlPlaneReleaseInstance:     cfg.ControlPlaneReleaseInstance,
 		ControlPlanePostgresClusterName: cfg.ControlPlanePostgresClusterName,

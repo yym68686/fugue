@@ -27,6 +27,7 @@ type APIConfig struct {
 	DatabaseMaxIdleConnections             int
 	DatabaseBillingWarmConnections         int
 	DatabaseConnectionMaxIdleTime          time.Duration
+	ObjectStorageUsageTimeout              time.Duration
 	BootstrapAdminKey                      string
 	WorkloadIdentitySigningKey             string
 	ControlPlaneNamespace                  string
@@ -340,6 +341,7 @@ func APIFromEnv() APIConfig {
 		DatabaseMaxIdleConnections:      max(0, getenvInt("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", 16)),
 		DatabaseBillingWarmConnections:  max(0, min(16, getenvInt("FUGUE_DATABASE_BILLING_WARM_CONNECTIONS", 4))),
 		DatabaseConnectionMaxIdleTime:   getenvDuration("FUGUE_DATABASE_CONNECTION_MAX_IDLE_TIME", 5*time.Minute),
+		ObjectStorageUsageTimeout:       getenvDuration("FUGUE_OBJECT_STORAGE_USAGE_TIMEOUT", 2*time.Minute),
 		BootstrapAdminKey:               getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
 		WorkloadIdentitySigningKey:      strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
 		ControlPlaneNamespace:           getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),

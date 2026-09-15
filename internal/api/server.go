@@ -37,6 +37,7 @@ type Server struct {
 	log                                    *log.Logger
 	metricsStartedAt                       time.Time
 	controlPlaneDatabaseURL                string
+	objectStorageUsageTimeout              time.Duration
 	controlPlaneNamespace                  string
 	controlPlaneReleaseInstance            string
 	controlPlanePostgresClusterName        string
@@ -206,6 +207,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		log:                             logger,
 		metricsStartedAt:                time.Now().UTC(),
 		controlPlaneDatabaseURL:         strings.TrimSpace(cfg.DatabaseURL),
+		objectStorageUsageTimeout:       normalizeObjectStorageUsageTimeout(cfg.ObjectStorageUsageTimeout),
 		controlPlaneNamespace:           strings.TrimSpace(cfg.ControlPlaneNamespace),
 		controlPlaneReleaseInstance:     strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
 		controlPlanePostgresClusterName: firstNonEmptyString(strings.TrimSpace(cfg.ControlPlanePostgresClusterName), "fugue-fugue-control-plane-postgres"),

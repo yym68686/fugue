@@ -7,12 +7,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/store"
 )
+
+func TestNormalizeObjectStorageUsageTimeout(t *testing.T) {
+	if got := normalizeObjectStorageUsageTimeout(0); got != defaultObjectStorageUsageTimeout {
+		t.Fatalf("zero timeout = %s, want %s", got, defaultObjectStorageUsageTimeout)
+	}
+	if got := normalizeObjectStorageUsageTimeout(45 * time.Second); got != 45*time.Second {
+		t.Fatalf("explicit timeout = %s, want 45s", got)
+	}
+}
 
 func TestObjectStorageIsolationAndRetryableCredentialLifecycle(t *testing.T) {
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "synthetic-object-storage-test-encryption-key")

@@ -28,6 +28,14 @@ func TestAPIDatabaseIdlePoolConfiguration(t *testing.T) {
 	}
 }
 
+func TestAPIFromEnvObjectStorageUsageTimeout(t *testing.T) {
+	t.Setenv("FUGUE_OBJECT_STORAGE_USAGE_TIMEOUT", "3m")
+	cfg := APIFromEnv()
+	if cfg.ObjectStorageUsageTimeout != 3*time.Minute {
+		t.Fatalf("expected object storage usage timeout 3m, got %s", cfg.ObjectStorageUsageTimeout)
+	}
+}
+
 func TestEdgeWorkloadIdentityCannotBeInjectedThroughEnvironment(t *testing.T) {
 	t.Setenv("FUGUE_EDGE_SLOT", "forged-slot")
 	t.Setenv("FUGUE_EDGE_ID", "forged-edge")
