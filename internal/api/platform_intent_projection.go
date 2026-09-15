@@ -212,12 +212,26 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 			continue
 		}
 		observedAt := release.UpdatedAt
-		if app, ok := observed[release.AppID]; ok && app.ObservedStatus != nil && app.ObservedStatus.ServingReleaseID == release.ID && app.ObservedStatus.Fresh && app.ObservedStatus.RuntimeID == release.RuntimeID && app.ObservedStatus.ImageRef != "" && app.ObservedStatus.ImageRef == release.ResolvedImageRef && slices.Contains(app.ObservedStatus.EvidenceSources, "app_release_traffic_policy") && !app.ObservedStatus.ObservedAt.IsZero() && app.ObservedStatus.ObservedAt.After(observedAt) {
-			observedAt = app.ObservedStatus.ObservedAt
+		releaseIdentityVerified := false
+		if app, ok := observed[release.AppID]; ok && app.ObservedStatus != nil && app.ObservedStatus.ServingReleaseID == release.ID && app.ObservedStatus.Fresh && app.ObservedStatus.RuntimeID == release.RuntimeID && app.ObservedStatus.ImageRef != "" && app.ObservedStatus.ImageRef == release.ResolvedImageRef && slices.Contains(app.ObservedStatus.EvidenceSources, "app_release_traffic_policy") && !app.ObservedStatus.ObservedAt.IsZero() {
+			releaseIdentityVerified = true
+			if app.ObservedStatus.ObservedAt.After(observedAt) {
+				observedAt = app.ObservedStatus.ObservedAt
+			}
 		}
 		status := model.EdgeRouteStatusUnavailable
 		if release.Status == model.AppReleaseStatusReady || release.Status == model.AppReleaseStatusServing {
-			status = model.EdgeRouteStatusActive
+			if releaseIdentityVerified {
+				status = model.EdgeRouteStatusActive
+			} else {
+				releaseStatusReason := strings.TrimSpace(release.StatusReason)
+				if releaseStatusReason == "" {
+					releaseStatusReason = "exact serving release identity is unavailable"
+				} else {
+					releaseStatusReason += "; exact serving release identity is unavailable"
+				}
+				release.StatusReason = releaseStatusReason
+			}
 		}
 		facts.Releases = append(facts.Releases, platformconfig.ReleaseObservation{ID: release.ID, AppID: release.AppID, TenantID: release.TenantID, ObservedAt: observedAt, Status: status, StatusReason: release.StatusReason, UpstreamURL: release.UpstreamURL, RuntimeID: release.RuntimeID, DeploymentGeneration: firstNonEmpty(release.ResolvedImageRef, release.SourceRef)})
 	}

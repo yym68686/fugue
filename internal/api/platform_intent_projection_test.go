@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +67,24 @@ func TestBusinessRouteDraftUsesMatchedServingRuntimeEvidence(t *testing.T) {
 	result, err := projectBusinessRouteDraft(route, map[string]model.App{app.ID: app}, map[string]model.App{app.ID: app}, nil, nil, []model.AppTrafficPolicy{traffic}, []model.AppRelease{release}, nil, nil, nil)
 	if err != nil || len(result.RuntimeSnapshot.Releases) != 1 || !result.RuntimeSnapshot.Releases[0].ObservedAt.Equal(now) {
 		t.Fatalf("matched runtime evidence was not used: err=%v facts=%+v", err, result.RuntimeSnapshot.Releases)
+	}
+}
+
+func TestBusinessRouteDraftDoesNotPromoteReleaseWithoutExactServingIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	release := model.AppRelease{ID: "release-a", AppID: "app-a", TenantID: "tenant-a", Status: model.AppReleaseStatusServing, RuntimeID: "runtime-a", ResolvedImageRef: "image-a", UpdatedAt: now.Add(-time.Hour), UpstreamURL: "http://app:80"}
+	traffic := model.AppTrafficPolicy{ID: "traffic-a", AppID: release.AppID, TenantID: release.TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100}
+	route := model.EdgeRouteIntentSnapshot{GeneratedAt: now, Routes: []model.EdgeRouteIntent{{Hostname: "app.example.test", PathPrefix: "/", AppID: release.AppID, TenantID: release.TenantID, RuntimeID: release.RuntimeID, ServicePort: 80}}}
+	app := model.App{ID: release.AppID, TenantID: release.TenantID, Spec: model.AppSpec{Replicas: 1}}
+	result, err := projectBusinessRouteDraft(route, map[string]model.App{app.ID: app}, map[string]model.App{}, nil, nil, []model.AppTrafficPolicy{traffic}, []model.AppRelease{release}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RuntimeSnapshot.Releases) != 1 || result.RuntimeSnapshot.Releases[0].Status != model.EdgeRouteStatusUnavailable {
+		t.Fatalf("release without exact identity was promoted: %+v", result.RuntimeSnapshot.Releases)
+	}
+	if !strings.Contains(result.RuntimeSnapshot.Releases[0].StatusReason, "exact serving release identity") {
+		t.Fatalf("missing identity diagnostic: %+v", result.RuntimeSnapshot.Releases[0])
 	}
 }
 
