@@ -13,6 +13,42 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
+func TestPGFailOperationReplacesProgressMessageAtomically(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	now := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
+	columns := strings.Split("id,tenant_id,type,status,execution_mode,requested_by_type,requested_by_id,app_id,service_id,source_runtime_id,target_runtime_id,desired_replicas,desired_spec_json,desired_source_json,result_message,manifest_path,assigned_runtime_id,error_message,created_at,updated_at,started_at,completed_at", ",")
+	mock.ExpectBegin()
+	mock.ExpectQuery("(?s)SELECT .* FROM fugue_operations.*FOR UPDATE").WithArgs("op-demo").WillReturnRows(sqlmock.NewRows(columns).AddRow(
+		"op-demo", "tenant-demo", model.OperationTypeDatabaseLocalize, model.OperationStatusRunning, model.ExecutionModeManaged, "system", "controller", "app-demo", "", "runtime-demo", "runtime-demo", nil, nil, nil, "database localize in progress", "", "", "", now, now, now, nil,
+	))
+	mock.ExpectQuery("(?s)SELECT .* FROM fugue_apps.*FOR UPDATE").WithArgs("app-demo").WillReturnRows(sqlmock.NewRows(strings.Split("id,tenant_id,project_id,name,description,source_json,route_json,spec_json,status_json,created_at,updated_at", ",")).AddRow("app-demo", "tenant-demo", "project-demo", "demo", "", []byte("null"), []byte("null"), []byte(`{"replicas":1}`), []byte(`{"phase":"deploying"}`), now, now))
+	mock.ExpectQuery("(?s)SELECT .* FROM fugue_service_bindings AS b.*").WithArgs("app-demo").WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	args := make([]driver.Value, 22)
+	for i := range args {
+		args[i] = sqlmock.AnyArg()
+	}
+	args[0], args[3], args[14], args[17] = "op-demo", model.OperationStatusFailed, "capacity exhausted", "capacity exhausted"
+	mock.ExpectExec("(?s)UPDATE fugue_operations.*").WithArgs(args...).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("(?s)UPDATE fugue_apps.*").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	op, err := s.FailOperation("op-demo", "  capacity exhausted  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Status != model.OperationStatusFailed || op.ResultMessage != "capacity exhausted" || op.ErrorMessage != "capacity exhausted" || op.CompletedAt == nil {
+		t.Fatalf("unexpected terminal operation: %+v", op)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPGFinalizeAssignedAgentReleaseFailureTxIsAtomic(t *testing.T) {
 	t.Parallel()
 

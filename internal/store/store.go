@@ -4161,6 +4161,7 @@ func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 		state.Operations[index].UpdatedAt = now
 		state.Operations[index].CompletedAt = &now
 		state.Operations[index].ErrorMessage = strings.TrimSpace(message)
+		state.Operations[index].ResultMessage = strings.TrimSpace(message)
 		applyFailedOperationToApp(state, &state.Operations[index])
 		op = state.Operations[index]
 		return nil

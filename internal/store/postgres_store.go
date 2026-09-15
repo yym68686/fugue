@@ -4767,6 +4767,7 @@ func (s *Store) pgFailOperation(id, message string) (model.Operation, error) {
 	op.UpdatedAt = now
 	op.CompletedAt = &now
 	op.ErrorMessage = strings.TrimSpace(message)
+	op.ResultMessage = strings.TrimSpace(message)
 	if op.StartedAt == nil {
 		op.StartedAt = &now
 	}

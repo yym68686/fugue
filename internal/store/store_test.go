@@ -5874,6 +5874,9 @@ func TestFailedOperationIsExposedAsHistoryWithoutServingAsRuntimeEvidence(t *tes
 	if err != nil {
 		t.Fatalf("fail operation: %v", err)
 	}
+	if failed.Status != model.OperationStatusFailed || failed.ResultMessage != "image missing" || failed.CompletedAt == nil {
+		t.Fatalf("failure must replace in-progress message and set terminal state: %+v", failed)
+	}
 	app, err = s.GetApp(app.ID)
 	if err != nil {
 		t.Fatalf("get app: %v", err)
