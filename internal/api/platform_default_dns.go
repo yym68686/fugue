@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -54,4 +55,97 @@ func projectDefaultAppDNS(result *platformIntentProjectionResponse, appBaseDomai
 	result.Intent.Generation = gen
 	result.RuntimeSnapshot.IntentGeneration = gen
 	return nil
+}
+
+// projectManagedCustomDomainDNS converts verified managed AppDomain bindings
+// into symbolic route records. The record points at the route identity, while
+// address selection remains a runtime fact resolved by the DNS compiler.
+func projectManagedCustomDomainDNS(result *platformIntentProjectionResponse, domains []model.AppDomain, apps map[string]model.App, targetForApp func(model.App) string, ttl int) error {
+	existing := make(map[string]int, len(result.Intent.DNS))
+	for index, record := range result.Intent.DNS {
+		existing[normalizeExternalAppDomain(record.Hostname)+"\x00"+strings.ToUpper(strings.TrimSpace(record.Type))] = index
+	}
+	for _, domain := range domains {
+		host := normalizeExternalAppDomain(domain.Hostname)
+		if host == "" || domain.Status != model.AppDomainStatusVerified || domain.DNSMode != model.AppDomainDNSModeManaged {
+			continue
+		}
+		app, ok := apps[strings.TrimSpace(domain.AppID)]
+		if !ok || app.Route == nil || normalizeExternalAppDomain(app.Route.Hostname) == "" {
+			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_custom_domain_route_missing", Hostname: host})
+			continue
+		}
+		target := normalizeExternalAppDomain(domain.RouteTarget)
+		if target == "" && targetForApp != nil {
+			target = normalizeExternalAppDomain(targetForApp(app))
+		}
+		if target == "" {
+			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_custom_domain_target_missing", Hostname: host})
+			continue
+		}
+		key := target + "\x00FUGUE_ROUTE"
+		if priorIndex, exists := existing[key]; exists {
+			prior := &result.Intent.DNS[priorIndex]
+			if prior.AppID != app.ID || prior.TenantID != app.TenantID || prior.Route == nil {
+				result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_custom_domain_target_conflict", Hostname: host})
+				continue
+			}
+			prior.Route.Hostnames = appendUniqueNormalizedHosts(prior.Route.Hostnames, host)
+			continue
+		}
+		record := platformconfig.DNSIntent{Hostname: target, Type: "FUGUE_ROUTE", Values: []string{}, TTL: edgeDNSPolicyTTL(ttl), RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, AppID: app.ID, TenantID: app.TenantID, Route: &platformconfig.DNSRouteIntent{Hostnames: []string{host}, DNSApplicationIntent: platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}}
+		result.Intent.DNS = append(result.Intent.DNS, record)
+		existing[key] = len(result.Intent.DNS) - 1
+	}
+	result.Intent = platformconfig.NormalizePlatformIntent(result.Intent)
+	result.Intent.Generation = ""
+	gen, err := platformconfig.PlatformIntentGeneration(result.Intent)
+	if err != nil {
+		return err
+	}
+	result.Intent.Generation = gen
+	result.RuntimeSnapshot.IntentGeneration = gen
+	return nil
+}
+
+func appendUniqueNormalizedHosts(hosts []string, additions ...string) []string {
+	seen := make(map[string]struct{}, len(hosts)+len(additions))
+	out := make([]string, 0, len(hosts)+len(additions))
+	for _, value := range append(append([]string(nil), hosts...), additions...) {
+		value = normalizeExternalAppDomain(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// validateProjectedRouteDNSReferences reports missing symbolic DNS references
+// per route. Runtime address selection remains outside this desired projection.
+func validateProjectedRouteDNSReferences(result *platformIntentProjectionResponse) {
+	referenced := make(map[string]struct{})
+	for _, record := range result.Intent.DNS {
+		if record.Route == nil || strings.ToUpper(strings.TrimSpace(record.Type)) != "FUGUE_ROUTE" {
+			continue
+		}
+		for _, host := range record.Route.Hostnames {
+			referenced[normalizeExternalAppDomain(host)] = struct{}{}
+		}
+	}
+	for _, route := range result.Intent.Routes {
+		host := normalizeExternalAppDomain(route.Hostname)
+		if host == "" {
+			continue
+		}
+		if _, exists := referenced[host]; exists {
+			continue
+		}
+		result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_route_placement_not_projected", Hostname: host, PathPrefix: model.NormalizeAppRoutePathPrefix(route.PathPrefix), Reason: "no symbolic FUGUE_ROUTE record references this route"})
+	}
 }

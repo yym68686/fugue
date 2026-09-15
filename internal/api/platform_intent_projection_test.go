@@ -57,6 +57,26 @@ func TestPlatformIntentProjectionRequiresPlatformAdmin(t *testing.T) {
 	}
 }
 
+func TestBusinessRouteDraftIncludesManagedCustomDomainRouteReferences(t *testing.T) {
+	now := time.Now().UTC()
+	app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{Replicas: 1}, Route: &model.AppRoute{Hostname: "www.customer.test"}}
+	domain := model.AppDomain{Hostname: "www.customer.test", AppID: app.ID, TenantID: app.TenantID, Status: model.AppDomainStatusVerified, DNSMode: model.AppDomainDNSModeManaged, DNSStatus: model.AppDomainDNSStatusReady, TLSStatus: model.AppDomainTLSStatusReady, RouteTarget: "target.example.test"}
+	routes := model.EdgeRouteIntentSnapshot{GeneratedAt: now, Routes: []model.EdgeRouteIntent{{Hostname: "www.customer.test", AppID: app.ID, TenantID: app.TenantID, RouteKind: model.EdgeRouteKindCustomDomain, PathPrefix: "/", ServicePort: 80, RuntimeID: "runtime-a", OriginStatus: model.EdgeRouteStatusActive}}}
+	result, err := projectBusinessRouteDraft(routes, map[string]model.App{app.ID: app}, map[string]model.App{app.ID: app}, nil, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projectManagedCustomDomainDNS(&result, []model.AppDomain{domain}, map[string]model.App{app.ID: app}, func(model.App) string { return "target.example.test" }, 60); err != nil {
+		t.Fatal(err)
+	}
+	validateProjectedRouteDNSReferences(&result)
+	for _, issue := range result.Issues {
+		if issue.Code == "dns_route_placement_not_projected" {
+			t.Fatalf("route unexpectedly missing DNS reference: %+v", result.Issues)
+		}
+	}
+}
+
 func TestBusinessRouteDraftRequiresHealthyExactReleaseEvidence(t *testing.T) {
 	captured := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	observationTime := captured.Add(-10 * time.Second)

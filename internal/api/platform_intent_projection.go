@@ -101,6 +101,11 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, "application DNS route migration configuration invalid")
 		return
 	}
+	if err := projectManagedCustomDomainDNS(&projection, business.Domains, source.apps, s.primaryCustomDomainTarget, s.dnsBundleTTL); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "managed custom-domain DNS projection invalid")
+		return
+	}
+	validateProjectedRouteDNSReferences(&projection)
 	if err := projectACMEChallengeIntents(&projection, business.ACMEChallenges); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "ACME migration configuration invalid")
 		return
@@ -187,7 +192,7 @@ func (source routeBusinessSource) ListAppReleases(filter model.AppReleaseFilter)
 // business/constraint/fact snapshot can be frozen and compared.
 func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, releases []model.AppRelease, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord, staticRecords []model.EdgeDNSRecord) (platformIntentProjectionResponse, error) {
 	result := platformIntentProjectionResponse{SourceGeneration: snapshot.Generation, CapturedAt: snapshot.GeneratedAt,
-		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "dns_route_placement_not_projected"}, {Code: "dns_acme_not_projected"}},
+		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "dns_acme_not_projected"}},
 		OmittedRuntimeFields: []string{"selected_edge_group", "decision_id", "exclusion_evidence"},
 	}
 	addIssue := func(code string, route model.EdgeRouteIntent) {
