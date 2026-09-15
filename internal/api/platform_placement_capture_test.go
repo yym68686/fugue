@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -217,6 +218,29 @@ func TestPlacementCaptureChecksEveryPathAndAddress(t *testing.T) {
 	}
 	if r.Issues[len(r.Issues)-1].Code != "dns_placement_inventory_ambiguous" {
 		t.Fatal(r.Issues)
+	}
+}
+
+func TestPlacementCaptureDiagnosticsClassifyBoundedProofFailures(t *testing.T) {
+	r, nodes, probe := placementCaptureFixture(t)
+	failures := map[string]int{}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _, err := captureDNSPlacementRecordWithDiagnostics(ctx, r, r.Intent.DNS[0], nodes, func(ctx context.Context, host, path, address string) (placementRouteProof, error) {
+		proof, err := probe(ctx, host, path, address)
+		if err != nil {
+			return proof, err
+		}
+		proof.Digest = "sha256:wrong"
+		return proof, nil
+	}, func() *atomic.Int64 { var b atomic.Int64; b.Store(4096); return &b }(), failures)
+	if err != nil || len(failures) == 0 {
+		t.Fatalf("expected bounded proof diagnostics, err=%v failures=%v", err, failures)
+	}
+	for key, count := range failures {
+		if count < 1 || !strings.Contains(key, ":digest_mismatch") || strings.Contains(key, "http://") {
+			t.Fatalf("unexpected diagnostic %q=%d", key, count)
+		}
 	}
 }
 

@@ -85,6 +85,7 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 		inputError bool
 		reason     string
 		limited    bool
+		failures   map[string]int
 	}
 	observations := make([]observation, len(records))
 	jobs := make(chan int)
@@ -96,12 +97,13 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				fact, limited, err := captureDNSPlacementRecord(ctx, snapshot, records[index], nodes, probe, &budget)
+				failures := map[string]int{}
+				fact, limited, err := captureDNSPlacementRecordWithDiagnostics(ctx, snapshot, records[index], nodes, probe, &budget, failures)
 				reason := ""
 				if err != nil {
 					reason = err.Error()
 				}
-				observations[index] = observation{fact: fact, limited: limited, inputError: err != nil, reason: reason}
+				observations[index] = observation{fact: fact, limited: limited, inputError: err != nil, reason: reason, failures: failures}
 			}
 		}()
 	}
@@ -148,6 +150,21 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 				}
 				reason = fmt.Sprintf("%s; candidates=%d healthy=%d route_ready=%d tls_ready=%d", reason, len(fact.Candidates), healthy, routeReady, tlsReady)
 			}
+			if len(observation.failures) > 0 {
+				keys := make([]string, 0, len(observation.failures))
+				for key := range observation.failures {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				if len(keys) > 12 {
+					keys = keys[:12]
+				}
+				parts := make([]string, 0, len(keys))
+				for _, key := range keys {
+					parts = append(parts, fmt.Sprintf("%s=%d", key, observation.failures[key]))
+				}
+				reason += "; proof_failures=" + strings.Join(parts, ",")
+			}
 			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_placement_evidence_requires_repair", Hostname: record.Hostname, Reason: reason})
 		}
 		if observation.limited {
@@ -160,6 +177,10 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 }
 
 func captureDNSPlacementRecord(ctx context.Context, snapshot platformIntentProjectionResponse, record platformconfig.DNSIntent, nodes []model.EdgeNode, probe placementRouteProbe, budget *atomic.Int64) (platformconfig.DNSPlacementObservation, bool, error) {
+	return captureDNSPlacementRecordWithDiagnostics(ctx, snapshot, record, nodes, probe, budget, nil)
+}
+
+func captureDNSPlacementRecordWithDiagnostics(ctx context.Context, snapshot platformIntentProjectionResponse, record platformconfig.DNSIntent, nodes []model.EdgeNode, probe placementRouteProbe, budget *atomic.Int64, failures map[string]int) (platformconfig.DNSPlacementObservation, bool, error) {
 	compiled, projected, err := placementRecordRoutes(snapshot, record)
 	if err != nil {
 		return platformconfig.DNSPlacementObservation{}, false, err
@@ -207,7 +228,25 @@ func captureDNSPlacementRecord(ctx context.Context, snapshot platformIntentProje
 					break
 				}
 				proof, err := probe(ctx, route.Hostname, model.NormalizeAppRoutePathPrefix(route.PathPrefix), ip.String())
-				if err != nil || proof.Digest != expected || proof.Version != node.RouteBundleVersion || proof.EdgeID != node.ID || proof.GroupID != node.EdgeGroupID || !proof.ValidUntil.After(time.Now()) {
+				failure := ""
+				switch {
+				case err != nil:
+					failure = "probe_error"
+				case proof.Digest != expected:
+					failure = "digest_mismatch"
+				case proof.Version != node.RouteBundleVersion:
+					failure = "bundle_version_mismatch"
+				case proof.EdgeID != node.ID:
+					failure = "edge_identity_mismatch"
+				case proof.GroupID != node.EdgeGroupID:
+					failure = "group_identity_mismatch"
+				case !proof.ValidUntil.After(time.Now()):
+					failure = "proof_expired"
+				}
+				if failure != "" {
+					if failures != nil {
+						failures[route.Hostname+model.NormalizeAppRoutePathPrefix(route.PathPrefix)+":"+failure]++
+					}
 					valid = false
 					if ctx.Err() != nil {
 						limited = true
