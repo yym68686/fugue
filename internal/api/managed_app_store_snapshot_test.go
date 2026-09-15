@@ -81,6 +81,36 @@ func TestManagedAppStoreSnapshotMatchesPointReads(t *testing.T) {
 	}
 }
 
+func TestServingReleaseTrafficTargetAcceptsReadyStableBaseline(t *testing.T) {
+	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := state.Init(); err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := state.CreateTenant("ready baseline tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := state.CreateProject(tenant.ID, "ready baseline project", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := state.CreateApp(tenant.ID, project.ID, "ready baseline app", "", model.AppSpec{Image: "registry.example/app:v1", Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := state.CreateAppRelease(model.AppRelease{TenantID: tenant.ID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusReady, ResolvedImageRef: app.Spec.Image, DeploymentName: "stable", ServiceName: "stable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = state.UpsertAppTrafficPolicy(model.AppTrafficPolicy{TenantID: tenant.ID, AppID: app.ID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: state}
+	if _, found := server.servingReleaseTrafficTarget(app); !found {
+		t.Fatal("ready stable baseline was excluded from exact serving observation")
+	}
+}
+
 func TestManagedAppStoreSnapshotImageEvidenceRetainsIdentityAndPrecedence(t *testing.T) {
 	app := model.App{ID: "app", TenantID: "tenant", Spec: model.AppSpec{Image: "registry.example/fugue-apps/demo:current"}}
 	now := time.Now().UTC()

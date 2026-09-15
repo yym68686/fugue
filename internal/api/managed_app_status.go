@@ -1554,7 +1554,7 @@ func (s *Server) servingReleaseTrafficTargetWithSnapshot(app model.App, snapshot
 	}
 	if err != nil || strings.TrimSpace(release.AppID) != strings.TrimSpace(app.ID) ||
 		!strings.EqualFold(strings.TrimSpace(release.Role), model.AppReleaseRoleStable) ||
-		!strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusServing) ||
+		!(strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusServing) || strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusReady)) ||
 		strings.TrimSpace(release.DeploymentName) == "" || strings.TrimSpace(release.ResolvedImageRef) == "" ||
 		!s.observedRuntimeImageRefsEquivalent(app, app.Spec.Image, release.ResolvedImageRef) {
 		return model.AppRelease{}, false
