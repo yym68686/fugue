@@ -119,6 +119,23 @@ func TestBusinessRouteDraftRequiresHealthyExactReleaseEvidence(t *testing.T) {
 	}
 }
 
+func TestBusinessRouteDraftIgnoresUnreferencedTrafficReleaseFacts(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	snapshot := model.EdgeRouteIntentSnapshot{GeneratedAt: now, Routes: []model.EdgeRouteIntent{{
+		Hostname: "app.example.test", PathPrefix: "/", AppID: "app-a", TenantID: "tenant-a", RuntimeID: "runtime-a", UpstreamURL: "http://app:80", OriginStatus: model.EdgeRouteStatusActive,
+	}}}
+	traffic := model.AppTrafficPolicy{ID: "unrelated-traffic", AppID: "app-b", TenantID: "tenant-a", Mode: model.AppTrafficModeSingle, StableReleaseID: "release-b", StableWeight: 100}
+	release := model.AppRelease{ID: "release-b", AppID: "app-b", TenantID: "tenant-a", Status: model.AppReleaseStatusCreating}
+	apps := map[string]model.App{"app-a": {ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{Replicas: 1, RuntimeID: "runtime-a", Ports: []int{80}}}}
+	result, err := projectBusinessRouteDraft(snapshot, apps, apps, nil, nil, []model.AppTrafficPolicy{traffic}, []model.AppRelease{release}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RuntimeSnapshot.Releases) != 0 || len(result.Policy.TrafficConstraints) != 0 {
+		t.Fatalf("unreferenced release facts entered route graph: releases=%+v policy=%+v", result.RuntimeSnapshot.Releases, result.Policy.TrafficConstraints)
+	}
+}
+
 func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 	captured := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	observedAt := captured.Add(-time.Hour)

@@ -203,8 +203,31 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 	}
 	intent := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, CachePolicies: platformconfig.CloneCachePolicies(snapshot.CachePolicies)}
 	facts := platformconfig.RuntimeSnapshot{CapturedAt: &result.CapturedAt}
-	referencedReleases := make(map[string]bool)
+	routeApps := map[string]bool{}
+	routeHosts := map[string]bool{}
+	for _, route := range snapshot.Routes {
+		if route.AppID != "" {
+			routeApps[route.AppID] = true
+		}
+		routeHosts[normalizeExternalAppDomain(route.Hostname)] = true
+	}
+	// Compile only policies and facts that are referenced by the frozen route
+	// graph. Unrelated app release ledgers must not make a route migration
+	// appear unhealthy or authorize traffic for an app absent from intent.
+	referencedTrafficPolicies := make([]model.AppTrafficPolicy, 0, len(trafficPolicies))
 	for _, traffic := range trafficPolicies {
+		if routeApps[traffic.AppID] {
+			referencedTrafficPolicies = append(referencedTrafficPolicies, traffic)
+		}
+	}
+	referencedRoutePolicies := make([]model.EdgeRoutePolicy, 0, len(routePolicies))
+	for _, policy := range routePolicies {
+		if routeHosts[normalizeExternalAppDomain(policy.Hostname)] {
+			referencedRoutePolicies = append(referencedRoutePolicies, policy)
+		}
+	}
+	referencedReleases := make(map[string]bool)
+	for _, traffic := range referencedTrafficPolicies {
 		for _, id := range []string{traffic.StableReleaseID, traffic.CandidateReleaseID} {
 			if id != "" {
 				referencedReleases[id] = true
@@ -333,7 +356,7 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		a, b := result.Issues[i], result.Issues[j]
 		return a.Code+"\x00"+a.Hostname+"\x00"+a.PathPrefix < b.Code+"\x00"+b.Hostname+"\x00"+b.PathPrefix
 	})
-	policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}, routePolicies, trafficPolicies, "policy-draft")
+	policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}, referencedRoutePolicies, referencedTrafficPolicies, "policy-draft")
 	if err != nil {
 		return result, err
 	}
