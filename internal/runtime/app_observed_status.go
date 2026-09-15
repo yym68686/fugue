@@ -50,6 +50,7 @@ type AppRuntimeObservation struct {
 	ImagePresent            *bool
 	ImageRef                string
 	CurrentRuntimeID        string
+	ServingReleaseID        string
 	InvariantViolations     []string
 	ErrorMessage            string
 }
@@ -61,15 +62,16 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		source = AppObservationSourceKubernetesAPI
 	}
 	status := model.AppObservedStatus{
-		Phase:           "unknown",
-		RuntimeID:       strings.TrimSpace(app.Spec.RuntimeID),
-		DesiredReplicas: app.Spec.Replicas,
-		Fresh:           evidence.Complete && evidence.Fresh,
-		ObservedAt:      observedAt,
-		ClusterID:       strings.TrimSpace(evidence.ClusterID),
-		EvidenceSource:  source,
-		EvidenceSources: append([]string(nil), evidence.EvidenceSources...),
-		Reason:          AppObservationReasonRuntimeObservationNotReady,
+		Phase:            "unknown",
+		RuntimeID:        strings.TrimSpace(app.Spec.RuntimeID),
+		ServingReleaseID: strings.TrimSpace(evidence.ServingReleaseID),
+		DesiredReplicas:  app.Spec.Replicas,
+		Fresh:            evidence.Complete && evidence.Fresh,
+		ObservedAt:       observedAt,
+		ClusterID:        strings.TrimSpace(evidence.ClusterID),
+		EvidenceSource:   source,
+		EvidenceSources:  append([]string(nil), evidence.EvidenceSources...),
+		Reason:           AppObservationReasonRuntimeObservationNotReady,
 	}
 	if len(status.EvidenceSources) == 0 {
 		status.EvidenceSources = []string{source}

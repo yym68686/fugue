@@ -19168,6 +19168,9 @@ components:
           enum: [deployed, deploying, disabled, deleting, failed, unavailable, unknown]
         runtime_id:
           type: string
+        serving_release_id:
+          type: string
+          description: Exact release identity proven by the serving traffic policy and runtime observation.
         desired_replicas:
           type: integer
           format: int32

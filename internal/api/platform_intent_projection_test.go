@@ -59,7 +59,7 @@ func TestPlatformIntentProjectionRequiresPlatformAdmin(t *testing.T) {
 func TestBusinessRouteDraftUsesMatchedServingRuntimeEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	old := now.Add(-48 * time.Hour)
-	app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{Replicas: 1}, ObservedStatus: &model.AppObservedStatus{RuntimeID: "runtime-a", ImageRef: "image-a", Fresh: true, ObservedAt: now, EvidenceSources: []string{"app_release_traffic_policy"}}}
+	app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{Replicas: 1}, ObservedStatus: &model.AppObservedStatus{RuntimeID: "runtime-a", ServingReleaseID: "release-a", ImageRef: "image-a", Fresh: true, ObservedAt: now, EvidenceSources: []string{"app_release_traffic_policy"}}}
 	release := model.AppRelease{ID: "release-a", AppID: app.ID, TenantID: app.TenantID, Status: model.AppReleaseStatusServing, RuntimeID: "runtime-a", ResolvedImageRef: "image-a", UpdatedAt: old, UpstreamURL: "http://app:80"}
 	traffic := model.AppTrafficPolicy{ID: "traffic-a", AppID: app.ID, TenantID: app.TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100}
 	route := model.EdgeRouteIntentSnapshot{GeneratedAt: now, Routes: []model.EdgeRouteIntent{{Hostname: "app.example.test", PathPrefix: "/", AppID: app.ID, TenantID: app.TenantID, RuntimeID: "runtime-a", ServicePort: 80}}}

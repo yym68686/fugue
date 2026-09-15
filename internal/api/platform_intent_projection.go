@@ -212,7 +212,7 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 			continue
 		}
 		observedAt := release.UpdatedAt
-		if app, ok := observed[release.AppID]; ok && app.ObservedStatus != nil && app.ObservedStatus.Fresh && app.ObservedStatus.RuntimeID == release.RuntimeID && app.ObservedStatus.ImageRef != "" && app.ObservedStatus.ImageRef == release.ResolvedImageRef && slices.Contains(app.ObservedStatus.EvidenceSources, "app_release_traffic_policy") && !app.ObservedStatus.ObservedAt.IsZero() && app.ObservedStatus.ObservedAt.After(observedAt) {
+		if app, ok := observed[release.AppID]; ok && app.ObservedStatus != nil && app.ObservedStatus.ServingReleaseID == release.ID && app.ObservedStatus.Fresh && app.ObservedStatus.RuntimeID == release.RuntimeID && app.ObservedStatus.ImageRef != "" && app.ObservedStatus.ImageRef == release.ResolvedImageRef && slices.Contains(app.ObservedStatus.EvidenceSources, "app_release_traffic_policy") && !app.ObservedStatus.ObservedAt.IsZero() && app.ObservedStatus.ObservedAt.After(observedAt) {
 			observedAt = app.ObservedStatus.ObservedAt
 		}
 		status := model.EdgeRouteStatusUnavailable

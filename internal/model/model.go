@@ -2352,6 +2352,7 @@ func AppHasCurrentFailedOperation(status AppStatus) bool {
 type AppObservedStatus struct {
 	Phase                string    `json:"phase"`
 	RuntimeID            string    `json:"runtime_id,omitempty"`
+	ServingReleaseID     string    `json:"serving_release_id,omitempty"`
 	DesiredReplicas      int       `json:"desired_replicas"`
 	ReadyReplicas        *int      `json:"ready_replicas,omitempty"`
 	RuntimeObjectPresent *bool     `json:"runtime_object_present,omitempty"`

@@ -1102,6 +1102,7 @@ func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatu
 		ImagePresent:            entry.evidence.imagePresent,
 		ImageRef:                entry.evidence.imageRef,
 		CurrentRuntimeID:        entry.evidence.currentRuntimeID,
+		ServingReleaseID:        entry.evidence.servingReleaseID,
 		InvariantViolations:     entry.evidence.invariantViolations,
 		ErrorMessage:            errorMessage,
 	})
