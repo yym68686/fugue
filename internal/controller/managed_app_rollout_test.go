@@ -2723,6 +2723,7 @@ func TestPrimaryFailingContainerStatusPrefersInitContainerFailure(t *testing.T) 
 func TestManagedPostgresPodFailureMessageIgnoresCompletedInitdb(t *testing.T) {
 	t.Parallel()
 	pod := kubePod{}
+	pod.ObservedOwnerReferences = []kubePodOwnerReference{{APIVersion: "batch/v1", Kind: "Job", Controller: true}}
 	pod.Status.Phase = "Running"
 	pod.Status.ContainerStatuses = []kubeContainerStatus{{
 		Name: "initdb", State: kubeRuntimeState{Terminated: &kubeStateDetail{Reason: "Completed", ExitCode: 0}},
@@ -2735,5 +2736,56 @@ func TestManagedPostgresPodFailureMessageIgnoresCompletedInitdb(t *testing.T) {
 	})
 	if got := managedPostgresPodFailureMessage([]kubePod{pod}); got == "" {
 		t.Fatal("expected real postgres container failure to be reported")
+	}
+}
+
+func TestManagedPostgresFailureSeparatesJobCompletionFromServiceExit(t *testing.T) {
+	t.Parallel()
+	completed := kubePod{}
+	completed.Metadata.Name = "database-join"
+	completed.Status.Phase = "Succeeded"
+	completed.ObservedOwnerReferences = []kubePodOwnerReference{{APIVersion: "batch/v1", Kind: "Job", Controller: true}}
+	completed.Status.ContainerStatuses = []kubeContainerStatus{{Name: "join", State: kubeRuntimeState{Terminated: &kubeStateDetail{Reason: "Completed", ExitCode: 0}}}}
+	for _, test := range []struct {
+		name string
+		pod  kubePod
+		want string
+	}{
+		{name: "completed job", pod: completed},
+		{name: "database service exited", pod: func() kubePod {
+			pod := completed
+			pod.Metadata.Name = "database-instance"
+			pod.ObservedOwnerReferences = []kubePodOwnerReference{{APIVersion: "postgresql.cnpg.io/v1", Kind: "Cluster", Controller: true}}
+			return pod
+		}(), want: "instead of staying online"},
+		{name: "real failure after completed job", pod: func() kubePod {
+			pod := kubePod{}
+			pod.Metadata.Name = "database-instance"
+			pod.Status.Phase = "Running"
+			pod.Status.ContainerStatuses = []kubeContainerStatus{{Name: "postgres", State: kubeRuntimeState{Waiting: &kubeStateDetail{Reason: "CrashLoopBackOff"}}}}
+			return pod
+		}(), want: "CrashLoopBackOff"},
+		{name: "failed job", pod: func() kubePod {
+			pod := completed
+			pod.Status.Phase = "Failed"
+			pod.Status.ContainerStatuses = []kubeContainerStatus{{Name: "join", State: kubeRuntimeState{Terminated: &kubeStateDetail{Reason: "Error", ExitCode: 2}}}}
+			return pod
+		}(), want: "Error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pods := []kubePod{completed, test.pod}
+			before, err := json.Marshal(pods)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := managedPostgresPodFailureMessage(pods)
+			if (test.want == "" && got != "") || (test.want != "" && !strings.Contains(got, test.want)) {
+				t.Fatalf("failure = %q, want %q", got, test.want)
+			}
+			after, err := json.Marshal(pods)
+			if err != nil || string(before) != string(after) {
+				t.Fatal("failure projection mutated pod facts")
+			}
+		})
 	}
 }

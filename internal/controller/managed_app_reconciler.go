@@ -521,7 +521,7 @@ func (s *Service) syncManagedAppObservedStatus(
 				if podsErr != nil {
 					return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("list backing service cluster %s pods: %w", serviceDeployment.ResourceName, podsErr))
 				}
-				if failure := managedBackingServicePodFailureMessage(pods); failure != "" &&
+				if failure := managedPostgresPodFailureMessage(pods); failure != "" &&
 					!strings.EqualFold(strings.TrimSpace(backingStatus.Phase), model.ManagedPostgresRuntimePhaseActive) {
 					backingStatus.Phase = model.ManagedPostgresRuntimePhaseError
 					backingStatus.Message = failure
@@ -560,10 +560,6 @@ func (s *Service) syncManagedAppObservedStatus(
 		}
 	}
 	return nil
-}
-
-func managedBackingServicePodFailureMessage(pods []kubePod) string {
-	return managedAppPodFailureMessage(pods, nil)
 }
 
 func managedAppCloudNativePGApplyContext(ctx context.Context, app model.App, forceWrite bool) context.Context {
