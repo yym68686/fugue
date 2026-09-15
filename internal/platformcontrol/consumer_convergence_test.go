@@ -35,8 +35,8 @@ func TestBuildExpectedConsumerSetIsDeterministicAndScoped(t *testing.T) {
 	if first.TopologyRevision != second.TopologyRevision || first.ID != second.ID {
 		t.Fatalf("topology revision must be order-independent: first=%+v second=%+v", first, second)
 	}
-	if !first.RequiresConsumers || first.RequiredCardinality != 2 || first.OptionalCardinality != 0 {
-		t.Fatalf("expected edge worker and caddy front for one scoped edge, got %+v", first)
+	if !first.RequiresConsumers || first.RequiredCardinality != 1 || first.OptionalCardinality != 0 {
+		t.Fatalf("expected one edge worker owner for one scoped edge, got %+v", first)
 	}
 	for _, consumer := range first.Consumers {
 		if consumer.NodeID != edgeUS.ID || consumer.FailureDomain == "" || consumer.Cohort != edgeUS.EdgeGroupID ||
@@ -51,10 +51,10 @@ func TestProjectExpectedConsumerSetToTopologyDropsRemovedNodesWithoutMutatingSet
 	now := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
 	set := mustBuildExpectedConsumerSet(t, ExpectedConsumerSetBuildRequest{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: "global", Generation: "route-gen", PreparedAt: now, Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "old", EdgeGroupID: "group"}, {ID: "current", EdgeGroupID: "group"}}}})
 	projected := ProjectExpectedConsumerSetToTopology(set, ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "current", EdgeGroupID: "group"}}})
-	if len(set.Consumers) != 4 || len(projected.Consumers) != 2 || projected.RequiredCardinality != 2 {
+	if len(set.Consumers) != 2 || len(projected.Consumers) != 1 || projected.RequiredCardinality != 1 {
 		t.Fatalf("removed topology was not projected safely: persisted=%+v projected=%+v", set, projected)
 	}
-	if len(set.Consumers) != 4 || set.RequiredCardinality != 4 {
+	if len(set.Consumers) != 2 || set.RequiredCardinality != 2 {
 		t.Fatal("persisted expected set was mutated")
 	}
 }
@@ -70,7 +70,7 @@ func TestEvaluateConsumerConvergenceRequiresAllExpectedConsumers(t *testing.T) {
 		PreparedAt:   now,
 		Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{
 			ID: "edge-1", EdgeGroupID: "edge-group-1", Status: model.EdgeHealthHealthy,
-		}}},
+		}, {ID: "edge-2", EdgeGroupID: "edge-group-1", Status: model.EdgeHealthHealthy}}},
 	})
 
 	observed := []model.PlatformConsumerInstance{
@@ -99,7 +99,7 @@ func TestEvaluateConsumerConvergenceBlocksCardinalityMismatch(t *testing.T) {
 		PreparedAt:   now,
 		Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{
 			ID: "edge-cardinality-1", EdgeGroupID: "edge-group-cardinality", Status: model.EdgeHealthHealthy,
-		}}},
+		}, {ID: "edge-cardinality-2", EdgeGroupID: "edge-group-cardinality", Status: model.EdgeHealthHealthy}}},
 	})
 	observed := []model.PlatformConsumerInstance{
 		passingConsumer(set.Consumers[0], now),

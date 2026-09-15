@@ -306,7 +306,9 @@ func assessExpectedConsumer(expected model.PlatformExpectedConsumer, observed mo
 func expectedComponentsForArtifact(kind string) []string {
 	switch kind {
 	case model.PlatformArtifactKindEdgeRouteBundle:
-		return []string{model.PlatformConsumerComponentEdgeWorker, model.PlatformConsumerComponentCaddyEdgeFront}
+		// Caddy is an owned sidecar of the edge worker DaemonSet. Its apply and
+		// probe state is included in the worker inventory/heartbeat.
+		return []string{model.PlatformConsumerComponentEdgeWorker}
 	case model.PlatformArtifactKindDNSAnswerBundle:
 		return []string{model.PlatformConsumerComponentDNSServer}
 	case model.PlatformArtifactKindCaddyRouteConfig:
@@ -352,7 +354,11 @@ func normalizeExpectedConsumerArtifactKind(kind string) string {
 func expectedEdgeConsumer(component string, node model.EdgeNode, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {
 	nodeID := strings.TrimSpace(node.ID)
 	failureDomain := firstNonEmptyExpected("edge-group:"+strings.TrimSpace(node.EdgeGroupID), "country:"+strings.ToLower(strings.TrimSpace(node.Country)), "region:"+strings.ToLower(strings.TrimSpace(node.Region)), "node:"+nodeID)
-	return expectedConsumer(component, nodeID, artifactKind, scopeKey, generation, failureDomain, firstNonEmptyExpected(strings.TrimSpace(node.EdgeGroupID), "edge"), !node.Draining, 90*time.Second, now)
+	consumer := expectedConsumer(component, nodeID, artifactKind, scopeKey, generation, failureDomain, firstNonEmptyExpected(strings.TrimSpace(node.EdgeGroupID), "edge"), !node.Draining, 90*time.Second, now)
+	if artifactKind == model.PlatformArtifactKindEdgeRouteBundle && (node.CaddyRouteCount > 0 || strings.TrimSpace(node.CaddyAppliedVersion) != "") {
+		consumer.CompatibilityCapabilities = []string{"caddy_apply_probe"}
+	}
+	return consumer
 }
 
 func expectedDNSConsumer(node model.DNSNode, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {
