@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -131,7 +132,23 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 			_, err = platformconfig.ResolveDNSPlacements(platformconfig.PlatformIntent{DNS: []platformconfig.DNSIntent{record}}, compiled, platformconfig.RuntimeSnapshot{CapturedAt: &result.CapturedAt, DNSPlacements: []platformconfig.DNSPlacementObservation{fact}}, result.Policy)
 		}
 		if err != nil {
-			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_placement_evidence_requires_repair", Hostname: record.Hostname, Reason: err.Error()})
+			reason := err.Error()
+			if strings.Contains(reason, "insufficient route-ready and TLS-ready edges") {
+				healthy, routeReady, tlsReady := 0, 0, 0
+				for _, candidate := range fact.Candidates {
+					if candidate.Healthy {
+						healthy++
+					}
+					if candidate.RouteReady {
+						routeReady++
+					}
+					if candidate.TLSReady {
+						tlsReady++
+					}
+				}
+				reason = fmt.Sprintf("%s; candidates=%d healthy=%d route_ready=%d tls_ready=%d", reason, len(fact.Candidates), healthy, routeReady, tlsReady)
+			}
+			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_placement_evidence_requires_repair", Hostname: record.Hostname, Reason: reason})
 		}
 		if observation.limited {
 			issue("dns_placement_capture_limit", record.Hostname)
