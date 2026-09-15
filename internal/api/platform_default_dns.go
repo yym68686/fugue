@@ -71,7 +71,15 @@ func projectManagedCustomDomainDNS(result *platformIntentProjectionResponse, dom
 			continue
 		}
 		app, ok := apps[strings.TrimSpace(domain.AppID)]
-		if !ok || app.Route == nil || normalizeExternalAppDomain(app.Route.Hostname) == "" {
+		if !ok {
+			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_custom_domain_app_missing", Hostname: host, Reason: "app owner is absent from the frozen business snapshot"})
+			continue
+		}
+		if strings.TrimSpace(domain.TenantID) == "" || strings.TrimSpace(app.TenantID) == "" || domain.TenantID != app.TenantID {
+			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_custom_domain_owner_mismatch", Hostname: host, Reason: "domain and app tenant identities differ"})
+			continue
+		}
+		if app.Route == nil || normalizeExternalAppDomain(app.Route.Hostname) == "" {
 			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_custom_domain_route_missing", Hostname: host})
 			continue
 		}
@@ -81,6 +89,22 @@ func projectManagedCustomDomainDNS(result *platformIntentProjectionResponse, dom
 		}
 		if target == "" {
 			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_custom_domain_target_missing", Hostname: host})
+			continue
+		}
+		for _, prior := range result.Intent.DNS {
+			if normalizeExternalAppDomain(prior.Hostname) != target || strings.EqualFold(strings.TrimSpace(prior.Type), "FUGUE_ROUTE") {
+				continue
+			}
+			switch strings.ToUpper(strings.TrimSpace(prior.Type)) {
+			case "A", "AAAA", "CNAME", "ALIAS", "ANAME", "FUGUE_APP":
+				result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_custom_domain_target_conflict", Hostname: host, Reason: "existing address record owns the shared target"})
+				target = ""
+			}
+			if target == "" {
+				break
+			}
+		}
+		if target == "" {
 			continue
 		}
 		key := target + "\x00FUGUE_ROUTE"

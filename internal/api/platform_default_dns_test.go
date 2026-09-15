@@ -63,7 +63,7 @@ func TestProjectManagedCustomDomainDNSMergesAliasesForSharedTarget(t *testing.T)
 		{Hostname: "one.customer.test", AppID: "app-a", TenantID: "tenant-a", Status: model.AppDomainStatusVerified, DNSMode: model.AppDomainDNSModeManaged, RouteTarget: "target.example.test"},
 		{Hostname: "two.customer.test", AppID: "app-a", TenantID: "tenant-a", Status: model.AppDomainStatusVerified, DNSMode: model.AppDomainDNSModeManaged, RouteTarget: "target.example.test"},
 	}
-	apps := map[string]model.App{"app-a": {ID: "app-a", TenantID: "tenant-a", Route: &model.AppRoute{Hostname: "app.example.test"}}}
+	apps := map[string]model.App{"app-a": {ID: "app-a", TenantID: "tenant-a", Route: &model.AppRoute{Hostname: "pending.customer.test"}}}
 	if err := projectManagedCustomDomainDNS(&result, domains, apps, nil, 60); err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +100,8 @@ func TestProjectManagedCustomDomainDNSRejectsConflictingSharedTarget(t *testing.
 
 func TestProjectManagedCustomDomainDNSSkipsUnreadyOrExternalDomains(t *testing.T) {
 	result := platformIntentProjectionResponse{}
-	domains := []model.AppDomain{{Hostname: "pending.customer.test", AppID: "app-a", Status: model.AppDomainStatusVerified, DNSMode: model.AppDomainDNSModeManaged, DNSStatus: model.AppDomainDNSStatusPending, TLSStatus: model.AppDomainTLSStatusReady, RouteTarget: "target.example.test"}, {Hostname: "external.customer.test", AppID: "app-a", Status: model.AppDomainStatusVerified, DNSMode: model.AppDomainDNSModeExternal, DNSStatus: model.AppDomainDNSStatusReady, TLSStatus: model.AppDomainTLSStatusReady, RouteTarget: "external.target.test"}}
-	apps := map[string]model.App{"app-a": {ID: "app-a", TenantID: "tenant-a", Route: &model.AppRoute{Hostname: "app.example.test"}}}
+	domains := []model.AppDomain{{Hostname: "pending.customer.test", AppID: "app-a", TenantID: "tenant-a", Status: model.AppDomainStatusVerified, DNSMode: model.AppDomainDNSModeManaged, DNSStatus: model.AppDomainDNSStatusPending, TLSStatus: model.AppDomainTLSStatusReady, RouteTarget: "target.example.test"}, {Hostname: "external.customer.test", AppID: "app-a", TenantID: "tenant-a", Status: model.AppDomainStatusVerified, DNSMode: model.AppDomainDNSModeExternal, DNSStatus: model.AppDomainDNSStatusReady, TLSStatus: model.AppDomainTLSStatusReady, RouteTarget: "external.target.test"}}
+	apps := map[string]model.App{"app-a": {ID: "app-a", TenantID: "tenant-a", Route: &model.AppRoute{Hostname: "pending.customer.test"}}}
 	if err := projectManagedCustomDomainDNS(&result, domains, apps, nil, 60); err != nil {
 		t.Fatal(err)
 	}
