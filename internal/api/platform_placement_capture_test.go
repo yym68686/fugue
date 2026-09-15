@@ -9,11 +9,73 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/edgecontrol"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/releaseflow"
 	"fugue/internal/routebinding"
 	"fugue/internal/routeproof"
 )
+
+func TestPlacementReleaseProofMatchesLegacyEdgeControlOutput(t *testing.T) {
+	for _, minimum := range []int{1, 3} {
+		t.Run(fmt.Sprintf("minimum=%d", minimum), func(t *testing.T) {
+			now := time.Now().UTC()
+			const host, group = "weighted.example.test", "edge-group-test-a"
+			binding := model.EdgeRouteBinding{Hostname: host, PathPrefix: "/", RouteKind: "platform", AppID: "app-a", TenantID: "tenant-a", RuntimeID: "runtime-a", UpstreamURL: "http://origin:8080", UpstreamKind: model.EdgeRouteUpstreamKindKubernetesService, UpstreamScope: model.EdgeRouteUpstreamScopeLocalService, ServicePort: 8080, TLSPolicy: "platform", RoutePolicy: model.EdgeRoutePolicyEnabled, Streaming: true, Status: model.EdgeRouteStatusActive}
+			traffic := model.AppTrafficPolicy{ID: "traffic-a", AppID: binding.AppID, TenantID: binding.TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: "release-a", StableWeight: 100}
+			release := model.AppRelease{ID: "release-a", AppID: binding.AppID, TenantID: binding.TenantID, RuntimeID: binding.RuntimeID, Status: model.AppReleaseStatusServing, UpstreamURL: binding.UpstreamURL, ResolvedImageRef: "registry.example/app:stable"}
+			routePolicy := model.EdgeRoutePolicy{ID: "route-policy-a", Hostname: host, AppID: binding.AppID, TenantID: binding.TenantID, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true, MinHealthyEdgeNodes: minimum, ExcludedEdgeIDs: []string{"other-edge"}}
+			legacy := releaseflow.ApplyAppReleaseTraffic(binding, map[string]model.AppTrafficPolicy{binding.AppID: traffic}, map[string]model.AppRelease{release.ID: release})
+			source := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, GeneratedAt: now, Routes: []model.EdgeRouteIntent{edgeRouteIntentFromBinding(legacy, routePolicy, now)}}
+			source.Generation = edgeRouteIntentSnapshotGeneration(source)
+			ledger := edgecontrol.NewMemoryGroupShadowLedger()
+			compiler := edgecontrol.GroupShadowCompiler{Inventory: projectionInventory{now}, Ledger: ledger, Now: func() time.Time { return now }}
+			batch, err := compiler.Reconcile(context.Background(), source, []string{group})
+			if err != nil || batch.Succeeded != 1 {
+				t.Fatalf("legacy Edge Control compile: %+v %v", batch, err)
+			}
+			head, found, err := ledger.Head(context.Background(), group)
+			if err != nil || !found || head.Bundle == nil || len(head.Bundle.Routes) != 1 {
+				t.Fatalf("legacy bundle unavailable: %+v %v", head, err)
+			}
+			actualDigest, err := routeproof.Digest(head.Bundle.Routes[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{MinimumHealthyEdges: 1, MaxStaleSeconds: 60}, []model.EdgeRoutePolicy{routePolicy}, []model.AppTrafficPolicy{traffic}, "policy-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			streaming := true
+			r := platformIntentProjectionResponse{SourceGeneration: "draft-a", CapturedAt: now, Policy: policy, Intent: platformconfig.NormalizePlatformIntent(platformconfig.PlatformIntent{Generation: "intent-a", Routes: []platformconfig.RouteIntent{{Hostname: host, PathPrefix: "/", Kind: binding.RouteKind, AppID: binding.AppID, TenantID: binding.TenantID, RuntimeID: binding.RuntimeID, UpstreamURL: binding.UpstreamURL, UpstreamKind: binding.UpstreamKind, UpstreamScope: binding.UpstreamScope, ServicePort: binding.ServicePort, TLSPolicy: binding.TLSPolicy, RoutePolicy: binding.RoutePolicy, Enabled: true, Streaming: &streaming}}, DNS: []platformconfig.DNSIntent{{Hostname: host, Type: "FUGUE_APP", AppID: binding.AppID, TenantID: binding.TenantID, Values: []string{binding.AppID}, TTL: 60, Application: &platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}}})}
+			r.RuntimeSnapshot = platformconfig.RuntimeSnapshot{CapturedAt: &r.CapturedAt, Releases: []platformconfig.ReleaseObservation{{ID: release.ID, AppID: release.AppID, TenantID: release.TenantID, RuntimeID: release.RuntimeID, UpstreamURL: release.UpstreamURL, DeploymentGeneration: release.ResolvedImageRef, Status: model.EdgeRouteStatusActive, ObservedAt: now}}}
+			_, projected, err := placementHostnameRoutes(r, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest, _ := routeproof.Digest(routebinding.FromIntent(projected[0], group))
+			if digest != actualDigest {
+				t.Fatalf("compiled release projection differs from actual legacy Edge Control output: projected=%+v actual=%+v", projected[0], head.Bundle.Routes[0])
+			}
+			beforeIntent, beforePolicy := r.Intent, r.Policy
+			nodes := []model.EdgeNode{{ID: "edge-test", EdgeGroupID: group, Status: model.EdgeHealthHealthy, Healthy: true, PublicIPv4: "93.184.216.34", RouteBundleVersion: "loaded-bundle", LastHeartbeatAt: &now}}
+			captureDNSPlacementFacts(context.Background(), &r, nodes, func(context.Context, string, string, string) (placementRouteProof, error) {
+				return placementRouteProof{Digest: actualDigest, EdgeID: "edge-test", GroupID: group, Version: "loaded-bundle", ValidUntil: now.Add(30 * time.Second)}, nil
+			})
+			if len(r.RuntimeSnapshot.DNSPlacements) != 1 || len(r.RuntimeSnapshot.DNSPlacements[0].Candidates) != 1 {
+				t.Fatalf("exact legacy proof not captured: %+v", r.Issues)
+			}
+			if !reflect.DeepEqual(beforeIntent, r.Intent) || !reflect.DeepEqual(beforePolicy, r.Policy) {
+				t.Fatal("projection changed configuration")
+			}
+			r.RuntimeSnapshot.Releases[0].ObservedAt = now.Add(-time.Hour)
+			if _, _, err := placementHostnameRoutes(r, host); err == nil {
+				t.Fatal("stale release evidence accepted")
+			}
+		})
+	}
+}
 
 func placementCaptureFixture(t *testing.T) (platformIntentProjectionResponse, []model.EdgeNode, placementRouteProbe) {
 	t.Helper()

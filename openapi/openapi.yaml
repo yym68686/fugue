@@ -16186,6 +16186,7 @@ components:
           type: string
         status:
           type: string
+          description: Traffic eligibility. Compiled release targets bound to a traffic policy are projected as active after compilation has validated their fixed runtime facts. Unresolved desired upstreams may omit this field.
           enum: [active, disabled, unavailable, runtime-missing]
         status_reason:
           type: string

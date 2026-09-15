@@ -132,6 +132,7 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 		disabledCacheIDs[strings.ToLower(policy.ID)] = policy.Kind == model.CachePolicyKindDisabled
 	}
 	minimumHealthy := 1
+	compiledTraffic := map[string]platformconfig.TrafficPolicyConstraint{}
 	if value, exists := artifact.Content["policy"]; exists {
 		rawPolicy, err := json.Marshal(value)
 		if err != nil {
@@ -146,6 +147,9 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 		}
 		if policy.MinimumHealthyEdges > 0 {
 			minimumHealthy = policy.MinimumHealthyEdges
+		}
+		for _, rule := range policy.TrafficConstraints {
+			compiledTraffic[rule.AppID] = rule
 		}
 	}
 	intents := make([]model.EdgeRouteIntent, 0, len(routes))
@@ -196,6 +200,20 @@ func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRo
 		intent.RuntimeType, intent.RuntimeEdgeGroupID, intent.RuntimeClusterNode = route.RuntimeType, route.RuntimeEdgeGroupID, route.RuntimeClusterNode
 		if intent.OriginStatus == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(intent.RoutePolicy) {
 			intent.Upstreams = platformconfig.ProjectUpstreamIntents(route.Upstreams)
+			if rule, resolved := compiledTraffic[route.AppID]; resolved {
+				// The traffic compiler emits only targets whose fixed release facts
+				// passed owner, freshness and availability checks. Preserve that
+				// eligibility in the executor projection; desired upstreams without
+				// a compiled traffic policy still carry no runtime status.
+				for i := range intent.Upstreams {
+					upstream := &intent.Upstreams[i]
+					if rule.TenantID != route.TenantID || upstream.ReleaseID == "" ||
+						(upstream.ReleaseID != rule.StableReleaseID && upstream.ReleaseID != rule.CandidateReleaseID) || upstream.Weight <= 0 {
+						return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("compiled release upstream does not match traffic policy")
+					}
+					upstream.Status = model.EdgeRouteStatusActive
+				}
+			}
 		}
 		intent.CachePolicyID, intent.CacheNamespace = route.CachePolicyID, route.CacheNamespace
 		if disabledCacheIDs[strings.ToLower(route.CachePolicyID)] {
