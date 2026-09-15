@@ -1226,7 +1226,7 @@ func (s *Service) prepareManagedPostgresStorageMigrationExpansion(
 			continue
 		}
 		storageClassName := strings.TrimSpace(pvc.Spec.StorageClassName)
-		if storageClassName == "" || storageClassName == strings.TrimSpace(target.StorageClassName) {
+		if storageClassName == "" || managedPostgresStorageClassesEquivalent(storageClassName, target.StorageClassName) {
 			continue
 		}
 		currentSize := managedPostgresPVCStorageSize(pvc)
@@ -1360,7 +1360,7 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	plans := make([]managedPostgresPVCExpansionPlan, 0, len(pvcNames))
 	for _, pvcName := range pvcNames {
 		pvc := pvcsByName[pvcName]
-		if target.StorageClassName != "" && strings.TrimSpace(pvc.Spec.StorageClassName) != strings.TrimSpace(target.StorageClassName) {
+		if target.StorageClassName != "" && !managedPostgresStorageClassesEquivalent(pvc.Spec.StorageClassName, target.StorageClassName) {
 			if requireExistingDataPVC {
 				return fmt.Errorf("postgres PVC %s/%s uses storage class %q, expected %q for in-place expansion", namespace, pvcName, pvc.Spec.StorageClassName, target.StorageClassName)
 			}
@@ -1407,6 +1407,11 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	storageClassName := strings.TrimSpace(target.StorageClassName)
 	if storageClassName == "" && len(pvcNames) > 0 {
 		storageClassName = strings.TrimSpace(pvcsByName[pvcNames[0]].Spec.StorageClassName)
+	} else if storageClassName != "" && len(pvcNames) > 0 {
+		actualStorageClass := strings.TrimSpace(pvcsByName[pvcNames[0]].Spec.StorageClassName)
+		if managedPostgresStorageClassesEquivalent(actualStorageClass, storageClassName) {
+			storageClassName = actualStorageClass
+		}
 	}
 	if storageClassName == "" {
 		// A newly created cluster may intentionally rely on Kubernetes' default
@@ -1422,7 +1427,7 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	}
 	for _, plan := range plans {
 		pvcName := plan.Name
-		if actualStorageClass := strings.TrimSpace(plan.PVC.Spec.StorageClassName); actualStorageClass != storageClassName {
+		if actualStorageClass := strings.TrimSpace(plan.PVC.Spec.StorageClassName); !managedPostgresStorageClassesEquivalent(actualStorageClass, storageClassName) {
 			return fmt.Errorf(
 				"postgres PVC %s/%s uses storage class %q, expected %q for in-place expansion",
 				namespace,
