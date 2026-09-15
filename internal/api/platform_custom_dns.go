@@ -55,7 +55,11 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 		for _, route := range routes[host] {
 			if route.AppID != app.ID || route.TenantID != app.TenantID {
 				t.blocked = true
-				issue("dns_custom_domain_owner_mismatch", host, "every path at a referenced hostname must match the target owner")
+				if route.TenantID == app.TenantID && route.AppID != "" && route.AppID != app.ID {
+					issue("dns_custom_domain_shared_hostname_conflict", host, "custom and platform routes at one hostname have different app owners")
+				} else {
+					issue("dns_custom_domain_owner_mismatch", host, "every path at a referenced hostname must match the target owner")
+				}
 				break
 			}
 		}
