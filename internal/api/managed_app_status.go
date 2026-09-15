@@ -1385,8 +1385,6 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 				serviceName = canonicalServiceName
 			}
 		}
-		evidence.servingReleaseID = strings.TrimSpace(servingRelease.ID)
-		evidence.evidenceSources = append(evidence.evidenceSources, "app_release_traffic_policy")
 	}
 	serviceKey := kubeNamespacedKey(namespace, serviceName)
 	deploymentKey := kubeNamespacedKey(namespace, deploymentName)
@@ -1510,6 +1508,8 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 		evidence.physicalReplicas != nil && *evidence.physicalReplicas >= app.Spec.Replicas &&
 		(!serviceRequired || (boolPointerTrue(evidence.servicePresent) && boolPointerTrue(evidence.endpointReady))) {
 		evidence.servingReleaseReady = true
+		evidence.servingReleaseID = strings.TrimSpace(servingRelease.ID)
+	evidence.evidenceSources = append(evidence.evidenceSources, "app_release_traffic_policy")
 	}
 
 	// Record contradictions as explicit invariant evidence. The calculator
