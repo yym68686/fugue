@@ -31245,6 +31245,9 @@ components:
                 type: string
               path_prefix:
                 type: string
+              reason:
+                type: string
+                description: Generic validation reason explaining the projection issue; excludes credentials and runtime target URLs.
         intent:
           $ref: "#/components/schemas/PlatformConfigIntent"
         policy:

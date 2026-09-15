@@ -81,6 +81,7 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 	type observation struct {
 		fact       platformconfig.DNSPlacementObservation
 		inputError bool
+		reason     string
 		limited    bool
 	}
 	observations := make([]observation, len(records))
@@ -94,7 +95,11 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 			defer workers.Done()
 			for index := range jobs {
 				fact, limited, err := captureDNSPlacementRecord(ctx, snapshot, records[index], nodes, probe, &budget)
-				observations[index] = observation{fact: fact, limited: limited, inputError: err != nil}
+				reason := ""
+				if err != nil {
+					reason = err.Error()
+				}
+				observations[index] = observation{fact: fact, limited: limited, inputError: err != nil, reason: reason}
 			}
 		}()
 	}
@@ -110,7 +115,7 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 	for index, record := range records {
 		observation := observations[index]
 		if observation.inputError {
-			issue("dns_placement_route_inputs_invalid", record.Hostname)
+			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_placement_route_inputs_invalid", Hostname: record.Hostname, Reason: observation.reason})
 			continue
 		}
 		fact := observation.fact
@@ -125,7 +130,7 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 			_, err = platformconfig.ResolveDNSPlacements(platformconfig.PlatformIntent{DNS: []platformconfig.DNSIntent{record}}, compiled, platformconfig.RuntimeSnapshot{CapturedAt: &result.CapturedAt, DNSPlacements: []platformconfig.DNSPlacementObservation{fact}}, result.Policy)
 		}
 		if err != nil {
-			issue("dns_placement_evidence_requires_repair", record.Hostname)
+			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_placement_evidence_requires_repair", Hostname: record.Hostname, Reason: err.Error()})
 		}
 		if observation.limited {
 			issue("dns_placement_capture_limit", record.Hostname)

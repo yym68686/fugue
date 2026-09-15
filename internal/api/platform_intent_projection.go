@@ -21,6 +21,7 @@ type platformProjectionIssue struct {
 	Code       string `json:"code"`
 	Hostname   string `json:"hostname,omitempty"`
 	PathPrefix string `json:"path_prefix,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 type platformIntentProjectionResponse struct {
