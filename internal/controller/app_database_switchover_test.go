@@ -749,7 +749,6 @@ func TestManagedPostgresInPlaceStorageExpansionRequired(t *testing.T) {
 	current := &model.AppPostgresSpec{
 		StorageSize:      "5Gi",
 		StorageClassName: "fugue-postgres-rwo",
-		PrimaryNodeName:  "node-a",
 	}
 	desired := &model.AppPostgresSpec{
 		StorageSize:      "10Gi",
@@ -769,30 +768,8 @@ func TestManagedPostgresInPlaceStorageExpansionRequired(t *testing.T) {
 	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_b", "") {
 		t.Fatal("expected cross-runtime storage growth to fall back to migration path")
 	}
-	if !managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-a") {
-		t.Fatal("expected explicit current target node to remain an in-place expansion")
-	}
-	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-b") {
-		t.Fatal("expected different explicit target node to remain a placement localize")
-	}
-	current.PrimaryNodeName = ""
-	if !managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-b") {
-		t.Fatal("expected explicit node to permit expansion when persisted primary placement is unknown")
-	}
-	desired.StorageClassName = "fugue-longhorn-rwo"
-	if !managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "") {
-		t.Fatal("expected managed postgres storage class alias to remain an in-place expansion")
-	}
-}
-
-func TestManagedPostgresStorageClassesEquivalent(t *testing.T) {
-	for _, pair := range [][2]string{{"fugue-postgres-rwo", "fugue-postgres-rwo"}, {"fugue-postgres-rwo", "fugue-longhorn-rwo"}, {"fugue-longhorn-rwo", "fugue-postgres-rwo"}} {
-		if !managedPostgresStorageClassesEquivalent(pair[0], pair[1]) {
-			t.Fatalf("expected storage class aliases %q and %q to be equivalent", pair[0], pair[1])
-		}
-	}
-	if managedPostgresStorageClassesEquivalent("fugue-postgres-rwo", "other") {
-		t.Fatal("unexpected equivalence for unrelated storage class")
+	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-a") {
+		t.Fatal("expected explicit target node to remain a placement localize")
 	}
 }
 

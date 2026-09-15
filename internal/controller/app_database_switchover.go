@@ -538,11 +538,6 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
-	if targetRuntime, runtimeErr := s.Store.GetRuntime(targetRuntimeID); runtimeErr == nil && model.RuntimeIsInternal(targetRuntime) && strings.EqualFold(strings.TrimSpace(desiredDatabase.StorageClassName), "fugue-postgres-rwo") {
-		if sc, found, scErr := client.getStorageClass(ctx, "fugue-longhorn-rwo"); scErr == nil && found && sc.Provisioner == "driver.longhorn.io" {
-			desiredDatabase.StorageClassName = "fugue-longhorn-rwo"
-		}
-	}
 	storageMigrationRequired = managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
 	storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 
@@ -730,11 +725,6 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
-	if targetRuntime, runtimeErr := s.Store.GetRuntime(targetRuntimeID); runtimeErr == nil && model.RuntimeIsInternal(targetRuntime) && strings.EqualFold(strings.TrimSpace(desiredDatabase.StorageClassName), "fugue-postgres-rwo") {
-		if sc, found, scErr := client.getStorageClass(ctx, "fugue-longhorn-rwo"); scErr == nil && found && sc.Provisioner == "driver.longhorn.io" {
-			desiredDatabase.StorageClassName = "fugue-longhorn-rwo"
-		}
-	}
 	storageMigrationRequired = managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
 	storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 	if !storageMigrationRequired {
@@ -931,7 +921,7 @@ func managedPostgresStorageMigrationRequired(current, desired *model.AppPostgres
 	if current == nil || desired == nil {
 		return false
 	}
-	return !managedPostgresStorageClassesEquivalent(current.StorageClassName, desired.StorageClassName) ||
+	return strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) ||
 		strings.TrimSpace(current.StorageSize) != strings.TrimSpace(desired.StorageSize)
 }
 
@@ -961,14 +951,11 @@ func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppP
 	}
 	if strings.TrimSpace(sourceRuntimeID) == "" ||
 		strings.TrimSpace(targetRuntimeID) == "" ||
-		strings.TrimSpace(sourceRuntimeID) != strings.TrimSpace(targetRuntimeID) {
+		strings.TrimSpace(sourceRuntimeID) != strings.TrimSpace(targetRuntimeID) ||
+		strings.TrimSpace(requestedTargetNodeName) != "" {
 		return false
 	}
-	if requestedNode := strings.TrimSpace(requestedTargetNodeName); requestedNode != "" &&
-		strings.TrimSpace(current.PrimaryNodeName) != "" && strings.TrimSpace(current.PrimaryNodeName) != requestedNode {
-		return false
-	}
-	if !managedPostgresStorageClassesEquivalent(current.StorageClassName, desired.StorageClassName) {
+	if strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) {
 		return false
 	}
 	currentSize := strings.TrimSpace(current.StorageSize)
@@ -985,22 +972,6 @@ func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppP
 		return false
 	}
 	return desiredQuantity.Cmp(currentQuantity) > 0
-}
-
-// The managed shared runtime exposes fugue-postgres-rwo as its logical class,
-// while the controller may resolve that class to the Longhorn provisioner
-// class before preparing the Kubernetes PVC. A same-runtime size increase is
-// still an in-place expansion; treating the implementation alias as a class
-// migration creates a deadlock when the app is down because the migration
-// path waits for a ready app pod before it can expand the existing database.
-func managedPostgresStorageClassesEquivalent(current, desired string) bool {
-	current = strings.TrimSpace(current)
-	desired = strings.TrimSpace(desired)
-	if current == desired {
-		return true
-	}
-	return (current == "fugue-postgres-rwo" && desired == "fugue-longhorn-rwo") ||
-		(current == "fugue-longhorn-rwo" && desired == "fugue-postgres-rwo")
 }
 
 func databaseLocalizeStorageTarget(required bool, postgres *model.AppPostgresSpec) managedPostgresStorageTarget {
@@ -1226,7 +1197,7 @@ func (s *Service) prepareManagedPostgresStorageMigrationExpansion(
 			continue
 		}
 		storageClassName := strings.TrimSpace(pvc.Spec.StorageClassName)
-		if storageClassName == "" || managedPostgresStorageClassesEquivalent(storageClassName, target.StorageClassName) {
+		if storageClassName == "" || storageClassName == strings.TrimSpace(target.StorageClassName) {
 			continue
 		}
 		currentSize := managedPostgresPVCStorageSize(pvc)
@@ -1360,7 +1331,7 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	plans := make([]managedPostgresPVCExpansionPlan, 0, len(pvcNames))
 	for _, pvcName := range pvcNames {
 		pvc := pvcsByName[pvcName]
-		if target.StorageClassName != "" && !managedPostgresStorageClassesEquivalent(pvc.Spec.StorageClassName, target.StorageClassName) {
+		if target.StorageClassName != "" && strings.TrimSpace(pvc.Spec.StorageClassName) != strings.TrimSpace(target.StorageClassName) {
 			if requireExistingDataPVC {
 				return fmt.Errorf("postgres PVC %s/%s uses storage class %q, expected %q for in-place expansion", namespace, pvcName, pvc.Spec.StorageClassName, target.StorageClassName)
 			}
@@ -1407,11 +1378,6 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	storageClassName := strings.TrimSpace(target.StorageClassName)
 	if storageClassName == "" && len(pvcNames) > 0 {
 		storageClassName = strings.TrimSpace(pvcsByName[pvcNames[0]].Spec.StorageClassName)
-	} else if storageClassName != "" && len(pvcNames) > 0 {
-		actualStorageClass := strings.TrimSpace(pvcsByName[pvcNames[0]].Spec.StorageClassName)
-		if managedPostgresStorageClassesEquivalent(actualStorageClass, storageClassName) {
-			storageClassName = actualStorageClass
-		}
 	}
 	if storageClassName == "" {
 		// A newly created cluster may intentionally rely on Kubernetes' default
@@ -1427,7 +1393,7 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	}
 	for _, plan := range plans {
 		pvcName := plan.Name
-		if actualStorageClass := strings.TrimSpace(plan.PVC.Spec.StorageClassName); !managedPostgresStorageClassesEquivalent(actualStorageClass, storageClassName) {
+		if actualStorageClass := strings.TrimSpace(plan.PVC.Spec.StorageClassName); actualStorageClass != storageClassName {
 			return fmt.Errorf(
 				"postgres PVC %s/%s uses storage class %q, expected %q for in-place expansion",
 				namespace,
