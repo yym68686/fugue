@@ -775,6 +775,10 @@ func TestManagedPostgresInPlaceStorageExpansionRequired(t *testing.T) {
 	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-b") {
 		t.Fatal("expected different explicit target node to remain a placement localize")
 	}
+	current.PrimaryNodeName = ""
+	if !managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-b") {
+		t.Fatal("expected explicit node to permit expansion when persisted primary placement is unknown")
+	}
 	desired.StorageClassName = "fugue-longhorn-rwo"
 	if !managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "") {
 		t.Fatal("expected managed postgres storage class alias to remain an in-place expansion")
