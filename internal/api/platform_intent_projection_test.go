@@ -56,6 +56,22 @@ func TestPlatformIntentProjectionRequiresPlatformAdmin(t *testing.T) {
 	}
 }
 
+func TestBusinessRouteDraftUsesFreshRuntimeObservationForReleaseFacts(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{Replicas: 1}, ObservedStatus: &model.AppObservedStatus{RuntimeID: "runtime-a", ObservedAt: now}}
+	snapshot := model.EdgeRouteIntentSnapshot{GeneratedAt: now, Routes: []model.EdgeRouteIntent{{Hostname: "app.example.test", PathPrefix: "/", AppID: app.ID, TenantID: app.TenantID, RuntimeID: "runtime-a", ServicePort: 80}}}
+	release := model.AppRelease{ID: "release-a", AppID: app.ID, TenantID: app.TenantID, Status: model.AppReleaseStatusServing, RuntimeID: "runtime-a", UpdatedAt: old, UpstreamURL: "http://app:80"}
+	traffic := model.AppTrafficPolicy{ID: "traffic-a", AppID: app.ID, TenantID: app.TenantID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100}
+	result, err := projectBusinessRouteDraft(snapshot, map[string]model.App{app.ID: app}, map[string]model.App{app.ID: app}, nil, nil, []model.AppTrafficPolicy{traffic}, []model.AppRelease{release}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RuntimeSnapshot.Releases) != 1 || !result.RuntimeSnapshot.Releases[0].ObservedAt.Equal(now) {
+		t.Fatalf("release observation did not use runtime evidence: %+v", result.RuntimeSnapshot.Releases)
+	}
+}
+
 func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 	captured := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	observedAt := captured.Add(-time.Hour)

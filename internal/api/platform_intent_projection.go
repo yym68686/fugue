@@ -209,11 +209,18 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		if !referencedReleases[release.ID] {
 			continue
 		}
+		observedAt := release.UpdatedAt
+		// Release rows describe desired/control-plane history. Prefer the
+		// app's point-in-time runtime observation when available so a stable
+		// release is not treated as stale merely because its row is old.
+		if app, ok := observed[release.AppID]; ok && app.ObservedStatus != nil && strings.TrimSpace(app.ObservedStatus.RuntimeID) != "" && strings.TrimSpace(app.ObservedStatus.RuntimeID) == strings.TrimSpace(release.RuntimeID) && !app.ObservedStatus.ObservedAt.IsZero() && app.ObservedStatus.ObservedAt.After(observedAt) {
+			observedAt = app.ObservedStatus.ObservedAt
+		}
 		status := model.EdgeRouteStatusUnavailable
 		if release.Status == model.AppReleaseStatusReady || release.Status == model.AppReleaseStatusServing {
 			status = model.EdgeRouteStatusActive
 		}
-		facts.Releases = append(facts.Releases, platformconfig.ReleaseObservation{ID: release.ID, AppID: release.AppID, TenantID: release.TenantID, ObservedAt: release.UpdatedAt, Status: status, StatusReason: release.StatusReason, UpstreamURL: release.UpstreamURL, RuntimeID: release.RuntimeID, DeploymentGeneration: firstNonEmpty(release.ResolvedImageRef, release.SourceRef)})
+		facts.Releases = append(facts.Releases, platformconfig.ReleaseObservation{ID: release.ID, AppID: release.AppID, TenantID: release.TenantID, ObservedAt: observedAt, Status: status, StatusReason: release.StatusReason, UpstreamURL: release.UpstreamURL, RuntimeID: release.RuntimeID, DeploymentGeneration: firstNonEmpty(release.ResolvedImageRef, release.SourceRef)})
 	}
 	sort.Slice(facts.Releases, func(i, j int) bool { return facts.Releases[i].ID < facts.Releases[j].ID })
 	for _, source := range snapshot.Routes {
