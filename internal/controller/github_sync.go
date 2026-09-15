@@ -73,17 +73,6 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			continue
 		}
 		trackedCommitStates := collectTrackedGitHubCommitStates(ops)
-		if blocked, found := githubSourceSyncRolloutBlock(ops); found {
-			// A serving app backed by storage that cannot be mounted by the
-			// replacement pod cannot accept an implicit online source update.
-			// Previously every new upstream commit queued another operation even
-			// though the same preflight refusal was already durable evidence. Keep
-			// the known-good release serving and suspend discovery until the user
-			// repairs the topology or explicitly resumes source sync.
-			app.Status.SourceSync = githubSourceSyncOKStatus(currentTime)
-			s.recordGitHubSourceSyncRolloutBlock(ctx, app, *originSource, blocked, currentTime)
-			continue
-		}
 		var retryBaseOperation *model.Operation
 		if state, found := trackedCommitStates[trackedGitHubCommitStateKey(app.ID, latestCommit)]; found {
 			if !gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
@@ -391,29 +380,4 @@ func gitHubTrackedCommitTransientFailure(op model.Operation) bool {
 		}
 	}
 	return false
-}
-
-func githubSourceSyncRolloutBlock(ops []model.Operation) (model.Operation, bool) {
-	var blocked model.Operation
-	for _, op := range ops {
-		if !gitHubTrackedCommitAutomaticFailure(op) || !strings.Contains(strings.ToLower(strings.TrimSpace(op.ErrorMessage)), "zero-downtime deploy refused") {
-			continue
-		}
-		if blocked.ID == "" || op.UpdatedAt.After(blocked.UpdatedAt) {
-			blocked = op
-		}
-	}
-	if blocked.ID == "" {
-		return model.Operation{}, false
-	}
-	for _, op := range ops {
-		if op.Status != model.OperationStatusCompleted || op.Type != model.OperationTypeDeploy || !op.UpdatedAt.After(blocked.UpdatedAt) {
-			continue
-		}
-		// A later completed deploy proves that the operator or a subsequent
-		// source update resolved the serving topology. Do not re-suspend it
-		// based on an older failure.
-		return model.Operation{}, false
-	}
-	return blocked, true
 }

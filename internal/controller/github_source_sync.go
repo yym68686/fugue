@@ -13,8 +13,6 @@ import (
 
 const gitHubSourceSyncMaxUserActionFailures = 3
 
-const gitHubSourceSyncRolloutBlockedCode = "rollout_requires_downtime"
-
 type gitHubSourceSyncErrorClass struct {
 	Code            string
 	NeedsUserAction bool
@@ -119,7 +117,7 @@ func (s *Service) recordGitHubSourceSyncFailure(ctx context.Context, app model.A
 }
 
 func (s *Service) recordGitHubSourceSyncSuccess(ctx context.Context, app model.App, now time.Time) bool {
-	status := githubSourceSyncOKStatus(now)
+	status := &model.AppSourceSyncStatus{Provider: model.AppSourceSyncProviderGitHub, Phase: model.AppSourceSyncPhaseOK, LastCheckedAt: &now, LastSuccessAt: &now}
 	recorded, err := s.Store.RecordAppSourceSyncCheck(ctx, app, status)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, context.Canceled) && s.Logger != nil {
@@ -131,47 +129,6 @@ func (s *Service) recordGitHubSourceSyncSuccess(ctx context.Context, app model.A
 		s.Logger.Printf("github sync source recovered for app=%s", app.ID)
 	}
 	return recorded
-}
-
-func githubSourceSyncOKStatus(now time.Time) *model.AppSourceSyncStatus {
-	return &model.AppSourceSyncStatus{Provider: model.AppSourceSyncProviderGitHub, Phase: model.AppSourceSyncPhaseOK, LastCheckedAt: &now, LastSuccessAt: &now}
-}
-
-// recordGitHubSourceSyncRolloutBlock turns a deployment preflight refusal into
-// a durable, user-actionable source-sync pause. The repository is reachable;
-// the serving topology simply cannot replace its pod without downtime.
-func (s *Service) recordGitHubSourceSyncRolloutBlock(ctx context.Context, app model.App, source model.AppSource, blocked model.Operation, now time.Time) {
-	if s == nil || s.Store == nil {
-		return
-	}
-	var lastSuccess *time.Time
-	if app.Status.SourceSync != nil && app.Status.SourceSync.LastSuccessAt != nil {
-		value := *app.Status.SourceSync.LastSuccessAt
-		lastSuccess = &value
-	}
-	suspendedAt := now
-	status := &model.AppSourceSyncStatus{
-		Provider:            model.AppSourceSyncProviderGitHub,
-		Phase:               model.AppSourceSyncPhaseSuspended,
-		ConsecutiveFailures: 1,
-		LastCheckedAt:       &now,
-		LastSuccessAt:       lastSuccess,
-		LastErrorAt:         &now,
-		LastErrorCode:       gitHubSourceSyncRolloutBlockedCode,
-		LastErrorMessage:    sanitizeGitHubSourceSyncError(fmt.Errorf("automatic source update paused: %s; resume source sync after selecting a storage topology that supports online replacement or after scheduling downtime", strings.TrimSpace(blocked.ErrorMessage))),
-		SuspendedAt:         &suspendedAt,
-		NeedsUserAction:     true,
-	}
-	recorded, err := s.Store.RecordAppSourceSyncCheck(ctx, app, status)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) && s.Logger != nil {
-			s.Logger.Printf("github sync rollout block status update failed for app=%s: %v", app.ID, err)
-		}
-		return
-	}
-	if recorded && s.Logger != nil {
-		s.Logger.Printf("github sync suspended for app=%s repo=%s branch=%s code=%s operation=%s: %s", app.ID, strings.TrimSpace(source.RepoURL), strings.TrimSpace(source.RepoBranch), gitHubSourceSyncRolloutBlockedCode, blocked.ID, status.LastErrorMessage)
-	}
 }
 
 func gitHubSourceSyncRetryDelay(baseDelay, maxDelay time.Duration, consecutiveFailures int) time.Duration {
