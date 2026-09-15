@@ -110,6 +110,48 @@ func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 	}
 }
 
+func TestGitHubSourceSyncRolloutBlockSuspendsAcrossNewCommits(t *testing.T) {
+	t.Parallel()
+
+	failed := model.Operation{
+		ID:            "op-failed",
+		Type:          model.OperationTypeDeploy,
+		Status:        model.OperationStatusFailed,
+		RequestedByID: model.OperationRequestedByGitHubSyncController,
+		UpdatedAt:     time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC),
+		ErrorMessage:  "zero-downtime deploy refused: storage class fugue-workspace-rwo does not support same-node online dual mount",
+		DesiredSource: &model.AppSource{Type: model.AppSourceTypeGitHubPublic, CommitSHA: "old-commit"},
+	}
+	blocked, ok := githubSourceSyncRolloutBlock([]model.Operation{failed})
+	if !ok || blocked.ID != failed.ID {
+		t.Fatalf("expected unsupported rollout to block future source commits, got blocked=%+v ok=%v", blocked, ok)
+	}
+}
+
+func TestGitHubSourceSyncRolloutBlockClearsAfterLaterCompletedDeploy(t *testing.T) {
+	t.Parallel()
+
+	failed := model.Operation{
+		ID:            "op-failed",
+		Type:          model.OperationTypeDeploy,
+		Status:        model.OperationStatusFailed,
+		RequestedByID: model.OperationRequestedByGitHubSyncController,
+		UpdatedAt:     time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC),
+		ErrorMessage:  "zero-downtime deploy refused: storage class fugue-workspace-rwo does not support same-node online dual mount",
+		DesiredSource: &model.AppSource{Type: model.AppSourceTypeGitHubPublic, CommitSHA: "old-commit"},
+	}
+	completed := model.Operation{
+		ID:            "op-completed",
+		Type:          model.OperationTypeDeploy,
+		Status:        model.OperationStatusCompleted,
+		UpdatedAt:     failed.UpdatedAt.Add(time.Minute),
+		DesiredSource: &model.AppSource{Type: model.AppSourceTypeGitHubPublic, CommitSHA: "new-commit"},
+	}
+	if blocked, ok := githubSourceSyncRolloutBlock([]model.Operation{failed, completed}); ok || blocked.ID != "" {
+		t.Fatalf("expected later successful deployment to clear old block, got blocked=%+v ok=%v", blocked, ok)
+	}
+}
+
 func TestSyncGitHubAppsBacksOffAndSuspendsDiscoveryFailures(t *testing.T) {
 	t.Parallel()
 
