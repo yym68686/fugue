@@ -338,6 +338,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := s.ensureManagedPostgresDataSafety(ctx, client, namespace, managed, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
+	if err := s.validatePersistentStorageClassMutation(ctx, client, namespace, childObjects); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+	}
 	releaseKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(app, managed.Spec.Scheduling))
 	rolloutDecision := managedAppRolloutDecisionFromObjects(ctx, namespace, managed, app, childObjects, releaseKey)
 	if s.controllerObservabilityEndpointConfigured() {
@@ -384,6 +387,44 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile workspace replication source: %w", err))
 	}
 	return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, app, postgresPlacements, releaseKey, recoverStoredBaseline)
+}
+
+// Kubernetes makes a bound PVC's storageClassName immutable. Validate that
+// invariant before applying the child-object set so a harmless app re-enable
+// cannot become a late 422 after other objects have been considered.
+func (s *Service) validatePersistentStorageClassMutation(ctx context.Context, client *kubeClient, namespace string, objects []map[string]any) error {
+	if client == nil {
+		return nil
+	}
+	for _, object := range objects {
+		if strings.TrimSpace(objectStringField(object, "kind")) != "PersistentVolumeClaim" {
+			continue
+		}
+		metadata, _ := object["metadata"].(map[string]any)
+		name, _ := metadata["name"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		desiredSpec := normalizeKubeMap(object["spec"])
+		desiredClass, _ := desiredSpec["storageClassName"].(string)
+		desiredClass = strings.TrimSpace(desiredClass)
+		if desiredClass == "" {
+			continue
+		}
+		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, name)
+		if err != nil {
+			return fmt.Errorf("preflight persistent volume claim %s/%s: %w", namespace, name, err)
+		}
+		if !found || strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+			continue
+		}
+		currentClass := strings.TrimSpace(pvc.Spec.StorageClassName)
+		if currentClass != "" && currentClass != desiredClass {
+			return fmt.Errorf("persistent volume claim %s/%s is already bound to storage class %q; storage class cannot be changed to %q after binding (create a new claim or keep %q)", namespace, name, currentClass, desiredClass, currentClass)
+		}
+	}
+	return nil
 }
 
 // preserveManagedAppServingDeploymentTemplate prevents a legacy controller's
