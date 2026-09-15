@@ -131,8 +131,11 @@ func applyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot, 
 		if !ok {
 			continue
 		}
-		if rule.AppID != "" && rule.AppID != routes[i].AppID || rule.TenantID != "" && rule.TenantID != routes[i].TenantID {
+		if rule.TenantID != "" && rule.TenantID != routes[i].TenantID {
 			return nil, fmt.Errorf("route policy owner does not match intent")
+		}
+		if rule.AppID != "" && rule.AppID != routes[i].AppID {
+			continue
 		}
 		matched[rule.Hostname] = true
 		routes[i].MinHealthyEdgeNodes = rule.MinHealthyEdgeNodes

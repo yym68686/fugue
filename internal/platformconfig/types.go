@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v13"
+	CompilerVersion = "platform-config-compiler/v14"
 	GlobalScopeKey  = "global"
 )
 
@@ -91,7 +91,17 @@ type DNSApplicationIntent struct {
 // aliases whose DNS owner differs from the HTTP/TLS hostnames they represent.
 type DNSRouteIntent struct {
 	DNSApplicationIntent
-	Hostnames []string `json:"hostnames"`
+	Hostnames []string          `json:"hostnames"`
+	Bindings  []DNSRouteBinding `json:"bindings,omitempty"`
+}
+
+// DNSRouteBinding is an explicit hostname/path/app dependency for a route
+// target shared by applications in one tenant. It does not duplicate route
+// configuration; the compiler checks it against PlatformIntent routes.
+type DNSRouteBinding struct {
+	Hostname   string `json:"hostname"`
+	PathPrefix string `json:"path_prefix"`
+	AppID      string `json:"app_id"`
 }
 
 type DNSFlattenIntent struct {
@@ -404,6 +414,15 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 				value.Hostnames[j] = normalizedImportHostname(value.Hostnames[j])
 			}
 			sort.Strings(value.Hostnames)
+			value.Bindings = append([]DNSRouteBinding(nil), value.Bindings...)
+			for j := range value.Bindings {
+				value.Bindings[j].Hostname = normalizedImportHostname(value.Bindings[j].Hostname)
+				value.Bindings[j].PathPrefix = model.NormalizeAppRoutePathPrefix(value.Bindings[j].PathPrefix)
+			}
+			sort.Slice(value.Bindings, func(a, b int) bool {
+				x, y := value.Bindings[a], value.Bindings[b]
+				return x.Hostname+"\x00"+x.PathPrefix+"\x00"+x.AppID < y.Hostname+"\x00"+y.PathPrefix+"\x00"+y.AppID
+			})
 			out.DNS[i].Route = &value
 		}
 		if out.DNS[i].Application != nil {

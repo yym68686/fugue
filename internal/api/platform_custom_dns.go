@@ -23,6 +23,7 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 	}
 	type targetIntent struct {
 		app     model.App
+		shared  bool
 		hosts   map[string]bool
 		blocked bool
 	}
@@ -43,7 +44,7 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 			targets[target] = t
 		}
 		t.hosts[host] = true
-		if app.ID == "" || app.TenantID == "" || domainOwner != app.TenantID || t.app.ID != app.ID || t.app.TenantID != app.TenantID {
+		if app.ID == "" || app.TenantID == "" || domainOwner != app.TenantID || t.app.TenantID != app.TenantID {
 			t.blocked = true
 			issue("dns_custom_domain_owner_mismatch", host, "domain, app and shared target must have one owner")
 			return
@@ -52,16 +53,20 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 			t.blocked = true
 			issue("dns_custom_domain_route_missing", host, "referenced hostname is absent from the frozen route intent")
 		}
+		ownerFound := false
 		for _, route := range routes[host] {
-			if route.AppID != app.ID || route.TenantID != app.TenantID {
+			routeApp, exists := apps[route.AppID]
+			if route.TenantID != app.TenantID || route.AppID == "" || !exists || routeApp.ID != route.AppID || routeApp.TenantID != app.TenantID {
 				t.blocked = true
-				if route.TenantID == app.TenantID && route.AppID != "" && route.AppID != app.ID {
-					issue("dns_custom_domain_shared_hostname_conflict", host, "custom and platform routes at one hostname have different app owners")
-				} else {
-					issue("dns_custom_domain_owner_mismatch", host, "every path at a referenced hostname must match the target owner")
-				}
+				issue("dns_custom_domain_owner_mismatch", host, "every path must have a verified app owner in the target tenant")
 				break
 			}
+			ownerFound = ownerFound || route.AppID == app.ID
+			t.shared = t.shared || route.AppID != app.ID
+		}
+		if len(routes[host]) > 0 && !ownerFound {
+			t.blocked = true
+			issue("dns_custom_domain_owner_mismatch", host, "target owning app is absent from the referenced hostname")
 		}
 	}
 	// Sorting detached inputs makes both diagnostics and output independent of
@@ -154,6 +159,14 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 			RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, AppID: t.app.ID, TenantID: t.app.TenantID,
 			Route: &platformconfig.DNSRouteIntent{Hostnames: hosts, DNSApplicationIntent: platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}},
 		})
+		if t.shared {
+			last := &result.Intent.DNS[len(result.Intent.DNS)-1]
+			for _, host := range hosts {
+				for _, route := range routes[host] {
+					last.Route.Bindings = append(last.Route.Bindings, platformconfig.DNSRouteBinding{Hostname: host, PathPrefix: route.PathPrefix, AppID: route.AppID})
+				}
+			}
+		}
 	}
 	result.Intent = platformconfig.NormalizePlatformIntent(result.Intent)
 	result.Intent.Generation = ""

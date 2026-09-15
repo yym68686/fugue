@@ -31,6 +31,22 @@ func TestProjectCustomDomainDNSAggregatesAliasesAndPreservesRouteOwners(t *testi
 	}
 }
 
+func TestProjectCustomDomainDNSEmitsExplicitBindingsForSharedTenantPaths(t *testing.T) {
+	s := customDNSTestServer()
+	r := platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Routes: []platformconfig.RouteIntent{
+		{Hostname: "shared.customer.test", PathPrefix: "/", AppID: "app-a", TenantID: "tenant-a", Enabled: true, UpstreamURL: "http://a"},
+		{Hostname: "shared.customer.test", PathPrefix: "/v1", AppID: "app-b", TenantID: "tenant-a", Enabled: true, UpstreamURL: "http://b"},
+	}}}
+	apps := map[string]model.App{"app-a": customDNSApp("app-a", "tenant-a", "shared.customer.test"), "app-b": {ID: "app-b", TenantID: "tenant-a"}}
+	domains := []model.AppDomain{customDNSDomain("shared.customer.test", "app-a", "tenant-a", "target.dns.example.test", model.AppDomainDNSModeManaged)}
+	if err := s.projectCustomDomainDNS(&r, domains, apps); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Intent.DNS) != 1 || len(r.Intent.DNS[0].Route.Bindings) != 2 {
+		t.Fatalf("expected two explicit path bindings: %+v", r.Intent.DNS)
+	}
+}
+
 func TestProjectCustomDomainDNSRejectsOwnerAndTargetConflicts(t *testing.T) {
 	s := customDNSTestServer()
 	r := platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Routes: []platformconfig.RouteIntent{{Hostname: "new.customer.test", AppID: "app-new", TenantID: "tenant-new", Enabled: true, UpstreamURL: "http://new"}}, DNS: []platformconfig.DNSIntent{{Hostname: "target.dns.example.test", Type: "A", Values: []string{"192.0.2.10"}, TTL: 60}}}}

@@ -30963,7 +30963,7 @@ components:
       type: object
       additionalProperties: false
       required: [hostnames, ipv4_policy, ipv6_policy, ttl_policy, fallback_policy]
-      description: Symbolic FUGUE_ROUTE address source with an empty values array. Each referenced hostname must have routes with the same app/tenant owner as the DNS record; platform routes use empty app/tenant IDs. Every path at every referenced hostname must be proved on a candidate edge. References may differ from the DNS owner name for managed custom-domain targets. Selected addresses and readiness are runtime facts, never intent.
+      description: Symbolic FUGUE_ROUTE address source with an empty values array. Without bindings, routes must match the record app/tenant owner, including empty platform ownership. Optional bindings explicitly declare every hostname/path/app dependency when applications in one tenant share a target. Bindings must exactly match PlatformIntent routes; the record retains its nonempty app/tenant owner, whose app must occur at each referenced hostname. Every path must be proved on each candidate edge. Addresses and readiness are runtime facts.
       properties:
         hostnames:
           type: array
@@ -30971,10 +30971,24 @@ components:
           maxItems: 128
           uniqueItems: true
           items: {type: string}
+        bindings:
+          type: array
+          maxItems: 4096
+          description: Complete path dependencies; tenant ownership is inherited from the DNS record. Omission retains single-app semantics.
+          items:
+            $ref: "#/components/schemas/PlatformDNSRouteBinding"
         ipv4_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
         ipv6_policy: {type: string, enum: [auto, ipv4_only, ipv6_only, dual_stack_required]}
         ttl_policy: {type: string, enum: [record, target, min, bounded]}
         fallback_policy: {type: string, enum: [fail_closed, stale_if_error, empty_noerror]}
+    PlatformDNSRouteBinding:
+      type: object
+      additionalProperties: false
+      required: [hostname, path_prefix, app_id]
+      properties:
+        hostname: {type: string}
+        path_prefix: {type: string}
+        app_id: {type: string}
     PlatformDNSFlattenIntent:
       type: object
       additionalProperties: false
@@ -31077,6 +31091,7 @@ components:
       type: object
       additionalProperties: false
       required: [id, hostname, route_policy, enabled]
+      description: Applies only to paths matching the specified app owner, or all paths at the hostname when app_id is empty. Every referenced constraint must match at least one route. A tenant mismatch is rejected, including other paths at the same hostname.
       properties:
         id: {type: string}
         hostname: {type: string}

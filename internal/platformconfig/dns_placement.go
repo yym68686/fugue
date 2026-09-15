@@ -173,6 +173,9 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 			}
 			owners = append(owners, byHost[host]...)
 		}
+		if err := ValidateDNSRouteOwners(record, owners); err != nil {
+			return nil, err
+		}
 		digest, err := DNSPlacementInputDigest(record, routes, policy)
 		if err != nil {
 			return nil, err
@@ -185,9 +188,6 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 		ready := record.Status == "" || record.Status == model.EdgeRouteStatusActive
 		minimum := policy.MinimumHealthyEdges
 		for _, route := range owners {
-			if route.AppID != record.AppID || route.TenantID != record.TenantID {
-				return nil, fmt.Errorf("DNS placement route ownership differs")
-			}
 			if !route.Enabled || (route.Status != "" && route.Status != model.EdgeRouteStatusActive) || (route.RoutePolicy != "" && !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy)) {
 				ready = false
 			}

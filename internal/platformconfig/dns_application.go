@@ -50,24 +50,24 @@ func validateDNSPlacementOptions(policy DNSApplicationIntent) error {
 }
 
 func validateDNSApplicationOwners(records []DNSIntent, routes []RouteIntent) error {
-	byHost := make(map[string][]RouteIntent, len(routes))
+	byHost := make(map[string][]CompiledRoute, len(routes))
 	for _, route := range routes {
-		byHost[normalizedImportHostname(route.Hostname)] = append(byHost[normalizedImportHostname(route.Hostname)], route)
+		host := normalizedImportHostname(route.Hostname)
+		byHost[host] = append(byHost[host], CompiledRoute{RouteIntent: route})
 	}
 	for _, record := range records {
 		if record.Application == nil && record.Route == nil {
 			continue
 		}
+		owners := []CompiledRoute{}
 		for _, host := range DNSPlacementHostnames(record) {
-			owners := byHost[host]
-			if len(owners) == 0 {
+			if len(byHost[host]) == 0 {
 				return fmt.Errorf("DNS placement binding requires routes at every referenced hostname")
 			}
-			for _, route := range owners {
-				if route.AppID != record.AppID || route.TenantID != record.TenantID {
-					return fmt.Errorf("DNS placement binding and route ownership differ")
-				}
-			}
+			owners = append(owners, byHost[host]...)
+		}
+		if err := ValidateDNSRouteOwners(record, owners); err != nil {
+			return err
 		}
 	}
 	return nil

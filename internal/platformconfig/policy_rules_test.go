@@ -59,6 +59,22 @@ func TestApplyRoutePolicyConstraintsChangesArtifactOnly(t *testing.T) {
 	}
 }
 
+func TestApplyRoutePolicyConstraintsScopesAppRuleToMatchingPath(t *testing.T) {
+	routes := []CompiledRoute{
+		{RouteIntent: RouteIntent{Hostname: "shared.example", PathPrefix: "/", AppID: "app-a", TenantID: "tenant-a", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}},
+		{RouteIntent: RouteIntent{Hostname: "shared.example", PathPrefix: "/v1", AppID: "app-b", TenantID: "tenant-a", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}},
+	}
+	policy := PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{{ID: "route-b", Hostname: "shared.example", AppID: "app-b", TenantID: "tenant-a", MinHealthyEdgeNodes: 2, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}}
+	got, err := ApplyRoutePolicyConstraints(routes, policy)
+	if err != nil || got[0].MinHealthyEdgeNodes != 0 || got[1].MinHealthyEdgeNodes != 2 {
+		t.Fatalf("sibling path policy was not scoped: %+v %v", got, err)
+	}
+	policy.RouteConstraints[0].AppID = "missing-app"
+	if _, err := ApplyRoutePolicyConstraints(routes, policy); err == nil {
+		t.Fatal("unmatched app policy was accepted")
+	}
+}
+
 func TestApplyRoutePolicyConstraintsForPlacementMaterializesEdgeGroup(t *testing.T) {
 	routes := []CompiledRoute{{RouteIntent: RouteIntent{Hostname: "app.example", UpstreamURL: "http://origin", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}}}
 	policy := PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{{ID: "route", Hostname: "app.example", EdgeGroupID: "edge-group-a", MinHealthyEdgeNodes: 2, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}}

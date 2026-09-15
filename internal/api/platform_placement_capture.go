@@ -331,5 +331,8 @@ func placementRecordRoutes(result platformIntentProjectionResponse, record platf
 		compiled = append(compiled, c...)
 		projected = append(projected, p...)
 	}
+	if err := platformconfig.ValidateDNSRouteOwners(record, compiled); err != nil {
+		return nil, nil, err
+	}
 	return compiled, projected, nil
 }

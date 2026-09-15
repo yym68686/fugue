@@ -63,6 +63,26 @@ func TestDNSRouteReferencesCompileLeasedAliasesAndPlatformOwners(t *testing.T) {
 	}
 }
 
+func TestDNSRouteReferencesCompileExplicitSameTenantPathOwners(t *testing.T) {
+	r := routeDNSFixture()
+	child := r.Intent.Routes[0]
+	child.AppID, child.TenantID, child.PathPrefix, child.UpstreamURL = "app-b", "tenant-a", "/v1", "http://child:8080"
+	r.Intent.Routes = append(r.Intent.Routes, child)
+	r.Intent.DNS[0].Route.Bindings = []DNSRouteBinding{
+		{Hostname: r.Intent.Routes[0].Hostname, PathPrefix: "/", AppID: "app-a"},
+		{Hostname: r.Intent.Routes[0].Hostname, PathPrefix: "/v1", AppID: "app-b"},
+	}
+	rebindPlacement(&r)
+	if _, err := Compile(r); err != nil {
+		t.Fatalf("explicit path ownership should compile: %v", err)
+	}
+	r.Intent.DNS[0].Route.Bindings[1].AppID = "app-c"
+	rebindPlacement(&r)
+	if _, err := Compile(r); err == nil {
+		t.Fatal("binding for a different route owner compiled")
+	}
+}
+
 func TestDNSRouteReferencesRejectMissingForeignAndConflictingInputs(t *testing.T) {
 	for name, change := range map[string]func(*CompileRequest){
 		"no references":           func(r *CompileRequest) { r.Intent.DNS[0].Route.Hostnames = nil },
