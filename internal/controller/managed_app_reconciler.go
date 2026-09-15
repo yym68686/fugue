@@ -1647,11 +1647,11 @@ func managedDeploymentProgressMessage(deployment kubeDeployment, desiredReplicas
 	if deployment.Status.AvailableReplicas < desiredReplicas {
 		return fmt.Sprintf("waiting for deployment %s available replicas %d/%d", deploymentName, deployment.Status.AvailableReplicas, desiredReplicas)
 	}
-	if deployment.Status.Replicas > desiredReplicas {
-		return fmt.Sprintf("waiting for deployment %s old replicas to terminate (%d total, desired=%d)", deploymentName, deployment.Status.Replicas, desiredReplicas)
-	}
 	if deployment.Status.UnavailableReplicas > 0 {
 		return fmt.Sprintf("waiting for deployment %s unavailable replicas to drain (%d)", deploymentName, deployment.Status.UnavailableReplicas)
+	}
+	if deployment.Status.Replicas > desiredReplicas {
+		return fmt.Sprintf("waiting for deployment %s old replicas to terminate (%d total, desired=%d)", deploymentName, deployment.Status.Replicas, desiredReplicas)
 	}
 	return fmt.Sprintf("deployment progressing (%d/%d ready replicas)", maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas), desiredReplicas)
 }

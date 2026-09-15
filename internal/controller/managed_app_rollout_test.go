@@ -879,6 +879,22 @@ func TestDeploymentRolloutReadyRequiresExpectedRelease(t *testing.T) {
 	}
 }
 
+func TestDeploymentRolloutReportsUnavailableReplacementBeforeOldReplicaDrain(t *testing.T) {
+	deployment := readyKubeDeployment("demo", 1)
+	deployment.Status.Replicas = 2
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1 // the old replica is the only ready one
+	deployment.Status.AvailableReplicas = 1
+	deployment.Status.UnavailableReplicas = 1
+	ready, message, err := deploymentRolloutReady(deployment, true, 1, "demo", "", "")
+	if err != nil || ready {
+		t.Fatalf("replacement must not be considered ready: ready=%t err=%v", ready, err)
+	}
+	if !strings.Contains(message, "unavailable replicas to drain") {
+		t.Fatalf("message concealed the unavailable replacement: %q", message)
+	}
+}
+
 func TestDeploymentSchedulingReadyRequiresRuntimeScheduling(t *testing.T) {
 	t.Parallel()
 

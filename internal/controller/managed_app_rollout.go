@@ -1129,11 +1129,11 @@ func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplic
 	if deployment.Status.AvailableReplicas < desiredReplicas {
 		return false, fmt.Sprintf("waiting for deployment %s available replicas %d/%d", deploymentName, deployment.Status.AvailableReplicas, desiredReplicas), nil
 	}
-	if deployment.Status.Replicas > desiredReplicas {
-		return false, fmt.Sprintf("waiting for deployment %s old replicas to terminate (%d total, desired=%d)", deploymentName, deployment.Status.Replicas, desiredReplicas), nil
-	}
 	if deployment.Status.UnavailableReplicas > 0 {
 		return false, fmt.Sprintf("waiting for deployment %s unavailable replicas to drain (%d)", deploymentName, deployment.Status.UnavailableReplicas), nil
+	}
+	if deployment.Status.Replicas > desiredReplicas {
+		return false, fmt.Sprintf("waiting for deployment %s old replicas to terminate (%d total, desired=%d)", deploymentName, deployment.Status.Replicas, desiredReplicas), nil
 	}
 	return true, fmt.Sprintf("deployment %s ready", deploymentName), nil
 }
