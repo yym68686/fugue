@@ -514,7 +514,19 @@ func (s *Service) syncManagedAppObservedStatus(
 			if err != nil {
 				return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read backing service cluster %s status: %w", serviceDeployment.ResourceName, err))
 			}
-			backingServiceStatuses = append(backingServiceStatuses, buildManagedBackingServiceClusterStatus(managed.Status, serviceDeployment, clusterStatus, clusterFound))
+			backingStatus := buildManagedBackingServiceClusterStatus(managed.Status, serviceDeployment, clusterStatus, clusterFound)
+			if clusterFound {
+				selector := "cnpg.io/cluster=" + strings.TrimSpace(serviceDeployment.ResourceName)
+				pods, podsErr := client.listPodsBySelector(ctx, namespace, selector)
+				if podsErr != nil {
+					return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("list backing service cluster %s pods: %w", serviceDeployment.ResourceName, podsErr))
+				}
+				if failure := managedAppPodFailureMessage(pods, nil); failure != "" {
+					backingStatus.Phase = model.ManagedPostgresRuntimePhaseError
+					backingStatus.Message = failure
+				}
+			}
+			backingServiceStatuses = append(backingServiceStatuses, backingStatus)
 		default:
 			serviceDeploymentStatus, deploymentFound, err := client.getDeployment(ctx, namespace, serviceDeployment.ResourceName)
 			if err != nil {
