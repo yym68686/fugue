@@ -756,7 +756,7 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 	deployment := kubeDeployment{}
 	deployment.Metadata.Generation = 2
 	deployment.Status.ObservedGeneration = 2
-	deployment.Status.Replicas = 1
+	deployment.Status.Replicas = 0
 	deployment.Status.UpdatedReplicas = 1
 
 	pods := []kubePod{

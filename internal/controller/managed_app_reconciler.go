@@ -1553,12 +1553,12 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	case managedDeploymentStatusReady(deployment, app.Spec.Replicas):
 		status.Phase = runtime.ManagedAppPhaseReady
 		status.Message = fmt.Sprintf("deployment ready (%d/%d replicas)", status.ReadyReplicas, app.Spec.Replicas)
-	case deployment.Status.Replicas == 0:
-		status.Phase = runtime.ManagedAppPhasePending
-		status.Message = fmt.Sprintf("deployment created; waiting for replicas (desired=%d)", app.Spec.Replicas)
 	case podFailureMessage != "":
 		status.Phase = runtime.ManagedAppPhaseError
 		status.Message = podFailureMessage
+	case deployment.Status.Replicas == 0:
+		status.Phase = runtime.ManagedAppPhasePending
+		status.Message = fmt.Sprintf("deployment created; waiting for replicas (desired=%d)", app.Spec.Replicas)
 	case hasDeploymentFailureCondition(deployment.Status.Conditions):
 		status.Phase = runtime.ManagedAppPhaseError
 		status.Message = deploymentFailureMessage(deployment.Status.Conditions)
