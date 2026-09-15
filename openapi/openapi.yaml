@@ -11350,6 +11350,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObjectStorageConfigStatus"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/object-stores:
@@ -11398,6 +11400,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObjectStoreEnvelope"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/object-stores/{store_id}:
@@ -11449,6 +11453,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObjectStoreEnvelope"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/object-stores/{store_id}/credentials:
@@ -11500,6 +11506,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObjectStorageConnection"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/object-stores/{store_id}/credentials/{credential_id}:
@@ -11527,6 +11535,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObjectStorageCredentialEnvelope"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/object-stores/{store_id}/usage:
@@ -11550,6 +11560,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObjectStoreEnvelope"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/backends:
@@ -32472,6 +32484,21 @@ components:
         preflight:
           $ref: "#/components/schemas/DNSFullZonePreflight"
   responses:
+    ObjectStorageBusy:
+      description: Another object storage management operation holds the lock. No mutation was performed by this request; retry after the indicated delay. Other state conflicts may also return 409 with retryable false.
+      headers:
+        Retry-After:
+          description: Suggested wait in seconds when the management lock is busy.
+          schema: {type: integer, minimum: 1}
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "object storage operation in progress; retry"
+            code: object_storage_busy
+            category: conflict
+            retryable: true
     ErrorResponse:
       description: Error response
       content:

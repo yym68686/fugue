@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,10 +11,41 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/store"
 )
+
+func TestObjectStorageBusyIsRetryableWithoutExecutingMutation(t *testing.T) {
+	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	if err := db.Init(); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(db, auth.New(db, ""), nil, ServerConfig{})
+	acquired, err := db.WithAdvisoryLock(context.Background(), objectStorageLock, func() error {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/object-stores/demo/usage", nil)
+		called := false
+		srv.objectStorageRun(rec, req, func() error { called = true; return nil })
+		var result httpx.ErrorResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if called || rec.Code != http.StatusConflict || result.Code != "object_storage_busy" || !result.Retryable || rec.Header().Get("Retry-After") != "1" {
+			t.Fatalf("unexpected busy response: called=%t status=%d body=%s headers=%v", called, rec.Code, rec.Body.String(), rec.Header())
+		}
+		return nil
+	})
+	if err != nil || !acquired {
+		t.Fatalf("hold management lock: acquired=%t err=%v", acquired, err)
+	}
+	called := false
+	srv.objectStorageRun(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/object-stores/demo/usage", nil), func() error { called = true; return nil })
+	if !called {
+		t.Fatal("released lock did not allow the next operation")
+	}
+}
 
 func TestNormalizeObjectStorageUsageTimeout(t *testing.T) {
 	if got := normalizeObjectStorageUsageTimeout(0); got != defaultObjectStorageUsageTimeout {

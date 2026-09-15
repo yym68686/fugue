@@ -52,7 +52,13 @@ func (s *Server) objectStorageRun(w http.ResponseWriter, r *http.Request, fn fun
 		return
 	}
 	if !acquired {
-		httpx.WriteError(w, http.StatusConflict, "object storage operation in progress; retry")
+		w.Header().Set("Retry-After", "1")
+		httpx.WriteJSON(w, http.StatusConflict, httpx.ErrorResponse{
+			Error:     "object storage operation in progress; retry",
+			Code:      "object_storage_busy",
+			Category:  "conflict",
+			Retryable: true,
+		})
 	}
 }
 func objectStorageScope(w http.ResponseWriter, r *http.Request, write bool) bool {
