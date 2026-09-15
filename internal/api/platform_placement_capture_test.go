@@ -30,13 +30,8 @@ func placementCaptureFixture(t *testing.T) (platformIntentProjectionResponse, []
 		t.Fatal(err)
 	}
 	proofs := map[string]string{}
-	compiled, _, err := placementHostnameRoutes(result, "app.example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, r := range projected {
-		bindingRoute := placementProofBinding(r, compiled)
-		proofs[r.PathPrefix], err = routeproof.Digest(routebinding.FromIntent(bindingRoute, nodes[0].EdgeGroupID))
+		proofs[r.PathPrefix], err = routeproof.Digest(routebinding.FromIntent(r, nodes[0].EdgeGroupID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -238,12 +233,8 @@ func TestPlacementCaptureRunsBeyondLegacyProbeLimitWithBoundedConcurrency(t *tes
 		t.Fatal(err)
 	}
 	byPath := map[string]model.EdgeRouteBinding{}
-	compiled, _, err := placementHostnameRoutes(r, "app-000.example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, route := range projected {
-		byPath[route.PathPrefix] = routebinding.FromIntent(placementProofBinding(route, compiled), nodes[0].EdgeGroupID)
+		byPath[route.PathPrefix] = routebinding.FromIntent(route, nodes[0].EdgeGroupID)
 	}
 	var active, maxActive, calls atomic.Int32
 	gate := make(chan struct{})

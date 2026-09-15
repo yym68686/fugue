@@ -176,8 +176,7 @@ func captureDNSPlacementRecord(ctx context.Context, snapshot platformIntentProje
 					limited, valid = true, false
 					break
 				}
-				bindingRoute := placementProofBinding(route, compiled)
-				expected, err := routeproof.Digest(routebinding.FromIntent(bindingRoute, node.EdgeGroupID))
+				expected, err := routeproof.Digest(routebinding.FromIntent(route, node.EdgeGroupID))
 				if err != nil {
 					valid = false
 					break
@@ -212,21 +211,6 @@ func captureDNSPlacementRecord(ctx context.Context, snapshot platformIntentProje
 	}
 	fact.CheckedAt = time.Now().UTC()
 	return fact, limited, nil
-}
-
-func placementProofBinding(route model.EdgeRouteIntent, compiled []platformconfig.CompiledRoute) model.EdgeRouteIntent {
-	// Keep the proof input aligned with the immutable serving artifact.
-	for _, compiledRoute := range compiled {
-		if compiledRoute.Hostname == route.Hostname && model.NormalizeAppRoutePathPrefix(compiledRoute.PathPrefix) == model.NormalizeAppRoutePathPrefix(route.PathPrefix) {
-			route.MinHealthyEdgeNodes = compiledRoute.MinHealthyEdgeNodes
-			route.ExcludedEdgeIDs = append([]string(nil), compiledRoute.ExcludedEdgeIDs...)
-			route.ExcludedEdgeGroupIDs = append([]string(nil), compiledRoute.ExcludedEdgeGroupIDs...)
-			route.ExclusionReason = compiledRoute.ExclusionReason
-			route.ExclusionExpiresAt = compiledRoute.ExclusionExpiresAt
-			break
-		}
-	}
-	return route
 }
 
 func placementInventoryEligible(node model.EdgeNode, policy platformconfig.PolicySnapshot, now time.Time) bool {
