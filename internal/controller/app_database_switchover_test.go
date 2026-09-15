@@ -773,6 +773,68 @@ func TestManagedPostgresInPlaceStorageExpansionRequired(t *testing.T) {
 	}
 }
 
+// An unhealthy app must not be a prerequisite for reaching the storage
+// preflight. The executor must also preserve the requested storage class even
+// when another driver is available on the same internal runtime.
+func TestDatabaseLocalizePreservesStorageIntentDuringAppOutage(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
+			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := state.Init(); err != nil {
+				t.Fatal(err)
+			}
+			postgres := model.AppPostgresSpec{ServiceName: "database", Database: "demo", User: "demo", Password: "test-secret", RuntimeID: model.DefaultManagedRuntimeID, StorageClassName: "fugue-postgres-rwo", StorageSize: "5Gi", Instances: 1}
+			app := model.App{ID: "app-demo", TenantID: "tenant-demo", Name: "demo", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1, Postgres: &postgres}, Status: model.AppStatus{Phase: "failed"}}
+			desired := *model.CloneAppPostgresSpec(&postgres)
+			desired.StorageSize = "10Gi"
+			op := model.Operation{Type: model.OperationTypeDatabaseLocalize, AppID: app.ID, SourceRuntimeID: postgres.RuntimeID, TargetRuntimeID: postgres.RuntimeID, DesiredSpec: &model.AppSpec{Postgres: &desired}}
+			if bound {
+				app.Spec.Postgres = nil
+				app.BackingServices = []model.BackingService{{ID: "service-demo", OwnerAppID: "another-app", Name: "database", TenantID: app.TenantID, Type: model.BackingServiceTypePostgres, Provisioner: model.BackingServiceProvisionerManaged, Spec: model.BackingServiceSpec{Postgres: &postgres}}}
+				app.Bindings = []model.ServiceBinding{{AppID: app.ID, ServiceID: "service-demo"}}
+				op.ServiceID = "service-demo"
+			}
+			namespace := runtimepkg.NamespaceForTenant(app.TenantID)
+			var wrongClassReads, podReads, writes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method != http.MethodGet {
+					writes.Add(1)
+					http.Error(w, "unexpected mutation", http.StatusInternalServerError)
+					return
+				}
+				switch r.URL.Path {
+				case "/apis/storage.k8s.io/v1/storageclasses/fugue-longhorn-rwo":
+					wrongClassReads.Add(1)
+					_ = json.NewEncoder(w).Encode(map[string]any{"provisioner": "driver.longhorn.io", "allowVolumeExpansion": true})
+				case "/apis/storage.k8s.io/v1/storageclasses/" + postgres.StorageClassName:
+					_ = json.NewEncoder(w).Encode(map[string]any{"provisioner": "local.csi.openebs.io", "allowVolumeExpansion": false})
+				case "/api/v1/namespaces/" + namespace + "/persistentvolumeclaims":
+					_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "database-1"}}}})
+				case "/api/v1/namespaces/" + namespace + "/persistentvolumeclaims/database-1":
+					_ = json.NewEncoder(w).Encode(map[string]any{"spec": map[string]any{"storageClassName": postgres.StorageClassName, "resources": map[string]any{"requests": map[string]string{"storage": "5Gi"}}}, "status": map[string]any{"capacity": map[string]string{"storage": "5Gi"}}})
+				case "/api/v1/namespaces/" + namespace + "/pods":
+					podReads.Add(1)
+					_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			svc := &Service{Store: state, Config: config.ControllerConfig{KubectlApply: true}, Logger: log.New(io.Discard, "", 0), newKubeClient: func(string) (*kubeClient, error) {
+				return &kubeClient{client: server.Client(), baseURL: server.URL, namespace: namespace}, nil
+			}}
+			err := svc.executeManagedDatabaseLocalizeOperation(context.Background(), op, app)
+			if err == nil || !strings.Contains(err.Error(), "storage class "+postgres.StorageClassName+" does not allow") {
+				t.Fatalf("expected original class preflight rejection, got %v", err)
+			}
+			if wrongClassReads.Load() != 0 || podReads.Load() != 0 || writes.Load() != 0 {
+				t.Fatalf("storage intent was not isolated: replacement reads=%d pod reads=%d writes=%d", wrongClassReads.Load(), podReads.Load(), writes.Load())
+			}
+		})
+	}
+}
+
 func TestPrepareManagedPostgresInPlaceStorageExpansionPatchesPVCRequest(t *testing.T) {
 	t.Parallel()
 
