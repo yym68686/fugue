@@ -35,6 +35,7 @@ func (s *Server) capturePlatformPlacements(rctx context.Context, result *platfor
 // The inventory is discovery and a finite heartbeat lease. Only independent
 // TLS/Host/path proofs matching compiled behavior authorize positive candidates.
 func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProjectionResponse, nodes []model.EdgeNode, probe placementRouteProbe) {
+	// Keep diagnostics bounded and deterministic while preserving every failed fact.
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	issue := func(code, host string) {
