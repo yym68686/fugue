@@ -1129,6 +1129,7 @@ func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplic
 	if deployment.Status.AvailableReplicas < desiredReplicas {
 		return false, fmt.Sprintf("waiting for deployment %s available replicas %d/%d", deploymentName, deployment.Status.AvailableReplicas, desiredReplicas), nil
 	}
+	// Aggregate readyReplicas can belong to the old revision; report the unavailable replacement first.
 	if deployment.Status.UnavailableReplicas > 0 {
 		return false, fmt.Sprintf("waiting for deployment %s unavailable replicas to drain (%d)", deploymentName, deployment.Status.UnavailableReplicas), nil
 	}
