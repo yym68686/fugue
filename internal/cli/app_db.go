@@ -32,8 +32,45 @@ func (c *CLI) newAppDatabaseCommand() *cobra.Command {
 		c.newAppDatabaseDisableCommand(),
 		c.newAppDatabaseSwitchoverCommand(),
 		c.newAppDatabaseLocalizeCommand(),
+		c.newAppDatabaseRecoverCommand(),
 		c.newAppDatabaseRestoreCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newAppDatabaseRecoverCommand() *cobra.Command {
+	var apply bool
+	var runtimeID, nodeName string
+	cmd := &cobra.Command{
+		Use:   "recover <app>",
+		Short: "Safely resume managed Postgres recovery after storage pressure or state drift",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.RecoverAppDatabase(app.ID, !apply, runtimeID, nodeName)
+			if err != nil {
+				return err
+			}
+			result := map[string]any{"app": redactAppForOutput(response.App), "plan": response.Plan, "dry_run": !apply}
+			if response.Operation != nil {
+				result["operation"] = redactOperationForOutput(*response.Operation)
+			}
+			if !apply {
+				result["next_command"] = "fugue app db recover " + shellSingleQuote(args[0]) + " --apply"
+			}
+			return c.renderResourceResult(result)
+		},
+	}
+	cmd.Flags().BoolVar(&apply, "apply", false, "Apply the guarded recovery operation; without this flag only a plan is returned")
+	cmd.Flags().StringVar(&runtimeID, "runtime-id", "", "Optional target runtime ID")
+	cmd.Flags().StringVar(&nodeName, "node", "", "Optional target Kubernetes node name")
 	return cmd
 }
 

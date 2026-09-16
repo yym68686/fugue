@@ -1042,6 +1042,27 @@ func (c *Client) DeployAppWithWorkspace(id string, spec *model.AppSpec, workspac
 	return response, nil
 }
 
+type appDatabaseRecoveryResponse struct {
+	App       model.App        `json:"app"`
+	Operation *model.Operation `json:"operation,omitempty"`
+	Plan      map[string]any   `json:"plan,omitempty"`
+}
+
+func (c *Client) RecoverAppDatabase(id string, dryRun bool, targetRuntimeID, targetNodeName string) (appDatabaseRecoveryResponse, error) {
+	request := map[string]any{"dry_run": dryRun}
+	if strings.TrimSpace(targetRuntimeID) != "" {
+		request["target_runtime_id"] = strings.TrimSpace(targetRuntimeID)
+	}
+	if strings.TrimSpace(targetNodeName) != "" {
+		request["target_node_name"] = strings.TrimSpace(targetNodeName)
+	}
+	var response appDatabaseRecoveryResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "database", "recover"), request, &response); err != nil {
+		return appDatabaseRecoveryResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) PatchAppStartupCommand(id string, startupCommand *string) (appPatchResponse, error) {
 	request := map[string]any{}
 	if startupCommand != nil {

@@ -8958,6 +8958,42 @@ paths:
                 $ref: "#/components/schemas/OperationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/recover:
+    post:
+      operationId: recoverAppDatabase
+      summary: Recover App Database Storage Pressure
+      tags: [Apps]
+      x-fugue-handler: handleRecoverAppDatabase
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                dry_run: {type: boolean}
+                target_runtime_id: {type: string}
+                target_node_name: {type: string}
+      responses:
+        '200':
+          description: Recovery plan
+          content:
+            application/json:
+              schema:
+                type: object
+        '202':
+          description: Recovery operation accepted or resumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/continuity:
     patch:
       operationId: patchAppContinuity

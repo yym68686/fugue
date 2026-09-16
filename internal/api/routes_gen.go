@@ -139,6 +139,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/apps/{id}/database/import/retry", s.auth.RequireAPI(http.HandlerFunc(s.handleRetryAppDatabaseImport)))
 	mux.Handle("POST /v1/apps/{id}/database/localize", s.auth.RequireAPI(http.HandlerFunc(s.handleLocalizeAppDatabase)))
 	mux.Handle("POST /v1/apps/{id}/database/query", s.auth.RequireAPI(http.HandlerFunc(s.handleQueryAppDatabase)))
+	mux.Handle("POST /v1/apps/{id}/database/recover", s.auth.RequireAPI(http.HandlerFunc(s.handleRecoverAppDatabase)))
 	mux.Handle("GET /v1/apps/{id}/database/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppDatabaseStatus)))
 	mux.Handle("POST /v1/apps/{id}/database/switchover", s.auth.RequireAPI(http.HandlerFunc(s.handleSwitchoverAppDatabase)))
 	mux.Handle("POST /v1/apps/{id}/deploy", s.auth.RequireAPI(http.HandlerFunc(s.handleDeployApp)))

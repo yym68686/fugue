@@ -538,6 +538,18 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	if liveSize, liveErr := managedPostgresLiveStorageSize(ctx, client, namespace, clusterName); liveErr != nil {
+		return liveErr
+	} else if liveSize != "" {
+		// CNPG rejects shrinking a live PVC. Treat the live observed size as
+		// authoritative so a retry after a partial expansion remains resumable.
+		if qLive, errLive := resource.ParseQuantity(liveSize); errLive == nil {
+			if qDesired, errDesired := resource.ParseQuantity(strings.TrimSpace(desiredDatabase.StorageSize)); errDesired != nil || qLive.Cmp(qDesired) > 0 {
+				currentDatabase.StorageSize = liveSize
+				desiredDatabase.StorageSize = liveSize
+			}
+		}
+	}
 	storageMigrationRequired = managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
 	storageTarget = databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 
@@ -943,6 +955,43 @@ func managedPostgresLiveStorageMigrationRequired(ctx context.Context, client *ku
 		}
 	}
 	return false, nil
+}
+
+func managedPostgresLiveStorageSize(ctx context.Context, client *kubeClient, namespace, clusterName string) (string, error) {
+	if client == nil {
+		return "", nil
+	}
+	names, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(clusterName)+",cnpg.io/pvcRole=PG_DATA")
+	if err != nil {
+		return "", fmt.Errorf("list live postgres PVCs for storage recovery %s/%s: %w", namespace, clusterName, err)
+	}
+	var largest resource.Quantity
+	found := false
+	for _, name := range names {
+		pvc, ok, err := client.getPersistentVolumeClaim(ctx, namespace, name)
+		if err != nil {
+			return "", fmt.Errorf("read live postgres PVC %s/%s for storage recovery: %w", namespace, name, err)
+		}
+		if !ok {
+			continue
+		}
+		size := managedPostgresPVCStorageSize(pvc)
+		if size == "" {
+			continue
+		}
+		q, err := resource.ParseQuantity(size)
+		if err != nil {
+			continue
+		}
+		if !found || q.Cmp(largest) > 0 {
+			largest = q
+			found = true
+		}
+	}
+	if !found {
+		return "", nil
+	}
+	return largest.String(), nil
 }
 
 func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppPostgresSpec, sourceRuntimeID, targetRuntimeID, requestedTargetNodeName string) bool {
