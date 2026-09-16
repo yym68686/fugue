@@ -94,11 +94,12 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return errors.New("edge platform candidate signature or digest rejected")
 	}
 	var payload struct {
-		Schema     string                         `json:"schema_version"`
-		Generation string                         `json:"generation"`
-		Routes     []platformconfig.CompiledRoute `json:"routes"`
-		Policy     platformconfig.PolicySnapshot  `json:"policy"`
-		Lineage    platformconfig.Lineage         `json:"lineage"`
+		Schema        string                         `json:"schema_version"`
+		Generation    string                         `json:"generation"`
+		Routes        []platformconfig.CompiledRoute `json:"routes"`
+		CachePolicies []model.CachePolicy            `json:"cache_policies,omitempty"`
+		Policy        platformconfig.PolicySnapshot  `json:"policy"`
+		Lineage       platformconfig.Lineage         `json:"lineage"`
 	}
 	raw, err := json.Marshal(artifact.Content)
 	if err != nil {
@@ -113,7 +114,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	for _, route := range payload.Routes {
 		routeIntents = append(routeIntents, route.RouteIntent)
 	}
-	if platformconfig.ValidatePlatformIntent(platformconfig.PlatformIntent{SchemaVersion: payload.Schema, Generation: payload.Generation, Scope: assignment.ScopeKey, Routes: routeIntents}) != nil {
+	if platformconfig.ValidatePlatformIntent(platformconfig.PlatformIntent{SchemaVersion: payload.Schema, Generation: payload.Generation, Scope: assignment.ScopeKey, Routes: routeIntents, CachePolicies: payload.CachePolicies}) != nil {
 		return errors.New("edge platform candidate routes invalid")
 	}
 	policyDigest, err := platformconfig.Digest(payload.Policy)

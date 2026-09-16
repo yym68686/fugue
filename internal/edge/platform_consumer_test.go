@@ -24,11 +24,38 @@ import (
 )
 
 func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
+	for _, scenario := range []string{"legacy", "compiled placement", "compiled placement and cache"} {
+		t.Run(scenario, func(t *testing.T) {
+			testEdgePlatformShadowPreservesServingAndChecksBindings(t, scenario)
+		})
+	}
+}
+
+func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scenario string) {
 	keyring := bundleauth.NewKeyring("synthetic-platform-key", "signer", "", "", nil)
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{
+	request := platformconfig.CompileRequest{
 		Intent: platformconfig.PlatformIntent{Generation: "intent-1", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin.example.test:8080", Enabled: true}}},
 		Policy: platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 86400},
-	})
+	}
+	if scenario != "legacy" {
+		captured := time.Now().UTC()
+		expires := captured.Add(time.Hour)
+		request.Intent.Routes[0].RuntimeID = "runtime-a"
+		request.Intent.Routes[0].OriginRef = "origin-a"
+		request.RuntimeSnapshot = platformconfig.RuntimeSnapshot{CapturedAt: &captured, Origins: []platformconfig.OriginObservation{{
+			Ref: "origin-a", ObservedAt: captured, Status: model.EdgeRouteStatusActive, RuntimeID: "runtime-a", RuntimeType: "managed", RuntimeEdgeGroupID: "group-a", RuntimeClusterNode: "node-a",
+		}}}
+		request.Policy.RouteConstraints = []platformconfig.RoutePolicyConstraint{{
+			ID: "route-policy-a", Hostname: "app.example.test", RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true,
+			MinHealthyEdgeNodes: 2, ExcludedEdgeIDs: []string{"edge-excluded"}, ExcludedEdgeGroupIDs: []string{"group-excluded"}, ExclusionReason: "maintenance", ExclusionExpiresAt: &expires,
+		}}
+	}
+	if scenario == "compiled placement and cache" {
+		request.Intent.CachePolicies = []model.CachePolicy{{ID: "assets", Kind: model.CachePolicyKindStaticAssets, HostnameScope: "app.example.test", TTLSeconds: 60, MethodAllowlist: []string{"GET", "HEAD"}}}
+		request.Intent.Routes[0].CachePolicyID = "assets"
+		request.Intent.Routes[0].CacheNamespace = "app_gen1"
+	}
+	compiled, err := platformconfig.Compile(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +156,29 @@ func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
 		t.Fatal(s.Status().PlatformCandidate)
 	}
 	staged, _ := os.ReadFile(cache + ".platform-shadow.json")
+	var persisted edgePlatformCandidate
+	if err := json.Unmarshal(staged, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	gotContent, _ := json.Marshal(persisted.Artifact.Content)
+	wantContent, _ := json.Marshal(candidate.Artifact.Content)
+	if !bytes.Equal(gotContent, wantContent) {
+		t.Fatal("candidate persistence lost compiled fields or cache policy")
+	}
+	resignCandidate := func() {
+		t.Helper()
+		var err error
+		candidate.Artifact.ContentHash, err = platformconfig.Digest(candidate.Artifact.Content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate.Artifact, err = platformsafety.SignPlatformArtifact(candidate.Artifact, keyring)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assignment.ContentHash = candidate.Artifact.ContentHash
+		candidate.Assignment = assignment
+	}
 	checkServing := func() {
 		t.Helper()
 		raw, _ := os.ReadFile(cache)
@@ -147,6 +197,24 @@ func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
 		{"sequence", func() { candidate.Artifact.GenerationSequence++ }},
 		{"release", func() { candidate.Release.ArtifactID = "other" }},
 		{"assignment", func() { candidate.Assignment.ExpectedConsumerSetID = "other" }},
+		{"unknown compiled route field", func() {
+			candidate.Artifact.Content["routes"].([]any)[0].(map[string]any)["runtime_unknown"] = true
+			resignCandidate()
+		}},
+		{"invalid compiled placement type", func() {
+			candidate.Artifact.Content["routes"].([]any)[0].(map[string]any)["runtime_cluster_node"] = true
+			resignCandidate()
+		}},
+		{"unknown cache reference", func() {
+			candidate.Artifact.Content["routes"].([]any)[0].(map[string]any)["cache_policy_id"] = "missing-policy"
+			resignCandidate()
+		}},
+		{"cache scope mismatch", func() {
+			route := candidate.Artifact.Content["routes"].([]any)[0].(map[string]any)
+			route["cache_policy_id"], route["cache_namespace"] = "assets", "app_gen1"
+			candidate.Artifact.Content["cache_policies"] = []model.CachePolicy{{ID: "assets", Kind: model.CachePolicyKindStaticAssets, HostnameScope: "other.example.test"}}
+			resignCandidate()
+		}},
 		{"unknown payload", func() {
 			candidate.Artifact.Content["unknown"] = true
 			candidate.Artifact.ContentHash, _ = platformconfig.Digest(candidate.Artifact.Content)
