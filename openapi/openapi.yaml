@@ -30645,6 +30645,8 @@ components:
           type: string
         actual_generation:
           type: string
+        candidate_generation:
+          type: string
         lkg_generation:
           type: string
         apply_status:
@@ -31716,6 +31718,8 @@ components:
           type: string
         actual_generation:
           type: string
+        candidate_generation:
+          type: string
         lkg_generation:
           type: string
         apply_status:
@@ -31796,6 +31800,8 @@ components:
           type: string
           description: Optional assertion; the server derives and verifies the value from the expected consumer set.
         actual_generation:
+          type: string
+        candidate_generation:
           type: string
         lkg_generation:
           type: string

@@ -20,6 +20,7 @@ const (
 )
 
 const platformStateSQL = `ALTER TABLE fugue_platform_consumer_instances
+	ADD COLUMN IF NOT EXISTS candidate_generation TEXT NOT NULL DEFAULT '',
 	ADD COLUMN IF NOT EXISTS observation_evidence_hash TEXT NOT NULL DEFAULT '',
 	ADD COLUMN IF NOT EXISTS observation_window_started_at TIMESTAMPTZ NULL,
 	ADD COLUMN IF NOT EXISTS observation_window_heartbeat_count BIGINT NOT NULL DEFAULT 0`

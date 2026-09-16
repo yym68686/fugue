@@ -1727,6 +1727,7 @@ func normalizePlatformConsumerHeartbeat(req model.PlatformConsumerHeartbeatReque
 		EvidenceHash:              strings.TrimSpace(strings.ToLower(req.EvidenceHash)),
 		DesiredGeneration:         strings.TrimSpace(req.DesiredGeneration),
 		ActualGeneration:          strings.TrimSpace(req.ActualGeneration),
+		CandidateGeneration:       strings.TrimSpace(req.CandidateGeneration),
 		LKGGeneration:             strings.TrimSpace(req.LKGGeneration),
 		ApplyStatus:               strings.TrimSpace(strings.ToLower(req.ApplyStatus)),
 		ProbeStatus:               strings.TrimSpace(strings.ToLower(req.ProbeStatus)),

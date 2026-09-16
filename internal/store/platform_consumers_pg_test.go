@@ -329,7 +329,7 @@ func platformConsumerRows(t *testing.T, consumer model.PlatformConsumerInstance)
 		consumer.ReleaseSetID, consumer.ExpectedConsumerSetID, consumer.FencingToken, supportedKindsJSON,
 		consumer.ProtocolVersion, consumer.SchemaVersion, compatibilityCapabilitiesJSON,
 		consumer.Sequence, issuedAt, consumer.Nonce, consumer.GenerationSequence, consumer.EvidenceHash, consumer.IdentityVerified,
-		consumer.DesiredGeneration, consumer.ActualGeneration, consumer.LKGGeneration, consumer.ApplyStatus, consumer.ProbeStatus,
+		consumer.DesiredGeneration, consumer.ActualGeneration, consumer.CandidateGeneration, consumer.LKGGeneration, consumer.ApplyStatus, consumer.ProbeStatus,
 		consumer.ServingLKG, consumer.LKGExpired, consumer.LastError, consumer.LastHeartbeatAt, consumer.UpdatedAt,
 	)
 }
@@ -340,7 +340,7 @@ func platformConsumerColumns() []string {
 		"release_set_id", "expected_consumer_set_id", "fencing_token", "supported_kinds_json",
 		"protocol_version", "schema_version", "compatibility_capabilities_json",
 		"sequence", "issued_at", "nonce", "generation_sequence", "evidence_hash", "identity_verified",
-		"desired_generation", "actual_generation", "lkg_generation", "apply_status", "probe_status",
+		"desired_generation", "actual_generation", "candidate_generation", "lkg_generation", "apply_status", "probe_status",
 		"serving_lkg", "lkg_expired", "last_error", "last_heartbeat_at", "updated_at",
 	}
 }

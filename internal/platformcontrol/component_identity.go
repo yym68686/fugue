@@ -80,6 +80,7 @@ type PlatformConsumerHeartbeatEnvelope struct {
 	GenerationSequence        int64     `json:"generation_sequence"`
 	DesiredGeneration         string    `json:"desired_generation"`
 	ActualGeneration          string    `json:"actual_generation"`
+	CandidateGeneration       string    `json:"candidate_generation,omitempty"`
 	LKGGeneration             string    `json:"lkg_generation"`
 	ApplyStatus               string    `json:"apply_status"`
 	ProbeStatus               string    `json:"probe_status"`
@@ -282,6 +283,7 @@ func BindPlatformConsumerHeartbeat(
 	heartbeat.Nonce = strings.TrimSpace(heartbeat.Nonce)
 	heartbeat.DesiredGeneration = strings.TrimSpace(heartbeat.DesiredGeneration)
 	heartbeat.ActualGeneration = strings.TrimSpace(heartbeat.ActualGeneration)
+	heartbeat.CandidateGeneration = strings.TrimSpace(heartbeat.CandidateGeneration)
 	heartbeat.LKGGeneration = strings.TrimSpace(heartbeat.LKGGeneration)
 	heartbeat.ApplyStatus = strings.TrimSpace(strings.ToLower(heartbeat.ApplyStatus))
 	heartbeat.ProbeStatus = strings.TrimSpace(strings.ToLower(heartbeat.ProbeStatus))
@@ -381,6 +383,7 @@ func ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat PlatformConsumerHear
 		GenerationSequence        int64    `json:"generation_sequence"`
 		DesiredGeneration         string   `json:"desired_generation"`
 		ActualGeneration          string   `json:"actual_generation"`
+		CandidateGeneration       string   `json:"candidate_generation"`
 		LKGGeneration             string   `json:"lkg_generation"`
 		ApplyStatus               string   `json:"apply_status"`
 		ProbeStatus               string   `json:"probe_status"`
@@ -405,6 +408,7 @@ func ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat PlatformConsumerHear
 		GenerationSequence:        heartbeat.GenerationSequence,
 		DesiredGeneration:         strings.TrimSpace(heartbeat.DesiredGeneration),
 		ActualGeneration:          strings.TrimSpace(heartbeat.ActualGeneration),
+		CandidateGeneration:       strings.TrimSpace(heartbeat.CandidateGeneration),
 		LKGGeneration:             strings.TrimSpace(heartbeat.LKGGeneration),
 		ApplyStatus:               strings.TrimSpace(strings.ToLower(heartbeat.ApplyStatus)),
 		ProbeStatus:               strings.TrimSpace(strings.ToLower(heartbeat.ProbeStatus)),
@@ -513,6 +517,7 @@ func VerifyTrustedPlatformConsumerHeartbeat(
 		IdentityVerified:          true,
 		DesiredGeneration:         bound.DesiredGeneration,
 		ActualGeneration:          bound.ActualGeneration,
+		CandidateGeneration:       bound.CandidateGeneration,
 		LKGGeneration:             bound.LKGGeneration,
 		ApplyStatus:               bound.ApplyStatus,
 		ProbeStatus:               bound.ProbeStatus,

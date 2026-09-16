@@ -1377,15 +1377,15 @@ INSERT INTO fugue_platform_consumer_instances (
 	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
 	protocol_version, schema_version, compatibility_capabilities_json,
 	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
-	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
+	desired_generation, actual_generation, candidate_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12::jsonb,
 	$13, $14, $15::jsonb,
 	$16, $17, $18, $19, $20, $21,
-	$22, $23, $24, $25, $26,
-	$27, $28, $29, $30, $31
+	 $22, $23, $24, $25, $26, $27,
+	$28, $29, $30, $31, $32
 ) ON CONFLICT (consumer_id, artifact_kind, scope_key) DO UPDATE SET
 	credential_id = EXCLUDED.credential_id,
 	token_id = EXCLUDED.token_id,
@@ -1406,6 +1406,7 @@ INSERT INTO fugue_platform_consumer_instances (
 	identity_verified = EXCLUDED.identity_verified,
 	desired_generation = EXCLUDED.desired_generation,
 	actual_generation = EXCLUDED.actual_generation,
+	candidate_generation = EXCLUDED.candidate_generation,
 	lkg_generation = EXCLUDED.lkg_generation,
 	apply_status = EXCLUDED.apply_status,
 	probe_status = EXCLUDED.probe_status,
@@ -1419,13 +1420,13 @@ RETURNING id, consumer_id, credential_id, token_id, component, node_id, artifact
 	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
 	protocol_version, schema_version, compatibility_capabilities_json,
 	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
-	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
+	desired_generation, actual_generation, candidate_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at`,
 		consumer.ID, consumer.ConsumerID, consumer.CredentialID, consumer.TokenID, consumer.Component, consumer.NodeID, consumer.ArtifactKind, consumer.ScopeKey,
 		consumer.ReleaseSetID, consumer.ExpectedConsumerSetID, consumer.FencingToken, supportedKindsJSON,
 		consumer.ProtocolVersion, consumer.SchemaVersion, compatibilityCapabilitiesJSON,
 		consumer.Sequence, consumer.IssuedAt, consumer.Nonce, consumer.GenerationSequence, consumer.EvidenceHash, consumer.IdentityVerified,
-		consumer.DesiredGeneration, consumer.ActualGeneration, consumer.LKGGeneration, consumer.ApplyStatus, consumer.ProbeStatus,
+		consumer.DesiredGeneration, consumer.ActualGeneration, consumer.CandidateGeneration, consumer.LKGGeneration, consumer.ApplyStatus, consumer.ProbeStatus,
 		consumer.ServingLKG, consumer.LKGExpired, consumer.LastError, consumer.LastHeartbeatAt, consumer.UpdatedAt))
 	if err != nil {
 		if mapDBErr(err) == ErrNotFound {
@@ -1476,7 +1477,7 @@ SELECT id, consumer_id, credential_id, token_id, component, node_id, artifact_ki
 	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
 	protocol_version, schema_version, compatibility_capabilities_json,
 	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
-	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
+	desired_generation, actual_generation, candidate_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at
 FROM fugue_platform_consumer_instances
 WHERE consumer_id = $1 AND artifact_kind = $2 AND scope_key = $3
@@ -1594,15 +1595,15 @@ INSERT INTO fugue_platform_consumer_instances (
 	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
 	protocol_version, schema_version, compatibility_capabilities_json,
 	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
-	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
+	desired_generation, actual_generation, candidate_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12::jsonb,
 	$13, $14, $15::jsonb,
 	$16, $17, $18, $19, $20, $21,
-	$22, $23, $24, $25, $26,
-	$27, $28, $29, $30, $31
+	$22, $23, $24, $25, $26, $27,
+	$28, $29, $30, $31, $32
 ) ON CONFLICT (consumer_id, artifact_kind, scope_key) DO UPDATE SET
 	credential_id = EXCLUDED.credential_id,
 	token_id = EXCLUDED.token_id,
@@ -1623,6 +1624,7 @@ INSERT INTO fugue_platform_consumer_instances (
 	identity_verified = EXCLUDED.identity_verified,
 	desired_generation = EXCLUDED.desired_generation,
 	actual_generation = EXCLUDED.actual_generation,
+	candidate_generation = EXCLUDED.candidate_generation,
 	lkg_generation = EXCLUDED.lkg_generation,
 	apply_status = EXCLUDED.apply_status,
 	probe_status = EXCLUDED.probe_status,
@@ -1651,13 +1653,13 @@ RETURNING id, consumer_id, credential_id, token_id, component, node_id, artifact
 	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
 	protocol_version, schema_version, compatibility_capabilities_json,
 	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
-	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
+	desired_generation, actual_generation, candidate_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at`,
 		consumer.ID, consumer.ConsumerID, consumer.CredentialID, consumer.TokenID, consumer.Component, consumer.NodeID, consumer.ArtifactKind, consumer.ScopeKey,
 		consumer.ReleaseSetID, consumer.ExpectedConsumerSetID, consumer.FencingToken, supportedKindsJSON,
 		consumer.ProtocolVersion, consumer.SchemaVersion, compatibilityCapabilitiesJSON,
 		consumer.Sequence, consumer.IssuedAt, consumer.Nonce, consumer.GenerationSequence, consumer.EvidenceHash, consumer.IdentityVerified,
-		consumer.DesiredGeneration, consumer.ActualGeneration, consumer.LKGGeneration, consumer.ApplyStatus, consumer.ProbeStatus,
+		consumer.DesiredGeneration, consumer.ActualGeneration, consumer.CandidateGeneration, consumer.LKGGeneration, consumer.ApplyStatus, consumer.ProbeStatus,
 		consumer.ServingLKG, consumer.LKGExpired, consumer.LastError, consumer.LastHeartbeatAt, consumer.UpdatedAt))
 	if err != nil {
 		if mapDBErr(err) == ErrNotFound {
@@ -1676,7 +1678,7 @@ SELECT id, consumer_id, credential_id, token_id, component, node_id, artifact_ki
 	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
 	protocol_version, schema_version, compatibility_capabilities_json,
 	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
-	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
+	desired_generation, actual_generation, candidate_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at
 FROM fugue_platform_consumer_instances
 WHERE artifact_kind = $1 AND scope_key = $2
@@ -1988,6 +1990,7 @@ func scanPlatformConsumerInstance(scanner sqlScanner) (model.PlatformConsumerIns
 		&consumer.IdentityVerified,
 		&consumer.DesiredGeneration,
 		&consumer.ActualGeneration,
+		&consumer.CandidateGeneration,
 		&consumer.LKGGeneration,
 		&consumer.ApplyStatus,
 		&consumer.ProbeStatus,

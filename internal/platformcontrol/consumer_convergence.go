@@ -310,9 +310,13 @@ func assessExpectedConsumer(expected model.PlatformExpectedConsumer, observed mo
 		assessment.State = aggregateEvidenceState(assessment.State, model.InvariantEvidenceStateUnknown)
 		assessment.Reasons = append(assessment.Reasons, "desired, actual, and LKG generations must all be reported")
 	} else {
-		if observed.DesiredGeneration != expected.ExpectedGeneration || observed.ActualGeneration != expected.ExpectedGeneration {
+		generation := strings.TrimSpace(observed.ActualGeneration)
+		if strings.TrimSpace(strings.ToLower(observed.ApplyStatus)) == model.PlatformConsumerApplyStatusApplied && strings.TrimSpace(strings.ToLower(observed.ProbeStatus)) == model.PlatformConsumerProbeStatusPassed && strings.TrimSpace(observed.CandidateGeneration) != "" {
+			generation = strings.TrimSpace(observed.CandidateGeneration)
+		}
+		if observed.DesiredGeneration != expected.ExpectedGeneration || generation != expected.ExpectedGeneration {
 			assessment.State = model.InvariantEvidenceStateFail
-			assessment.Reasons = append(assessment.Reasons, "desired or actual generation does not match the expected generation")
+			assessment.Reasons = append(assessment.Reasons, "desired or applied candidate generation does not match the expected generation")
 		}
 	}
 	if strings.TrimSpace(strings.ToLower(observed.ApplyStatus)) != model.PlatformConsumerApplyStatusApplied {

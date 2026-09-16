@@ -213,6 +213,7 @@ type PlatformConsumerInstance struct {
 	IdentityVerified          bool       `json:"identity_verified"`
 	DesiredGeneration         string     `json:"desired_generation,omitempty"`
 	ActualGeneration          string     `json:"actual_generation,omitempty"`
+	CandidateGeneration       string     `json:"candidate_generation,omitempty"`
 	LKGGeneration             string     `json:"lkg_generation,omitempty"`
 	ApplyStatus               string     `json:"apply_status,omitempty"`
 	ProbeStatus               string     `json:"probe_status,omitempty"`
@@ -406,6 +407,7 @@ type PlatformConsumerHeartbeatRequest struct {
 	EvidenceHash              string     `json:"evidence_hash,omitempty"`
 	DesiredGeneration         string     `json:"desired_generation,omitempty"`
 	ActualGeneration          string     `json:"actual_generation,omitempty"`
+	CandidateGeneration       string     `json:"candidate_generation,omitempty"`
 	LKGGeneration             string     `json:"lkg_generation,omitempty"`
 	ApplyStatus               string     `json:"apply_status,omitempty"`
 	ProbeStatus               string     `json:"probe_status,omitempty"`
