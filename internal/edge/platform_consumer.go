@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -23,23 +24,79 @@ import (
 )
 
 type PlatformCandidateStatus struct {
-	State        string    `json:"state"`
-	ArtifactID   string    `json:"artifact_id,omitempty"`
-	Digest       string    `json:"digest,omitempty"`
-	ReleaseSetID string    `json:"release_set_id,omitempty"`
-	RouteCount   int       `json:"route_count"`
-	Sequence     int64     `json:"sequence,omitempty"`
-	VerifiedAt   time.Time `json:"verified_at,omitempty"`
-	ReportedAt   time.Time `json:"reported_at,omitempty"`
-	LastError    string    `json:"last_error,omitempty"`
+	State            string    `json:"state"`
+	ArtifactID       string    `json:"artifact_id,omitempty"`
+	Digest           string    `json:"digest,omitempty"`
+	ReleaseSetID     string    `json:"release_set_id,omitempty"`
+	RouteCount       int       `json:"route_count"`
+	RouteIndexDigest string    `json:"route_index_digest,omitempty"`
+	Sequence         int64     `json:"sequence,omitempty"`
+	VerifiedAt       time.Time `json:"verified_at,omitempty"`
+	ReportedAt       time.Time `json:"reported_at,omitempty"`
+	LastError        string    `json:"last_error,omitempty"`
 }
 
 type edgePlatformCandidate struct {
-	Artifact   model.PlatformArtifact           `json:"artifact"`
-	Assignment model.PlatformConsumerAssignment `json:"assignment"`
-	Release    model.PlatformArtifactRelease    `json:"release"`
-	Sequence   int64                            `json:"sequence"`
-	VerifiedAt time.Time                        `json:"verified_at"`
+	Artifact         model.PlatformArtifact           `json:"artifact"`
+	Assignment       model.PlatformConsumerAssignment `json:"assignment"`
+	Release          model.PlatformArtifactRelease    `json:"release"`
+	Sequence         int64                            `json:"sequence"`
+	VerifiedAt       time.Time                        `json:"verified_at"`
+	RouteIndexDigest string                           `json:"route_index_digest"`
+}
+
+// validatePlatformCandidateIndex builds the same immutable lookup structure
+// used by the proxy, but keeps it detached from the serving pointer. This is
+// an isolated probe: it proves candidate route resolution without applying
+// Caddy, changing the active index, or changing the local LKG.
+func validatePlatformCandidateIndex(routes []platformconfig.CompiledRoute, generation, edgeGroupID string) (string, error) {
+	bundle := model.EdgeRouteBundle{
+		SchemaVersion: model.BundleSchemaVersionV1,
+		Version:       strings.TrimSpace(generation),
+		Generation:    strings.TrimSpace(generation),
+		EdgeGroupID:   strings.TrimSpace(edgeGroupID),
+		Routes:        make([]model.EdgeRouteBinding, 0, len(routes)),
+	}
+	for _, route := range routes {
+		binding := model.EdgeRouteBinding{
+			Hostname: route.Hostname, PathPrefix: route.PathPrefix,
+			RouteKind: route.Kind, AppID: route.AppID, TenantID: route.TenantID,
+			RuntimeID: route.RuntimeID, RuntimeType: route.RuntimeType,
+			RuntimeEdgeGroupID: route.RuntimeEdgeGroupID, RuntimeClusterNode: route.RuntimeClusterNode,
+			EdgeGroupID: route.EdgeGroupID, ExcludedEdgeIDs: append([]string(nil), route.ExcludedEdgeIDs...),
+			ExcludedEdgeGroupIDs: append([]string(nil), route.ExcludedEdgeGroupIDs...),
+			ExclusionReason:      route.ExclusionReason, ExclusionExpiresAt: route.ExclusionExpiresAt,
+			MinHealthyEdgeNodes: route.MinHealthyEdgeNodes, RoutePolicy: route.RoutePolicy,
+			UpstreamKind: route.UpstreamKind, UpstreamScope: route.UpstreamScope,
+			UpstreamURL: route.UpstreamURL, Upstreams: platformconfig.ProjectUpstreamIntents(route.Upstreams),
+			ServicePort: route.ServicePort, TLSPolicy: route.TLSPolicy, CachePolicyID: route.CachePolicyID,
+			CacheNamespace: route.CacheNamespace, DeploymentGeneration: route.DeploymentGeneration,
+			RequestBodyPolicies: model.CloneEdgeRequestBodyPolicies(route.RequestBodyPolicies),
+			Streaming:           route.Streaming != nil && *route.Streaming, Status: route.Status,
+			StatusReason: route.StatusReason, RouteGeneration: generation,
+		}
+		if binding.Status == "" {
+			binding.Status = model.EdgeRouteStatusActive
+		}
+		bundle.Routes = append(bundle.Routes, binding)
+	}
+	if strings.TrimSpace(bundle.Version) == "" || len(bundle.Routes) == 0 {
+		return "", errors.New("candidate route index is empty")
+	}
+	index := buildEdgeRouteIndex(bundle, edgeGroupID, routePublicationMetadata{})
+	for _, route := range bundle.Routes {
+		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || route.Status != model.EdgeRouteStatusActive {
+			continue
+		}
+		if _, ok, _ := index.routeForHost(route.Hostname); !ok {
+			return "", fmt.Errorf("candidate route index cannot resolve hostname %q", route.Hostname)
+		}
+	}
+	digest, err := platformconfig.Digest(bundle)
+	if err != nil {
+		return "", fmt.Errorf("digest candidate route index: %w", err)
+	}
+	return digest, nil
 }
 
 func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
@@ -126,6 +183,10 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 			return errors.New("edge platform candidate lineage binding mismatch")
 		}
 	}
+	routeIndexDigest, err := validatePlatformCandidateIndex(payload.Routes, assignment.ExpectedGeneration, s.Config.EdgeGroupID)
+	if err != nil {
+		return err
+	}
 	path := s.Config.CachePath + ".platform-shadow.json"
 	var prev edgePlatformCandidate
 	if b, e := platformconsumer.ReadFile(path, 8<<20); e == nil {
@@ -138,7 +199,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if prev.Assignment.FencingToken > assignment.FencingToken || prev.Assignment.GenerationSequence > assignment.GenerationSequence {
 		return errors.New("edge platform candidate replay rejected")
 	}
-	c := edgePlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release, Sequence: max(prev.Sequence+1, time.Now().UnixNano()), VerifiedAt: time.Now().UTC()}
+	c := edgePlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release, Sequence: max(prev.Sequence+1, time.Now().UnixNano()), VerifiedAt: time.Now().UTC(), RouteIndexDigest: routeIndexDigest}
 	b, err := json.Marshal(c)
 	if err != nil {
 		return errors.New("encode edge platform candidate failed")
@@ -171,7 +232,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return errors.New("edge platform heartbeat receipt mismatch")
 	}
 	s.mu.Lock()
-	s.platformCandidate = PlatformCandidateStatus{State: "shadow_verified", ArtifactID: assignment.ArtifactID, Digest: assignment.ContentHash, ReleaseSetID: assignment.ReleaseSetID, RouteCount: len(payload.Routes), Sequence: c.Sequence, VerifiedAt: c.VerifiedAt, ReportedAt: time.Now().UTC()}
+	s.platformCandidate = PlatformCandidateStatus{State: "shadow_verified", ArtifactID: assignment.ArtifactID, Digest: assignment.ContentHash, ReleaseSetID: assignment.ReleaseSetID, RouteCount: len(payload.Routes), RouteIndexDigest: routeIndexDigest, Sequence: c.Sequence, VerifiedAt: c.VerifiedAt, ReportedAt: time.Now().UTC()}
 	s.mu.Unlock()
 	s.Logger.Printf("edge platform candidate verified; artifact=%s digest=%s routes=%d sequence=%d serving=%s", assignment.ArtifactID, assignment.ContentHash, len(payload.Routes), c.Sequence, status.ServingGeneration)
 	return nil

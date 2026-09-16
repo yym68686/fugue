@@ -31,6 +31,25 @@ func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
 	}
 }
 
+func TestValidatePlatformCandidateIndexIsDeterministicAndRejectsEmpty(t *testing.T) {
+	routes := []platformconfig.CompiledRoute{{RouteIntent: platformconfig.RouteIntent{
+		Hostname: "app.example.test", PathPrefix: "/api", Kind: "http", AppID: "app",
+		TenantID: "tenant", UpstreamURL: "http://origin.example.test:8080", Enabled: true,
+		RoutePolicy: model.EdgeRoutePolicyEnabled, Status: model.EdgeRouteStatusActive,
+	}}}
+	first, err := validatePlatformCandidateIndex(routes, "candidate-generation", "edge-group-a")
+	if err != nil {
+		t.Fatalf("validate candidate index: %v", err)
+	}
+	second, err := validatePlatformCandidateIndex(routes, "candidate-generation", "edge-group-a")
+	if err != nil || first != second {
+		t.Fatalf("candidate index digest was not deterministic: first=%q second=%q err=%v", first, second, err)
+	}
+	if _, err := validatePlatformCandidateIndex(nil, "candidate-generation", "edge-group-a"); err == nil {
+		t.Fatal("empty candidate route index was accepted")
+	}
+}
+
 func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scenario string) {
 	keyring := bundleauth.NewKeyring("synthetic-platform-key", "signer", "", "", nil)
 	request := platformconfig.CompileRequest{
@@ -155,6 +174,9 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 	if s.Status().PlatformCandidate.State != "shadow_verified" {
 		t.Fatal(s.Status().PlatformCandidate)
 	}
+	if s.Status().PlatformCandidate.RouteIndexDigest == "" {
+		t.Fatal("candidate route index digest was not recorded")
+	}
 	staged, _ := os.ReadFile(cache + ".platform-shadow.json")
 	var persisted edgePlatformCandidate
 	if err := json.Unmarshal(staged, &persisted); err != nil {
@@ -164,6 +186,9 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 	wantContent, _ := json.Marshal(candidate.Artifact.Content)
 	if !bytes.Equal(gotContent, wantContent) {
 		t.Fatal("candidate persistence lost compiled fields or cache policy")
+	}
+	if persisted.RouteIndexDigest != s.Status().PlatformCandidate.RouteIndexDigest {
+		t.Fatalf("candidate route index digest was not persisted: file=%q status=%q", persisted.RouteIndexDigest, s.Status().PlatformCandidate.RouteIndexDigest)
 	}
 	resignCandidate := func() {
 		t.Helper()
