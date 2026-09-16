@@ -383,7 +383,7 @@ func ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat PlatformConsumerHear
 		GenerationSequence        int64    `json:"generation_sequence"`
 		DesiredGeneration         string   `json:"desired_generation"`
 		ActualGeneration          string   `json:"actual_generation"`
-		CandidateGeneration       string   `json:"candidate_generation"`
+		CandidateGeneration       string   `json:"candidate_generation,omitempty"`
 		LKGGeneration             string   `json:"lkg_generation"`
 		ApplyStatus               string   `json:"apply_status"`
 		ProbeStatus               string   `json:"probe_status"`
