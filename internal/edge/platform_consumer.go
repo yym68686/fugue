@@ -94,11 +94,11 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return errors.New("edge platform candidate signature or digest rejected")
 	}
 	var payload struct {
-		Schema     string                        `json:"schema_version"`
-		Generation string                        `json:"generation"`
-		Routes     []platformconfig.RouteIntent  `json:"routes"`
-		Policy     platformconfig.PolicySnapshot `json:"policy"`
-		Lineage    platformconfig.Lineage        `json:"lineage"`
+		Schema     string                         `json:"schema_version"`
+		Generation string                         `json:"generation"`
+		Routes     []platformconfig.CompiledRoute `json:"routes"`
+		Policy     platformconfig.PolicySnapshot  `json:"policy"`
+		Lineage    platformconfig.Lineage         `json:"lineage"`
 	}
 	raw, err := json.Marshal(artifact.Content)
 	if err != nil {
@@ -109,7 +109,11 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if dec.Decode(&payload) != nil || dec.Decode(&struct{}{}) != io.EOF || payload.Schema != platformconfig.SchemaVersion || payload.Generation != artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
 		return errors.New("edge platform candidate schema invalid")
 	}
-	if platformconfig.ValidatePlatformIntent(platformconfig.PlatformIntent{SchemaVersion: payload.Schema, Generation: payload.Generation, Scope: assignment.ScopeKey, Routes: payload.Routes}) != nil {
+	routeIntents := make([]platformconfig.RouteIntent, 0, len(payload.Routes))
+	for _, route := range payload.Routes {
+		routeIntents = append(routeIntents, route.RouteIntent)
+	}
+	if platformconfig.ValidatePlatformIntent(platformconfig.PlatformIntent{SchemaVersion: payload.Schema, Generation: payload.Generation, Scope: assignment.ScopeKey, Routes: routeIntents}) != nil {
 		return errors.New("edge platform candidate routes invalid")
 	}
 	policyDigest, err := platformconfig.Digest(payload.Policy)
