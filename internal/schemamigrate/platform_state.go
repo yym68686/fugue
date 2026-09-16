@@ -172,6 +172,7 @@ WHERE attribute.attrelid = to_regclass('fugue_platform_consumer_instances')::oid
   AND attribute.attnum > 0
   AND NOT attribute.attisdropped
   AND attribute.attname IN (
+    'candidate_generation',
     'observation_evidence_hash',
     'observation_window_started_at',
     'observation_window_heartbeat_count'
@@ -185,7 +186,7 @@ WHERE attribute.attrelid = to_regclass('fugue_platform_consumer_instances')::oid
 		nullable   string
 		defaultSQL string
 	}
-	columns := make(map[string]columnShape, 3)
+	columns := make(map[string]columnShape, 4)
 	for rows.Next() {
 		var name string
 		var shape columnShape
@@ -198,6 +199,7 @@ WHERE attribute.attrelid = to_regclass('fugue_platform_consumer_instances')::oid
 		return false, fmt.Errorf("iterate platform-state schema migration: %w", err)
 	}
 	expected := map[string]columnShape{
+		"candidate_generation":               {dataType: "text", nullable: "NO", defaultSQL: "''::text"},
 		"observation_evidence_hash":          {dataType: "text", nullable: "NO", defaultSQL: "''::text"},
 		"observation_window_started_at":      {dataType: "timestamp with time zone", nullable: "YES", defaultSQL: ""},
 		"observation_window_heartbeat_count": {dataType: "bigint", nullable: "NO", defaultSQL: "0"},

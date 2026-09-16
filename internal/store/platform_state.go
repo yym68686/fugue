@@ -1857,6 +1857,7 @@ func buildPlatformConsumerHeartbeatAuditEvent(
 		"generation_sequence":      fmt.Sprintf("%d", consumer.GenerationSequence),
 		"desired_generation":       strings.TrimSpace(consumer.DesiredGeneration),
 		"actual_generation":        strings.TrimSpace(consumer.ActualGeneration),
+		"candidate_generation":     strings.TrimSpace(consumer.CandidateGeneration),
 		"lkg_generation":           strings.TrimSpace(consumer.LKGGeneration),
 		"apply_status":             strings.TrimSpace(consumer.ApplyStatus),
 		"probe_status":             strings.TrimSpace(consumer.ProbeStatus),

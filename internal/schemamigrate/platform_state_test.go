@@ -16,6 +16,7 @@ const platformStateInspectQueryPattern = `(?s)SELECT attribute\.attname,.*WHERE 
 
 func exactPlatformStateRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"column_name", "data_type", "is_nullable", "column_default"}).
+		AddRow("candidate_generation", "text", "NO", "''::text").
 		AddRow("observation_evidence_hash", "text", "NO", "''::text").
 		AddRow("observation_window_started_at", "timestamp with time zone", "YES", "").
 		AddRow("observation_window_heartbeat_count", "bigint", "NO", "0")

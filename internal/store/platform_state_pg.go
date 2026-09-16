@@ -1384,7 +1384,7 @@ INSERT INTO fugue_platform_consumer_instances (
 	$9, $10, $11, $12::jsonb,
 	$13, $14, $15::jsonb,
 	$16, $17, $18, $19, $20, $21,
-	 $22, $23, $24, $25, $26, $27,
+	$22, $23, $24, $25, $26, $27,
 	$28, $29, $30, $31, $32
 ) ON CONFLICT (consumer_id, artifact_kind, scope_key) DO UPDATE SET
 	credential_id = EXCLUDED.credential_id,
