@@ -1839,6 +1839,11 @@ func (s *Service) waitForManagedPostgresReplicaOnNode(
 				return "", err
 			}
 		}
+		if recovering, _ := ctx.Value(recoveryOperationContextKey{}).(bool); recovering {
+			if err := retainAbandonedRecoveryClaims(waitCtx, client, namespace, clusterName, firstStorageTarget(storageTargets)); err != nil {
+				return "", err
+			}
+		}
 
 		cluster, found, err := client.getCloudNativePGCluster(waitCtx, namespace, clusterName)
 		if err != nil {

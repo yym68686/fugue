@@ -14,8 +14,12 @@ filesystem capacity plus writable SQL must converge before migration starts.
 The source check ignores unrelated destination claims that have not started.
 For Longhorn, recovery selects a ready attachment node within the target
 runtime's scheduling constraints; CSI registration alone is insufficient.
-An unstarted join Job pinned to an incompatible node is recreated after applying
-the corrected placement, using its existing PVC. The source is never deleted.
+An unstarted join Job pinned to an incompatible node is removed after applying
+the corrected placement. An abandoned initializing replica PVC with no Pod or
+Job references is retained with a recovery annotation, outside CNPG discovery
+and garbage collection, allowing CNPG to bootstrap a fresh replica. No PVC is
+deleted and an uninitialized claim is never marked ready. Whole-spec writes
+preserve the explicitly observed CNPG in-use resize policy.
 
 File-backed OpenEBS LVM pools can grow through the authenticated node updater.
 The optional task requires updater protocol v39; only participating nodes need

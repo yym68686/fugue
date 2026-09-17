@@ -22,7 +22,10 @@ import (
 // Recovery first makes the existing primary writable. Replication cannot rescue
 // a stopped source. No source PVC is removed, and normal localization remains
 // responsible for verifying catch-up, promotion, and the final write probe.
+type recoveryOperationContextKey struct{}
+
 func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, op model.Operation, app model.App) error {
+	ctx = context.WithValue(ctx, recoveryOperationContextKey{}, true)
 	timeout := s.Config.ManagedAppRolloutTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Minute
@@ -50,6 +53,9 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 	}
 	if cluster.Status.CurrentPrimary == "" {
 		return fmt.Errorf("recovery requires an observed primary; refusing to choose a data source")
+	}
+	if err := freezeRecoverySourceExpansion(ctx, client, namespace, name, cluster.Metadata.UID, cluster.Status.CurrentPrimary); err != nil {
+		return err
 	}
 	pg := model.CloneAppPostgresSpec(&target.Postgres)
 	if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {

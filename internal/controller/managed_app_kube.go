@@ -340,6 +340,7 @@ func (c *kubeClient) shouldSkipApply(ctx context.Context, apiPath string, obj ma
 	if cloudNativePGObject(obj) && skipExistingCloudNativePGWrites(ctx) {
 		return "apply_skipped_existing", true, nil
 	}
+	preserveCloudNativePGResizePolicy(current, obj)
 	if desiredObjectAlreadyApplied(current, obj) {
 		return "apply_skipped_noop", true, nil
 	}
@@ -399,6 +400,28 @@ func guardKubernetesNoopObject(obj map[string]any) bool {
 func cloudNativePGObject(obj map[string]any) bool {
 	return strings.TrimSpace(objectStringField(obj, "apiVersion")) == runtime.CloudNativePGAPIVersion &&
 		strings.TrimSpace(objectStringField(obj, "kind")) == runtime.CloudNativePGClusterKind
+}
+
+// The renderer does not own CNPG's in-use resize policy. Replacing the whole
+// spec without carrying this observed field resets it to the webhook default
+// and can unexpectedly expand a migration source volume.
+func preserveCloudNativePGResizePolicy(current, desired map[string]any) {
+	if !cloudNativePGObject(desired) {
+		return
+	}
+	currentSpec, _ := current["spec"].(map[string]any)
+	desiredSpec, _ := desired["spec"].(map[string]any)
+	currentStorage, _ := currentSpec["storage"].(map[string]any)
+	desiredStorage, _ := desiredSpec["storage"].(map[string]any)
+	if desiredStorage == nil {
+		return
+	}
+	if _, explicit := desiredStorage["resizeInUseVolumes"]; explicit {
+		return
+	}
+	if value, present := currentStorage["resizeInUseVolumes"]; present {
+		desiredStorage["resizeInUseVolumes"] = value
+	}
 }
 
 func desiredObjectAlreadyApplied(current, desired map[string]any) bool {
@@ -851,6 +874,7 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 				c.writeStats.record("replace_spec_skipped_existing", obj)
 				return nil
 			}
+			preserveCloudNativePGResizePolicy(current, obj)
 			if desiredSpecAlreadyApplied(current, obj) {
 				c.writeStats.record("replace_spec_skipped_noop", obj)
 				return nil

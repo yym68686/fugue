@@ -1,11 +1,14 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
@@ -68,9 +71,115 @@ func recoveryStorageTargetNode(ctx context.Context, client *kubeClient, targetRu
 	return candidates[0], nil
 }
 
+// An initializing PVC without a Job is not a reusable database instance in
+// CNPG. Retain that volume outside the cluster's discovery/GC ownership, so
+// CNPG can bootstrap a new replica from the still-ready primary. Never mark an
+// uninitialized volume ready, delete it, or detach a claim used by any Pod/Job.
+func retainAbandonedRecoveryClaims(ctx context.Context, client *kubeClient, namespace, name string, target managedPostgresStorageTarget) error {
+	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+	if !found || cluster.Metadata.UID == "" || cluster.Status.CurrentPrimary == "" || cluster.Status.ReadyInstances < 1 || cluster.Spec.Storage.StorageClass != target.StorageClassName {
+		return nil
+	}
+	pods, err := client.listPodsBySelector(ctx, namespace, "")
+	if err != nil {
+		return err
+	}
+	var jobs struct {
+		Items []struct {
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Volumes []kubePodVolume `json:"volumes"`
+					} `json:"spec"`
+				} `json:"template"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if _, err := client.doJSON(ctx, http.MethodGet, "/apis/batch/v1/namespaces/"+url.PathEscape(namespace)+"/jobs", nil, &jobs); err != nil {
+		return err
+	}
+	inUse := map[string]bool{}
+	for _, pod := range pods {
+		for _, v := range pod.Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				inUse[v.PersistentVolumeClaim.ClaimName] = true
+			}
+		}
+	}
+	for _, job := range jobs.Items {
+		for _, v := range job.Spec.Template.Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				inUse[v.PersistentVolumeClaim.ClaimName] = true
+			}
+		}
+	}
+	claims, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+name+",cnpg.io/pvcRole=PG_DATA")
+	if err != nil {
+		return err
+	}
+	for _, claim := range claims {
+		if claim == cluster.Status.CurrentPrimary || claim == cluster.Status.TargetPrimary || inUse[claim] {
+			continue
+		}
+		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, claim)
+		if err != nil {
+			return err
+		}
+		if !found || pvc.Metadata.UID == "" || pvc.Metadata.ResourceVersion == "" || pvc.Metadata.Annotations["cnpg.io/pvcStatus"] != "initializing" || pvc.Spec.StorageClassName != target.StorageClassName || pvc.Metadata.Labels["cnpg.io/instanceRole"] != "replica" {
+			continue
+		}
+		path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/persistentvolumeclaims/" + url.PathEscape(claim)
+		current, found, err := client.getRawObject(ctx, path)
+		if err != nil {
+			return err
+		}
+		if !found {
+			continue
+		}
+		meta, _ := current["metadata"].(map[string]any)
+		if meta["uid"] != pvc.Metadata.UID || meta["resourceVersion"] != pvc.Metadata.ResourceVersion {
+			continue
+		}
+		refs, _ := meta["ownerReferences"].([]any)
+		kept := []any{}
+		for _, raw := range refs {
+			ref, _ := raw.(map[string]any)
+			if ref["uid"] == cluster.Metadata.UID && ref["kind"] == "Cluster" {
+				continue
+			}
+			kept = append(kept, raw)
+		}
+		labels := map[string]any{}
+		for key := range pvc.Metadata.Labels {
+			if strings.HasPrefix(key, "cnpg.io/") {
+				labels[key] = nil
+			}
+		}
+		body := map[string]any{"metadata": map[string]any{"uid": pvc.Metadata.UID, "resourceVersion": pvc.Metadata.ResourceVersion, "ownerReferences": kept, "labels": labels, "annotations": map[string]string{"fugue.pro/recovery-retained-cluster-uid": cluster.Metadata.UID, "fugue.pro/recovery-retained-reason": "abandoned-initializing-replica"}}}
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		status, _, err := client.doRaw(ctx, http.MethodPatch, path, bytes.NewReader(raw), "application/merge-patch+json")
+		if status == http.StatusConflict || status == http.StatusNotFound {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if status >= 300 {
+			return fmt.Errorf("retain abandoned initializing claim %s: status=%d", claim, status)
+		}
+	}
+	return nil
+}
+
 // CNPG join Jobs copy affinity at creation. After correcting the target node,
-// replace only a Job whose containers have never started. Preserve its bound
-// PVC: the new Job mounts the same volume and no source data is discarded.
+// remove only a Job whose containers have never started. The abandoned claim
+// is retained separately before CNPG bootstraps a fresh replica.
 func rescheduleUnstartedRecoveryJoins(ctx context.Context, client *kubeClient, namespace, name, targetNode string, target managedPostgresStorageTarget) error {
 	if targetNode == "" || target.StorageClassName == "" {
 		return nil
