@@ -226,6 +226,12 @@ func routeMigrationIndex(routes []model.EdgeRouteIntent) (map[string]map[string]
 		delete(fields, "generation")
 		delete(fields, "created_at")
 		delete(fields, "updated_at")
+		// No exclusion has no lifecycle to execute. Preserve all non-clear
+		// states and every list/expiry/reason field; this only normalizes the
+		// legacy omission of an explicitly empty exclusion state.
+		if len(route.ExcludedEdgeIDs) == 0 && len(route.ExcludedEdgeGroupIDs) == 0 && route.ExclusionLifecycle == model.EdgeExclusionLifecycleClear {
+			delete(fields, "exclusion_lifecycle")
+		}
 		index[key] = fields
 	}
 	return index, nil

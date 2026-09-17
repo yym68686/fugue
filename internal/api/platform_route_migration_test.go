@@ -137,6 +137,61 @@ func TestRouteMigrationCachePolicyIdentityAndNestedSemantics(t *testing.T) {
 	}
 }
 
+func TestRouteMigrationEmptyExclusionLifecycleEquivalence(t *testing.T) {
+	for _, scenario := range []struct {
+		name, left, right string
+		edges, groups     []string
+		equal             bool
+	}{
+		{name: "empty and clear", right: model.EdgeExclusionLifecycleClear, equal: true},
+		{name: "clear and empty", left: model.EdgeExclusionLifecycleClear, equal: true},
+		{name: "edge exclusion", right: model.EdgeExclusionLifecycleClear, edges: []string{"edge-a"}},
+		{name: "group exclusion", right: model.EdgeExclusionLifecycleClear, groups: []string{"edge-group-a"}},
+		{name: "legacy hold", right: model.EdgeExclusionLifecycleLegacyHold},
+		{name: "expired hold", right: model.EdgeExclusionLifecycleExpiredHold},
+		{name: "active to expired", left: model.EdgeExclusionLifecycleActive, right: model.EdgeExclusionLifecycleExpiredHold, edges: []string{"edge-a"}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			a := model.EdgeRouteIntent{Hostname: "route.example.test", PathPrefix: "/", ExclusionLifecycle: scenario.left, ExcludedEdgeIDs: scenario.edges, ExcludedEdgeGroupIDs: scenario.groups}
+			b := a
+			b.ExclusionLifecycle = scenario.right
+			result, err := comparePlatformRouteSnapshots(model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{a}}, model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{b}})
+			if err != nil || result.Equivalent != scenario.equal {
+				t.Fatalf("unsafe lifecycle comparison: %+v %v", result, err)
+			}
+			if !scenario.equal && (len(result.Differences) != 1 || !reflect.DeepEqual(result.Differences[0].Fields, []string{"exclusion_lifecycle"})) {
+				t.Fatalf("lifecycle difference hidden: %+v", result)
+			}
+		})
+	}
+	base := model.EdgeRouteIntent{Hostname: "route.example.test", ExclusionLifecycle: model.EdgeExclusionLifecycleClear}
+	for _, field := range []string{"excluded_edge_ids", "excluded_edge_group_ids", "exclusion_reason", "exclusion_expires_at"} {
+		changed := base
+		switch field {
+		case "excluded_edge_ids":
+			changed.ExcludedEdgeIDs = []string{"edge-a"}
+		case "excluded_edge_group_ids":
+			changed.ExcludedEdgeGroupIDs = []string{"edge-group-a"}
+		case "exclusion_reason":
+			changed.ExclusionReason = "maintenance"
+		case "exclusion_expires_at":
+			at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+			changed.ExclusionExpiresAt = &at
+		}
+		result, err := comparePlatformRouteSnapshots(model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{base}}, model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{changed}})
+		if err != nil || result.Equivalent || len(result.Differences) != 1 {
+			t.Fatalf("exclusion field %s was lost: %+v %v", field, result, err)
+		}
+		found := false
+		for _, difference := range result.Differences[0].Fields {
+			found = found || difference == field
+		}
+		if !found {
+			t.Fatalf("missing exclusion field diagnostic %s: %+v", field, result)
+		}
+	}
+}
+
 func TestPlatformRouteMigrationAPIIsReadOnlyAndRequiresTrustedArtifact(t *testing.T) {
 	state, server, tenant, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
