@@ -924,7 +924,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`short_lived_kubernetes_bootstrap_token`,
 		`k3s_cluster_membership`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="` + model.NodeUpdaterCurrentVersion + `"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="` + nodeUpdaterScriptVersion + `"`,
 		`export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES`,
 		`restore_node_updater_static_env`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,

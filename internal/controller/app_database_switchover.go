@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"math"
 	"net"
 	"net/url"
@@ -443,6 +444,9 @@ func (s *Service) rollbackManagedPostgresStage(
 ) error {
 	if cause == nil {
 		return nil
+	}
+	if op.Type == storagerecovery.OperationType {
+		return recoverableManagedPostgresTransitionError("recovery staging", cause)
 	}
 	// A canceled controller run is requeued by the worker. Leaving the staged
 	// replica in place is safe and lets the resumed operation adopt it. Likewise,

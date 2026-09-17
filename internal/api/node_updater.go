@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"net/http"
 	"sort"
 	"strconv"
@@ -19,7 +20,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion        = model.NodeUpdaterCurrentVersion
+	nodeUpdaterScriptVersion        = storagerecovery.NodeUpdaterVersion
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 	nodeRepairTaskMaxAge            = 45 * time.Minute
@@ -1278,7 +1279,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="__FUGUE_NODE_UPDATER_SCRIPT_VERSION__"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,reconcile-host-journald-policy,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,expand-lvm-localpv,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,reconcile-host-journald-policy,time-sync"
 export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
@@ -5591,6 +5592,22 @@ reconcile_host_journald_policy_task() {
   log_task "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE}"
 }
 
+expand_lvm_localpv() {
+  export FUGUE_NODE_UPDATE_TASK_IMAGE_PATH FUGUE_NODE_UPDATE_TASK_VG_NAME
+  export FUGUE_NODE_UPDATE_TASK_EXPECTED_IMAGE_SIZE_BYTES FUGUE_NODE_UPDATE_TASK_TARGET_IMAGE_SIZE_BYTES
+  export FUGUE_NODE_UPDATE_TASK_DRY_RUN
+  python3 - <<'FUGUE_LOCALPV_EXPAND_PY'
+__FUGUE_LOCALPV_EXPAND_PYTHON__
+FUGUE_LOCALPV_EXPAND_PY
+  local rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    FUGUE_NODE_UPDATE_TASK_ERROR_MESSAGE="LocalPV expansion refused or did not converge; see task logs"
+    return "${rc}"
+  fi
+  report_lvm_localpv_inventory || return $?
+  FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="LocalPV pool expansion verified and inventory refreshed"
+}
+
 run_task() {
   case "${FUGUE_NODE_UPDATE_TASK_TYPE}" in
     refresh-join-config)
@@ -5636,6 +5653,9 @@ run_task() {
       ;;
     report-lvm-localpv-inventory)
       report_lvm_localpv_inventory
+      ;;
+    expand-lvm-localpv)
+      expand_lvm_localpv
       ;;
     decommission-lvm-localpv)
       decommission_lvm_localpv
@@ -5761,6 +5781,7 @@ esac
 	return strings.NewReplacer(
 		"__FUGUE_API_BASE__", apiBase,
 		"__FUGUE_NODE_UPDATER_SCRIPT_VERSION__", nodeUpdaterScriptVersion,
+		"__FUGUE_LOCALPV_EXPAND_PYTHON__", localPVExpandPython,
 		"__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary(),
 		"__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__", hostJournaldPolicyShellLibrary(),
 	).Replace(script)

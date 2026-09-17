@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"strings"
 	"time"
 
@@ -292,7 +293,7 @@ func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID,
 		model.NodeUpdateTaskTypePruneImageCache,
 		model.NodeUpdateTaskTypeReportImageCache,
 		model.NodeUpdateTaskTypeReportLocalPV,
-		model.NodeUpdateTaskTypeDecommissionLocalPV,
+		model.NodeUpdateTaskTypeDecommissionLocalPV, storagerecovery.ExpandPoolTask,
 		model.NodeUpdateTaskTypeRepairManagedIPTables,
 		model.NodeUpdateTaskTypeRefreshDesiredState,
 		model.NodeUpdateTaskTypeReloadLKGBundle,

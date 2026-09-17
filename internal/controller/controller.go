@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"log"
 	"strings"
 	"sync"
@@ -942,6 +943,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return s.executeManagedFailoverOperation(ctx, op, app)
 	case model.OperationTypeDatabaseSwitchover:
 		return s.executeManagedDatabaseSwitchoverOperation(ctx, op, app)
+	case storagerecovery.OperationType:
+		return s.executeManagedDatabaseRecoveryOperation(ctx, op, app)
 	case model.OperationTypeDatabaseLocalize:
 		return s.executeManagedDatabaseLocalizeOperation(ctx, op, app)
 	case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
@@ -1001,7 +1004,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				model.OperationTypeMigrate,
 				model.OperationTypeFailover,
 				model.OperationTypeDatabaseSwitchover,
-				model.OperationTypeDatabaseLocalize:
+				model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 				completionDesiredSpec = cloneControllerAppSpec(&app.Spec)
 			}
 		}

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fugue/internal/storagerecovery"
 	"strings"
 
 	"fugue/internal/model"
@@ -53,7 +54,7 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 	case model.OperationTypeDeploy,
 		model.OperationTypeMigrate,
 		model.OperationTypeDatabaseSwitchover,
-		model.OperationTypeDatabaseLocalize,
+		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType,
 		model.OperationTypeDatabaseSuspend,
 		model.OperationTypeDatabaseResume,
 		model.OperationTypeDatabaseResize,
@@ -67,7 +68,7 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 func isManagedPostgresServiceOperation(operationType string) bool {
 	switch operationType {
 	case model.OperationTypeDatabaseSwitchover,
-		model.OperationTypeDatabaseLocalize,
+		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType,
 		model.OperationTypeDatabaseSuspend,
 		model.OperationTypeDatabaseResume,
 		model.OperationTypeDatabaseResize:
@@ -80,6 +81,7 @@ func isManagedPostgresServiceOperation(operationType string) bool {
 func operationRequiresManagedController(operationType string) bool {
 	switch operationType {
 	case model.OperationTypeImport,
+		storagerecovery.OperationType,
 		model.OperationTypeDatabaseSuspend,
 		model.OperationTypeDatabaseResume,
 		model.OperationTypeDatabaseResize:

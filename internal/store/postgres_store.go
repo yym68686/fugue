@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"sort"
 	"strings"
 	"time"
@@ -3667,7 +3668,7 @@ WHERE app_id = $1
 		if op.DesiredSpec == nil {
 			op.DesiredSpec = cloneAppSpec(&app.Spec)
 		}
-	case model.OperationTypeDatabaseLocalize:
+	case model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 		var inFlightCount int
 		if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(1)
@@ -6343,7 +6344,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 			return err
 		}
 	case model.OperationTypeDatabaseSwitchover,
-		model.OperationTypeDatabaseLocalize:
+		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 		if op.DesiredSpec == nil {
 			return ErrInvalidInput
 		}

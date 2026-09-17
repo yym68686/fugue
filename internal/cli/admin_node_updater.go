@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"io"
 	"sort"
 	"strings"
@@ -408,7 +409,7 @@ func nodeUpdateTaskTypes() []string {
 		model.NodeUpdateTaskTypePruneImageCache,
 		model.NodeUpdateTaskTypeReportImageCache,
 		model.NodeUpdateTaskTypeReportLocalPV,
-		model.NodeUpdateTaskTypeDecommissionLocalPV,
+		model.NodeUpdateTaskTypeDecommissionLocalPV, storagerecovery.ExpandPoolTask,
 		model.NodeUpdateTaskTypeVerifySystemdEscape,
 		model.NodeUpdateTaskTypeRepairManagedIPTables,
 		model.NodeUpdateTaskTypeRefreshDesiredState,

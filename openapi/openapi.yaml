@@ -8965,6 +8965,12 @@ paths:
     post:
       operationId: recoverAppDatabase
       summary: Recover App Database Storage Pressure
+      description: |-
+        Platform administrator only. Queues an observed-state recovery, including
+        bounded LocalPV pool growth when required. Source volumes are retained
+        until a replacement primary passes replication and write-read probes.
+        Dry run describes the stages; live storage preconditions are evaluated by
+        the controller before each mutation. Conflicting operations return 409.
       tags: [Apps]
       x-fugue-handler: handleRecoverAppDatabase
       security:
@@ -8979,7 +8985,7 @@ paths:
               type: object
               additionalProperties: false
               properties:
-                dry_run: {type: boolean}
+                dry_run: {type: boolean, default: true}
                 target_runtime_id: {type: string}
                 target_node_name: {type: string}
       responses:
@@ -8995,6 +9001,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationResponse"
+        '403':
+          description: Platform administrator permission is required for host storage recovery.
+        '409':
+          description: Another app operation or a different recovery target is active.
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/continuity:

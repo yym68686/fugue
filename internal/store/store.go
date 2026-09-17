@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"os"
 	"path/filepath"
 	"sort"
@@ -3231,7 +3232,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			if op.DesiredSpec == nil {
 				op.DesiredSpec = cloneAppSpec(&app.Spec)
 			}
-		case model.OperationTypeDatabaseLocalize:
+		case model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 			if hasInFlightOperationForApp(state.Operations, app.ID) {
 				return ErrConflict
 			}
@@ -5220,7 +5221,7 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 			return err
 		}
 	case model.OperationTypeDatabaseSwitchover,
-		model.OperationTypeDatabaseLocalize:
+		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 		if op.DesiredSpec == nil {
 			return ErrInvalidInput
 		}
@@ -5329,7 +5330,7 @@ func inFlightOperationPhase(op model.Operation) (string, error) {
 		return "failing-over", nil
 	case model.OperationTypeDatabaseSwitchover:
 		return "database-switchover", nil
-	case model.OperationTypeDatabaseLocalize:
+	case model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 		return "database-localize", nil
 	case model.OperationTypeDatabaseSuspend:
 		return "database-suspend", nil
@@ -5382,7 +5383,7 @@ func operationActionLabel(op model.Operation) string {
 		return "failover"
 	case model.OperationTypeDatabaseSwitchover:
 		return "database switchover"
-	case model.OperationTypeDatabaseLocalize:
+	case model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 		return "database localize"
 	case model.OperationTypeDatabaseSuspend:
 		return "database suspend"

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fugue/internal/storagerecovery"
 	"sort"
 	"strings"
 	"time"
@@ -248,11 +249,11 @@ func validateOperationRuntimeReservationsState(state *model.State, projectID str
 			return validateAppSpecRuntimeReservationsState(state, projectID, *op.DesiredSpec)
 		}
 		return validateRuntimeReservedForProjectState(state, projectID, op.TargetRuntimeID)
-	case model.OperationTypeFailover, model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize:
+	case model.OperationTypeFailover, model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 		if err := validateRuntimeReservedForProjectState(state, projectID, op.TargetRuntimeID); err != nil {
 			return err
 		}
-		if op.Type == model.OperationTypeDatabaseLocalize && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+		if (op.Type == model.OperationTypeDatabaseLocalize || op.Type == storagerecovery.OperationType) && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
 			return validateRuntimeReservedForProjectState(state, projectID, op.DesiredSpec.Postgres.RuntimeID)
 		}
 	case model.OperationTypeDatabaseSuspend:

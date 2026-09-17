@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"sort"
 	"strings"
 	"time"
@@ -196,6 +197,9 @@ func (s *Store) NodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtim
 
 func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clusterNodeName, runtimeID, taskType string, payload map[string]string) (model.NodeUpdateTask, error) {
 	taskType = normalizeNodeUpdateTaskType(taskType)
+	if taskType == storagerecovery.ExpandPoolTask && !principal.IsPlatformAdmin() {
+		return model.NodeUpdateTask{}, fmt.Errorf("%w: pool expansion requires platform administrator permission", ErrInvalidInput)
+	}
 	if taskType == "" {
 		return model.NodeUpdateTask{}, ErrInvalidInput
 	}
@@ -255,7 +259,7 @@ func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType stri
 		model.NodeUpdateTaskTypePruneImageCache,
 		model.NodeUpdateTaskTypeReportImageCache,
 		model.NodeUpdateTaskTypeReportLocalPV,
-		model.NodeUpdateTaskTypeDecommissionLocalPV,
+		model.NodeUpdateTaskTypeDecommissionLocalPV, storagerecovery.ExpandPoolTask,
 		model.NodeUpdateTaskTypeRepairManagedIPTables,
 		model.NodeUpdateTaskTypeRefreshDesiredState,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
@@ -399,7 +403,7 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask, now time.Time) in
 	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
 		return 3
 	case model.NodeUpdateTaskTypePruneImageCache,
-		model.NodeUpdateTaskTypeDecommissionLocalPV,
+		model.NodeUpdateTaskTypeDecommissionLocalPV, storagerecovery.ExpandPoolTask,
 		model.NodeUpdateTaskTypeRepairManagedIPTables,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
@@ -668,6 +672,8 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypeReportImageCache
 	case model.NodeUpdateTaskTypeReportLocalPV:
 		return model.NodeUpdateTaskTypeReportLocalPV
+	case storagerecovery.ExpandPoolTask:
+		return storagerecovery.ExpandPoolTask
 	case model.NodeUpdateTaskTypeDecommissionLocalPV:
 		return model.NodeUpdateTaskTypeDecommissionLocalPV
 	case model.NodeUpdateTaskTypeVerifySystemdEscape:

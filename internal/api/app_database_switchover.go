@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fugue/internal/storagerecovery"
 	"net/http"
 	"strings"
 	"time"
@@ -29,8 +30,8 @@ func (s *Server) handleGetAppDatabaseStatus(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleRecoverAppDatabase(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("app.migrate") {
-		httpx.WriteError(w, http.StatusForbidden, "missing app.write or app.migrate scope")
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform.admin is required for host storage recovery")
 		return
 	}
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
@@ -42,25 +43,14 @@ func (s *Server) handleRecoverAppDatabase(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusBadRequest, "managed postgres is not configured for this app")
 		return
 	}
-	var req struct {
+	req := struct {
 		DryRun          bool   `json:"dry_run"`
 		TargetRuntimeID string `json:"target_runtime_id"`
 		TargetNodeName  string `json:"target_node_name"`
-	}
+	}{DryRun: true}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	ops, err := s.store.ListOperationsByApp(app.TenantID, principal.IsPlatformAdmin(), app.ID)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	for _, existing := range ops {
-		if existing.Status == model.OperationStatusPending || existing.Status == model.OperationStatusRunning {
-			httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"app": sanitizeAppForAPI(app), "operation": sanitizeOperationForAPI(existing), "resumed": true})
-			return
-		}
 	}
 	targetRuntimeID := strings.TrimSpace(req.TargetRuntimeID)
 	if targetRuntimeID == "" {
@@ -77,12 +67,28 @@ func (s *Server) handleRecoverAppDatabase(w http.ResponseWriter, r *http.Request
 		pg.PrimaryNodeName = strings.TrimSpace(req.TargetNodeName)
 	}
 	desired.Postgres = &pg
-	plan := map[string]any{"action": "database-localize-resume", "target_runtime_id": targetRuntimeID, "target_node_name": strings.TrimSpace(req.TargetNodeName), "preserve_storage_size": strings.TrimSpace(pg.StorageSize), "preserve_storage_class": strings.TrimSpace(pg.StorageClassName), "checks": []string{"active operation absent", "controller reads live PVC size before apply", "CNPG readiness required"}}
+	plan := map[string]any{"action": "database-storage-recovery", "target_runtime_id": targetRuntimeID, "target_node_name": strings.TrimSpace(req.TargetNodeName), "stages": []string{"observe cluster and bound PVC identities", "preserve the largest declared storage size", "reserve host and LocalPV headroom before bounded source rescue", "verify source filesystem and writable primary", "replicate and verify destination before promotion"}, "live_preflight_pending": true}
+	ops, err := s.store.ListOperationsByApp(app.TenantID, principal.IsPlatformAdmin(), app.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	for _, existing := range ops {
+		if existing.Status != model.OperationStatusPending && existing.Status != model.OperationStatusRunning {
+			continue
+		}
+		if existing.Type != storagerecovery.OperationType || existing.TargetRuntimeID != targetRuntimeID || existing.DesiredSpec == nil || existing.DesiredSpec.Postgres == nil || existing.DesiredSpec.Postgres.PrimaryNodeName != pg.PrimaryNodeName {
+			httpx.WriteError(w, http.StatusConflict, "a conflicting app operation is active")
+			return
+		}
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"app": sanitizeAppForAPI(app), "operation": sanitizeOperationForAPI(existing), "plan": plan, "resumed": true})
+		return
+	}
 	if req.DryRun {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"app": sanitizeAppForAPI(app), "plan": plan, "dry_run": true})
 		return
 	}
-	op, err := s.store.CreateOperation(model.Operation{TenantID: app.TenantID, Type: model.OperationTypeDatabaseLocalize, RequestedByType: principal.ActorType, RequestedByID: principal.ActorID, AppID: app.ID, TargetRuntimeID: targetRuntimeID, DesiredSpec: &desired})
+	op, err := s.store.CreateOperation(model.Operation{TenantID: app.TenantID, Type: storagerecovery.OperationType, RequestedByType: principal.ActorType, RequestedByID: principal.ActorID, AppID: app.ID, TargetRuntimeID: targetRuntimeID, DesiredSpec: &desired})
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

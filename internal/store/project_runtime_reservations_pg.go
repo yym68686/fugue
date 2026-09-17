@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"sort"
 	"strings"
 	"time"
@@ -273,9 +274,9 @@ func pgValidateOperationRuntimeReservationsTx(ctx context.Context, tx *sql.Tx, p
 			return pgValidateAppSpecRuntimeReservationsTx(ctx, tx, projectID, *op.DesiredSpec)
 		}
 		return pgValidateRuntimeReservedForProjectTx(ctx, tx, projectID, op.TargetRuntimeID)
-	case model.OperationTypeFailover, model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize:
+	case model.OperationTypeFailover, model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 		runtimeIDs := []string{op.TargetRuntimeID}
-		if op.Type == model.OperationTypeDatabaseLocalize && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+		if (op.Type == model.OperationTypeDatabaseLocalize || op.Type == storagerecovery.OperationType) && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
 			runtimeIDs = append(runtimeIDs, op.DesiredSpec.Postgres.RuntimeID)
 		}
 		return pgValidateRuntimesReservedForProjectTx(ctx, tx, projectID, runtimeIDs)

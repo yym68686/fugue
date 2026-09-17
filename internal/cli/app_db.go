@@ -39,7 +39,7 @@ func (c *CLI) newAppDatabaseCommand() *cobra.Command {
 }
 
 func (c *CLI) newAppDatabaseRecoverCommand() *cobra.Command {
-	var apply bool
+	var apply, wait bool
 	var runtimeID, nodeName string
 	cmd := &cobra.Command{
 		Use:   "recover <app>",
@@ -58,6 +58,16 @@ func (c *CLI) newAppDatabaseRecoverCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if apply && wait && response.Operation != nil {
+				finalApp, finalOp, err := c.waitForSingleAppOperation(client, app.ID, *response.Operation, true)
+				if err != nil {
+					return err
+				}
+				if finalApp != nil {
+					response.App = *finalApp
+				}
+				response.Operation = finalOp
+			}
 			result := map[string]any{"app": redactAppForOutput(response.App), "plan": response.Plan, "dry_run": !apply}
 			if response.Operation != nil {
 				result["operation"] = redactOperationForOutput(*response.Operation)
@@ -68,6 +78,7 @@ func (c *CLI) newAppDatabaseRecoverCommand() *cobra.Command {
 			return c.renderResourceResult(result)
 		},
 	}
+	cmd.Flags().BoolVar(&wait, "wait", true, "Wait for the recovery operation and verified primary")
 	cmd.Flags().BoolVar(&apply, "apply", false, "Apply the guarded recovery operation; without this flag only a plan is returned")
 	cmd.Flags().StringVar(&runtimeID, "runtime-id", "", "Optional target runtime ID")
 	cmd.Flags().StringVar(&nodeName, "node", "", "Optional target Kubernetes node name")

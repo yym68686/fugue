@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"fugue/internal/storagerecovery"
 	"sort"
 	"strings"
 	"time"
@@ -970,7 +971,7 @@ func validateManagedPostgresActiveForOperation(app model.App, op model.Operation
 	case model.OperationTypeMigrate,
 		model.OperationTypeFailover,
 		model.OperationTypeDatabaseSwitchover,
-		model.OperationTypeDatabaseLocalize:
+		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
 	default:
 		return nil
 	}
