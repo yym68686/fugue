@@ -11,6 +11,11 @@ different storage class is rescued before replication. Its two-GiB rescue
 target is recorded durably. The source claim is retained, automatic expansion
 is frozen on that cluster with a resource-version precondition, and actual
 filesystem capacity plus writable SQL must converge before migration starts.
+The source check ignores unrelated destination claims that have not started.
+For Longhorn, recovery selects a ready attachment node within the target
+runtime's scheduling constraints; CSI registration alone is insufficient.
+An unstarted join Job pinned to an incompatible node is recreated after applying
+the corrected placement, using its existing PVC. The source is never deleted.
 
 File-backed OpenEBS LVM pools can grow through the authenticated node updater.
 The optional task requires updater protocol v39; only participating nodes need

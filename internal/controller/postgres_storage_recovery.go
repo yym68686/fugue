@@ -110,6 +110,14 @@ func (s *Service) executeManagedDatabaseRecoveryOperation(ctx context.Context, o
 			return err
 		}
 	}
+	targetRuntime, err := s.Store.GetRuntime(pg.RuntimeID)
+	if err != nil {
+		return err
+	}
+	pg.PrimaryNodeName, err = recoveryStorageTargetNode(ctx, client, targetRuntime, pg.StorageClassName, pg.PrimaryNodeName)
+	if err != nil {
+		return err
+	}
 	return s.executeManagedDatabaseLocalizeOperation(ctx, op, app)
 }
 
@@ -329,7 +337,7 @@ func (s *Service) waitRecoverySourceStorage(ctx context.Context, client *kubeCli
 		if err := s.ensureOperationStillActive(op.ID); err != nil {
 			return err
 		}
-		converged, detail, err := inspectManagedPostgresStorageExpansion(ctx, client, namespace, name, target)
+		converged, detail, err := inspectManagedPostgresStorageExpansion(ctx, client, namespace, name, target, primary)
 		if err != nil {
 			return err
 		}

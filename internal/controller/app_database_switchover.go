@@ -624,6 +624,11 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 			cause := fmt.Errorf("prepare localized managed postgres standby on runtime %s: %w", targetRuntimeID, err)
 			return s.rollbackAppOwnedManagedPostgresStage(ctx, op, app, currentDatabase, cause)
 		}
+		if op.Type == storagerecovery.OperationType {
+			if err := rescheduleUnstartedRecoveryJoins(ctx, client, namespace, clusterName, targetNodeName, storageTarget); err != nil {
+				return err
+			}
+		}
 		if targetNodeName != "" {
 			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID, storageTarget)
 		} else {
@@ -2577,6 +2582,7 @@ func inspectManagedPostgresStorageExpansion(
 	client *kubeClient,
 	namespace, clusterName string,
 	target managedPostgresStorageTarget,
+	claims ...string,
 ) (bool, string, error) {
 	targetSize := strings.TrimSpace(target.StorageSize)
 	targetQuantity, err := resource.ParseQuantity(targetSize)
@@ -2596,6 +2602,9 @@ func inspectManagedPostgresStorageExpansion(
 	}
 	if len(pvcNames) == 0 {
 		return false, fmt.Sprintf("waiting for postgres data PVCs for cluster %s", clusterName), nil
+	}
+	if len(claims) > 0 {
+		pvcNames = claims
 	}
 	pods, err := client.listPodsBySelector(
 		ctx,
