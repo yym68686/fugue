@@ -393,14 +393,17 @@ func (s *Server) platformConsumerTopology(ctx context.Context, principal model.P
 	if err != nil {
 		return platformcontrol.ExpectedConsumerTopology{}, err
 	}
-	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal); policyErr == nil {
-		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
-	}
-	edges = freshEdgeNodes(edges, time.Now().UTC())
 	dns, err := s.store.ListDNSNodes("")
 	if err != nil {
 		return platformcontrol.ExpectedConsumerTopology{}, err
 	}
+	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal); policyErr == nil {
+		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
+		dns = activeDNSNodesForPolicy(dns, nodePolicies)
+	}
+	edges = freshEdgeNodes(edges, time.Now().UTC())
+	// DNS process existence is distinct from health. Keep stale/unhealthy
+	// current nodes required; only authoritative node policy removes history.
 	updaters, err := s.store.ListNodeUpdaters("", true)
 	if err != nil {
 		return platformcontrol.ExpectedConsumerTopology{}, err
@@ -687,33 +690,11 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusConflict, "release set references or integrity are invalid")
 		return
 	}
-	edges, _, err := s.store.ListEdgeNodes("")
+	topology, err := s.platformConsumerTopology(r.Context(), principal)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), mustPrincipal(r)); policyErr == nil {
-		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
-	}
-	// Use the same fresh active inventory as the edge read model. Historical
-	// rows must not keep decommissioned nodes required forever.
-	edges = freshEdgeNodes(edges, time.Now().UTC())
-	dns, err := s.store.ListDNSNodes("")
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	updaters, err := s.store.ListNodeUpdaters("", true)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	runtimes, err := s.store.ListRuntimes("", true)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	topology := platformcontrol.ExpectedConsumerTopology{EdgeNodes: edges, DNSNodes: dns, NodeUpdaters: updaters, Runtimes: runtimes}
 	ids, okIDs := releaseSet.Content["artifact_ids"].([]any)
 	kinds, okKinds := releaseSet.Content["artifact_kinds"].([]any)
 	if !okIDs || !okKinds || len(ids) != len(kinds) {

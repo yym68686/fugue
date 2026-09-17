@@ -36,6 +36,20 @@ type ExpectedConsumerSetBuildRequest struct {
 // remains immutable for lineage; convergence is evaluated against the live
 // topology so decommissioned nodes do not block a release forever.
 func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet, topology ExpectedConsumerTopology) model.PlatformExpectedConsumerSet {
+	var dnsNodes []model.DNSNode
+	var aliases map[string]string
+	if containsStringFold(expectedComponentsForArtifact(set.ArtifactKind), model.PlatformConsumerComponentDNSServer) {
+		var err error
+		dnsNodes, aliases, err = physicalDNSConsumerNodes(topology.DNSNodes)
+		if err != nil {
+			// Ambiguous ownership cannot prove a required consumer topology.
+			out := set
+			out.Consumers = nil
+			out.RequiredCardinality, out.OptionalCardinality = 0, 0
+			out.RequiresConsumers = true
+			return out
+		}
+	}
 	active := map[string]bool{}
 	for _, node := range topology.EdgeNodes {
 		active[model.PlatformConsumerComponentEdgeWorker+":"+strings.TrimSpace(node.ID)] = true
@@ -43,7 +57,7 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 			active[model.PlatformConsumerComponentCaddyEdgeFront+":"+strings.TrimSpace(node.ID)] = true
 		}
 	}
-	for _, node := range topology.DNSNodes {
+	for _, node := range dnsNodes {
 		active[model.PlatformConsumerComponentDNSServer+":"+strings.TrimSpace(node.ID)] = true
 	}
 	for _, updater := range topology.NodeUpdaters {
@@ -73,6 +87,12 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 	out := set
 	out.Consumers = make([]model.PlatformExpectedConsumer, 0, len(set.Consumers))
 	for _, consumer := range set.Consumers {
+		if consumer.Component == model.PlatformConsumerComponentDNSServer {
+			if physical, exists := aliases[consumer.NodeID]; exists {
+				consumer.NodeID = physical
+				consumer.ConsumerID = model.PlatformConsumerComponentDNSServer + ":" + physical
+			}
+		}
 		if !active[consumer.ConsumerID] {
 			continue
 		}
@@ -86,6 +106,7 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 		}
 		out.Consumers = append(out.Consumers, consumer)
 	}
+	out.Consumers = deduplicateAndSortExpectedConsumers(out.Consumers)
 	out.RequiredCardinality, out.OptionalCardinality = 0, 0
 	for _, consumer := range out.Consumers {
 		if consumer.Required {
@@ -139,7 +160,11 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 				consumers = append(consumers, expectedEdgeConsumer(component, node, kind, scopeKey, generation, now))
 			}
 		case model.PlatformConsumerComponentDNSServer:
-			for _, node := range req.Topology.DNSNodes {
+			dnsNodes, _, err := physicalDNSConsumerNodes(req.Topology.DNSNodes)
+			if err != nil {
+				return model.PlatformExpectedConsumerSet{}, err
+			}
+			for _, node := range dnsNodes {
 				if !expectedDNSNodeMatchesScope(node, req.Scope) {
 					continue
 				}
@@ -402,7 +427,7 @@ func expectedEdgeConsumer(component string, node model.EdgeNode, artifactKind, s
 func expectedDNSConsumer(node model.DNSNode, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {
 	nodeID := strings.TrimSpace(node.ID)
 	failureDomain := firstNonEmptyExpected("edge-group:"+strings.TrimSpace(node.EdgeGroupID), "node:"+firstNonEmptyExpected(strings.TrimSpace(node.PhysicalNodeID), nodeID))
-	cohort := firstNonEmptyExpected(strings.TrimSpace(node.Zone), strings.TrimSpace(node.EdgeGroupID), "dns")
+	cohort := firstNonEmptyExpected(strings.TrimSpace(node.EdgeGroupID), "dns")
 	return expectedConsumer(model.PlatformConsumerComponentDNSServer, nodeID, artifactKind, scopeKey, generation, failureDomain, cohort, true, 90*time.Second, now)
 }
 

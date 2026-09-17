@@ -2733,6 +2733,7 @@ paths:
     post:
       operationId: preparePlatformReleaseSetConsumers
       summary: Prepare ReleaseSet Consumer Expectations
+      description: Builds immutable expectations from current node policy topology. DNS zone rows are owned by one physical DNS process identified by physical_node_id (or id when absent); per-zone rows do not create separate process consumers. Unknown or unhealthy existing DNS processes remain required.
       tags: [Admin]
       x-fugue-handler: handlePreparePlatformReleaseSetConsumers
       security:
@@ -2760,6 +2761,7 @@ paths:
     get:
       operationId: listPlatformConsumerConvergence
       summary: List Platform Consumer Convergence
+      description: Projects immutable expected sets onto current topology. DNS zone aliases are attributed to their physical process and duplicate expectations are collapsed; missing or unhealthy processes are not treated as successful. Empty required topology remains unknown. Full promotion uses the same projection.
       tags: [Admin]
       x-fugue-handler: handleListPlatformConsumerConvergence
       security:
