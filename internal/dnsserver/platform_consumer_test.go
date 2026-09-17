@@ -24,8 +24,27 @@ import (
 )
 
 func TestDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T) {
+	for _, versioned := range []bool{false, true} {
+		name := "legacy policy"
+		if versioned {
+			name = "versioned exclusion policy"
+		}
+		t.Run(name, func(t *testing.T) { testDNSPlatformShadowPreservesServingAndDurableCursor(t, versioned) })
+	}
+}
+
+func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, versioned bool) {
 	const key = "synthetic-dns-platform-signing-key"
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent-1", Scope: "global", DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", Type: "A", Values: []string{"192.0.2.99"}, TTL: 60, Status: "active"}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}})
+	request := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent-1", Scope: "global", DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", Type: "A", Values: []string{"192.0.2.99"}, TTL: 60, Status: "active"}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}}
+	if versioned {
+		captured := time.Now().UTC()
+		expires := captured.Add(-time.Hour)
+		request.Intent.Routes = []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", Enabled: true, UpstreamURL: "http://origin"}}
+		request.Policy.RouteConstraints = []platformconfig.RoutePolicyConstraint{{ID: "route-policy", Hostname: "app.example.test", TenantID: "tenant", AppID: "app", MatchScope: "tenant_hostname", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled,
+			ExcludedEdgeGroupIDs: []string{"edge-group-excluded"}, ExclusionOwnerDigest: "sha256:" + strings.Repeat("a", 64), ExclusionGeneration: 2, ExclusionFence: "fence-2", ExclusionExpiresAt: &expires}}
+		request.RuntimeSnapshot.CapturedAt = &captured
+	}
+	compiled, err := platformconfig.Compile(request)
 	if err != nil {
 		t.Fatal(err)
 	}
