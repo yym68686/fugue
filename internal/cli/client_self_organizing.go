@@ -567,6 +567,36 @@ func (c *Client) ListPlatformExpectedConsumerSets(filter model.PlatformExpectedC
 	return response.ExpectedConsumerSets, nil
 }
 
+func (c *Client) ListPlatformConsumerConvergence(filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformConsumerConvergenceStatus, error) {
+	values := url.Values{}
+	if strings.TrimSpace(filter.ReleaseSetID) != "" {
+		values.Set("release_set_id", strings.TrimSpace(filter.ReleaseSetID))
+	}
+	if strings.TrimSpace(filter.ArtifactReleaseID) != "" {
+		values.Set("artifact_release_id", strings.TrimSpace(filter.ArtifactReleaseID))
+	}
+	if strings.TrimSpace(filter.ArtifactKind) != "" {
+		values.Set("artifact_kind", strings.TrimSpace(filter.ArtifactKind))
+	}
+	if strings.TrimSpace(filter.ScopeKey) != "" {
+		values.Set("scope_key", strings.TrimSpace(filter.ScopeKey))
+	}
+	if filter.Limit > 0 {
+		values.Set("limit", strconv.Itoa(filter.Limit))
+	}
+	path := "/v1/admin/platform-state/convergence"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response struct {
+		Convergence []model.PlatformConsumerConvergenceStatus `json:"convergence"`
+	}
+	if err := c.doJSON(http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Convergence, nil
+}
+
 func (c *Client) GetPlatformArtifactLKG(id string) (*model.PlatformLKGSnapshot, error) {
 	var response platformArtifactLKGEnvelope
 	if err := c.doJSON(http.MethodGet, "/v1/admin/artifacts/"+url.PathEscape(strings.TrimSpace(id))+"/lkg", nil, &response); err != nil {

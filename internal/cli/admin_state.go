@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"fugue/internal/model"
-	"fugue/internal/platformcontrol"
 	"github.com/spf13/cobra"
 	"time"
 )
@@ -40,20 +39,22 @@ func (c *CLI) loadArtifactState(client *Client, id, channel string) (artifactSta
 	} else {
 		result.Consumers = consumers
 	}
-	filter := model.PlatformExpectedConsumerSetFilter{ArtifactKind: artifact.ArtifactKind, ScopeKey: artifact.ScopeKey, Limit: 100}
-	if current.Release != nil {
-		filter.ArtifactReleaseID = current.Release.ID
+	filter := model.PlatformExpectedConsumerSetFilter{ArtifactKind: artifact.ArtifactKind, ScopeKey: artifact.ScopeKey, Limit: 200}
+	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+		filter.ReleaseSetID, filter.ArtifactKind = artifact.ID, ""
+		if current.Release != nil {
+			filter.ArtifactReleaseID = current.Release.ID
+		}
 	}
-	sets, err := client.ListPlatformExpectedConsumerSets(filter)
+	assessments, err := client.ListPlatformConsumerConvergence(filter)
 	if err != nil {
-		result.MissingEvidence = append(result.MissingEvidence, "expected_consumer_sets")
+		result.MissingEvidence = append(result.MissingEvidence, "authoritative_consumer_convergence")
 	} else {
 		result.ConsumersConverged = true
-		for _, set := range sets {
-			if set.ExpectedGeneration != artifact.Generation {
+		for _, assessment := range assessments {
+			if artifact.ArtifactKind != model.PlatformArtifactKindReleaseSet && assessment.ExpectedGeneration != artifact.Generation {
 				continue
 			}
-			assessment := platformcontrol.EvaluateConsumerConvergence(set, consumers, result.ObservedAt)
 			result.Convergence = append(result.Convergence, assessment)
 			if !assessment.Pass {
 				result.ConsumersConverged = false
@@ -62,6 +63,24 @@ func (c *CLI) loadArtifactState(client *Client, id, channel string) (artifactSta
 		if len(result.Convergence) == 0 {
 			result.ConsumersConverged = false
 			result.MissingEvidence = append(result.MissingEvidence, "matching_expected_consumer_set")
+		}
+		if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+			kinds, ok := artifact.Content["artifact_kinds"].([]any)
+			observed := map[string]bool{}
+			for _, assessment := range result.Convergence {
+				observed[assessment.ArtifactKind] = true
+			}
+			if !ok || len(kinds) == 0 {
+				result.ConsumersConverged = false
+				result.MissingEvidence = append(result.MissingEvidence, "release_set_members")
+			}
+			for _, raw := range kinds {
+				kind, ok := raw.(string)
+				if !ok || !observed[kind] {
+					result.ConsumersConverged = false
+					result.MissingEvidence = append(result.MissingEvidence, "release_set_member_convergence")
+				}
+			}
 		}
 	}
 	if current.Artifact != nil && current.Release != nil && current.LKG != nil {

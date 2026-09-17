@@ -230,8 +230,12 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 	}, nil
 }
 
-func EvaluateConsumerConvergence(set model.PlatformExpectedConsumerSet, observed []model.PlatformConsumerInstance, now time.Time) model.PlatformConsumerConvergenceStatus {
+func EvaluateConsumerConvergence(set model.PlatformExpectedConsumerSet, observed []model.PlatformConsumerInstance, now time.Time, bindings ...*ConsumerReleaseBinding) model.PlatformConsumerConvergenceStatus {
 	set = ProjectExpectedConsumerOwners(set)
+	var binding *ConsumerReleaseBinding
+	if len(bindings) == 1 {
+		binding = bindings[0]
+	}
 	now = now.UTC()
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -248,21 +252,29 @@ func EvaluateConsumerConvergence(set model.PlatformExpectedConsumerSet, observed
 		EvaluatedAt:           now,
 	}
 
+	expectedIDs := make(map[string]struct{}, len(set.Consumers))
+	for _, expected := range set.Consumers {
+		expectedIDs[expected.ConsumerID] = struct{}{}
+	}
 	observedByID := make(map[string]model.PlatformConsumerInstance, len(observed))
 	for _, consumer := range observed {
 		id := strings.TrimSpace(consumer.ConsumerID)
 		if id == "" {
 			continue
 		}
+		if set.ReleaseSetID != "" && consumer.ExpectedConsumerSetID != set.ID {
+			if _, requiredIdentity := expectedIDs[id]; !requiredIdentity {
+				continue
+			}
+		}
 		if previous, ok := observedByID[id]; !ok || consumer.LastHeartbeatAt.After(previous.LastHeartbeatAt) {
 			observedByID[id] = consumer
 		}
 	}
-	expectedIDs := make(map[string]struct{}, len(set.Consumers))
 	for _, expected := range set.Consumers {
-		expectedIDs[expected.ConsumerID] = struct{}{}
 		consumer, found := observedByID[expected.ConsumerID]
 		assessment := assessExpectedConsumer(expected, consumer, found, now)
+		assessConsumerReleaseBinding(set, consumer, binding, &assessment)
 		status.Assessments = append(status.Assessments, assessment)
 		if expected.Required && found {
 			status.RequiredObserved++

@@ -54,8 +54,10 @@ func TestConsumerMembershipRetainsSilentEdgesAndBlocksPartialConvergence(t *test
 	if len(body.Convergence) != 1 {
 		t.Fatal(body)
 	}
+	// This fixture has no real artifact/release record, so its observed
+	// heartbeat remains unknown under the authoritative binding gate.
 	status := body.Convergence[0]
-	if status.RequiredExpected != 2 || status.RequiredObserved != 1 || status.RequiredPassing != 1 || status.Pass {
+	if status.RequiredExpected != 2 || status.RequiredObserved != 1 || status.RequiredPassing != 0 || status.Pass {
 		t.Fatal("silent edge disappeared from required membership", status)
 	}
 	gate := server.validateReleaseSetConvergence(model.PlatformArtifact{ID: set.ReleaseSetID})

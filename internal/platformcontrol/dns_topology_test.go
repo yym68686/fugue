@@ -44,16 +44,17 @@ func TestDNSConsumerTopologyUsesPhysicalProcessWithoutInventingHealth(t *testing
 	if string(before) != string(after) || projected.ID != legacy.ID || projected.TopologyRevision != legacy.TopologyRevision || projected.RequiredCardinality != 2 {
 		t.Fatal("live projection changed immutable lineage or failed to attribute aliases")
 	}
-	observed := []model.PlatformConsumerInstance{passingConsumer(set.Consumers[0], now), passingConsumer(set.Consumers[1], now)}
-	if status := EvaluateConsumerConvergence(projected, observed, now); !status.Pass || status.RequiredPassing != 2 {
+	binding := &ConsumerReleaseBinding{ReleaseSetID: set.ReleaseSetID, ArtifactReleaseID: set.ArtifactReleaseID, ArtifactKind: set.ArtifactKind, ScopeKey: set.ScopeKey, Generation: set.ExpectedGeneration, FencingToken: 4, GenerationSequence: 7}
+	observed := []model.PlatformConsumerInstance{boundPassingConsumer(set, set.Consumers[0], now), boundPassingConsumer(set, set.Consumers[1], now)}
+	if status := EvaluateConsumerConvergence(projected, observed, now, binding); !status.Pass || status.RequiredPassing != 2 {
 		t.Fatal("physical process evidence did not satisfy owned zones", status)
 	}
 	observed[0].ConsumerID, observed[0].NodeID = "dns-server:zone-two", "zone-two"
-	if status := EvaluateConsumerConvergence(projected, observed, now); status.Pass {
+	if status := EvaluateConsumerConvergence(projected, observed, now, binding); status.Pass {
 		t.Fatal("a zone alias fabricated physical process health")
 	}
-	observed[0] = passingConsumer(set.Consumers[0], now.Add(-5*time.Minute))
-	if status := EvaluateConsumerConvergence(projected, observed, now); status.Pass {
+	observed[0] = boundPassingConsumer(set, set.Consumers[0], now.Add(-5*time.Minute))
+	if status := EvaluateConsumerConvergence(projected, observed, now, binding); status.Pass {
 		t.Fatal("stale physical process heartbeat accepted")
 	}
 	empty := ProjectExpectedConsumerSetToTopology(legacy, ExpectedConsumerTopology{})

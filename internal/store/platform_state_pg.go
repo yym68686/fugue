@@ -1472,6 +1472,7 @@ FOR SHARE`, expectedSetID))
 
 	var previous *platformcontrol.PlatformConsumerHeartbeatCursor
 	var existing *model.PlatformConsumerInstance
+	verifiedLaneTransition := false
 	candidate, err := scanPlatformConsumerInstance(tx.QueryRowContext(ctx, `
 SELECT id, consumer_id, credential_id, token_id, component, node_id, artifact_kind, scope_key,
 	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
@@ -1491,6 +1492,29 @@ FOR UPDATE`, bound.ConsumerID, bound.ArtifactKind, bound.ScopeKey))
 		if err != nil {
 			return model.PlatformConsumerInstance{}, err
 		}
+		if previous != nil && bound.FencingToken < previous.FencingToken {
+			nextRelease, readErr := pgGetPlatformArtifactRelease(ctx, tx, expectedSet.ArtifactReleaseID, false)
+			if readErr != nil {
+				return model.PlatformConsumerInstance{}, readErr
+			}
+			lane, readErr := pgGetPlatformReleaseLaneForUpdate(ctx, tx, nextRelease.LaneKey)
+			if readErr != nil {
+				return model.PlatformConsumerInstance{}, readErr
+			}
+			oldSet, readErr := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, `SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json, expected_generation, topology_revision, revision, requires_consumers, required_cardinality, optional_cardinality, heartbeat_deadline, convergence_deadline, consumers_json, created_at, updated_at FROM fugue_platform_expected_consumer_sets WHERE id=$1`, candidate.ExpectedConsumerSetID))
+			if readErr != nil {
+				return model.PlatformConsumerInstance{}, mapDBErr(readErr)
+			}
+			oldRelease, readErr := pgGetPlatformArtifactRelease(ctx, tx, oldSet.ArtifactReleaseID, false)
+			if readErr != nil {
+				return model.PlatformConsumerInstance{}, readErr
+			}
+			previous, err = consumerCursorForLaneTransition(candidate, previous, oldSet, expectedSet, oldRelease, nextRelease, lane, bound.FencingToken)
+			if err != nil {
+				return model.PlatformConsumerInstance{}, err
+			}
+			verifiedLaneTransition = true
+		}
 	}
 
 	consumer, _, err := platformcontrol.VerifyTrustedPlatformConsumerHeartbeat(
@@ -1503,7 +1527,7 @@ FOR UPDATE`, bound.ConsumerID, bound.ArtifactKind, bound.ScopeKey))
 	if existing != nil {
 		consumer.ID = existing.ID
 	}
-	out, err := pgUpsertTrustedPlatformConsumerHeartbeat(ctx, tx, consumer)
+	out, err := pgUpsertTrustedPlatformConsumerHeartbeat(ctx, tx, consumer, verifiedLaneTransition)
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
@@ -1577,10 +1601,12 @@ func pgUpsertTrustedPlatformConsumerHeartbeat(
 	ctx context.Context,
 	tx *sql.Tx,
 	consumer model.PlatformConsumerInstance,
+	verifiedLaneTransitions ...bool,
 ) (model.PlatformConsumerInstance, error) {
 	if !consumer.IdentityVerified {
 		return model.PlatformConsumerInstance{}, ErrInvalidInput
 	}
+	verifiedLaneTransition := len(verifiedLaneTransitions) == 1 && verifiedLaneTransitions[0]
 	supportedKindsJSON, err := marshalJSON(consumer.SupportedKinds)
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
@@ -1642,11 +1668,24 @@ WHERE NOT fugue_platform_consumer_instances.identity_verified
 		AND EXCLUDED.issued_at >= fugue_platform_consumer_instances.issued_at
 		AND EXCLUDED.nonce <> fugue_platform_consumer_instances.nonce
 		AND EXCLUDED.generation_sequence >= fugue_platform_consumer_instances.generation_sequence
-		AND EXCLUDED.fencing_token >= fugue_platform_consumer_instances.fencing_token
+		AND (EXCLUDED.fencing_token >= fugue_platform_consumer_instances.fencing_token OR $33)
 		AND (
 			EXCLUDED.expected_consumer_set_id = fugue_platform_consumer_instances.expected_consumer_set_id
 			OR EXCLUDED.generation_sequence > fugue_platform_consumer_instances.generation_sequence
 			OR EXCLUDED.fencing_token > fugue_platform_consumer_instances.fencing_token
+			OR $33
+			OR EXISTS (
+				SELECT 1 FROM fugue_platform_expected_consumer_sets prior_set
+				JOIN fugue_platform_expected_consumer_sets next_set ON next_set.id = EXCLUDED.expected_consumer_set_id
+				WHERE prior_set.id = fugue_platform_consumer_instances.expected_consumer_set_id
+				AND next_set.release_set_id = prior_set.release_set_id
+				AND next_set.artifact_release_id = prior_set.artifact_release_id
+				AND next_set.artifact_release_id <> ''
+				AND next_set.artifact_kind = prior_set.artifact_kind
+				AND next_set.scope_key = prior_set.scope_key
+				AND next_set.expected_generation = prior_set.expected_generation
+				AND next_set.revision > prior_set.revision
+			)
 		)
 	)
 RETURNING id, consumer_id, credential_id, token_id, component, node_id, artifact_kind, scope_key,
@@ -1660,7 +1699,7 @@ RETURNING id, consumer_id, credential_id, token_id, component, node_id, artifact
 		consumer.ProtocolVersion, consumer.SchemaVersion, compatibilityCapabilitiesJSON,
 		consumer.Sequence, consumer.IssuedAt, consumer.Nonce, consumer.GenerationSequence, consumer.EvidenceHash, consumer.IdentityVerified,
 		consumer.DesiredGeneration, consumer.ActualGeneration, consumer.CandidateGeneration, consumer.LKGGeneration, consumer.ApplyStatus, consumer.ProbeStatus,
-		consumer.ServingLKG, consumer.LKGExpired, consumer.LastError, consumer.LastHeartbeatAt, consumer.UpdatedAt))
+		consumer.ServingLKG, consumer.LKGExpired, consumer.LastError, consumer.LastHeartbeatAt, consumer.UpdatedAt, verifiedLaneTransition))
 	if err != nil {
 		if mapDBErr(err) == ErrNotFound {
 			return model.PlatformConsumerInstance{}, ErrConflict

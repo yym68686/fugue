@@ -1782,6 +1782,12 @@ func acceptTrustedPlatformConsumerHeartbeatInState(
 		if err != nil {
 			return model.PlatformConsumerInstance{}, err
 		}
+		if cursor != nil && bound.FencingToken < cursor.FencingToken {
+			cursor, err = consumerLaneTransitionInState(state, candidate, cursor, expectedSet, bound.FencingToken)
+			if err != nil {
+				return model.PlatformConsumerInstance{}, err
+			}
+		}
 		break
 	}
 	consumer, _, err := platformcontrol.VerifyTrustedPlatformConsumerHeartbeat(

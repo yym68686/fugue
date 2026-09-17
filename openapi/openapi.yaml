@@ -61,6 +61,14 @@ x-fugue-custom-domain-tls-continuity:
     not-yet-valid shared certificate cannot promote TLS readiness through repair
     or consumer reports. Diagnosis distinguishes certificate presence from usable
     certificate evidence and does not count historical ready status as validity.
+x-fugue-consumer-release-evidence:
+  semantics: >-
+    Release-bound trusted heartbeats are accepted only for an active exact
+    release, its child artifact sequence and latest expected-set revision.
+    Incorrect fences or sequences are rejected before advancing the persisted
+    cursor. Legacy expectations without an artifact release reference cannot
+    establish ReleaseSet convergence. Fences are lane-scoped; publication time
+    orders active releases across channels, never a cross-lane fence comparison.
 x-fugue-edge-route-probe:
   version: 1
   transport: HTTPS to an inventory candidate IP with the desired hostname as TLS SNI and HTTP Host
@@ -2763,7 +2771,7 @@ paths:
     post:
       operationId: preparePlatformReleaseSetConsumers
       summary: Prepare ReleaseSet Consumer Expectations
-      description: Builds immutable expectations from current node policy topology. Edge and DNS membership is independent of heartbeat freshness; missing or stale heartbeats cannot remove an existing required consumer. DNS zone rows are owned by one physical DNS process identified by physical_node_id (or id when absent); per-zone rows do not create separate process consumers. Unknown or unhealthy existing processes remain required.
+      description: Builds immutable expectations for an active ReleaseSet release from authoritative node policy topology. Same release and topology is idempotent; a new release authority or changed topology creates increasing revisions without overwriting historical sets. Edge and DNS membership is independent of heartbeat freshness; missing or stale heartbeats cannot remove an existing required consumer. DNS zone rows belong to one physical process. Incomplete preparation never satisfies full promotion.
       tags: [Admin]
       x-fugue-handler: handlePreparePlatformReleaseSetConsumers
       security:
@@ -2791,7 +2799,7 @@ paths:
     get:
       operationId: listPlatformConsumerConvergence
       summary: List Platform Consumer Convergence
-      description: Projects immutable expected sets onto current authoritative node policy topology. Heartbeat freshness is assessed after membership, so a silent or stale Edge or DNS process remains required and cannot make a partial cohort pass. DNS zone aliases are attributed to their physical process and duplicate expectations are collapsed; missing or unhealthy processes are not treated as successful. Empty required topology remains unknown. Full promotion uses the same projection.
+      description: Projects immutable expected sets onto current authoritative node policy topology. Heartbeat freshness is assessed after membership, so a silent or stale Edge or DNS process remains required. ReleaseSet assessments require verified consumer identity and exact expected-set, ReleaseSet, active release fence and child artifact generation sequence; missing binding context is unknown and old or unverified receipts cannot pass. DNS zone aliases belong to one physical process. Full promotion selects the newest active release publication for the target ReleaseSet, requires the latest expected set for every referenced traffic artifact, and applies the same assessment. Historical expected sets remain available without granting current promotion authority. CLI state queries use these server assessments.
       tags: [Admin]
       x-fugue-handler: handleListPlatformConsumerConvergence
       security:

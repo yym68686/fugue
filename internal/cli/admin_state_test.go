@@ -21,8 +21,8 @@ func TestArtifactStateDoesNotTreatPublishedAsVerified(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"artifact": artifact, "release": model.PlatformArtifactRelease{ID: "release_test", ArtifactID: artifact.ID, Status: "active", VerificationState: "serving_unverified"}})
 		case "/v1/admin/artifacts/artifact_test/consumers":
 			fmt.Fprint(w, `{"consumers":[]}`)
-		case "/v1/admin/expected-consumer-sets":
-			fmt.Fprint(w, `{"expected_consumer_sets":[]}`)
+		case "/v1/admin/platform-state/convergence":
+			fmt.Fprint(w, `{"convergence":[]}`)
 		default:
 			t.Errorf("unexpected %s", r.URL.Path)
 		}
@@ -51,8 +51,8 @@ func TestArtifactWaitDeadlineNeverPublishesOrVerifies(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/admin/artifacts/artifact_test":
 			fmt.Fprint(w, `{"artifact":{"id":"artifact_test","artifact_kind":"edge_route_bundle","scope_key":"global","generation":"generation_test"}}`)
-		case "/v1/admin/expected-consumer-sets":
-			fmt.Fprint(w, `{"expected_consumer_sets":[]}`)
+		case "/v1/admin/platform-state/convergence":
+			fmt.Fprint(w, `{"convergence":[]}`)
 		case "/v1/admin/artifacts/artifact_test/consumers":
 			fmt.Fprint(w, `{"consumers":[]}`)
 		default:
@@ -72,5 +72,40 @@ func TestArtifactWaitDeadlineNeverPublishesOrVerifies(t *testing.T) {
 	}
 	if result.VerifiedLKG {
 		t.Fatal("false verification")
+	}
+}
+
+func TestCLIUsesAuthoritativeConvergenceAndRequiresAllReleaseMembers(t *testing.T) {
+	artifact := model.PlatformArtifact{ID: "release-set", ArtifactKind: model.PlatformArtifactKindReleaseSet, ScopeKey: "global", Generation: "generation", Content: map[string]any{"artifact_kinds": []any{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatal("state inspection mutated")
+		}
+		switch r.URL.Path {
+		case "/v1/admin/artifacts/release-set":
+			json.NewEncoder(w).Encode(map[string]any{"artifact": artifact})
+		case "/v1/platform-state/artifacts/release_set":
+			json.NewEncoder(w).Encode(map[string]any{"artifact": artifact, "release": model.PlatformArtifactRelease{ID: "current-release", ArtifactID: artifact.ID, Status: "active"}})
+		case "/v1/admin/artifacts/release-set/consumers":
+			fmt.Fprint(w, `{"consumers":[]}`)
+		case "/v1/admin/platform-state/convergence":
+			if r.URL.Query().Get("release_set_id") != artifact.ID || r.URL.Query().Get("artifact_release_id") != "current-release" || r.URL.Query().Get("artifact_kind") != "" {
+				t.Fatal("CLI did not bind release query")
+			}
+			json.NewEncoder(w).Encode(map[string]any{"convergence": []model.PlatformConsumerConvergenceStatus{{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, Pass: true}}})
+		default:
+			t.Errorf("unexpected local-evaluation read %s", r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	client, _ := newClientWithOptions(srv.URL, "test", clientOptions{RequireToken: true})
+	c := newCLI(&bytes.Buffer{}, &bytes.Buffer{})
+	view, err := c.loadArtifactState(client, artifact.ID, "shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ConsumersConverged || len(view.Convergence) != 1 || len(view.MissingEvidence) == 0 {
+		t.Fatal("partial authoritative assessments became full convergence", view)
 	}
 }
