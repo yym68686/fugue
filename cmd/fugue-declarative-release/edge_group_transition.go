@@ -64,6 +64,8 @@ var (
 	errEdgeCandidateStageSequenceConflict = errors.New("stage edge Worker candidate: HTTP 409 (sequence_conflict)")
 	errEdgeCandidateStageTransient        = errors.New("stage edge Worker candidate: transient transport failure")
 	errEdgeInventoryHeartbeatUnavailable  = errors.New("edge inventory heartbeat is temporarily unavailable")
+	errEdgeCandidateCommitted             = errors.New("exact staged code authority is already committed")
+	errEdgeCandidateConfigurationAdvanced = errors.New("staged Worker candidate was superseded by a healthy configuration publication")
 )
 
 type edgeServingAuthorityWitness = edgecontrol.GroupServingAuthorityWitness
@@ -181,7 +183,7 @@ type edgeGroupTransitionRuntime interface {
 	StageCandidate(context.Context, edgeGroupState, string, declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error)
 	StageStandby(context.Context, edgeGroupState, string, declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error)
 	DeclaredTarget(string) (declarativerelease.TargetIdentity, error)
-	Roll(context.Context, string, declarativerelease.TargetIdentity, bool, bool) (map[string]edgeGroupPod, error)
+	Roll(context.Context, string, declarativerelease.TargetIdentity, bool, bool, *edgeCandidateStageReceipt) (map[string]edgeGroupPod, error)
 	WaitCandidateWorkerAuthority(context.Context, string, declarativerelease.TargetIdentity, edgeCandidateStageReceipt) (map[string]edgeGroupPod, error)
 	SelectCASExecutor(context.Context, ...edgeGroupPod) (edgeGroupPod, error)
 	ReadActivation(context.Context, edgeGroupPod) (edgeActivationState, bool, error)
@@ -411,11 +413,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	if err := runtime.ApplySharedResources(ctx); err != nil {
 		return fmt.Errorf("apply shared edge group resources before candidate staging: %w", err)
 	}
-	stage, candidatePods, err := stageEdgeGroupCandidate(ctx, runtime, release, target, plan)
-	if err != nil {
-		return err
-	}
-	frontPods, frontHealth, err := commitEdgeGroupAuthority(ctx, runtime, release, transition, target, plan, stage)
+	candidatePods, frontPods, frontHealth, err := stageAndCommitEdgeGroupAuthority(ctx, runtime, release, transition, target, plan)
 	if err != nil {
 		return err
 	}
@@ -427,6 +425,59 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	}
 	standbyConverged := repairEdgeGroupStandby(ctx, runtime, plan, serving)
 	return verifyEdgeGroupTransition(ctx, runtime, transition, target, plan, standbyConverged)
+}
+
+// A configuration publication can retire the candidate while code is rolling.
+// Restage only that typed event and only while the original traffic grant is
+// unchanged. Each attempt obtains a new signed candidate and independent canary.
+func stageAndCommitEdgeGroupAuthority(ctx context.Context, runtime edgeGroupTransitionRuntime, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity, plan edgeGroupABPlan) (map[string]edgeGroupPod, map[string]edgeGroupPod, map[string]edgeFrontHealth, error) {
+	for attempt := 0; attempt < edgeCandidateStageAttempts; attempt++ {
+		stage, candidatePods, err := stageEdgeGroupCandidate(ctx, runtime, release, target, plan)
+		if err == nil {
+			var fronts map[string]edgeGroupPod
+			var health map[string]edgeFrontHealth
+			fronts, health, err = commitEdgeGroupAuthority(ctx, runtime, release, transition, target, plan, stage)
+			if err == nil {
+				return candidatePods, fronts, health, nil
+			}
+		}
+		if !errors.Is(err, errEdgeCandidateConfigurationAdvanced) || attempt+1 == edgeCandidateStageAttempts || ctx.Err() != nil {
+			return nil, nil, nil, err
+		}
+		observed, snapshotErr := runtime.Snapshot(ctx)
+		if snapshotErr != nil || !edgeRestagingPreservesTraffic(plan.before, observed, transition) {
+			return nil, nil, nil, errors.Join(err, errors.New("configuration restaging cannot prove the unchanged active code authority"), snapshotErr)
+		}
+		plan.before = observed
+	}
+	return nil, nil, nil, errEdgeCandidateConfigurationAdvanced
+}
+
+func edgeRestagingPreservesTraffic(before, observed edgeGroupState, transition declarativerelease.EdgeGroupABTransition) bool {
+	a, b := before.FrontActivation, observed.FrontActivation
+	if a == nil || b == nil || a.Schema != edgeActivationStateSchema || b.Schema != a.Schema || a.Generation == 0 ||
+		a.Authority != edgeActivationAuthority || !edgeSourceSHAPattern.MatchString(a.WorkerSourceCommit) || !edgePromotionDigestPattern.MatchString(a.WorkerImageDigest) ||
+		a.GroupID != transition.GroupID || a.GroupID != b.GroupID ||
+		before.ActiveSlot != observed.ActiveSlot || b.ActiveSlot != before.ActiveSlot ||
+		a.Generation != b.Generation || a.ActiveSlot != b.ActiveSlot || a.BundleGeneration != b.BundleGeneration ||
+		a.WorkerSourceCommit != b.WorkerSourceCommit || a.WorkerImageDigest != b.WorkerImageDigest || a.Authority != b.Authority ||
+		!sameEdgeNodes(before.Front, observed.Front) || len(observed.Front) != transition.ExpectedNodes ||
+		validateActiveEdgeGroupAuthority(observed, transition) != nil {
+		return false
+	}
+	oldWorkers, newWorkers := edgeWorkerPods(before, before.ActiveSlot), edgeWorkerPods(observed, observed.ActiveSlot)
+	if !sameEdgeNodes(oldWorkers, newWorkers) || len(newWorkers) != transition.ExpectedNodes {
+		return false
+	}
+	for node, worker := range newWorkers {
+		prior := oldWorkers[node]
+		digest, err := immutableDigestFromRef(worker.ImageRef)
+		if err != nil || !worker.Ready || worker.RestartCount != 0 || worker.SourceCommit != prior.SourceCommit || worker.ImageRef != prior.ImageRef ||
+			worker.SourceCommit != a.WorkerSourceCommit || digest != a.WorkerImageDigest {
+			return false
+		}
+	}
+	return true
 }
 
 func executeEdgeGroupLKGRestore(ctx context.Context, runtime edgeGroupTransitionRuntime, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity, plan edgeGroupABPlan) error {
@@ -441,7 +492,7 @@ func executeEdgeGroupLKGRestore(ctx context.Context, runtime edgeGroupTransition
 		if err != nil {
 			return err
 		}
-		if _, err := runtime.Roll(ctx, name, declared, name != transition.FrontName, true); err != nil {
+		if _, err := runtime.Roll(ctx, name, declared, name != transition.FrontName, true, nil); err != nil {
 			return fmt.Errorf("restore exact edge LKG workload %s: %w", name, err)
 		}
 	}
@@ -462,7 +513,7 @@ func stageEdgeGroupCandidate(ctx context.Context, runtime edgeGroupTransitionRun
 	}
 	// A superseding recovery candidate may prove its immutable bundle before it
 	// owns group authority; the current publication can remain degraded here.
-	candidatePods, err := runtime.Roll(ctx, plan.inactiveName, target, release.SupersedesFailedConfigSHA == "", release.SupersedesFailedConfigSHA != "")
+	candidatePods, err := runtime.Roll(ctx, plan.inactiveName, target, release.SupersedesFailedConfigSHA == "", release.SupersedesFailedConfigSHA != "", &stage)
 	if err != nil {
 		return edgeCandidateStageReceipt{}, nil, fmt.Errorf("roll inactive edge slot %s: %w", plan.inactiveSlot, err)
 	}
@@ -480,7 +531,7 @@ func commitEdgeGroupAuthority(ctx context.Context, runtime edgeGroupTransitionRu
 	if release.SupersedesFailedConfigSHA != "" && edgeFrontNeedsCodeRecovery(plan.before, plan.frontTarget) {
 		frontRecoveryErr := runtime.ApplyCandidateResources(ctx, transition.FrontName)
 		if frontRecoveryErr == nil {
-			frontPods, frontRecoveryErr = runtime.Roll(ctx, transition.FrontName, plan.frontTarget, false, true)
+			frontPods, frontRecoveryErr = runtime.Roll(ctx, transition.FrontName, plan.frontTarget, false, true, nil)
 		}
 		if frontRecoveryErr != nil {
 			// A concurrently committed Guardian transaction is authoritative. Do
@@ -508,7 +559,7 @@ func commitEdgeGroupAuthority(ctx context.Context, runtime edgeGroupTransitionRu
 		return nil, nil, fmt.Errorf("apply Front candidate after Guardian authority switch: %w", err)
 	}
 	if !frontRecovered {
-		frontPods, err = runtime.Roll(ctx, transition.FrontName, plan.frontTarget, true, release.SupersedesFailedConfigSHA != "")
+		frontPods, err = runtime.Roll(ctx, transition.FrontName, plan.frontTarget, true, release.SupersedesFailedConfigSHA != "", nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("roll edge front after Guardian authority switch: %w", err)
 		}
@@ -542,7 +593,7 @@ func repairEdgeGroupStandby(ctx context.Context, runtime edgeGroupTransitionRunt
 			standby.WorkerSourceSHA == plan.activeTarget.ConfigSHA && standby.WorkerImageDigest == previousDigest &&
 			!standby.AllowDegradedPrevious && standby.StandbyOnly && !standby.OrdinaryTrafficMutation
 		if receiptValid && runtime.ApplyCandidateResources(ctx, plan.activeName) == nil {
-			_, standbyErr = runtime.Roll(ctx, plan.activeName, plan.activeTarget, true, true)
+			_, standbyErr = runtime.Roll(ctx, plan.activeName, plan.activeTarget, true, true, nil)
 			standbyConverged = standbyErr == nil
 		}
 	}
@@ -1675,8 +1726,28 @@ func zeroEdgeCandidateSecret(value []byte) {
 	}
 }
 
-func (runtime *kubectlEdgeGroupRuntime) Roll(ctx context.Context, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool) (map[string]edgeGroupPod, error) {
-	return runtime.cluster.rollEdgeDaemonSetTarget(ctx, runtime.client, runtime.release, runtime.transition, name, target, requireGroupAuthority, replaceUnready)
+func (runtime *kubectlEdgeGroupRuntime) Roll(ctx context.Context, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool, stage *edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
+	var progress func(context.Context) error
+	if stage != nil {
+		progress = func(ctx context.Context) error {
+			current, _, err := runtime.readCurrentAuthority(ctx)
+			if err != nil || current.Validate() != nil || current.GroupID != stage.GroupID {
+				return nil
+			}
+			if edgeCurrentAuthorityMatchesCandidate(current, *stage) {
+				return errEdgeCandidateCommitted
+			}
+			if string(current.CurrentWorkerSlot) == stage.CurrentWorkerSlot && runtime.candidateConfigurationAdvanced(ctx, *stage) {
+				return errEdgeCandidateConfigurationAdvanced
+			}
+			return nil
+		}
+	}
+	pods, err := runtime.cluster.rollEdgeDaemonSetTarget(ctx, runtime.client, runtime.release, runtime.transition, name, target, requireGroupAuthority, replaceUnready, progress)
+	if stage != nil && errors.Is(err, errEdgeCandidateCommitted) {
+		return runtime.WaitCandidateWorkerAuthority(ctx, name, target, *stage)
+	}
+	return pods, err
 }
 
 func (runtime *kubectlEdgeGroupRuntime) SelectCASExecutor(ctx context.Context, candidates ...edgeGroupPod) (edgeGroupPod, error) {
@@ -1735,6 +1806,9 @@ func (runtime *kubectlEdgeGroupRuntime) WaitCurrentAuthority(ctx context.Context
 		if err == nil && edgeCurrentAuthorityMatchesCandidate(current, staged) {
 			return nil
 		}
+		if err == nil && current.Validate() == nil && current.GroupID == staged.GroupID && string(current.CurrentWorkerSlot) == staged.CurrentWorkerSlot && runtime.candidateConfigurationAdvanced(ctx, staged) {
+			return errEdgeCandidateConfigurationAdvanced
+		}
 		if time.Now().After(deadline) {
 			return errors.New("Guardian CurrentAuthority did not converge to the staged candidate")
 		}
@@ -1757,7 +1831,42 @@ func edgeCurrentAuthorityMatchesCandidate(current releaseguardian.CurrentAuthori
 }
 
 func (runtime *kubectlEdgeGroupRuntime) WaitCandidateWorkerAuthority(ctx context.Context, name string, target declarativerelease.TargetIdentity, stage edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
-	return runtime.cluster.waitEdgeCandidateWorkerAuthority(ctx, runtime.release, runtime.transition, name, target, stage)
+	return runtime.waitEdgeCandidateWorkerAuthority(ctx, name, target, stage)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) candidateConfigurationAdvanced(ctx context.Context, stage edgeCandidateStageReceipt) bool {
+	status, err := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
+	return err == nil && edgeCandidateSupersededByPublication(status, stage)
+}
+
+func edgeCandidateSupersededByPublication(status edgeCandidateStageStatus, stage edgeCandidateStageReceipt) bool {
+	return stage.GroupID != "" && stage.CandidateEpoch > 0 && stage.CurrentPublicationSequence > 0 && stage.CandidateBundleGeneration != "" &&
+		status.GroupID == stage.GroupID && status.Ready && status.ServingHealthy && status.LKGState == "current" &&
+		status.PublicationDecision == "published" && status.CandidateEpoch == 0 && status.CandidateWorkerSourceSHA == "" &&
+		stage.AuthoritySequence >= stage.CurrentPublicationSequence && status.CurrentPublicationSequence > stage.AuthoritySequence && status.AuthoritySequence >= status.CurrentPublicationSequence &&
+		status.RecoveryEpoch == stage.CurrentRecoveryEpoch && status.BundleGeneration != "" && status.BundleGeneration != stage.CandidateBundleGeneration &&
+		edgePromotionDigestPattern.MatchString(status.PublishedBundleDigest)
+}
+
+func edgeCommittedCandidateCohortReady(pods map[string]edgeGroupPod, target declarativerelease.TargetIdentity, stage edgeCandidateStageReceipt, current releaseguardian.CurrentAuthority, expectedNodes int, now time.Time) bool {
+	digest, err := immutableDigestFromRef(target.ImageRef)
+	if err != nil || target.ConfigSHA != stage.WorkerSourceSHA || digest != stage.WorkerImageDigest ||
+		!edgeCurrentAuthorityMatchesCandidate(current, stage) || expectedNodes < 1 || len(pods) != expectedNodes {
+		return false
+	}
+	base, sequence, recovery, ok := parseEdgePublicationVersion(current.CurrentBundleGeneration)
+	if !ok {
+		return false
+	}
+	for _, pod := range pods {
+		loadedBase, loadedSequence, loadedRecovery, valid := parseEdgePublicationVersion(pod.BundleGeneration)
+		if !edgePodMatchesTarget(pod, target) || !edgePodHasActiveInventoryAt(pod, now) || !valid ||
+			loadedBase != pod.ServingGeneration || loadedSequence != pod.PublicationSequence || loadedSequence < sequence || loadedRecovery < recovery ||
+			(loadedSequence == sequence && loadedBase != base) {
+			return false
+		}
+	}
+	return true
 }
 
 func (runtime *kubectlEdgeGroupRuntime) WaitActiveWorkerAuthority(ctx context.Context, name string, target declarativerelease.TargetIdentity) error {
@@ -2201,14 +2310,15 @@ func (cluster *kubectlCluster) waitActiveEdgeWorkerAuthority(ctx context.Context
 	}
 }
 
-func (cluster *kubectlCluster) waitEdgeCandidateWorkerAuthority(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity, stage edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
+func (runtime *kubectlEdgeGroupRuntime) waitEdgeCandidateWorkerAuthority(ctx context.Context, name string, target declarativerelease.TargetIdentity, stage edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
+	cluster, release, transition := runtime.cluster, runtime.release, runtime.transition
 	if stage.WorkerSlot != "a" && stage.WorkerSlot != "b" || !edgePromotionDigestPattern.MatchString(stage.CandidateRecordDigest) ||
 		!edgePromotionDigestPattern.MatchString(stage.ReleaseRecordDigest) || strings.TrimSpace(stage.CandidateBundleGeneration) == "" {
 		return nil, errors.New("staged candidate authority witness is incomplete")
 	}
 	deadline := time.Now().Add(cluster.timeout)
 	for {
-		pods, err := cluster.readEdgeDaemonSetPods(ctx, release, name, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
+		pods, err := cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, name, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
 		if err == nil {
 			converged := len(pods) == transition.ExpectedNodes
 			for _, pod := range pods {
@@ -2217,6 +2327,16 @@ func (cluster *kubectlCluster) waitEdgeCandidateWorkerAuthority(ctx context.Cont
 			if converged {
 				return pods, nil
 			}
+		}
+		current, _, currentErr := runtime.readCurrentAuthority(ctx)
+		if currentErr == nil && edgeCurrentAuthorityMatchesCandidate(current, stage) {
+			// The exact code grant may commit before this observer sees the
+			// candidate. A newer signed config must not turn that into failure.
+			if err == nil && edgeCommittedCandidateCohortReady(pods, target, stage, current, transition.ExpectedNodes, time.Now().UTC()) {
+				return pods, nil
+			}
+		} else if err == nil && currentErr == nil && current.Validate() == nil && current.GroupID == stage.GroupID && string(current.CurrentWorkerSlot) == stage.CurrentWorkerSlot && runtime.candidateConfigurationAdvanced(ctx, stage) {
+			return nil, errEdgeCandidateConfigurationAdvanced
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("DaemonSet/%s did not load the exact staged candidate authority", name)
@@ -2255,10 +2375,10 @@ func (cluster *kubectlCluster) readEdgeFrontHealth(ctx context.Context, pod edge
 }
 
 func (cluster *kubectlCluster) rollEdgeDaemonSet(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error) {
-	return cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, name, target, true, false)
+	return cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, name, target, true, false, nil)
 }
 
-func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool) (map[string]edgeGroupPod, error) {
+func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool, progress func(context.Context) error) (map[string]edgeGroupPod, error) {
 	container := transition.WorkerContainer
 	// Inactive workers may be pre-authority during adoption, but their
 	// immutable bundle generation is still required by the activation CAS.
@@ -2271,7 +2391,7 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 	}
 	var current map[string]edgeGroupPod
 	var err error
-	if replaceUnready {
+	if replaceUnready || progress != nil {
 		current, err = cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
 	} else {
 		current, err = cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
@@ -2280,14 +2400,25 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 		return nil, err
 	}
 	for _, node := range sortedEdgeNodes(current) {
+		if progress != nil {
+			if err := progress(ctx); err != nil {
+				return nil, err
+			}
+		}
 		pod := current[node]
+		if progress != nil && !replaceUnready && pod.SourceCommit == target.ConfigSHA && pod.ImageRef == target.ImageRef {
+			if _, err := cluster.waitEdgePodTarget(ctx, release, transition, name, container, node, "", target, includeHealth, requireGroupAuthority, progress); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if edgePodMatchesTarget(pod, target) && (!replaceUnready || pod.Ready && (!includeHealth || edgePodHasGroupAuthority(pod))) {
 			continue
 		}
 		if err := deleteEdgePodExact(ctx, client, release.Workload.Namespace, pod); err != nil {
 			return nil, err
 		}
-		if _, err := cluster.waitEdgePodTarget(ctx, release, transition, name, container, node, pod.UID, target, includeHealth, requireGroupAuthority); err != nil {
+		if _, err := cluster.waitEdgePodTarget(ctx, release, transition, name, container, node, pod.UID, target, includeHealth, requireGroupAuthority, progress); err != nil {
 			return nil, err
 		}
 	}
@@ -2309,11 +2440,22 @@ func deleteEdgePodExact(ctx context.Context, client dynamic.Interface, namespace
 	return nil
 }
 
-func (cluster *kubectlCluster) waitEdgePodTarget(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name, container, node, priorUID string, target declarativerelease.TargetIdentity, includeHealth, requireGroupAuthority bool) (edgeGroupPod, error) {
+func (cluster *kubectlCluster) waitEdgePodTarget(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name, container, node, priorUID string, target declarativerelease.TargetIdentity, includeHealth, requireGroupAuthority bool, progress func(context.Context) error) (edgeGroupPod, error) {
 	deadline := time.Now().Add(cluster.timeout)
 	for {
-		pods, err := cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
+		var pods map[string]edgeGroupPod
+		var err error
+		if progress != nil {
+			pods, err = cluster.readEdgeDaemonSetPodsForSnapshot(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
+		} else {
+			pods, err = cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
+		}
 		if err == nil {
+			if progress != nil {
+				if err := progress(ctx); err != nil {
+					return edgeGroupPod{}, err
+				}
+			}
 			pod, exists := pods[node]
 			authorityReady := !includeHealth || !requireGroupAuthority || edgePodHasGroupAuthority(pod)
 			if exists && pod.UID != priorUID && edgePodMatchesTarget(pod, target) && authorityReady {

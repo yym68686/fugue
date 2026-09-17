@@ -84,6 +84,54 @@ func TestPostActivationRouteFailsClosedWithoutExactAttestation(t *testing.T) {
 	}
 }
 
+func TestPostActivationConfigurationAdvanceRequiresIndependentCodeEvidence(t *testing.T) {
+	for _, scenario := range []string{"verified", "missing witness", "failed witness", "whitespace without witness", "wrong body", "wrong attestation", "partial attestation"} {
+		t.Run(scenario, func(t *testing.T) {
+			body := []byte("ok")
+			headers := http.Header{}
+			witnessCalls := 0
+			record := "sha256:" + strings.Repeat("1", 64)
+			if scenario == "wrong body" {
+				body = []byte("wrong")
+			}
+			if scenario == "wrong attestation" {
+				headers.Set("X-Fugue-Candidate-Record-Digest", "sha256:"+strings.Repeat("2", 64))
+				headers.Set("X-Fugue-Candidate-Worker-Slot", "a")
+			}
+			if scenario == "partial attestation" {
+				headers.Set("X-Fugue-Candidate-Worker-Slot", "a")
+			}
+			if scenario == "whitespace without witness" {
+				headers.Set("X-Fugue-Candidate-Record-Digest", " ")
+				headers.Set("X-Fugue-Candidate-Worker-Slot", "\t")
+			}
+			var witness func(context.Context) error
+			if scenario != "missing witness" && scenario != "whitespace without witness" {
+				witness = func(context.Context) error {
+					witnessCalls++
+					if scenario == "failed witness" {
+						return errors.New("runtime identity mismatch")
+					}
+					return nil
+				}
+			}
+			request := routeRequestWithCodeWitness(func(context.Context, canaryProbe) (int, []byte, http.Header, error) {
+				return http.StatusOK, body, headers, nil
+			}, witness)
+			err := waitForAuthorityRoute(context.Background(), canaryProbe{}, shaDigest([]byte("ok")), record, releaseguardian.AuthoritySlotA, true, 3, 3, 0, request)
+			if (err == nil) != (scenario == "verified") {
+				t.Fatalf("scenario %s outcome=%v", scenario, err)
+			}
+			if scenario == "verified" && (witnessCalls != 3 || len(headers) != 0) {
+				t.Fatal("code witness not rechecked per sample or observations were fabricated")
+			}
+			if (scenario == "wrong attestation" || scenario == "partial attestation") && witnessCalls != 0 {
+				t.Fatal("runtime fallback used for a contradictory attestation")
+			}
+		})
+	}
+}
+
 func TestFrontLKGGenerationAcceptsOnlyExactCompensationChain(t *testing.T) {
 	base := uint64(34)
 	if !frontLKGGenerationMatches(edgegroupfront.ActivationState{Generation: base}, base, edgegroupfront.ActivationOperationPromote) {

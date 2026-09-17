@@ -437,14 +437,16 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 		}
 		changed[node] = receipt
 	}
-	if err := activator.waitFront(ctx, target, operation == edgegroupfront.ActivationOperationRollback); err != nil {
+	// The signed candidate has already been promoted and Front CAS is exact.
+	// A later configuration publication must not invalidate this code grant.
+	if err := activator.waitFront(ctx, target, true); err != nil {
 		if rollbackErr := activator.rollbackReceipts(context.WithoutCancel(ctx), workers, changed); rollbackErr != nil {
 			return nil, errors.Join(err, fmt.Errorf("%w: %v", errFrontCompensationUnknown, rollbackErr))
 		}
 		return nil, err
 	}
 	if activator.config.RouteAddress != "" {
-		if err := activator.verifyPublicRoute(ctx, target, operation == edgegroupfront.ActivationOperationRollback); err != nil {
+		if err := activator.verifyPublicRoute(ctx, target, previousGeneration+1, operation == edgegroupfront.ActivationOperationRollback); err != nil {
 			if rollbackErr := activator.rollbackReceipts(context.WithoutCancel(ctx), workers, changed); rollbackErr != nil {
 				return nil, errors.Join(errors.New("post-activation public route canary failed"), fmt.Errorf("%w: %v", errFrontCompensationUnknown, rollbackErr))
 			}
@@ -472,7 +474,7 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 	return &frontAuthorityTransaction{activator: activator, lease: lease, receipt: receipt}, nil
 }
 
-func (activator *frontAuthorityActivator) verifyPublicRoute(ctx context.Context, target releaseguardian.FrontAuthorityTarget, allowUnattestedLKG bool) error {
+func (activator *frontAuthorityActivator) verifyPublicRoute(ctx context.Context, target releaseguardian.FrontAuthorityTarget, activationGeneration uint64, allowUnattestedLKG bool) error {
 	if activator.config.RouteAddress == "" {
 		return nil
 	}
@@ -499,18 +501,45 @@ func (activator *frontAuthorityActivator) verifyPublicRoute(ctx context.Context,
 			}
 			return status, body, headers, err
 		}
+	} else {
+		// Ordinary configuration publication clears candidate attestations.
+		// Their absence is accepted only with an independently observed exact
+		// code/image/Front CAS and a verified publication at or after the grant.
+		request = routeRequestWithCodeWitness(request, func(ctx context.Context) error {
+			healthy, err := activator.observeAuthorityRuntime(ctx, target.TargetSlot, target.WorkerSourceSHA,
+				target.WorkerImageDigest, activationGeneration, target.FrontBundleGeneration, true)
+			if err != nil || !healthy {
+				return errors.New("post-activation code authority evidence is unavailable")
+			}
+			return nil
+		})
 	}
 	return waitForAuthorityRoute(verifyCtx, probe, activator.config.RouteBodyDigest, target.CandidateRecordDigest,
-		target.TargetSlot, allowUnattestedLKG, postActivationRouteAttempts, postActivationRouteSuccesses,
+		target.TargetSlot, true, postActivationRouteAttempts, postActivationRouteSuccesses,
 		postActivationRouteInterval, request)
 }
 
 type authorityRouteRequest func(context.Context, canaryProbe) (int, []byte, http.Header, error)
 
+func routeRequestWithCodeWitness(request authorityRouteRequest, witness func(context.Context) error) authorityRouteRequest {
+	return func(ctx context.Context, probe canaryProbe) (int, []byte, http.Header, error) {
+		status, body, headers, err := request(ctx, probe)
+		if err == nil && status == http.StatusOK && strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) == "" && strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot")) == "" {
+			if witness == nil {
+				err = errors.New("post-activation code witness is missing")
+			} else {
+				err = witness(ctx)
+			}
+		}
+		return status, body, headers, err
+	}
+}
+
 // waitForAuthorityRoute allows the Front process and its in-memory proxy
 // configuration to converge after the activation CAS. It never weakens the
-// route witness: every accepted sample must bind the exact body, record and
-// worker slot, and a transient failure resets the consecutive-success count.
+// route witness: every accepted sample must bind the exact body and code
+// authority (attestation or independently verified runtime). A transient
+// failure resets the consecutive-success count.
 func waitForAuthorityRoute(ctx context.Context, probe canaryProbe, bodyDigest, recordDigest string,
 	slot releaseguardian.AuthoritySlot, allowUnattestedLKG bool, attempts, requiredSuccesses int,
 	interval time.Duration, request authorityRouteRequest) error {

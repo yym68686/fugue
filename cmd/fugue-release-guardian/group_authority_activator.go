@@ -170,19 +170,19 @@ func authorityGenerationBase(value string) string {
 	return value
 }
 
-// authorityRouteMatches permits an unattested route only for a previous LKG.
-// Old LKG workers predate candidate headers; their record binding is instead
-// supplied by observeAuthorityRuntime's exact source/image and bundle witness.
+// authorityRouteMatches permits an unattested route only when the caller has
+// independently verified its code/runtime authority. This covers old LKG
+// workers and a newly activated worker whose configuration has advanced.
 // A partially populated or wrong attestation always fails closed.
 func authorityRouteMatches(status int, body []byte, headers http.Header, requestErr error, expectedBodyDigest, recordDigest string,
-	slot releaseguardian.AuthoritySlot, allowUnattestedLKG bool) bool {
+	slot releaseguardian.AuthoritySlot, allowVerifiedUnattested bool) bool {
 	if requestErr != nil || status != http.StatusOK || shaDigest(body) != expectedBodyDigest {
 		return false
 	}
 	record := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest"))
 	observedSlot := strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))
 	if record == "" && observedSlot == "" {
-		return allowUnattestedLKG
+		return allowVerifiedUnattested
 	}
 	return record == recordDigest && releaseguardian.AuthoritySlot(observedSlot) == slot
 }

@@ -797,19 +797,22 @@ func TestServingAuthorityWitnessOmitsLegacyUnboundFront(t *testing.T) {
 }
 
 type fakeEdgeGroupRuntime struct {
-	snapshots       []edgeGroupState
-	rolls           map[string]map[string]edgeGroupPod
-	rollTargets     map[string]declarativerelease.TargetIdentity
-	waits           []map[string]edgeFrontHealth
-	calls           []string
-	requests        []edgeActivationRequest
-	rollAuthority   []bool
-	rollUnready     []bool
-	activationState *edgeActivationState
-	standbyErr      error
-	applyFailures   map[string]int
-	declared        map[string]declarativerelease.TargetIdentity
-	stageDegraded   bool
+	snapshots           []edgeGroupState
+	rolls               map[string]map[string]edgeGroupPod
+	rollTargets         map[string]declarativerelease.TargetIdentity
+	waits               []map[string]edgeFrontHealth
+	calls               []string
+	requests            []edgeActivationRequest
+	rollAuthority       []bool
+	rollUnready         []bool
+	activationState     *edgeActivationState
+	standbyErr          error
+	applyFailures       map[string]int
+	declared            map[string]declarativerelease.TargetIdentity
+	stageDegraded       bool
+	candidateWaitErrors []error
+	currentWaitErrors   []error
+	candidateRollErrors []error
 }
 
 func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, error) {
@@ -862,10 +865,17 @@ func (fake *fakeEdgeGroupRuntime) DeclaredTarget(name string) (declarativereleas
 	return target, nil
 }
 
-func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool) (map[string]edgeGroupPod, error) {
+func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool, stage *edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
 	fake.calls = append(fake.calls, "roll:"+name)
 	fake.rollAuthority = append(fake.rollAuthority, requireGroupAuthority)
 	fake.rollUnready = append(fake.rollUnready, replaceUnready)
+	if stage != nil && len(fake.candidateRollErrors) > 0 {
+		err := fake.candidateRollErrors[0]
+		fake.candidateRollErrors = fake.candidateRollErrors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	if fake.rollTargets != nil {
 		fake.rollTargets[name] = target
 	}
@@ -878,6 +888,13 @@ func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, target de
 
 func (fake *fakeEdgeGroupRuntime) WaitCandidateWorkerAuthority(_ context.Context, name string, _ declarativerelease.TargetIdentity, _ edgeCandidateStageReceipt) (map[string]edgeGroupPod, error) {
 	fake.calls = append(fake.calls, "wait-candidate-authority:"+name)
+	if len(fake.candidateWaitErrors) > 0 {
+		err := fake.candidateWaitErrors[0]
+		fake.candidateWaitErrors = fake.candidateWaitErrors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	value, exists := fake.rolls[name]
 	if !exists {
 		return nil, fmt.Errorf("unexpected candidate authority wait %s", name)
@@ -928,6 +945,11 @@ func (fake *fakeEdgeGroupRuntime) WaitFront(_ context.Context, slot, source, dig
 
 func (fake *fakeEdgeGroupRuntime) WaitCurrentAuthority(_ context.Context, _ edgeCandidateStageReceipt) error {
 	fake.calls = append(fake.calls, "wait-current-authority")
+	if len(fake.currentWaitErrors) > 0 {
+		err := fake.currentWaitErrors[0]
+		fake.currentWaitErrors = fake.currentWaitErrors[1:]
+		return err
+	}
 	return nil
 }
 
