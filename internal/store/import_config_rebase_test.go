@@ -222,7 +222,7 @@ func TestQueuedBuildDeployRebasesPostgres(t *testing.T) {
 
 func testQueuedBuildRebase(t *testing.T, s *Store) {
 	t.Helper()
-	tenant, err := s.CreateTenant("queued build merge")
+	tenant, err := s.CreateTenant(model.NewID("queued_build_merge"))
 	if err != nil {
 		t.Fatal(err)
 	}
