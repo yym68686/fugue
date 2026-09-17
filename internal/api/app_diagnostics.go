@@ -21,7 +21,8 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
@@ -133,7 +134,7 @@ func (s *Server) handleQueryAppDatabase(w http.ResponseWriter, r *http.Request) 
 
 	dbOpener := s.openAppDatabase
 	if dbOpener == nil {
-		dbOpener = sql.Open
+		dbOpener = openAppDiagnosticDatabase
 	}
 	db, err := dbOpener(appDatabaseQueryDefaultDriver, connection.DSN)
 	if err != nil {
@@ -161,6 +162,20 @@ func (s *Server) handleQueryAppDatabase(w http.ResponseWriter, r *http.Request) 
 		"max_rows": strconv.Itoa(req.MaxRows),
 	})
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+func openAppDiagnosticDatabase(driver, dsn string) (*sql.DB, error) {
+	if driver != appDatabaseQueryDefaultDriver {
+		return nil, fmt.Errorf("unsupported app database diagnostic driver %q", driver)
+	}
+	// Application URLs may configure pgxpool. Parse with its grammar before
+	// opening the single diagnostic connection; pool-only keys must never be
+	// sent to PostgreSQL as startup parameters. TLS and server parameters remain.
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	return stdlib.OpenDB(*config.ConnConfig), nil
 }
 
 func (s *Server) handleRequestAppInternalHTTP(w http.ResponseWriter, r *http.Request) {

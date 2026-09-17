@@ -1,19 +1,53 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
+
+func TestDatabaseDiagnosticsAcceptPoolDSNWithoutForwardingPoolParameters(t *testing.T) {
+	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("FUGUE_TEST_DATABASE_URL is not configured")
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("pool_max_conns", "20")
+	q.Set("pool_min_conns", "2")
+	q.Set("pool_max_conn_lifetime", "1h")
+	q.Set("application_name", "diagnostic-pool-parser")
+	u.RawQuery = q.Encode()
+	db, err := openAppDiagnosticDatabase("pgx", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := queryAppDatabase(ctx, db, appDatabaseConnection{}, `select current_setting('application_name') as application_name,current_setting('transaction_read_only') as read_only`, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 || result.Rows[0]["application_name"] != "diagnostic-pool-parser" || result.Rows[0]["read_only"] != "on" {
+		t.Fatalf("server parameters or read-only safety changed: %+v", result)
+	}
+}
 
 type diagnosticRoundTripFunc func(*http.Request) (*http.Response, error)
 
