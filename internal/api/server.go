@@ -298,7 +298,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		filesystemExecRunner: kubeFilesystemExecRunner{},
 		appProxyTransport:    newDefaultAppProxyTransport(),
 		appRequestHTTPClient: &http.Client{},
-		openAppDatabase:      sql.Open,
+		openAppDatabase:      openAppDiagnosticDatabase,
 		backupRunner:         nil,
 		dnsResolver:          netAppDomainResolver{},
 		dnsDelegationProbe:   defaultDNSDelegationProbe,

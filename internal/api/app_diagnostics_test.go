@@ -47,6 +47,18 @@ func TestDatabaseDiagnosticsAcceptPoolDSNWithoutForwardingPoolParameters(t *test
 	if len(result.Rows) != 1 || result.Rows[0]["application_name"] != "diagnostic-pool-parser" || result.Rows[0]["read_only"] != "on" {
 		t.Fatalf("server parameters or read-only safety changed: %+v", result)
 	}
+	// Exercise NewServer's default opener as well: a helper-only test would
+	// miss initialization still wiring the old sql.Open path in production.
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{Image: "ghcr.io/example/demo:latest", Ports: []int{8080}, Replicas: 1, RuntimeID: "runtime_managed_shared", Env: map[string]string{"DATABASE_URL": u.String()}})
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/database/query", apiKey, map[string]any{"sql": `select current_setting('transaction_read_only') as read_only`})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("default HTTP database opener failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response appDatabaseQueryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if !response.ReadOnly || len(response.Rows) != 1 || response.Rows[0]["read_only"] != "on" {
+		t.Fatalf("HTTP diagnostics did not preserve read-only transaction: %+v", response)
+	}
 }
 
 type diagnosticRoundTripFunc func(*http.Request) (*http.Response, error)
