@@ -1835,8 +1835,30 @@ func (runtime *kubectlEdgeGroupRuntime) WaitCandidateWorkerAuthority(ctx context
 }
 
 func (runtime *kubectlEdgeGroupRuntime) candidateConfigurationAdvanced(ctx context.Context, stage edgeCandidateStageReceipt) bool {
+	if runtime == nil || runtime.client == nil {
+		return false
+	}
 	status, err := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
-	return err == nil && edgeCandidateSupersededByPublication(status, stage)
+	if err != nil || !edgeCandidateSupersededByPublication(status, stage) {
+		return false
+	}
+	// Control can publish a newer config after its promotion CAS while Guardian
+	// is still applying Front and committing CurrentAuthority. That is progress
+	// of the same code transaction, not permission to restage or compensate its
+	// workloads. A journal of either phase, or an unreadable journal, means wait.
+	resource := runtime.client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace(runtime.release.Workload.Namespace)
+	for _, phase := range []string{"prepared", "activated"} {
+		_, err := resource.Get(ctx, "fugue-authority-transition-"+phase+"-"+stage.GroupID, metav1.GetOptions{})
+		if !apierrors.IsNotFound(err) {
+			return false
+		}
+	}
+	// Finalization removes the journal only after committing the code pointer.
+	// Re-read after journal absence so a concurrent commit is observed next loop
+	// instead of being turned into a destructive generic workload compensation.
+	current, _, err := runtime.readCurrentAuthority(ctx)
+	return err == nil && current.Validate() == nil && current.GroupID == stage.GroupID &&
+		string(current.CurrentWorkerSlot) == stage.CurrentWorkerSlot
 }
 
 func edgeCandidateSupersededByPublication(status edgeCandidateStageStatus, stage edgeCandidateStageReceipt) bool {

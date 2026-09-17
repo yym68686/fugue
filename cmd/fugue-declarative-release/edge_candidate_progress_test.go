@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 func TestCandidateSupersessionRequiresPositiveConfigurationEvidence(t *testing.T) {
@@ -199,6 +200,88 @@ func TestWaitCurrentAuthorityReadsSupersessionWithoutWritingTraffic(t *testing.T
 	if err := r.WaitCurrentAuthority(context.Background(), stage); !errors.Is(err, errEdgeCandidateConfigurationAdvanced) {
 		t.Fatalf("lost typed configuration progress: %v", err)
 	}
+	for _, phase := range []string{"prepared", "activated", "unreadable", "committed while observing"} {
+		t.Run(phase, func(t *testing.T) {
+			c := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object.DeepCopy())
+			journalName := "fugue-authority-transition-" + phase + "-" + current.GroupID
+			c.PrependReactor("get", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
+				name := action.(ktesting.GetAction).GetName()
+				if name == journalName {
+					return true, &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "v1", "kind": "ConfigMap"}}, nil
+				}
+				if phase == "unreadable" && strings.HasPrefix(name, "fugue-authority-transition-") {
+					return true, nil, errors.New("journal observation unavailable")
+				}
+				if phase == "committed while observing" && name == object.GetName() {
+					changed := current
+					changed.CurrentWorkerSlot = releaseguardian.AuthoritySlotB
+					raw, _ := json.Marshal(changed)
+					observed := object.DeepCopy()
+					_ = unstructured.SetNestedField(observed.Object, string(raw), "data", "authority.json")
+					return true, observed, nil
+				}
+				return false, nil, nil
+			})
+			observer := r
+			observer.client = c
+			if observer.candidateConfigurationAdvanced(context.Background(), stage) {
+				t.Fatal("configuration advancement retired an in-flight or committed code transaction")
+			}
+			for _, action := range c.Actions() {
+				if action.GetVerb() != "get" {
+					t.Fatal("transaction observation mutated authority", action.GetVerb())
+				}
+			}
+		})
+	}
+	t.Run("waits for exact journal commit", func(t *testing.T) {
+		target := edgeTargetFixture("2", "b")
+		staged := stage
+		staged.WorkerSourceSHA, staged.WorkerImageDigest = target.ConfigSHA, digestFromTarget(t, target)
+		staged.CandidateRecordDigest = "sha256:" + strings.Repeat("c", 64)
+		committed := current
+		committed.PreviousRecordDigest, committed.PreviousWorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
+		committed.PreviousWorkerSourceSHA, committed.PreviousWorkerImageDigest = current.CurrentWorkerSourceSHA, current.CurrentWorkerImageDigest
+		committed.PreviousFrontGeneration, committed.PreviousBundleGeneration = current.CurrentFrontGeneration, current.CurrentBundleGeneration
+		committed.CurrentRecordDigest, committed.CurrentWorkerSlot = staged.CandidateRecordDigest, releaseguardian.AuthoritySlotB
+		committed.CurrentWorkerSourceSHA, committed.CurrentWorkerImageDigest = staged.WorkerSourceSHA, staged.WorkerImageDigest
+		committed.CurrentFrontGeneration, committed.CurrentBundleGeneration = 2, "old-config.p13.r2"
+		committed.AuthorityEpoch++
+		if err := committed.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		currentReads := 0
+		c := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object.DeepCopy())
+		c.PrependReactor("get", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
+			name := action.(ktesting.GetAction).GetName()
+			if strings.HasPrefix(name, "fugue-authority-transition-prepared-") {
+				return true, &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "v1", "kind": "ConfigMap"}}, nil
+			}
+			if name == object.GetName() {
+				currentReads++
+				if currentReads > 1 {
+					raw, _ := json.Marshal(committed)
+					observed := object.DeepCopy()
+					_ = unstructured.SetNestedField(observed.Object, string(raw), "data", "authority.json")
+					return true, observed, nil
+				}
+			}
+			return false, nil, nil
+		})
+		observer := r
+		observer.client, observer.cluster = c, &kubectlCluster{timeout: 3 * time.Second}
+		if err := observer.WaitCurrentAuthority(context.Background(), staged); err != nil {
+			t.Fatalf("in-flight exact commit became a restage/rollback error: %v", err)
+		}
+		if currentReads != 2 {
+			t.Fatalf("expected fresh observation of exact commit, got %d reads", currentReads)
+		}
+		for _, action := range c.Actions() {
+			if action.GetVerb() != "get" {
+				t.Fatal("commit observation mutated authority", action.GetVerb())
+			}
+		}
+	})
 	for _, action := range client.Actions() {
 		if action.GetVerb() != "get" {
 			t.Fatal("progress mutated authority", action.GetVerb())

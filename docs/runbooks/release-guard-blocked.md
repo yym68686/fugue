@@ -50,6 +50,13 @@ slot, and the same recovery epoch. The Front activation and active Worker code
 identity must remain unchanged, with fresh inventory evidence. Each new stage
 gets a new signed candidate and must pass the normal independent canary.
 
+The executor must first observe that Guardian has neither a prepared nor an
+activated transition journal. An existing or unreadable journal means the code
+transaction may still be committing, so observation continues. After journal
+absence, it re-reads CurrentAuthority before declaring the candidate retired.
+This prevents configuration progress from starting workload compensation while
+Guardian is still committing the exact candidate.
+
 An already committed CurrentAuthority is a separate outcome. The executor
 requires the exact staged record, Worker source/image, slot and original bundle
 generation, plus a complete ready Worker cohort with fresh active inventory.
