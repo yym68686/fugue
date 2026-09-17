@@ -13,10 +13,11 @@ is frozen on that cluster with a resource-version precondition, and actual
 filesystem capacity plus writable SQL must converge before migration starts.
 
 File-backed OpenEBS LVM pools can grow through the authenticated node updater.
-The optional task requires updater protocol v38; only participating nodes need
+The optional task requires updater protocol v39; only participating nodes need
 the upgrade. The task verifies the exact backing file, loop device and sole PV,
 allocates at most 64 GiB, preserves at least 10%/5 GiB of host filesystem space,
-and verifies loop/PV capacity. The controller also preserves the LocalPV pool's
+and verifies loop/PV capacity. It reserves only the newly appended file interval;
+existing sparse holes created by filesystem discard remain unchanged. The controller also preserves the LocalPV pool's
 10%/5 GiB free reserve after the requested PVC growth. No LVs are deleted.
 
 Existing localization checks still gate replica readiness, replication catch-up,

@@ -979,17 +979,18 @@ func managedPostgresLiveStorageSize(ctx context.Context, client *kubeClient, nam
 		if !ok {
 			continue
 		}
-		size := managedPostgresPVCStorageSize(pvc)
-		if size == "" {
-			continue
-		}
-		q, err := resource.ParseQuantity(size)
-		if err != nil {
-			continue
-		}
-		if !found || q.Cmp(largest) > 0 {
-			largest = q
-			found = true
+		for _, size := range []string{pvc.Spec.Resources.Requests["storage"], pvc.Status.Capacity["storage"], pvc.Status.AllocatedResources["storage"]} {
+			if size == "" {
+				continue
+			}
+			q, err := resource.ParseQuantity(size)
+			if err != nil || q.Sign() <= 0 {
+				return "", fmt.Errorf("invalid live PVC storage quantity %s/%s: %q", namespace, name, size)
+			}
+			if !found || q.Cmp(largest) > 0 {
+				largest = q
+				found = true
+			}
 		}
 	}
 	if !found {

@@ -8,5 +8,5 @@ const (
 	ExpandPoolTask = "expand-lvm-localpv"
 	// Only a node taking part in storage recovery needs this capability. Existing
 	// nodes keep the normal model.NodeUpdaterCurrentVersion baseline until needed.
-	NodeUpdaterVersion = "v38"
+	NodeUpdaterVersion = "v39"
 )

@@ -255,7 +255,7 @@ func (s *Service) ensureRecoveryPoolCapacity(ctx context.Context, client *kubeCl
 		return nil
 	}
 	principal := model.Principal{ActorType: model.ActorTypeSystem, ActorID: "fugue-controller/storage-recovery", Scopes: map[string]struct{}{"platform.admin": {}}}
-	supported, err := s.Store.NodeUpdaterTargetSupportsTask(inventory.ReportedByNodeUpdaterID, node, "", storagerecovery.ExpandPoolTask)
+	supported, err := s.recoveryUpdaterReady(inventory.ReportedByNodeUpdaterID, node)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func (s *Service) ensureRecoveryPoolCapacity(ctx context.Context, client *kubeCl
 			if err := s.ensureOperationStillActive(op.ID); err != nil {
 				return false, err
 			}
-			return s.Store.NodeUpdaterTargetSupportsTask(inventory.ReportedByNodeUpdaterID, node, "", storagerecovery.ExpandPoolTask)
+			return s.recoveryUpdaterReady(inventory.ReportedByNodeUpdaterID, node)
 		}, func(ctx context.Context) error { return waitManagedPostgresResizePollInterval(ctx, 2*time.Second) }); err != nil {
 			return err
 		}
@@ -287,6 +287,23 @@ func (s *Service) ensureRecoveryPoolCapacity(ctx context.Context, client *kubeCl
 		return err
 	}
 	return s.waitRecoveryHostTask(ctx, op.ID, task)
+}
+
+func (s *Service) recoveryUpdaterReady(id, node string) (bool, error) {
+	supported, err := s.Store.NodeUpdaterTargetSupportsTask(id, node, "", storagerecovery.ExpandPoolTask)
+	if err != nil || !supported {
+		return false, err
+	}
+	updaters, err := s.Store.ListNodeUpdaters("", true)
+	if err != nil {
+		return false, err
+	}
+	for _, updater := range updaters {
+		if updater.ID == id {
+			return !controllerNodeUpdaterNeedsUpgrade(updater.UpdaterVersion, storagerecovery.NodeUpdaterVersion), nil
+		}
+	}
+	return false, fmt.Errorf("recovery node updater %s disappeared", id)
 }
 
 func waitRecoveryCapability(ctx context.Context, observe func() (bool, error), wait func(context.Context) error) error {

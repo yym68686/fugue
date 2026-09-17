@@ -41,12 +41,14 @@ def expand(env=os.environ):
             if len(members) != 1 or members[0]["pv_name"].strip() != loop:
                 raise ValueError("volume group must contain only the observed loop PV")
             fs = os.fstatvfs(source.fileno())
-            # Reserve for all unallocated image bytes too: do not approve a
-            # pre-existing sparse image based on its apparent size alone.
-            allocation = max(0, target - info.st_blocks * 512)
+            # LocalPV discard can legitimately punch holes in the existing
+            # image. Preserve those historical extents; reserve only the new
+            # interval. Re-filling the entire old sparse file is an unrelated,
+            # potentially enormous allocation and can prevent small rescues.
+            allocation = target - expected
             reserve = max(5 << 30, (fs.f_blocks * fs.f_frsize + 9) // 10)
             if fs.f_bavail * fs.f_frsize < allocation + reserve:
-                raise ValueError("insufficient host filesystem headroom for pool growth")
+                raise ValueError(f"insufficient host filesystem headroom: available_bytes={fs.f_bavail * fs.f_frsize} growth_bytes={allocation} reserve_bytes={reserve}")
             plan = dict(image=image, volume_group=vg, loop_device=loop,
                         previous_bytes=info.st_size, target_bytes=target,
                         allocation_bytes=allocation, host_reserve_bytes=reserve)
@@ -57,7 +59,8 @@ def expand(env=os.environ):
             # Every subsequent step can be repeated after interrupted delivery.
             if os.stat(image).st_ino != info.st_ino:
                 raise ValueError("backing image replaced during preflight")
-            run("fallocate", "-l", str(target), image)
+            if allocation:
+                run("fallocate", "--offset", str(expected), "--length", str(allocation), image)
             os.fsync(source.fileno())
             run("losetup", "--set-capacity", loop)
             if int(run("blockdev", "--getsize64", loop)) != target:

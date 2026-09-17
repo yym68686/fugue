@@ -2,11 +2,30 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
+
+func TestRecoveryReadsRequestedCapacityBeforeFilesystemConverges(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "db-1"}}}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "db-1"}, "spec": map[string]any{"resources": map[string]any{"requests": map[string]string{"storage": "40Gi"}}}, "status": map[string]any{"capacity": map[string]string{"storage": "20Gi"}}})
+	}))
+	defer server.Close()
+	client := &kubeClient{baseURL: server.URL, client: server.Client()}
+	got, err := managedPostgresLiveStorageSize(context.Background(), client, "test", "db")
+	if err != nil || got != "40Gi" {
+		t.Fatalf("lost pending expansion request: %s %v", got, err)
+	}
+}
 
 func TestRecoveryWaitsForNewProcessCapabilityAfterUpgradeAcknowledgement(t *testing.T) {
 	observations, waits := 0, 0

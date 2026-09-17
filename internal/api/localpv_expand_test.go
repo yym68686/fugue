@@ -20,11 +20,14 @@ def command(*args):
     if args[0]=="pvs": return '{"report":[{"pv":[{"pv_size":"25765609472"}]}]}'
     if args[0]=="blockdev": return str(24*gib)
     return ''
-info=types.SimpleNamespace(st_mode=stat.S_IFREG,st_size=20*gib,st_blocks=20*gib//512,st_ino=17)
+info=types.SimpleNamespace(st_mode=stat.S_IFREG,st_size=20*gib,st_blocks=2*gib//512,st_ino=17)
 fs=types.SimpleNamespace(f_blocks=100*gib//4096,f_frsize=4096,f_bavail=30*gib//4096)
 with m.patch('builtins.open',m.mock_open()), m.patch.object(fcntl,'flock'), m.patch.object(os,'fstat',return_value=info), m.patch.object(os,'stat',return_value=info), m.patch.object(os,'fstatvfs',return_value=fs), m.patch.object(os,'fsync'), m.patch.dict(expand.__globals__,run=command):
     expand(env)
     assert [a[0] for a in actions if a[0] in ('fallocate','pvresize','blockdev')]==['fallocate','blockdev','pvresize']
+    assert ('fallocate','--offset',str(20*gib),'--length',str(4*gib),'/pool/image') in actions
+    # Enough room for new extents + reserve, but not for historical holes.
+    fs.f_bavail=15*gib//4096;actions.clear();expand(env)
     # Interrupted after allocation: a retry adopts the exact target image.
     info.st_size=24*gib;info.st_blocks=24*gib//512;actions.clear();expand(env)
     assert any(a[0]=='pvresize' for a in actions)
