@@ -207,3 +207,87 @@ func TestImportConfigurationBaselinePostgres(t *testing.T) {
 		}
 	}
 }
+
+func TestQueuedBuildDeployRebasesAfterScaleAndEnvironmentComplete(t *testing.T) {
+	s := New(filepath.Join(t.TempDir(), "state.json"))
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	testQueuedBuildRebase(t, s)
+}
+
+func TestQueuedBuildDeployRebasesPostgres(t *testing.T) {
+	testQueuedBuildRebase(t, billingBatchPGStore(t))
+}
+
+func testQueuedBuildRebase(t *testing.T, s *Store) {
+	t.Helper()
+	tenant, err := s.CreateTenant("queued build merge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := s.CreateProject(tenant.ID, "queued", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "queued", "", model.AppSpec{Image: "registry.example/app:old", RuntimeID: model.DefaultManagedRuntimeID, Ports: []int{8080}, Replicas: 1, Env: map[string]string{"EDIT": "old", "REMOVE": "old"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeImport, DesiredSpec: cloneAppSpec(&app.Spec), DesiredSource: &model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/app:new"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := cloneAppSpec(&app.Spec)
+	built.Image = "registry.example/app:new"
+	deploy, err := s.CreateDeployOperationAfterImport(parent.ID, model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: built, DesiredSource: parent.DesiredSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deploy.ConfigBaseSpec == nil {
+		t.Fatal("queued deployment lost configuration baseline")
+	}
+	replicas := 2
+	scale, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeScale, DesiredReplicas: &replicas})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CompleteManagedOperation(scale.ID, "", "scaled"); err != nil {
+		t.Fatal(err)
+	}
+	live, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := cloneAppSpec(&live.Spec)
+	edited.Env["EDIT"] = "new"
+	delete(edited.Env, "REMOVE")
+	edit, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: edited})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CompleteManagedOperation(edit.ID, "", "edited"); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := s.RebaseDeployOperationForExecution(deploy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.DesiredSpec.Replicas != 2 || merged.DesiredSpec.Env["EDIT"] != "new" || merged.DesiredSpec.Env["REMOVE"] != "" || merged.DesiredSpec.Image != built.Image {
+		t.Fatalf("queued artifact reverted config: %+v", merged.DesiredSpec)
+	}
+	again, err := s.RebaseDeployOperationForExecution(deploy.ID)
+	if err != nil || !reflect.DeepEqual(again.DesiredSpec, merged.DesiredSpec) {
+		t.Fatal("rebase is not idempotent", err)
+	}
+	if _, err = s.CompleteManagedOperation(deploy.ID, "", "activated"); err != nil {
+		t.Fatal(err)
+	}
+	final, err := s.GetApp(app.ID)
+	if err != nil || final.Spec.Replicas != 2 || final.Spec.Env["EDIT"] != "new" || final.Spec.Image != built.Image {
+		t.Fatal("completion lost merged intent", err)
+	}
+	if _, err = s.RebaseDeployOperationForExecution(deploy.ID); err != ErrConflict {
+		t.Fatal("completed operation was reopened", err)
+	}
+}

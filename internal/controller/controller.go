@@ -907,6 +907,13 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 }
 
 func (s *Service) executeManagedOperation(ctx context.Context, op model.Operation) (err error) {
+	if op.Type == model.OperationTypeDeploy && op.ConfigBaseSpec != nil {
+		op, err = s.Store.RebaseDeployOperationForExecution(op.ID)
+		if err != nil {
+			return fmt.Errorf("rebase queued build deployment: %w", err)
+		}
+	}
+
 	timer := newControllerOperationTimer(s.now)
 	defer func() {
 		if op.Type != model.OperationTypeImport {
