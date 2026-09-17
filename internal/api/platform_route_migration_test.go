@@ -65,7 +65,7 @@ func TestComparePlatformRouteSnapshotsPreservesPathsAndNestedSemantics(t *testin
 		t.Fatalf("path or nested route semantics lost: %+v %v", result, err)
 	}
 	source.TLSAllowlist = []model.EdgeTLSAllowlistEntry{{Hostname: "route.example"}}
-	source.CachePolicies = []model.CachePolicy{{}}
+	source.CachePolicies = []model.CachePolicy{{ID: "test-cache"}}
 	result, err = comparePlatformRouteSnapshots(source, model.EdgeRouteIntentSnapshot{Routes: source.Routes})
 	if err != nil || result.Equivalent || result.MatchingRouteCount != 2 || !reflect.DeepEqual(result.SnapshotDifferences, []string{"tls_allowlist", "cache_policies"}) {
 		t.Fatalf("non-route drift was hidden: %+v %v", result, err)
@@ -77,6 +77,63 @@ func TestComparePlatformRouteSnapshotsPreservesPathsAndNestedSemantics(t *testin
 		if _, err := comparePlatformRouteSnapshots(source, duplicate); err == nil {
 			t.Fatal("ambiguous route identity accepted")
 		}
+	}
+}
+
+func TestRouteMigrationCachePolicyIdentityAndNestedSemantics(t *testing.T) {
+	policies := defaultEdgeCachePolicies()
+	source := model.EdgeRouteIntentSnapshot{CachePolicies: policies}
+	artifact := model.EdgeRouteIntentSnapshot{CachePolicies: []model.CachePolicy{policies[1], policies[0]}}
+	beforeSource := platformconfig.CloneCachePolicies(source.CachePolicies)
+	beforeArtifact := platformconfig.CloneCachePolicies(artifact.CachePolicies)
+	result, err := comparePlatformRouteSnapshots(source, artifact)
+	if err != nil || !result.Equivalent || len(result.SnapshotDifferences) != 0 {
+		t.Fatalf("compiler collection normalization changed cache semantics: %+v %v", result, err)
+	}
+	if !reflect.DeepEqual(source.CachePolicies, beforeSource) || !reflect.DeepEqual(artifact.CachePolicies, beforeArtifact) {
+		t.Fatal("comparison mutated a captured snapshot")
+	}
+	for _, scenario := range []string{"ttl", "nested order", "missing policy", "extra policy"} {
+		t.Run(scenario, func(t *testing.T) {
+			changed := model.EdgeRouteIntentSnapshot{CachePolicies: platformconfig.CloneCachePolicies(artifact.CachePolicies)}
+			switch scenario {
+			case "ttl":
+				changed.CachePolicies[0].TTLSeconds++
+			case "nested order":
+				patterns := changed.CachePolicies[0].PathPatterns
+				patterns[0], patterns[1] = patterns[1], patterns[0]
+			case "missing policy":
+				changed.CachePolicies = changed.CachePolicies[:1]
+			case "extra policy":
+				changed.CachePolicies = append(changed.CachePolicies, model.CachePolicy{ID: "extra", Kind: model.CachePolicyKindDisabled})
+			}
+			result, err := comparePlatformRouteSnapshots(source, changed)
+			if err != nil || result.Equivalent || !reflect.DeepEqual(result.SnapshotDifferences, []string{"cache_policies"}) {
+				t.Fatalf("cache behavior change hidden: %+v %v", result, err)
+			}
+		})
+	}
+	for _, policies := range [][]model.CachePolicy{{{ID: ""}}, {{ID: " a"}}, {{ID: "duplicate"}, {ID: "DUPLICATE"}}} {
+		for _, left := range []bool{true, false} {
+			a, b := source, artifact
+			if left {
+				a.CachePolicies = policies
+			} else {
+				b.CachePolicies = policies
+			}
+			if _, err := comparePlatformRouteSnapshots(a, b); err == nil {
+				t.Fatal("ambiguous cache policy collection accepted")
+			}
+		}
+	}
+	// Static routes implicitly try HTML policies in bundle order. A reorder
+	// can change the selected TTL, so collection normalization must retain it.
+	first := model.CachePolicy{ID: "html-a", Kind: model.CachePolicyKindHTMLDocuments, TTLSeconds: 30}
+	second := model.CachePolicy{ID: "html-b", Kind: model.CachePolicyKindHTMLDocuments, TTLSeconds: 60}
+	result, err = comparePlatformRouteSnapshots(model.EdgeRouteIntentSnapshot{CachePolicies: []model.CachePolicy{first, second}},
+		model.EdgeRouteIntentSnapshot{CachePolicies: []model.CachePolicy{second, first}})
+	if err != nil || result.Equivalent || !reflect.DeepEqual(result.SnapshotDifferences, []string{"cache_policies"}) {
+		t.Fatalf("implicit HTML fallback precedence was lost: %+v %v", result, err)
 	}
 }
 

@@ -150,12 +150,20 @@ func comparePlatformRouteSnapshots(source, artifact model.EdgeRouteIntentSnapsho
 		result.Differences = append(result.Differences, difference)
 	}
 	// A route-only match must not hide a lost TLS allowlist or cache policy.
+	leftCache, err := cachePoliciesForMigrationComparison(source.CachePolicies)
+	if err != nil {
+		return result, err
+	}
+	rightCache, err := cachePoliciesForMigrationComparison(artifact.CachePolicies)
+	if err != nil {
+		return result, err
+	}
 	for _, field := range []struct {
 		name        string
 		left, right any
 	}{
 		{"tls_allowlist", append([]model.EdgeTLSAllowlistEntry{}, source.TLSAllowlist...), append([]model.EdgeTLSAllowlistEntry{}, artifact.TLSAllowlist...)},
-		{"cache_policies", append([]model.CachePolicy{}, source.CachePolicies...), append([]model.CachePolicy{}, artifact.CachePolicies...)},
+		{"cache_policies", leftCache, rightCache},
 	} {
 		a, err := json.Marshal(field.left)
 		if err != nil {
@@ -170,6 +178,31 @@ func comparePlatformRouteSnapshots(source, artifact model.EdgeRouteIntentSnapsho
 		}
 	}
 	result.Equivalent = len(result.Differences) == 0 && len(result.SnapshotDifferences) == 0
+	return result, nil
+}
+
+type migrationCachePolicies struct {
+	Policies          []model.CachePolicy `json:"policies"`
+	HTMLFallbackOrder []string            `json:"html_fallback_order"`
+}
+
+func cachePoliciesForMigrationComparison(policies []model.CachePolicy) (migrationCachePolicies, error) {
+	result := migrationCachePolicies{Policies: append([]model.CachePolicy{}, policies...), HTMLFallbackOrder: []string{}}
+	seen := make(map[string]bool, len(policies))
+	for _, policy := range policies {
+		key := strings.ToLower(strings.TrimSpace(policy.ID))
+		if key == "" || policy.ID != strings.TrimSpace(policy.ID) || seen[key] {
+			return result, fmt.Errorf("duplicate or empty cache policy identity")
+		}
+		seen[key] = true
+		// Edge resolves the explicitly referenced policy by ID, then appends
+		// HTML document policies in bundle order. Preserve that precedence;
+		// only collection order without executor meaning may be normalized.
+		if strings.EqualFold(strings.TrimSpace(policy.Kind), model.CachePolicyKindHTMLDocuments) {
+			result.HTMLFallbackOrder = append(result.HTMLFallbackOrder, policy.ID)
+		}
+	}
+	sort.Slice(result.Policies, func(i, j int) bool { return result.Policies[i].ID < result.Policies[j].ID })
 	return result, nil
 }
 
