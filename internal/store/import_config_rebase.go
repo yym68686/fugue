@@ -59,9 +59,20 @@ func rebaseImportDeployConfiguration(op *model.Operation, current model.App, bas
 		return err
 	}
 	merged := mergeInterveningConfiguration(baseObject, desiredObject, currentObject)
-	// The import owns its new artifact identity and explicit restart request.
-	merged["image"] = desiredObject["image"]
-	if restart, ok := desiredObject["restart_token"]; ok {
+	// Independent configuration edits preserve a newer serving artifact. Two
+	// different artifact updates since the baseline require a fresh operation;
+	// never silently roll the serving image back.
+	artifactChanged := op.DesiredSpec.Image != base.Image
+	if artifactChanged && current.Spec.Image != base.Image && current.Spec.Image != op.DesiredSpec.Image {
+		return ErrConflict
+	}
+	if artifactChanged {
+		merged["image"] = desiredObject["image"]
+	} else if current.Spec.Image != base.Image {
+		op.DesiredSource = model.CloneAppSource(model.AppBuildSource(current))
+		op.DesiredOriginSource = model.CloneAppSource(model.AppOriginSource(current))
+	}
+	if restart, ok := desiredObject["restart_token"]; ok && op.DesiredSpec.RestartToken != base.RestartToken {
 		merged["restart_token"] = restart
 	}
 	raw, err := json.Marshal(merged)
@@ -70,6 +81,12 @@ func rebaseImportDeployConfiguration(op *model.Operation, current model.App, bas
 	}
 	var spec model.AppSpec
 	if err := json.Unmarshal(raw, &spec); err != nil {
+		return err
+	}
+	if err := normalizeAppSpecResources(&spec); err != nil {
+		return err
+	}
+	if err := validateAppNetworkMode(spec); err != nil {
 		return err
 	}
 	op.DesiredSpec = &spec

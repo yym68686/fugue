@@ -56,3 +56,46 @@ func TestQueuedBuildExecutionPreservesScaleAfterEnqueue(t *testing.T) {
 		t.Fatalf("activation lost latest intent: replicas=%d image=%s", result.Spec.Replicas, result.Spec.Image)
 	}
 }
+
+func TestQueuedConfigurationEditSurvivesEarlierDeployCompletingLater(t *testing.T) {
+	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	if e := st.Init(); e != nil {
+		t.Fatal(e)
+	}
+	tenant, _ := st.CreateTenant("queued configuration")
+	project, _ := st.CreateProject(tenant.ID, "demo", "")
+	app, e := st.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{Image: "example/app:old", RuntimeID: model.DefaultManagedRuntimeID, Ports: []int{8080}, Replicas: 1, Env: map[string]string{"BOOTSTRAP": "initial"}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	earlier := app.Spec
+	earlier.Env = map[string]string{"BOOTSTRAP": "initial", "ORIGIN": "https://console.example"}
+	first, e := st.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: &earlier})
+	if e != nil {
+		t.Fatal(e)
+	}
+	later := app.Spec
+	later.Env = map[string]string{}
+	second, e := st.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: &later})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = st.CompleteManagedOperation(first.ID, "", "earlier completed"); e != nil {
+		t.Fatal(e)
+	}
+	op, ok, e := st.TryClaimPendingOperation(second.ID)
+	if e != nil || !ok {
+		t.Fatal("claim", e)
+	}
+	svc := &Service{Store: st, Renderer: runtime.Renderer{BaseDir: t.TempDir()}, Logger: log.New(io.Discard, "", 0)}
+	if e = svc.executeManagedOperation(context.Background(), op); e != nil {
+		t.Fatal(e)
+	}
+	result, e := st.GetApp(app.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, present := result.Spec.Env["BOOTSTRAP"]; present || result.Spec.Env["ORIGIN"] != "https://console.example" {
+		t.Fatalf("independent config edit was dropped: %+v", result.Spec.Env)
+	}
+}

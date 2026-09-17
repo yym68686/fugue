@@ -291,3 +291,21 @@ func testQueuedBuildRebase(t *testing.T, s *Store) {
 		t.Fatal("completed operation was reopened", err)
 	}
 }
+
+func TestQueuedConfigurationKeepsCurrentArtifactAndConflictsOnCompetingImage(t *testing.T) {
+	base := model.AppSpec{Image: "old", Env: map[string]string{"EDIT": "old"}}
+	current := model.App{Spec: model.AppSpec{Image: "current", Env: map[string]string{"EDIT": "old"}}, Source: &model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "current"}}
+	requested := model.AppSpec{Image: "old", Env: map[string]string{"EDIT": "new"}}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &requested}
+	if e := rebaseImportDeployConfiguration(&op, current, &base); e != nil {
+		t.Fatal(e)
+	}
+	if op.DesiredSpec.Image != "current" || op.DesiredSpec.Env["EDIT"] != "new" || op.DesiredSource.ImageRef != "current" {
+		t.Fatalf("wrong artifact merge: %+v", op)
+	}
+	competing := model.AppSpec{Image: "competing"}
+	op.DesiredSpec = &competing
+	if e := rebaseImportDeployConfiguration(&op, current, &base); e != ErrConflict {
+		t.Fatal("competing artifacts did not conflict", e)
+	}
+}

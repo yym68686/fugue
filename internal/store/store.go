@@ -2972,7 +2972,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		if err := validateDataReferencesState(state, op.TenantID, op.DesiredSpec); err != nil {
 			return err
 		}
-		if op.Type == model.OperationTypeImport {
+		if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy {
 			op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
 		}
 		if policy.ExpectedAppSpecHash != "" && (model.AppSpecSHA256(app.Spec) != policy.ExpectedAppSpecHash || hasInFlightOperationForApp(state.Operations, app.ID)) {

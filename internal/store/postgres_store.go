@@ -3230,7 +3230,7 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := rebaseImportDeployConfiguration(&op, app, policy.ImportConfigBase); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
-	if op.Type == model.OperationTypeImport {
+	if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy {
 		op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
 	}
 	if err := lockDataReferencesTx(ctx, tx, op.TenantID, op.DesiredSpec); err != nil {

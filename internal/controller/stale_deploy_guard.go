@@ -36,6 +36,13 @@ func (s *Service) completeStaleDeployOperationIfNeeded(ctx context.Context, op m
 		return true, nil
 	}
 
+	// Baseline-aware operations have already been merged against current state
+	// at execution. Completion time alone cannot prove that an independent edit
+	// was superseded (an earlier operation can finish after this one was queued).
+	if op.ConfigBaseSpec != nil {
+		return false, nil
+	}
+
 	newer, found, err := s.completedDeployAfterOperationMatchingCurrentApp(ctx, op, currentApp)
 	if err != nil {
 		return false, err
