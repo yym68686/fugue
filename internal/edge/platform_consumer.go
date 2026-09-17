@@ -25,16 +25,17 @@ import (
 )
 
 type PlatformCandidateStatus struct {
-	State            string    `json:"state"`
-	ArtifactID       string    `json:"artifact_id,omitempty"`
-	Digest           string    `json:"digest,omitempty"`
-	ReleaseSetID     string    `json:"release_set_id,omitempty"`
-	RouteCount       int       `json:"route_count"`
-	RouteIndexDigest string    `json:"route_index_digest,omitempty"`
-	Sequence         int64     `json:"sequence,omitempty"`
-	VerifiedAt       time.Time `json:"verified_at,omitempty"`
-	ReportedAt       time.Time `json:"reported_at,omitempty"`
-	LastError        string    `json:"last_error,omitempty"`
+	State            string                      `json:"state"`
+	ArtifactID       string                      `json:"artifact_id,omitempty"`
+	Digest           string                      `json:"digest,omitempty"`
+	ReleaseSetID     string                      `json:"release_set_id,omitempty"`
+	RouteCount       int                         `json:"route_count"`
+	RouteIndexDigest string                      `json:"route_index_digest,omitempty"`
+	Sequence         int64                       `json:"sequence,omitempty"`
+	VerifiedAt       time.Time                   `json:"verified_at,omitempty"`
+	ReportedAt       time.Time                   `json:"reported_at,omitempty"`
+	LastError        string                      `json:"last_error,omitempty"`
+	Execution        *PlatformCandidateExecution `json:"execution,omitempty"`
 }
 
 type edgePlatformCandidate struct {
@@ -44,6 +45,7 @@ type edgePlatformCandidate struct {
 	Sequence         int64                            `json:"sequence"`
 	VerifiedAt       time.Time                        `json:"verified_at"`
 	RouteIndexDigest string                           `json:"route_index_digest"`
+	Execution        *PlatformCandidateExecution      `json:"execution,omitempty"`
 }
 
 // validatePlatformCandidateIndex probes a detached bundle using the same
@@ -182,7 +184,11 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if prev.Assignment.FencingToken > assignment.FencingToken || prev.Assignment.GenerationSequence > assignment.GenerationSequence {
 		return errors.New("edge platform candidate replay rejected")
 	}
-	c := edgePlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release, Sequence: max(prev.Sequence+1, time.Now().UnixNano()), VerifiedAt: time.Now().UTC(), RouteIndexDigest: routeIndexDigest}
+	execution, err := s.executePlatformCandidate(ctx, artifact, assignment, routeIndexDigest)
+	if err != nil {
+		return err
+	}
+	c := edgePlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release, Sequence: max(prev.Sequence+1, time.Now().UnixNano()), VerifiedAt: time.Now().UTC(), RouteIndexDigest: routeIndexDigest, Execution: execution}
 	b, err := json.Marshal(c)
 	if err != nil {
 		return errors.New("encode edge platform candidate failed")
@@ -215,7 +221,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return errors.New("edge platform heartbeat receipt mismatch")
 	}
 	s.mu.Lock()
-	s.platformCandidate = PlatformCandidateStatus{State: "shadow_verified", ArtifactID: assignment.ArtifactID, Digest: assignment.ContentHash, ReleaseSetID: assignment.ReleaseSetID, RouteCount: len(payload.Routes), RouteIndexDigest: routeIndexDigest, Sequence: c.Sequence, VerifiedAt: c.VerifiedAt, ReportedAt: time.Now().UTC()}
+	s.platformCandidate = PlatformCandidateStatus{State: "shadow_verified", ArtifactID: assignment.ArtifactID, Digest: assignment.ContentHash, ReleaseSetID: assignment.ReleaseSetID, RouteCount: len(payload.Routes), RouteIndexDigest: routeIndexDigest, Sequence: c.Sequence, VerifiedAt: c.VerifiedAt, ReportedAt: time.Now().UTC(), Execution: execution}
 	s.mu.Unlock()
 	s.Logger.Printf("edge platform candidate verified; artifact=%s digest=%s routes=%d sequence=%d serving=%s", assignment.ArtifactID, assignment.ContentHash, len(payload.Routes), c.Sequence, status.ServingGeneration)
 	return nil

@@ -7,6 +7,20 @@ info:
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
 servers:
   - url: /
+x-fugue-edge-candidate-execution:
+  schema: fugue.edge.candidate-execution/v1
+  semantics: >-
+    A verified shadow route artifact may be applied to an isolated, short-lived
+    Caddy process with a loopback-only HTTP listener and a detached route index.
+    Its local execution receipt binds the artifact digest, ReleaseSet, expected
+    consumer set, generation sequence, fencing token, materialized route digest,
+    loaded Caddy config digest, probe count and observation expiry.
+    The candidate has no public listener, origin transport, ACME or serving
+    authority. A passed isolated HTTP probe does not assert TLS readiness,
+    origin health or serving convergence. Existing trusted heartbeat apply/probe
+    fields remain staged/shadow_validated until the serving protocol permits it.
+    Receipts are persisted with the shadow candidate and exposed in local Edge
+    health under platform_candidate.execution; they are not serving LKG records.
 x-fugue-edge-route-probe:
   version: 1
   transport: HTTPS to an inventory candidate IP with the desired hostname as TLS SNI and HTTP Host
