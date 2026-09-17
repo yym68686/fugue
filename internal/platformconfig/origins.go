@@ -75,9 +75,10 @@ func ResolveRouteOrigins(routes []RouteIntent, snapshot RuntimeSnapshot, policy 
 			compiled.RuntimeType = origin.RuntimeType
 			compiled.RuntimeEdgeGroupID = origin.RuntimeEdgeGroupID
 			compiled.RuntimeClusterNode = origin.RuntimeClusterNode
-			// Explicit intent disable/maintenance wins. A recovered origin can
-			// never re-enable an explicitly disabled route.
-			if route.Enabled && (route.Status == "" || route.Status == model.EdgeRouteStatusActive) && origin.Status != model.EdgeRouteStatusActive {
+			// Retain non-active origin diagnostics even for a disabled route.
+			// Enabled remains a separate immutable intent gate: an observed
+			// recovery can never re-enable it. Explicit maintenance status wins.
+			if (route.Status == "" || route.Status == model.EdgeRouteStatusActive) && origin.Status != model.EdgeRouteStatusActive {
 				compiled.Status = origin.Status
 				compiled.StatusReason = origin.StatusReason
 			}

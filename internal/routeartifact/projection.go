@@ -114,8 +114,15 @@ func Project(artifact model.PlatformArtifact) (model.EdgeRouteIntentSnapshot, er
 			legacy.EdgeGroupMode = model.PlatformRouteEdgeGroupModePinned
 		}
 		if !*route.Enabled {
-			legacy.Status = model.EdgeRouteStatusDisabled
-			legacy.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+			// Disabled intent denies upstreams independently of the configured
+			// routing policy. Retain non-active origin status/reason, including
+			// unavailable runtime evidence, without reviving traffic.
+			if legacy.Status == "" || legacy.Status == model.EdgeRouteStatusActive {
+				legacy.Status = model.EdgeRouteStatusDisabled
+			}
+			if legacy.RoutePolicy == "" {
+				legacy.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+			}
 		}
 		legacy, ok := NormalizePlatformRoute(legacy)
 		if !ok {
