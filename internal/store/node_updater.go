@@ -388,6 +388,12 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask, now time.Time) in
 	if task.Type == model.NodeUpdateTaskTypeUpgradeUpdater {
 		return 0
 	}
+	// A stopped database cannot recover while periodic inventory replenishes
+	// the queue. Rescue growth is administrator-only, bounded and preflighted
+	// against live host facts; it must precede routine inventory and pruning.
+	if task.Type == storagerecovery.ExpandPoolTask {
+		return 1
+	}
 	if nodeUpdateTaskInventoryOverdue(task, now) {
 		return 1
 	}
