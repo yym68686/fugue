@@ -93,6 +93,10 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	}
 	projection.BusinessSnapshotRevision = business.Revision
 	projection.BusinessSnapshotAt = business.CapturedAt
+	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "TLS domain lifecycle projection invalid")
+		return
+	}
 	if err := projectPlatformEntryDNS(&projection, s.platformRoutes, s.dnsStaticRecords, []string{s.appBaseDomain, s.customDomainBaseDomain}); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "platform DNS entry migration configuration invalid")
 		return

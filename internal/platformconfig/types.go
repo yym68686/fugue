@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v17"
+	CompilerVersion = "platform-config-compiler/v18"
 	GlobalScopeKey  = "global"
 )
 
@@ -115,8 +115,11 @@ type DNSFlattenIntent struct {
 }
 
 type TLSIntent struct {
-	Hostname string `json:"hostname"`
-	Policy   string `json:"policy"`
+	Hostname  string `json:"hostname"`
+	Policy    string `json:"policy"`
+	DomainRef string `json:"domain_ref,omitempty"`
+	AppID     string `json:"app_id,omitempty"`
+	TenantID  string `json:"tenant_id,omitempty"`
 }
 
 // PolicySnapshot contains changeable release constraints. It is deliberately
@@ -186,6 +189,7 @@ type CompileRequest struct {
 // RuntimeSnapshot is the immutable runtime fact view used by one compiler
 // invocation. It is input data, never serving configuration.
 type RuntimeSnapshot struct {
+	TLSDomains       []TLSDomainObservation    `json:"tls_domains,omitempty"`
 	DNSPlacements    []DNSPlacementObservation `json:"dns_placements,omitempty"`
 	DNSFlatten       []DNSFlattenObservation   `json:"dns_flatten,omitempty"`
 	IntentGeneration string                    `json:"intent_generation"`
@@ -248,7 +252,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
-	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && len(runtimeSnapshot.DNSPlacements) == 0 && req.InputSnapshot != nil {
+	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && len(runtimeSnapshot.DNSPlacements) == 0 && len(runtimeSnapshot.TLSDomains) == 0 && req.InputSnapshot != nil {
 		runtimeSnapshot = RuntimeSnapshot{IntentGeneration: intent.Generation, PolicyGeneration: policy.Generation, Facts: req.InputSnapshot}
 	}
 	if runtimeSnapshot.IntentGeneration == "" {
@@ -266,6 +270,12 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	sort.Slice(runtimeSnapshot.Releases, func(i, j int) bool { return runtimeSnapshot.Releases[i].ID < runtimeSnapshot.Releases[j].ID })
 	runtimeSnapshot.DNSFlatten = normalizeDNSFlattenObservations(runtimeSnapshot.DNSFlatten)
 	runtimeSnapshot.DNSPlacements = normalizeDNSPlacementObservations(runtimeSnapshot.DNSPlacements)
+	runtimeSnapshot.TLSDomains = append([]TLSDomainObservation(nil), runtimeSnapshot.TLSDomains...)
+	sort.Slice(runtimeSnapshot.TLSDomains, func(i, j int) bool { return runtimeSnapshot.TLSDomains[i].Ref < runtimeSnapshot.TLSDomains[j].Ref })
+	tlsAllowlist, err := CompileTLSDomains(intent, runtimeSnapshot)
+	if err != nil {
+		return CompileResult{}, err
+	}
 	compiledRoutes, err := ResolveRouteOrigins(intent.Routes, runtimeSnapshot, policy)
 	if err != nil {
 		return CompileResult{}, err
@@ -328,6 +338,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if len(intent.CachePolicies) > 0 {
 		routePayload["cache_policies"] = intent.CachePolicies
 	}
+	if len(tlsAllowlist) > 0 {
+		routePayload["tls_allowlist"] = tlsAllowlist
+	}
 	dnsPayload := map[string]any{
 		"schema_version": SchemaVersion,
 		"generation":     intent.Generation,
@@ -341,6 +354,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		"certificates":   intent.TLS,
 		"policy":         policy,
 		"lineage":        lineage,
+	}
+	if len(runtimeSnapshot.TLSDomains) > 0 {
+		tlsPayload["domain_states"] = runtimeSnapshot.TLSDomains
+		tlsPayload["tls_allowlist"] = tlsAllowlist
 	}
 	metadata := lineageMetadata(lineage)
 	releaseSetGeneration := "release-" + configurationGeneration
@@ -512,6 +529,9 @@ func validateIntent(in PlatformIntent) error {
 		return err
 	}
 	if err := ValidateACMEChallenges(in.ACMEChallenges); err != nil {
+		return err
+	}
+	if err := ValidateTLSIntents(in.TLS, in.Routes); err != nil {
 		return err
 	}
 	return ValidateRouteBehavior(in.Routes, in.CachePolicies)

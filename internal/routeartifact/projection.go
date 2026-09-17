@@ -60,6 +60,22 @@ func Project(artifact model.PlatformArtifact) (model.EdgeRouteIntentSnapshot, er
 	if err := platformconfig.ValidateRouteBehavior(typedRoutes, cachePolicies); err != nil {
 		return model.EdgeRouteIntentSnapshot{}, err
 	}
+	tlsAllowlist := []model.EdgeTLSAllowlistEntry{}
+	if content, exists := artifact.Content["tls_allowlist"]; exists {
+		raw, err := json.Marshal(content)
+		if err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&tlsAllowlist); err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
+		if err := platformconfig.ValidateTLSAllowlist(tlsAllowlist, typedRoutes); err != nil {
+			return model.EdgeRouteIntentSnapshot{}, err
+		}
+		sort.Slice(tlsAllowlist, func(i, j int) bool { return tlsAllowlist[i].Hostname < tlsAllowlist[j].Hostname })
+	}
 	disabledCacheIDs := map[string]bool{}
 	cacheIDs := map[string]string{}
 	for _, policy := range cachePolicies {
@@ -185,7 +201,7 @@ func Project(artifact model.PlatformArtifact) (model.EdgeRouteIntentSnapshot, er
 		}
 		return intents[i].PathPrefix < intents[j].PathPrefix
 	})
-	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Generation: artifact.Generation, GeneratedAt: artifact.CreatedAt, Routes: intents, TLSAllowlist: []model.EdgeTLSAllowlistEntry{}, CachePolicies: cachePolicies}
+	snapshot := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, Generation: artifact.Generation, GeneratedAt: artifact.CreatedAt, Routes: intents, TLSAllowlist: tlsAllowlist, CachePolicies: cachePolicies}
 	return snapshot, nil
 }
 

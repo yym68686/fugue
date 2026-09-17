@@ -29,6 +29,7 @@ func MaterializeForGroup(artifact model.PlatformArtifact, groupID string) (model
 		Routes: make([]model.EdgeRouteBinding, 0, len(snapshot.Routes)),
 	}
 	used := map[string]bool{}
+	hosts := map[string]bool{}
 	for _, intent := range snapshot.Routes {
 		switch intent.TargetGroupMode {
 		case model.EdgeRouteIntentGroupModeAllGroups:
@@ -42,11 +43,17 @@ func MaterializeForGroup(artifact model.PlatformArtifact, groupID string) (model
 		binding := routebinding.FromIntent(intent, groupID)
 		binding.RouteGeneration = intent.Generation
 		bundle.Routes = append(bundle.Routes, binding)
+		hosts[binding.Hostname] = true
 		used[binding.CachePolicyID] = true
 	}
 	for _, policy := range snapshot.CachePolicies {
 		if used[policy.ID] {
 			bundle.CachePolicies = append(bundle.CachePolicies, policy)
+		}
+	}
+	for _, entry := range snapshot.TLSAllowlist {
+		if hosts[entry.Hostname] {
+			bundle.TLSAllowlist = append(bundle.TLSAllowlist, entry)
 		}
 	}
 	sort.Slice(bundle.CachePolicies, func(i, j int) bool { return bundle.CachePolicies[i].ID < bundle.CachePolicies[j].ID })

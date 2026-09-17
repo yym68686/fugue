@@ -31092,11 +31092,30 @@ components:
       type: object
       additionalProperties: false
       required: [hostname, policy]
+      description: Desired TLS policy and optional domain binding. domain_ref requires app_id and tenant_id and an exact matching route owner. It references frozen domain lifecycle facts; verification status and certificate readiness are never desired intent.
       properties:
         hostname:
           type: string
         policy:
           type: string
+        domain_ref: {type: string}
+        app_id: {type: string}
+        tenant_id: {type: string}
+    PlatformTLSDomainObservation:
+      type: object
+      additionalProperties: false
+      required: [ref, hostname, app_id, tenant_id, status]
+      description: Frozen persisted domain lifecycle state, with original verification and TLS event timestamps. Historical ready status is not a fresh certificate probe or serving ACK. Missing or old tls_last_checked_at is retained, never renewed by snapshot capture. DNS eligibility still requires independent route/TLS placement proofs. References and owners must exactly match TLS intent and routes; duplicate or unreferenced facts and future timestamps are rejected. verified status requires verified_at; ready status requires verified ownership and tls_ready_at.
+      properties:
+        ref: {type: string}
+        hostname: {type: string}
+        app_id: {type: string}
+        tenant_id: {type: string}
+        status: {type: string, enum: [pending, verified]}
+        tls_status: {type: string, enum: ['', pending, ready, error]}
+        verified_at: {type: string, format: date-time, nullable: true}
+        tls_last_checked_at: {type: string, format: date-time, nullable: true}
+        tls_ready_at: {type: string, format: date-time, nullable: true}
     PlatformConfigIntent:
       type: object
       additionalProperties: false
@@ -31411,6 +31430,11 @@ components:
       additionalProperties: false
       required: [intent_generation, policy_generation]
       properties:
+        tls_domains:
+          type: array
+          maxItems: 10000
+          items:
+            $ref: "#/components/schemas/PlatformTLSDomainObservation"
         dns_placements:
           type: array
           maxItems: 10000
@@ -31419,7 +31443,7 @@ components:
         captured_at:
           type: string
           format: date-time
-          description: Fixed freshness reference for origin and release observations, required when either is present. Compiler wall clock is never used.
+          description: Fixed reference for runtime observations and policy expiry evaluation. Required for origin, release or domain lifecycle facts and fully identified expiring exclusions. Snapshot capture never renews original verification or TLS check timestamps. Compiler wall clock is never used.
         origins:
           type: array
           items:

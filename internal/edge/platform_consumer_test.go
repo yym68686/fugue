@@ -24,7 +24,7 @@ import (
 )
 
 func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
-	for _, scenario := range []string{"legacy", "compiled placement", "compiled placement and cache"} {
+	for _, scenario := range []string{"legacy", "compiled placement", "compiled placement and cache", "compiled domain TLS"} {
 		t.Run(scenario, func(t *testing.T) {
 			testEdgePlatformShadowPreservesServingAndChecksBindings(t, scenario)
 		})
@@ -76,6 +76,13 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 		request.Intent.CachePolicies = []model.CachePolicy{{ID: "assets", Kind: model.CachePolicyKindStaticAssets, HostnameScope: "app.example.test", TTLSeconds: 60, MethodAllowlist: []string{"GET", "HEAD"}}}
 		request.Intent.Routes[0].CachePolicyID = "assets"
 		request.Intent.Routes[0].CacheNamespace = "app_gen1"
+	}
+	if scenario == "compiled domain TLS" {
+		route := &request.Intent.Routes[0]
+		route.AppID, route.TenantID = "app", "tenant"
+		request.Intent.TLS = []platformconfig.TLSIntent{{Hostname: route.Hostname, Policy: "custom-domain", AppID: route.AppID, TenantID: route.TenantID, DomainRef: "domain-ref"}}
+		original := request.RuntimeSnapshot.CapturedAt.Add(-24 * time.Hour)
+		request.RuntimeSnapshot.TLSDomains = []platformconfig.TLSDomainObservation{{Ref: "domain-ref", Hostname: route.Hostname, AppID: route.AppID, TenantID: route.TenantID, Status: "verified", TLSStatus: "ready", VerifiedAt: &original, TLSReadyAt: &original}}
 	}
 	compiled, err := platformconfig.Compile(request)
 	if err != nil {

@@ -140,6 +140,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		Generation    string                         `json:"generation"`
 		Routes        []platformconfig.CompiledRoute `json:"routes"`
 		CachePolicies []model.CachePolicy            `json:"cache_policies,omitempty"`
+		TLSAllowlist  []model.EdgeTLSAllowlistEntry  `json:"tls_allowlist,omitempty"`
 		Policy        platformconfig.PolicySnapshot  `json:"policy"`
 		Lineage       platformconfig.Lineage         `json:"lineage"`
 	}
