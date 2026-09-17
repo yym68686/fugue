@@ -261,7 +261,7 @@
               "fugue.io/edge-heartbeat-fenced": "false",
               "fugue.pro/edge-worker-manifest-state": "materialization-ready",
               "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1",
-              "fugue.pro/consumer-identity": "{\"version\":\"v1\",\"component\":\"edge-worker\",\"scope_key\":\"global\",\"artifact_kinds\":[\"edge_route_bundle\"]}"
+              "fugue.pro/consumer-identity": "{\"version\":\"v1\",\"component\":\"edge-worker\",\"scope_key\":\"global\",\"artifact_kinds\":[\"edge_route_bundle\",\"caddy_route_config\"]}"
             },
             "labels": {
               "app.kubernetes.io/component": "@@WORKER_A_COMPONENT@@",
@@ -861,7 +861,7 @@
               "fugue.io/edge-heartbeat-fenced": "false",
               "fugue.pro/edge-worker-manifest-state": "materialization-ready",
               "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1",
-              "fugue.pro/consumer-identity": "{\"version\":\"v1\",\"component\":\"edge-worker\",\"scope_key\":\"global\",\"artifact_kinds\":[\"edge_route_bundle\"]}"
+              "fugue.pro/consumer-identity": "{\"version\":\"v1\",\"component\":\"edge-worker\",\"scope_key\":\"global\",\"artifact_kinds\":[\"edge_route_bundle\",\"caddy_route_config\"]}"
             },
             "labels": {
               "app.kubernetes.io/component": "@@WORKER_B_COMPONENT@@",

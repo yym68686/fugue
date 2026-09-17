@@ -79,6 +79,25 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 	released := release(compiled.ReleaseArtifact)
 	set := buildSet(compiled, released, 1, "assignment-node")
 	persist(set)
+	// An immutable historical TLS expectation belongs to this node's Worker.
+	tlsSet, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: compiled.ReleaseArtifact.ID, ArtifactReleaseID: released.ID, ArtifactKind: compiled.TLSArtifact.ArtifactKind, Scope: compiled.TLSArtifact.Scope, ScopeKey: "global", Generation: compiled.TLSArtifact.Generation, Revision: 900, Topology: platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "assignment-node"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsSet.Consumers[0].Component = model.PlatformConsumerComponentCaddyEdgeFront
+	tlsSet.Consumers[0].ConsumerID = "caddy-edge-front:assignment-node"
+	persist(tlsSet)
+	tlsToken := issue(model.PlatformConsumerComponentEdgeWorker, "assignment-node", "global", compiled.TLSArtifact.ArtifactKind)
+	tlsAssigned := get(tlsToken, http.StatusOK)
+	if len(tlsAssigned.Assignments) != 1 || tlsAssigned.Assignments[0].ExpectedConsumerSetID != tlsSet.ID || tlsAssigned.Assignments[0].ArtifactID != compiled.TLSArtifact.ID {
+		t.Fatal(tlsAssigned)
+	}
+	get(issue(model.PlatformConsumerComponentCaddyEdgeFront, "assignment-node", "global", compiled.TLSArtifact.ArtifactKind), http.StatusNotFound)
+	get(issue(model.PlatformConsumerComponentEdgeWorker, "other-node", "global", compiled.TLSArtifact.ArtifactKind), http.StatusNotFound)
+	storedTLS, err := state.GetPlatformExpectedConsumerSet(tlsSet.ID)
+	if err != nil || storedTLS.Consumers[0].Component != model.PlatformConsumerComponentCaddyEdgeFront {
+		t.Fatal("TLS assignment modified immutable expectation", err)
+	}
 	// Newer unrelated topology must not evict the assignment from a global limit.
 	for i := 0; i < 205; i++ {
 		noise := buildSet(compiled, released, int64(i+2), "unrelated-node")

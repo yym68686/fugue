@@ -300,6 +300,7 @@ func BindPlatformConsumerHeartbeatToExpectedSet(
 	set model.PlatformExpectedConsumerSet,
 	heartbeat PlatformConsumerHeartbeatEnvelope,
 ) (PlatformConsumerHeartbeatEnvelope, error) {
+	set = ProjectExpectedConsumerOwners(set)
 	setID := strings.TrimSpace(set.ID)
 	releaseSetID := strings.TrimSpace(set.ReleaseSetID)
 	expectedGeneration := strings.TrimSpace(set.ExpectedGeneration)

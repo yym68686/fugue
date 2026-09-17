@@ -36,6 +36,7 @@ type ExpectedConsumerSetBuildRequest struct {
 // remains immutable for lineage; convergence is evaluated against the live
 // topology so decommissioned nodes do not block a release forever.
 func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet, topology ExpectedConsumerTopology) model.PlatformExpectedConsumerSet {
+	set = ProjectExpectedConsumerOwners(set)
 	var dnsNodes []model.DNSNode
 	var aliases map[string]string
 	if containsStringFold(expectedComponentsForArtifact(set.ArtifactKind), model.PlatformConsumerComponentDNSServer) {
@@ -230,6 +231,7 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 }
 
 func EvaluateConsumerConvergence(set model.PlatformExpectedConsumerSet, observed []model.PlatformConsumerInstance, now time.Time) model.PlatformConsumerConvergenceStatus {
+	set = ProjectExpectedConsumerOwners(set)
 	now = now.UTC()
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -375,7 +377,7 @@ func expectedComponentsForArtifact(kind string) []string {
 	case model.PlatformArtifactKindDNSAnswerBundle:
 		return []string{model.PlatformConsumerComponentDNSServer}
 	case model.PlatformArtifactKindCaddyRouteConfig:
-		return []string{model.PlatformConsumerComponentCaddyEdgeFront}
+		return []string{model.PlatformConsumerComponentEdgeWorker}
 	case model.PlatformArtifactKindDiscoveryBundle, model.PlatformArtifactKindNodeDesiredState:
 		return []string{model.PlatformConsumerComponentNodeUpdater}
 	case model.PlatformArtifactKindNodeGuardianPolicy:

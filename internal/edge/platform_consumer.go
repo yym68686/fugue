@@ -98,6 +98,13 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 			s.mu.Unlock()
 			s.Logger.Printf("edge platform candidate failed: %v", err)
 		}
+		if err := s.SyncPlatformTLSShadowOnce(ctx); err != nil && ctx.Err() == nil {
+			s.mu.Lock()
+			s.platformTLSCandidate.State = "failed"
+			s.platformTLSCandidate.LastError = err.Error()
+			s.mu.Unlock()
+			s.Logger.Printf("edge platform TLS candidate failed: %v", err)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -129,45 +136,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if assignment.ExpectedConsumerSetID == "" || assignment.ReleaseSetID == "" || assignment.ArtifactReleaseID == "" || assignment.GenerationSequence <= 0 || assignment.FencingToken <= 0 || artifact.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || artifact.ScopeKey != assignment.ScopeKey || artifact.GenerationSequence != assignment.GenerationSequence || artifact.ID != assignment.ArtifactID || artifact.Status != model.PlatformArtifactStatusValidated || artifact.ContentHash != assignment.ContentHash || artifact.Generation != assignment.ExpectedGeneration || release.ID != assignment.ArtifactReleaseID || release.ArtifactID != assignment.ReleaseSetID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet || release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken != assignment.FencingToken || release.Generation == "" || artifact.Metadata["release_set_generation"] != release.Generation {
-		return errors.New("edge platform candidate binding mismatch")
-	}
-	if !platformsafety.EvaluateArtifactIntegrity(artifact, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)).Pass {
-		return errors.New("edge platform candidate signature or digest rejected")
-	}
-	var payload struct {
-		Schema        string                         `json:"schema_version"`
-		Generation    string                         `json:"generation"`
-		Routes        []platformconfig.CompiledRoute `json:"routes"`
-		CachePolicies []model.CachePolicy            `json:"cache_policies,omitempty"`
-		TLSAllowlist  []model.EdgeTLSAllowlistEntry  `json:"tls_allowlist,omitempty"`
-		Policy        platformconfig.PolicySnapshot  `json:"policy"`
-		Lineage       platformconfig.Lineage         `json:"lineage"`
-	}
-	raw, err := json.Marshal(artifact.Content)
+	payload, err := s.verifyPlatformRouteCandidate(artifact, assignment, release)
 	if err != nil {
-		return errors.New("edge platform candidate content invalid")
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if dec.Decode(&payload) != nil || dec.Decode(&struct{}{}) != io.EOF || payload.Schema != platformconfig.SchemaVersion || payload.Generation != artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
-		return errors.New("edge platform candidate schema invalid")
-	}
-	routeIntents := make([]platformconfig.RouteIntent, 0, len(payload.Routes))
-	for _, route := range payload.Routes {
-		routeIntents = append(routeIntents, route.RouteIntent)
-	}
-	if platformconfig.ValidatePlatformIntent(platformconfig.PlatformIntent{SchemaVersion: payload.Schema, Generation: payload.Generation, Scope: assignment.ScopeKey, Routes: routeIntents, CachePolicies: payload.CachePolicies}) != nil {
-		return errors.New("edge platform candidate routes invalid")
-	}
-	policyDigest, err := platformconfig.Digest(payload.Policy)
-	if err != nil || payload.Policy.Scope != assignment.ScopeKey || payload.Lineage.IntentGeneration != payload.Generation || payload.Lineage.PolicyGeneration != payload.Policy.Generation || payload.Lineage.PolicyDigest != policyDigest {
-		return errors.New("edge platform candidate policy lineage invalid")
-	}
-	for key, value := range map[string]string{"intent_generation": payload.Lineage.IntentGeneration, "policy_generation": payload.Lineage.PolicyGeneration, "intent_digest": payload.Lineage.IntentDigest, "policy_digest": payload.Lineage.PolicyDigest, "input_snapshot_digest": payload.Lineage.InputSnapshotDigest, "compiler_version": payload.Lineage.CompilerVersion} {
-		if value == "" || artifact.Metadata[key] != value {
-			return errors.New("edge platform candidate lineage binding mismatch")
-		}
+		return err
 	}
 	routeIndexDigest, err := validatePlatformCandidateIndex(artifact, s.Config.EdgeGroupID)
 	if err != nil {
@@ -226,4 +197,49 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	s.mu.Unlock()
 	s.Logger.Printf("edge platform candidate verified; artifact=%s digest=%s routes=%d sequence=%d serving=%s", assignment.ArtifactID, assignment.ContentHash, len(payload.Routes), c.Sequence, status.ServingGeneration)
 	return nil
+}
+
+type platformRouteCandidatePayload struct {
+	Schema        string                         `json:"schema_version"`
+	Generation    string                         `json:"generation"`
+	Routes        []platformconfig.CompiledRoute `json:"routes"`
+	CachePolicies []model.CachePolicy            `json:"cache_policies,omitempty"`
+	TLSAllowlist  []model.EdgeTLSAllowlistEntry  `json:"tls_allowlist,omitempty"`
+	Policy        platformconfig.PolicySnapshot  `json:"policy"`
+	Lineage       platformconfig.Lineage         `json:"lineage"`
+}
+
+func (s *Service) verifyPlatformRouteCandidate(artifact model.PlatformArtifact, assignment model.PlatformConsumerAssignment, release model.PlatformArtifactRelease) (payload platformRouteCandidatePayload, err error) {
+	if assignment.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || assignment.ExpectedConsumerSetID == "" || assignment.ReleaseSetID == "" || assignment.ArtifactReleaseID == "" || assignment.GenerationSequence <= 0 || assignment.FencingToken <= 0 || artifact.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || artifact.ScopeKey != assignment.ScopeKey || artifact.GenerationSequence != assignment.GenerationSequence || artifact.ID != assignment.ArtifactID || artifact.Status != model.PlatformArtifactStatusValidated || artifact.ContentHash != assignment.ContentHash || artifact.Generation != assignment.ExpectedGeneration || release.ID != assignment.ArtifactReleaseID || release.ArtifactID != assignment.ReleaseSetID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet || release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken != assignment.FencingToken || release.Generation == "" || artifact.Metadata["release_set_generation"] != release.Generation {
+		return payload, errors.New("edge platform candidate binding mismatch")
+	}
+	if !platformsafety.EvaluateArtifactIntegrity(artifact, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)).Pass {
+		return payload, errors.New("edge platform candidate signature or digest rejected")
+	}
+	raw, err := json.Marshal(artifact.Content)
+	if err != nil {
+		return payload, errors.New("edge platform candidate content invalid")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&payload) != nil || dec.Decode(&struct{}{}) != io.EOF || payload.Schema != platformconfig.SchemaVersion || payload.Generation != artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
+		return payload, errors.New("edge platform candidate schema invalid")
+	}
+	routeIntents := make([]platformconfig.RouteIntent, 0, len(payload.Routes))
+	for _, route := range payload.Routes {
+		routeIntents = append(routeIntents, route.RouteIntent)
+	}
+	if platformconfig.ValidatePlatformIntent(platformconfig.PlatformIntent{SchemaVersion: payload.Schema, Generation: payload.Generation, Scope: assignment.ScopeKey, Routes: routeIntents, CachePolicies: payload.CachePolicies}) != nil {
+		return payload, errors.New("edge platform candidate routes invalid")
+	}
+	policyDigest, err := platformconfig.Digest(payload.Policy)
+	if err != nil || payload.Policy.Scope != assignment.ScopeKey || payload.Lineage.IntentGeneration != payload.Generation || payload.Lineage.PolicyGeneration != payload.Policy.Generation || payload.Lineage.PolicyDigest != policyDigest {
+		return payload, errors.New("edge platform candidate policy lineage invalid")
+	}
+	for key, value := range map[string]string{"intent_generation": payload.Lineage.IntentGeneration, "policy_generation": payload.Lineage.PolicyGeneration, "intent_digest": payload.Lineage.IntentDigest, "policy_digest": payload.Lineage.PolicyDigest, "input_snapshot_digest": payload.Lineage.InputSnapshotDigest, "compiler_version": payload.Lineage.CompilerVersion} {
+		if value == "" || artifact.Metadata[key] != value {
+			return payload, errors.New("edge platform candidate lineage binding mismatch")
+		}
+	}
+	return payload, nil
 }

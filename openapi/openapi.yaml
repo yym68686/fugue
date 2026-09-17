@@ -38,6 +38,19 @@ x-fugue-edge-candidate-execution:
     fields remain staged/shadow_validated until the serving protocol permits it.
     Receipts are persisted with the shadow candidate and exposed in local Edge
     health under platform_candidate.execution; they are not serving LKG records.
+x-fugue-tls-shadow-consumer:
+  semantics: >-
+    TLS reference artifacts (caddy_route_config) are consumed by the Edge Worker
+    that owns Caddy. Historical caddy-edge-front expectations project to the
+    same node's Worker for assignment, heartbeat binding and convergence;
+    persisted expected sets remain immutable and Front reports cannot satisfy
+    Worker expectations. Pod identity must explicitly authorize the TLS kind.
+    The Worker verifies both signed route and TLS artifacts from the same active
+    shadow ReleaseSet, including scope, release, fence, lineage, policy, hostname
+    ownership and matching TLS allowlists. Its independent durable TLS cursor
+    and local platform_tls_candidate status report staged/shadow_validated only.
+    Historical domain lifecycle events do not prove fresh certificate readiness;
+    this validation neither loads Caddy nor changes serving, certificates or LKG.
 x-fugue-edge-route-probe:
   version: 1
   transport: HTTPS to an inventory candidate IP with the desired hostname as TLS SNI and HTTP Host

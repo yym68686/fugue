@@ -1068,7 +1068,8 @@ func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.Platf
 			}
 			// A newer topology may remove the consumer. Never resurrect its old
 			// assignment by filtering consumer membership before revision selection.
-			for _, expected := range latest.Consumers {
+			owned := platformcontrol.ProjectExpectedConsumerOwners(*latest)
+			for _, expected := range owned.Consumers {
 				if expected.ConsumerID != claims.Component+":"+claims.NodeID || expected.Component != claims.Component ||
 					expected.NodeID != claims.NodeID || expected.ScopeKey != claims.ScopeKey || expected.ArtifactKind != kind {
 					continue
