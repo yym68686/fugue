@@ -57,6 +57,13 @@ absence, it re-reads CurrentAuthority before declaring the candidate retired.
 This prevents configuration progress from starting workload compensation while
 Guardian is still committing the exact candidate.
 
+A staging CAS conflict against a healthy current configuration refreshes the
+Worker/Front snapshot before retrying. The new snapshot must preserve the
+active code grant and node cohort, contain fresh healthy facts, and not regress
+the loaded publication sequence. The signed staging request then binds the
+observed current Worker configuration. This path does not renew the LKG or
+increment its recovery epoch; the existing four-attempt bound still applies.
+
 An already committed CurrentAuthority is a separate outcome. The executor
 requires the exact staged record, Worker source/image, slot and original bundle
 generation, plus a complete ready Worker cohort with fresh active inventory.

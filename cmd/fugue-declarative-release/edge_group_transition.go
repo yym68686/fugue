@@ -473,7 +473,7 @@ func edgeRestagingPreservesTraffic(before, observed edgeGroupState, transition d
 		prior := oldWorkers[node]
 		digest, err := immutableDigestFromRef(worker.ImageRef)
 		if err != nil || !worker.Ready || worker.RestartCount != 0 || worker.SourceCommit != prior.SourceCommit || worker.ImageRef != prior.ImageRef ||
-			worker.SourceCommit != a.WorkerSourceCommit || digest != a.WorkerImageDigest {
+			worker.SourceCommit != a.WorkerSourceCommit || digest != a.WorkerImageDigest || worker.PublicationSequence < prior.PublicationSequence {
 			return false
 		}
 	}
@@ -741,14 +741,14 @@ func (runtime *kubectlEdgeGroupRuntime) DeclaredTarget(name string) (declarative
 }
 
 func (runtime *kubectlEdgeGroupRuntime) StageCandidate(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error) {
-	return runtime.stageCandidate(ctx, before, inactiveSlot, target, false)
+	return runtime.stageCandidate(ctx, before, inactiveSlot, target, false, runtime.Snapshot)
 }
 
 func (runtime *kubectlEdgeGroupRuntime) StageStandby(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error) {
-	return runtime.stageCandidate(ctx, before, inactiveSlot, target, true)
+	return runtime.stageCandidate(ctx, before, inactiveSlot, target, true, runtime.Snapshot)
 }
 
-func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool) (edgeCandidateStageReceipt, error) {
+func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, before edgeGroupState, inactiveSlot string, target declarativerelease.TargetIdentity, standbyOnly bool, snapshot func(context.Context) (edgeGroupState, error)) (edgeCandidateStageReceipt, error) {
 	var lastErr error
 	recoveryAttempts := 0
 	for attempt := 0; attempt < edgeCandidateStageAttempts; attempt++ {
@@ -786,7 +786,31 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 			return edgeCandidateStageReceipt{}, err
 		}
 		lastErr = err
-		if errors.Is(err, errEdgeCandidateStageSequenceConflict) && recoveryAttempts < 2 && !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "" {
+		refreshedServingFacts := false
+		if errors.Is(err, errEdgeCandidateStageSequenceConflict) && before.FrontActivation != nil {
+			status, statusErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
+			if statusErr != nil {
+				return edgeCandidateStageReceipt{}, errors.Join(lastErr, statusErr)
+			}
+			if status.Ready && status.ServingHealthy && status.PublicationDecision == "published" && status.LKGState == "current" &&
+				status.CurrentPublicationSequence > 0 && status.BundleGeneration != "" && edgePromotionDigestPattern.MatchString(status.PublishedBundleDigest) {
+				// A healthy configuration publication does not need a recovery
+				// write. Refresh the Worker facts used to bind the next request;
+				// reusing the prewrite snapshot repeats the same stale witness.
+				if attempt+1 == edgeCandidateStageAttempts {
+					break
+				}
+				if snapshot == nil {
+					return edgeCandidateStageReceipt{}, errors.Join(lastErr, errors.New("candidate retry snapshot reader is unavailable"))
+				}
+				observed, snapshotErr := snapshot(ctx)
+				if snapshotErr != nil || !edgeRestagingPreservesTraffic(before, observed, runtime.transition) {
+					return edgeCandidateStageReceipt{}, errors.Join(lastErr, errors.New("candidate retry cannot prove unchanged active code authority"), snapshotErr)
+				}
+				before, refreshedServingFacts = observed, true
+			}
+		}
+		if !refreshedServingFacts && errors.Is(err, errEdgeCandidateStageSequenceConflict) && recoveryAttempts < 2 && !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "" {
 			status, statusErr := readEdgeCandidateStageStatus(ctx, runtime.transition.CandidateStageURL, runtime.transition.GroupID)
 			if statusErr != nil {
 				return edgeCandidateStageReceipt{}, errors.Join(lastErr, fmt.Errorf("read Edge Control status before published LKG recovery: %w", statusErr))
