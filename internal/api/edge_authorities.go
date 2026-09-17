@@ -144,7 +144,9 @@ func (s *Server) readEdgeAuthorityStatus(ctx context.Context, service, groupID s
 	if err != nil {
 		return edgeAuthorityReadStatus{}, 0, errors.New("build Edge Control authority request")
 	}
-	request.Header.Set("Accept", "application/json")
+	// Edge Control reserves Accept: application/json for the legacy strict
+	// inventory cursor. Omit it to request the complete authority projection;
+	// the cursor omits serving health and must not become a false observation.
 	client := s.edgeDNSAuthorityHTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Second}
@@ -158,11 +160,20 @@ func (s *Server) readEdgeAuthorityStatus(ctx context.Context, service, groupID s
 	if err != nil || len(body) == 0 || len(body) > edgeAuthorityReadStatusLimit {
 		return edgeAuthorityReadStatus{}, response.StatusCode, errors.New("Edge Control authority status is unavailable")
 	}
-	var status edgeAuthorityReadStatus
+	var status struct {
+		edgeAuthorityReadStatus
+		ServingHealthy    *bool `json:"serving_healthy"`
+		BootstrapEligible *bool `json:"bootstrap_eligible"`
+	}
 	if err := json.Unmarshal(body, &status); err != nil {
 		return edgeAuthorityReadStatus{}, response.StatusCode, errors.New("Edge Control authority status is invalid")
 	}
-	return status, response.StatusCode, nil
+	if status.ServingHealthy == nil || status.BootstrapEligible == nil {
+		return edgeAuthorityReadStatus{}, response.StatusCode, errors.New("Edge Control authority status is missing serving health or bootstrap evidence")
+	}
+	status.edgeAuthorityReadStatus.ServingHealthy = *status.ServingHealthy
+	status.edgeAuthorityReadStatus.BootstrapEligible = *status.BootstrapEligible
+	return status.edgeAuthorityReadStatus, response.StatusCode, nil
 }
 
 func validateEdgeAuthorityReadStatus(status edgeAuthorityReadStatus, now time.Time) error {

@@ -562,6 +562,9 @@ paths:
       description: >-
         Read-only diagnostic view of the Edge Control group authority. This
         endpoint never synthesizes Edge nodes or ACKs from DNS state.
+        It reads the complete authority projection, including explicit serving
+        health and bootstrap eligibility. A response that omits either fact is
+        reported as unavailable with an error, never as a false health observation.
       tags: [Admin, Edge]
       x-fugue-handler: handleAdminListEdgeAuthorities
       security:
