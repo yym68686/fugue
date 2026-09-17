@@ -401,9 +401,9 @@ func (s *Server) platformConsumerTopology(ctx context.Context, principal model.P
 		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
 		dns = activeDNSNodesForPolicy(dns, nodePolicies)
 	}
-	edges = freshEdgeNodes(edges, time.Now().UTC())
-	// DNS process existence is distinct from health. Keep stale/unhealthy
-	// current nodes required; only authoritative node policy removes history.
+	// Membership is distinct from health for both Edge and DNS. Silence must
+	// not shrink required convergence; only authoritative node policy removes
+	// history. Trusted heartbeats assess freshness after this projection.
 	updaters, err := s.store.ListNodeUpdaters("", true)
 	if err != nil {
 		return platformcontrol.ExpectedConsumerTopology{}, err
