@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v18"
+	CompilerVersion = "platform-config-compiler/v19"
 	GlobalScopeKey  = "global"
 )
 
@@ -125,19 +125,20 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
-	SchemaVersion       string                    `json:"schema_version"`
-	Generation          string                    `json:"generation"`
-	Scope               string                    `json:"scope"`
-	RequireTLSReady     bool                      `json:"require_tls_ready"`
-	RequireRouteReady   bool                      `json:"require_route_ready"`
-	MinimumHealthyEdges int                       `json:"minimum_healthy_edges"`
-	MaxStaleSeconds     int                       `json:"max_stale_seconds"`
-	CanaryWeights       []int                     `json:"canary_weights,omitempty"`
-	DependencyOrder     []string                  `json:"dependency_order,omitempty"`
-	ConstraintGraph     ConstraintGraph           `json:"constraint_graph,omitempty"`
-	RouteConstraints    []RoutePolicyConstraint   `json:"route_constraints,omitempty"`
-	TrafficConstraints  []TrafficPolicyConstraint `json:"traffic_constraints,omitempty"`
-	CreatedAt           time.Time                 `json:"created_at,omitempty"`
+	DNSRouteStateConstraints []DNSRouteStateConstraint `json:"dns_route_state_constraints,omitempty"`
+	SchemaVersion            string                    `json:"schema_version"`
+	Generation               string                    `json:"generation"`
+	Scope                    string                    `json:"scope"`
+	RequireTLSReady          bool                      `json:"require_tls_ready"`
+	RequireRouteReady        bool                      `json:"require_route_ready"`
+	MinimumHealthyEdges      int                       `json:"minimum_healthy_edges"`
+	MaxStaleSeconds          int                       `json:"max_stale_seconds"`
+	CanaryWeights            []int                     `json:"canary_weights,omitempty"`
+	DependencyOrder          []string                  `json:"dependency_order,omitempty"`
+	ConstraintGraph          ConstraintGraph           `json:"constraint_graph,omitempty"`
+	RouteConstraints         []RoutePolicyConstraint   `json:"route_constraints,omitempty"`
+	TrafficConstraints       []TrafficPolicyConstraint `json:"traffic_constraints,omitempty"`
+	CreatedAt                time.Time                 `json:"created_at,omitempty"`
 }
 
 type ConstraintGraph struct {
@@ -468,6 +469,10 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 
 func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out := in
+	out.DNSRouteStateConstraints = append([]DNSRouteStateConstraint(nil), in.DNSRouteStateConstraints...)
+	sort.Slice(out.DNSRouteStateConstraints, func(i, j int) bool {
+		return out.DNSRouteStateConstraints[i].RecordKind < out.DNSRouteStateConstraints[j].RecordKind
+	})
 	out.SchemaVersion = firstNonEmpty(strings.TrimSpace(in.SchemaVersion), SchemaVersion)
 	out.Scope = firstNonEmpty(strings.TrimSpace(in.Scope), GlobalScopeKey)
 	if out.MinimumHealthyEdges <= 0 {
@@ -575,6 +580,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := validateDNSRouteStateConstraints(in.DNSRouteStateConstraints); err != nil {
+		return err
+	}
 	if in.SchemaVersion != SchemaVersion || strings.TrimSpace(in.Generation) == "" {
 		return fmt.Errorf("policy snapshot requires schema_version %q and generation", SchemaVersion)
 	}

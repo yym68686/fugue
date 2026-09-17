@@ -61,7 +61,7 @@ func TestPlacementReleaseProofMatchesLegacyEdgeControlOutput(t *testing.T) {
 			}
 			beforeIntent, beforePolicy := r.Intent, r.Policy
 			nodes := []model.EdgeNode{{ID: "edge-test", EdgeGroupID: group, Status: model.EdgeHealthHealthy, Healthy: true, PublicIPv4: "93.184.216.34", RouteBundleVersion: "loaded-bundle", LastHeartbeatAt: &now}}
-			captureDNSPlacementFacts(context.Background(), &r, nodes, func(context.Context, string, string, string) (placementRouteProof, error) {
+			captureDNSPlacementFacts(context.Background(), &r, nodes, func(context.Context, string, string, string, string) (placementRouteProof, error) {
 				return placementRouteProof{Digest: actualDigest, EdgeID: "edge-test", GroupID: group, Version: "loaded-bundle", ValidUntil: now.Add(30 * time.Second)}, nil
 			})
 			if len(r.RuntimeSnapshot.DNSPlacements) != 1 || len(r.RuntimeSnapshot.DNSPlacements[0].Candidates) != 1 {
@@ -151,7 +151,7 @@ func placementCaptureFixture(t *testing.T) (platformIntentProjectionResponse, []
 			t.Fatal(err)
 		}
 	}
-	probe := func(ctx context.Context, host, path, address string) (placementRouteProof, error) {
+	probe := func(ctx context.Context, host, path, address, state string) (placementRouteProof, error) {
 		if _, ok := ctx.Deadline(); !ok {
 			t.Fatal("unbounded collection")
 		}
@@ -163,13 +163,74 @@ func placementCaptureFixture(t *testing.T) (platformIntentProjectionResponse, []
 	return result, nodes, probe
 }
 
+func TestPlacementCaptureRequiresAllExactInactiveStates(t *testing.T) {
+	for _, behavior := range []string{"omit", "verified", "missing state", "wrong state", "wrong path digest"} {
+		t.Run(behavior, func(t *testing.T) {
+			r, nodes, _ := placementCaptureFixture(t)
+			r.Intent.DNS[0].RecordKind = model.EdgeDNSRecordKindCustomDomainTarget
+			for i := range r.Intent.Routes {
+				r.Intent.Routes[i].Enabled = false
+				r.Intent.Routes[i].RoutePolicy = model.EdgeRoutePolicyEnabled
+			}
+			if behavior != "omit" {
+				r.Policy.DNSRouteStateConstraints = []platformconfig.DNSRouteStateConstraint{{RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, InactiveBehavior: "serve_error_page"}}
+			}
+			_, projected, err := placementRecordRoutes(r, r.Intent.DNS[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			proofs := map[string]string{}
+			for _, p := range projected {
+				binding := routebinding.FromIntent(p, nodes[0].EdgeGroupID)
+				if binding.Status != "disabled" || binding.UpstreamURL != "" || len(binding.Upstreams) != 0 {
+					t.Fatal("non-origin projection failed", binding)
+				}
+				proofs[p.PathPrefix], err = routeproof.Digest(binding)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, host, path, address, state string) (placementRouteProof, error) {
+				calls++
+				if state != "disabled" {
+					t.Fatal("collector did not request exact inactive state", state)
+				}
+				p := placementRouteProof{State: state, Digest: proofs[path], Version: "bundle-a", EdgeID: "edge-a", GroupID: nodes[0].EdgeGroupID, ValidUntil: time.Now().Add(20 * time.Second)}
+				if path == "/api" {
+					switch behavior {
+					case "missing state":
+						p.State = ""
+					case "wrong state":
+						p.State = "unavailable"
+					case "wrong path digest":
+						p.Digest = proofs["/"]
+					}
+				}
+				return p, nil
+			})
+			candidates := r.RuntimeSnapshot.DNSPlacements[0].Candidates
+			if behavior == "verified" {
+				if len(candidates) != 1 || !candidates[0].InactiveRoutesVerified || len(candidates[0].A) != 1 || len(candidates[0].AAAA) != 1 || calls != 4 {
+					t.Fatal("valid exact inactive proof was lost", candidates, calls)
+				}
+			} else if len(candidates) != 0 {
+				t.Fatal("partial inactive evidence accepted", candidates)
+			}
+			if behavior == "omit" && calls != 0 {
+				t.Fatal("implicit policy probed inactive routes")
+			}
+		})
+	}
+}
+
 func TestPlacementCaptureCompilesOnlyFreshExactProofAndPreservesInputs(t *testing.T) {
 	r, nodes, probe := placementCaptureFixture(t)
 	intent, policy := r.Intent, r.Policy
 	calls := 0
-	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a string) (placementRouteProof, error) {
+	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a, state string) (placementRouteProof, error) {
 		calls++
-		return probe(ctx, h, p, a)
+		return probe(ctx, h, p, a, state)
 	})
 	if calls != 4 || len(r.RuntimeSnapshot.DNSPlacements) != 1 || len(r.RuntimeSnapshot.DNSPlacements[0].Candidates) != 1 {
 		t.Fatalf("capture=%+v calls=%d", r, calls)
@@ -229,7 +290,7 @@ func TestPlacementCaptureNeverRenewsBadEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			change(&nodes[0], &p)
-			captureDNSPlacementFacts(context.Background(), &r, nodes, func(context.Context, string, string, string) (placementRouteProof, error) { return p, nil })
+			captureDNSPlacementFacts(context.Background(), &r, nodes, func(context.Context, string, string, string, string) (placementRouteProof, error) { return p, nil })
 			if len(r.RuntimeSnapshot.DNSPlacements) != 1 || len(r.RuntimeSnapshot.DNSPlacements[0].Candidates) != 0 {
 				t.Fatal("invalid evidence captured", r.RuntimeSnapshot.DNSPlacements)
 			}
@@ -246,16 +307,16 @@ func TestPlacementCaptureNeverRenewsBadEvidence(t *testing.T) {
 func probeWithDeadline(probe placementRouteProbe, path, ip string) (placementRouteProof, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	return probe(ctx, "app.example.test", path, ip)
+	return probe(ctx, "app.example.test", path, ip, "")
 }
 
 func TestPlacementCaptureChecksEveryPathAndAddress(t *testing.T) {
 	r, nodes, probe := placementCaptureFixture(t)
-	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a string) (placementRouteProof, error) {
+	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a, state string) (placementRouteProof, error) {
 		if p == "/api" && a == nodes[0].PublicIPv6 {
 			return placementRouteProof{}, errors.New("TLS failure")
 		}
-		return probe(ctx, h, p, a)
+		return probe(ctx, h, p, a, state)
 	})
 	c := r.RuntimeSnapshot.DNSPlacements[0].Candidates[0]
 	if len(c.A) != 1 || len(c.AAAA) != 0 {
@@ -278,8 +339,8 @@ func TestPlacementCaptureDiagnosticsClassifyBoundedProofFailures(t *testing.T) {
 	failures := map[string]int{}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, _, err := captureDNSPlacementRecordWithDiagnostics(ctx, r, r.Intent.DNS[0], nodes, func(ctx context.Context, host, path, address string) (placementRouteProof, error) {
-		proof, err := probe(ctx, host, path, address)
+	_, _, err := captureDNSPlacementRecordWithDiagnostics(ctx, r, r.Intent.DNS[0], nodes, func(ctx context.Context, host, path, address, state string) (placementRouteProof, error) {
+		proof, err := probe(ctx, host, path, address, state)
 		if err != nil {
 			return proof, err
 		}
@@ -303,12 +364,12 @@ func TestPlacementCaptureProbesReferencedHostInsteadOfDNSTarget(t *testing.T) {
 	r.Intent.DNS[0].Route = &platformconfig.DNSRouteIntent{DNSApplicationIntent: options, Hostnames: []string{"app.example.test"}}
 	r.Intent.DNS[0].Type, r.Intent.DNS[0].Hostname, r.Intent.DNS[0].Values = "FUGUE_ROUTE", "target.example.test", []string{}
 	called := 0
-	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a string) (placementRouteProof, error) {
+	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a, state string) (placementRouteProof, error) {
 		if h != "app.example.test" {
 			t.Fatal("probed DNS alias instead of route hostname", h)
 		}
 		called++
-		return probe(ctx, h, p, a)
+		return probe(ctx, h, p, a, state)
 	})
 	if called != 4 || len(r.RuntimeSnapshot.DNSPlacements) != 1 || len(r.RuntimeSnapshot.DNSPlacements[0].Candidates) != 1 {
 		t.Fatal("route alias not captured", r.Issues)
@@ -333,9 +394,9 @@ func TestPlacementCaptureExcludesStaleInventoryAndNeverDropsHostPolicy(t *testin
 	r, nodes, probe = placementCaptureFixture(t)
 	r.Policy.RouteConstraints = []platformconfig.RoutePolicyConstraint{{ID: "disabled-policy", Hostname: "app.example.test", AppID: "app-a", TenantID: "tenant-a", RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: false}}
 	calls := 0
-	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a string) (placementRouteProof, error) {
+	captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, h, p, a, state string) (placementRouteProof, error) {
 		calls++
-		return probe(ctx, h, p, a)
+		return probe(ctx, h, p, a, state)
 	})
 	if calls != 0 || len(r.RuntimeSnapshot.DNSPlacements) != 1 || len(r.RuntimeSnapshot.DNSPlacements[0].Candidates) != 0 {
 		t.Fatal("disabled route probed or became ready", r)
@@ -380,7 +441,7 @@ func TestPlacementCaptureRunsBeyondLegacyProbeLimitWithBoundedConcurrency(t *tes
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, host, path, address string) (placementRouteProof, error) {
+		captureDNSPlacementFacts(context.Background(), &r, nodes, func(ctx context.Context, host, path, address, state string) (placementRouteProof, error) {
 			n := active.Add(1)
 			defer active.Add(-1)
 			for old := maxActive.Load(); n > old && !maxActive.CompareAndSwap(old, n); old = maxActive.Load() {
@@ -429,7 +490,7 @@ func TestPlacementCaptureCancellationJoinsWorkers(t *testing.T) {
 	started, done := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
-		captureDNSPlacementFacts(ctx, &r, nodes, func(ctx context.Context, host, path, address string) (placementRouteProof, error) {
+		captureDNSPlacementFacts(ctx, &r, nodes, func(ctx context.Context, host, path, address, state string) (placementRouteProof, error) {
 			close(started)
 			<-ctx.Done()
 			return placementRouteProof{}, ctx.Err()

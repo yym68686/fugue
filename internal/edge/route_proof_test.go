@@ -128,3 +128,42 @@ func TestRouteProofRejectsCandidateAndKeepsBundleExpiry(t *testing.T) {
 		t.Fatal("probe changed serving bundle")
 	}
 }
+
+func TestInactiveRouteProofRequiresExactLocalNonOriginState(t *testing.T) {
+	for _, state := range []string{"disabled", "unavailable"} {
+		for name, mutate := range map[string]func(*model.EdgeRouteBundle, *http.Request){
+			"valid":           func(*model.EdgeRouteBundle, *http.Request) {},
+			"wrong state":     func(b *model.EdgeRouteBundle, r *http.Request) { b.Routes[0].Status = "active" },
+			"origin":          func(b *model.EdgeRouteBundle, r *http.Request) { b.Routes[0].UpstreamURL = "http://origin:8080" },
+			"weighted origin": func(b *model.EdgeRouteBundle, r *http.Request) { b.Routes[0].Upstreams = []model.EdgeRouteUpstream{{}} },
+			"foreign":         func(b *model.EdgeRouteBundle, r *http.Request) { b.Routes[0].EdgeGroupID = "other" },
+			"excluded":        func(b *model.EdgeRouteBundle, r *http.Request) { b.Routes[0].ExcludedEdgeIDs = []string{"edge-a"} },
+			"route policy":    func(b *model.EdgeRouteBundle, r *http.Request) { b.Routes[0].RoutePolicy = "route_a_only" },
+			"expired":         func(b *model.EdgeRouteBundle, r *http.Request) { b.ValidUntil = time.Now().Add(-time.Second) },
+			"unknown mode":    func(b *model.EdgeRouteBundle, r *http.Request) { r.Header.Set(routeproof.StateHeader, "any") },
+			"duplicate mode":  func(b *model.EdgeRouteBundle, r *http.Request) { r.Header.Add(routeproof.StateHeader, state) },
+			"empty mode":      func(b *model.EdgeRouteBundle, r *http.Request) { r.Header.Set(routeproof.StateHeader, "") },
+		} {
+			t.Run(state+"/"+name, func(t *testing.T) {
+				s := NewService(config.EdgeConfig{EdgeID: "edge-a", EdgeGroupID: "group-a"}, nil)
+				b := model.EdgeRouteBundle{Version: "published", ValidUntil: time.Now().Add(time.Minute), Routes: []model.EdgeRouteBinding{{Hostname: "app.example.test", EdgeGroupID: "group-a", Status: state, RoutePolicy: "edge_enabled"}}}
+				r := httptest.NewRequest(http.MethodHead, "https://app.example.test/", nil)
+				r.Header.Set(routeproof.RequestHeader, "1")
+				r.Header.Set(routeproof.NonceHeader, "0123456789abcdef0123456789abcdef")
+				r.Header.Set(routeproof.StateHeader, state)
+				mutate(&b, r)
+				s.recordSyncSuccess(b, "published", time.Now(), false)
+				w := httptest.NewRecorder()
+				s.ProxyHandler().ServeHTTP(w, r)
+				if name == "valid" {
+					want, _ := routeproof.Digest(b.Routes[0])
+					if w.Code != 204 || w.Header().Get(routeproof.StateHeader) != state || w.Header().Get(routeproof.DigestHeader) != want || w.Header().Get(routeproof.ExpiryHeader) != b.ValidUntil.UTC().Format(time.RFC3339Nano) {
+						t.Fatal(w)
+					}
+				} else if w.Code < 400 || w.Header().Get(routeproof.DigestHeader) != "" || w.Header().Get(routeproof.StateHeader) != "" {
+					t.Fatal("invalid inactive proof accepted", w)
+				}
+			})
+		}
+	}
+}

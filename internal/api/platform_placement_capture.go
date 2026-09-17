@@ -30,7 +30,7 @@ func (s *Server) capturePlatformPlacements(rctx context.Context, result *platfor
 		result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_placement_inventory_unavailable"})
 		return
 	}
-	captureDNSPlacementFacts(rctx, result, nodes, probePlacementRoute)
+	captureDNSPlacementFacts(rctx, result, nodes, probePlacementRouteState)
 }
 
 // The inventory is discovery and a finite heartbeat lease. Only independent
@@ -194,7 +194,7 @@ func captureDNSPlacementRecordWithDiagnostics(ctx context.Context, snapshot plat
 	for _, node := range nodes {
 		now := time.Now().UTC()
 		// LastSeenAt is not a health observation and cannot renew readiness.
-		if !placementInventoryEligible(node, snapshot.Policy, now) || !placementGroupEligible(record, compiled, node) {
+		if !placementInventoryEligible(node, snapshot.Policy, now) || !placementGroupEligible(record, compiled, node, snapshot.Policy) {
 			continue
 		}
 		expires := node.LastHeartbeatAt.Add(platformNodeHeartbeatStaleAfter)
@@ -205,6 +205,9 @@ func captureDNSPlacementRecordWithDiagnostics(ctx context.Context, snapshot plat
 			continue
 		}
 		candidate := platformconfig.DNSPlacementCandidate{EdgeID: node.ID, EdgeGroupID: node.EdgeGroupID, ObservedAt: *node.LastHeartbeatAt, ValidUntil: expires, ServingGeneration: node.RouteBundleVersion, Healthy: true, RouteReady: true, TLSReady: true}
+		for _, route := range compiled {
+			candidate.InactiveRoutesVerified = candidate.InactiveRoutesVerified || platformconfig.DNSRouteServingState(route) != model.EdgeRouteStatusActive
+		}
 		for _, family := range []struct {
 			value string
 			v4    bool
@@ -222,16 +225,23 @@ func captureDNSPlacementRecordWithDiagnostics(ctx context.Context, snapshot plat
 				}
 				// Hash the route intent exactly as the serving artifact currently does;
 				// this keeps the recovery retry artifact-compatible.
-				expected, err := routeproof.Digest(routebinding.FromIntent(route, node.EdgeGroupID))
+				binding := routebinding.FromIntent(route, node.EdgeGroupID)
+				expected, err := routeproof.Digest(binding)
 				if err != nil {
 					valid = false
 					break
 				}
-				proof, err := probe(ctx, route.Hostname, model.NormalizeAppRoutePathPrefix(route.PathPrefix), ip.String())
+				expectedState := ""
+				if binding.Status == model.EdgeRouteStatusDisabled || binding.Status == model.EdgeRouteStatusUnavailable {
+					expectedState = binding.Status
+				}
+				proof, err := probe(ctx, route.Hostname, model.NormalizeAppRoutePathPrefix(route.PathPrefix), ip.String(), expectedState)
 				failure := ""
 				switch {
 				case err != nil:
 					failure = "probe_error"
+				case proof.State != expectedState:
+					failure = "route_state_mismatch"
 				case proof.Digest != expected:
 					failure = "digest_mismatch"
 				case proof.Version != node.RouteBundleVersion:
@@ -285,9 +295,9 @@ func placementInventoryEligible(node model.EdgeNode, policy platformconfig.Polic
 	return age < platformNodeHeartbeatStaleAfter && age.Seconds() < float64(policy.MaxStaleSeconds)
 }
 
-func placementGroupEligible(record platformconfig.DNSIntent, routes []platformconfig.CompiledRoute, node model.EdgeNode) bool {
+func placementGroupEligible(record platformconfig.DNSIntent, routes []platformconfig.CompiledRoute, node model.EdgeNode, policy platformconfig.PolicySnapshot) bool {
 	for _, r := range routes {
-		if !r.Enabled || (r.Status != "" && r.Status != model.EdgeRouteStatusActive) || (r.RoutePolicy != "" && !model.EdgeRoutePolicyAllowsTraffic(r.RoutePolicy)) {
+		if !platformconfig.DNSRouteStateAllowed(record, r, policy) {
 			return false
 		}
 	}

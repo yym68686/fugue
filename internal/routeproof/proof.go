@@ -20,6 +20,7 @@ const (
 	ExpiryHeader  = "X-Fugue-Route-Valid-Until"
 	EdgeHeader    = "X-Fugue-Route-Edge-Id"
 	GroupHeader   = "X-Fugue-Route-Edge-Group"
+	StateHeader   = "X-Fugue-Route-Probe-State"
 )
 
 func ValidNonce(nonce string) bool {

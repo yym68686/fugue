@@ -19,12 +19,20 @@ import (
 
 type placementRouteProof struct {
 	Digest, Version, EdgeID, GroupID string
+	State                            string
 	ValidUntil                       time.Time
 }
 
-type placementRouteProbe func(context.Context, string, string, string) (placementRouteProof, error)
+type placementRouteProbe func(context.Context, string, string, string, string) (placementRouteProof, error)
 
 func probePlacementRoute(ctx context.Context, host, path, address string) (placementRouteProof, error) {
+	return probePlacementRouteState(ctx, host, path, address, "")
+}
+
+func probePlacementRouteState(ctx context.Context, host, path, address, expectedState string) (placementRouteProof, error) {
+	if expectedState != "" && expectedState != "disabled" && expectedState != "unavailable" {
+		return placementRouteProof{}, errors.New("invalid placement probe state")
+	}
 	ip, err := netip.ParseAddr(address)
 	if err != nil || !platformconfig.PublicDNSFlattenIP(ip) || host == "" || strings.ContainsAny(host, "/:@?#") || !strings.HasPrefix(path, "/") {
 		return placementRouteProof{}, errors.New("invalid placement probe target")
@@ -50,6 +58,9 @@ func probePlacementRoute(ctx context.Context, host, path, address string) (place
 	}
 	req.Header.Set(routeproof.RequestHeader, "1")
 	req.Header.Set(routeproof.NonceHeader, nonce)
+	if expectedState != "" {
+		req.Header.Set(routeproof.StateHeader, expectedState)
+	}
 	response, err := client.Do(req)
 	if err != nil {
 		return placementRouteProof{}, errors.New("placement TLS probe unavailable")
@@ -58,6 +69,9 @@ func probePlacementRoute(ctx context.Context, host, path, address string) (place
 	proof, err := parsePlacementRouteProof(response, nonce, time.Now().UTC())
 	if err != nil {
 		return placementRouteProof{}, err
+	}
+	if proof.State != expectedState {
+		return placementRouteProof{}, errors.New("placement route state proof mismatch")
 	}
 	// A route lease cannot outlive the certificate chain that authenticated it.
 	if response.TLS == nil || len(response.TLS.VerifiedChains) == 0 {
@@ -85,6 +99,10 @@ func parsePlacementRouteProof(response *http.Response, nonce string, now time.Ti
 	if response.Header.Get(routeproof.NonceHeader) != nonce || response.Header.Get("Cache-Control") != "no-store" {
 		return placementRouteProof{}, fail
 	}
+	state := response.Header.Get(routeproof.StateHeader)
+	if len(response.Header.Values(routeproof.StateHeader)) > 1 || (len(response.Header.Values(routeproof.StateHeader)) == 1 && state != "disabled" && state != "unavailable") {
+		return placementRouteProof{}, fail
+	}
 	digest := response.Header.Get(routeproof.DigestHeader)
 	decoded, err := hex.DecodeString(strings.TrimPrefix(digest, "sha256:"))
 	if err != nil || len(decoded) != 32 || len(digest) != 71 || !strings.HasPrefix(digest, "sha256:") || strings.ToLower(digest) != digest {
@@ -94,5 +112,5 @@ func parsePlacementRouteProof(response *http.Response, nonce string, now time.Ti
 	if err != nil || !expires.After(now) {
 		return placementRouteProof{}, fail
 	}
-	return placementRouteProof{Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires}, nil
+	return placementRouteProof{Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires, State: state}, nil
 }

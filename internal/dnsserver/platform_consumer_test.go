@@ -37,6 +37,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	const key = "synthetic-dns-platform-signing-key"
 	request := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent-1", Scope: "global", DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", Type: "A", Values: []string{"192.0.2.99"}, TTL: 60, Status: "active"}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}}
 	if versioned {
+		request.Policy.DNSRouteStateConstraints = []platformconfig.DNSRouteStateConstraint{{RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, InactiveBehavior: "serve_error_page"}}
 		captured := time.Now().UTC()
 		expires := captured.Add(-time.Hour)
 		request.Intent.Routes = []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", Enabled: true, UpstreamURL: "http://origin"}}

@@ -386,6 +386,10 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		constraints[route.Hostname] = true
 	}
 	policy = platformconfig.NormalizePolicySnapshot(policy)
+	// Legacy managed targets remain resolvable when Edge serves a stopped or
+	// unavailable application's local error page. Freeze that behavior as policy;
+	// the new compiler still requires independent exact-state/TLS evidence.
+	policy.DNSRouteStateConstraints = []platformconfig.DNSRouteStateConstraint{{RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, InactiveBehavior: "serve_error_page"}}
 	policy.Generation, err = platformconfig.PolicySnapshotGeneration(policy)
 	if err != nil {
 		return result, err

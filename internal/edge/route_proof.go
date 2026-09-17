@@ -14,6 +14,11 @@ import (
 // business state, renew a lease, or turn an emergency expired LKG into new evidence.
 func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	expectedState := r.Header.Get(routeproof.StateHeader)
+	if len(r.Header.Values(routeproof.StateHeader)) > 1 || (len(r.Header.Values(routeproof.StateHeader)) == 1 && expectedState != model.EdgeRouteStatusDisabled && expectedState != model.EdgeRouteStatusUnavailable) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	if r.Method != http.MethodHead || len(r.Header.Values(routeproof.RequestHeader)) != 1 ||
 		r.Header.Get(routeproof.RequestHeader) != "1" || len(r.Header.Values(routeproof.NonceHeader)) != 1 ||
 		!routeproof.ValidNonce(r.Header.Get(routeproof.NonceHeader)) {
@@ -28,7 +33,13 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	if index.publication.Candidate || fallback || route.Status != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) ||
+	stateMatches := !fallback && route.Status == model.EdgeRouteStatusActive
+	if expectedState != "" {
+		// Inactive index entries use the error-page fallback path even when
+		// local. Check actual ownership and forbid any remaining upstream.
+		stateMatches = route.Status == expectedState && routeMatchesCurrentEdgeGroup(route, s.Config.EdgeGroupID) && route.UpstreamURL == "" && len(route.Upstreams) == 0
+	}
+	if index.publication.Candidate || !stateMatches || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) ||
 		strings.TrimSpace(s.Config.EdgeID) == "" || strings.TrimSpace(s.Config.EdgeGroupID) == "" || version == "" ||
 		!index.validUntil.After(time.Now()) || slices.Contains(route.ExcludedEdgeIDs, s.Config.EdgeID) ||
 		slices.Contains(route.ExcludedEdgeGroupIDs, s.Config.EdgeGroupID) {
@@ -46,5 +57,8 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(routeproof.ExpiryHeader, index.validUntil.UTC().Format(time.RFC3339Nano))
 	w.Header().Set(routeproof.EdgeHeader, s.Config.EdgeID)
 	w.Header().Set(routeproof.GroupHeader, s.Config.EdgeGroupID)
+	if expectedState != "" {
+		w.Header().Set(routeproof.StateHeader, expectedState)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

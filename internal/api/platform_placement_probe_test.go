@@ -34,7 +34,13 @@ func TestParsePlacementRouteProofBindsNonceIdentityExpiryAndNoStore(t *testing.T
 		"expired": func(r *http.Response) {
 			r.Header.Set(routeproof.ExpiryHeader, now.Add(-time.Second).Format(time.RFC3339Nano))
 		},
-		"cache": func(r *http.Response) { r.Header.Set("Cache-Control", "max-age=30") },
+		"cache":         func(r *http.Response) { r.Header.Set("Cache-Control", "max-age=30") },
+		"unknown state": func(r *http.Response) { r.Header.Set(routeproof.StateHeader, "any") },
+		"ambiguous state": func(r *http.Response) {
+			r.Header.Add(routeproof.StateHeader, "disabled")
+			r.Header.Add(routeproof.StateHeader, "unavailable")
+		},
+		"empty state": func(r *http.Response) { r.Header.Set(routeproof.StateHeader, "") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := &http.Response{StatusCode: response.Code, Header: response.Header().Clone()}

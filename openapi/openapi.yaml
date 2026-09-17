@@ -60,6 +60,7 @@ x-fugue-edge-route-probe:
     headers:
       X-Fugue-Route-Probe: '1'
       X-Fugue-Route-Probe-Nonce: 32 lowercase hexadecimal characters from a fresh random nonce
+      X-Fugue-Route-Probe-State: Optional disabled or unavailable; proves an exact loaded local error-page route with no upstream. Omission requires active routing.
   response:
     success: 204
     headers:
@@ -69,7 +70,8 @@ x-fugue-edge-route-probe:
       X-Fugue-Route-Valid-Until: Original signed bundle expiry in RFC3339Nano
       X-Fugue-Route-Edge-Id: Loaded worker identity
       X-Fugue-Route-Edge-Group: Loaded worker group identity
-    errors: Invalid probe requests return 400; missing routes return 404; inactive, foreign-group, expired, or excluded routes return 503. Errors contain no proof headers.
+      X-Fugue-Route-Probe-State: Echoes the explicitly requested inactive state only when that exact local route is loaded with no upstream.
+    errors: Invalid probe requests return 400; missing routes return 404; mismatched state, inactive routes without an explicit state request, foreign-group, expired, or excluded routes return 503. Errors contain no proof headers.
   semantics: |-
     This protocol runs on the Edge proxy listener, not the control API. It reads one
     immutable route index snapshot and never proxies to an origin or peer. Responses
@@ -78,6 +80,11 @@ x-fugue-edge-route-probe:
     inventory identity and original expiry; HTTP success alone is not placement evidence.
     No upstream address, credential, or route payload is returned. Ordinary requests
     without X-Fugue-Route-Probe retain normal proxy behavior.
+    Inactive-state proof does not grant origin readiness. DNS policy must explicitly
+    permit serving the error page for that record kind, and fixed placement facts
+    must separately attest all inactive routes were verified. Default policy omits
+    inactive targets. TLS verification, ownership, exclusions, quorum and original
+    evidence expiry remain mandatory.
     Digest material is Go encoding/json of {schema,route}, with schema set to
     fugue.edge.route-proof/v1 and route in EdgeRouteBinding field order. Hostname is
     lowercase without a trailing dot and path uses NormalizeAppRoutePathPrefix.
@@ -31175,6 +31182,21 @@ components:
           type: string
         scope:
           type: string
+        dns_route_state_constraints:
+          type: array
+          maxItems: 5
+          description: Versioned DNS treatment of inactive routes, keyed uniquely by record kind. Omission defaults to omit. serve_error_page permits disabled/unavailable local routes only with exact loaded-state and TLS proof; it never restores upstreams or permits route_a_only or excluded nodes.
+          items:
+            type: object
+            additionalProperties: false
+            required: [record_kind, inactive_behavior]
+            properties:
+              record_kind:
+                type: string
+                enum: [platform, platform-route, platform-domain, custom-domain-target, hosted]
+              inactive_behavior:
+                type: string
+                enum: [omit, serve_error_page]
         require_tls_ready:
           type: boolean
         require_route_ready:
@@ -31556,6 +31578,9 @@ components:
         valid_until: {type: string, format: date-time}
         healthy: {type: boolean}
         route_ready: {type: boolean}
+        inactive_routes_verified:
+          type: boolean
+          description: Every inactive dependency was independently probed through verified TLS for its exact loaded disabled/unavailable state and digest, with no upstream. Required by serve_error_page policy; does not attest origin health.
         tls_ready: {type: boolean}
         a: {type: array, maxItems: 16, items: {type: string, format: ipv4}}
         aaaa: {type: array, maxItems: 16, items: {type: string, format: ipv6}}

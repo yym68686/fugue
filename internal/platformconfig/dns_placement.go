@@ -14,16 +14,17 @@ import (
 )
 
 type DNSPlacementCandidate struct {
-	EdgeID            string    `json:"edge_id"`
-	EdgeGroupID       string    `json:"edge_group_id"`
-	ServingGeneration string    `json:"serving_generation"`
-	ObservedAt        time.Time `json:"observed_at"`
-	ValidUntil        time.Time `json:"valid_until"`
-	Healthy           bool      `json:"healthy"`
-	RouteReady        bool      `json:"route_ready"`
-	TLSReady          bool      `json:"tls_ready"`
-	A                 []string  `json:"a,omitempty"`
-	AAAA              []string  `json:"aaaa,omitempty"`
+	InactiveRoutesVerified bool      `json:"inactive_routes_verified,omitempty"`
+	EdgeID                 string    `json:"edge_id"`
+	EdgeGroupID            string    `json:"edge_group_id"`
+	ServingGeneration      string    `json:"serving_generation"`
+	ObservedAt             time.Time `json:"observed_at"`
+	ValidUntil             time.Time `json:"valid_until"`
+	Healthy                bool      `json:"healthy"`
+	RouteReady             bool      `json:"route_ready"`
+	TLSReady               bool      `json:"tls_ready"`
+	A                      []string  `json:"a,omitempty"`
+	AAAA                   []string  `json:"aaaa,omitempty"`
 }
 
 type DNSPlacementObservation struct {
@@ -186,11 +187,13 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 		}
 		matched[digest] = true
 		ready := record.Status == "" || record.Status == model.EdgeRouteStatusActive
+		inactive := false
 		minimum := policy.MinimumHealthyEdges
 		for _, route := range owners {
-			if !route.Enabled || (route.Status != "" && route.Status != model.EdgeRouteStatusActive) || (route.RoutePolicy != "" && !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy)) {
+			if !DNSRouteStateAllowed(record, route, policy) {
 				ready = false
 			}
+			inactive = inactive || DNSRouteServingState(route) != model.EdgeRouteStatusActive
 			minimum = max(minimum, route.MinHealthyEdgeNodes)
 		}
 		if !ready {
@@ -223,6 +226,9 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 		quorumExpiries, v4Expiries, v6Expiries := []time.Time{}, []time.Time{}, []time.Time{}
 		count, count4, count6 := 0, 0, 0
 		for _, c := range fact.Candidates {
+			if inactive && !c.InactiveRoutesVerified {
+				continue
+			}
 			expiry := c.ValidUntil
 			if float64(policy.MaxStaleSeconds) < expiry.Sub(c.ObservedAt).Seconds() {
 				expiry = c.ObservedAt.Add(time.Duration(policy.MaxStaleSeconds) * time.Second)
