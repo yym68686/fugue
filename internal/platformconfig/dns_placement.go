@@ -230,16 +230,7 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 			if !c.Healthy || !c.RouteReady || !c.TLSReady || expiry.Sub(*snapshot.CapturedAt) < time.Second {
 				continue
 			}
-			eligible := record.EdgeGroupID == "" || c.EdgeGroupID == record.EdgeGroupID || c.EdgeGroupID == record.FallbackEdgeGroupID
-			for _, route := range owners {
-				if slices.Contains(route.ExcludedEdgeIDs, c.EdgeID) || slices.Contains(route.ExcludedEdgeGroupIDs, c.EdgeGroupID) {
-					eligible = false
-				}
-				if route.EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned && route.EdgeGroupID != c.EdgeGroupID {
-					eligible = false
-				}
-			}
-			if !eligible {
+			if !DNSPlacementAllowsEdge(record, owners, c.EdgeID, c.EdgeGroupID) {
 				continue
 			}
 			has4, has6 := allow4 && len(c.A) > 0, allow6 && len(c.AAAA) > 0
@@ -303,6 +294,23 @@ func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapsho
 		return nil, fmt.Errorf("DNS placement observations reference configuration outside intent")
 	}
 	return NormalizePlatformIntent(PlatformIntent{DNS: out}).DNS, nil
+}
+
+// DNSPlacementAllowsEdge is shared by evidence collection and fixed-snapshot
+// resolution. It is only a constraint check; positive health, route/TLS proof,
+// freshness and quorum remain required separately.
+func DNSPlacementAllowsEdge(record DNSIntent, routes []CompiledRoute, edgeID, groupID string) bool {
+	if record.EdgeGroupID != "" && groupID != record.EdgeGroupID && groupID != record.FallbackEdgeGroupID {
+		return false
+	}
+	for _, route := range routes {
+		if slices.Contains(route.ExcludedEdgeIDs, edgeID) || slices.Contains(route.ExcludedEdgeGroupIDs, groupID) ||
+			(route.DNSPlacementEdgeGroupID != "" && route.DNSPlacementEdgeGroupID != groupID) ||
+			(route.EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned && route.EdgeGroupID != groupID) {
+			return false
+		}
+	}
+	return true
 }
 
 func dnsPlacementQuorumUntil(expiries []time.Time, minimum int) time.Time {

@@ -117,17 +117,18 @@ func TestProjectedHostnamePolicyPreservesSiblingAppConstraints(t *testing.T) {
 	}
 }
 
-func TestApplyRoutePolicyConstraintsForPlacementMaterializesEdgeGroup(t *testing.T) {
+func TestApplyRoutePolicyConstraintsKeepsDNSAndServingScopeSeparate(t *testing.T) {
 	routes := []CompiledRoute{{RouteIntent: RouteIntent{Hostname: "app.example", UpstreamURL: "http://origin", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}}}
 	policy := PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{{ID: "route", Hostname: "app.example", EdgeGroupID: "edge-group-a", MinHealthyEdgeNodes: 2, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}}
-	got, err := ApplyRoutePolicyConstraintsForPlacement(routes, policy)
+	got, err := ApplyRoutePolicyConstraints(routes, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got[0].EdgeGroupMode != model.PlatformRouteEdgeGroupModePinned || got[0].EdgeGroupID != "edge-group-a" || got[0].MinHealthyEdgeNodes != 2 {
+	if got[0].EdgeGroupMode != "" || got[0].EdgeGroupID != "" || got[0].DNSPlacementEdgeGroupID != "edge-group-a" || got[0].MinHealthyEdgeNodes != 2 {
 		t.Fatalf("placement constraint was not materialized: %+v", got[0])
 	}
+	routes[0].EdgeGroupMode, routes[0].EdgeGroupID = model.PlatformRouteEdgeGroupModePinned, "edge-group-b"
 	if _, err := ApplyRoutePolicyConstraints(routes, policy); err == nil {
-		t.Fatal("strict serving compiler accepted unresolved edge-group constraint")
+		t.Fatal("conflicting intent/policy group accepted")
 	}
 }

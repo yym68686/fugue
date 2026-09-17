@@ -25,14 +25,15 @@ type OriginObservation struct {
 // back into PlatformIntent.
 type CompiledRoute struct {
 	RouteIntent
-	RuntimeType          string     `json:"runtime_type,omitempty"`
-	RuntimeEdgeGroupID   string     `json:"runtime_edge_group_id,omitempty"`
-	RuntimeClusterNode   string     `json:"runtime_cluster_node,omitempty"`
-	ExcludedEdgeIDs      []string   `json:"excluded_edge_ids,omitempty"`
-	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
-	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
-	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
-	MinHealthyEdgeNodes  int        `json:"min_healthy_edge_nodes,omitempty"`
+	RuntimeType             string     `json:"runtime_type,omitempty"`
+	RuntimeEdgeGroupID      string     `json:"runtime_edge_group_id,omitempty"`
+	RuntimeClusterNode      string     `json:"runtime_cluster_node,omitempty"`
+	DNSPlacementEdgeGroupID string     `json:"dns_placement_edge_group_id,omitempty"`
+	ExcludedEdgeIDs         []string   `json:"excluded_edge_ids,omitempty"`
+	ExcludedEdgeGroupIDs    []string   `json:"excluded_edge_group_ids,omitempty"`
+	ExclusionReason         string     `json:"exclusion_reason,omitempty"`
+	ExclusionExpiresAt      *time.Time `json:"exclusion_expires_at,omitempty"`
+	MinHealthyEdgeNodes     int        `json:"min_healthy_edge_nodes,omitempty"`
 }
 
 func ResolveRouteOrigins(routes []RouteIntent, snapshot RuntimeSnapshot, policy PolicySnapshot) ([]CompiledRoute, error) {

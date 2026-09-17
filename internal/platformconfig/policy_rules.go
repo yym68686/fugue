@@ -115,17 +115,6 @@ func validatePolicyRules(in PolicySnapshot) error {
 }
 
 func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot) ([]CompiledRoute, error) {
-	return applyRoutePolicyConstraints(routes, policy, true)
-}
-
-// ApplyRoutePolicyConstraintsForPlacement materializes route ownership and
-// edge-group constraints before DNS placement resolves runtime health. The
-// final serving compiler still uses the strict variant above.
-func ApplyRoutePolicyConstraintsForPlacement(routes []CompiledRoute, policy PolicySnapshot) ([]CompiledRoute, error) {
-	return applyRoutePolicyConstraints(routes, policy, false)
-}
-
-func applyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot, rejectEdgeGroup bool) ([]CompiledRoute, error) {
 	if err := validatePolicyRules(policy); err != nil {
 		return nil, err
 	}
@@ -136,9 +125,6 @@ func applyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot, 
 	}
 	byHost := make(map[string]RoutePolicyConstraint, len(policy.RouteConstraints))
 	for _, rule := range policy.RouteConstraints {
-		if rule.EdgeGroupID != "" && rejectEdgeGroup {
-			return nil, fmt.Errorf("edge-group constraints require DNS placement resolution; compilation refused")
-		}
 		byHost[strings.ToLower(strings.Trim(strings.TrimSpace(rule.Hostname), "."))] = rule
 	}
 	matched := map[string]bool{}
@@ -158,8 +144,13 @@ func applyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot, 
 		routes[i].ExcludedEdgeIDs = append([]string(nil), rule.ExcludedEdgeIDs...)
 		routes[i].ExcludedEdgeGroupIDs = append([]string(nil), rule.ExcludedEdgeGroupIDs...)
 		if rule.EdgeGroupID != "" {
-			routes[i].EdgeGroupMode = model.PlatformRouteEdgeGroupModePinned
-			routes[i].EdgeGroupID = rule.EdgeGroupID
+			if routes[i].EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned && routes[i].EdgeGroupID != rule.EdgeGroupID {
+				return nil, fmt.Errorf("DNS policy group conflicts with route intent group")
+			}
+			// Policy drains DNS selection, not Host serving. Keep the intent's
+			// executor scope intact and bind this derived DNS constraint into
+			// the artifact and fixed placement input digest.
+			routes[i].DNSPlacementEdgeGroupID = rule.EdgeGroupID
 		}
 		routes[i].ExclusionReason, routes[i].ExclusionExpiresAt = rule.ExclusionReason, rule.ExclusionExpiresAt
 		routes[i].RoutePolicy = model.NormalizeEdgeRoutePolicy(rule.RoutePolicy)

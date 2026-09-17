@@ -7,6 +7,16 @@ info:
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
 servers:
   - url: /
+x-fugue-dns-placement-constraints:
+  semantics: >-
+    Route policy edge_group_id restricts DNS answer eligibility, independently
+    of the Host serving range declared by route intent edge_group_mode.
+    Compiled routes carry dns_placement_edge_group_id derived from policy.
+    This field enters artifact and fixed placement input digests but does not
+    pin or remove the Host route from other Edge groups. DNS resolution applies
+    it together with intent placement, exclusions, route/TLS readiness, quorum
+    and absolute evidence expiry. Missing or mismatched fixed evidence fails
+    compilation. Conflicting intent and policy group constraints are rejected.
 x-fugue-edge-candidate-execution:
   schema: fugue.edge.candidate-execution/v1
   semantics: >-
@@ -31171,7 +31181,7 @@ components:
           description: Omission preserves app matching. tenant_hostname explicitly applies the rule to every path owned by tenant_id at this hostname; app_id retains the originating policy owner.
         edge_group_id:
           type: string
-          description: Compilation refuses nonempty placement constraints until DNS placement resolution is available.
+          description: Restricts DNS answer eligibility to this group. It does not narrow Host serving scope; any explicit route intent pin must agree. Compiled output carries this as dns_placement_edge_group_id and DNS resolution requires matching fixed placement evidence.
         excluded_edge_ids: {type: array, items: {type: string}}
         excluded_edge_group_ids: {type: array, items: {type: string}}
         exclusion_reason: {type: string}

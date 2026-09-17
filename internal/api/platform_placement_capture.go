@@ -286,15 +286,12 @@ func placementInventoryEligible(node model.EdgeNode, policy platformconfig.Polic
 }
 
 func placementGroupEligible(record platformconfig.DNSIntent, routes []platformconfig.CompiledRoute, node model.EdgeNode) bool {
-	if record.EdgeGroupID != "" && record.EdgeGroupID != node.EdgeGroupID && record.FallbackEdgeGroupID != node.EdgeGroupID {
-		return false
-	}
 	for _, r := range routes {
-		if !r.Enabled || (r.Status != "" && r.Status != model.EdgeRouteStatusActive) || (r.RoutePolicy != "" && !model.EdgeRoutePolicyAllowsTraffic(r.RoutePolicy)) || slices.Contains(r.ExcludedEdgeIDs, node.ID) || slices.Contains(r.ExcludedEdgeGroupIDs, node.EdgeGroupID) || (r.EdgeGroupMode == model.PlatformRouteEdgeGroupModePinned && r.EdgeGroupID != node.EdgeGroupID) {
+		if !r.Enabled || (r.Status != "" && r.Status != model.EdgeRouteStatusActive) || (r.RoutePolicy != "" && !model.EdgeRoutePolicyAllowsTraffic(r.RoutePolicy)) {
 			return false
 		}
 	}
-	return true
+	return platformconfig.DNSPlacementAllowsEdge(record, routes, node.ID, node.EdgeGroupID)
 }
 
 // Compile only the hostname's dependency closure for diagnosis. The original
@@ -347,7 +344,7 @@ func placementHostnameRoutes(result platformIntentProjectionResponse, host strin
 	if err != nil {
 		return nil, nil, err
 	}
-	compiled, err = platformconfig.ApplyRoutePolicyConstraintsForPlacement(compiled, filteredPolicy)
+	compiled, err = platformconfig.ApplyRoutePolicyConstraints(compiled, filteredPolicy)
 	if err != nil {
 		return nil, nil, err
 	}
