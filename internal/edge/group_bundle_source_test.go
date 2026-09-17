@@ -376,6 +376,84 @@ func TestInactiveWorkerTreatsEmptyCandidateAsHealthyLKG(t *testing.T) {
 	}
 }
 
+func TestEmptyCandidateRetriesFailedCaddyWithVerifiedCache(t *testing.T) {
+	const groupID, keyID = "edge-group-test-a", "test-key"
+	key := []byte("0123456789abcdef0123456789abcdef")
+	root := t.TempDir()
+	tokenFile, keyringFile := filepath.Join(root, "reader-token"), filepath.Join(root, "keyring.json")
+	if err := os.WriteFile(tokenFile, []byte("reader-token-0123456789-abcdef-0123456789\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeEdgeVerifierKeyring(t, keyringFile, groupID, keyID, key)
+	activationFile := writeInventoryActivationFixture(t, time.Now().UTC(), groupID, model.EdgeSlotA, strings.Repeat("1", 40))
+	activationBefore, _ := os.ReadFile(activationFile)
+	routes := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != edgeControlCandidateBundlePath {
+			t.Error("unexpected serving source", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer routes.Close()
+	var mu sync.Mutex
+	ready, attempts := false, 0
+	caddy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		attempts++
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Error("unexpected Caddy operation", r.Method, r.URL.Path)
+		}
+		if !ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer caddy.Close()
+	service := NewServiceWithRouteBundleSource(config.EdgeConfig{APIURL: "http://127.0.0.1:1", EdgeToken: "heartbeat-token", EdgeID: "edge-test", EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, CachePath: filepath.Join(root, "cache.json"), HTTPTimeout: time.Second, MaxStale: time.Hour, CaddyEnabled: true, CaddyAdminURL: caddy.URL, CaddyListenAddr: "127.0.0.1:18080", CaddyProxyListenAddr: "127.0.0.1:18081", CaddyTLSMode: caddyTLSModeOff}, RouteBundleSourceConfig{URL: routes.URL + edgeControlBundlePath, CandidateURL: routes.URL + edgeControlCandidateBundlePath, TokenFile: tokenFile, VerifierKeyringFile: keyringFile, ActivationStateFile: activationFile}, log.New(io.Discard, "", 0))
+	defer service.cancelCurrentCaddyWarmup()
+	bundle := signedEdgeControlTestBundle(groupID, "verified-cache", 1, 0, keyID, key)
+	if err := service.writeCache(cacheFile{Version: cacheFileVersion, ETag: strconv.Quote(bundle.Version), CachedAt: time.Now().UTC(), RouteBundleSource: edgeControlRouteSourceV1, PublicationSequence: 1, Bundle: bundle}); err != nil {
+		t.Fatal(err)
+	}
+	cacheBefore, _ := os.ReadFile(service.Config.CachePath)
+	if err := service.LoadCache(); err != nil {
+		t.Fatal(err)
+	}
+	publicationBefore, _ := service.currentRoutePublicationAndBundle()
+	if err := service.applyCurrentCaddyConfig(context.Background()); err == nil {
+		t.Fatal("startup apply unexpectedly succeeded")
+	}
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if service.Status().Healthy || service.Status().CaddyLastError == "" {
+		t.Fatal("failed retry masked Caddy failure")
+	}
+	mu.Lock()
+	ready = true
+	mu.Unlock()
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status := service.Status()
+	if !status.Healthy || status.CaddyLastError != "" || status.CaddyAppliedVersion != bundle.Version || service.metricSnapshot().Metrics.CaddyRouteCount == 0 {
+		t.Fatalf("empty candidate never recovered cached Caddy: %+v", status)
+	}
+	mu.Lock()
+	count := attempts
+	mu.Unlock()
+	if count != 3 {
+		t.Fatalf("expected startup and two bounded sync attempts, got %d", count)
+	}
+	cacheAfter, _ := os.ReadFile(service.Config.CachePath)
+	activationAfter, _ := os.ReadFile(activationFile)
+	publicationAfter, current := service.currentRoutePublicationAndBundle()
+	if string(cacheBefore) != string(cacheAfter) || string(activationBefore) != string(activationAfter) || publicationBefore != publicationAfter || current.Version != bundle.Version || !current.ValidUntil.Equal(bundle.ValidUntil) {
+		t.Fatal("Caddy recovery changed artifact, lease or traffic authority")
+	}
+}
+
 func TestInactiveWorkerRejectsEmptyCandidateAfterActivationChanges(t *testing.T) {
 	const groupID = "edge-group-country-us"
 	const keyID = "edge-us-key-v1"

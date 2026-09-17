@@ -816,6 +816,10 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		s.recordNoCandidate(now)
+		// The retained verified bundle may never have reached Caddy if its
+		// sidecar was unavailable at startup. Empty candidates do not imply
+		// successful local apply; retry without waiting for a config change.
+		s.retryCurrentCaddyConfig(ctx, "inactive candidate is empty")
 		result = "not_modified"
 		return nil
 	default:

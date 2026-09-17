@@ -7,6 +7,13 @@ info:
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
 servers:
   - url: /
+x-fugue-edge-cache-recovery:
+  semantics: >-
+    An empty inactive-slot candidate response retains the previously verified
+    local bundle and retries applying its Caddy configuration when needed.
+    A transient Caddy startup failure must recover even when no configuration
+    changes. This retry does not advance publication, renew artifact validity,
+    change the Front activation, or claim readiness while Caddy apply fails.
 x-fugue-dns-placement-constraints:
   semantics: >-
     Route policy edge_group_id restricts DNS answer eligibility, independently
