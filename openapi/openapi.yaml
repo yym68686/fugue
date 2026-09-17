@@ -297,6 +297,9 @@ paths:
         A verified global route artifact takes precedence over the legacy source.
         An unusable artifact or LKG returns 503 so Edge Control retains its last
         serving bundle rather than recompiling from mutable business tables.
+        Artifact-backed serving and candidate validation share one route
+        projection. Cache references resolve case-insensitively to the declared
+        policy ID; disabled cache policies are not materialized as active bindings.
       tags: [Edge]
       x-fugue-handler: handleEdgeRouteIntents
       security:

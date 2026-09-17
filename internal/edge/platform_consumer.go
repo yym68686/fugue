@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"os"
@@ -21,6 +20,8 @@ import (
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
+	"fugue/internal/routeartifact"
+	"fugue/internal/routeproof"
 )
 
 type PlatformCandidateStatus struct {
@@ -45,58 +46,40 @@ type edgePlatformCandidate struct {
 	RouteIndexDigest string                           `json:"route_index_digest"`
 }
 
-// validatePlatformCandidateIndex builds the same immutable lookup structure
-// used by the proxy, but keeps it detached from the serving pointer. This is
-// an isolated probe: it proves candidate route resolution without applying
-// Caddy, changing the active index, or changing the local LKG.
-func validatePlatformCandidateIndex(routes []platformconfig.CompiledRoute, generation, edgeGroupID string) (string, error) {
-	bundle := model.EdgeRouteBundle{
-		SchemaVersion: model.BundleSchemaVersionV1,
-		Version:       strings.TrimSpace(generation),
-		Generation:    strings.TrimSpace(generation),
-		EdgeGroupID:   strings.TrimSpace(edgeGroupID),
-		Routes:        make([]model.EdgeRouteBinding, 0, len(routes)),
+// validatePlatformCandidateIndex probes a detached bundle using the same
+// projection and lookup semantics as serving. It never loads Caddy, publishes
+// the index, or changes the serving cache, so its evidence remains shadow-only.
+func validatePlatformCandidateIndex(artifact model.PlatformArtifact, edgeGroupID string) (string, error) {
+	bundle, err := routeartifact.MaterializeForGroup(artifact, edgeGroupID)
+	if err != nil {
+		return "", err
 	}
-	for _, route := range routes {
-		binding := model.EdgeRouteBinding{
-			Hostname: route.Hostname, PathPrefix: route.PathPrefix,
-			RouteKind: route.Kind, AppID: route.AppID, TenantID: route.TenantID,
-			RuntimeID: route.RuntimeID, RuntimeType: route.RuntimeType,
-			RuntimeEdgeGroupID: route.RuntimeEdgeGroupID, RuntimeClusterNode: route.RuntimeClusterNode,
-			EdgeGroupID: route.EdgeGroupID, ExcludedEdgeIDs: append([]string(nil), route.ExcludedEdgeIDs...),
-			ExcludedEdgeGroupIDs: append([]string(nil), route.ExcludedEdgeGroupIDs...),
-			ExclusionReason:      route.ExclusionReason, ExclusionExpiresAt: route.ExclusionExpiresAt,
-			MinHealthyEdgeNodes: route.MinHealthyEdgeNodes, RoutePolicy: route.RoutePolicy,
-			UpstreamKind: route.UpstreamKind, UpstreamScope: route.UpstreamScope,
-			UpstreamURL: route.UpstreamURL, Upstreams: platformconfig.ProjectUpstreamIntents(route.Upstreams),
-			ServicePort: route.ServicePort, TLSPolicy: route.TLSPolicy, CachePolicyID: route.CachePolicyID,
-			CacheNamespace: route.CacheNamespace, DeploymentGeneration: route.DeploymentGeneration,
-			RequestBodyPolicies: model.CloneEdgeRequestBodyPolicies(route.RequestBodyPolicies),
-			Streaming:           route.Streaming != nil && *route.Streaming, Status: route.Status,
-			StatusReason: route.StatusReason, RouteGeneration: generation,
-		}
-		if binding.Status == "" {
-			binding.Status = model.EdgeRouteStatusActive
-		}
-		bundle.Routes = append(bundle.Routes, binding)
+	index := buildEdgeRouteIndex(bundle, edgeGroupID, routePublicationMetadata{Candidate: true})
+	if err := probePlatformCandidateIndex(bundle, index); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(bundle.Version) == "" || len(bundle.Routes) == 0 {
-		return "", errors.New("candidate route index is empty")
-	}
-	index := buildEdgeRouteIndex(bundle, edgeGroupID, routePublicationMetadata{})
-	for _, route := range bundle.Routes {
-		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || route.Status != model.EdgeRouteStatusActive {
+	return platformconfig.Digest(bundle)
+}
+
+func probePlatformCandidateIndex(bundle model.EdgeRouteBundle, index *edgeRouteIndex) error {
+	for _, expected := range bundle.Routes {
+		if !model.EdgeRoutePolicyAllowsTraffic(expected.RoutePolicy) {
 			continue
 		}
-		if _, ok, _ := index.routeForHost(route.Hostname); !ok {
-			return "", fmt.Errorf("candidate route index cannot resolve hostname %q", route.Hostname)
+		actual, ok, fallback, version, _ := index.routeForRequest(expected.Hostname, expected.PathPrefix)
+		if !ok || version != bundle.Version || (expected.Status == model.EdgeRouteStatusActive && fallback) {
+			return errors.New("candidate route index lookup failed")
+		}
+		want, err := routeproof.Digest(expected)
+		if err != nil {
+			return err
+		}
+		got, err := routeproof.Digest(actual)
+		if err != nil || want != got {
+			return errors.New("candidate route index behavior mismatch")
 		}
 	}
-	digest, err := platformconfig.Digest(bundle)
-	if err != nil {
-		return "", fmt.Errorf("digest candidate route index: %w", err)
-	}
-	return digest, nil
+	return nil
 }
 
 func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
@@ -183,7 +166,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 			return errors.New("edge platform candidate lineage binding mismatch")
 		}
 	}
-	routeIndexDigest, err := validatePlatformCandidateIndex(payload.Routes, assignment.ExpectedGeneration, s.Config.EdgeGroupID)
+	routeIndexDigest, err := validatePlatformCandidateIndex(artifact, s.Config.EdgeGroupID)
 	if err != nil {
 		return err
 	}

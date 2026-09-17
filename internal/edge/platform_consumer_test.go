@@ -32,21 +32,24 @@ func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
 }
 
 func TestValidatePlatformCandidateIndexIsDeterministicAndRejectsEmpty(t *testing.T) {
-	routes := []platformconfig.CompiledRoute{{RouteIntent: platformconfig.RouteIntent{
-		Hostname: "app.example.test", PathPrefix: "/api", Kind: "http", AppID: "app",
-		TenantID: "tenant", UpstreamURL: "http://origin.example.test:8080", Enabled: true,
-		RoutePolicy: model.EdgeRoutePolicyEnabled, Status: model.EdgeRouteStatusActive,
-	}}}
-	first, err := validatePlatformCandidateIndex(routes, "candidate-generation", "edge-group-a")
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{
+		Intent: platformconfig.PlatformIntent{Generation: "candidate", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", PathPrefix: "/api", UpstreamURL: "http://origin.example.test:8080", Enabled: true}}},
+		Policy: platformconfig.PolicySnapshot{Generation: "policy"},
+	})
 	if err != nil {
-		t.Fatalf("validate candidate index: %v", err)
+		t.Fatal(err)
 	}
-	second, err := validatePlatformCandidateIndex(routes, "candidate-generation", "edge-group-a")
+	first, err := validatePlatformCandidateIndex(compiled.RouteArtifact, "edge-group-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := validatePlatformCandidateIndex(compiled.RouteArtifact, "edge-group-test")
 	if err != nil || first != second {
-		t.Fatalf("candidate index digest was not deterministic: first=%q second=%q err=%v", first, second, err)
+		t.Fatalf("non-deterministic index: %s %s %v", first, second, err)
 	}
-	if _, err := validatePlatformCandidateIndex(nil, "candidate-generation", "edge-group-a"); err == nil {
-		t.Fatal("empty candidate route index was accepted")
+	compiled.RouteArtifact.Content["routes"] = []platformconfig.CompiledRoute{}
+	if _, err := validatePlatformCandidateIndex(compiled.RouteArtifact, "edge-group-test"); err == nil {
+		t.Fatal("empty candidate index accepted")
 	}
 }
 
@@ -161,12 +164,13 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 		t.Fatal(err)
 	}
 	create := func() *Service {
-		s := NewService(config.EdgeConfig{APIURL: server.URL, EdgeID: "edge-node", CachePath: cache, BundleSigningKey: "synthetic-platform-key", BundleSigningKeyID: "signer"}, log.New(io.Discard, "", 0))
+		s := NewService(config.EdgeConfig{APIURL: server.URL, EdgeID: "edge-node", EdgeGroupID: "edge-group-test", CachePath: cache, BundleSigningKey: "synthetic-platform-key", BundleSigningKeyID: "signer"}, log.New(io.Discard, "", 0))
 		s.PlatformTokenFile = tokenFile
 		s.recordSyncSuccess(testBundle("legacy-serving"), "etag", time.Now(), false)
 		return s
 	}
 	s := create()
+	servingIndex := s.currentRouteIndex()
 	ctx := context.Background()
 	if err := s.SyncPlatformShadowOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -208,7 +212,7 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 		t.Helper()
 		raw, _ := os.ReadFile(cache)
 		b, _ := s.Bundle()
-		if !bytes.Equal(raw, servingBytes) || b.Version != "legacy-serving" {
+		if !bytes.Equal(raw, servingBytes) || b.Version != "legacy-serving" || s.currentRouteIndex() != servingIndex {
 			t.Fatal("shadow changed serving cache or routes")
 		}
 	}
@@ -224,6 +228,10 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 		{"assignment", func() { candidate.Assignment.ExpectedConsumerSetID = "other" }},
 		{"unknown compiled route field", func() {
 			candidate.Artifact.Content["routes"].([]any)[0].(map[string]any)["runtime_unknown"] = true
+			resignCandidate()
+		}},
+		{"missing explicit enabled", func() {
+			delete(candidate.Artifact.Content["routes"].([]any)[0].(map[string]any), "enabled")
 			resignCandidate()
 		}},
 		{"invalid compiled placement type", func() {
@@ -270,6 +278,7 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 	loseReceipt = false
 	first := lastSequence
 	s = create()
+	servingIndex = s.currentRouteIndex()
 	if err := s.SyncPlatformShadowOnce(ctx); err != nil {
 		t.Fatal(err)
 	}

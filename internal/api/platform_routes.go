@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/routeartifact"
 )
 
 type platformRoutesEnvelope struct {
@@ -39,64 +40,5 @@ func parsePlatformRoutes(raw string, logger *log.Logger) []model.PlatformRoute {
 }
 
 func normalizePlatformRoute(route model.PlatformRoute) (model.PlatformRoute, bool) {
-	route.Hostname = normalizeExternalAppDomain(route.Hostname)
-	route.Kind = strings.TrimSpace(route.Kind)
-	route.UpstreamKind = strings.TrimSpace(route.UpstreamKind)
-	route.UpstreamScope = strings.TrimSpace(route.UpstreamScope)
-	route.UpstreamURL = strings.TrimSpace(route.UpstreamURL)
-	route.TLSPolicy = strings.TrimSpace(route.TLSPolicy)
-	rawRoutePolicy := strings.TrimSpace(route.RoutePolicy)
-	if rawRoutePolicy == "" {
-		route.RoutePolicy = model.EdgeRoutePolicyEnabled
-	} else {
-		route.RoutePolicy = model.NormalizeEdgeRoutePolicy(rawRoutePolicy)
-	}
-	route.EdgeGroupMode = strings.TrimSpace(route.EdgeGroupMode)
-	route.EdgeGroupID = strings.TrimSpace(route.EdgeGroupID)
-	route.Status = strings.TrimSpace(route.Status)
-	route.StatusReason = strings.TrimSpace(route.StatusReason)
-
-	if route.Hostname == "" || route.UpstreamURL == "" {
-		return model.PlatformRoute{}, false
-	}
-	if route.Kind == "" {
-		route.Kind = model.EdgeRouteKindPlatformRoute
-	}
-	if route.UpstreamKind == "" {
-		route.UpstreamKind = model.EdgeRouteUpstreamKindKubernetesService
-	}
-	if route.UpstreamScope == "" {
-		route.UpstreamScope = model.EdgeRouteUpstreamScopeCluster
-	}
-	if route.TLSPolicy == "" {
-		route.TLSPolicy = model.EdgeRouteTLSPolicyPlatform
-	}
-	if route.RoutePolicy == "" {
-		return model.PlatformRoute{}, false
-	}
-	if route.EdgeGroupMode == "" {
-		route.EdgeGroupMode = model.PlatformRouteEdgeGroupModeAllHealthy
-	}
-	switch route.EdgeGroupMode {
-	case model.PlatformRouteEdgeGroupModeAllHealthy, model.PlatformRouteEdgeGroupModeRegionAware:
-		route.EdgeGroupID = ""
-	case model.PlatformRouteEdgeGroupModePinned:
-		if route.EdgeGroupID == "" {
-			return model.PlatformRoute{}, false
-		}
-	default:
-		return model.PlatformRoute{}, false
-	}
-	if route.Status == "" {
-		route.Status = model.EdgeRouteStatusActive
-	}
-	switch route.Status {
-	case model.EdgeRouteStatusActive, model.EdgeRouteStatusDisabled, model.EdgeRouteStatusUnavailable:
-	default:
-		return model.PlatformRoute{}, false
-	}
-	if route.TTL <= 0 {
-		route.TTL = defaultEdgeDNSTTL
-	}
-	return route, true
+	return routeartifact.NormalizePlatformRoute(route)
 }
