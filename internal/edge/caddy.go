@@ -21,6 +21,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/proxyproto"
+	"fugue/internal/tlscertificate"
 )
 
 const (
@@ -762,7 +763,7 @@ func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[s
 		if !strings.EqualFold(strings.TrimSpace(route.TLSPolicy), model.EdgeRouteTLSPolicyCustomDomain) {
 			continue
 		}
-		if !s.routeCanIssueTLS(route) {
+		if !s.routeCanIssueTLS(route, bundle.TLSAllowlist) {
 			continue
 		}
 		out[host] = tlsStatus
@@ -792,7 +793,7 @@ func (s *Service) customDomainTLSHosts(bundle model.EdgeRouteBundle) []string {
 		if !strings.EqualFold(strings.TrimSpace(route.TLSPolicy), model.EdgeRouteTLSPolicyCustomDomain) {
 			continue
 		}
-		if !s.routeCanIssueTLS(route) {
+		if !s.routeCanIssueTLS(route, bundle.TLSAllowlist) {
 			continue
 		}
 		seen[host] = struct{}{}
@@ -899,8 +900,8 @@ func (s *Service) installSharedCaddyTLSCertificate(hostname string, bundle caddy
 	if !validCaddyStorageSegment(bundle.IssuerStorage) {
 		return false, fmt.Errorf("shared TLS certificate issuer storage for %s is invalid", hostname)
 	}
-	if _, err := tls.X509KeyPair([]byte(bundle.CertificatePEM), []byte(bundle.PrivateKeyPEM)); err != nil {
-		return false, fmt.Errorf("shared TLS certificate key pair for %s is invalid: %w", hostname, err)
+	if _, err := tlscertificate.Validate(hostname, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC()); err != nil {
+		return false, err
 	}
 	s.caddyTLSInstallMu.Lock()
 	defer s.caddyTLSInstallMu.Unlock()

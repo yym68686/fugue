@@ -2185,7 +2185,7 @@ func TestCaddyWarmupOnlyTargetsCurrentEdgeGroup(t *testing.T) {
 	}
 }
 
-func TestApplyCaddyConfigSkipsDisabledCustomDomainTLSWork(t *testing.T) {
+func TestApplyCaddyConfigMaintainsVerifiedDisabledCustomDomainTLS(t *testing.T) {
 	t.Parallel()
 
 	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2199,7 +2199,19 @@ func TestApplyCaddyConfigSkipsDisabledCustomDomainTLSWork(t *testing.T) {
 	var apiCalls int
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls++
-		http.Error(w, "disabled custom domain must not request TLS work", http.StatusInternalServerError)
+		switch r.Method {
+		case http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPost:
+			var report map[string]string
+			if json.NewDecoder(r.Body).Decode(&report) != nil || report["tls_status"] != "ready" || report["hostname"] != "disabled.customer.com" || report["certificate_pem"] == "" {
+				t.Error("renewed TLS report missing")
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Error("unexpected TLS request")
+			w.WriteHeader(http.StatusBadRequest)
+		}
 	}))
 	defer api.Close()
 
@@ -2235,16 +2247,24 @@ func TestApplyCaddyConfigSkipsDisabledCustomDomainTLSWork(t *testing.T) {
 		CaddySharedTLSEnabled: true,
 	}, log.New(ioDiscard{}, "", 0))
 	isolateParallelTestHTTPClient(t, service, admin)
-	service.caddyWarmup = func(context.Context, string, string) error {
+	cert, key := testCaddyTLSKeyPair(t, custom.Hostname)
+	service.caddyWarmup = func(_ context.Context, _ string, host string) error {
 		warmups++
+		if host != custom.Hostname {
+			t.Fatal("wrong renewal hostname")
+		}
+		writeLocalCaddyTLSBundle(t, service.Config.CaddyDataDir, host, cert, key, `{}`)
 		return nil
 	}
 
 	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
 		t.Fatalf("apply caddy config: %v", err)
 	}
-	if warmups != 0 || apiCalls != 0 {
-		t.Fatalf("expected disabled custom domain to skip TLS work, got warmups=%d api_calls=%d", warmups, apiCalls)
+	if warmups != 1 || apiCalls != 2 {
+		t.Fatalf("verified stopped domain must renew/report TLS, got warmups=%d api_calls=%d", warmups, apiCalls)
+	}
+	if bundle.Routes[0].Status != model.EdgeRouteStatusDisabled || bundle.Routes[0].UpstreamURL != "" {
+		t.Fatal("TLS renewal re-enabled origin")
 	}
 }
 
@@ -4514,6 +4534,9 @@ func writeLocalCaddyTLSBundle(t *testing.T, dataDir, hostname, certPEM, keyPEM, 
 }
 
 func testCaddyTLSKeyPair(t *testing.T, hostname string) (string, string) {
+	return testCaddyTLSKeyPairAt(t, hostname, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+}
+func testCaddyTLSKeyPairAt(t *testing.T, hostname string, notBefore, notAfter time.Time) (string, string) {
 	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -4523,13 +4546,12 @@ func testCaddyTLSKeyPair(t *testing.T, hostname string) (string, string) {
 	if err != nil {
 		t.Fatalf("generate test Caddy TLS serial: %v", err)
 	}
-	now := time.Now().UTC()
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject:      pkix.Name{CommonName: hostname},
 		DNSNames:     []string{hostname},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}

@@ -16,6 +16,7 @@ type edgeRouteIndex struct {
 	edgeGroupID   string
 	publication   routePublicationMetadata
 	byHost        map[string][]edgeIndexedRoute
+	tlsAllowlist  []model.EdgeTLSAllowlistEntry
 }
 
 type edgeIndexedRoute struct {
@@ -30,6 +31,7 @@ func buildEdgeRouteIndex(bundle model.EdgeRouteBundle, edgeGroupID string, publi
 		edgeGroupID:   strings.TrimSpace(edgeGroupID),
 		publication:   publication,
 		byHost:        make(map[string][]edgeIndexedRoute),
+		tlsAllowlist:  append([]model.EdgeTLSAllowlistEntry(nil), bundle.TLSAllowlist...),
 	}
 	for _, route := range bundle.Routes {
 		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {

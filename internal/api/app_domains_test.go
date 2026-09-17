@@ -1081,6 +1081,9 @@ func TestPrimaryCustomDomainTargetDefaultsToDNSNamespace(t *testing.T) {
 }
 
 func generateTestTLSCertificateBundle(t *testing.T, hostname string) (string, string, string) {
+	return generateTestTLSCertificateBundleAt(t, hostname, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+}
+func generateTestTLSCertificateBundleAt(t *testing.T, hostname string, notBefore, notAfter time.Time) (string, string, string) {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -1098,8 +1101,8 @@ func generateTestTLSCertificateBundle(t *testing.T, hostname string) (string, st
 			CommonName: hostname,
 		},
 		DNSNames:              []string{hostname},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,

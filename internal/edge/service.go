@@ -1122,19 +1122,20 @@ func (s *Service) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "domain is required", http.StatusBadRequest)
 		return
 	}
-	route, ok, _ := s.routeForHost(host)
+	index := s.currentRouteIndex()
+	route, ok, _ := index.routeForHost(host)
 	if !ok {
 		http.Error(w, "domain is not in the current route bundle", http.StatusForbidden)
 		return
 	}
-	if !s.routeCanIssueTLS(route) {
+	if !s.routeCanIssueTLS(route, index.tlsAllowlist) {
 		http.Error(w, "route is not active", http.StatusForbidden)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding) bool {
+func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding, allowlist []model.EdgeTLSAllowlistEntry) bool {
 	if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
 		return true
 	}
@@ -1145,6 +1146,20 @@ func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding) bool {
 	if strings.EqualFold(strings.TrimSpace(route.RouteKind), model.EdgeRouteKindCustomDomain) &&
 		!strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusDisabled) {
 		return true
+	}
+	// A verified custom hostname still needs TLS to serve its local stopped
+	// page. This does not authorize an origin or invent domain ownership.
+	if route.Status == model.EdgeRouteStatusDisabled && route.RouteKind == model.EdgeRouteKindCustomDomain && route.TLSPolicy == model.EdgeRouteTLSPolicyCustomDomain && s.routeWarmupAllowedForThisEdge(route) && route.AppID != "" && route.TenantID != "" && route.UpstreamURL == "" && len(route.Upstreams) == 0 {
+		matched := 0
+		for _, entry := range allowlist {
+			if entry.Hostname == route.Hostname {
+				if entry.AppID != route.AppID || entry.TenantID != route.TenantID || entry.Status != model.AppDomainStatusVerified {
+					return false
+				}
+				matched++
+			}
+		}
+		return matched == 1
 	}
 	return false
 }

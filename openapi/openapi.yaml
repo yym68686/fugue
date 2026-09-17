@@ -51,6 +51,16 @@ x-fugue-tls-shadow-consumer:
     and local platform_tls_candidate status report staged/shadow_validated only.
     Historical domain lifecycle events do not prove fresh certificate readiness;
     this validation neither loads Caddy nor changes serving, certificates or LKG.
+x-fugue-custom-domain-tls-continuity:
+  semantics: >-
+    A stopped custom-domain route may maintain TLS independently of its origin
+    only when the same immutable bundle authorizes the exact verified hostname,
+    application and tenant. Unknown, unverified or foreign-owner domains remain
+    denied. Certificate upload and installation require a matching key pair,
+    hostname coverage and a currently valid leaf certificate. An expired or
+    not-yet-valid shared certificate cannot promote TLS readiness through repair
+    or consumer reports. Diagnosis distinguishes certificate presence from usable
+    certificate evidence and does not count historical ready status as validity.
 x-fugue-edge-route-probe:
   version: 1
   transport: HTTPS to an inventory candidate IP with the desired hostname as TLS SNI and HTTP Host
@@ -7040,6 +7050,7 @@ paths:
     get:
       operationId: getAppDomainDiagnosis
       summary: Get App Domain Diagnosis
+      description: Checks actual shared certificate validity and ownership independently from historical TLS status. Presence alone cannot pass shared_tls_certificate, tls_ready or route_active.
       tags: [Apps]
       x-fugue-handler: handleGetAppDomainDiagnosis
       security:
@@ -7060,6 +7071,7 @@ paths:
     post:
       operationId: repairAppDomain
       summary: Repair App Domain
+      description: Reconciles domain configuration and DNS verification. TLS ready is restored only from a currently usable, hostname- and owner-bound shared certificate; an expired certificate requires renewal and never receives a new ready timestamp.
       tags: [Apps]
       x-fugue-handler: handleRepairAppDomain
       security:

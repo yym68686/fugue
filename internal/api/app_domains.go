@@ -3,10 +3,9 @@ package api
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/store"
+	"fugue/internal/tlscertificate"
 )
 
 type appDomainDNSResolver interface {
@@ -382,7 +382,7 @@ func (s *Server) handleRepairAppDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	if verified && domain.Status == model.AppDomainStatusVerified {
 		now := time.Now().UTC()
-		if _, certErr := s.store.GetEdgeTLSCertificate(domain.Hostname); certErr == nil {
+		if certErr := s.usableSharedTLSCertificate(domain, now); certErr == nil {
 			domain.TLSStatus = model.AppDomainTLSStatusReady
 			domain.TLSLastMessage = ""
 			domain.TLSLastCheckedAt = &now
@@ -393,9 +393,15 @@ func (s *Server) handleRepairAppDomain(w http.ResponseWriter, r *http.Request) {
 				s.writeStoreError(w, putErr)
 				return
 			}
-		} else if certErr == store.ErrNotFound {
+		} else if !errors.Is(certErr, store.ErrNotFound) && !errors.Is(certErr, tlscertificate.ErrInvalid) {
+			s.writeStoreError(w, certErr)
+			return
+		} else {
 			domain.TLSStatus = model.AppDomainTLSStatusPending
-			domain.TLSLastMessage = "waiting for shared edge certificate bundle"
+			domain.TLSLastMessage = certErr.Error()
+			if errors.Is(certErr, store.ErrNotFound) {
+				domain.TLSLastMessage = "waiting for shared edge certificate bundle"
+			}
 			domain.TLSLastCheckedAt = &now
 			domain.TLSReadyAt = nil
 			if stored, putErr := s.store.PutAppDomain(domain); putErr == nil {
@@ -404,9 +410,6 @@ func (s *Server) handleRepairAppDomain(w http.ResponseWriter, r *http.Request) {
 				s.writeStoreError(w, putErr)
 				return
 			}
-		} else {
-			s.writeStoreError(w, certErr)
-			return
 		}
 	}
 
@@ -690,22 +693,23 @@ func (s *Server) handleEdgeDomainTLSReport(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		}
-		if _, certErr := s.store.GetEdgeTLSCertificate(hostname); certErr != nil {
-			if certErr != store.ErrNotFound {
-				s.writeStoreError(w, certErr)
-				return
-			}
-			tlsStatus = model.AppDomainTLSStatusPending
-			if strings.TrimSpace(req.TLSLastMessage) == "" {
-				req.TLSLastMessage = "waiting for shared edge certificate bundle"
-			}
+	}
+	if certErr := s.usableSharedTLSCertificate(domain, now); certErr != nil {
+		if !errors.Is(certErr, store.ErrNotFound) && !errors.Is(certErr, tlscertificate.ErrInvalid) {
+			s.writeStoreError(w, certErr)
+			return
 		}
-	} else if _, certErr := s.store.GetEdgeTLSCertificate(hostname); certErr == nil {
+		if tlsStatus == model.AppDomainTLSStatusReady {
+			tlsStatus = model.AppDomainTLSStatusPending
+		}
+		if errors.Is(certErr, tlscertificate.ErrInvalid) {
+			req.TLSLastMessage = certErr.Error()
+		} else if strings.TrimSpace(req.TLSLastMessage) == "" {
+			req.TLSLastMessage = "waiting for shared edge certificate bundle"
+		}
+	} else {
 		tlsStatus = model.AppDomainTLSStatusReady
 		req.TLSLastMessage = ""
-	} else if certErr != store.ErrNotFound {
-		s.writeStoreError(w, certErr)
-		return
 	}
 	domain.TLSStatus = tlsStatus
 	domain.TLSLastMessage = strings.TrimSpace(req.TLSLastMessage)
@@ -1302,24 +1306,12 @@ func (s *Server) validateEdgeTLSCertificateBundle(hostname string, domain model.
 	if hostname == "" || certPEM == "" || keyPEM == "" {
 		return model.EdgeTLSCertificate{}, fmt.Errorf("hostname, certificate_pem, and private_key_pem are required")
 	}
-	keyPair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	leaf, err := tlscertificate.Validate(hostname, certPEM, keyPEM, time.Now().UTC())
 	if err != nil {
-		return model.EdgeTLSCertificate{}, fmt.Errorf("invalid certificate/key pair: %w", err)
+		return model.EdgeTLSCertificate{}, err
 	}
-	if keyPair.Leaf == nil {
-		if len(keyPair.Certificate) == 0 {
-			return model.EdgeTLSCertificate{}, fmt.Errorf("certificate chain is empty")
-		}
-		keyPair.Leaf, err = x509.ParseCertificate(keyPair.Certificate[0])
-		if err != nil {
-			return model.EdgeTLSCertificate{}, fmt.Errorf("parse leaf certificate: %w", err)
-		}
-	}
-	if err := keyPair.Leaf.VerifyHostname(hostname); err != nil {
-		return model.EdgeTLSCertificate{}, fmt.Errorf("certificate does not cover %s: %w", hostname, err)
-	}
-	notAfter := keyPair.Leaf.NotAfter.UTC()
-	sum := sha256.Sum256(keyPair.Leaf.Raw)
+	notAfter := leaf.NotAfter.UTC()
+	sum := sha256.Sum256(leaf.Raw)
 	cert := model.EdgeTLSCertificate{
 		Hostname:              hostname,
 		TenantID:              domain.TenantID,
@@ -1362,7 +1354,8 @@ func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, dom
 		}
 	}
 	certSummary := appDomainTLSCertificateSummary{}
-	if cert, certErr := s.store.GetEdgeTLSCertificate(domain.Hostname); certErr == nil {
+	cert, certificateErr := s.store.GetEdgeTLSCertificate(domain.Hostname)
+	if certificateErr == nil {
 		updatedAt := cert.UpdatedAt
 		certSummary = appDomainTLSCertificateSummary{
 			Present:               true,
@@ -1373,8 +1366,20 @@ func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, dom
 			UploadedByEdgeGroupID: cert.UploadedByEdgeGroupID,
 			UpdatedAt:             &updatedAt,
 		}
+		certificateErr = validateSharedTLSCertificate(domain, cert, time.Now().UTC())
 	}
 
+	certificateUsable := certificateErr == nil
+	certificateMessage := ""
+	if certificateErr != nil {
+		certificateMessage = "shared TLS certificate state unavailable"
+		if errors.Is(certificateErr, store.ErrNotFound) {
+			certificateMessage = "waiting for an edge node to upload the shared certificate bundle"
+		}
+		if errors.Is(certificateErr, tlscertificate.ErrInvalid) {
+			certificateMessage = certificateErr.Error()
+		}
+	}
 	checks := []appDomainDiagnosticCheck{
 		{
 			Name:    "dns_record",
@@ -1389,20 +1394,20 @@ func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, dom
 		},
 		{
 			Name:    "shared_tls_certificate",
-			Status:  appDomainCheckStatus(certSummary.Present),
-			Message: missingMessage(certSummary.Present, "waiting for an edge node to upload the shared certificate bundle"),
+			Status:  appDomainCheckStatus(certificateUsable),
+			Message: certificateMessage,
 		},
 		{
 			Name:       "tls_ready",
-			Status:     appDomainCheckStatus(domain.TLSStatus == model.AppDomainTLSStatusReady),
+			Status:     appDomainCheckStatus(certificateUsable && domain.TLSStatus == model.AppDomainTLSStatusReady),
 			Message:    domain.TLSLastMessage,
-			Repairable: domain.Status == model.AppDomainStatusVerified && certSummary.Present && domain.TLSStatus != model.AppDomainTLSStatusReady,
+			Repairable: domain.Status == model.AppDomainStatusVerified && certificateUsable && domain.TLSStatus != model.AppDomainTLSStatusReady,
 		},
 		{
 			Name: "route_active",
 			Status: appDomainCheckStatus(domain.Status == model.AppDomainStatusVerified &&
 				domain.DNSStatus == model.AppDomainDNSStatusReady &&
-				domain.TLSStatus == model.AppDomainTLSStatusReady),
+				certificateUsable && domain.TLSStatus == model.AppDomainTLSStatusReady),
 		},
 	}
 
@@ -1410,10 +1415,10 @@ func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, dom
 	if !observation.Verified && observation.Message != "" {
 		actions = append(actions, observation.Message)
 	}
-	if domain.Status == model.AppDomainStatusVerified && !certSummary.Present {
+	if domain.Status == model.AppDomainStatusVerified && !certificateUsable {
 		actions = append(actions, "wait for an edge node to complete TLS issuance and upload the shared certificate bundle")
 	}
-	if domain.Status == model.AppDomainStatusVerified && certSummary.Present && domain.TLSStatus != model.AppDomainTLSStatusReady {
+	if domain.Status == model.AppDomainStatusVerified && certificateUsable && domain.TLSStatus != model.AppDomainTLSStatusReady {
 		actions = append(actions, "run domain repair to promote the verified shared certificate to ready")
 	}
 	return appDomainDiagnosis{
@@ -1598,4 +1603,21 @@ func strconvFormatBool(value bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// Certificate existence and historical ready state are not validity evidence.
+func (s *Server) usableSharedTLSCertificate(domain model.AppDomain, now time.Time) error {
+	cert, err := s.store.GetEdgeTLSCertificate(domain.Hostname)
+	if err != nil {
+		return err
+	}
+	return validateSharedTLSCertificate(domain, cert, now)
+}
+
+func validateSharedTLSCertificate(domain model.AppDomain, cert model.EdgeTLSCertificate, now time.Time) error {
+	if cert.Hostname != domain.Hostname || cert.AppID != domain.AppID || cert.TenantID != domain.TenantID {
+		return fmt.Errorf("%w: owner mismatch", tlscertificate.ErrInvalid)
+	}
+	_, err := tlscertificate.Validate(domain.Hostname, cert.CertificatePEM, cert.PrivateKeyPEM, now)
+	return err
 }
