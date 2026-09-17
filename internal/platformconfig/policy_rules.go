@@ -13,6 +13,7 @@ type RoutePolicyConstraint struct {
 	Hostname             string     `json:"hostname"`
 	AppID                string     `json:"app_id,omitempty"`
 	TenantID             string     `json:"tenant_id,omitempty"`
+	MatchScope           string     `json:"match_scope,omitempty"`
 	EdgeGroupID          string     `json:"edge_group_id,omitempty"`
 	ExcludedEdgeIDs      []string   `json:"excluded_edge_ids,omitempty"`
 	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
@@ -43,7 +44,14 @@ func ProjectPolicySnapshot(base PolicySnapshot, routePolicies []model.EdgeRouteP
 	out.RouteConstraints = nil
 	out.TrafficConstraints = nil
 	for _, p := range routePolicies {
-		out.RouteConstraints = append(out.RouteConstraints, RoutePolicyConstraint{ID: p.ID, Hostname: strings.Trim(strings.ToLower(strings.TrimSpace(p.Hostname)), "."), AppID: p.AppID, TenantID: p.TenantID, EdgeGroupID: p.EdgeGroupID, ExcludedEdgeIDs: append([]string(nil), p.ExcludedEdgeIDs...), ExcludedEdgeGroupIDs: append([]string(nil), p.ExcludedEdgeGroupIDs...), ExclusionReason: p.ExclusionReason, ExclusionExpiresAt: p.ExclusionExpiresAt, MinHealthyEdgeNodes: p.MinHealthyEdgeNodes, RoutePolicy: p.RoutePolicy, Enabled: p.Enabled})
+		// Legacy hostname policies also match sibling apps in the same tenant.
+		// Preserve that desired scope explicitly; generic app-scoped rules retain
+		// their existing behavior and never inherit this migration default.
+		matchScope := ""
+		if strings.TrimSpace(p.TenantID) != "" {
+			matchScope = "tenant_hostname"
+		}
+		out.RouteConstraints = append(out.RouteConstraints, RoutePolicyConstraint{ID: p.ID, Hostname: strings.Trim(strings.ToLower(strings.TrimSpace(p.Hostname)), "."), AppID: p.AppID, TenantID: p.TenantID, MatchScope: matchScope, EdgeGroupID: p.EdgeGroupID, ExcludedEdgeIDs: append([]string(nil), p.ExcludedEdgeIDs...), ExcludedEdgeGroupIDs: append([]string(nil), p.ExcludedEdgeGroupIDs...), ExclusionReason: p.ExclusionReason, ExclusionExpiresAt: p.ExclusionExpiresAt, MinHealthyEdgeNodes: p.MinHealthyEdgeNodes, RoutePolicy: p.RoutePolicy, Enabled: p.Enabled})
 	}
 	for _, p := range trafficPolicies {
 		out.TrafficConstraints = append(out.TrafficConstraints, TrafficPolicyConstraint{TenantID: p.TenantID, UnavailableCandidate: "stable", ID: p.ID, AppID: p.AppID, Mode: p.Mode, StableReleaseID: p.StableReleaseID, CandidateReleaseID: p.CandidateReleaseID, StableWeight: p.StableWeight, CandidateWeight: p.CandidateWeight, StickyHeader: p.StickyHeader, StickyCookie: p.StickyCookie})
@@ -63,6 +71,11 @@ func validatePolicyRules(in PolicySnapshot) error {
 	for _, rule := range in.RouteConstraints {
 		if rule.ID == "" || rule.Hostname == "" || rule.ID != strings.TrimSpace(rule.ID) || rule.Hostname != strings.Trim(strings.ToLower(strings.TrimSpace(rule.Hostname)), ".") || routes[rule.Hostname] || rule.RoutePolicy == "" || model.NormalizeEdgeRoutePolicy(rule.RoutePolicy) == "" || rule.MinHealthyEdgeNodes < 0 || rule.MinHealthyEdgeNodes > 10000 {
 			return fmt.Errorf("route policy constraint is invalid")
+		}
+		if rule.AppID != strings.TrimSpace(rule.AppID) || rule.TenantID != strings.TrimSpace(rule.TenantID) ||
+			(rule.MatchScope != "" && rule.MatchScope != "app" && rule.MatchScope != "tenant_hostname") ||
+			(rule.MatchScope == "tenant_hostname" && rule.TenantID == "") {
+			return fmt.Errorf("route policy match scope is invalid")
 		}
 		if rule.ExclusionExpiresAt != nil && rule.ExclusionExpiresAt.IsZero() {
 			return fmt.Errorf("exclusion expiry is invalid")
@@ -113,6 +126,9 @@ func ApplyRoutePolicyConstraintsForPlacement(routes []CompiledRoute, policy Poli
 }
 
 func applyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot, rejectEdgeGroup bool) ([]CompiledRoute, error) {
+	if err := validatePolicyRules(policy); err != nil {
+		return nil, err
+	}
 	routes = append([]CompiledRoute(nil), routes...)
 	for i := range routes {
 		routes[i].Upstreams = append([]UpstreamIntent(nil), routes[i].Upstreams...)
@@ -134,7 +150,7 @@ func applyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot, 
 		if rule.TenantID != "" && rule.TenantID != routes[i].TenantID {
 			return nil, fmt.Errorf("route policy owner does not match intent")
 		}
-		if rule.AppID != "" && rule.AppID != routes[i].AppID {
+		if rule.MatchScope != "tenant_hostname" && rule.AppID != "" && rule.AppID != routes[i].AppID {
 			continue
 		}
 		matched[rule.Hostname] = true

@@ -78,6 +78,58 @@ func TestPlacementReleaseProofMatchesLegacyEdgeControlOutput(t *testing.T) {
 	}
 }
 
+func TestSharedHostnamePolicyProofMatchesLegacyEdgeControl(t *testing.T) {
+	now := time.Now().UTC()
+	expired := now.Add(-time.Hour)
+	const host, group = "shared.example.test", "edge-group-test-a"
+	legacyPolicy := model.EdgeRoutePolicy{ID: "hostname-policy", Hostname: host, AppID: "app-b", TenantID: "tenant-a", EdgeGroupID: group, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true, MinHealthyEdgeNodes: 1, ExcludedEdgeIDs: []string{"other-edge"}, ExclusionExpiresAt: &expired}
+	policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{}, []model.EdgeRoutePolicy{legacyPolicy}, nil, "projected-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := model.EdgeRouteIntentSnapshot{SchemaVersion: model.EdgeRouteIntentSchemaVersionV1, GeneratedAt: now}
+	draft := platformIntentProjectionResponse{SourceGeneration: "draft", CapturedAt: now, Policy: policy}
+	for i, path := range []string{"/", "/v1"} {
+		app := []string{"app-a", "app-b"}[i]
+		binding := model.EdgeRouteBinding{Hostname: host, PathPrefix: path, RouteKind: "platform", AppID: app, TenantID: "tenant-a", UpstreamURL: "http://origin:8080", UpstreamKind: model.EdgeRouteUpstreamKindKubernetesService, UpstreamScope: model.EdgeRouteUpstreamScopeLocalService, ServicePort: 8080, TLSPolicy: "platform", RoutePolicy: model.EdgeRoutePolicyEnabled, Streaming: true, Status: model.EdgeRouteStatusActive}
+		source.Routes = append(source.Routes, edgeRouteIntentFromBinding(binding, legacyPolicy, now))
+		streaming := true
+		draft.Intent.Routes = append(draft.Intent.Routes, platformconfig.RouteIntent{Hostname: host, PathPrefix: path, Kind: binding.RouteKind, AppID: app, TenantID: binding.TenantID, UpstreamURL: binding.UpstreamURL, UpstreamKind: binding.UpstreamKind, UpstreamScope: binding.UpstreamScope, ServicePort: binding.ServicePort, TLSPolicy: binding.TLSPolicy, RoutePolicy: binding.RoutePolicy, Enabled: true, Streaming: &streaming})
+	}
+	source.Generation = edgeRouteIntentSnapshotGeneration(source)
+	ledger := edgecontrol.NewMemoryGroupShadowLedger()
+	compiler := edgecontrol.GroupShadowCompiler{Inventory: projectionInventory{now}, Ledger: ledger, Now: func() time.Time { return now }}
+	batch, err := compiler.Reconcile(context.Background(), source, []string{group})
+	if err != nil || batch.Succeeded != 1 {
+		t.Fatalf("legacy compile: %+v %v", batch, err)
+	}
+	head, found, err := ledger.Head(context.Background(), group)
+	if err != nil || !found || head.Bundle == nil || len(head.Bundle.Routes) != 2 {
+		t.Fatal("legacy route bundle missing", err)
+	}
+	_, projected, err := placementHostnameRoutes(draft, host)
+	if err != nil || len(projected) != 2 {
+		t.Fatal("projected routes missing", err)
+	}
+	for _, route := range projected {
+		want, _ := routeproof.Digest(routebinding.FromIntent(route, group))
+		matched := false
+		for _, actual := range head.Bundle.Routes {
+			if actual.PathPrefix != route.PathPrefix {
+				continue
+			}
+			got, _ := routeproof.Digest(actual)
+			if got != want {
+				t.Fatalf("policy behavior changed for %s: projected=%+v actual=%+v", route.PathPrefix, route, actual)
+			}
+			matched = true
+		}
+		if !matched {
+			t.Fatal("missing path", route.PathPrefix)
+		}
+	}
+}
+
 func placementCaptureFixture(t *testing.T) (platformIntentProjectionResponse, []model.EdgeNode, placementRouteProbe) {
 	t.Helper()
 	now := time.Now().UTC()

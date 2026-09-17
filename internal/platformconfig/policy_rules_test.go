@@ -75,6 +75,48 @@ func TestApplyRoutePolicyConstraintsScopesAppRuleToMatchingPath(t *testing.T) {
 	}
 }
 
+func TestProjectedHostnamePolicyPreservesSiblingAppConstraints(t *testing.T) {
+	expired := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	legacy := model.EdgeRoutePolicy{ID: "shared-policy", Hostname: "shared.example", AppID: "app-b", TenantID: "tenant-a", RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true, ExcludedEdgeIDs: []string{"excluded-edge"}, ExclusionExpiresAt: &expired}
+	policy, err := ProjectPolicySnapshot(PolicySnapshot{}, []model.EdgeRoutePolicy{legacy}, nil, "projected")
+	if err != nil || policy.RouteConstraints[0].MatchScope != "tenant_hostname" || policy.RouteConstraints[0].AppID != "app-b" {
+		t.Fatalf("legacy scope or source owner lost: %+v %v", policy, err)
+	}
+	routes := []CompiledRoute{
+		{RouteIntent: RouteIntent{Hostname: legacy.Hostname, PathPrefix: "/", AppID: "app-a", TenantID: "tenant-a", Enabled: true}},
+		{RouteIntent: RouteIntent{Hostname: legacy.Hostname, PathPrefix: "/v1", AppID: "app-b", TenantID: "tenant-a", Enabled: true}},
+	}
+	got, err := ApplyRoutePolicyConstraints(routes, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range got {
+		if len(route.ExcludedEdgeIDs) != 1 || route.ExclusionExpiresAt == nil || !route.ExclusionExpiresAt.Equal(expired) {
+			t.Fatal("hostname constraint or expired exclusion was lost")
+		}
+	}
+	if len(routes[0].ExcludedEdgeIDs) != 0 {
+		t.Fatal("input intent mutated")
+	}
+	routes[0].TenantID = "other-tenant"
+	if _, err := ApplyRoutePolicyConstraints(routes, policy); err == nil {
+		t.Fatal("hostname scope crossed tenant boundary")
+	}
+	for _, rule := range []RoutePolicyConstraint{
+		{ID: "rule", Hostname: "shared.example", RoutePolicy: model.EdgeRoutePolicyEnabled, MatchScope: "tenant_hostname"},
+		{ID: "rule", Hostname: "shared.example", RoutePolicy: model.EdgeRoutePolicyEnabled, TenantID: "tenant-a", MatchScope: "all"},
+	} {
+		if _, err := ApplyRoutePolicyConstraints(routes, PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{rule}}); err == nil {
+			t.Fatal("invalid scope accepted")
+		}
+	}
+	legacy.TenantID = ""
+	policy, err = ProjectPolicySnapshot(PolicySnapshot{}, []model.EdgeRoutePolicy{legacy}, nil, "app-only")
+	if err != nil || policy.RouteConstraints[0].MatchScope != "" {
+		t.Fatal("policy without tenant widened to hostname scope")
+	}
+}
+
 func TestApplyRoutePolicyConstraintsForPlacementMaterializesEdgeGroup(t *testing.T) {
 	routes := []CompiledRoute{{RouteIntent: RouteIntent{Hostname: "app.example", UpstreamURL: "http://origin", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}}}
 	policy := PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{{ID: "route", Hostname: "app.example", EdgeGroupID: "edge-group-a", MinHealthyEdgeNodes: 2, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}}
