@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v16"
+	CompilerVersion = "platform-config-compiler/v17"
 	GlobalScopeKey  = "global"
 )
 
@@ -270,7 +270,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if err != nil {
 		return CompileResult{}, err
 	}
-	compiledRoutes, err = ApplyRoutePolicyConstraints(compiledRoutes, policy)
+	compiledRoutes, err = ApplyRoutePolicyConstraints(compiledRoutes, policy, runtimeSnapshot.CapturedAt)
 	if err != nil {
 		return CompileResult{}, err
 	}

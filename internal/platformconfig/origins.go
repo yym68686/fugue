@@ -33,6 +33,7 @@ type CompiledRoute struct {
 	ExcludedEdgeGroupIDs    []string   `json:"excluded_edge_group_ids,omitempty"`
 	ExclusionReason         string     `json:"exclusion_reason,omitempty"`
 	ExclusionExpiresAt      *time.Time `json:"exclusion_expires_at,omitempty"`
+	ExclusionLifecycle      string     `json:"exclusion_lifecycle,omitempty"`
 	MinHealthyEdgeNodes     int        `json:"min_healthy_edge_nodes,omitempty"`
 }
 

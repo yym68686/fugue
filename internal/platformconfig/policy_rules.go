@@ -19,6 +19,9 @@ type RoutePolicyConstraint struct {
 	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
 	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
 	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
+	ExclusionOwnerDigest string     `json:"exclusion_owner_digest,omitempty"`
+	ExclusionGeneration  uint64     `json:"exclusion_generation,omitempty"`
+	ExclusionFence       string     `json:"exclusion_fence,omitempty"`
 	MinHealthyEdgeNodes  int        `json:"min_healthy_edge_nodes,omitempty"`
 	RoutePolicy          string     `json:"route_policy"`
 	Enabled              bool       `json:"enabled"`
@@ -51,7 +54,7 @@ func ProjectPolicySnapshot(base PolicySnapshot, routePolicies []model.EdgeRouteP
 		if strings.TrimSpace(p.TenantID) != "" {
 			matchScope = "tenant_hostname"
 		}
-		out.RouteConstraints = append(out.RouteConstraints, RoutePolicyConstraint{ID: p.ID, Hostname: strings.Trim(strings.ToLower(strings.TrimSpace(p.Hostname)), "."), AppID: p.AppID, TenantID: p.TenantID, MatchScope: matchScope, EdgeGroupID: p.EdgeGroupID, ExcludedEdgeIDs: append([]string(nil), p.ExcludedEdgeIDs...), ExcludedEdgeGroupIDs: append([]string(nil), p.ExcludedEdgeGroupIDs...), ExclusionReason: p.ExclusionReason, ExclusionExpiresAt: p.ExclusionExpiresAt, MinHealthyEdgeNodes: p.MinHealthyEdgeNodes, RoutePolicy: p.RoutePolicy, Enabled: p.Enabled})
+		out.RouteConstraints = append(out.RouteConstraints, RoutePolicyConstraint{ID: p.ID, Hostname: strings.Trim(strings.ToLower(strings.TrimSpace(p.Hostname)), "."), AppID: p.AppID, TenantID: p.TenantID, MatchScope: matchScope, EdgeGroupID: p.EdgeGroupID, ExcludedEdgeIDs: append([]string(nil), p.ExcludedEdgeIDs...), ExcludedEdgeGroupIDs: append([]string(nil), p.ExcludedEdgeGroupIDs...), ExclusionReason: p.ExclusionReason, ExclusionExpiresAt: p.ExclusionExpiresAt, ExclusionOwnerDigest: p.ExclusionOwnerDigest, ExclusionGeneration: p.ExclusionGeneration, ExclusionFence: p.ExclusionFence, MinHealthyEdgeNodes: p.MinHealthyEdgeNodes, RoutePolicy: p.RoutePolicy, Enabled: p.Enabled})
 	}
 	for _, p := range trafficPolicies {
 		out.TrafficConstraints = append(out.TrafficConstraints, TrafficPolicyConstraint{TenantID: p.TenantID, UnavailableCandidate: "stable", ID: p.ID, AppID: p.AppID, Mode: p.Mode, StableReleaseID: p.StableReleaseID, CandidateReleaseID: p.CandidateReleaseID, StableWeight: p.StableWeight, CandidateWeight: p.CandidateWeight, StickyHeader: p.StickyHeader, StickyCookie: p.StickyCookie})
@@ -79,6 +82,9 @@ func validatePolicyRules(in PolicySnapshot) error {
 		}
 		if rule.ExclusionExpiresAt != nil && rule.ExclusionExpiresAt.IsZero() {
 			return fmt.Errorf("exclusion expiry is invalid")
+		}
+		if rule.ExclusionOwnerDigest != strings.TrimSpace(rule.ExclusionOwnerDigest) || rule.ExclusionFence != strings.TrimSpace(rule.ExclusionFence) {
+			return fmt.Errorf("exclusion authorization metadata is not canonical")
 		}
 		if len(rule.ExcludedEdgeIDs) > 4096 || len(rule.ExcludedEdgeGroupIDs) > 4096 {
 			return fmt.Errorf("exclusion list is too large")
@@ -114,7 +120,7 @@ func validatePolicyRules(in PolicySnapshot) error {
 	return nil
 }
 
-func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot) ([]CompiledRoute, error) {
+func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot, capturedAt *time.Time) ([]CompiledRoute, error) {
 	if err := validatePolicyRules(policy); err != nil {
 		return nil, err
 	}
@@ -140,6 +146,11 @@ func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot) 
 			continue
 		}
 		matched[rule.Hostname] = true
+		lifecycle, err := routeConstraintExclusionLifecycle(rule, capturedAt)
+		if err != nil {
+			return nil, err
+		}
+		routes[i].ExclusionLifecycle = lifecycle
 		routes[i].MinHealthyEdgeNodes = rule.MinHealthyEdgeNodes
 		routes[i].ExcludedEdgeIDs = append([]string(nil), rule.ExcludedEdgeIDs...)
 		routes[i].ExcludedEdgeGroupIDs = append([]string(nil), rule.ExcludedEdgeGroupIDs...)
@@ -164,4 +175,21 @@ func ApplyRoutePolicyConstraints(routes []CompiledRoute, policy PolicySnapshot) 
 		return nil, fmt.Errorf("route policy references a hostname outside the intent")
 	}
 	return routes, nil
+}
+
+func routeConstraintExclusionLifecycle(rule RoutePolicyConstraint, capturedAt *time.Time) (string, error) {
+	policy := model.EdgeRoutePolicy{ExcludedEdgeIDs: rule.ExcludedEdgeIDs, ExcludedEdgeGroupIDs: rule.ExcludedEdgeGroupIDs,
+		ExclusionExpiresAt: rule.ExclusionExpiresAt, ExclusionOwnerDigest: rule.ExclusionOwnerDigest,
+		ExclusionGeneration: rule.ExclusionGeneration, ExclusionFence: rule.ExclusionFence}
+	var at time.Time
+	if capturedAt != nil {
+		at = *capturedAt
+	}
+	if model.EdgeRoutePolicyHasExclusions(policy) && rule.ExclusionOwnerDigest != "" && rule.ExclusionGeneration > 0 && rule.ExclusionFence != "" &&
+		rule.ExclusionExpiresAt != nil && at.IsZero() {
+		return "", fmt.Errorf("versioned expiring exclusion requires fixed runtime captured_at")
+	}
+	// The shared lifecycle rule retains legacy/expired holds. Classification
+	// never mutates the exclusion set, policy or its authorization metadata.
+	return model.EdgeRoutePolicyExclusionLifecycleAt(policy, at), nil
 }

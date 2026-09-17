@@ -172,6 +172,7 @@ func Project(artifact model.PlatformArtifact) (model.EdgeRouteIntentSnapshot, er
 		intent.ExcludedEdgeIDs = append([]string(nil), route.ExcludedEdgeIDs...)
 		intent.ExcludedEdgeGroupIDs = append([]string(nil), route.ExcludedEdgeGroupIDs...)
 		intent.ExclusionReason, intent.ExclusionExpiresAt = route.ExclusionReason, route.ExclusionExpiresAt
+		intent.ExclusionLifecycle = route.ExclusionLifecycle
 		if route.MinHealthyEdgeNodes > 0 {
 			intent.MinHealthyEdgeNodes = route.MinHealthyEdgeNodes
 		}

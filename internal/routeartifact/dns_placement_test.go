@@ -22,7 +22,7 @@ func dnsGroupCompileFixture(t *testing.T) platformconfig.CompileRequest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	routes, err = platformconfig.ApplyRoutePolicyConstraints(routes, r.Policy)
+	routes, err = platformconfig.ApplyRoutePolicyConstraints(routes, r.Policy, r.RuntimeSnapshot.CapturedAt)
 	if err != nil {
 		t.Fatal(err)
 	}

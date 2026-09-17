@@ -25,7 +25,7 @@ func placementFixture() CompileRequest {
 }
 func rebindPlacement(r *CompileRequest) {
 	routes, _ := ResolveRouteOrigins(r.Intent.Routes, r.RuntimeSnapshot, r.Policy)
-	routes, _ = ApplyRoutePolicyConstraints(routes, r.Policy)
+	routes, _ = ApplyRoutePolicyConstraints(routes, r.Policy, r.RuntimeSnapshot.CapturedAt)
 	routes, _ = ApplyTrafficPolicyConstraints(routes, r.Policy, r.RuntimeSnapshot)
 	r.RuntimeSnapshot.DNSPlacements[0].InputDigest, _ = DNSPlacementInputDigest(r.Intent.DNS[0], routes, r.Policy)
 }

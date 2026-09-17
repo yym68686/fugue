@@ -47,7 +47,7 @@ func TestApplyRoutePolicyConstraintsChangesArtifactOnly(t *testing.T) {
 	routes := []CompiledRoute{{RouteIntent: RouteIntent{Hostname: "app.example", UpstreamURL: "http://origin", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}}}
 	expires := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	policy := PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{{ID: "route", Hostname: "app.example", RoutePolicy: model.EdgeRoutePolicyRouteAOnly, Enabled: false, MinHealthyEdgeNodes: 2, ExcludedEdgeIDs: []string{"edge-a"}, ExclusionReason: "maintenance", ExclusionExpiresAt: &expires}}}
-	got, err := ApplyRoutePolicyConstraints(routes, policy)
+	got, err := ApplyRoutePolicyConstraints(routes, policy, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,12 +65,12 @@ func TestApplyRoutePolicyConstraintsScopesAppRuleToMatchingPath(t *testing.T) {
 		{RouteIntent: RouteIntent{Hostname: "shared.example", PathPrefix: "/v1", AppID: "app-b", TenantID: "tenant-a", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}},
 	}
 	policy := PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{{ID: "route-b", Hostname: "shared.example", AppID: "app-b", TenantID: "tenant-a", MinHealthyEdgeNodes: 2, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}}
-	got, err := ApplyRoutePolicyConstraints(routes, policy)
+	got, err := ApplyRoutePolicyConstraints(routes, policy, nil)
 	if err != nil || got[0].MinHealthyEdgeNodes != 0 || got[1].MinHealthyEdgeNodes != 2 {
 		t.Fatalf("sibling path policy was not scoped: %+v %v", got, err)
 	}
 	policy.RouteConstraints[0].AppID = "missing-app"
-	if _, err := ApplyRoutePolicyConstraints(routes, policy); err == nil {
+	if _, err := ApplyRoutePolicyConstraints(routes, policy, nil); err == nil {
 		t.Fatal("unmatched app policy was accepted")
 	}
 }
@@ -86,7 +86,7 @@ func TestProjectedHostnamePolicyPreservesSiblingAppConstraints(t *testing.T) {
 		{RouteIntent: RouteIntent{Hostname: legacy.Hostname, PathPrefix: "/", AppID: "app-a", TenantID: "tenant-a", Enabled: true}},
 		{RouteIntent: RouteIntent{Hostname: legacy.Hostname, PathPrefix: "/v1", AppID: "app-b", TenantID: "tenant-a", Enabled: true}},
 	}
-	got, err := ApplyRoutePolicyConstraints(routes, policy)
+	got, err := ApplyRoutePolicyConstraints(routes, policy, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +99,14 @@ func TestProjectedHostnamePolicyPreservesSiblingAppConstraints(t *testing.T) {
 		t.Fatal("input intent mutated")
 	}
 	routes[0].TenantID = "other-tenant"
-	if _, err := ApplyRoutePolicyConstraints(routes, policy); err == nil {
+	if _, err := ApplyRoutePolicyConstraints(routes, policy, nil); err == nil {
 		t.Fatal("hostname scope crossed tenant boundary")
 	}
 	for _, rule := range []RoutePolicyConstraint{
 		{ID: "rule", Hostname: "shared.example", RoutePolicy: model.EdgeRoutePolicyEnabled, MatchScope: "tenant_hostname"},
 		{ID: "rule", Hostname: "shared.example", RoutePolicy: model.EdgeRoutePolicyEnabled, TenantID: "tenant-a", MatchScope: "all"},
 	} {
-		if _, err := ApplyRoutePolicyConstraints(routes, PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{rule}}); err == nil {
+		if _, err := ApplyRoutePolicyConstraints(routes, PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{rule}}, nil); err == nil {
 			t.Fatal("invalid scope accepted")
 		}
 	}
@@ -120,7 +120,7 @@ func TestProjectedHostnamePolicyPreservesSiblingAppConstraints(t *testing.T) {
 func TestApplyRoutePolicyConstraintsKeepsDNSAndServingScopeSeparate(t *testing.T) {
 	routes := []CompiledRoute{{RouteIntent: RouteIntent{Hostname: "app.example", UpstreamURL: "http://origin", Enabled: true, RoutePolicy: model.EdgeRoutePolicyEnabled}}}
 	policy := PolicySnapshot{RouteConstraints: []RoutePolicyConstraint{{ID: "route", Hostname: "app.example", EdgeGroupID: "edge-group-a", MinHealthyEdgeNodes: 2, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}}
-	got, err := ApplyRoutePolicyConstraints(routes, policy)
+	got, err := ApplyRoutePolicyConstraints(routes, policy, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestApplyRoutePolicyConstraintsKeepsDNSAndServingScopeSeparate(t *testing.T
 		t.Fatalf("placement constraint was not materialized: %+v", got[0])
 	}
 	routes[0].EdgeGroupMode, routes[0].EdgeGroupID = model.PlatformRouteEdgeGroupModePinned, "edge-group-b"
-	if _, err := ApplyRoutePolicyConstraints(routes, policy); err == nil {
+	if _, err := ApplyRoutePolicyConstraints(routes, policy, nil); err == nil {
 		t.Fatal("conflicting intent/policy group accepted")
 	}
 }
