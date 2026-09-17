@@ -1,10 +1,30 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"testing"
 )
+
+func TestRecoveryWaitsForNewProcessCapabilityAfterUpgradeAcknowledgement(t *testing.T) {
+	observations, waits := 0, 0
+	err := waitRecoveryCapability(context.Background(), func() (bool, error) { observations++; return observations >= 3, nil }, func(context.Context) error { waits++; return nil })
+	if err != nil || observations != 3 || waits != 2 {
+		t.Fatalf("did not wait for delayed heartbeat: observations=%d waits=%d error=%v", observations, waits, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	err = waitRecoveryCapability(ctx, func() (bool, error) { return false, nil }, func(context.Context) error { cancel(); return nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled recovery kept waiting: %v", err)
+	}
+	failure := errors.New("capability store unavailable")
+	err = waitRecoveryCapability(context.Background(), func() (bool, error) { return false, failure }, func(context.Context) error { t.Fatal("waited after observation failure"); return nil })
+	if !errors.Is(err, failure) {
+		t.Fatalf("observation failure hidden: %v", err)
+	}
+}
 
 func TestRecoveryPreservesFailedClusterExpansionAndPVCRequests(t *testing.T) {
 	for _, tc := range []struct {

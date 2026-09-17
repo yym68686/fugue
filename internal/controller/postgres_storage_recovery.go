@@ -267,6 +267,18 @@ func (s *Service) ensureRecoveryPoolCapacity(ctx context.Context, client *kubeCl
 		if err := s.waitRecoveryHostTask(ctx, op.ID, task); err != nil {
 			return err
 		}
+		// The old updater process acknowledges its own replacement before the
+		// new process can heartbeat its capabilities. Task completion alone is
+		// not evidence that the control plane can deliver the new task type.
+		s.updateManagedPostgresTransitionProgress(op.ID, "node updater upgraded; waiting for advertised storage recovery capability")
+		if err := waitRecoveryCapability(ctx, func() (bool, error) {
+			if err := s.ensureOperationStillActive(op.ID); err != nil {
+				return false, err
+			}
+			return s.Store.NodeUpdaterTargetSupportsTask(inventory.ReportedByNodeUpdaterID, node, "", storagerecovery.ExpandPoolTask)
+		}, func(ctx context.Context) error { return waitManagedPostgresResizePollInterval(ctx, 2*time.Second) }); err != nil {
+			return err
+		}
 	}
 	task, err := s.Store.CreateNodeUpdateTask(principal, inventory.ReportedByNodeUpdaterID, node, "", storagerecovery.ExpandPoolTask, map[string]string{
 		"image_path": inventory.ImagePath, "vg_name": vg, "expected_image_size_bytes": strconv.FormatInt(inventory.ImageSizeBytes, 10), "target_image_size_bytes": strconv.FormatInt(imageSize, 10), "dry_run": "false",
@@ -275,6 +287,24 @@ func (s *Service) ensureRecoveryPoolCapacity(ctx context.Context, client *kubeCl
 		return err
 	}
 	return s.waitRecoveryHostTask(ctx, op.ID, task)
+}
+
+func waitRecoveryCapability(ctx context.Context, observe func() (bool, error), wait func(context.Context) error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		supported, err := observe()
+		if err != nil {
+			return err
+		}
+		if supported {
+			return nil
+		}
+		if err := wait(ctx); err != nil {
+			return err
+		}
+	}
 }
 
 func (s *Service) waitRecoverySourceStorage(ctx context.Context, client *kubeClient, op model.Operation, namespace, name, primary, pvcUID string, target managedPostgresStorageTarget, postgres model.AppPostgresSpec) error {
