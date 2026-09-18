@@ -69,6 +69,20 @@ x-fugue-consumer-release-evidence:
     cursor. Legacy expectations without an artifact release reference cannot
     establish ReleaseSet convergence. Fences are lane-scoped; publication time
     orders active releases across channels, never a cross-lane fence comparison.
+x-fugue-release-set-atomic-convergence:
+  semantics: >-
+    Full ReleaseSet publication re-evaluates every child artifact, the newest
+    active release, latest immutable expected-set revisions and fresh trusted
+    applied/probed consumer facts inside the publishing store transaction.
+    File storage holds one state lock. PostgreSQL uses a per-scope transaction
+    lock shared by expected-set creation, trusted heartbeats and ReleaseSet lane
+    changes; full promotion excludes those writes until its commit or rollback.
+    Failed or expired convergence cannot advance a release lane, append a release
+    message or change verified LKG. Soft overrides do not bypass this check.
+    Live inventory diagnostics do not replace immutable expected topology;
+    a changed topology must be prepared as a new expected-set revision before
+    full publication. External Kubernetes observations are not part of the
+    database transaction. The API retains its independent topology preflight.
 x-fugue-dns-query-shadow:
   semantics: >-
     DNS answer rules are typed versioned policy keyed by physical consumer,

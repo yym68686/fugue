@@ -48,8 +48,11 @@ func TestPostgresPlatformConsumerHeartbeatPersistsShadowEnvelope(t *testing.T) {
 		ProbeStatus:               model.PlatformConsumerProbeStatusPassed,
 	})
 
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)INSERT INTO fugue_platform_consumer_instances .*RETURNING`).
 		WillReturnRows(platformConsumerRows(t, consumer))
+	mock.ExpectCommit()
 	created, err := s.UpsertPlatformConsumerHeartbeat(model.PlatformConsumerHeartbeatRequest{
 		ConsumerID:                consumer.ConsumerID,
 		Component:                 consumer.Component,
@@ -117,6 +120,7 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testin
 	verified.ID = platformConsumerInstanceID(verified.ConsumerID, verified.ArtifactKind, verified.ScopeKey)
 
 	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
 		WithArgs(set.ID).
 		WillReturnRows(expectedConsumerSetRows(t, set))
@@ -165,6 +169,7 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatWithAuditCommitsAtomicall
 	chainID := platformConsumerHeartbeatAuditChainID(verified)
 
 	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
 		WithArgs(set.ID).
 		WillReturnRows(expectedConsumerSetRows(t, set))
@@ -223,6 +228,7 @@ func TestPostgresTrustedHeartbeatRejectsConcurrentReplayAtUpsert(t *testing.T) {
 	}
 
 	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
 		WithArgs(set.ID).
 		WillReturnRows(expectedConsumerSetRows(t, set))
@@ -266,6 +272,7 @@ func TestPostgresTrustedHeartbeatRejectsReplayBeforeWrite(t *testing.T) {
 	existing.ID = platformConsumerInstanceID(existing.ConsumerID, existing.ArtifactKind, existing.ScopeKey)
 
 	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
 		WithArgs(set.ID).
 		WillReturnRows(expectedConsumerSetRows(t, set))
@@ -294,8 +301,11 @@ func TestPostgresLegacyHeartbeatCannotOverwriteVerifiedConsumer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	s := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)INSERT INTO fugue_platform_consumer_instances .*WHERE NOT fugue_platform_consumer_instances.identity_verified\s+RETURNING`).
 		WillReturnRows(sqlmock.NewRows(platformConsumerColumns()))
+	mock.ExpectRollback()
 
 	_, err = s.UpsertPlatformConsumerHeartbeat(model.PlatformConsumerHeartbeatRequest{
 		ConsumerID:   "edge-worker:edge-node-1",

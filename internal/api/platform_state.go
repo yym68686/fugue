@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -433,7 +434,12 @@ func (s *Server) validateReleaseSetConvergence(artifact model.PlatformArtifact) 
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer topology could not be evaluated"}
 	}
 	for _, set := range sets {
-		set = platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
+		declared := platformcontrol.ProjectExpectedConsumerOwners(set)
+		projected := platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
+		if !reflect.DeepEqual(declared.Consumers, projected.Consumers) || declared.RequiredCardinality != projected.RequiredCardinality {
+			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set topology changed; prepare a new immutable expected-set revision before full publication"}
+		}
+		set = projected
 		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
 		if consumerErr != nil {
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}

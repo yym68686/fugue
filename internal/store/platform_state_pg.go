@@ -323,10 +323,15 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
+	if err := pgLockReleaseSetMutation(ctx, tx, id, NormalizePlatformReleaseChannel(req.ReleaseChannel) == model.PlatformArtifactReleaseChannelFull); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+
 	artifact, err := pgGetPlatformArtifactForUpdate(ctx, tx, id, true)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
+
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
 	overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
@@ -375,6 +380,13 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if lkg != nil {
 		pinnedRollbackGeneration = lkg.Generation
 	}
+	var promotionSnapshot *model.State
+	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelFull {
+		promotionSnapshot, err = s.pgFullReleaseSetSnapshot(ctx, tx, artifact)
+		if err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
 	lane, err := pgNextPlatformReleaseLane(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -409,6 +421,12 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	)
 	if !decision.Pass {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelFull {
+		if err := validateFullReleaseSetInState(promotionSnapshot, artifact, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+		now = time.Now().UTC()
 	}
 	entry := buildPlatformArtifactReleaseLedgerEntry(
 		artifact,
@@ -449,6 +467,11 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
 	}
+	if promotionSnapshot != nil {
+		if err := validateFullReleaseSetInState(promotionSnapshot, artifact, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
@@ -463,10 +486,15 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
+	if err := pgLockReleaseSetMutation(ctx, tx, id, false); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+
 	current, err := pgGetPlatformArtifactForUpdate(ctx, tx, id, true)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
+
 	target, err := pgGetPlatformArtifactByGenerationForUpdate(ctx, tx, current.ArtifactKind, current.ScopeKey, req.ToGeneration)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
@@ -1267,7 +1295,15 @@ func (s *Store) pgCreatePlatformExpectedConsumerSet(set model.PlatformExpectedCo
 	if err != nil {
 		return model.PlatformExpectedConsumerSet{}, err
 	}
-	out, err := scanPlatformExpectedConsumerSet(s.db.QueryRowContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	defer tx.Rollback()
+	if err := pgLockPromotionScope(ctx, tx, set.ScopeKey, false); err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	out, err := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_platform_expected_consumer_sets (
 	id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
 	expected_generation, topology_revision, revision, requires_consumers,
@@ -1290,6 +1326,9 @@ RETURNING id, release_set_id, artifact_release_id, artifact_kind, scope_key, sco
 	))
 	if err != nil {
 		return model.PlatformExpectedConsumerSet{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
 	}
 	return out, nil
 }
@@ -1371,7 +1410,15 @@ func (s *Store) pgUpsertPlatformConsumerHeartbeat(consumer model.PlatformConsume
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
-	out, err := scanPlatformConsumerInstance(s.db.QueryRowContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	defer tx.Rollback()
+	if err := pgLockPromotionScope(ctx, tx, consumer.ScopeKey, false); err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	out, err := scanPlatformConsumerInstance(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_platform_consumer_instances (
 	id, consumer_id, credential_id, token_id, component, node_id, artifact_kind, scope_key,
 	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
@@ -1434,6 +1481,9 @@ RETURNING id, consumer_id, credential_id, token_id, component, node_id, artifact
 		}
 		return model.PlatformConsumerInstance{}, mapDBErr(err)
 	}
+	if err := tx.Commit(); err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
 	return out, nil
 }
 
@@ -1452,6 +1502,10 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 		return model.PlatformConsumerInstance{}, mapDBErr(err)
 	}
 	defer tx.Rollback()
+
+	if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, false); err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
 
 	expectedSet, err := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, `
 SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,

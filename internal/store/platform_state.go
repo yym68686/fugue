@@ -426,6 +426,12 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 		if !decision.Pass {
 			return ErrConflict
 		}
+		if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelFull {
+			now = time.Now().UTC()
+			if err := validateFullReleaseSetInState(state, artifact, s.platformArtifactSigningKeyring(), now); err != nil {
+				return err
+			}
+		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
 		if err != nil {
 			return err

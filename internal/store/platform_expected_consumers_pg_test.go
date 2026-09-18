@@ -23,8 +23,11 @@ func TestPostgresPlatformExpectedConsumerSetCreateGetAndList(t *testing.T) {
 		t.Fatalf("normalize fixture: %v", err)
 	}
 
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)INSERT INTO fugue_platform_expected_consumer_sets .*RETURNING`).
 		WillReturnRows(expectedConsumerSetRows(t, set))
+	mock.ExpectCommit()
 	created, err := s.CreatePlatformExpectedConsumerSet(set)
 	if err != nil {
 		t.Fatalf("create postgres expected consumer set: %v", err)
