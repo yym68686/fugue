@@ -37,6 +37,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	const key = "synthetic-dns-platform-signing-key"
 	request := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent-1", Scope: "global", DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", Type: "A", Values: []string{"192.0.2.99"}, TTL: 60, Status: "active"}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}}
 	if versioned {
+		request.Policy.DNSReadiness = &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 		request.Policy.DNSRouteStateConstraints = []platformconfig.DNSRouteStateConstraint{{RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, InactiveBehavior: "serve_error_page"}}
 		captured := time.Now().UTC()
 		expires := captured.Add(-time.Hour)
@@ -77,6 +78,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	lastSequence := int64(0)
 	reports := 0
 	loseReceipt := false
+	changeAssignmentDuringObservation, artifactFetched := false, false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/platform-state/consumers/identity" {
@@ -91,8 +93,13 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 		}
 		switch r.URL.Path {
 		case "/v1/platform-state/consumers/assignment":
-			json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{assignment}})
+			current := assignment
+			if changeAssignmentDuringObservation && artifactFetched {
+				current.FencingToken++
+			}
+			json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{current}})
 		case "/v1/platform-state/consumers/artifacts/dns-candidate":
+			artifactFetched = true
 			if r.URL.Query().Get("expected_consumer_set_id") != "dns-set" {
 				t.Error("missing exact expected set binding")
 			}
@@ -156,6 +163,9 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	}
 	if versioned {
 		status := service.Status().PlatformCandidate
+		if status.Readiness == nil || status.Readiness.Serving || status.Readiness.PlanDigest == "" {
+			t.Fatal("readiness status missing or serving")
+		}
 		if status.RecordCount != 1 || status.ConsumerViewCount != 2 || status.ProbeRecordCount != 2 {
 			t.Fatalf("wrong verified counts: %+v", status)
 		}
@@ -184,6 +194,18 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	}
 	checkServing(service)
 	candidate.Artifact = a
+	if versioned {
+		changeAssignmentDuringObservation, artifactFetched = true, false
+		if err := service.SyncPlatformShadowOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "assignment changed") {
+			t.Fatal("changed assignment accepted", err)
+		}
+		unchanged, _ := os.ReadFile(cfg.CachePath + ".platform-shadow.json")
+		if !bytes.Equal(stagedBefore, unchanged) || reports != 1 {
+			t.Fatal("changed assignment wrote candidate or heartbeat")
+		}
+		changeAssignmentDuringObservation = false
+		checkServing(service)
+	}
 	restarted := create()
 	if err := restarted.LoadCache(); err != nil {
 		t.Fatal(err)

@@ -146,6 +146,23 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS consumer declaration ownership invalid")
 		return
 	}
+	if len(dnsNodes) > 0 {
+		edges, _, edgeErr := s.store.ListEdgeNodes("")
+		if edgeErr != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS readiness edge topology unavailable")
+			return
+		}
+		nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), mustPrincipal(r))
+		if policyErr != nil || len(nodePolicies) == 0 {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS readiness authoritative topology unavailable")
+			return
+		}
+		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
+		if err := projectDNSReadiness(&projection, edges, time.Now().UTC()); err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS readiness topology invalid")
+			return
+		}
+	}
 	resolver := newHostedDNSFlattenResolver()
 	captureDNSFlattenFacts(r.Context(), &projection, resolver.resolve)
 	s.capturePlatformPlacements(r.Context(), &projection)

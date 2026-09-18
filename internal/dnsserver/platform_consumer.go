@@ -27,17 +27,18 @@ import (
 
 // This is a staged candidate, never a serving LKG or an apply-success receipt.
 type PlatformCandidateStatus struct {
-	State             string    `json:"state"`
-	ArtifactID        string    `json:"artifact_id,omitempty"`
-	Digest            string    `json:"digest,omitempty"`
-	ReleaseSetID      string    `json:"release_set_id,omitempty"`
-	RecordCount       int       `json:"record_count"`
-	Sequence          int64     `json:"sequence,omitempty"`
-	VerifiedAt        time.Time `json:"verified_at,omitempty"`
-	ReportedAt        time.Time `json:"reported_at,omitempty"`
-	LastError         string    `json:"last_error,omitempty"`
-	ConsumerViewCount int       `json:"consumer_view_count"`
-	ProbeRecordCount  int       `json:"probe_record_count"`
+	Readiness         *DNSReadinessStatus `json:"readiness,omitempty"`
+	State             string              `json:"state"`
+	ArtifactID        string              `json:"artifact_id,omitempty"`
+	Digest            string              `json:"digest,omitempty"`
+	ReleaseSetID      string              `json:"release_set_id,omitempty"`
+	RecordCount       int                 `json:"record_count"`
+	Sequence          int64               `json:"sequence,omitempty"`
+	VerifiedAt        time.Time           `json:"verified_at,omitempty"`
+	ReportedAt        time.Time           `json:"reported_at,omitempty"`
+	LastError         string              `json:"last_error,omitempty"`
+	ConsumerViewCount int                 `json:"consumer_view_count"`
+	ProbeRecordCount  int                 `json:"probe_record_count"`
 }
 
 type dnsPlatformCandidate struct {
@@ -126,6 +127,25 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	readiness, err := s.observePlatformDNSReadiness(ctx, candidate, *chosen)
+	if err != nil {
+		return err
+	}
+	if readiness != nil {
+		var current model.PlatformConsumerAssignmentResponse
+		if err = s.platformJSON(ctx, base.String()+"/v1/platform-state/consumers/assignment", identity.Token, http.MethodGet, nil, &current); err != nil {
+			return err
+		}
+		stillAssigned := false
+		for _, assignment := range current.Assignments {
+			if reflect.DeepEqual(assignment, *chosen) {
+				stillAssigned = true
+			}
+		}
+		if !stillAssigned {
+			return errors.New("DNS assignment changed during readiness observation")
+		}
+	}
 	// Persist a monotonic cursor before sending it. A lost response consumes the
 	// sequence; a restart cannot replay it. Corrupt state is never reset silently.
 	cachePath := s.Config.CachePath + ".platform-shadow.json"
@@ -149,6 +169,16 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err = lkgcache.AtomicWriteFile(cachePath, raw, 0600); err != nil {
 		return errors.New("persist platform candidate failed")
 	}
+	if readiness != nil {
+		readiness.Facts = sortedDNSReadinessFacts(readiness.Facts)
+		raw, err := json.Marshal(readiness)
+		if err != nil {
+			return errors.New("encode DNS readiness facts failed")
+		}
+		if err = lkgcache.AtomicWriteFile(s.Config.CachePath+".platform-dns-readiness.json", raw, 0600); err != nil {
+			return errors.New("persist DNS readiness facts failed")
+		}
+	}
 	status := s.Status()
 	nonce := make([]byte, 16)
 	if _, err = rand.Read(nonce); err != nil {
@@ -168,6 +198,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.platformCandidate = PlatformCandidateStatus{State: "shadow_verified", ArtifactID: chosen.ArtifactID, Digest: chosen.ContentHash, ReleaseSetID: chosen.ReleaseSetID, RecordCount: counts.records, ConsumerViewCount: counts.views, ProbeRecordCount: counts.probes, Sequence: candidate.Sequence, VerifiedAt: candidate.VerifiedAt}
+	if readiness != nil {
+		s.platformCandidate.Readiness = &readiness.Status
+	}
 	s.mu.Unlock()
 	var receipt model.PlatformConsumerHeartbeatResponse
 	if err = s.platformJSON(ctx, base.String()+"/v1/platform-state/consumers/trusted-heartbeat", identity.Token, http.MethodPost, heartbeat, &receipt); err != nil {
@@ -212,6 +245,7 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 		Generation    string                           `json:"generation"`
 		Records       []platformconfig.DNSIntent       `json:"records"`
 		ConsumerViews []platformconfig.DNSConsumerView `json:"consumer_views,omitempty"`
+		ReadinessPlan *platformconfig.DNSReadinessPlan `json:"readiness_plan,omitempty"`
 		Policy        platformconfig.PolicySnapshot    `json:"policy"`
 		Lineage       platformconfig.Lineage           `json:"lineage"`
 	}
@@ -235,6 +269,9 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 		if value == "" || c.Artifact.Metadata[key] != value {
 			return dnsCandidateCounts{}, errors.New("DNS candidate lineage binding invalid")
 		}
+	}
+	if err := platformconfig.ValidateDNSReadinessPlan(payload.ReadinessPlan, payload.Policy.DNSReadiness); err != nil {
+		return dnsCandidateCounts{}, errors.New("DNS readiness plan invalid")
 	}
 	active, err := platformconfig.DNSRecordsAt(payload.Records, time.Now().UTC())
 	if err != nil {

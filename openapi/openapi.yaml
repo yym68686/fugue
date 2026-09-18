@@ -69,6 +69,24 @@ x-fugue-consumer-release-evidence:
     cursor. Legacy expectations without an artifact release reference cannot
     establish ReleaseSet convergence. Fences are lane-scoped; publication time
     orders active releases across channels, never a cross-lane fence comparison.
+x-fugue-dns-readiness-shadow:
+  semantics: >-
+    Optional typed dns_readiness policy compiles route-proof requirements for
+    authorized edge endpoint observations separately from finite DNS answer
+    leases. Endpoint discovery is not health. Each requirement binds the exact
+    hostname/path/state digest from the shared route projection and the physical
+    edge/group/address. DNS shadow consumers independently collect fresh HTTPS
+    nonce-bound route/TLS facts for these requirements; facts expire at the
+    earliest policy freshness, original served bundle expiry or verified
+    certificate expiry. Failed, missing or changed requirements remain unready.
+    These observations never renew artifact value expirations or grant serving,
+    applied/passed, positive LKG or gray/full promotion. Existing lease guards
+    and legacy serving remain in force. DNS platform_candidate.readiness exposes
+    plan_digest, probes, ready_probes, failed_probes, records, ready_records,
+    checked_at, fresh_until and serving=false. The local durable facts file binds
+    artifact digest, ReleaseSet, expected set, fence and DNS identity. Cached
+    summaries are recomputed against original deadlines; changed assignments
+    invalidate in-flight publication and mismatched facts are never reused.
 x-fugue-dns-consumer-views:
   semantics: >-
     DNS consumer intent declares physical node ownership, served zones, probe
@@ -31285,11 +31303,33 @@ components:
         observed_at: {type: string, format: date-time}
         a: {type: array, maxItems: 16, items: {type: string, format: ipv4}}
         aaaa: {type: array, maxItems: 16, items: {type: string, format: ipv6}}
+    PlatformDNSReadinessPolicy:
+      type: object
+      additionalProperties: false
+      required: [probe_interval_seconds, probe_timeout_seconds, fact_freshness_seconds, max_concurrency, max_probes]
+      properties:
+        probe_interval_seconds: {type: integer, minimum: 10, maximum: 300}
+        probe_timeout_seconds: {type: integer, minimum: 1, maximum: 10}
+        fact_freshness_seconds: {type: integer, minimum: 20, maximum: 600}
+        max_concurrency: {type: integer, minimum: 1, maximum: 16}
+        max_probes: {type: integer, minimum: 1, maximum: 4096}
+    PlatformDNSEdgeEndpoint:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id, observed_at]
+      properties:
+        edge_id: {type: string}
+        edge_group_id: {type: string}
+        observed_at: {type: string, format: date-time}
+        a: {type: array, maxItems: 16, items: {type: string, format: ipv4}}
+        aaaa: {type: array, maxItems: 16, items: {type: string, format: ipv6}}
     PlatformConfigPolicySnapshot:
       type: object
       additionalProperties: false
       required: [generation]
       properties:
+        dns_readiness:
+          $ref: "#/components/schemas/PlatformDNSReadinessPolicy"
         schema_version:
           type: string
         generation:
@@ -31615,6 +31655,10 @@ components:
       additionalProperties: false
       required: [intent_generation, policy_generation]
       properties:
+        dns_edge_endpoints:
+          type: array
+          maxItems: 4096
+          items: {$ref: "#/components/schemas/PlatformDNSEdgeEndpoint"}
         dns_consumers:
           type: array
           maxItems: 4096

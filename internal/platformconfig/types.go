@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v20"
+	CompilerVersion = "platform-config-compiler/v21"
 	GlobalScopeKey  = "global"
 )
 
@@ -126,6 +126,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	DNSReadiness             *DNSReadinessPolicy       `json:"dns_readiness,omitempty"`
 	DNSRouteStateConstraints []DNSRouteStateConstraint `json:"dns_route_state_constraints,omitempty"`
 	SchemaVersion            string                    `json:"schema_version"`
 	Generation               string                    `json:"generation"`
@@ -191,6 +192,7 @@ type CompileRequest struct {
 // RuntimeSnapshot is the immutable runtime fact view used by one compiler
 // invocation. It is input data, never serving configuration.
 type RuntimeSnapshot struct {
+	DNSEdgeEndpoints []DNSEdgeEndpoint         `json:"dns_edge_endpoints,omitempty"`
 	DNSConsumers     []DNSConsumerObservation  `json:"dns_consumers,omitempty"`
 	TLSDomains       []TLSDomainObservation    `json:"tls_domains,omitempty"`
 	DNSPlacements    []DNSPlacementObservation `json:"dns_placements,omitempty"`
@@ -255,7 +257,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
-	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && len(runtimeSnapshot.DNSPlacements) == 0 && len(runtimeSnapshot.TLSDomains) == 0 && len(runtimeSnapshot.DNSConsumers) == 0 && req.InputSnapshot != nil {
+	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && len(runtimeSnapshot.DNSPlacements) == 0 && len(runtimeSnapshot.TLSDomains) == 0 && len(runtimeSnapshot.DNSConsumers) == 0 && len(runtimeSnapshot.DNSEdgeEndpoints) == 0 && req.InputSnapshot != nil {
 		runtimeSnapshot = RuntimeSnapshot{IntentGeneration: intent.Generation, PolicyGeneration: policy.Generation, Facts: req.InputSnapshot}
 	}
 	if runtimeSnapshot.IntentGeneration == "" {
@@ -274,6 +276,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	runtimeSnapshot.DNSFlatten = normalizeDNSFlattenObservations(runtimeSnapshot.DNSFlatten)
 	runtimeSnapshot.DNSPlacements = normalizeDNSPlacementObservations(runtimeSnapshot.DNSPlacements)
 	runtimeSnapshot.DNSConsumers = normalizeDNSConsumerObservations(runtimeSnapshot.DNSConsumers)
+	runtimeSnapshot.DNSEdgeEndpoints = normalizeDNSEdgeEndpoints(runtimeSnapshot.DNSEdgeEndpoints)
 	runtimeSnapshot.TLSDomains = append([]TLSDomainObservation(nil), runtimeSnapshot.TLSDomains...)
 	sort.Slice(runtimeSnapshot.TLSDomains, func(i, j int) bool { return runtimeSnapshot.TLSDomains[i].Ref < runtimeSnapshot.TLSDomains[j].Ref })
 	tlsAllowlist, err := CompileTLSDomains(intent, runtimeSnapshot)
@@ -305,6 +308,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, err
 	}
 	dnsViews, err := CompileDNSConsumerViews(intent.DNSConsumers, runtimeSnapshot, compiledDNS)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	readiness, err := CompileDNSReadiness(intent, compiledRoutes, runtimeSnapshot, policy)
 	if err != nil {
 		return CompileResult{}, err
 	}
@@ -355,6 +362,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		"records":        compiledDNS,
 		"policy":         policy,
 		"lineage":        lineage,
+	}
+	if readiness != nil {
+		dnsPayload["readiness_plan"] = readiness
 	}
 	if len(dnsViews) > 0 {
 		dnsPayload["consumer_views"] = dnsViews
@@ -480,6 +490,11 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 
 func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out := in
+	if in.DNSReadiness != nil {
+		p := *in.DNSReadiness
+		out.DNSReadiness = &p
+	}
+
 	out.DNSRouteStateConstraints = append([]DNSRouteStateConstraint(nil), in.DNSRouteStateConstraints...)
 	sort.Slice(out.DNSRouteStateConstraints, func(i, j int) bool {
 		return out.DNSRouteStateConstraints[i].RecordKind < out.DNSRouteStateConstraints[j].RecordKind
@@ -594,6 +609,10 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := ValidateDNSReadinessPolicy(in.DNSReadiness); err != nil {
+		return err
+	}
+
 	if err := validateDNSRouteStateConstraints(in.DNSRouteStateConstraints); err != nil {
 		return err
 	}
