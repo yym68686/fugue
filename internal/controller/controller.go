@@ -776,6 +776,11 @@ func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Ope
 		if err != nil {
 			return model.Operation{}, false, fmt.Errorf("list active operations: %w", err)
 		}
+		if changed, err := s.cancelDeploysSupersededByDeletion(activeOps); err != nil {
+			return model.Operation{}, false, err
+		} else if changed {
+			continue
+		}
 		apps, err := s.loadAppsForPendingOperationClaim(activeOps, lane)
 		if err != nil {
 			return model.Operation{}, false, fmt.Errorf("list apps: %w", err)

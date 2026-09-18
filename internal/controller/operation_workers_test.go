@@ -1486,7 +1486,7 @@ func TestForegroundActivateFailsDeployWithMissingComposeDependency(t *testing.T)
 	}
 }
 
-func TestForegroundActivateFailsBlockedComposeDeployAndClaimsQueuedDelete(t *testing.T) {
+func TestForegroundActivateCancelsBlockedComposeDeployAndClaimsQueuedDelete(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -1586,7 +1586,7 @@ func TestForegroundActivateFailsBlockedComposeDeployAndClaimsQueuedDelete(t *tes
 		t.Fatalf("claim after dependency failure: %v", err)
 	}
 	if !found {
-		t.Fatal("expected queued delete to become claimable after blocked deploy fails")
+		t.Fatal("expected queued delete to become claimable after blocked deploy is canceled")
 	}
 	if claimed.ID != deleteOp.ID {
 		t.Fatalf("expected delete operation %s after dependency failure, got %s", deleteOp.ID, claimed.ID)
@@ -1596,11 +1596,11 @@ func TestForegroundActivateFailsBlockedComposeDeployAndClaimsQueuedDelete(t *tes
 	if err != nil {
 		t.Fatalf("get blocked deploy: %v", err)
 	}
-	if op.Status != model.OperationStatusFailed {
-		t.Fatalf("expected blocked deploy status %q, got %q", model.OperationStatusFailed, op.Status)
+	if op.Status != model.OperationStatusCanceled {
+		t.Fatalf("expected blocked deploy status %q, got %q", model.OperationStatusCanceled, op.Status)
 	}
-	if !strings.Contains(op.ErrorMessage, `"failed"`) && !strings.Contains(op.ErrorMessage, "MANIFEST_UNKNOWN") {
-		t.Fatalf("expected dependency failure details in deploy error, got %q", op.ErrorMessage)
+	if !strings.Contains(op.ResultMessage, "superseded by app deletion") {
+		t.Fatalf("expected deletion supersession reason, got %q", op.ResultMessage)
 	}
 }
 
