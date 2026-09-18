@@ -83,6 +83,17 @@ x-fugue-release-set-atomic-convergence:
     a changed topology must be prepared as a new expected-set revision before
     full publication. External Kubernetes observations are not part of the
     database transaction. The API retains its independent topology preflight.
+x-fugue-dns-client-policy:
+  semantics: >-
+    Typed DNS client policies bind ordered CIDR-to-geography mappings to a physical
+    consumer. The first matching rule wins; rule order is part of the policy
+    digest. Client hints cannot authorize an address or bypass route/TLS readiness.
+    The migration capture reads explicit DNS workload declarations once, rejects
+    unresolved environment sources, and emits an explicit empty mapping when none
+    is configured. Query execution uses only the signed policy, never ambient
+    GeoIP overrides. IPv4/IPv6 ECS and resolver addresses share the same mapping;
+    per-record ECS enablement remains enforced. This capability is shadow-only
+    until serving apply and recovery have been verified.
 x-fugue-dns-query-shadow:
   semantics: >-
     DNS answer rules are typed versioned policy keyed by physical consumer,
@@ -31334,6 +31345,27 @@ components:
         observed_at: {type: string, format: date-time}
         a: {type: array, maxItems: 16, items: {type: string, format: ipv4}}
         aaaa: {type: array, maxItems: 16, items: {type: string, format: ipv6}}
+    PlatformDNSClientPolicy:
+      type: object
+      additionalProperties: false
+      required: [node_id, rules]
+      properties:
+        node_id: {type: string}
+        rules:
+          type: array
+          maxItems: 256
+          description: Ordered first-match mappings. An empty array explicitly disables client geography overrides.
+          items: {$ref: "#/components/schemas/PlatformDNSClientRule"}
+    PlatformDNSClientRule:
+      type: object
+      additionalProperties: false
+      required: [cidr]
+      properties:
+        cidr: {type: string, maxLength: 64}
+        country: {type: string, maxLength: 16}
+        region: {type: string, maxLength: 128}
+        asn: {type: string, maxLength: 64}
+        edge_group_id: {type: string, maxLength: 128}
     PlatformDNSAnswerRule:
       type: object
       additionalProperties: false
@@ -31436,6 +31468,10 @@ components:
       additionalProperties: false
       required: [generation]
       properties:
+        dns_client_policies:
+          type: array
+          maxItems: 256
+          items: {$ref: "#/components/schemas/PlatformDNSClientPolicy"}
         dns_answer_rules:
           type: array
           maxItems: 20000

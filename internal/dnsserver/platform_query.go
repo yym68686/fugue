@@ -3,6 +3,8 @@ package dnsserver
 import (
 	"encoding/json"
 	"errors"
+	"net"
+	"net/netip"
 	"sort"
 	"time"
 
@@ -12,13 +14,15 @@ import (
 )
 
 type DNSQueryStatus struct {
-	ViewDigest      string    `json:"view_digest"`
-	Records         int       `json:"records"`
-	EligibleRecords int       `json:"eligible_records"`
-	Questions       int       `json:"questions"`
-	Answers         int       `json:"answers"`
-	EvaluatedAt     time.Time `json:"evaluated_at"`
-	Serving         bool      `json:"serving"`
+	ClientPolicyDigest string    `json:"client_policy_digest,omitempty"`
+	ClientPolicyRules  int       `json:"client_policy_rules"`
+	ViewDigest         string    `json:"view_digest"`
+	Records            int       `json:"records"`
+	EligibleRecords    int       `json:"eligible_records"`
+	Questions          int       `json:"questions"`
+	Answers            int       `json:"answers"`
+	EvaluatedAt        time.Time `json:"evaluated_at"`
+	Serving            bool      `json:"serving"`
 }
 
 type dnsQueryReceipt struct {
@@ -56,8 +60,30 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 	if readiness == nil || payload.Plan == nil || payload.Policy.DNSReadiness == nil || readiness.ArtifactID != c.Artifact.ID || readiness.ArtifactDigest != c.Artifact.ContentHash || readiness.ReleaseSetID != a.ReleaseSetID || readiness.ExpectedConsumerSetID != a.ExpectedConsumerSetID || readiness.FencingToken != a.FencingToken || readiness.NodeID != s.Config.DNSNodeID {
 		return nil, errors.New("DNS query facts do not match candidate release")
 	}
+	clientPolicy := platformconfig.DNSClientPolicy{NodeID: s.Config.DNSNodeID, Rules: []platformconfig.DNSClientRule{}}
+	if err := platformconfig.ValidateDNSClientPolicies(payload.Policy.DNSClientPolicies); err != nil {
+		return nil, err
+	}
+	foundClientPolicy := false
+	for _, p := range payload.Policy.DNSClientPolicies {
+		if p.NodeID == s.Config.DNSNodeID {
+			clientPolicy = p
+			foundClientPolicy = true
+		}
+	}
+	if len(payload.Policy.DNSClientPolicies) > 0 && !foundClientPolicy {
+		return nil, errors.New("DNS consumer has no client policy")
+	}
+	matcher, err := platformconfig.NewDNSClientMatcher(clientPolicy.Rules)
+	if err != nil {
+		return nil, err
+	}
+	clientDigest, err := platformconfig.Digest(clientPolicy)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
-	receipt := &dnsQueryReceipt{ArtifactID: c.Artifact.ID, ArtifactDigest: c.Artifact.ContentHash, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, NodeID: s.Config.DNSNodeID, Status: DNSQueryStatus{EvaluatedAt: now}, Zones: []dnsQueryZoneReceipt{}}
+	receipt := &dnsQueryReceipt{ArtifactID: c.Artifact.ID, ArtifactDigest: c.Artifact.ContentHash, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, NodeID: s.Config.DNSNodeID, Status: DNSQueryStatus{EvaluatedAt: now, ClientPolicyDigest: clientDigest, ClientPolicyRules: len(clientPolicy.Rules)}, Zones: []dnsQueryZoneReceipt{}}
 	owned := []platformconfig.DNSQueryView{}
 	for _, view := range payload.Views {
 		if view.NodeID != s.Config.DNSNodeID {
@@ -82,8 +108,30 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 			// not a public serving probe or a manufactured positive ACK.
 			hints := []dnsGeoHint{{}}
 			hintKeys := map[string]bool{}
+			// Exercise representative client addresses through the exact ordered
+			// signed matcher. Ambient Service.Config.GeoIPOverrides is not read.
+			for _, r := range clientPolicy.Rules {
+				prefix, _ := netip.ParsePrefix(r.CIDR)
+				if len(hints) >= 16 {
+					break
+				}
+				packet := new(dns.Msg)
+				packet.SetQuestion(dns.Fqdn(record.Name), dns.StringToType[record.Type])
+				packet.SetEdns0(1232, false)
+				family := uint16(2)
+				if prefix.Addr().Is4() {
+					family = 1
+				}
+				packet.IsEdns0().Option = append(packet.IsEdns0().Option, &dns.EDNS0_SUBNET{Code: dns.EDNS0SUBNET, Family: family, SourceNetmask: uint8(prefix.Bits()), Address: net.IP(prefix.Addr().AsSlice())})
+				hint := platformDNSHintForQuery(matcher, packet, "")
+				key := hint.Country + "\x00" + hint.Region + "\x00" + hint.ASN + "\x00" + hint.EdgeGroupID
+				if !hintKeys[key] {
+					hints = append(hints, hint)
+					hintKeys[key] = true
+				}
+			}
 			for _, c := range record.Candidates {
-				key := c.Country + "\x00" + c.Region
+				key := c.Country + "\x00" + c.Region + "\x00\x00"
 				if hintKeys[key] || len(hints) >= 16 {
 					continue
 				}

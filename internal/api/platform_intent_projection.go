@@ -135,8 +135,9 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	var dnsZones map[string][]string
+	var dnsClientRules map[string][]platformconfig.DNSClientRule
 	if len(dnsNodes) > 0 {
-		dnsZones, err = s.captureDNSConsumerZones(r.Context(), business.HostedZones)
+		dnsZones, dnsClientRules, err = s.captureDNSConsumerConfiguration(r.Context(), business.HostedZones)
 		if err != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS workload zone declarations unavailable")
 			return
@@ -144,6 +145,10 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	}
 	if err := projectDNSConsumerDeclarations(&projection, dnsNodes, dnsZones, s.dnsBundleTTL, time.Now().UTC()); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS consumer declaration ownership invalid")
+		return
+	}
+	if err := projectDNSClientPolicies(&projection, dnsClientRules); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS client policy declaration invalid")
 		return
 	}
 	if len(dnsNodes) > 0 {

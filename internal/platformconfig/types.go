@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v22"
+	CompilerVersion = "platform-config-compiler/v23"
 	GlobalScopeKey  = "global"
 )
 
@@ -126,6 +126,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	DNSClientPolicies        []DNSClientPolicy         `json:"dns_client_policies,omitempty"`
 	DNSAnswerRules           []DNSAnswerRule           `json:"dns_answer_rules,omitempty"`
 	DNSReadiness             *DNSReadinessPolicy       `json:"dns_readiness,omitempty"`
 	DNSRouteStateConstraints []DNSRouteStateConstraint `json:"dns_route_state_constraints,omitempty"`
@@ -308,6 +309,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	}
 	compiledDNS, err = CompileACMEChallenges(compiledDNS, intent.ACMEChallenges, runtimeSnapshot.CapturedAt)
 	if err != nil {
+		return CompileResult{}, err
+	}
+	if err := ValidateDNSClientPolicyOwnership(policy.DNSClientPolicies, intent.DNSConsumers); err != nil {
 		return CompileResult{}, err
 	}
 	dnsViews, err := CompileDNSConsumerViews(intent.DNSConsumers, runtimeSnapshot, compiledDNS)
@@ -504,6 +508,7 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out := in
 	out.DNSAnswerRules = normalizeDNSAnswerRules(in.DNSAnswerRules)
+	out.DNSClientPolicies = normalizeDNSClientPolicies(in.DNSClientPolicies)
 
 	if in.DNSReadiness != nil {
 		p := *in.DNSReadiness
@@ -624,6 +629,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := ValidateDNSClientPolicies(in.DNSClientPolicies); err != nil {
+		return err
+	}
 	if err := ValidateDNSAnswerRules(in.DNSAnswerRules); err != nil {
 		return err
 	}

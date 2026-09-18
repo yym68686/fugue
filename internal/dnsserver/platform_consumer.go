@@ -222,6 +222,17 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	if dec.Decode(&payload) != nil || payload.Schema != platformconfig.SchemaVersion || payload.Generation != c.Artifact.Metadata["intent_generation"] || platformconfig.ValidatePolicySnapshot(payload.Policy) != nil {
 		return dnsCandidateCounts{}, errors.New("DNS candidate schema invalid")
 	}
+	owners := map[string]bool{}
+	consumers := []platformconfig.DNSConsumerIntent{}
+	for _, v := range payload.ConsumerViews {
+		if !owners[v.NodeID] {
+			consumers = append(consumers, platformconfig.DNSConsumerIntent{NodeID: v.NodeID})
+			owners[v.NodeID] = true
+		}
+	}
+	if err := platformconfig.ValidateDNSClientPolicyOwnership(payload.Policy.DNSClientPolicies, consumers); err != nil {
+		return dnsCandidateCounts{}, err
+	}
 	if err := platformconfig.ValidateDNSIntents(payload.Records); err != nil {
 		return dnsCandidateCounts{}, errors.New("DNS candidate intent semantics invalid")
 	}
