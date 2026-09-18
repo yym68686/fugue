@@ -108,6 +108,13 @@ func (w *edgeHTTPCacheCapture) WriteHeader(statusCode int) {
 	if w.statusCode != 0 {
 		return
 	}
+	// Informational responses are forwarded without committing final state.
+	// 101 is terminal because it upgrades the connection.
+	if statusCode >= 100 && statusCode < 200 && statusCode != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+
 	w.statusCode = statusCode
 	w.header = cloneHTTPHeader(w.ResponseWriter.Header())
 	w.ResponseWriter.WriteHeader(statusCode)

@@ -4954,6 +4954,13 @@ func (w *edgeProxyObservationResponseWriter) WriteHeader(statusCode int) {
 	if w.wroteHeader {
 		return
 	}
+	// Informational responses are forwarded without committing final state.
+	// 101 is terminal because it upgrades the connection.
+	if statusCode >= 100 && statusCode < 200 && statusCode != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+
 	writeStarted := time.Now()
 	w.wroteHeader = true
 	w.status = statusCode
