@@ -143,6 +143,8 @@ func newInventoryProducerHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+var errInventoryProducerCAS = errors.New("Edge inventory producer sequence conflict")
+
 type inventoryProducerTransportError struct {
 	operation string
 	cause     error
@@ -193,15 +195,21 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 		return err
 	}
 	// A heartbeat write may queue behind edge-control's durable authority CAS.
-	// Retry the complete transaction so an ambiguous POST timeout first reads a
+	// Retry transport failures and explicit CAS conflicts with jitter so a slower
+	// producer does not lose every synchronized heartbeat to a peer. Each retry
+	// runs the complete transaction; an ambiguous POST timeout first reads a
 	// fresh cursor instead of replaying a sequence that may already be stored.
 	for attempt := 0; attempt < inventoryProducerRequestAttempts; attempt++ {
 		err = s.inventoryHeartbeatAttempt(ctx, edgeConfig, status)
 		var transportErr *inventoryProducerTransportError
-		if err == nil || !errors.As(err, &transportErr) || attempt+1 == inventoryProducerRequestAttempts {
+		if err == nil || (!errors.As(err, &transportErr) && !errors.Is(err, errInventoryProducerCAS)) || attempt+1 == inventoryProducerRequestAttempts {
 			return err
 		}
-		timer := time.NewTimer(inventoryProducerRetryDelay * time.Duration(attempt+1))
+		jitter := make([]byte, 1)
+		if _, randomErr := rand.Read(jitter); randomErr != nil {
+			return randomErr
+		}
+		timer := time.NewTimer(inventoryProducerRetryDelay*time.Duration(attempt+1) + time.Duration(jitter[0])*time.Millisecond)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
@@ -290,6 +298,17 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 		return &inventoryProducerTransportError{operation: "heartbeat", cause: err}
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict {
+		var failure struct {
+			Error string `json:"error"`
+		}
+		decoder := json.NewDecoder(io.LimitReader(response.Body, maxInventoryProducerResponseBytes+1))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&failure) == nil && decoder.Decode(&struct{}{}) == io.EOF && failure.Error == "sequence_conflict" {
+			return errInventoryProducerCAS
+		}
+		return fmt.Errorf("Edge inventory producer heartbeat returned status %d", response.StatusCode)
+	}
 	if response.StatusCode != http.StatusCreated {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxInventoryProducerResponseBytes))
 		return fmt.Errorf("Edge inventory producer heartbeat returned status %d", response.StatusCode)

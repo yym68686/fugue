@@ -361,7 +361,12 @@ func TestInventoryProducerTransportFailureDoesNotExposeProjectedIdentity(t *test
 	}
 }
 
-func TestInventoryProducerRetriesTransportFailureWithFreshCursor(t *testing.T) {
+func TestInventoryProducerRetriesWithFreshCursor(t *testing.T) {
+	for _, failure := range []string{"transport", "sequence_conflict", "persistent_conflict", "unknown_conflict"} {
+		t.Run(failure, func(t *testing.T) { testInventoryProducerRetry(t, failure) })
+	}
+}
+func testInventoryProducerRetry(t *testing.T, failure string) {
 	now := time.Now().UTC().Truncate(time.Second)
 	groupID := "edge-group-country-de"
 	nodeID := "edge-node-de-1"
@@ -392,9 +397,17 @@ func TestInventoryProducerRetriesTransportFailureWithFreshCursor(t *testing.T) {
 			t.Fatal(err)
 		}
 		attempt := postAttempts.Add(1)
+		if failure == "unknown_conflict" {
+			return inventoryJSONResponse(http.StatusConflict, map[string]string{"error": "other_conflict"}), nil
+		}
 		if attempt == 1 {
 			firstHeartbeat = heartbeat
-			return nil, &url.Error{Op: "Post", URL: request.URL.String(), Err: errors.New("timeout")}
+		}
+		if attempt == 1 || failure == "persistent_conflict" {
+			if failure == "transport" {
+				return nil, &url.Error{Op: "Post", URL: request.URL.String(), Err: errors.New("timeout")}
+			}
+			return inventoryJSONResponse(http.StatusConflict, map[string]string{"error": "sequence_conflict"}), nil
 		}
 		if request.Header.Get("Authorization") == "" || heartbeat.ExpectedSequence != firstHeartbeat.ExpectedSequence+1 ||
 			heartbeat.ProducerGeneration != firstHeartbeat.ProducerGeneration+1 || heartbeat.Nonce == firstHeartbeat.Nonce {
@@ -411,7 +424,18 @@ func TestInventoryProducerRetriesTransportFailureWithFreshCursor(t *testing.T) {
 	service.snapshot.Status = "healthy"
 	service.mu.Unlock()
 
-	if err := service.InventoryHeartbeatOnce(context.Background()); err != nil {
+	err := service.InventoryHeartbeatOnce(context.Background())
+	if failure == "persistent_conflict" || failure == "unknown_conflict" {
+		want := int32(inventoryProducerRequestAttempts)
+		if failure == "unknown_conflict" {
+			want = 1
+		}
+		if err == nil || postAttempts.Load() != want || getAttempts.Load() != want || service.Status().InventoryHeartbeatGeneration != 0 || service.Status().InventoryHeartbeatAt != nil {
+			t.Fatal("conflict retried without bound or produced success", err, postAttempts.Load())
+		}
+		return
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	if getAttempts.Load() != 2 || postAttempts.Load() != 2 || service.Status().InventoryHeartbeatGeneration != 11 {
