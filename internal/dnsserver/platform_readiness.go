@@ -11,6 +11,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/routeprobe"
 )
 
@@ -70,7 +71,7 @@ func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatform
 	}
 	receipt := &dnsReadinessReceipt{ArtifactID: c.Artifact.ID, ArtifactDigest: c.Artifact.ContentHash, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, NodeID: s.Config.DNSNodeID}
 	cachePath := s.Config.CachePath + ".platform-dns-readiness.json"
-	if raw, err := readPlatformCandidateFile(cachePath, 8<<20); err == nil {
+	if raw, err := platformconsumer.ReadFile(cachePath, 8<<20); err == nil {
 		var previous dnsReadinessReceipt
 		if json.Unmarshal(raw, &previous) != nil || previous.Status.CheckedAt.IsZero() {
 			return nil, errors.New("DNS readiness facts cache is corrupt")

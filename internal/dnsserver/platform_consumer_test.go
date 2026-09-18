@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,7 +195,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	}
 	checkServing(service)
 	candidate.Artifact = a
-	if versioned {
+	{
 		changeAssignmentDuringObservation, artifactFetched = true, false
 		if err := service.SyncPlatformShadowOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "assignment changed") {
 			t.Fatal("changed assignment accepted", err)
@@ -225,6 +226,20 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	}
 	if reports != 3 || lastSequence <= first {
 		t.Fatal("cursor replay after restart")
+	}
+	checkServing(again)
+	overflow := candidate
+	overflow.Sequence = math.MaxInt64
+	overflowBytes, _ := json.Marshal(overflow)
+	if err := os.WriteFile(cfg.CachePath+".platform-shadow.json", overflowBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := again.SyncPlatformShadowOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "cursor is corrupt") {
+		t.Fatalf("overflowed cursor reset: %v", err)
+	}
+	afterOverflow, _ := os.ReadFile(cfg.CachePath + ".platform-shadow.json")
+	if !bytes.Equal(afterOverflow, overflowBytes) || reports != 3 {
+		t.Fatal("overflow changed cursor or submitted heartbeat")
 	}
 	checkServing(again)
 	if err := os.WriteFile(cfg.CachePath+".platform-shadow.json", []byte("corrupt"), 0600); err != nil {

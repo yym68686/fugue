@@ -36,6 +36,17 @@ type Identity struct {
 }
 
 func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
+	return c.SyncChannel(ctx, component, nodeID, scope, kind, model.PlatformArtifactReleaseChannelShadow)
+}
+
+// SyncChannel downloads exactly one declared lane. It never chooses a newer
+// lane, falls back to another channel, applies the artifact or grants serving.
+func (c Client) SyncChannel(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
+	switch channel {
+	case model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull:
+	default:
+		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform release channel is invalid")
+	}
 	base, err := url.Parse(strings.TrimSpace(c.BaseURL))
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil {
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform API endpoint is invalid")
@@ -60,15 +71,15 @@ func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string)
 	var chosen *model.PlatformConsumerAssignment
 	for i := range assignments.Assignments {
 		a := &assignments.Assignments[i]
-		if a.ScopeKey == scope && a.ArtifactKind == kind && a.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
+		if a.ScopeKey == scope && a.ArtifactKind == kind && a.ReleaseChannel == channel {
 			if chosen != nil {
-				return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("ambiguous platform shadow assignment")
+				return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("ambiguous platform release assignment")
 			}
 			chosen = a
 		}
 	}
 	if chosen == nil {
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform shadow assignment unavailable")
+		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform release assignment unavailable")
 	}
 	var envelope struct {
 		Artifact   model.PlatformArtifact           `json:"artifact"`
@@ -85,14 +96,40 @@ func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string)
 	return id, *chosen, envelope.Artifact, envelope.Release, nil
 }
 
+// CheckAssignment prevents a completed observation from being reported against
+// a release or topology revision replaced while the consumer was working.
+func (c Client) CheckAssignment(ctx context.Context, identity Identity, assignment model.PlatformConsumerAssignment) error {
+	var current model.PlatformConsumerAssignmentResponse
+	if err := c.requestJSON(ctx, "/v1/platform-state/consumers/assignment", identity.Token, http.MethodGet, nil, &current); err != nil {
+		return err
+	}
+	matches := 0
+	for _, item := range current.Assignments {
+		if item.ScopeKey == assignment.ScopeKey && item.ArtifactKind == assignment.ArtifactKind && item.ReleaseChannel == assignment.ReleaseChannel {
+			if !reflect.DeepEqual(item, assignment) {
+				return errors.New("platform assignment changed during observation")
+			}
+			matches++
+		}
+	}
+	if matches != 1 {
+		return errors.New("platform assignment changed during observation")
+	}
+	return nil
+}
+
 func (c Client) PostJSON(ctx context.Context, path, token string, in, out any) error {
+	return c.requestJSON(ctx, path, token, http.MethodPost, in, out)
+}
+
+func (c Client) requestJSON(ctx context.Context, path, token, method string, in, out any) error {
 	base, err := url.Parse(strings.TrimSpace(c.BaseURL))
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil {
 		return errors.New("platform API endpoint is invalid")
 	}
 	base.RawQuery, base.Fragment = "", ""
 	base.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(path, "/")
-	return c.json(ctx, base.String(), token, http.MethodPost, in, out)
+	return c.json(ctx, base.String(), token, method, in, out)
 }
 
 func (c Client) json(ctx context.Context, endpoint, token, method string, in, out any) error {

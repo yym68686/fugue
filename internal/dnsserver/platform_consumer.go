@@ -7,10 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -20,6 +17,7 @@ import (
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 	dns "github.com/miekg/dns"
@@ -77,53 +75,13 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
-	base, err := url.Parse(s.Config.APIURL)
-	if err != nil || (base.Scheme != "https" && base.Scheme != "http") || base.Host == "" || base.User != nil {
-		return errors.New("platform API endpoint is invalid")
-	}
-	base.RawQuery = ""
-	base.Fragment = ""
-	base.Path = strings.TrimRight(base.Path, "/")
-	podToken, err := readPlatformCandidateFile(s.PlatformTokenFile, 32768)
+	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
+	identity, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, "global", model.PlatformArtifactKindDNSAnswerBundle)
 	if err != nil {
-		return errors.New("platform Pod credential unavailable")
-	}
-	var identity struct {
-		Token         string    `json:"token"`
-		ExpiresAt     time.Time `json:"expires_at"`
-		Component     string    `json:"component"`
-		NodeID        string    `json:"node_id"`
-		ScopeKey      string    `json:"scope_key"`
-		ArtifactKinds []string  `json:"artifact_kinds"`
-	}
-	if err = s.platformJSON(ctx, base.String()+"/v1/platform-state/consumers/identity", strings.TrimSpace(string(podToken)), http.MethodPost, nil, &identity); err != nil {
 		return err
 	}
-	if identity.Token == "" || identity.Component != model.PlatformConsumerComponentDNSServer || identity.NodeID != s.Config.DNSNodeID || !identity.ExpiresAt.After(time.Now().Add(10*time.Second)) {
-		return errors.New("platform credential identity mismatch")
-	}
-	var assignments model.PlatformConsumerAssignmentResponse
-	if err = s.platformJSON(ctx, base.String()+"/v1/platform-state/consumers/assignment", identity.Token, http.MethodGet, nil, &assignments); err != nil {
-		return err
-	}
-	var chosen *model.PlatformConsumerAssignment
-	for i := range assignments.Assignments {
-		a := &assignments.Assignments[i]
-		if a.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && a.ScopeKey == identity.ScopeKey && a.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
-			if chosen != nil {
-				return errors.New("ambiguous DNS shadow assignment")
-			}
-			chosen = a
-		}
-	}
-	if chosen == nil {
-		return errors.New("DNS shadow assignment unavailable")
-	}
-	var candidate dnsPlatformCandidate
-	endpoint := base.String() + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(chosen.ArtifactID) + "?expected_consumer_set_id=" + url.QueryEscape(chosen.ExpectedConsumerSetID)
-	if err = s.platformJSON(ctx, endpoint, identity.Token, http.MethodGet, nil, &candidate); err != nil {
-		return err
-	}
+	chosen := &assignment
+	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release}
 	counts, err := s.verifyPlatformDNSCandidate(candidate, *chosen)
 	if err != nil {
 		return err
@@ -136,20 +94,8 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if readiness != nil {
-		var current model.PlatformConsumerAssignmentResponse
-		if err = s.platformJSON(ctx, base.String()+"/v1/platform-state/consumers/assignment", identity.Token, http.MethodGet, nil, &current); err != nil {
-			return err
-		}
-		stillAssigned := false
-		for _, assignment := range current.Assignments {
-			if reflect.DeepEqual(assignment, *chosen) {
-				stillAssigned = true
-			}
-		}
-		if !stillAssigned {
-			return errors.New("DNS assignment changed during readiness observation")
-		}
+	if err = client.CheckAssignment(ctx, identity, assignment); err != nil {
+		return err
 	}
 	// Persist a monotonic cursor before sending it. A lost response consumes the
 	// sequence; a restart cannot replay it. Corrupt state is never reset silently.
@@ -158,8 +104,8 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return errors.New("platform candidate cache path is required")
 	}
 	var previous dnsPlatformCandidate
-	if raw, readErr := readPlatformCandidateFile(cachePath, 8<<20); readErr == nil {
-		if json.Unmarshal(raw, &previous) != nil || previous.Sequence <= 0 {
+	if raw, readErr := platformconsumer.ReadFile(cachePath, 8<<20); readErr == nil {
+		if json.Unmarshal(raw, &previous) != nil || previous.Sequence <= 0 || previous.Sequence == math.MaxInt64 {
 			return errors.New("platform candidate cursor is corrupt")
 		}
 	} else if !errors.Is(readErr, os.ErrNotExist) {
@@ -220,7 +166,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	var receipt model.PlatformConsumerHeartbeatResponse
-	if err = s.platformJSON(ctx, base.String()+"/v1/platform-state/consumers/trusted-heartbeat", identity.Token, http.MethodPost, heartbeat, &receipt); err != nil {
+	if err = client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", identity.Token, heartbeat, &receipt); err != nil {
 		return err
 	}
 	if !receipt.Consumer.IdentityVerified || receipt.Consumer.ConsumerID != heartbeat.ConsumerID || receipt.Consumer.Sequence != heartbeat.Sequence || receipt.Consumer.ExpectedConsumerSetID != chosen.ExpectedConsumerSetID || receipt.Consumer.EvidenceHash != heartbeat.EvidenceHash {
@@ -341,53 +287,4 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 		}
 	}
 	return counts, nil
-}
-
-func readPlatformCandidateFile(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) > limit {
-		return nil, errors.New("platform file exceeds limit")
-	}
-	return b, nil
-}
-
-func (s *Service) platformJSON(ctx context.Context, endpoint, token, method string, in, out any) error {
-	var data []byte
-	var err error
-	if in != nil {
-		data, err = json.Marshal(in)
-		if err != nil {
-			return errors.New("encode platform request failed")
-		}
-	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(data))
-	if err != nil {
-		return errors.New("platform request invalid")
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	client := *s.HTTPClient
-	client.Timeout = 15 * time.Second
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	resp, err := client.Do(req)
-	if err != nil {
-		return errors.New("platform request unavailable")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("platform request rejected: HTTP %d", resp.StatusCode)
-	}
-	dec := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
-	if dec.Decode(out) != nil || dec.Decode(&struct{}{}) != io.EOF {
-		return errors.New("platform response invalid")
-	}
-	return nil
 }

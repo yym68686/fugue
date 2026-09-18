@@ -160,6 +160,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := client.CheckAssignment(ctx, id, assignment); err != nil {
+		return err
+	}
 	c := edgePlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release, Sequence: max(prev.Sequence+1, time.Now().UnixNano()), VerifiedAt: time.Now().UTC(), RouteIndexDigest: routeIndexDigest, Execution: execution}
 	b, err := json.Marshal(c)
 	if err != nil {

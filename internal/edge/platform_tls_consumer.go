@@ -175,6 +175,12 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 	if prev.Assignment.FencingToken > a.FencingToken || prev.Assignment.GenerationSequence > a.GenerationSequence {
 		return errors.New("TLS candidate replay rejected")
 	}
+	if err := client.CheckAssignment(ctx, id, a); err != nil {
+		return err
+	}
+	if err := client.CheckAssignment(ctx, id, ra); err != nil {
+		return err
+	}
 	c.Sequence, c.VerifiedAt = max(prev.Sequence+1, time.Now().UnixNano()), time.Now().UTC()
 	raw, err := json.Marshal(c)
 	if err != nil {
