@@ -208,6 +208,17 @@ func ValidateDNSConsumerViews(views []DNSConsumerView, global []DNSIntent) error
 }
 
 func MaterializeDNSConsumerView(global []DNSIntent, views []DNSConsumerView, nodeID, groupID, zone string, now time.Time) ([]DNSIntent, error) {
+	records, err := DNSConsumerViewRecords(global, views, nodeID, groupID, zone)
+	if err != nil {
+		return nil, err
+	}
+	return DNSRecordsAt(records, now)
+}
+
+// DNSConsumerViewRecords returns the signed records, including leases, for one
+// exact consumer zone. Callers enforce the original expirations at their own
+// fixed observation time; this function never creates or renews readiness.
+func DNSConsumerViewRecords(global []DNSIntent, views []DNSConsumerView, nodeID, groupID, zone string) ([]DNSIntent, error) {
 	if err := ValidateDNSConsumerViews(views, global); err != nil {
 		return nil, err
 	}
@@ -246,5 +257,5 @@ func MaterializeDNSConsumerView(global []DNSIntent, views []DNSConsumerView, nod
 	if err := ValidateDNSIntents(records); err != nil {
 		return nil, err
 	}
-	return DNSRecordsAt(records, now)
+	return records, nil
 }

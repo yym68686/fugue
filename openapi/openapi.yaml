@@ -2443,6 +2443,55 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-config/dns/compare:
+    get:
+      operationId: comparePlatformDNSMigration
+      summary: Compare a Signed DNS Consumer View with its Current Published DNS Bundle
+      description: Read-only platform administrator diagnostic for one exact physical DNS node and zone. Validates the candidate artifact signature, schema, policy lineage and consumer ownership, then compares its materialized records with the current trusted full DNS bundle or verified LKG used by the legacy bundle endpoint. Both sides use one server observation time and absolute value expirations; expired values are not renewed. Compares RRset values, effective TTL, policy, candidates, scoped candidates and ownership metadata; ignores record_generation and record ordering, but preserves nested selection order and TXT bytes. A missing, ambiguous or untrusted source is unavailable, never equivalent. Does not regenerate legacy records from business tables, write artifacts or releases, attest actual serving, or authorize promotion. Equivalence covers only the requested node/zone.
+      tags: [Admin]
+      x-fugue-handler: handleComparePlatformDNSMigration
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: artifact_id
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+        - in: query
+          name: node_id
+          required: true
+          description: Physical DNS process identity, not a zone alias.
+          schema: {type: string, minLength: 1, maxLength: 256}
+        - in: query
+          name: zone
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 253}
+      responses:
+        '200':
+          description: Comparison for the requested node and zone at captured_at.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PlatformDNSMigrationComparison"}
+        '400':
+          description: Required comparison identity is missing or invalid.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        '404':
+          description: Artifact not found.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        '409':
+          description: Candidate is untrusted, incompatible, or lacks the exact consumer view.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        '503':
+          description: Current DNS inventory or trusted published reference is unavailable or ambiguous.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
   /v1/admin/platform-config/routes/compare:
     get:
       operationId: comparePlatformRouteMigration
@@ -31418,6 +31467,40 @@ components:
         relation:
           type: string
           enum: [requires]
+    PlatformDNSMigrationComparison:
+      type: object
+      additionalProperties: false
+      required: [artifact_id, artifact_digest, artifact_generation, node_id, edge_group_id, zone, source_generation, source_digest, source_scope_key, captured_at, source_record_count, artifact_record_count, matching_record_count, expired_candidate_value_count, equivalent, differences]
+      properties:
+        artifact_id: {type: string}
+        artifact_digest: {type: string}
+        artifact_generation: {type: string}
+        node_id: {type: string}
+        edge_group_id: {type: string}
+        zone: {type: string}
+        source_generation: {type: string}
+        source_digest: {type: string}
+        source_scope_key: {type: string}
+        captured_at: {type: string, format: date-time}
+        source_record_count: {type: integer, minimum: 0}
+        artifact_record_count: {type: integer, minimum: 0}
+        matching_record_count: {type: integer, minimum: 0}
+        expired_candidate_value_count: {type: integer, minimum: 0}
+        equivalent: {type: boolean}
+        differences:
+          type: array
+          maxItems: 20000
+          items:
+            type: object
+            additionalProperties: false
+            required: [hostname, type, kind, fields]
+            properties:
+              hostname: {type: string}
+              type: {type: string}
+              kind: {type: string, enum: [missing_from_artifact, extra_in_artifact, changed]}
+              fields:
+                type: array
+                items: {type: string}
     PlatformRouteMigrationComparison:
       type: object
       additionalProperties: false

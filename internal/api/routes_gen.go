@@ -69,6 +69,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /v1/admin/object-storage", s.auth.RequireAPI(http.HandlerFunc(s.handleConfigureObjectStorage)))
 	mux.Handle("POST /v1/admin/platform-config/compile", s.auth.RequireAPI(http.HandlerFunc(s.handleCompilePlatformConfig)))
 	mux.Handle("POST /v1/admin/platform-config/compile-from-artifacts", s.auth.RequireAPI(http.HandlerFunc(s.handleCompilePlatformConfigFromArtifacts)))
+	mux.Handle("GET /v1/admin/platform-config/dns/compare", s.auth.RequireAPI(http.HandlerFunc(s.handleComparePlatformDNSMigration)))
 	mux.Handle("GET /v1/admin/platform-config/hostname-lineage", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformHostnameLineage)))
 	mux.Handle("POST /v1/admin/platform-config/import-env", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformConfigEnvironmentImport)))
 	mux.Handle("GET /v1/admin/platform-config/import-env/preview", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformConfigEnvironmentImportPreview)))
