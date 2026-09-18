@@ -2982,6 +2982,9 @@ func (s *Store) pgPurgeApp(id string) (model.App, error) {
 	if err := s.pgDeleteAutomationPoliciesByAppTx(ctx, tx, app.ID); err != nil {
 		return model.App{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_idempotency_keys WHERE app_id = $1`, app.ID); err != nil {
+		return model.App{}, fmt.Errorf("delete app idempotency results: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_apps WHERE id = $1`, app.ID); err != nil {
 		return model.App{}, fmt.Errorf("delete app %s: %w", app.ID, err)
 	}
@@ -3041,10 +3044,25 @@ ON CONFLICT DO NOTHING
 	if record.RequestHash != requestHash {
 		return model.IdempotencyRecord{}, false, ErrIdempotencyMismatch
 	}
+	fresh := false
+	if scope == model.IdempotencyScopeAppImportGitHub && record.AppID != "" {
+		var appExists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_apps WHERE id = $1 AND tenant_id = $2)`, record.AppID, tenantID).Scan(&appExists); err != nil {
+			return model.IdempotencyRecord{}, false, err
+		}
+		if !appExists {
+			if _, err := tx.ExecContext(ctx, `UPDATE fugue_idempotency_keys SET status = $4, app_id = '', operation_id = '', created_at = $5, updated_at = $5 WHERE scope = $1 AND tenant_id = $2 AND key = $3`, scope, tenantID, key, model.IdempotencyStatusPending, now); err != nil {
+				return model.IdempotencyRecord{}, false, err
+			}
+			record.Status, record.AppID, record.OperationID = model.IdempotencyStatusPending, "", ""
+			record.CreatedAt, record.UpdatedAt = now, now
+			fresh = true
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return model.IdempotencyRecord{}, false, fmt.Errorf("commit read idempotency transaction: %w", err)
 	}
-	return record, false, nil
+	return record, fresh, nil
 }
 
 func (s *Store) pgCompleteIdempotencyRecord(scope, tenantID, key, appID, operationID string) (model.IdempotencyRecord, error) {
@@ -5285,6 +5303,9 @@ func (s *Store) pgDeleteProjectTx(ctx context.Context, tx *sql.Tx, project model
 		return err
 	} else if live {
 		return ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_idempotency_keys WHERE app_id IN (SELECT id FROM fugue_apps WHERE project_id = $1)`, project.ID); err != nil {
+		return fmt.Errorf("delete project idempotency results: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_projects WHERE id = $1`, project.ID); err != nil {
 		return fmt.Errorf("delete project %s: %w", project.ID, err)

@@ -4275,6 +4275,7 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
     delete:
       operationId: deleteProject
+      description: Delete a project after its resources are removed. Import idempotency results for removed apps are discarded so the same creation request can create a fresh project.
       summary: Delete Project
       tags: [Projects]
       x-fugue-handler: handleDeleteProject

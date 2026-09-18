@@ -29,6 +29,13 @@ func (s *Store) ReserveIdempotencyRecord(scope, tenantID, key, requestHash strin
 			if record.RequestHash != requestHash {
 				return ErrIdempotencyMismatch
 			}
+			if scope == model.IdempotencyScopeAppImportGitHub && record.AppID != "" && findApp(state, record.AppID) < 0 {
+				now := time.Now().UTC()
+				record.Status, record.AppID, record.OperationID = model.IdempotencyStatusPending, "", ""
+				record.CreatedAt, record.UpdatedAt = now, now
+				state.Idempotency[index] = record
+				fresh = true
+			}
 			return nil
 		}
 
@@ -120,4 +127,16 @@ func (s *Store) GetIdempotencyRecord(scope, tenantID, key string) (model.Idempot
 		return nil
 	})
 	return record, err
+}
+
+// Results whose apps were deleted must not prevent an intentional recreation.
+func deleteIdempotencyRecordsByAppIDs(records []model.IdempotencyRecord, appIDs []string) []model.IdempotencyRecord {
+	ids := trimmedStringSet(appIDs)
+	kept := records[:0]
+	for _, record := range records {
+		if _, deleted := ids[record.AppID]; !deleted {
+			kept = append(kept, record)
+		}
+	}
+	return kept
 }

@@ -6153,6 +6153,15 @@ func TestIdempotencyRecordLifecycle(t *testing.T) {
 		t.Fatalf("create tenant: %v", err)
 	}
 
+	project, err := s.CreateProject(tenant.ID, "example", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := s.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "example", "", model.AppSpec{Replicas: 1, RuntimeID: "runtime_managed_shared"}, model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://github.com/example/source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	record, fresh, err := s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-1", "hash-a")
 	if err != nil {
 		t.Fatalf("reserve idempotency record: %v", err)
@@ -6173,11 +6182,11 @@ func TestIdempotencyRecordLifecycle(t *testing.T) {
 		t.Fatalf("expected ErrIdempotencyMismatch, got %v", err)
 	}
 
-	record, err = s.CompleteIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-1", "app_demo", "op_demo")
+	record, err = s.CompleteIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-1", app.ID, "op_demo")
 	if err != nil {
 		t.Fatalf("complete idempotency record: %v", err)
 	}
-	if record.Status != model.IdempotencyStatusCompleted || record.AppID != "app_demo" || record.OperationID != "op_demo" {
+	if record.Status != model.IdempotencyStatusCompleted || record.AppID != app.ID || record.OperationID != "op_demo" {
 		t.Fatalf("unexpected completed idempotency record: %+v", record)
 	}
 
@@ -6232,6 +6241,14 @@ func TestDeleteProjectConflictsUntilAppDeleted(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 
+	const recreateKey = "example-recreate"
+	if _, _, err := s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, recreateKey, "request-hash"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CompleteIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, recreateKey, app.ID, "operation-import"); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := s.DeleteProject(project.ID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict while app exists, got %v", err)
 	}
@@ -6268,6 +6285,10 @@ func TestDeleteProjectConflictsUntilAppDeleted(t *testing.T) {
 	if len(projects) != 0 {
 		t.Fatalf("expected project to be removed, got %+v", projects)
 	}
+	if _, fresh, err := s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, recreateKey, "request-hash"); err != nil || !fresh {
+		t.Fatalf("deleted project's import result blocks recreation: fresh=%v err=%v", fresh, err)
+	}
+
 }
 
 func TestRequestedProjectDeleteFinalizesAfterLastAppDelete(t *testing.T) {

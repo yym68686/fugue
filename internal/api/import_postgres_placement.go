@@ -54,6 +54,7 @@ func (s *Server) applyNewImportedPostgresPlacement(spec *model.AppPostgresSpec, 
 		Items []importStorageCapacity `json:"items"`
 	}
 	if err := client.doJSON(ctx, http.MethodGet, "/apis/storage.k8s.io/v1/csistoragecapacities", &capacities); err != nil {
+		s.log.Printf("observe imported postgres capacity for runtime %s: %v", runtimeID, err)
 		return
 	}
 	var classes struct {

@@ -107,6 +107,22 @@ jobs:
           python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json
           python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json --apply
 
+      - name: Reconcile read-only PostgreSQL capacity observation access
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="${BASE_SHA}"
+          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ || "${base}" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          config=deploy/environments/production/postgres-capacity-observation/rbac.json
+          if ! git diff --quiet "${base}" HEAD -- "${config}"; then
+            kubectl apply --server-side --dry-run=server --field-manager=fugue-postgres-capacity-observation -f "${config}"
+            kubectl apply --server-side --field-manager=fugue-postgres-capacity-observation -f "${config}"
+            kubectl auth can-i list csistoragecapacities.storage.k8s.io --all-namespaces --as=system:serviceaccount:fugue-system:fugue-fugue-control-plane-sa
+          fi
+
   component-build:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.release_count != '0' }}

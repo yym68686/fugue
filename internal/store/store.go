@@ -2707,6 +2707,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		}
 
 		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
+		state.Idempotency = deleteIdempotencyRecordsByAppIDs(state.Idempotency, []string{id})
 		deleteAppDomainsByApp(state, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
 		state.AppImageTrackingChecks = deleteAppImageTrackingChecksByApp(state.AppImageTrackingChecks, id)
@@ -6069,6 +6070,7 @@ func deleteProjectFromState(state *model.State, projectID string) (model.Project
 	}
 	project := state.Projects[index]
 	appIDs := appIDsForProject(state.Apps, projectID)
+	state.Idempotency = deleteIdempotencyRecordsByAppIDs(state.Idempotency, appIDs)
 	state.Projects = append(state.Projects[:index], state.Projects[index+1:]...)
 	state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByProject(state.ProjectRuntimeReservations, projectID)
 	state.ProjectRouteTables = deleteProjectRouteTablesByProject(state.ProjectRouteTables, projectID)
