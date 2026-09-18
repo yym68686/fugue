@@ -144,7 +144,10 @@ esac
 	t.Setenv("GET_COUNT", getCount)
 	t.Setenv("WRITE_COUNT", writeCount)
 	cluster := &kubectlCluster{
-		kubectl: kubectl, readTimeout: 2 * time.Second, readAttempts: 2, readRetryDelay: time.Millisecond,
+		// This test proves retry count and read/write separation. Give process
+		// startup room under concurrent package builds; timeout behavior has
+		// separate cancellation coverage.
+		kubectl: kubectl, readTimeout: 10 * time.Second, readAttempts: 2, readRetryDelay: time.Millisecond,
 	}
 	output, err := cluster.kubectlRun(context.Background(), nil, "get", "pods", "--output", "json")
 	if err != nil || string(output) != "{\"items\":[]}\n" {

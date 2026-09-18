@@ -128,7 +128,7 @@ func TestCommittedRecoveryResumesExactVerifiedMonitorBeforeDesiredCAS(t *testing
 	bundle := ExecutionBundle{Prepared: prepared, Files: files, Release: release}
 	bundle.Release.Delivery = &declarativerelease.Delivery{Writer: "guardian", Group: key.Group}
 	bundle.Release.Transition = &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{GroupID: "group-a"}}
-	record, err := NewReleaseRecord(key, bundle.Prepared.ConfigSHA, artifact.TopDigest, bundle.Prepared.Forward.ManifestDigest, otherDigest, testDigest)
+	record, err := NewReleaseRecord(key, bundle.Prepared.ConfigSHA, artifact.TopDigest, bundle.Prepared.Forward.ManifestDigest, otherDigest, canonical.HealthContractDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +136,22 @@ func TestCommittedRecoveryResumesExactVerifiedMonitorBeforeDesiredCAS(t *testing
 	if !CommittedMonitorRecoveryEligible(s) {
 		t.Fatal("exact persisted monitor cannot finish Desired CAS")
 	}
+	s.CurrentRecordDigest = record.RecordDigest
+	s.LastSuccessfulLKG = record.RecordDigest
+	if !CommittedMonitorRecoveryEligible(s) {
+		t.Fatal("published candidate alias cannot finish Desired CAS")
+	}
+	s.Record = canonical
+	s.Desired.RecordDigest = canonical.RecordDigest
+	s.CurrentRecordDigest = canonical.RecordDigest
+	s.LastSuccessfulLKG = canonical.RecordDigest
+	if CommittedMonitorRecoveryEligible(s) {
+		t.Fatal("settled canonical record attempted recovery again")
+	}
+	s.Record = record
+	s.Desired.RecordDigest = record.RecordDigest
+	s.CurrentRecordDigest = record.RecordDigest
+	s.LastSuccessfulLKG = record.RecordDigest
 	s.Bundle.Files["forward.json"] = []byte(`{}`)
 	if CommittedMonitorRecoveryEligible(s) {
 		t.Fatal("different execution accepted")

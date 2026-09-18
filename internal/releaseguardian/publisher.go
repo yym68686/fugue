@@ -537,7 +537,7 @@ func (store *KubeStore) AdoptCurrentStable(ctx context.Context, key Key, expecte
 		return DesiredRelease{}, err
 	}
 	canonical, monitor, err := canonicalStableReleaseRecord(key, stored.currentMonitorData)
-	if err != nil || canonical != stable || monitor.RecordDigest != monitorRecordDigest || stored.currentRecord != stable {
+	if err != nil || canonical != stable || monitor.RecordDigest != monitorRecordDigest || !SameCommittedReleaseTarget(stored.currentRecord, stable) {
 		return DesiredRelease{}, errors.New("verified monitor does not derive the requested current stable record")
 	}
 	if stored.desired != expected || stored.desiredRV != expectedResourceVersion {
@@ -588,4 +588,14 @@ func stringMapEqual(left, right map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// A persisted verified monitor may select the published candidate record until
+// Desired is canonicalized. Its LKG digest and envelope hash differ from the
+// monitor-derived record, but every serving and health-contract identity must
+// still match. This check cannot adopt a different target.
+func SameCommittedReleaseTarget(current, canonical ReleaseRecord) bool {
+	return current.Validate() == nil && canonical.Validate() == nil && current.Key() == canonical.Key() &&
+		current.ConfigSHA == canonical.ConfigSHA && current.ImageDigest == canonical.ImageDigest &&
+		current.ManifestDigest == canonical.ManifestDigest && current.HealthContractDigest == canonical.HealthContractDigest
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -123,6 +124,7 @@ func (controller *Controller) processNext(ctx context.Context) bool {
 	}
 	defer controller.queue.Done(key)
 	if err := controller.Reconcile(ctx, key); err != nil {
+		log.Printf("release guardian reconcile %s: %.2048s", key.String(), err.Error())
 		controller.queue.AddRateLimited(key)
 		return true
 	}

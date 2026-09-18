@@ -852,3 +852,37 @@ func stableDataHealth(t *testing.T, data map[string]string) []declarativerelease
 	}
 	return plan.Releases[0].Health
 }
+
+func TestCommittedReleaseTargetAliasRetainsEveryServingIdentity(t *testing.T) {
+	key := Key{Component: "edge-worker", Group: "group-a"}
+	canonical, err := NewReleaseRecord(key, testSHA, testDigest, testDigest, testDigest, testDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias, err := NewReleaseRecord(key, testSHA, testDigest, testDigest, otherDigest, testDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !SameCommittedReleaseTarget(alias, canonical) {
+		t.Fatal("verified target with predecessor alias rejected")
+	}
+	for name, change := range map[string]func(*ReleaseRecord){
+		"component": func(r *ReleaseRecord) { r.Component = "foreign" },
+		"group":     func(r *ReleaseRecord) { r.Group = "foreign" },
+		"code":      func(r *ReleaseRecord) { r.ConfigSHA = strings.Repeat("2", 40) },
+		"image":     func(r *ReleaseRecord) { r.ImageDigest = otherDigest },
+		"manifest":  func(r *ReleaseRecord) { r.ManifestDigest = otherDigest },
+		"health":    func(r *ReleaseRecord) { r.HealthContractDigest = otherDigest },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := alias
+			change(&value)
+			value.RecordDigest = ""
+			raw, _ := declarativerelease.CanonicalJSON(value)
+			value.RecordDigest = digest(raw)
+			if SameCommittedReleaseTarget(value, canonical) {
+				t.Fatal("different target adopted")
+			}
+		})
+	}
+}

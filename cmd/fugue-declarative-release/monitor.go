@@ -130,7 +130,7 @@ func runAdoptCommittedMonitorContext(parent context.Context, args []string, outp
 	predecessorRecordDigest := before.CurrentRecordDigest
 	if monitorAdopted {
 		stable, stableErr := committedStableRecord(key, release, artifact, prepared, stableMonitor.Bundle.Record)
-		if stableErr != nil || before.CurrentRecordDigest != stable.RecordDigest || before.LastSuccessfulLKG != stable.RecordDigest {
+		if stableErr != nil || !releaseguardian.SameCommittedReleaseTarget(before.Record, stable) || before.LastSuccessfulLKG != before.CurrentRecordDigest || (before.CurrentRecordDigest != stable.RecordDigest && before.CurrentRecordDigest != before.Record.RecordDigest) {
 			return errors.New("adopted monitor does not derive the current Guardian record")
 		}
 		if before.Desired.RecordDigest == stable.RecordDigest {

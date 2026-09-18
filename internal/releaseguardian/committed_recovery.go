@@ -13,7 +13,7 @@ func CommittedMonitorRecoveryEligible(s Snapshot) bool {
 	p := s.PreviousStatus
 	r := s.Bundle.Release
 	if !s.Managed || s.DesiredRecordMissing || s.Record.Validate() != nil || s.Key != s.Record.Key() ||
-		s.Desired.Key() != s.Key || s.Desired.RecordDigest != s.Record.RecordDigest || s.CurrentRecordDigest == s.Desired.RecordDigest ||
+		s.Desired.Key() != s.Key || s.Desired.RecordDigest != s.Record.RecordDigest ||
 		s.LastSuccessfulLKG != s.CurrentRecordDigest || s.Bundle.Prepared.ConfigSHA != s.Record.ConfigSHA || s.Bundle.Prepared.Component != s.Key.Component ||
 		r.ComponentID != s.Key.Component || r.Delivery == nil || r.Delivery.Writer != "guardian" || r.Delivery.Group != s.Key.Group ||
 		r.Transition == nil || r.Transition.Type != "edge-group-ab" || r.Transition.EdgeGroupAB == nil ||
@@ -35,7 +35,7 @@ func CommittedMonitorRecoveryEligible(s Snapshot) bool {
 
 func committedMonitorMatchesCandidate(s Snapshot) bool {
 	canonical, monitor, err := canonicalStableReleaseRecord(s.Key, s.CurrentMonitorData)
-	if err != nil || canonical.RecordDigest != s.CurrentRecordDigest || canonical.ConfigSHA != s.Record.ConfigSHA || canonical.ImageDigest != s.Record.ImageDigest || monitor.ExecutionPlanDigest != s.Bundle.Prepared.PlanDigest {
+	if err != nil || canonical.RecordDigest == s.Desired.RecordDigest || (s.CurrentRecordDigest != canonical.RecordDigest && s.CurrentRecordDigest != s.Record.RecordDigest) || !SameCommittedReleaseTarget(s.Record, canonical) || monitor.ExecutionPlanDigest != s.Bundle.Prepared.PlanDigest {
 		return false
 	}
 	for _, name := range executionFileNames {
