@@ -80,11 +80,13 @@ x-fugue-dns-consumer-views:
     application route/TLS readiness. Conflicting owners, aliases, probe collisions
     or incomplete endpoint observations reject compilation. Legacy artifacts
     without consumer_views retain their existing shadow validation behavior.
-    The migration projection captures current authoritative DNS inventory
-    declarations, including stale consumers, while excluding explicitly removed
-    nodes. Zone aliases collapse to their physical owner; their group and address
+    The migration projection captures declared primary/static zones from DNS
+    workload templates and publishable hosted zones from the fixed business
+    snapshot. Historical zone heartbeats cannot add a desired zone. Physical
+    consumers remain required when stale; explicit node policy removes members.
+    Zone aliases collapse to their physical owner; retained group and address
     bindings must agree. Observation time records this capture, not a new health
-    proof. DNS shadow status exposes global active record_count separately from
+    proof. Missing or ambiguous workload declarations reject projection. DNS shadow status exposes global active record_count separately from
     owned consumer_view_count and probe_record_count; these are validation facts,
     not applied or serving acknowledgements.
 x-fugue-edge-route-probe:

@@ -134,7 +134,15 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	if err := projectDNSConsumerDeclarations(&projection, dnsNodes, s.dnsBundleTTL, time.Now().UTC()); err != nil {
+	var dnsZones map[string][]string
+	if len(dnsNodes) > 0 {
+		dnsZones, err = s.captureDNSConsumerZones(r.Context(), business.HostedZones)
+		if err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS workload zone declarations unavailable")
+			return
+		}
+	}
+	if err := projectDNSConsumerDeclarations(&projection, dnsNodes, dnsZones, s.dnsBundleTTL, time.Now().UTC()); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS consumer declaration ownership invalid")
 		return
 	}
