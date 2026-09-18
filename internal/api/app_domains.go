@@ -1403,13 +1403,12 @@ func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, dom
 			Message:    domain.TLSLastMessage,
 			Repairable: domain.Status == model.AppDomainStatusVerified && certificateUsable && domain.TLSStatus != model.AppDomainTLSStatusReady,
 		},
-		{
-			Name: "route_active",
-			Status: appDomainCheckStatus(domain.Status == model.AppDomainStatusVerified &&
-				domain.DNSStatus == model.AppDomainDNSStatusReady &&
-				certificateUsable && domain.TLSStatus == model.AppDomainTLSStatusReady),
-		},
 	}
+	configurationReady := domain.Status == model.AppDomainStatusVerified && domain.DNSStatus == model.AppDomainDNSStatusReady && certificateUsable && domain.TLSStatus == model.AppDomainTLSStatusReady
+	if configurationReady && app.Spec.Replicas > 0 {
+		app = s.overlayManagedAppStatus(ctx, app)
+	}
+	checks = append(checks, appDomainRouteActivityCheck(app, configurationReady, time.Now().UTC()))
 
 	actions := make([]string, 0, 3)
 	if !observation.Verified && observation.Message != "" {
@@ -1429,6 +1428,33 @@ func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, dom
 		Checks:               checks,
 		RecommendedActions:   actions,
 	}
+}
+
+func appDomainRouteActivityCheck(app model.App, configurationReady bool, now time.Time) appDomainDiagnosticCheck {
+	check := appDomainDiagnosticCheck{Name: "route_active", Status: "fail"}
+	if app.Spec.Replicas == 0 {
+		check.Message = "application is stopped by desired replicas = 0"
+		return check
+	}
+	if !configurationReady {
+		check.Message = "domain DNS or TLS configuration is not ready"
+		return check
+	}
+	if appUsesKnownNonHTTPRouteProtocol(app) {
+		check.Message = "application service protocol does not support HTTP routing"
+		return check
+	}
+	if appObservedReadyForServing(app, now) {
+		check.Status = "pass"
+		return check
+	}
+	if !appObservedStatusFresh(app.ObservedStatus, now) {
+		check.Status = "unknown"
+		check.Message = "fresh application runtime evidence is unavailable"
+		return check
+	}
+	check.Message = firstNonEmpty(app.ObservedStatus.Message, "application runtime has not demonstrated current serving readiness")
+	return check
 }
 
 func appDomainCheckStatus(ok bool) string {
