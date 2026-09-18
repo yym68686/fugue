@@ -139,6 +139,25 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 	if err := snapshot.Validate(now); err != nil {
 		return err
 	}
+	// A crash can lose the terminal receipt after authority commits. Reconcile
+	// that exact immutable forward target before considering another rollout.
+	if controller.mode == ModeWrite && CommittedMonitorRecoveryEligible(snapshot) {
+		if recovery, ok := controller.executor.(interface {
+			AdoptCommitted(context.Context, Snapshot) (ExecutionReceipt, error)
+		}); ok {
+			receipt, err := recovery.AdoptCommitted(ctx, snapshot)
+			if err != nil {
+				return fmt.Errorf("reconcile committed release monitor: %w", err)
+			}
+			if receipt.Status != "verified" || receipt.RecordDigest != snapshot.Record.RecordDigest || receipt.ReceiptDigest == "" {
+				return errors.New("committed monitor recovery receipt is invalid")
+			}
+			// The recovery command uses the component Lease and its own pointer CAS.
+			// Never overwrite its new status using this pre-recovery snapshot.
+			controller.queue.Add(key)
+			return nil
+		}
+	}
 	decision := Classify(snapshot.CurrentRecordDigest, snapshot.Desired.RecordDigest, snapshot.Health)
 	degradedPredecessorRollout := degradedPredecessorRolloutEligible(snapshot)
 	degradedEdgeRouteRecovery := degradedEdgeRouteRecoveryEligible(snapshot, snapshot.Bundle)

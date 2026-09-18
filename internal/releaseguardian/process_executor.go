@@ -54,6 +54,13 @@ func (executor *ProcessExecutor) Rollout(ctx context.Context, snapshot Snapshot)
 	return executor.execute(ctx, snapshot, "execute", snapshot.Bundle.Files)
 }
 
+func (executor *ProcessExecutor) AdoptCommitted(ctx context.Context, snapshot Snapshot) (ExecutionReceipt, error) {
+	if !CommittedMonitorRecoveryEligible(snapshot) {
+		return ExecutionReceipt{}, errors.New("committed monitor recovery is not eligible")
+	}
+	return executor.execute(ctx, snapshot, "adopt-committed-monitor", snapshot.Bundle.Files)
+}
+
 func (executor *ProcessExecutor) Repair(ctx context.Context, snapshot Snapshot) (ExecutionReceipt, error) {
 	files := make(map[string][]byte, len(snapshot.CurrentMonitorData))
 	for name, value := range snapshot.CurrentMonitorData {
@@ -74,7 +81,7 @@ func (executor *ProcessExecutor) Rollback(ctx context.Context, snapshot Snapshot
 
 func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot, operation string, files map[string][]byte) (ExecutionReceipt, error) {
 	if executor == nil || snapshot.Record.Validate() != nil ||
-		(operation != "execute" && operation != "repair-monitor" && operation != "restore-monitor") {
+		(operation != "execute" && operation != "repair-monitor" && operation != "restore-monitor" && operation != "adopt-committed-monitor") {
 		return ExecutionReceipt{}, errors.New("Guardian executor request is invalid")
 	}
 	directory, err := os.MkdirTemp("", "fugue-release-guardian-")
@@ -122,6 +129,9 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 			return ExecutionReceipt{}, configErr
 		}
 		environment = setEnvironment(environment, "KUBECONFIG", kubeconfig)
+	}
+	if limit := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_EXECUTOR_GOMEMLIMIT")); limit != "" {
+		environment = setEnvironment(environment, "GOMEMLIMIT", limit)
 	}
 	command.Env = append(environment,
 		"FUGUE_COMPONENT_LEASE_OWNER=guardian",
@@ -178,7 +188,7 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	// not prove that the metadata transaction completed.
 	degradedLKGRestored := operation == "repair-monitor" && result.Status == "recovery-required" &&
 		result.Reason == "continuous-repair-lkg-unproven" && result.LKGApplyCount == 1
-	if (operation == "repair-monitor" || operation == "restore-monitor") && runErr != nil &&
+	if (operation == "repair-monitor" || operation == "restore-monitor" || operation == "adopt-committed-monitor") && runErr != nil &&
 		(result.Status == "verified" || result.Status == "compensated" || degradedLKGRestored) {
 		return ExecutionReceipt{}, fmt.Errorf("Guardian %s terminal metadata is unproven: %w", operation, runErr)
 	}

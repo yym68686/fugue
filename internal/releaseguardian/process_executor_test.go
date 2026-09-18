@@ -352,3 +352,48 @@ func configureInClusterExecutorFixture(t *testing.T) {
 		serviceAccountCAPath, serviceAccountTokenPath = oldCA, oldToken
 	})
 }
+
+func TestProcessExecutorCommittedAdoptionRequiresSuccessfulMetadataAndChildBudget(t *testing.T) {
+	configureInClusterExecutorFixture(t)
+	t.Setenv("GOMEMLIMIT", "256MiB")
+	t.Setenv("FUGUE_RELEASE_EXECUTOR_GOMEMLIMIT", "96MiB")
+	snapshot := processSnapshot(t)
+	healthy := interruptedCommitSnapshot(t, time.Now().UTC())
+	snapshot.Managed = true
+	snapshot.Desired = DesiredRelease{Component: snapshot.Key.Component, Group: snapshot.Key.Group, RecordDigest: snapshot.Record.RecordDigest}
+	snapshot.CurrentRecordDigest = otherDigest
+	snapshot.LastSuccessfulLKG = otherDigest
+	snapshot.Health = healthy.Health
+	snapshot.Bundle.Release = healthy.Bundle.Release
+	snapshot.Bundle.Release.ComponentID = snapshot.Key.Component
+	snapshot.Bundle.Release.Delivery.Group = snapshot.Key.Group
+	state := *healthy.PreviousStatus
+	state.Component = snapshot.Key.Component
+	state.Group = snapshot.Key.Group
+	state.TargetRecordDigest = snapshot.Record.RecordDigest
+	snapshot.PreviousStatus = &state
+	result := processResult(t, "verified", "committed-authority-reconciled-after-executor-failure")
+	for _, failure := range []bool{false, true} {
+		binary := writeExecutorFixture(t, "adopt-committed-monitor", snapshot.Record.RecordDigest, result)
+		raw, _ := os.ReadFile(binary)
+		raw = []byte(strings.Replace(string(raw), "set -eu\n", "set -eu\ntest \"$GOMEMLIMIT\" = 96MiB\n", 1))
+		if failure {
+			raw = append(raw, []byte("exit 1\n")...)
+		}
+		if err := os.WriteFile(binary, raw, 0700); err != nil {
+			t.Fatal(err)
+		}
+		executor, _ := NewProcessExecutor(binary, "pod-uid")
+		receipt, err := executor.AdoptCommitted(context.Background(), snapshot)
+		if failure {
+			if err == nil || !strings.Contains(err.Error(), "metadata is unproven") {
+				t.Fatalf("failed metadata accepted: %v", err)
+			}
+		} else if err != nil || receipt.Status != "verified" {
+			t.Fatalf("adoption failed: %v", err)
+		}
+	}
+	if os.Getenv("GOMEMLIMIT") != "256MiB" {
+		t.Fatal("child budget changed parent")
+	}
+}

@@ -91,8 +91,8 @@ func runAdoptCommittedMonitorContext(parent context.Context, args []string, outp
 		return err
 	}
 	if release.Delivery == nil || release.Delivery.Writer != "guardian" || release.Transition == nil ||
-		release.Transition.Type != "edge-group-ab" || release.Transition.EdgeGroupAB == nil || release.SupersedesFailedConfigSHA == "" {
-		return errors.New("committed monitor adoption is allowed only for an explicit Guardian Edge A/B supersession")
+		release.Transition.Type != "edge-group-ab" || release.Transition.EdgeGroupAB == nil {
+		return errors.New("committed monitor adoption is allowed only for a Guardian Edge A/B publication")
 	}
 	key := releaseguardian.Key{Component: release.ComponentID, Group: release.Delivery.Group}
 	candidate, err := releaseguardian.DecodeExecutionBundle(files, key)
@@ -141,7 +141,9 @@ func runAdoptCommittedMonitorContext(parent context.Context, args []string, outp
 			_, encodeErr = output.Write(append(raw, '\n'))
 			return encodeErr
 		}
-		predecessorRecordDigest = before.Desired.RecordDigest
+		// Desired still names the original candidate, whose immutable LKG
+		// binding must survive the first metadata CAS.
+		predecessorRecordDigest = before.Record.LKGRecordDigest
 	}
 	candidateRecord, err := candidate.ReleaseRecord(key, predecessorRecordDigest)
 	if err != nil {
@@ -219,6 +221,9 @@ func runAdoptCommittedMonitorContext(parent context.Context, args []string, outp
 }
 
 func committedGuardianCandidateFenced(snapshot releaseguardian.Snapshot, key releaseguardian.Key, candidate releaseguardian.ReleaseRecord) bool {
+	if snapshot.Record == candidate && candidate.Key() == key && releaseguardian.CommittedMonitorRecoveryEligible(snapshot) {
+		return true
+	}
 	status := snapshot.PreviousStatus
 	unproven := status != nil && (status.Reason == "lkg-unproven" || strings.HasPrefix(status.Reason, "lkg-unproven: ") ||
 		strings.HasPrefix(status.Reason, "failed candidate is fenced while LKG health awaits complete evidence"))
