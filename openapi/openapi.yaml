@@ -69,6 +69,24 @@ x-fugue-consumer-release-evidence:
     cursor. Legacy expectations without an artifact release reference cannot
     establish ReleaseSet convergence. Fences are lane-scoped; publication time
     orders active releases across channels, never a cross-lane fence comparison.
+x-fugue-dns-consumer-views:
+  semantics: >-
+    DNS consumer intent declares physical node ownership, served zones, probe
+    label and TTL. Fixed runtime endpoint observations supply addresses and
+    original observation times separately. The compiler emits signed per-node,
+    per-zone consumer_views alongside global DNS records. A consumer materializes
+    only its exact node/group/zone view, with longest-zone ownership and no ambient
+    IP or zone overrides. Probe records describe the DNS listener endpoint, never
+    application route/TLS readiness. Conflicting owners, aliases, probe collisions
+    or incomplete endpoint observations reject compilation. Legacy artifacts
+    without consumer_views retain their existing shadow validation behavior.
+    The migration projection captures current authoritative DNS inventory
+    declarations, including stale consumers, while excluding explicitly removed
+    nodes. Zone aliases collapse to their physical owner; their group and address
+    bindings must agree. Observation time records this capture, not a new health
+    proof. DNS shadow status exposes global active record_count separately from
+    owned consumer_view_count and probe_record_count; these are validation facts,
+    not applied or serving acknowledgements.
 x-fugue-edge-route-probe:
   version: 1
   transport: HTTPS to an inventory candidate IP with the desired hostname as TLS SNI and HTTP Host
@@ -31169,6 +31187,11 @@ components:
           type: string
         scope:
           type: string
+        dns_consumers:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: "#/components/schemas/PlatformDNSConsumerIntent"
         routes:
           type: array
           items:
@@ -31191,6 +31214,26 @@ components:
           maxItems: 128
           items:
             $ref: "#/components/schemas/CachePolicy"
+    PlatformDNSConsumerIntent:
+      type: object
+      additionalProperties: false
+      required: [node_id, edge_group_id, zones, probe_label, probe_ttl]
+      properties:
+        node_id: {type: string}
+        edge_group_id: {type: string}
+        zones: {type: array, minItems: 1, maxItems: 256, items: {type: string}}
+        probe_label: {type: string, description: Canonical single DNS label for the process reachability record.}
+        probe_ttl: {type: integer, minimum: 1, maximum: 3600}
+    PlatformDNSConsumerObservation:
+      type: object
+      additionalProperties: false
+      required: [node_id, edge_group_id, observed_at]
+      properties:
+        node_id: {type: string}
+        edge_group_id: {type: string}
+        observed_at: {type: string, format: date-time}
+        a: {type: array, maxItems: 16, items: {type: string, format: ipv4}}
+        aaaa: {type: array, maxItems: 16, items: {type: string, format: ipv6}}
     PlatformConfigPolicySnapshot:
       type: object
       additionalProperties: false
@@ -31487,6 +31530,12 @@ components:
       additionalProperties: false
       required: [intent_generation, policy_generation]
       properties:
+        dns_consumers:
+          type: array
+          maxItems: 4096
+          description: Fixed endpoint ownership observations; health and application readiness are not implied.
+          items:
+            $ref: "#/components/schemas/PlatformDNSConsumerObservation"
         tls_domains:
           type: array
           maxItems: 10000

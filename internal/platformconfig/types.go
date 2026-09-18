@@ -14,13 +14,14 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v19"
+	CompilerVersion = "platform-config-compiler/v20"
 	GlobalScopeKey  = "global"
 )
 
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
+	DNSConsumers   []DNSConsumerIntent   `json:"dns_consumers,omitempty"`
 	ACMEChallenges []ACMEChallengeIntent `json:"acme_challenges,omitempty"`
 	SchemaVersion  string                `json:"schema_version"`
 	Generation     string                `json:"generation"`
@@ -190,6 +191,7 @@ type CompileRequest struct {
 // RuntimeSnapshot is the immutable runtime fact view used by one compiler
 // invocation. It is input data, never serving configuration.
 type RuntimeSnapshot struct {
+	DNSConsumers     []DNSConsumerObservation  `json:"dns_consumers,omitempty"`
 	TLSDomains       []TLSDomainObservation    `json:"tls_domains,omitempty"`
 	DNSPlacements    []DNSPlacementObservation `json:"dns_placements,omitempty"`
 	DNSFlatten       []DNSFlattenObservation   `json:"dns_flatten,omitempty"`
@@ -253,7 +255,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
-	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && len(runtimeSnapshot.DNSPlacements) == 0 && len(runtimeSnapshot.TLSDomains) == 0 && req.InputSnapshot != nil {
+	if runtimeSnapshot.IntentGeneration == "" && runtimeSnapshot.PolicyGeneration == "" && runtimeSnapshot.Facts == nil && runtimeSnapshot.CapturedAt == nil && len(runtimeSnapshot.Origins) == 0 && len(runtimeSnapshot.Releases) == 0 && len(runtimeSnapshot.DNSFlatten) == 0 && len(runtimeSnapshot.DNSPlacements) == 0 && len(runtimeSnapshot.TLSDomains) == 0 && len(runtimeSnapshot.DNSConsumers) == 0 && req.InputSnapshot != nil {
 		runtimeSnapshot = RuntimeSnapshot{IntentGeneration: intent.Generation, PolicyGeneration: policy.Generation, Facts: req.InputSnapshot}
 	}
 	if runtimeSnapshot.IntentGeneration == "" {
@@ -271,6 +273,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	sort.Slice(runtimeSnapshot.Releases, func(i, j int) bool { return runtimeSnapshot.Releases[i].ID < runtimeSnapshot.Releases[j].ID })
 	runtimeSnapshot.DNSFlatten = normalizeDNSFlattenObservations(runtimeSnapshot.DNSFlatten)
 	runtimeSnapshot.DNSPlacements = normalizeDNSPlacementObservations(runtimeSnapshot.DNSPlacements)
+	runtimeSnapshot.DNSConsumers = normalizeDNSConsumerObservations(runtimeSnapshot.DNSConsumers)
 	runtimeSnapshot.TLSDomains = append([]TLSDomainObservation(nil), runtimeSnapshot.TLSDomains...)
 	sort.Slice(runtimeSnapshot.TLSDomains, func(i, j int) bool { return runtimeSnapshot.TLSDomains[i].Ref < runtimeSnapshot.TLSDomains[j].Ref })
 	tlsAllowlist, err := CompileTLSDomains(intent, runtimeSnapshot)
@@ -298,6 +301,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, err
 	}
 	compiledDNS, err = CompileACMEChallenges(compiledDNS, intent.ACMEChallenges, runtimeSnapshot.CapturedAt)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	dnsViews, err := CompileDNSConsumerViews(intent.DNSConsumers, runtimeSnapshot, compiledDNS)
 	if err != nil {
 		return CompileResult{}, err
 	}
@@ -348,6 +355,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		"records":        compiledDNS,
 		"policy":         policy,
 		"lineage":        lineage,
+	}
+	if len(dnsViews) > 0 {
+		dnsPayload["consumer_views"] = dnsViews
 	}
 	tlsPayload := map[string]any{
 		"schema_version": SchemaVersion,
@@ -400,6 +410,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 
 func normalizeIntent(in PlatformIntent) PlatformIntent {
 	out := in
+	out.DNSConsumers = normalizeDNSConsumers(in.DNSConsumers)
 	out.SchemaVersion = firstNonEmpty(strings.TrimSpace(in.SchemaVersion), SchemaVersion)
 	out.Scope = firstNonEmpty(strings.TrimSpace(in.Scope), GlobalScopeKey)
 	out.Routes = append([]RouteIntent(nil), in.Routes...)
@@ -500,6 +511,9 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 }
 
 func validateIntent(in PlatformIntent) error {
+	if err := ValidateDNSConsumers(in.DNSConsumers); err != nil {
+		return err
+	}
 	if in.SchemaVersion != SchemaVersion || strings.TrimSpace(in.Generation) == "" {
 		return fmt.Errorf("platform intent requires schema_version %q and generation", SchemaVersion)
 	}

@@ -45,6 +45,16 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 			ExcludedEdgeGroupIDs: []string{"edge-group-excluded"}, ExclusionOwnerDigest: "sha256:" + strings.Repeat("a", 64), ExclusionGeneration: 2, ExclusionFence: "fence-2", ExclusionExpiresAt: &expires}}
 		request.RuntimeSnapshot.CapturedAt = &captured
 	}
+	if versioned {
+		request.Intent.DNSConsumers = []platformconfig.DNSConsumerIntent{
+			{NodeID: "physical-dns-node", EdgeGroupID: "group-a", Zones: []string{"example.test", "second.test"}, ProbeLabel: "probe", ProbeTTL: 60},
+			{NodeID: "other-dns-node", EdgeGroupID: "group-b", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60},
+		}
+		request.RuntimeSnapshot.DNSConsumers = []platformconfig.DNSConsumerObservation{
+			{NodeID: "physical-dns-node", EdgeGroupID: "group-a", ObservedAt: *request.RuntimeSnapshot.CapturedAt, A: []string{"8.8.8.8"}},
+			{NodeID: "other-dns-node", EdgeGroupID: "group-b", ObservedAt: *request.RuntimeSnapshot.CapturedAt, A: []string{"9.9.9.9"}},
+		}
+	}
 	compiled, err := platformconfig.Compile(request)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +124,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	if err := os.WriteFile(tokenPath, []byte("pod-credential"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "physical-dns-node", Zone: "example.test", AnswerIPs: []string{"192.0.2.1"}, TTL: 60, CachePath: filepath.Join(dir, "serving.json"), BundleSigningKey: key, BundleSigningKeyID: "signer", MaxStale: time.Hour}
+	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "physical-dns-node", EdgeGroupID: "group-a", Zone: "example.test", AnswerIPs: []string{"192.0.2.1"}, TTL: 60, CachePath: filepath.Join(dir, "serving.json"), BundleSigningKey: key, BundleSigningKeyID: "signer", MaxStale: time.Hour}
 	create := func() *Service {
 		s := NewService(cfg, log.New(io.Discard, "", 0))
 		s.PlatformTokenFile = tokenPath
@@ -144,7 +154,23 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	if service.Status().PlatformCandidate.State != "shadow_verified" || service.Status().PlatformCandidate.ReportedAt.IsZero() {
 		t.Fatal("shadow facts were not exposed")
 	}
+	if versioned {
+		status := service.Status().PlatformCandidate
+		if status.RecordCount != 1 || status.ConsumerViewCount != 2 || status.ProbeRecordCount != 2 {
+			t.Fatalf("wrong verified counts: %+v", status)
+		}
+		for _, identity := range [][3]string{{"unknown", "group-a", "example.test"}, {"physical-dns-node", "group-b", "example.test"}, {"physical-dns-node", "group-a", "absent.test"}} {
+			other := create()
+			other.Config.DNSNodeID = identity[0]
+			other.Config.EdgeGroupID = identity[1]
+			other.Config.Zone = identity[2]
+			if _, err := other.verifyPlatformDNSCandidate(candidate, assignment); err == nil {
+				t.Fatal("candidate authorized an unassigned consumer")
+			}
+		}
+	}
 	stagedBefore, _ := os.ReadFile(cfg.CachePath + ".platform-shadow.json")
+	verifiedStatus := *service.Status().PlatformCandidate
 	candidate.Artifact.Provenance.Signature = "tampered"
 	if err := service.SyncPlatformShadowOnce(context.Background()); err == nil {
 		t.Fatal("tampered signature accepted")
@@ -152,6 +178,9 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	stagedAfter, _ := os.ReadFile(cfg.CachePath + ".platform-shadow.json")
 	if !bytes.Equal(stagedBefore, stagedAfter) || reports != 1 {
 		t.Fatal("bad candidate overwrote verified cache or reported success")
+	}
+	if *service.Status().PlatformCandidate != verifiedStatus {
+		t.Fatal("invalid candidate changed verified statistics")
 	}
 	checkServing(service)
 	candidate.Artifact = a

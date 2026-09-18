@@ -117,6 +117,27 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, "ACME migration configuration invalid")
 		return
 	}
+	dnsNodes, err := s.store.ListDNSNodes("")
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS consumer declarations unavailable")
+		return
+	}
+	if len(dnsNodes) > 0 {
+		nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), mustPrincipal(r))
+		if policyErr != nil || len(nodePolicies) == 0 {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "authoritative DNS consumer topology unavailable")
+			return
+		}
+		dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
+		if len(dnsNodes) == 0 {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "authoritative DNS consumer topology is empty")
+			return
+		}
+	}
+	if err := projectDNSConsumerDeclarations(&projection, dnsNodes, s.dnsBundleTTL, time.Now().UTC()); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS consumer declaration ownership invalid")
+		return
+	}
 	resolver := newHostedDNSFlattenResolver()
 	captureDNSFlattenFacts(r.Context(), &projection, resolver.resolve)
 	s.capturePlatformPlacements(r.Context(), &projection)
