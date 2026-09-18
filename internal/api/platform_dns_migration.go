@@ -129,6 +129,7 @@ func platformDNSMigrationView(artifact model.PlatformArtifact, nodeID, zone stri
 		Records       []platformconfig.DNSIntent       `json:"records"`
 		ConsumerViews []platformconfig.DNSConsumerView `json:"consumer_views,omitempty"`
 		ReadinessPlan *platformconfig.DNSReadinessPlan `json:"readiness_plan,omitempty"`
+		QueryViews    []platformconfig.DNSQueryView    `json:"query_views,omitempty"`
 		Policy        platformconfig.PolicySnapshot    `json:"policy"`
 		Lineage       platformconfig.Lineage           `json:"lineage"`
 	}
@@ -154,6 +155,9 @@ func platformDNSMigrationView(artifact model.PlatformArtifact, nodeID, zone stri
 		return nil, "", err
 	}
 	if err := platformconfig.ValidateDNSReadinessPlan(payload.ReadinessPlan, payload.Policy.DNSReadiness); err != nil {
+		return nil, "", err
+	}
+	if err := platformconfig.ValidateDNSQueryViews(payload.QueryViews, payload.Records, payload.ConsumerViews, payload.ReadinessPlan, payload.Policy); err != nil {
 		return nil, "", err
 	}
 	group := ""

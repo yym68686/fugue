@@ -27,6 +27,7 @@ import (
 
 // This is a staged candidate, never a serving LKG or an apply-success receipt.
 type PlatformCandidateStatus struct {
+	Query             *DNSQueryStatus     `json:"query,omitempty"`
 	Readiness         *DNSReadinessStatus `json:"readiness,omitempty"`
 	State             string              `json:"state"`
 	ArtifactID        string              `json:"artifact_id,omitempty"`
@@ -131,6 +132,10 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	query, err := s.evaluatePlatformDNSQueries(candidate, *chosen, readiness)
+	if err != nil {
+		return err
+	}
 	if readiness != nil {
 		var current model.PlatformConsumerAssignmentResponse
 		if err = s.platformJSON(ctx, base.String()+"/v1/platform-state/consumers/assignment", identity.Token, http.MethodGet, nil, &current); err != nil {
@@ -179,6 +184,15 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 			return errors.New("persist DNS readiness facts failed")
 		}
 	}
+	if query != nil {
+		raw, err := json.Marshal(query)
+		if err != nil {
+			return errors.New("encode DNS query receipt failed")
+		}
+		if err = lkgcache.AtomicWriteFile(s.Config.CachePath+".platform-query-shadow.json", raw, 0600); err != nil {
+			return errors.New("persist DNS query receipt failed")
+		}
+	}
 	status := s.Status()
 	nonce := make([]byte, 16)
 	if _, err = rand.Read(nonce); err != nil {
@@ -200,6 +214,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	s.platformCandidate = PlatformCandidateStatus{State: "shadow_verified", ArtifactID: chosen.ArtifactID, Digest: chosen.ContentHash, ReleaseSetID: chosen.ReleaseSetID, RecordCount: counts.records, ConsumerViewCount: counts.views, ProbeRecordCount: counts.probes, Sequence: candidate.Sequence, VerifiedAt: candidate.VerifiedAt}
 	if readiness != nil {
 		s.platformCandidate.Readiness = &readiness.Status
+	}
+	if query != nil {
+		s.platformCandidate.Query = &query.Status
 	}
 	s.mu.Unlock()
 	var receipt model.PlatformConsumerHeartbeatResponse
@@ -246,6 +263,7 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 		Records       []platformconfig.DNSIntent       `json:"records"`
 		ConsumerViews []platformconfig.DNSConsumerView `json:"consumer_views,omitempty"`
 		ReadinessPlan *platformconfig.DNSReadinessPlan `json:"readiness_plan,omitempty"`
+		QueryViews    []platformconfig.DNSQueryView    `json:"query_views,omitempty"`
 		Policy        platformconfig.PolicySnapshot    `json:"policy"`
 		Lineage       platformconfig.Lineage           `json:"lineage"`
 	}
@@ -272,6 +290,9 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	}
 	if err := platformconfig.ValidateDNSReadinessPlan(payload.ReadinessPlan, payload.Policy.DNSReadiness); err != nil {
 		return dnsCandidateCounts{}, errors.New("DNS readiness plan invalid")
+	}
+	if err := platformconfig.ValidateDNSQueryViews(payload.QueryViews, payload.Records, payload.ConsumerViews, payload.ReadinessPlan, payload.Policy); err != nil {
+		return dnsCandidateCounts{}, errors.New("DNS query view invalid")
 	}
 	active, err := platformconfig.DNSRecordsAt(payload.Records, time.Now().UTC())
 	if err != nil {

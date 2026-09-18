@@ -163,6 +163,12 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	if len(dnsNodes) > 0 {
+		if err := s.projectDNSQueryRules(&projection, dnsNodes); err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "signed DNS query migration input unavailable")
+			return
+		}
+	}
 	resolver := newHostedDNSFlattenResolver()
 	captureDNSFlattenFacts(r.Context(), &projection, resolver.resolve)
 	s.capturePlatformPlacements(r.Context(), &projection)

@@ -146,28 +146,10 @@ func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadi
 
 func summarizeDNSReadiness(plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, digest string, checkedAt, now time.Time) DNSReadinessStatus {
 	status := DNSReadinessStatus{PlanDigest: digest, Probes: len(plan.Probes), Records: len(plan.Records), CheckedAt: checkedAt}
+	validFacts := validDNSReadinessFacts(plan, policy, facts, now)
 	valid := map[string]bool{}
-	requirements := map[string]platformconfig.DNSReadinessProbe{}
-	for _, probe := range plan.Probes {
-		requirements[probe.ID] = probe
-	}
-	duplicate := map[string]bool{}
-	for _, fact := range facts {
-		if _, ok := duplicate[fact.ProbeID]; ok {
-			duplicate[fact.ProbeID] = true
-		} else {
-			duplicate[fact.ProbeID] = false
-		}
-	}
-	for _, fact := range facts {
-		requirement, exists := requirements[fact.ProbeID]
-		if !exists || duplicate[fact.ProbeID] || fact.Proof.Digest != requirement.RouteDigest || fact.Proof.EdgeID != requirement.EdgeID || fact.Proof.GroupID != requirement.EdgeGroupID || fact.Proof.State != requirement.State || fact.Proof.Version == "" || fact.Proof.ValidUntil.After(fact.Proof.CheckedAt.Add(time.Duration(policy.FactFreshnessSeconds)*time.Second)) {
-			continue
-		}
-		if !fact.Ready || fact.Proof.CheckedAt.IsZero() || fact.Proof.CheckedAt.After(now) || !fact.Proof.ValidUntil.After(now) {
-			continue
-		}
-		valid[fact.ProbeID] = true
+	for id, fact := range validFacts {
+		valid[id] = true
 		if status.FreshUntil.IsZero() || fact.Proof.ValidUntil.Before(status.FreshUntil) {
 			status.FreshUntil = fact.Proof.ValidUntil
 		}
@@ -202,4 +184,32 @@ func sortedDNSReadinessFacts(facts []dnsReadinessFact) []dnsReadinessFact {
 	out := append([]dnsReadinessFact(nil), facts...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ProbeID < out[j].ProbeID })
 	return out
+}
+
+func validDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, now time.Time) map[string]dnsReadinessFact {
+	valid := map[string]dnsReadinessFact{}
+	requirements := map[string]platformconfig.DNSReadinessProbe{}
+	for _, probe := range plan.Probes {
+		requirements[probe.ID] = probe
+	}
+	duplicate := map[string]bool{}
+	for _, fact := range facts {
+		if _, ok := duplicate[fact.ProbeID]; ok {
+			duplicate[fact.ProbeID] = true
+		} else {
+			duplicate[fact.ProbeID] = false
+		}
+	}
+	for _, fact := range facts {
+		requirement, exists := requirements[fact.ProbeID]
+		if !exists || duplicate[fact.ProbeID] || fact.Proof.Digest != requirement.RouteDigest || fact.Proof.EdgeID != requirement.EdgeID || fact.Proof.GroupID != requirement.EdgeGroupID || fact.Proof.State != requirement.State || fact.Proof.Version == "" || fact.Proof.ValidUntil.After(fact.Proof.CheckedAt.Add(time.Duration(policy.FactFreshnessSeconds)*time.Second)) {
+			continue
+		}
+		if !fact.Ready || fact.Proof.CheckedAt.IsZero() || fact.Proof.CheckedAt.After(now) || !fact.Proof.ValidUntil.After(now) {
+			continue
+		}
+		valid[fact.ProbeID] = fact
+	}
+
+	return valid
 }

@@ -69,6 +69,23 @@ x-fugue-consumer-release-evidence:
     cursor. Legacy expectations without an artifact release reference cannot
     establish ReleaseSet convergence. Fences are lane-scoped; publication time
     orders active releases across channels, never a cross-lane fence comparison.
+x-fugue-dns-query-shadow:
+  semantics: >-
+    DNS answer rules are typed versioned policy keyed by physical consumer,
+    hostname and record type. Rules contain selection mode, preferred/fallback
+    groups, TTL and ECS/exploration/cooldown controls. Fixed selection observations
+    carry signed source generation/digest, ranking and candidate metadata,
+    separately from endpoint readiness. The compiler emits consumer query views
+    bounded by the desired DNS records and readiness-plan endpoint/path ownership.
+    DNS shadow execution joins only fresh exact local proof facts, enforces every
+    dependency and quorum, and uses the existing DNS answer selector. This does
+    not extend finite artifact value leases, apply a serving bundle or authorize
+    gray/full publication. Legacy selection capture is a migration adapter only.
+    DNS platform_candidate.query reports view_digest, records, eligible_records,
+    questions, answers, evaluated_at and serving=false. Its durable receipt binds
+    the same artifact, ReleaseSet, expected-set, fence and node as the readiness
+    facts. Queries execute only consumer-owned zones and never use ambient
+    GeoIP overrides; the shadow probe matrix supplies explicit bounded hints.
 x-fugue-dns-readiness-shadow:
   semantics: >-
     Optional typed dns_readiness policy compiles route-proof requirements for
@@ -31303,6 +31320,83 @@ components:
         observed_at: {type: string, format: date-time}
         a: {type: array, maxItems: 16, items: {type: string, format: ipv4}}
         aaaa: {type: array, maxItems: 16, items: {type: string, format: ipv6}}
+    PlatformDNSAnswerRule:
+      type: object
+      additionalProperties: false
+      required: [node_id, hostname, type, selection_mode, ttl_seconds, ecs_enabled, exploration_percent, switch_cooldown_seconds]
+      properties:
+        node_id: {type: string}
+        hostname: {type: string}
+        type: {type: string, enum: [A, AAAA]}
+        selection_mode: {type: string, enum: [geo, latency_aware, global, weighted, pinned, disabled]}
+        scoped_selection_mode: {type: string, enum: [geo, latency_aware, global, weighted, pinned, disabled]}
+        preferred_edge_groups: {type: array, maxItems: 4096, items: {type: string}}
+        fallback_edge_groups: {type: array, maxItems: 4096, items: {type: string}}
+        ttl_seconds: {type: integer, minimum: 1, maximum: 3600}
+        ecs_enabled: {type: boolean}
+        exploration_percent: {type: integer, minimum: 0, maximum: 50}
+        switch_cooldown_seconds: {type: integer, minimum: 0, maximum: 86400}
+    PlatformDNSSelectionObservation:
+      type: object
+      additionalProperties: false
+      required: [node_id, hostname, type, source_generation, source_digest, observed_at, candidates]
+      properties:
+        node_id: {type: string}
+        hostname: {type: string}
+        type: {type: string, enum: [A, AAAA]}
+        source_generation: {type: string}
+        source_digest: {type: string}
+        observed_at: {type: string, format: date-time}
+        selected_edge_group_id: {type: string}
+        shadow_selected_edge_group_id: {type: string}
+        ranking_version: {type: string}
+        ranking_scope: {type: string}
+        reason: {type: string}
+        shadow_reason: {type: string}
+        weight: {type: integer, minimum: 0, maximum: 10000}
+        candidates:
+          type: array
+          maxItems: 4096
+          items: {$ref: "#/components/schemas/PlatformDNSSelectionCandidate"}
+        scoped_candidates:
+          type: array
+          maxItems: 256
+          items: {$ref: "#/components/schemas/PlatformDNSSelectionScope"}
+    PlatformDNSSelectionCandidate:
+      type: object
+      additionalProperties: false
+      required: [ip, edge_id, edge_group_id]
+      properties:
+        ip: {type: string}
+        edge_id: {type: string}
+        edge_group_id: {type: string}
+        country: {type: string}
+        region: {type: string}
+        priority: {type: integer, minimum: 0, maximum: 10000}
+        weight: {type: integer, minimum: 0, maximum: 10000}
+        score: {type: number, minimum: 0, maximum: 1000000000000}
+        traffic_class: {type: string}
+        reason: {type: string}
+        score_breakdown:
+          type: object
+          maxProperties: 64
+          additionalProperties: {type: number}
+    PlatformDNSSelectionScope:
+      type: object
+      additionalProperties: false
+      required: [scope_key, candidates]
+      properties:
+        scope_key: {type: string}
+        country: {type: string}
+        region: {type: string}
+        asn: {type: string}
+        selected_edge_group_id: {type: string}
+        cooldown_until: {type: string, format: date-time}
+        reason: {type: string}
+        candidates:
+          type: array
+          maxItems: 4096
+          items: {$ref: "#/components/schemas/PlatformDNSSelectionCandidate"}
     PlatformDNSReadinessPolicy:
       type: object
       additionalProperties: false
@@ -31328,6 +31422,10 @@ components:
       additionalProperties: false
       required: [generation]
       properties:
+        dns_answer_rules:
+          type: array
+          maxItems: 20000
+          items: {$ref: "#/components/schemas/PlatformDNSAnswerRule"}
         dns_readiness:
           $ref: "#/components/schemas/PlatformDNSReadinessPolicy"
         schema_version:
@@ -31655,6 +31753,10 @@ components:
       additionalProperties: false
       required: [intent_generation, policy_generation]
       properties:
+        dns_selections:
+          type: array
+          maxItems: 20000
+          items: {$ref: "#/components/schemas/PlatformDNSSelectionObservation"}
         dns_edge_endpoints:
           type: array
           maxItems: 4096
