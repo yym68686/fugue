@@ -133,6 +133,18 @@ func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfi
 			if err != nil {
 				return nil, err
 			}
+			// filterDNSRecordValues preserves legacy audit metadata. A
+			// detached query projection will be encoded again, so it must
+			// retain expiry references only for the surviving values.
+			if len(filtered.ValueExpirations) > 0 {
+				expirations := map[string]time.Time{}
+				for _, value := range filtered.Values {
+					if until, ok := filtered.ValueExpirations[value]; ok {
+						expirations[value] = until
+					}
+				}
+				filtered.ValueExpirations = expirations
+			}
 			*r = filtered
 			continue
 		}

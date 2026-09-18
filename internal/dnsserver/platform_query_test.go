@@ -132,3 +132,20 @@ func TestDNSQueryReceiptBindsExactReleaseAndConsumer(t *testing.T) {
 		})
 	}
 }
+
+func TestDNSQueryMaterializationPreservesPartialTXTExpiryAcrossRepeatedReads(t *testing.T) {
+	view, plan, policy, facts, now := queryExecutionFixture()
+	view.Records[1].Values = []string{"expired", "surviving"}
+	view.Records[1].ValueExpirations["surviving"] = now.Add(20 * time.Second)
+	records, err := materializeDNSQueries(view, &plan, &policy, facts, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers, err := executeDNSQueryRecord(records[1], dnsGeoHint{}, now.Add(time.Second))
+	if err != nil || len(answers) != 1 || answers[0].(*dns.TXT).Txt[0] != "surviving" || answers[0].Header().Ttl != 19 {
+		t.Fatalf("partial expiry lost live TXT value: %v %v", answers, err)
+	}
+	if _, exists := records[1].ValueExpirations["expired"]; exists {
+		t.Fatal("expired value retained stale lease reference")
+	}
+}
