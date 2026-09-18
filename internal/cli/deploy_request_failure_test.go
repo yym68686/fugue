@@ -181,3 +181,12 @@ func TestUploadTruncatedResponseRetainsStatusAndCorrelation(t *testing.T) {
 		t.Fatal("unsafe correlation header escaped the allowlist")
 	}
 }
+
+func TestDeploymentValidationFailurePreservesRedactedCondition(t *testing.T) {
+	c := newCLI(&bytes.Buffer{}, &bytes.Buffer{})
+	c.deployment = &deploymentCommandState{requestStarted: true}
+	result, code := c.deploymentRequestFailureResult(&apiServerError{StatusCode: 400, Response: apiError{Error: "repository fetch failed: password=test-secret"}})
+	if code != ExitCodeSystemFault || !strings.Contains(result.Causes[0].Message, "repository fetch failed") || strings.Contains(result.Causes[0].Message, "test-secret") {
+		t.Fatalf("lost validation reason or leaked secret: %+v", result)
+	}
+}

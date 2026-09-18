@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strings"
 )
 
 type deploymentRequestFailure struct {
@@ -70,6 +71,15 @@ func (c *CLI) deploymentRequestFailureResult(err error) (deploymentResult, int) 
 		result.Summary = "The API rejected the deployment request during " + request.Stage + "."
 		cause.Code, cause.Message = "request_rejected", "The API rejected this request. Correct the reported condition before submitting again."
 		switch apiErr.StatusCode {
+		case http.StatusBadRequest, http.StatusUnprocessableEntity:
+			// Validation failures are actionable only when the rejected condition
+			// survives the result projection. Never include headers or raw bodies.
+			if message := strings.TrimSpace(redactDiagnosticString(apiErr.Response.Error)); message != "" {
+				if len(message) > 2048 {
+					message = message[:2048] + "…"
+				}
+				cause.Message = message
+			}
 		case http.StatusRequestTimeout:
 			cause.Code, cause.Message = "request_timeout", "The API timed out while receiving the request."
 		case http.StatusRequestEntityTooLarge:
