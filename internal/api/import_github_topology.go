@@ -449,6 +449,9 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 			specCopy := spec
 			postgres = &specCopy
 		}
+		if _, exists := existingMatches[service.Name]; !exists {
+			s.applyNewImportedPostgresPlacement(postgres, options.RuntimeID)
+		}
 		suggestedEnv = mergeImportedEnv(suggestedEnv, options.Env)
 		suggestedEnv = mergeImportedEnv(suggestedEnv, options.ServiceEnv[service.Name])
 		// A newly provisioned managed Postgres cluster has no schema yet. Keep
@@ -933,7 +936,11 @@ func buildTopologyRouteRequests(topology sourceimport.NormalizedTopology) (map[s
 			}
 			hostname, domainName := resolveTopologyEntrypointDomain(topology.Domains, domainsByName, domainsByHost, domainsByOwner, entrypoint.Domain, serviceName)
 			if hostname == "" {
-				warnings = append(warnings, fmt.Sprintf("entrypoint %q for service %q does not resolve to a hostname", entrypoint.Name, serviceName))
+				// A hostless entrypoint uses the public hostname allocated below.
+				// Its absence before allocation is expected, not a broken route.
+				if strings.TrimSpace(entrypoint.Domain) != "" || len(topology.Domains) != 0 {
+					warnings = append(warnings, fmt.Sprintf("entrypoint %q for service %q does not resolve to a hostname", entrypoint.Name, serviceName))
+				}
 				continue
 			}
 			byService[serviceName] = topologyRouteRequest{
@@ -989,6 +996,19 @@ func projectRouteTableFromTopology(projectID, tenantID string, topology sourceim
 	}
 	entrypoints := make([]model.ProjectRouteEntrypoint, 0, len(topology.Entrypoints))
 	for _, entrypoint := range topology.Entrypoints {
+		domain := entrypoint.Domain
+		if strings.TrimSpace(domain) == "" && len(topology.Domains) == 0 {
+			// Match FUGUE_ENTRYPOINT_* resolution: the first route with a
+			// public hostname owns this generated entrypoint. Persist the host
+			// so strict route compilation can reproduce that same intent.
+			for _, route := range entrypoint.Routes {
+				app, ok := appsByService[strings.TrimSpace(route.Service)]
+				if ok && app.Route != nil && strings.TrimSpace(app.Route.Hostname) != "" {
+					domain = app.Route.Hostname
+					break
+				}
+			}
+		}
 		routes := make([]model.ProjectRouteEntrypointRoute, 0, len(entrypoint.Routes))
 		for _, route := range entrypoint.Routes {
 			serviceName := strings.TrimSpace(route.Service)
@@ -1010,7 +1030,7 @@ func projectRouteTableFromTopology(projectID, tenantID string, topology sourceim
 		}
 		entrypoints = append(entrypoints, model.ProjectRouteEntrypoint{
 			Name:   entrypoint.Name,
-			Domain: entrypoint.Domain,
+			Domain: domain,
 			Routes: routes,
 		})
 	}

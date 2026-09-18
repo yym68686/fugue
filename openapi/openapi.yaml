@@ -6209,6 +6209,7 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/import-github:
     post:
+      description: Import a GitHub topology. Entrypoints without explicit domains use the allocated public service hostname for both runtime environment references and the persisted project route table. For a new managed database without an explicit storage class, an explicit physical runtime uses a platform-approved PostgreSQL class with observed capacity when the configured default is exhausted.
       operationId: importGitHubApp
       summary: Import Git Hub App
       tags: [Apps]
