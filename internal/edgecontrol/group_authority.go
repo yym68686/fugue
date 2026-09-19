@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -54,6 +55,7 @@ var (
 	ErrGroupAuthorityPublishedPointerCAS = fmt.Errorf("%w: published pointer changed", ErrGroupAuthorityCASConflict)
 	ErrGroupAuthorityRecoveryEpochCAS    = fmt.Errorf("%w: recovery epoch changed", ErrGroupAuthorityCASConflict)
 	ErrGroupAuthorityAuditTailCAS        = fmt.Errorf("%w: non-preserving audit tail", ErrGroupAuthorityCASConflict)
+	ErrGroupAuthorityTrafficRecovery     = fmt.Errorf("%w: code recovery cannot change traffic release authority", ErrGroupAuthorityCASConflict)
 	groupAuthorityKeyIDPattern           = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
 	groupAuthorityDigestPattern          = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
@@ -680,6 +682,18 @@ func prepareGroupAuthorityAppend(groupID string, expectedSequence uint64, entrie
 			return GroupAuthorityLedgerEntry{}, nil, errors.New("failed edge-control group authority entry changed published LKG")
 		}
 	} else {
+		// Recovery renews the configuration already selected by its parent. A
+		// previously signed Group bundle is not authority to change that parent,
+		// even when its channel differs and the numeric fences are incomparable.
+		if entry.RecoveryEpoch != 0 && signed != nil {
+			var previous *model.TrafficReleaseBinding
+			if current != nil {
+				previous = current.Bundle.TrafficRelease
+			}
+			if !reflect.DeepEqual(previous, signed.TrafficRelease) {
+				return GroupAuthorityLedgerEntry{}, nil, ErrGroupAuthorityTrafficRecovery
+			}
+		}
 		if current != nil && signed != nil {
 			if err := trafficbinding.ValidateTransition(current.Bundle.TrafficRelease, signed.TrafficRelease); err != nil {
 				return GroupAuthorityLedgerEntry{}, nil, err

@@ -66,6 +66,16 @@ x-fugue-traffic-verified-recovery:
     each release lane: changing channels with an equal fence requires the same
     current-publication proof as changing to a lower fence; global heartbeat
     sequence, artifact sequence, timestamps and nonce replay checks stay intact.
+x-fugue-group-traffic-recovery:
+  semantics: >-
+    Once Group Authority carries a traffic ReleaseSet binding, a code recovery
+    operation may renew or restore only a bundle with that identical binding.
+    It cannot change parent/child digest, release identity, channel, fence or
+    signed cohort, nor enter or leave bound traffic through historical recovery.
+    The store checks this atomically with publication CAS and preserves the
+    previous bundle and ledger on rejection. Current configuration renewal and
+    ordinary publication of an explicitly authorized traffic rollback remain
+    available; legacy recovery between unbound bundles is unchanged.
 x-fugue-dns-artifact-serving:
   semantics: >-
     DNS serving uses a verified ReleaseSet child and explicit signed authority

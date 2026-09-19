@@ -245,6 +245,10 @@ func (handler *groupRecoveryHandler) ServeHTTP(w http.ResponseWriter, request *h
 	}
 	appended, err := handler.store.RecoverGroupAuthorityCAS(request.Context(), groupID, recovery.ExpectedPublicationSequence, recovery.ExpectedRecoveryEpoch, entry, signed)
 	if err != nil {
+		if errors.Is(err, ErrGroupAuthorityTrafficRecovery) {
+			writeGroupBundleError(w, http.StatusConflict, "traffic_release_conflict")
+			return
+		}
 		if errors.Is(err, ErrGroupAuthorityCASConflict) || errors.Is(err, ErrGroupAuthorityCandidateCAS) {
 			writeGroupBundleError(w, http.StatusConflict, "sequence_conflict")
 			return

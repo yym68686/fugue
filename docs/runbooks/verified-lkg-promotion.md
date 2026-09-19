@@ -84,3 +84,18 @@ target.
 - Expired or signature-invalid current LKG: stop full promotion and follow
   `pinned-rollback-recovery.md`; do not treat the invalid snapshot as an
   existing healthy LKG.
+
+## Group code recovery and traffic rollback
+
+When a Group bundle carries a TrafficReleaseSet binding, code recovery can
+renew or restore only the identical traffic binding. A previously published
+signed bundle does not authorize a different parent, child, release, channel,
+fence or cohort. Rejected historical recovery returns `409
+traffic_release_conflict` and preserves the durable bundle and ledger; retrying
+with a different code recovery sequence cannot grant traffic authority.
+
+Use the parent ReleaseSet rollback API to authorize an older traffic artifact
+under a new fence. It reaches Group Authority through the ordinary route
+publication path. Current-bundle lease renewal remains available without
+changing the traffic binding. Recovery of existing unbound legacy bundles
+retains its previous behavior during migration.
