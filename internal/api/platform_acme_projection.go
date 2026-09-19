@@ -21,32 +21,22 @@ func projectACMEChallengeIntents(result *platformIntentProjectionResponse, chall
 	result.RuntimeSnapshot.IntentGeneration = gen
 	issues := result.Issues[:0]
 	for _, issue := range result.Issues {
-		if issue.Code != "dns_acme_not_projected" {
+		if issue.Code != "dns_acme_not_projected" && issue.Code != "dns_value_expiration_consumer_not_ready" {
 			issues = append(issues, issue)
 		}
 	}
 	result.Issues = issues
-	for _, c := range challenges {
-		if c.ExpiresAt.After(result.CapturedAt) {
-			result.Issues = append(result.Issues, platformProjectionIssue{Code: "dns_value_expiration_consumer_not_ready"})
-			break
-		}
-	}
+	// Runtime capability belongs to transactional admission. Capturing desired
+	// ACME input cannot assert that every executor is permanently unsupported.
 	return nil
 }
 
-// Consumers must enforce per-value expiration before these artifacts can
-// enter traffic. This guard covers both direct DNS publication and ReleaseSet
-// publication; shadow compilation/staging remains available for validation.
+// Consumers must enforce per-value expiration before these artifacts enter
+// traffic. Standalone DNS remains blocked; ReleaseSet publication also checks
+// fresh executor capabilities within the store transaction.
 func (s *Server) platformArtifactHasDNSLeases(artifact model.PlatformArtifact) (bool, error) {
-	if records, ok := artifact.Content["records"].([]any); ok {
-		for _, row := range records {
-			if record, ok := row.(map[string]any); ok {
-				if expiry, ok := record["value_expirations"].(map[string]any); ok && len(expiry) > 0 {
-					return true, nil
-				}
-			}
-		}
+	if platformconfig.DNSArtifactHasValueExpirations(artifact) {
+		return true, nil
 	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
 		if ids, ok := artifact.Content["artifact_ids"].([]any); ok {

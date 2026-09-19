@@ -323,7 +323,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
-	if err := pgLockPlatformReleaseMutation(ctx, tx, id, NormalizePlatformReleaseChannel(req.ReleaseChannel) == model.PlatformArtifactReleaseChannelFull); err != nil {
+	if err := pgLockPlatformReleaseMutation(ctx, tx, id, NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 
@@ -381,7 +381,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		pinnedRollbackGeneration = lkg.Generation
 	}
 	var promotionSnapshot *model.State
-	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelFull {
+	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel != model.PlatformArtifactReleaseChannelShadow {
 		promotionSnapshot, err = s.pgFullReleaseSetSnapshot(ctx, tx, artifact)
 		if err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -433,6 +433,9 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		}
 		now = time.Now().UTC()
 	}
+	if err := validateLeasedTrafficAdmission(promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
 	entry := buildPlatformArtifactReleaseLedgerEntry(
 		artifact,
 		channel,
@@ -472,10 +475,13 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
 	}
-	if promotionSnapshot != nil {
+	if promotionSnapshot != nil && channel == model.PlatformArtifactReleaseChannelFull {
 		if err := validateFullReleaseSetInState(promotionSnapshot, artifact, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
+	}
+	if err := validateLeasedTrafficAdmission(promotionSnapshot, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -491,7 +497,7 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
-	if err := pgLockPlatformReleaseMutation(ctx, tx, id, false); err != nil {
+	if err := pgLockPlatformReleaseMutation(ctx, tx, id, NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 
@@ -532,6 +538,13 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	if lkg != nil {
 		pinnedRollbackGeneration = lkg.Generation
 	}
+	var admissionSnapshot *model.State
+	if target.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel != model.PlatformArtifactReleaseChannelShadow {
+		admissionSnapshot, err = s.pgFullReleaseSetSnapshot(ctx, tx, target)
+		if err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
 	lane, err := pgNextPlatformReleaseLane(ctx, tx, target.ArtifactKind, target.ScopeKey, channel, now)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -564,6 +577,9 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	)
 	if !decision.Pass {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
+	if err := validateLeasedTrafficAdmission(admissionSnapshot, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	entry := buildPlatformArtifactReleaseLedgerEntry(
 		target,
@@ -603,6 +619,9 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 		); err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
+	}
+	if err := validateLeasedTrafficAdmission(admissionSnapshot, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err

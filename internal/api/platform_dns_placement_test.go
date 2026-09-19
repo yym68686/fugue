@@ -38,12 +38,12 @@ func TestDNSPlacementCompilationPreservesReleaseAndRejectsUnreadyEvidence(t *tes
 	for _, artifact := range []model.PlatformArtifact{first.DNSArtifact, first.ReleaseArtifact} {
 		for _, channel := range []string{"gray", "full"} {
 			response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+artifact.ID+"/release", admin, model.PlatformArtifactReleaseRequest{ReleaseChannel: channel})
-			if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "DNS value expiration requires consumer support") {
+			if response.Code != http.StatusConflict || artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && !strings.Contains(response.Body.String(), "DNS value expiration requires consumer support") {
 				t.Fatal("leased address promotion escaped rollout gate", response.Code, response.Body.String())
 			}
 		}
 		response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+artifact.ID+"/rollback", admin, model.PlatformArtifactRollbackRequest{ReleaseChannel: "full", ToGeneration: artifact.Generation, Reason: "address compatibility regression"})
-		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "DNS value expiration requires consumer support") {
+		if response.Code != http.StatusConflict || artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && !strings.Contains(response.Body.String(), "DNS value expiration requires consumer support") {
 			t.Fatal("leased address rollback escaped rollout gate", response.Code, response.Body.String())
 		}
 	}
@@ -86,7 +86,7 @@ func TestDNSRouteAliasCompilationAndPromotionGate(t *testing.T) {
 	mustDecodeJSON(t, response, &result)
 	for _, artifact := range []model.PlatformArtifact{result.DNSArtifact, result.ReleaseArtifact} {
 		response = performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+artifact.ID+"/release", admin, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full"})
-		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "DNS value expiration requires consumer support") {
+		if response.Code != http.StatusConflict || artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && !strings.Contains(response.Body.String(), "DNS value expiration requires consumer support") {
 			t.Fatal("route alias bypassed leased DNS rollout guard", response.Code, response.Body.String())
 		}
 	}

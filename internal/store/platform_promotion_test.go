@@ -24,10 +24,14 @@ func preparePromotionFixture(t *testing.T, s *Store, scope string) promotionFixt
 	return prepareTrafficLKGFixture(t, s, scope, "gray", true)
 }
 
-func prepareTrafficLKGFixture(t *testing.T, s *Store, scope, channel string, seed bool) promotionFixture {
+func prepareTrafficLKGFixture(t *testing.T, s *Store, scope, channel string, seed bool, inputs ...platformconfig.CompileRequest) promotionFixture {
 	t.Helper()
 	now := time.Now().UTC()
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "test", EdgeGroupIDs: []string{"edge-group-a"}}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now}})
+	requestInput := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "test", EdgeGroupIDs: []string{"edge-group-a"}}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now}}
+	if len(inputs) > 0 {
+		requestInput = inputs[0]
+	}
+	compiled, err := platformconfig.Compile(requestInput)
 	if err != nil {
 		t.Fatal(err)
 	}

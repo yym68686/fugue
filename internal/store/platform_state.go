@@ -437,6 +437,9 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 				return err
 			}
 		}
+		if err := validateLeasedTrafficAdmission(state, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+			return err
+		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
 		if err != nil {
 			return err
@@ -473,7 +476,7 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 				return err
 			}
 		}
-		return nil
+		return validateLeasedTrafficAdmission(state, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC())
 	})
 	return artifact, release, message, lkg, err
 }
@@ -556,6 +559,9 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 		if !decision.Pass {
 			return ErrConflict
 		}
+		if err := validateLeasedTrafficAdmission(state, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+			return err
+		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, target.ArtifactKind, target.ScopeKey, channel, now)
 		if err != nil {
 			return err
@@ -592,7 +598,7 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 				return err
 			}
 		}
-		return nil
+		return validateLeasedTrafficAdmission(state, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC())
 	})
 	return target, release, message, lkg, err
 }

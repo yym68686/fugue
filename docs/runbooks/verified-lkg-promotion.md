@@ -139,7 +139,10 @@ artifact kind: route/TLS declares signed parent authority, durable Caddy apply,
 actual probes, negative facts and recovery; DNS declares atomic zone snapshots,
 value expiration, answer-time proof expiry and recovery. Capability data is part
 of the heartbeat evidence hash. It never establishes applied/passed or LKG and
-must not be copied from a desired assignment. Admission must combine fresh,
-authenticated capability evidence with the current required topology and all
-existing release checks; this declaration alone does not remove the DNS lease
-publication guard.
+must not be copied from a desired assignment. Admission combines fresh, authenticated capability evidence with prepared
+required topology and the selected signed cohort. The file and PostgreSQL stores
+check every route, DNS and TLS executor in the publication transaction, rechecking
+freshness before commit. Full convergence and verified LKG remain separate gates.
+Standalone leased DNS stays blocked, and soft overrides cannot bypass capability
+admission. A fresh failed serving fact can prove binary support for recovery;
+it cannot prove that the candidate is applied, healthy or an LKG.

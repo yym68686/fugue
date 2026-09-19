@@ -73,6 +73,16 @@ x-fugue-traffic-verified-recovery:
     each release lane: changing channels with an equal fence requires the same
     current-publication proof as changing to a lower fence; global heartbeat
     sequence, artifact sequence, timestamps and nonce replay checks stay intact.
+x-fugue-leased-traffic-admission:
+  semantics: >-
+    DNS artifacts carrying value expirations enter serving only through a
+    complete signed TrafficReleaseSet. Publication and rollback require fresh,
+    authenticated traffic_release_v1 facts for every required route, DNS and TLS
+    consumer in the prepared topology and selected cohort. Capability admission
+    is rechecked within the release transaction and cannot be bypassed by soft
+    override. It does not claim apply, successful probes or LKG and leaves full
+    convergence and recovery checks in force. Standalone leased DNS serving
+    remains rejected; failed admission preserves the lane, ledger and LKG.
 x-fugue-traffic-consumer-capability:
   semantics: >-
     traffic_release_v1 in a verified consumer heartbeat declares support for

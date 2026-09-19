@@ -22,7 +22,7 @@ func TestACMEProjectionPreservesExpiredDesiredInput(t *testing.T) {
 	if err := projectACMEChallengeIntents(&second, challenges); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(first.Intent, second.Intent) || len(second.Intent.ACMEChallenges) != 1 || first.RuntimeSnapshot.IntentGeneration != first.Intent.Generation {
+	if len(first.Issues) != 0 || len(second.Issues) != 0 || !reflect.DeepEqual(first.Intent, second.Intent) || len(second.Intent.ACMEChallenges) != 1 || first.RuntimeSnapshot.IntentGeneration != first.Intent.Generation {
 		t.Fatal("time changed desired challenge configuration")
 	}
 }
@@ -39,7 +39,7 @@ func TestACMEArtifactsCannotEnterTrafficBeforeConsumerSupport(t *testing.T) {
 	for _, id := range []string{compiled.DNSArtifact.ID, compiled.ReleaseArtifact.ID} {
 		for _, channel := range []string{"gray", "full"} {
 			r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+id+"/release", admin, model.PlatformArtifactReleaseRequest{ReleaseChannel: channel})
-			if r.Code != http.StatusConflict || !strings.Contains(r.Body.String(), "DNS value expiration requires consumer support") {
+			if r.Code != http.StatusConflict || id == compiled.DNSArtifact.ID && !strings.Contains(r.Body.String(), "DNS value expiration requires consumer support") {
 				t.Fatalf("leased DNS release accepted: %d %s", r.Code, r.Body.String())
 			}
 		}
@@ -52,7 +52,7 @@ func TestACMEArtifactsCannotEnterTrafficBeforeConsumerSupport(t *testing.T) {
 	mustDecodeJSON(t, response, &later)
 	for _, pair := range []struct{ id, generation string }{{later.DNSArtifact.ID, compiled.DNSArtifact.Generation}, {later.ReleaseArtifact.ID, compiled.ReleaseArtifact.Generation}} {
 		r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+pair.id+"/rollback", admin, model.PlatformArtifactRollbackRequest{ReleaseChannel: "full", ToGeneration: pair.generation, Reason: "compatibility test"})
-		if r.Code != http.StatusConflict || !strings.Contains(r.Body.String(), "DNS value expiration requires consumer support") {
+		if r.Code != http.StatusConflict || pair.id == later.DNSArtifact.ID && !strings.Contains(r.Body.String(), "DNS value expiration requires consumer support") {
 			t.Fatalf("leased rollback accepted: %d %s", r.Code, r.Body.String())
 		}
 	}

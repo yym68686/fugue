@@ -351,7 +351,7 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 			s.writeStoreError(w, err)
 			return
 		}
-		if leased {
+		if leased && releaseArtifact.ArtifactKind != model.PlatformArtifactKindReleaseSet {
 			httpx.WriteError(w, http.StatusConflict, "DNS value expiration requires consumer support before traffic promotion")
 			return
 		}
@@ -538,7 +538,7 @@ func (s *Server) handleRollbackPlatformArtifact(w http.ResponseWriter, r *http.R
 			s.writeStoreError(w, err)
 			return
 		}
-		if leased {
+		if leased && target.ArtifactKind != model.PlatformArtifactKindReleaseSet {
 			httpx.WriteError(w, http.StatusConflict, "DNS value expiration requires consumer support before traffic rollback")
 			return
 		}
