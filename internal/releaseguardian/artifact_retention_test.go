@@ -209,3 +209,70 @@ func TestArtifactPrunerDefersWhenPublicationChangesDuringInventory(t *testing.T)
 		}
 	}
 }
+
+func TestArtifactPrunerAllowsHealthRefreshButFencesReferenceChanges(t *testing.T) {
+	for _, changeReference := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reference-change=%t", changeReference), func(t *testing.T) {
+			now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+			objects := []runtime.Object{}
+			for i := 0; i < 10; i++ {
+				record := sealedRouteRecord(t, "edge-pool-a", int64(i+1))
+				raw, _ := declarativerelease.CanonicalJSON(record)
+				objects = append(objects, retentionConfigMap(routeBundleRecordName(record.GroupID, record.RecordDigest), now.Add(time.Duration(i-48)*time.Hour), authorityLabels(record.GroupID), map[string]string{"fugue.pro/authority-kind": "route-bundle"}, map[string]string{"record.json": string(raw)}, true))
+			}
+			key := Key{Component: "api", Group: "global"}
+			record, err := NewReleaseRecord(key, testSHA, testDigest, testDigest, otherDigest, testDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canary, err := NewCanaryResult(record, HealthHealthy, testDigest, now, now.Add(time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := declarativerelease.CanonicalJSON(canary)
+			canaryObject := retentionConfigMap(canaryName(key), now, guardianLabels(key), nil, map[string]string{"result.json": string(raw)}, false)
+			objects = append(objects, canaryObject)
+			data, monitor, _, _ := guardianStableFixture(t, key, now)
+			monitorName := monitorRecordNameFromDigest(key.Component, monitor.RecordDigest)
+			objects = append(objects, retentionConfigMap(monitorName, now, map[string]string{"app.kubernetes.io/managed-by": "fugue-declarative-release", "fugue.pro/component": key.Component, "fugue.pro/config-sha": monitor.ConfigSHA}, nil, data, true))
+			state, _, err := declarativerelease.NewMonitorState(monitor, declarativerelease.MonitorState{}, true, "", now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ = declarativerelease.CanonicalJSON(state)
+			monitorObject := retentionConfigMap("fugue-release-monitor-"+key.Component, now, map[string]string{"app.kubernetes.io/managed-by": "fugue-declarative-release"}, nil, map[string]string{"recordName": monitorName, "state.json": string(raw)}, false)
+			objects = append(objects, monitorObject)
+			client := fake.NewSimpleClientset(objects...)
+			lists := 0
+			client.PrependReactor("list", "configmaps", func(action kubetesting.Action) (bool, runtime.Object, error) {
+				lists++
+				if lists == 2 {
+					if changeReference {
+						record.RecordDigest = otherDigest
+					}
+					canary, err = NewCanaryResult(record, HealthHealthy, testDigest, now.Add(time.Second), now.Add(2*time.Minute))
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw, _ = declarativerelease.CanonicalJSON(canary)
+					canaryObject.Data["result.json"] = string(raw)
+					state.LastCheckedAt = now.Add(time.Second).Format(time.RFC3339Nano)
+					state.LastHealthyAt = state.LastCheckedAt
+					raw, _ = declarativerelease.CanonicalJSON(state)
+					monitorObject.Data["state.json"] = string(raw)
+					for _, object := range []*corev1.ConfigMap{canaryObject, monitorObject} {
+						if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("configmaps"), object, "fugue-system"); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				return false, nil, nil
+			})
+			pruner, _ := NewArtifactPruner(client, "fugue-system", ArtifactRetentionPolicy{MinimumAge: time.Hour, MinimumHistory: 8, MaximumDeletes: 2})
+			result, err := pruner.Prune(context.Background(), now)
+			if err != nil || result.Deferred != changeReference || (!changeReference && result.Deleted != 2) || (changeReference && result.Deleted != 0) {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
+	}
+}

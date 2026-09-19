@@ -392,6 +392,20 @@ func artifactRootFingerprint(objects []corev1.ConfigMap) string {
 			} else {
 				value += "/" + string(status.State) + "/" + status.CurrentRecordDigest + "/" + status.TargetRecordDigest + "/" + status.LastSuccessfulLKG
 			}
+		} else if strings.HasPrefix(object.Name, "fugue-canary-result-") {
+			var result CanaryResult
+			if decodeStrict([]byte(object.Data["result.json"]), &result) != nil {
+				value += "/invalid/" + object.ResourceVersion
+			} else {
+				value += "/" + result.Key().String() + "/" + result.RecordDigest + "/" + string(result.State)
+			}
+		} else if strings.HasPrefix(object.Name, "fugue-release-monitor-") {
+			var state declarativerelease.MonitorState
+			if decodeStrict([]byte(object.Data["state.json"]), &state) != nil {
+				value += "/invalid/" + object.ResourceVersion
+			} else {
+				value += "/" + object.Data["recordName"] + "/" + state.RecordDigest + "/" + state.ConfigSHA + "/" + state.RollbackStatus
+			}
 		} else if object.Immutable == nil || !*object.Immutable {
 			raw, _ := declarativerelease.CanonicalJSON(object.Data)
 			value += "/" + digest(raw)

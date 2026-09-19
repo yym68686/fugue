@@ -24,6 +24,8 @@ Release history collection retains the transitive closure of immutable execution
 Guardian rollback, monitor and route dependencies. It reads a paginated snapshot
 of both managers together, defers while a component is not settled or the
 publication inventory changes, and deletes with UID/resourceVersion preconditions.
+Canary and monitor health refresh timestamps do not change the inventory's
+reference fingerprint; changes to their target record or rollback state still do.
 Retention is configured in the Guardian deployment data, independently of
 serving configuration: keep at least eight records per kind/scope and every
 record younger than six hours, then delete at most 32 unreferenced objects per
