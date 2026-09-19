@@ -20,8 +20,10 @@ type platformConfigStoredInputs struct {
 type platformConfigReferenceError struct{ reason string }
 
 type platformCompilationSource struct {
-	PolicyReleaseID string
-	SourceDigest    string
+	PolicyReleaseID    string
+	SourceDigest       string
+	StaticIntentID     string
+	StaticIntentDigest string
 }
 
 func (err *platformConfigReferenceError) Error() string { return err.reason }
@@ -33,7 +35,7 @@ func (err *platformConfigReferenceError) Error() string { return err.reason }
 func (s *Server) materializePlatformCompilation(ctx context.Context, compiled platformconfig.CompileResult, principal model.Principal, inputs *platformConfigStoredInputs, sources ...platformCompilationSource) (platformConfigCompileResponse, error) {
 	if binding, present := compiled.InputSnapshot.Facts["configuration_producer"]; present {
 		raw, ok := binding.(map[string]any)
-		if !ok || len(raw) != 2 {
+		if !ok || len(raw) != 2 && len(raw) != 4 {
 			return platformConfigCompileResponse{}, store.ErrInvalidInput
 		}
 		policyID, idOK := raw["policy_release_id"].(string)
@@ -46,6 +48,14 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 			return platformConfigCompileResponse{}, store.ErrInvalidInput
 		}
 		source := platformCompilationSource{PolicyReleaseID: policyID, SourceDigest: digest}
+		if len(raw) == 4 {
+			id, idOK := raw["static_intent_artifact_id"].(string)
+			d, dOK := raw["static_intent_digest"].(string)
+			if !idOK || id == "" || !dOK || !platformproducer.ValidDigest(d) {
+				return platformConfigCompileResponse{}, store.ErrInvalidInput
+			}
+			source.StaticIntentID, source.StaticIntentDigest = id, d
+		}
 		if len(sources) == 0 {
 			sources = append(sources, source)
 		} else if sources[0] != source {
@@ -112,6 +122,10 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	if len(sources) == 1 {
 		parent.Metadata[platformproducer.PolicyReleaseMetadata] = sources[0].PolicyReleaseID
 		parent.Metadata[platformproducer.SourceDigestMetadata] = sources[0].SourceDigest
+		if sources[0].StaticIntentID != "" {
+			parent.Metadata[platformproducer.StaticIntentIDMetadata] = sources[0].StaticIntentID
+			parent.Metadata[platformproducer.StaticIntentDigestMetadata] = sources[0].StaticIntentDigest
+		}
 	}
 	parent.CreatedByType, parent.CreatedByID = strings.TrimSpace(principal.ActorType), strings.TrimSpace(principal.ActorID)
 	if err := s.preservePlatformArtifactCreator(&parent); err != nil {

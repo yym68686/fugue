@@ -122,6 +122,10 @@ func (s *Server) deriveEdgeRouteIntentSnapshot(r *http.Request, source edgeRoute
 // The migration reader captures the same observations used by the legacy
 // projection; a second cache read could incorrectly renew or mix evidence.
 func (s *Server) deriveEdgeRouteIntentSnapshotWithObservations(ctx context.Context, source edgeRouteIntentSource, capture func([]model.App)) (model.EdgeRouteIntentSnapshot, error) {
+	return s.deriveEdgeRouteIntentSnapshotWithStatic(ctx, source, capture, s.platformRoutes)
+}
+
+func (s *Server) deriveEdgeRouteIntentSnapshotWithStatic(ctx context.Context, source edgeRouteIntentSource, capture func([]model.App), configuredRoutes []model.PlatformRoute) (model.EdgeRouteIntentSnapshot, error) {
 	apps, err := source.ListAppsMetadata("", true)
 	if err != nil {
 		return model.EdgeRouteIntentSnapshot{}, err
@@ -177,7 +181,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithObservations(ctx context.Conte
 		right := strings.TrimSpace(projectRouteTables[j].TenantID) + "\x00" + strings.TrimSpace(projectRouteTables[j].ProjectID)
 		return left < right
 	})
-	platformRoutes := append([]model.PlatformRoute(nil), s.platformRoutes...)
+	platformRoutes := append([]model.PlatformRoute(nil), configuredRoutes...)
 	sort.Slice(platformRoutes, func(i, j int) bool {
 		left := normalizeExternalAppDomain(platformRoutes[i].Hostname) + "\x00" + strings.TrimSpace(platformRoutes[i].Kind) + "\x00" + strings.TrimSpace(platformRoutes[i].UpstreamURL)
 		right := normalizeExternalAppDomain(platformRoutes[j].Hostname) + "\x00" + strings.TrimSpace(platformRoutes[j].Kind) + "\x00" + strings.TrimSpace(platformRoutes[j].UpstreamURL)
@@ -199,7 +203,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithObservations(ctx context.Conte
 	releaseByID := appReleaseByID(releases)
 	trafficPolicyByApp := appTrafficPolicyByApp(trafficPolicies)
 
-	intents := make([]model.EdgeRouteIntent, 0, len(apps)+len(domains)+len(s.platformRoutes))
+	intents := make([]model.EdgeRouteIntent, 0, len(apps)+len(domains)+len(configuredRoutes))
 	tlsAllowlist := make([]model.EdgeTLSAllowlistEntry, 0, len(domains))
 	appendBinding := func(binding model.EdgeRouteBinding) {
 		binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)

@@ -63,3 +63,44 @@ legacy serving inputs. This stage maintains the business-to-artifact path while
 serving migration is unfinished. Durable intent/policy ownership, output
 equivalence, real gray/full/rollback and removal of legacy sources must still be
 completed before declaring the architecture migration finished.
+
+## Pin static platform input
+
+Import the two static environment inputs once with the existing
+`POST /v1/admin/platform-config/import-env` API. Keep its returned exact
+`platform_intent` ID and `content_hash`, migration actor and source digest.
+Alternatively create and validate an equivalent static PlatformIntent through
+the artifact APIs. The static subset supports plain platform routes and DNS
+records; dynamic app bindings, per-path routing, cache/TLS/consumer declarations
+and other unrepresentable fields are rejected rather than silently dropped.
+Disabled routes and per-value DNS expiration are preserved.
+
+Create a new producer policy generation using:
+
+```json
+{
+  "input_source": "business-static-intent",
+  "static_intent_artifact_id": "<exact-artifact-id>",
+  "static_intent_digest": "sha256:<content-hash>"
+}
+```
+
+Retain the other required policy fields from the preceding example. Preview
+the explicit source with `GET /v1/admin/platform-config/routes/project?static_intent_artifact_id=<id>`
+and compare desired output before activating its shadow policy release. This
+mode never reads the API's ambient platform-route or static-DNS arrays. It
+continues projecting App/Domain changes from one consistent business snapshot.
+An invalid, missing, wrong-scope, altered or revoked explicit source rejects the
+run without falling back to environment. The store revalidates the source at
+publication while holding the normal transaction locks.
+
+The retained compiler input records the source ID/digest, and the signed parent
+artifact exposes `producer_static_intent_id` and `producer_static_intent_digest`.
+An operator replay retains both references. Editing static configuration means
+creating another PlatformIntent and publishing another producer policy that
+pins it; changing the environment or restarting code cannot replace that input.
+
+This stage removes only the two static inputs from the producer. Authority,
+base-domain/default policy and selection capture still follow their existing
+migration paths. Legacy serving paths remain until their traffic cutover and
+recovery checks are complete.

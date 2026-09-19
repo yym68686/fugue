@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
 )
 
 func TestImportedEnvironmentMatchesLegacyRouteAndDNSProjection(t *testing.T) {
@@ -30,6 +32,26 @@ func TestImportedEnvironmentMatchesLegacyRouteAndDNSProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	// The producer's pinned static adapter must preserve the legacy import
+	// interpretation, including default route fields and DNS exclusions.
+	server.platformRoutes = parsePlatformRoutes(routesJSON, nil)
+	server.dnsStaticRecords = parseEdgeDNSStaticRecords(dnsJSON, nil)
+	legacyCapture, err := server.capturePlatformIntent(context.Background(), platformProducerPrincipal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	staticArtifact := model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPlatformIntent, ScopeKey: "global", Generation: imported.Intent.Generation, Content: mustPlatformIntentContent(imported.Intent)}
+	static, err := platformproducer.DecodeStaticIntent(staticArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinnedCapture, err := server.capturePlatformIntentWithStatic(context.Background(), platformProducerPrincipal(), static)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(legacyCapture.Intent, pinnedCapture.Intent) || !reflect.DeepEqual(legacyCapture.Policy, pinnedCapture.Policy) || !reflect.DeepEqual(legacyCapture.DNSExclusions, pinnedCapture.DNSExclusions) {
+		t.Fatal("pinned import changed legacy desired semantics")
+	}
 	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
 		Intent: imported.Intent, Policy: platformconfig.PolicySnapshot{Generation: "migration-policy", MinimumHealthyEdges: 2},
 	})

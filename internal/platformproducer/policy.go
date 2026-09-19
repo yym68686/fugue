@@ -2,6 +2,7 @@ package platformproducer
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,21 +11,25 @@ import (
 )
 
 const (
-	Schema                = "fugue.platform.producer/v1"
-	Scope                 = "platform-config-producer"
-	Actor                 = "platform-config-producer"
-	PolicyReleaseMetadata = "producer_policy_release_id"
-	SourceDigestMetadata  = "producer_source_digest"
+	Schema                     = "fugue.platform.producer/v1"
+	Scope                      = "platform-config-producer"
+	Actor                      = "platform-config-producer"
+	PolicyReleaseMetadata      = "producer_policy_release_id"
+	SourceDigestMetadata       = "producer_source_digest"
+	StaticIntentIDMetadata     = "producer_static_intent_id"
+	StaticIntentDigestMetadata = "producer_static_intent_digest"
 )
 
 type Policy struct {
-	SchemaVersion   string `json:"schema_version"`
-	Generation      string `json:"generation"`
-	Mode            string `json:"mode"`
-	InputSource     string `json:"input_source"`
-	TargetScope     string `json:"target_scope"`
-	IntervalSeconds int    `json:"interval_seconds"`
-	RefreshSeconds  int    `json:"refresh_seconds"`
+	SchemaVersion          string `json:"schema_version"`
+	Generation             string `json:"generation"`
+	Mode                   string `json:"mode"`
+	InputSource            string `json:"input_source"`
+	TargetScope            string `json:"target_scope"`
+	IntervalSeconds        int    `json:"interval_seconds"`
+	RefreshSeconds         int    `json:"refresh_seconds"`
+	StaticIntentArtifactID string `json:"static_intent_artifact_id,omitempty"`
+	StaticIntentDigest     string `json:"static_intent_digest,omitempty"`
 }
 
 func Decode(artifact model.PlatformArtifact) (Policy, error) {
@@ -41,8 +46,28 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	if artifact.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || artifact.ScopeKey != Scope || p.SchemaVersion != Schema || strings.TrimSpace(p.Generation) == "" || p.Generation != artifact.Generation {
 		return p, fmt.Errorf("producer policy identity or scope invalid")
 	}
-	if p.Mode != "paused" && p.Mode != "shadow" || p.InputSource != "business-migration" || p.TargetScope != "global" || p.IntervalSeconds < 30 || p.IntervalSeconds > 900 || p.RefreshSeconds < 120 || p.RefreshSeconds > 3600 || p.RefreshSeconds < p.IntervalSeconds {
+	if p.Mode != "paused" && p.Mode != "shadow" || p.TargetScope != "global" || p.IntervalSeconds < 30 || p.IntervalSeconds > 900 || p.RefreshSeconds < 120 || p.RefreshSeconds > 3600 || p.RefreshSeconds < p.IntervalSeconds {
 		return p, fmt.Errorf("producer policy mode, source or schedule invalid")
 	}
+	switch p.InputSource {
+	case "business-migration":
+		if p.StaticIntentArtifactID != "" || p.StaticIntentDigest != "" {
+			return p, fmt.Errorf("migration source cannot bind a static intent")
+		}
+	case "business-static-intent":
+		if p.StaticIntentArtifactID == "" || strings.TrimSpace(p.StaticIntentArtifactID) != p.StaticIntentArtifactID || !ValidDigest(p.StaticIntentDigest) {
+			return p, fmt.Errorf("static intent source requires exact identity and digest")
+		}
+	default:
+		return p, fmt.Errorf("producer source unsupported")
+	}
 	return p, nil
+}
+
+func ValidDigest(value string) bool {
+	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	b, err := hex.DecodeString(value[7:])
+	return err == nil && hex.EncodeToString(b) == value[7:]
 }

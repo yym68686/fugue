@@ -78,7 +78,10 @@ x-fugue-platform-producer:
   semantics: >-
     A validated signed policy_snapshot in scope platform-config-producer controls
     the built-in migration producer through its current shadow release. The only
-    modes are paused and shadow. The producer captures the existing business and
+    modes are paused and shadow. business-static-intent pins a validated signed
+    PlatformIntent by exact ID and content digest for static platform routes and
+    DNS records; missing, invalid or revoked input never falls back to environment.
+    Other migration inputs remain unchanged in this phase. The producer captures the existing business and
     migration inputs, compiles immutable intent/policy/route/DNS/TLS artifacts and
     publishes only the global shadow ReleaseSet. The exact normalized runtime
     snapshot is retained in the existing digest-addressed content store and is
@@ -2786,6 +2789,12 @@ paths:
       x-fugue-handler: handleProjectPlatformIntent
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: static_intent_artifact_id
+          description: Optional exact signed validated global PlatformIntent used instead of ambient platform routes and static DNS. Only static representable records and routes are accepted; an explicit invalid reference is rejected without fallback.
+          schema:
+            type: string
       responses:
         '200':
           description: Draft intent, captured origin observations and unresolved migration issues.
@@ -32198,6 +32207,12 @@ components:
                 source_digest:
                   type: string
                   pattern: '^sha256:[a-f0-9]{64}$'
+                static_intent_artifact_id:
+                  type: string
+                  minLength: 1
+                static_intent_digest:
+                  type: string
+                  pattern: '^sha256:[a-f0-9]{64}$'
     PlatformConfigCompileRequest:
       type: object
       additionalProperties: false
@@ -32373,7 +32388,15 @@ components:
           enum: [paused, shadow]
         input_source:
           type: string
-          enum: [business-migration]
+          enum: [business-migration, business-static-intent]
+        static_intent_artifact_id:
+          type: string
+          minLength: 1
+          description: Required only for business-static-intent; an exact immutable platform_intent ID in global scope.
+        static_intent_digest:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+          description: Exact content_hash of the pinned static intent. Required only for business-static-intent.
         target_scope:
           type: string
           enum: [global]

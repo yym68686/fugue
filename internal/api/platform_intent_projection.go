@@ -15,6 +15,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
@@ -72,7 +73,22 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
 		return
 	}
-	projection, err := s.capturePlatformIntent(r.Context(), mustPrincipal(r))
+	var projection platformIntentProjectionResponse
+	var err error
+	refs, present := r.URL.Query()["static_intent_artifact_id"]
+	if present {
+		if len(refs) != 1 || strings.TrimSpace(refs[0]) == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "one static_intent_artifact_id required")
+			return
+		}
+		var input platformproducer.StaticIntentInput
+		input, err = s.loadStaticPlatformIntent(refs[0], "")
+		if err == nil {
+			projection, err = s.capturePlatformIntentWithStatic(r.Context(), mustPrincipal(r), input)
+		}
+	} else {
+		projection, err = s.capturePlatformIntent(r.Context(), mustPrincipal(r))
+	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -85,6 +101,10 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 // independently. This entry point can be called without an HTTP request; it
 // neither publishes artifacts nor changes serving or recovery state.
 func (s *Server) capturePlatformIntent(ctx context.Context, principal model.Principal) (platformIntentProjectionResponse, error) {
+	return s.capturePlatformIntentWithStatic(ctx, principal, platformproducer.StaticIntentInput{Routes: s.platformRoutes, DNS: s.dnsStaticRecords})
+}
+
+func (s *Server) capturePlatformIntentWithStatic(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput) (platformIntentProjectionResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return platformIntentProjectionResponse{}, err
 	}
@@ -94,15 +114,15 @@ func (s *Server) capturePlatformIntent(ctx context.Context, principal model.Prin
 	}
 	source := &platformProjectionSource{edgeRouteIntentSource: routeBusinessSource{business}}
 	observed := map[string]model.App{}
-	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithObservations(ctx, source, func(apps []model.App) {
+	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithStatic(ctx, source, func(apps []model.App) {
 		for _, app := range apps {
 			observed[app.ID] = app
 		}
-	})
+	}, static.Routes)
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route projection unavailable")
 	}
-	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, s.platformRoutes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords, s.dnsStaticRecords)
+	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, static.Routes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords, static.DNS)
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route draft cannot be captured")
 	}
@@ -111,10 +131,10 @@ func (s *Server) capturePlatformIntent(ctx context.Context, principal model.Prin
 	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("TLS domain lifecycle projection invalid")
 	}
-	if err := projectPlatformEntryDNS(&projection, s.platformRoutes, s.dnsStaticRecords, []string{s.appBaseDomain, s.customDomainBaseDomain}); err != nil {
+	if err := projectPlatformEntryDNS(&projection, static.Routes, static.DNS, []string{s.appBaseDomain, s.customDomainBaseDomain}); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("platform DNS entry migration configuration invalid")
 	}
-	if err := s.projectPlatformDomainDNS(&projection, business.Domains); err != nil {
+	if err := s.projectPlatformDomainDNSWithStatic(&projection, business.Domains, static.DNS); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("platform domain DNS ownership projection invalid")
 	}
 	if err := projectDefaultAppDNS(&projection, s.appBaseDomain, s.dnsBundleTTL); err != nil {

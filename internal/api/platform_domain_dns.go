@@ -12,6 +12,10 @@ import (
 // precedence as explicit platform entries. Preserve that desired ownership,
 // while all address selection and route/TLS readiness stay in fixed facts.
 func (s *Server) projectPlatformDomainDNS(result *platformIntentProjectionResponse, domains []model.AppDomain) error {
+	return s.projectPlatformDomainDNSWithStatic(result, domains, s.dnsStaticRecords)
+}
+
+func (s *Server) projectPlatformDomainDNSWithStatic(result *platformIntentProjectionResponse, domains []model.AppDomain, configuredRecords []model.EdgeDNSRecord) error {
 	routes := make(map[string][]platformconfig.RouteIntent)
 	for _, route := range result.Intent.Routes {
 		routes[route.Hostname] = append(routes[route.Hostname], route)
@@ -44,7 +48,7 @@ func (s *Server) projectPlatformDomainDNS(result *platformIntentProjectionRespon
 	if len(desired) == 0 {
 		return nil
 	}
-	staticRecords, _ := projectBusinessDNSDraft(&platformIntentProjectionResponse{}, nil, nil, nil, s.dnsStaticRecords)
+	staticRecords, _ := projectBusinessDNSDraft(&platformIntentProjectionResponse{}, nil, nil, nil, configuredRecords)
 	staticDigests := map[string]int{}
 	for _, record := range staticRecords {
 		if record.Type != "A" && record.Type != "AAAA" && record.Type != "CNAME" {

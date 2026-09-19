@@ -9,6 +9,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
+	"fugue/internal/platformsafety"
 	"fugue/internal/store"
 )
 
@@ -108,7 +109,16 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	}
 	runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	projection, err := capture(runCtx, principal)
+	var projection platformIntentProjectionResponse
+	if policy.InputSource == "business-static-intent" {
+		static, loadErr := s.loadStaticPlatformIntent(policy.StaticIntentArtifactID, policy.StaticIntentDigest)
+		if loadErr != nil {
+			return interval, loadErr
+		}
+		projection, err = s.capturePlatformIntentWithStatic(runCtx, principal, static)
+	} else {
+		projection, err = capture(runCtx, principal)
+	}
 	if err != nil {
 		return interval, err
 	}
@@ -133,6 +143,10 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 		projection.RuntimeSnapshot.Facts = map[string]any{}
 	}
 	projection.RuntimeSnapshot.Facts["configuration_producer"] = map[string]any{"policy_release_id": authority.ID, "source_digest": sourceDigest}
+	if policy.InputSource == "business-static-intent" {
+		binding := projection.RuntimeSnapshot.Facts["configuration_producer"].(map[string]any)
+		binding["static_intent_artifact_id"], binding["static_intent_digest"] = policy.StaticIntentArtifactID, policy.StaticIntentDigest
+	}
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot})
 	if err != nil {
 		return interval, err
@@ -141,7 +155,7 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	if err != nil {
 		return interval, err
 	}
-	result, err := s.materializePlatformCompilation(runCtx, compiled, principal, &inputs, platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest})
+	result, err := s.materializePlatformCompilation(runCtx, compiled, principal, &inputs, platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest})
 	if err != nil {
 		return interval, err
 	}
@@ -160,6 +174,17 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 		s.log.Printf("platform configuration producer published policy_release=%s release=%s artifact=%s source_digest=%s business_revision=%s", authority.ID, release.ID, result.ReleaseArtifact.ID, sourceDigest, projection.BusinessSnapshotRevision)
 	}
 	return interval, nil
+}
+
+func (s *Server) loadStaticPlatformIntent(id, digest string) (platformproducer.StaticIntentInput, error) {
+	a, err := s.store.GetPlatformArtifact(id)
+	if err != nil {
+		return platformproducer.StaticIntentInput{}, err
+	}
+	if a.ID != id || a.Status != model.PlatformArtifactStatusValidated || digest != "" && a.ContentHash != digest || s.store.VerifyPlatformArtifactIntegrity(a) != nil || !platformsafety.EvaluateArtifactIntegrity(a, s.bundleKeyring()).Pass {
+		return platformproducer.StaticIntentInput{}, fmt.Errorf("static intent reference is not trusted")
+	}
+	return platformproducer.DecodeStaticIntent(a)
 }
 
 func (s *Server) ensurePlatformProducerInputs(ctx context.Context, compiled platformconfig.CompileResult, principal model.Principal) (platformConfigStoredInputs, error) {

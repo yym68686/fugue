@@ -31,7 +31,7 @@ func TestPlatformProducerGuardPostgres(t *testing.T) {
 }
 
 func testPlatformProducerGuard(t *testing.T, dsn string) {
-	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze"} {
+	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if strings.HasPrefix(scenario, "queued") && dsn == "" {
 				t.Skip("real PostgreSQL queue")
@@ -49,9 +49,36 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			}
 			since := time.Now().UTC()
 			principal := model.Principal{ActorType: model.ActorTypeBootstrap, ActorID: platformproducer.Actor, Scopes: map[string]struct{}{"platform.admin": {}}}
+			var static model.PlatformArtifact
+			staticCase := strings.Contains(scenario, "static")
+			if staticCase {
+				gen := model.NewID("static")
+				i := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: gen, Routes: []platformconfig.RouteIntent{{Hostname: "static.example.test", UpstreamURL: "http://static:8080", Enabled: true}}}
+				raw, _ := json.Marshal(i)
+				var content map[string]any
+				json.Unmarshal(raw, &content)
+				var err error
+				static, err = s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPlatformIntent, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: "global"}, Generation: gen, Content: content})
+				if err != nil {
+					t.Fatal(err)
+				}
+				static, err = s.ValidatePlatformArtifact(static.ID, []model.PlatformArtifactValidationResult{{Name: "static", Pass: true}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			makePolicy := func(mode string) model.PlatformArtifactRelease {
 				gen := model.NewID("producer-policy")
-				raw, _ := json.Marshal(platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: gen, Mode: mode, InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 120})
+				policy := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: gen, Mode: mode, InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 120}
+				if staticCase {
+					policy.InputSource = "business-static-intent"
+					policy.StaticIntentArtifactID = static.ID
+					policy.StaticIntentDigest = static.ContentHash
+					if scenario == "static digest" {
+						policy.StaticIntentDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+					}
+				}
+				raw, _ := json.Marshal(policy)
 				var content map[string]any
 				json.Unmarshal(raw, &content)
 				a, err := s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: platformproducer.Scope}, Generation: gen, Content: content})
@@ -109,6 +136,13 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, ids, time.Now().UTC())
 			parent.Metadata[platformproducer.PolicyReleaseMetadata] = authority.ID
 			parent.Metadata[platformproducer.SourceDigestMetadata] = "sha256:source"
+			if staticCase {
+				parent.Metadata[platformproducer.StaticIntentIDMetadata] = static.ID
+				parent.Metadata[platformproducer.StaticIntentDigestMetadata] = static.ContentHash
+				if scenario == "static binding" {
+					delete(parent.Metadata, platformproducer.StaticIntentIDMetadata)
+				}
+			}
 			parent, err = s.CreatePlatformArtifact(parent)
 			if err != nil {
 				t.Fatal(err)
@@ -140,6 +174,23 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 				}
 			}
 			switch scenario {
+			case "static revoked validation":
+				if _, err := s.ValidatePlatformArtifact(static.ID, []model.PlatformArtifactValidationResult{{Name: "invalidated", Pass: false, Severity: model.RobustnessSeverityBlockPublish}}); err != nil {
+					t.Fatal(err)
+				}
+			case "static tampered":
+				if dsn != "" {
+					if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json || '{"tampered":true}'::jsonb WHERE id=$1`, static.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := s.withLockedState(true, func(st *model.State) error {
+						st.PlatformArtifacts[platformArtifactIndex(st.PlatformArtifacts, static.ID)].Content["tampered"] = true
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
 			case "paused":
 				makePolicy("paused")
 			case "superseded":
@@ -205,8 +256,14 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					}
 					time.Sleep(10 * time.Millisecond)
 				}
-				if _, err = tx.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE scope_key=$1 AND release_channel='shadow'`, scope); err != nil {
-					t.Fatal(err)
+				if scenario == "queued static invalidation" {
+					if _, err = tx.Exec(`UPDATE fugue_platform_artifacts SET status='invalid' WHERE id=$1`, static.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if _, err = tx.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE scope_key=$1 AND release_channel='shadow'`, scope); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if err = tx.Commit(); err != nil {
 					t.Fatal(err)
@@ -226,7 +283,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if scenario == "complete" || scenario == "retry" {
+			if scenario == "complete" || scenario == "retry" || scenario == "static complete" {
 				if err != nil || len(after) != len(before)+1 {
 					t.Fatal("valid production failed", err)
 				}
@@ -239,7 +296,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 						t.Fatal("retry added another release")
 					}
 				}
-			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && !reflect.DeepEqual(before, after) {
+			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && !reflect.DeepEqual(before, after) {
 				t.Fatal("failed producer mutated ledger", err)
 			}
 		})

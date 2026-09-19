@@ -59,6 +59,21 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 	if err != nil || policy.Mode != "shadow" || policyRelease.Generation != artifact.Generation || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
 		return ErrConflict
 	}
+	if policy.InputSource == "business-static-intent" {
+		index := platformArtifactIndex(state.PlatformArtifacts, policy.StaticIntentArtifactID)
+		if index < 0 {
+			return ErrConflict
+		}
+		base := state.PlatformArtifacts[index]
+		if base.ID != policy.StaticIntentArtifactID || base.ContentHash != policy.StaticIntentDigest || base.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(base, keys).Pass || parent.Metadata[platformproducer.StaticIntentIDMetadata] != base.ID || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != base.ContentHash {
+			return ErrConflict
+		}
+		if _, err := platformproducer.DecodeStaticIntent(base); err != nil {
+			return ErrConflict
+		}
+	} else if parent.Metadata[platformproducer.StaticIntentIDMetadata] != "" || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != "" {
+		return ErrConflict
+	}
 	ids, idsOK := parent.Content["artifact_ids"].([]any)
 	kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
 	if !idsOK || !kindsOK || len(ids) != 3 || len(kinds) != 3 {
@@ -143,6 +158,17 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 	}
 	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	state.PlatformArtifacts = []model.PlatformArtifact{artifact}
+	policy, err := platformproducer.Decode(artifact)
+	if err != nil {
+		return ErrConflict
+	}
+	if policy.StaticIntentArtifactID != "" {
+		base, err := pgGetPlatformArtifactForUpdate(ctx, tx, policy.StaticIntentArtifactID, true)
+		if err != nil {
+			return err
+		}
+		state.PlatformArtifacts = append(state.PlatformArtifacts, base)
+	}
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	if !ok || len(ids) != 3 {
 		return ErrConflict

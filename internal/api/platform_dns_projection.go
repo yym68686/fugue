@@ -74,7 +74,14 @@ func projectBusinessDNSDraft(result *platformIntentProjectionResponse, apps map[
 		result.Issues = append(result.Issues, platformProjectionIssue{Code: code, Hostname: hostname})
 	}
 	for _, record := range static {
-		out = append(out, platformconfig.DNSIntent{Hostname: record.Name, Type: record.Type, Values: append([]string(nil), record.Values...), TTL: record.TTL, RecordKind: record.RecordKind, Status: record.Status, StatusReason: record.StatusReason, AppID: record.AppID, TenantID: record.TenantID, EdgeGroupID: record.EdgeGroupID, FallbackEdgeGroupID: record.FallbackEdgeGroupID})
+		expirations := map[string]time.Time{}
+		for value, until := range record.ValueExpirations {
+			expirations[value] = until
+		}
+		if len(expirations) == 0 {
+			expirations = nil
+		}
+		out = append(out, platformconfig.DNSIntent{Hostname: record.Name, Type: record.Type, Values: append([]string(nil), record.Values...), ValueExpirations: expirations, TTL: record.TTL, RecordKind: record.RecordKind, Status: record.Status, StatusReason: record.StatusReason, AppID: record.AppID, TenantID: record.TenantID, EdgeGroupID: record.EdgeGroupID, FallbackEdgeGroupID: record.FallbackEdgeGroupID})
 	}
 	for _, record := range records {
 		host := normalizeExternalAppDomain(record.FQDN)
