@@ -3,6 +3,9 @@ package controller
 import (
 	"context"
 	"errors"
+	"fugue/internal/config"
+	"fugue/internal/store"
+	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -284,5 +287,57 @@ func TestAppWithResolvedLaunchOverrideDoesNotUseFallbackForDockerImageSource(t *
 	}
 	if len(resolved.Spec.Args) != 0 {
 		t.Fatalf("expected docker image source args to remain empty, got %#v", resolved.Spec.Args)
+	}
+}
+
+func TestLaunchOverrideUsesDistributedCacheWithoutLogicalDNSFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mode   string
+		cached bool
+		want   []string
+	}{
+		{name: "physical replica", mode: "distributed", cached: true, want: []string{"192.0.2.10:5000/apps/demo:tag"}},
+		{name: "no reachable evidence", mode: "distributed"},
+		{name: "explicit registry fallback", mode: "distributed-with-registry-fallback", cached: true, want: []string{"192.0.2.10:5000/apps/demo:tag", "logical.example:5000/apps/demo:tag"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := state.Init(); err != nil {
+				t.Fatal(err)
+			}
+			app := model.App{ID: "app-demo", TenantID: "tenant-demo", Spec: model.AppSpec{Image: "logical.example:5000/apps/demo:tag", Command: []string{"sh", "-lc", "run-service"}}, BuildSource: &model.AppSource{BuildStrategy: model.AppBuildStrategyBuildpacks}}
+			if tc.cached {
+				_, err := state.UpsertImageLocation(model.ImageLocation{TenantID: app.TenantID, AppID: app.ID, ImageRef: app.Spec.Image, RuntimeID: "runtime-demo", CacheEndpoint: "http://192.0.2.10:5000", Status: model.ImageLocationStatusPresent})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			svc := &Service{Store: state, Config: config.ControllerConfig{ImageStoreMode: tc.mode}, registryPushBase: "logical.example:5000", registryPullBase: "logical.example:5000"}
+			got := svc.launchOverrideInspectionImageRefs(app)
+			if len(got) != len(tc.want) {
+				t.Fatalf("refs=%v want=%v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("refs=%v want=%v", got, tc.want)
+				}
+			}
+			calls := 0
+			svc.inspectManagedImageConfig = func(_ context.Context, ref string) (*v1.ConfigFile, error) {
+				calls++
+				if !tc.cached || ref != "192.0.2.10:5000/apps/demo:tag" {
+					t.Fatalf("unexpected inspection: %s", ref)
+				}
+				return &v1.ConfigFile{Config: v1.Config{Entrypoint: []string{"/cnb/process/web"}}}, nil
+			}
+			resolved := svc.appWithResolvedLaunchOverride(context.Background(), app)
+			if resolved.Spec.Command[0] != defaultCNBLauncherPath {
+				t.Fatalf("launcher lost: %v", resolved.Spec.Command)
+			}
+			if !tc.cached && calls != 0 {
+				t.Fatal("unknown cache was inspected")
+			}
+		})
 	}
 }

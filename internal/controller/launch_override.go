@@ -116,6 +116,31 @@ func (s *Service) launchOverrideInspectionImageRefs(app model.App) []string {
 	if s.shouldInspectControllerImageRef(app.Spec.Image) {
 		appendUnique(app.Spec.Image)
 	}
+	if !s.imageStoreDistributedMode() {
+		return refs
+	}
+	// Logical registry aliases are resolved by node containerd configuration,
+	// which is not available inside the controller Pod. Inspect the same image
+	// through its fresh physical cache locations, honoring registry fallback
+	// policy instead of issuing DNS requests for an unreachable logical alias.
+	logicalRefs := refs
+	refs = nil
+	for _, ref := range logicalRefs {
+		if !s.imageRefUsesConfiguredInternalRegistry(ref) {
+			appendUnique(ref)
+			continue
+		}
+		locations, err := s.presentImageLocations(app, ref)
+		if err != nil && s.Logger != nil {
+			s.Logger.Printf("resolve launch override image locations app=%s: %v", app.ID, err)
+		}
+		for _, location := range locations {
+			appendUnique(cacheEndpointImageRef(location.CacheEndpoint, ref))
+		}
+		if s.imageStoreRegistryFallbackEnabled() {
+			appendUnique(ref)
+		}
+	}
 	return refs
 }
 
