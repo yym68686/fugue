@@ -266,10 +266,11 @@ func managedPostgresLifecycleProgressBestEffort(progress func(string) error, mes
 }
 
 type managedPostgresSuspendPodDrainHooks struct {
-	ListPods    func(context.Context, model.App) ([]kubePod, error)
-	Wait        func(context.Context, []kubeWatchTarget, time.Duration) error
-	EnsureOwned func() error
-	Progress    func(string) error
+	ListPodSnapshot func(context.Context, model.App) (kubePodList, error)
+	ListPods        func(context.Context, model.App) ([]kubePod, error)
+	Wait            func(context.Context, []kubeWatchTarget, time.Duration) error
+	EnsureOwned     func() error
+	Progress        func(string) error
 }
 
 func (s *Service) waitForManagedPostgresSuspendConsumersStopped(
@@ -295,6 +296,9 @@ func (s *Service) waitForManagedPostgresSuspendConsumersStopped(
 		interval = 2 * time.Second
 	}
 	hooks := managedPostgresSuspendPodDrainHooks{
+		ListPodSnapshot: func(callCtx context.Context, app model.App) (kubePodList, error) {
+			return client.listPodSnapshotBySelector(callCtx, runtime.NamespaceForTenant(app.TenantID), managedAppPodLabelSelector(app))
+		},
 		ListPods: func(callCtx context.Context, app model.App) ([]kubePod, error) {
 			selector := strings.TrimSpace(managedAppPodLabelSelector(app))
 			if selector == "" {
@@ -348,7 +352,7 @@ func waitForManagedPostgresSuspendConsumerPodDrain(
 	consumerApps []model.App,
 	hooks managedPostgresSuspendPodDrainHooks,
 ) error {
-	if len(consumerApps) == 0 || hooks.ListPods == nil || hooks.Wait == nil {
+	if len(consumerApps) == 0 || (hooks.ListPods == nil && hooks.ListPodSnapshot == nil) || hooks.Wait == nil {
 		return fmt.Errorf("managed postgres suspend pod-drain inputs are incomplete")
 	}
 	if timeout <= 0 {
@@ -369,7 +373,15 @@ func waitForManagedPostgresSuspendConsumerPodDrain(
 		remaining := 0
 		watchTargets := make([]kubeWatchTarget, 0, len(consumerApps))
 		for _, app := range consumerApps {
-			pods, err := hooks.ListPods(waitCtx, app)
+			var pods []kubePod
+			var resourceVersion string
+			var err error
+			if hooks.ListPodSnapshot != nil {
+				snapshot, listErr := hooks.ListPodSnapshot(waitCtx, app)
+				pods, resourceVersion, err = snapshot.Items, snapshot.Metadata.ResourceVersion, listErr
+			} else {
+				pods, err = hooks.ListPods(waitCtx, app)
+			}
 			if err != nil {
 				return fmt.Errorf("list actual pods for managed postgres consumer app %s: %w", app.ID, err)
 			}
@@ -377,7 +389,7 @@ func waitForManagedPostgresSuspendConsumerPodDrain(
 			// succeeded, and failed pods that still exist in the API server.
 			remaining += len(pods)
 			if len(pods) > 0 {
-				watchTargets = append(watchTargets, managedAppPodRolloutWatchTargets(runtime.NamespaceForTenant(app.TenantID), app)...)
+				watchTargets = append(watchTargets, managedAppPodRolloutWatchTargets(runtime.NamespaceForTenant(app.TenantID), app, resourceVersion)...)
 			}
 		}
 		if remaining == 0 {

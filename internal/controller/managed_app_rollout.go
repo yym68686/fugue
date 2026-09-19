@@ -197,15 +197,18 @@ func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
 		blockingMessage := ""
 		volumePod, volumeMessage := "", ""
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
-			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppRevisionPodLabelSelector(app, revision))
+			podSnapshot, err := client.listPodSnapshotBySelector(waitCtx, namespace, managedAppRevisionPodLabelSelector(app, revision))
+			pods := podSnapshot.Items
 			if err != nil {
 				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
 					return fmt.Errorf("list candidate revision pods for %s/%s: %w", namespace, expectedName, err)
 				}
 				pods = nil
 			}
+			if err == nil {
+				watchTargets = append(watchTargets, managedAppRevisionPodRolloutWatchTargets(namespace, app, revision, podSnapshot.Metadata.ResourceVersion)...)
+			}
 			if len(pods) > 0 {
-				watchTargets = append(watchTargets, managedAppRevisionPodRolloutWatchTargets(namespace, app, revision)...)
 				volumePod, volumeMessage = deploymentVolumeBlockMessage(waitCtx, client, namespace, pods, deployment, s.rolloutObservationTime())
 				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
 					primaryEvidenceID := s.captureDeploymentRolloutFailureEvidence(waitCtx, client, app, operationID, namespace, deployment, pods, failureMessage)
@@ -323,15 +326,18 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 		blockingMessage := ""
 		volumePod, volumeMessage := "", ""
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
-			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppPodLabelSelector(app))
+			podSnapshot, err := client.listPodSnapshotBySelector(waitCtx, namespace, managedAppPodLabelSelector(app))
+			pods := podSnapshot.Items
 			if err != nil {
 				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
 					return fmt.Errorf("list deployment pods for %s/%s: %w", namespace, strings.TrimSpace(deployment.Metadata.Name), err)
 				}
 				pods = nil
 			}
+			if err == nil {
+				watchTargets = append(watchTargets, managedAppPodRolloutWatchTargets(namespace, app, podSnapshot.Metadata.ResourceVersion)...)
+			}
 			if len(pods) > 0 {
-				watchTargets = append(watchTargets, managedAppPodRolloutWatchTargets(namespace, app)...)
 				volumePod, volumeMessage = deploymentVolumeBlockMessage(waitCtx, client, namespace, pods, deployment, s.rolloutObservationTime())
 				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
 					primaryEvidenceID := s.captureDeploymentRolloutFailureEvidence(waitCtx, client, app, operationID, namespace, deployment, pods, failureMessage)
@@ -541,7 +547,7 @@ func managedAppRolloutWatchTargets(namespace, name string, managed runtime.Manag
 	return []kubeWatchTarget{target}
 }
 
-func managedAppPodRolloutWatchTargets(namespace string, app model.App) []kubeWatchTarget {
+func managedAppPodRolloutWatchTargets(namespace string, app model.App, resourceVersion ...string) []kubeWatchTarget {
 	selector := strings.TrimSpace(managedAppPodLabelSelector(app))
 	if selector == "" {
 		return nil
@@ -549,11 +555,12 @@ func managedAppPodRolloutWatchTargets(namespace string, app model.App) []kubeWat
 	query := url.Values{}
 	query.Set("labelSelector", selector)
 	return []kubeWatchTarget{{
-		apiPath: "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+		apiPath:         "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+		resourceVersion: podListWatchVersion(resourceVersion),
 	}}
 }
 
-func managedAppRevisionPodRolloutWatchTargets(namespace string, app model.App, revision runtime.AppRevisionRenderOptions) []kubeWatchTarget {
+func managedAppRevisionPodRolloutWatchTargets(namespace string, app model.App, revision runtime.AppRevisionRenderOptions, resourceVersion ...string) []kubeWatchTarget {
 	selector := strings.TrimSpace(managedAppRevisionPodLabelSelector(app, revision))
 	if selector == "" {
 		return nil
@@ -561,7 +568,8 @@ func managedAppRevisionPodRolloutWatchTargets(namespace string, app model.App, r
 	query := url.Values{}
 	query.Set("labelSelector", selector)
 	return []kubeWatchTarget{{
-		apiPath: "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+		apiPath:         "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+		resourceVersion: podListWatchVersion(resourceVersion),
 	}}
 }
 
@@ -579,7 +587,7 @@ func cloudNativePGClusterRolloutWatchTargets(namespace, name string, cluster kub
 	return []kubeWatchTarget{target}
 }
 
-func managedPostgresPodRolloutWatchTargets(namespace, clusterName string) []kubeWatchTarget {
+func managedPostgresPodRolloutWatchTargets(namespace, clusterName string, resourceVersion ...string) []kubeWatchTarget {
 	selector := strings.TrimSpace(fmt.Sprintf(managedPostgresPodSelectorTemplate, clusterName))
 	if selector == "" {
 		return nil
@@ -587,7 +595,8 @@ func managedPostgresPodRolloutWatchTargets(namespace, clusterName string) []kube
 	query := url.Values{}
 	query.Set("labelSelector", selector)
 	return []kubeWatchTarget{{
-		apiPath: "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+		apiPath:         "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+		resourceVersion: podListWatchVersion(resourceVersion),
 	}}
 }
 
@@ -609,7 +618,8 @@ func (s *Service) managedBackingServicesRolloutReady(
 			}
 			watchTargets = append(watchTargets, cloudNativePGClusterRolloutWatchTargets(namespace, deployment.ResourceName, cluster, found)...)
 			podsListed := true
-			pods, err := client.listPodsBySelector(ctx, namespace, fmt.Sprintf(managedPostgresPodSelectorTemplate, deployment.ResourceName))
+			podSnapshot, err := client.listPodSnapshotBySelector(ctx, namespace, fmt.Sprintf(managedPostgresPodSelectorTemplate, deployment.ResourceName))
+			pods := podSnapshot.Items
 			if err != nil {
 				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
 					return false, "", watchTargets, fmt.Errorf("list backing service pods %s/%s: %w", namespace, deployment.ResourceName, err)
@@ -625,8 +635,10 @@ func (s *Service) managedBackingServicesRolloutReady(
 				podsListed = false
 				pods = nil
 			}
+			if err == nil {
+				watchTargets = append(watchTargets, managedPostgresPodRolloutWatchTargets(namespace, deployment.ResourceName, podSnapshot.Metadata.ResourceVersion)...)
+			}
 			if len(pods) > 0 {
-				watchTargets = append(watchTargets, managedPostgresPodRolloutWatchTargets(namespace, deployment.ResourceName)...)
 				if failureMessage := managedPostgresPodFailureMessage(pods); failureMessage != "" {
 					return false, "", watchTargets, fmt.Errorf("backing service cluster %s/%s rollout failed: %s", namespace, deployment.ResourceName, failureMessage)
 				}
@@ -1545,4 +1557,13 @@ func deploymentPrimaryContainerImage(deployment kubeDeployment) string {
 		}
 	}
 	return ""
+}
+
+// The LIST collection cursor also observes creation after an empty list. A Pod's
+// own resourceVersion is not a substitute for the collection observation.
+func podListWatchVersion(versions []string) string {
+	if len(versions) != 1 {
+		return ""
+	}
+	return strings.TrimSpace(versions[0])
 }

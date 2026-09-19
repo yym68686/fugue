@@ -57,6 +57,9 @@ type kubeLeaseSpec struct {
 }
 
 type kubePodList struct {
+	Metadata struct {
+		ResourceVersion string `json:"resourceVersion"`
+	} `json:"metadata"`
 	Items []kubePod `json:"items"`
 }
 
@@ -560,6 +563,11 @@ func (c *kubeClient) getPodIP(ctx context.Context, namespace, name string) (stri
 }
 
 func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSelector string) ([]kubePod, error) {
+	list, err := c.listPodSnapshotBySelector(ctx, namespace, labelSelector)
+	return list.Items, err
+}
+
+func (c *kubeClient) listPodSnapshotBySelector(ctx context.Context, namespace, labelSelector string) (kubePodList, error) {
 	query := url.Values{}
 	if strings.TrimSpace(labelSelector) != "" {
 		query.Set("labelSelector", labelSelector)
@@ -572,7 +580,7 @@ func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSel
 	}
 	_, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &podList)
 	if err != nil {
-		return nil, err
+		return kubePodList{}, err
 	}
 
 	sort.Slice(podList.Items, func(i, j int) bool {
@@ -584,7 +592,7 @@ func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSel
 		return left.Metadata.Name < right.Metadata.Name
 	})
 
-	return podList.Items, nil
+	return podList, nil
 }
 
 func (c *kubeClient) getPodLogs(ctx context.Context, namespace, podName, containerName string, previous bool, tailLines int) (string, bool, error) {

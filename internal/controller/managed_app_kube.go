@@ -1214,7 +1214,9 @@ func uniqueKubeWatchTargets(targets []kubeWatchTarget) []kubeWatchTarget {
 		target.apiPath = strings.TrimSpace(target.apiPath)
 		target.fieldSelector = strings.TrimSpace(target.fieldSelector)
 		target.resourceVersion = strings.TrimSpace(target.resourceVersion)
-		if target.apiPath == "" {
+		// An unbound watch replays existing objects as ADDED. Fall back to
+		// the bounded polling timer when no complete LIST cursor exists.
+		if target.apiPath == "" || target.resourceVersion == "" || target.resourceVersion == "0" {
 			continue
 		}
 		key := target.apiPath + "\x00" + target.fieldSelector + "\x00" + target.resourceVersion

@@ -215,11 +215,34 @@ type managedAppKubeSnapshot struct {
 	endpointSlicesAvailable bool
 }
 
-type kubeResourceList struct {
-	Items    []map[string]any `json:"items"`
+type kubeTypedResourceList[T any] struct {
+	Items    []T `json:"items"`
 	Metadata struct {
 		Continue string `json:"continue"`
 	} `json:"metadata"`
+}
+type kubeMetadataEvidence struct {
+	Metadata struct {
+		Name      string            `json:"name"`
+		Namespace string            `json:"namespace"`
+		Labels    map[string]string `json:"labels"`
+	} `json:"metadata"`
+}
+type kubeEndpointsEvidence struct {
+	kubeMetadataEvidence
+	Subsets []struct {
+		Addresses         []json.RawMessage `json:"addresses"`
+		NotReadyAddresses []json.RawMessage `json:"notReadyAddresses"`
+	} `json:"subsets"`
+}
+type kubeEndpointSliceEvidence struct {
+	kubeMetadataEvidence
+	Endpoints []struct {
+		Addresses  []string `json:"addresses"`
+		Conditions struct {
+			Ready *bool `json:"ready"`
+		} `json:"conditions"`
+	} `json:"endpoints"`
 }
 
 type kubeDeploymentRuntimeEvidence struct {
@@ -252,13 +275,6 @@ type kubeEndpointRuntimeEvidence struct {
 	Present           bool
 	ReadyAddresses    int
 	NotReadyAddresses int
-}
-
-type managedAppList struct {
-	Items    []map[string]any `json:"items"`
-	Metadata struct {
-		Continue string `json:"continue"`
-	} `json:"metadata"`
 }
 
 type kubeNamespaceIdentity struct {
@@ -612,15 +628,11 @@ func (c *managedAppStatusClient) listManagedAppsByAppIDWithValidation(ctx contex
 	seenContinue := make(map[string]struct{})
 	path := basePath
 	for {
-		var list managedAppList
+		var list kubeTypedResourceList[runtime.ManagedAppObject]
 		if err := c.doJSON(ctx, path, &list); err != nil {
 			return nil, err
 		}
-		for _, raw := range list.Items {
-			managed, err := runtime.ManagedAppObjectFromMap(raw)
-			if err != nil {
-				return nil, err
-			}
+		for _, managed := range list.Items {
 			if requireIdentity {
 				if err := validateObservedManagedAppObject(managed); err != nil {
 					return nil, err
@@ -654,16 +666,16 @@ func (c *managedAppStatusClient) listManagedAppsByAppIDWithValidation(ctx contex
 	}
 }
 
-func (c *managedAppStatusClient) listKubeResources(ctx context.Context, basePath string) ([]map[string]any, error) {
+func listTypedKubeResources[T any](ctx context.Context, c *managedAppStatusClient, basePath string) ([]T, error) {
 	basePath = strings.TrimSpace(basePath)
 	if basePath == "" {
 		return nil, fmt.Errorf("kubernetes resource list path is empty")
 	}
-	items := make([]map[string]any, 0)
+	items := make([]T, 0)
 	seenContinue := make(map[string]struct{})
 	path := basePath
 	for {
-		var list kubeResourceList
+		var list kubeTypedResourceList[T]
 		if err := c.doJSON(ctx, path, &list); err != nil {
 			return nil, err
 		}
@@ -686,8 +698,8 @@ func (c *managedAppStatusClient) listKubeResources(ctx context.Context, basePath
 // on a few older/locked-down Kubernetes APIs. A 404/405 means the API group is
 // unavailable and the legacy Endpoints snapshot remains the authoritative
 // source; all other failures are incomplete evidence and must fail closed.
-func (c *managedAppStatusClient) listKubeResourcesOptional(ctx context.Context, basePath string) ([]map[string]any, bool, error) {
-	items, err := c.listKubeResources(ctx, basePath)
+func listTypedKubeResourcesOptional[T any](ctx context.Context, c *managedAppStatusClient, basePath string) ([]T, bool, error) {
+	items, err := listTypedKubeResources[T](ctx, c, basePath)
 	if err == nil {
 		return items, true, nil
 	}
@@ -699,14 +711,17 @@ func (c *managedAppStatusClient) listKubeResourcesOptional(ctx context.Context, 
 }
 
 func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (managedAppKubeSnapshot, error) {
-	var namespaceItems, deploymentItems, serviceItems, endpointItems, endpointSliceItems []map[string]any
+	var namespaceItems, serviceItems []kubeMetadataEvidence
+	var deploymentItems []kubeDeploymentRuntimeEvidence
+	var endpointItems []kubeEndpointsEvidence
+	var endpointSliceItems []kubeEndpointSliceEvidence
 	endpointsAvailable := false
 	endpointSlicesAvailable := false
 	var endpointsErr, endpointSlicesErr error
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		var err error
-		namespaceItems, err = c.listKubeResources(groupCtx, "/api/v1/namespaces")
+		namespaceItems, err = listTypedKubeResources[kubeMetadataEvidence](groupCtx, c, "/api/v1/namespaces")
 		if err != nil {
 			return fmt.Errorf("list kubernetes namespaces: %w", err)
 		}
@@ -714,7 +729,7 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 	})
 	group.Go(func() error {
 		var err error
-		deploymentItems, err = c.listKubeResources(groupCtx, "/apis/apps/v1/deployments")
+		deploymentItems, err = listTypedKubeResources[kubeDeploymentRuntimeEvidence](groupCtx, c, "/apis/apps/v1/deployments")
 		if err != nil {
 			return fmt.Errorf("list kubernetes deployments: %w", err)
 		}
@@ -722,18 +737,18 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 	})
 	group.Go(func() error {
 		var err error
-		serviceItems, err = c.listKubeResources(groupCtx, "/api/v1/services")
+		serviceItems, err = listTypedKubeResources[kubeMetadataEvidence](groupCtx, c, "/api/v1/services")
 		if err != nil {
 			return fmt.Errorf("list kubernetes services: %w", err)
 		}
 		return nil
 	})
 	group.Go(func() error {
-		endpointItems, endpointsAvailable, endpointsErr = c.listKubeResourcesOptional(groupCtx, "/api/v1/endpoints")
+		endpointItems, endpointsAvailable, endpointsErr = listTypedKubeResourcesOptional[kubeEndpointsEvidence](groupCtx, c, "/api/v1/endpoints")
 		return nil
 	})
 	group.Go(func() error {
-		endpointSliceItems, endpointSlicesAvailable, endpointSlicesErr = c.listKubeResourcesOptional(groupCtx, "/apis/discovery.k8s.io/v1/endpointslices")
+		endpointSliceItems, endpointSlicesAvailable, endpointSlicesErr = listTypedKubeResourcesOptional[kubeEndpointSliceEvidence](groupCtx, c, "/apis/discovery.k8s.io/v1/endpointslices")
 		return nil
 	})
 	if err := group.Wait(); err != nil {
@@ -763,88 +778,58 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 		endpointsAvailable:      endpointsAvailable,
 		endpointSlicesAvailable: endpointSlicesAvailable,
 	}
-	for _, raw := range namespaceItems {
-		name := kubeObjectNamespaceOrName(raw, "")
+
+	for _, item := range namespaceItems {
+		name := strings.TrimSpace(item.Metadata.Name)
 		if name == "" {
 			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes namespace: metadata.name is missing")
 		}
 		snapshot.namespaces[name] = struct{}{}
 	}
-	for _, raw := range deploymentItems {
-		var deployment kubeDeploymentRuntimeEvidence
-		if err := decodeKubeObject(raw, &deployment); err != nil {
-			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes deployment: %w", err)
-		}
-		key := kubeNamespacedKey(deployment.Metadata.Namespace, deployment.Metadata.Name)
-		if key == "/" {
+	for _, deployment := range deploymentItems {
+		if strings.TrimSpace(deployment.Metadata.Name) == "" || strings.TrimSpace(deployment.Metadata.Namespace) == "" {
 			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes deployment: metadata name/namespace is missing")
 		}
-		snapshot.deployments[key] = deployment
+		snapshot.deployments[kubeNamespacedKey(deployment.Metadata.Namespace, deployment.Metadata.Name)] = deployment
 	}
-	for _, raw := range serviceItems {
-		key := kubeObjectNamespacedKey(raw)
-		if key != "/" {
-			snapshot.services[key] = struct{}{}
-		} else {
+	for _, item := range serviceItems {
+		if strings.TrimSpace(item.Metadata.Name) == "" || strings.TrimSpace(item.Metadata.Namespace) == "" {
 			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes service: metadata name/namespace is missing")
 		}
+		snapshot.services[kubeNamespacedKey(item.Metadata.Namespace, item.Metadata.Name)] = struct{}{}
 	}
-	for _, raw := range endpointItems {
-		metadata := kubeObjectMetadata(raw)
-		key := kubeNamespacedKey(metadata.namespace, metadata.name)
-		if key == "/" {
+	for _, item := range endpointItems {
+		if strings.TrimSpace(item.Metadata.Name) == "" || strings.TrimSpace(item.Metadata.Namespace) == "" {
 			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes endpoint: metadata name/namespace is missing")
 		}
 		evidence := kubeEndpointRuntimeEvidence{Present: true}
-		if subsets, ok := raw["subsets"].([]any); ok {
-			for _, rawSubset := range subsets {
-				subset, ok := rawSubset.(map[string]any)
-				if !ok {
-					continue
-				}
-				evidence.ReadyAddresses += kubeAddressCount(subset["addresses"])
-				evidence.NotReadyAddresses += kubeAddressCount(subset["notReadyAddresses"])
+		for _, subset := range item.Subsets {
+			evidence.ReadyAddresses += len(subset.Addresses)
+			evidence.NotReadyAddresses += len(subset.NotReadyAddresses)
+		}
+		snapshot.endpoints[kubeNamespacedKey(item.Metadata.Namespace, item.Metadata.Name)] = evidence
+	}
+	for _, item := range endpointSliceItems {
+		if strings.TrimSpace(item.Metadata.Name) == "" || strings.TrimSpace(item.Metadata.Namespace) == "" {
+			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes endpoint slice: metadata name/namespace is missing")
+		}
+		serviceName := strings.TrimSpace(item.Metadata.Labels["kubernetes.io/service-name"])
+		if serviceName == "" {
+			continue
+		}
+		key := kubeNamespacedKey(item.Metadata.Namespace, serviceName)
+		evidence := snapshot.endpointSlices[key]
+		evidence.Present = true
+		for _, endpoint := range item.Endpoints {
+			if endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
+				evidence.ReadyAddresses += len(endpoint.Addresses)
+			} else {
+				evidence.NotReadyAddresses += len(endpoint.Addresses)
 			}
 		}
-		snapshot.endpoints[key] = evidence
+		snapshot.endpointSlices[key] = evidence
 	}
-	if endpointSlicesAvailable {
-		for _, raw := range endpointSliceItems {
-			metadata := kubeObjectMetadata(raw)
-			if metadata.namespace == "" || metadata.name == "" {
-				return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes endpoint slice: metadata name/namespace is missing")
-			}
-			serviceName := ""
-			if metadataRaw, ok := raw["metadata"].(map[string]any); ok {
-				if labels, ok := metadataRaw["labels"].(map[string]any); ok {
-					serviceName, _ = labels["kubernetes.io/service-name"].(string)
-				}
-			}
-			key := kubeNamespacedKey(metadata.namespace, serviceName)
-			if key == "/" || strings.TrimSpace(serviceName) == "" {
-				continue
-			}
-			evidence := snapshot.endpointSlices[key]
-			evidence.Present = true
-			if endpoints, ok := raw["endpoints"].([]any); ok {
-				for _, rawEndpoint := range endpoints {
-					endpoint, ok := rawEndpoint.(map[string]any)
-					if !ok {
-						continue
-					}
-					addresses := kubeAddressCount(endpoint["addresses"])
-					conditions, _ := endpoint["conditions"].(map[string]any)
-					ready, hasReady := conditions["ready"].(bool)
-					if hasReady && ready {
-						evidence.ReadyAddresses += addresses
-					} else {
-						evidence.NotReadyAddresses += addresses
-					}
-				}
-			}
-			snapshot.endpointSlices[key] = evidence
-		}
-	}
+
 	return snapshot, nil
 }
 
@@ -922,18 +907,32 @@ func (c *managedAppStatusClient) doRequest(ctx context.Context, method, apiPath,
 	}
 	defer resp.Body.Close()
 
-	responseBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return &kubeStatusError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("kubernetes request %s %s failed: status=%d body=%s", method, apiPath, resp.StatusCode, strings.TrimSpace(string(responseBody))),
+		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if readErr != nil {
+			return fmt.Errorf("read kubernetes error response: %w", readErr)
 		}
+		return &kubeStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("kubernetes request %s %s failed: status=%d body=%s", method, apiPath, resp.StatusCode, strings.TrimSpace(string(responseBody)))}
 	}
-	if out != nil && len(responseBody) > 0 {
-		if err := json.Unmarshal(responseBody, out); err != nil {
+	if out != nil {
+		limited := &io.LimitedReader{R: resp.Body, N: (32 << 20) + 1}
+		decoder := json.NewDecoder(limited)
+		if err := decoder.Decode(out); err != nil {
 			return fmt.Errorf("decode kubernetes response: %w", err)
 		}
+		var trailing json.RawMessage
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			return fmt.Errorf("kubernetes response contains trailing data or read error: %v", err)
+		}
+		if limited.N <= 0 {
+			return fmt.Errorf("kubernetes response exceeds 32 MiB")
+		}
+	} else {
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			return fmt.Errorf("read kubernetes response: %w", err)
+		}
 	}
+
 	return nil
 }
 
@@ -1915,7 +1914,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 		mark("observation_identity_final")
 		var apps []model.App
 		if s != nil && s.store != nil {
-			apps, err = s.listAppSummariesWithTiming(ctx, "", true, true)
+			apps, err = s.listAppSummariesWithTiming(refreshCtx, "", true, true)
 			if err != nil {
 				return managedAppStatusListCacheEntry{}, fmt.Errorf("list apps for runtime evidence: %w", err)
 			}
@@ -1927,7 +1926,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 		for _, app := range apps {
 			appIDs = append(appIDs, strings.TrimSpace(app.ID))
 		}
-		storeSnapshot, snapshotErr := s.loadManagedAppStoreSnapshotScoped(ctx, apps, items, appIDs...)
+		storeSnapshot, snapshotErr := s.loadManagedAppStoreSnapshotScoped(refreshCtx, apps, items, appIDs...)
 		if snapshotErr != nil {
 			return managedAppStatusListCacheEntry{}, snapshotErr
 		}

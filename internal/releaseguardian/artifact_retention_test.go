@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	kubetesting "k8s.io/client-go/testing"
 )
 
 func TestArtifactPrunerRetainsCurrentRouteAndBoundedHistory(t *testing.T) {
@@ -155,5 +156,56 @@ func retentionConfigMap(name string, created time.Time, baseLabels, extraLabels,
 		},
 		Immutable: &value,
 		Data:      data,
+	}
+}
+
+func TestArtifactRetentionReferenceClosureIsOrderIndependent(t *testing.T) {
+	keep := map[string]bool{"execution": true}
+	refs := map[string][]string{
+		"execution": {"candidate"}, "candidate": {"rollback", "monitor"},
+		"rollback": {"ancestor", "old-monitor"}, "ancestor": {"rollback"},
+		"unreachable": {"unreachable-monitor"},
+	}
+	protectArtifactClosure(keep, refs)
+	for _, name := range []string{"candidate", "rollback", "monitor", "ancestor", "old-monitor"} {
+		if !keep[name] {
+			t.Fatalf("lost transitive recovery dependency %s", name)
+		}
+	}
+	if keep["unreachable"] || keep["unreachable-monitor"] {
+		t.Fatal("unreferenced history was retained")
+	}
+}
+
+func TestArtifactPrunerDefersWhenPublicationChangesDuringInventory(t *testing.T) {
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	group := "edge-pool-a"
+	objects := []runtime.Object{}
+	for i := 0; i < 10; i++ {
+		record := sealedRouteRecord(t, group, int64(i+1))
+		raw, _ := declarativerelease.CanonicalJSON(record)
+		objects = append(objects, retentionConfigMap(routeBundleRecordName(group, record.RecordDigest), now.Add(time.Duration(i-48)*time.Hour), authorityLabels(group), map[string]string{"fugue.pro/authority-kind": "route-bundle"}, map[string]string{"record.json": string(raw)}, true))
+	}
+	client := fake.NewSimpleClientset(objects...)
+	lists := 0
+	client.PrependReactor("list", "configmaps", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		lists++
+		if lists == 2 {
+			cm := retentionConfigMap("fugue-candidate-authority-edge-pool-a", now, authorityLabels(group), nil, map[string]string{"candidate.json": "new publication"}, false)
+			if err := client.Tracker().Add(cm); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return false, nil, nil
+	})
+	pruner, _ := NewArtifactPruner(client, "fugue-system", ArtifactRetentionPolicy{MinimumAge: time.Hour, MinimumHistory: 8, MaximumDeletes: 2})
+	result, err := pruner.Prune(context.Background(), now)
+	if err != nil || !result.Deferred || result.Deleted != 0 {
+		t.Fatalf("published reference changed during prune: %+v %v", result, err)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "delete" {
+			t.Fatal("deleted after a concurrent publication")
+		}
 	}
 }

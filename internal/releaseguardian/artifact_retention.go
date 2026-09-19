@@ -38,6 +38,9 @@ type ArtifactPruneResult struct {
 	Candidates int
 	Deleted    int
 	Remaining  int
+	Deferred   bool
+	Inventory  int
+	Protected  int
 }
 
 type ArtifactPruner struct {
@@ -72,22 +75,26 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 	if pruner == nil || pruner.client == nil || now.IsZero() || !now.Equal(now.UTC()) {
 		return ArtifactPruneResult{}, errors.New("release artifact prune request is invalid")
 	}
-	guardianObjects, err := pruner.listManagedConfigMaps(ctx, "fugue-release-guardian")
+	objects, err := pruner.listManagedConfigMaps(ctx, "")
 	if err != nil {
 		return ArtifactPruneResult{}, err
 	}
-	monitorObjects, err := pruner.listManagedConfigMaps(ctx, "fugue-declarative-release")
-	if err != nil {
-		return ArtifactPruneResult{}, err
+	var guardianObjects, monitorObjects []corev1.ConfigMap
+	for _, object := range objects {
+		if object.Labels["app.kubernetes.io/managed-by"] == "fugue-release-guardian" {
+			guardianObjects = append(guardianObjects, object)
+		} else {
+			monitorObjects = append(monitorObjects, object)
+		}
 	}
 	if len(guardianObjects)+len(monitorObjects) > maxArtifactInventory {
 		return ArtifactPruneResult{}, errors.New("release artifact inventory exceeds its cleanup bound")
 	}
 
 	keep := map[string]bool{}
-	desiredGenerations := map[Key]int64{}
 	artifacts := make([]retainedArtifact, 0, len(guardianObjects)+len(monitorObjects))
-	guardianRecords := make([]guardianArtifactReference, 0)
+	references := map[string][]string{}
+	busy := false
 
 	for index := range guardianObjects {
 		object := &guardianObjects[index]
@@ -99,13 +106,14 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 				return ArtifactPruneResult{}, artifactErr
 			}
 			artifacts = append(artifacts, retainedArtifact{object: *object, kind: "guardian-record", scope: record.Key().String(), identity: record.RecordDigest, priority: 2})
-			guardianRecords = append(guardianRecords, ref)
+			references[name] = []string{releaseRecordName(ref.key, ref.lkgRecordDigest), ref.lkgMonitorRecordRef}
 		case strings.HasPrefix(name, "fugue-guardian-execution-"):
 			key, generation, artifactErr := validateGuardianExecutionArtifact(object)
 			if artifactErr != nil {
 				return ArtifactPruneResult{}, artifactErr
 			}
 			artifacts = append(artifacts, retainedArtifact{object: *object, kind: "guardian-execution", scope: key.String(), identity: strconv.FormatInt(generation, 10), priority: 1})
+			references[name] = []string{releaseRecordName(key, strings.TrimSpace(object.Data["record-digest"]))}
 		case strings.HasPrefix(name, "fugue-route-bundle-record-"):
 			record, artifactErr := validateRouteBundleArtifact(object)
 			if artifactErr != nil {
@@ -119,11 +127,13 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 			}
 			keep[releaseRecordName(desired.Key(), desired.RecordDigest)] = true
 			keep[executionSnapshotName(desired.Key(), desired.Generation)] = true
-			desiredGenerations[desired.Key()] = desired.Generation
 		case strings.HasPrefix(name, "fugue-release-status-"):
 			var status ReleaseStatus
 			if decodeStrict([]byte(object.Data["status.json"]), &status) != nil || status.Validate(now) != nil || name != statusName(status.Key()) {
 				return ArtifactPruneResult{}, fmt.Errorf("release artifact cleanup encountered invalid ReleaseStatus %s", name)
+			}
+			if status.State != StateStable && status.State != StateLKGStable {
+				busy = true
 			}
 			for _, digest := range []string{status.CurrentRecordDigest, status.TargetRecordDigest, status.LastSuccessfulLKG} {
 				if digest != "" {
@@ -183,26 +193,9 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 	cutoff := now.Add(-pruner.policy.MinimumAge)
 	keepRecentArtifactHistory(artifacts, keep, cutoff, pruner.policy.MinimumHistory)
 
-	// Retained Guardian records must keep their exact rollback record and the
-	// direct monitor artifact whose bytes supply that rollback target.
-	for _, ref := range guardianRecords {
-		if !keep[ref.name] {
-			continue
-		}
-		keep[releaseRecordName(ref.key, ref.lkgRecordDigest)] = true
-		keep[ref.lkgMonitorRecordRef] = true
-	}
-	for index := range artifacts {
-		artifact := &artifacts[index]
-		if artifact.kind != "guardian-execution" {
-			continue
-		}
-		key, keyErr := keyFromGuardianLabels(&artifact.object)
-		generation, generationErr := strconv.ParseInt(artifact.identity, 10, 64)
-		if keyErr == nil && generationErr == nil && desiredGenerations[key] == generation {
-			keep[artifact.object.Name] = true
-		}
-	}
+	// Reach a fixed point: execution -> Guardian -> exact rollback/monitor.
+	// A single pass depends on list order and can delete a transitive predecessor.
+	protectArtifactClosure(keep, references)
 
 	candidates := make([]retainedArtifact, 0)
 	for _, artifact := range artifacts {
@@ -221,7 +214,27 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 		return candidates[left].object.Name < candidates[right].object.Name
 	})
 
-	result := ArtifactPruneResult{Candidates: len(candidates), Remaining: len(candidates)}
+	result := ArtifactPruneResult{Candidates: len(candidates), Remaining: len(candidates), Inventory: len(artifacts), Protected: len(artifacts) - len(candidates)}
+	if len(candidates) == 0 {
+		return result, nil
+	}
+	// A component in transition can still be consuming its immutable execution
+	// bundle. Never collect around an unfinished rollout or rollback.
+	if busy {
+		result.Deferred = true
+		return result, nil
+	}
+	latest, err := pruner.listManagedConfigMaps(ctx, "")
+	if err != nil {
+		return result, err
+	}
+	if artifactRootFingerprint(objects) != artifactRootFingerprint(latest) {
+		result.Deferred = true
+		return result, nil
+	}
+	// New publications may reference only their freshly created artifacts or the
+	// protected current/LKG predecessor. A changed inventory defers the pass;
+	// per-object UID/RV preconditions still fence each immutable deletion.
 	for index := 0; index < len(candidates) && index < pruner.policy.MaximumDeletes; index++ {
 		object := &candidates[index].object
 		uid, rv := object.UID, object.ResourceVersion
@@ -242,9 +255,13 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 
 func (pruner *ArtifactPruner) listManagedConfigMaps(ctx context.Context, manager string) ([]corev1.ConfigMap, error) {
 	selector := labels.Set{"app.kubernetes.io/managed-by": manager}.AsSelector().String()
+	if manager == "" {
+		selector = "app.kubernetes.io/managed-by in (fugue-release-guardian,fugue-declarative-release)"
+	}
 	configMaps := pruner.client.CoreV1().ConfigMaps(pruner.namespace)
 	result := make([]corev1.ConfigMap, 0)
 	continuation := ""
+	seen := map[string]bool{}
 	for {
 		page, err := configMaps.List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 500, Continue: continuation})
 		if err != nil {
@@ -258,6 +275,10 @@ func (pruner *ArtifactPruner) listManagedConfigMaps(ctx context.Context, manager
 		if continuation == "" {
 			return result, nil
 		}
+		if seen[continuation] {
+			return nil, errors.New("release artifact inventory repeated pagination cursor")
+		}
+		seen[continuation] = true
 	}
 }
 
@@ -337,4 +358,46 @@ func keepRecentArtifactHistory(artifacts []retainedArtifact, keep map[string]boo
 			}
 		}
 	}
+}
+
+func protectArtifactClosure(keep map[string]bool, references map[string][]string) {
+	queue := make([]string, 0, len(keep))
+	for name, retained := range keep {
+		if retained {
+			queue = append(queue, name)
+		}
+	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for _, ref := range references[name] {
+			if ref != "" && !keep[ref] {
+				keep[ref] = true
+				queue = append(queue, ref)
+			}
+		}
+	}
+}
+
+// Include new/deleted immutable records and the semantic pointer bytes. Health
+// observation timestamps alone change continuously and do not change reachability.
+func artifactRootFingerprint(objects []corev1.ConfigMap) string {
+	rows := make([]string, 0, len(objects))
+	for _, object := range objects {
+		value := object.Name + "/" + string(object.UID)
+		if strings.HasPrefix(object.Name, "fugue-release-status-") {
+			var status ReleaseStatus
+			if decodeStrict([]byte(object.Data["status.json"]), &status) != nil {
+				value += "/invalid/" + object.ResourceVersion
+			} else {
+				value += "/" + string(status.State) + "/" + status.CurrentRecordDigest + "/" + status.TargetRecordDigest + "/" + status.LastSuccessfulLKG
+			}
+		} else if object.Immutable == nil || !*object.Immutable {
+			raw, _ := declarativerelease.CanonicalJSON(object.Data)
+			value += "/" + digest(raw)
+		}
+		rows = append(rows, value)
+	}
+	sort.Strings(rows)
+	return strings.Join(rows, "\n")
 }

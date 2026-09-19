@@ -253,8 +253,8 @@ func runArtifactPruner(ctx context.Context, pruner *releaseguardian.ArtifactPrun
 			log.Printf("release artifact retention: %v", err)
 			return
 		}
-		if result.Deleted > 0 {
-			log.Printf("release artifact retention: deleted=%d remaining=%d candidates=%d", result.Deleted, result.Remaining, result.Candidates)
+		if result.Candidates > 0 {
+			log.Printf("release artifact retention: inventory=%d protected=%d deleted=%d remaining=%d candidates=%d deferred=%t", result.Inventory, result.Protected, result.Deleted, result.Remaining, result.Candidates, result.Deferred)
 		}
 	}
 	prune()

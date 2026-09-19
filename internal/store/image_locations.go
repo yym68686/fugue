@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"slices"
 	"sort"
 	"strings"
@@ -360,4 +361,18 @@ func imageLocationSeenAt(location model.ImageLocation) time.Time {
 		return *location.LastSeenAt
 	}
 	return location.UpdatedAt
+}
+
+func (s *Store) ListImageLocationsContext(ctx context.Context, filter model.ImageLocationFilter) ([]model.ImageLocation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.usingDatabase() {
+		return s.pgListImageLocationsContext(ctx, normalizeImageLocationFilter(filter))
+	}
+	result, err := s.ListImageLocations(filter)
+	if err == nil {
+		err = ctx.Err()
+	}
+	return result, err
 }

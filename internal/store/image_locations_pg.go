@@ -166,7 +166,10 @@ RETURNING id, tenant_id, app_id, image_ref, digest, source_operation_id, node_id
 }
 
 func (s *Store) pgListImageLocations(filter model.ImageLocationFilter) ([]model.ImageLocation, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return s.pgListImageLocationsContext(context.Background(), filter)
+}
+func (s *Store) pgListImageLocationsContext(ctx context.Context, filter model.ImageLocationFilter) ([]model.ImageLocation, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	clauses := []string{}

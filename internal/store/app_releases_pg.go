@@ -98,7 +98,10 @@ func (s *Store) pgListAppReleases(filter model.AppReleaseFilter) ([]model.AppRel
 }
 
 func (s *Store) pgListAppReleaseView(filter model.AppReleaseFilter, includeSpec bool) ([]model.AppRelease, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return s.pgListAppReleaseViewContext(context.Background(), filter, includeSpec)
+}
+func (s *Store) pgListAppReleaseViewContext(ctx context.Context, filter model.AppReleaseFilter, includeSpec bool) ([]model.AppRelease, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	clauses := []string{}
@@ -172,7 +175,10 @@ func (s *Store) pgGetAppTrafficPolicy(tenantID string, platformAdmin bool, appID
 }
 
 func (s *Store) pgListAppTrafficPolicies(tenantID string, platformAdmin bool) ([]model.AppTrafficPolicy, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return s.pgListAppTrafficPoliciesContext(context.Background(), tenantID, platformAdmin)
+}
+func (s *Store) pgListAppTrafficPoliciesContext(ctx context.Context, tenantID string, platformAdmin bool) ([]model.AppTrafficPolicy, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	args := []any{}

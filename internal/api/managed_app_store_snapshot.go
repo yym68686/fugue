@@ -13,12 +13,15 @@ import (
 	"strings"
 )
 
+type imageObservationKey struct{ tenant, app, runtime, image, status string }
+
 // A refresh observes the whole cluster. Load its durable evidence once instead
 // of paying a database round trip for every app, image reference, and status.
 type managedAppStoreSnapshot struct {
-	policies  map[string]model.AppTrafficPolicy
-	releases  map[string]model.AppRelease
-	locations map[string][]model.ImageLocation
+	policies      map[string]model.AppTrafficPolicy
+	releases      map[string]model.AppRelease
+	locations     map[string][]model.ImageLocation
+	locationIndex map[imageObservationKey][]model.ImageLocation
 }
 
 func (s *Server) loadManagedAppStoreSnapshot(ctx context.Context, appIDs ...string) (*managedAppStoreSnapshot, error) {
@@ -30,19 +33,19 @@ func (s *Server) loadManagedAppStoreSnapshotScoped(ctx context.Context, apps []m
 	var policies []model.AppTrafficPolicy
 	var releases []model.AppRelease
 	var locations []model.ImageLocation
-	group := new(errgroup.Group)
+	group, readCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		started := time.Now()
 		defer func() { serverTimingFromContext(ctx).Add("observation_traffic_policies", time.Since(started)) }()
 		var err error
-		policies, err = s.store.ListAppTrafficPolicies("", true)
+		policies, err = s.store.ListAppTrafficPoliciesContext(readCtx, "", true)
 		return err
 	})
 	group.Go(func() error {
 		started := time.Now()
 		defer func() { serverTimingFromContext(ctx).Add("observation_releases", time.Since(started)) }()
 		var err error
-		releases, err = s.store.ListAppReleaseMetadata(model.AppReleaseFilter{PlatformAdmin: true, ActiveOnly: true})
+		releases, err = s.store.ListAppReleaseMetadataContext(readCtx, model.AppReleaseFilter{PlatformAdmin: true, ActiveOnly: true})
 		return err
 	})
 	// The store treats an empty status as Present. Read every explicit status
@@ -53,7 +56,7 @@ func (s *Server) loadManagedAppStoreSnapshotScoped(ctx context.Context, apps []m
 			group.Go(func() error {
 				started := time.Now()
 				defer func() { serverTimingFromContext(ctx).Add("observation_locations_"+status, time.Since(started)) }()
-				items, err := s.store.ListImageLocations(model.ImageLocationFilter{PlatformAdmin: true, Status: status, AppIDs: appIDs})
+				items, err := s.store.ListImageLocationsContext(readCtx, model.ImageLocationFilter{PlatformAdmin: true, Status: status, AppIDs: appIDs})
 				if err != nil {
 					return err
 				}
@@ -105,13 +108,19 @@ func (s *Server) loadManagedAppStoreSnapshotScoped(ctx context.Context, apps []m
 			return nil, err
 		}
 	}
+	result.locationIndex = make(map[imageObservationKey][]model.ImageLocation)
 	for _, location := range locations {
+		key := imageObservationKey{location.TenantID, location.AppID, location.RuntimeID, location.ImageRef, location.Status}
+		result.locationIndex[key] = append(result.locationIndex[key], location)
 		result.locations[location.AppID] = append(result.locations[location.AppID], location)
 	}
 	return result, nil
 }
 
 func (snapshot *managedAppStoreSnapshot) imageLocations(filter model.ImageLocationFilter) ([]model.ImageLocation, error) {
+	if snapshot.locationIndex != nil {
+		return append([]model.ImageLocation(nil), snapshot.locationIndex[imageObservationKey{filter.TenantID, filter.AppID, filter.RuntimeID, filter.ImageRef, filter.Status}]...), nil
+	}
 	result := make([]model.ImageLocation, 0)
 	for _, location := range snapshot.locations[filter.AppID] {
 		if location.TenantID == filter.TenantID && location.ImageRef == filter.ImageRef &&

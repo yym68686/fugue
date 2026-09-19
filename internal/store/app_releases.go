@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"time"
@@ -373,4 +374,32 @@ func findAppTrafficPolicyByApp(policies []model.AppTrafficPolicy, appID string) 
 		}
 	}
 	return -1
+}
+
+// Context variants keep runtime observation work within its caller's budget.
+func (s *Store) ListAppReleaseMetadataContext(ctx context.Context, filter model.AppReleaseFilter) ([]model.AppRelease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.usingDatabase() {
+		return s.pgListAppReleaseViewContext(ctx, normalizeAppReleaseFilter(filter), false)
+	}
+	result, err := s.ListAppReleaseMetadata(filter)
+	if err == nil {
+		err = ctx.Err()
+	}
+	return result, err
+}
+func (s *Store) ListAppTrafficPoliciesContext(ctx context.Context, tenantID string, platformAdmin bool) ([]model.AppTrafficPolicy, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.usingDatabase() {
+		return s.pgListAppTrafficPoliciesContext(ctx, strings.TrimSpace(tenantID), platformAdmin)
+	}
+	result, err := s.ListAppTrafficPolicies(tenantID, platformAdmin)
+	if err == nil {
+		err = ctx.Err()
+	}
+	return result, err
 }
