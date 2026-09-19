@@ -18,18 +18,28 @@ const (
 	SourceDigestMetadata       = "producer_source_digest"
 	StaticIntentIDMetadata     = "producer_static_intent_id"
 	StaticIntentDigestMetadata = "producer_static_intent_digest"
+	DNSPolicyIDMetadata        = "producer_dns_policy_id"
+	DNSPolicyDigestMetadata    = "producer_dns_policy_digest"
 )
 
 type Policy struct {
-	SchemaVersion          string `json:"schema_version"`
-	Generation             string `json:"generation"`
-	Mode                   string `json:"mode"`
-	InputSource            string `json:"input_source"`
-	TargetScope            string `json:"target_scope"`
-	IntervalSeconds        int    `json:"interval_seconds"`
-	RefreshSeconds         int    `json:"refresh_seconds"`
-	StaticIntentArtifactID string `json:"static_intent_artifact_id,omitempty"`
-	StaticIntentDigest     string `json:"static_intent_digest,omitempty"`
+	SchemaVersion          string               `json:"schema_version"`
+	Generation             string               `json:"generation"`
+	Mode                   string               `json:"mode"`
+	InputSource            string               `json:"input_source"`
+	TargetScope            string               `json:"target_scope"`
+	IntervalSeconds        int                  `json:"interval_seconds"`
+	RefreshSeconds         int                  `json:"refresh_seconds"`
+	StaticIntentArtifactID string               `json:"static_intent_artifact_id,omitempty"`
+	StaticIntentDigest     string               `json:"static_intent_digest,omitempty"`
+	DNSPolicyArtifactID    string               `json:"dns_policy_artifact_id,omitempty"`
+	DNSPolicyDigest        string               `json:"dns_policy_digest,omitempty"`
+	HostedZoneTemplates    []HostedZoneTemplate `json:"hosted_zone_templates,omitempty"`
+}
+
+type HostedZoneTemplate struct {
+	NodeID       string `json:"node_id"`
+	TemplateZone string `json:"template_zone"`
 }
 
 func Decode(artifact model.PlatformArtifact) (Policy, error) {
@@ -60,6 +70,18 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 		}
 	default:
 		return p, fmt.Errorf("producer source unsupported")
+	}
+	if p.DNSPolicyArtifactID != "" || p.DNSPolicyDigest != "" || len(p.HostedZoneTemplates) > 0 {
+		if p.InputSource != "business-static-intent" || p.DNSPolicyArtifactID == "" || strings.TrimSpace(p.DNSPolicyArtifactID) != p.DNSPolicyArtifactID || !ValidDigest(p.DNSPolicyDigest) || len(p.HostedZoneTemplates) > 256 {
+			return p, fmt.Errorf("DNS input requires paired exact policy reference")
+		}
+		seen := map[string]bool{}
+		for _, t := range p.HostedZoneTemplates {
+			if t.NodeID == "" || t.TemplateZone == "" || seen[t.NodeID] {
+				return p, fmt.Errorf("invalid hosted zone template")
+			}
+			seen[t.NodeID] = true
+		}
 	}
 	return p, nil
 }

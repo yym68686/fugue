@@ -111,11 +111,7 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	defer cancel()
 	var projection platformIntentProjectionResponse
 	if policy.InputSource == "business-static-intent" {
-		static, loadErr := s.loadStaticPlatformIntent(policy.StaticIntentArtifactID, policy.StaticIntentDigest)
-		if loadErr != nil {
-			return interval, loadErr
-		}
-		projection, err = s.capturePlatformIntentWithStatic(runCtx, principal, static)
+		projection, err = s.capturePlatformIntentForProducer(runCtx, principal, policy)
 	} else {
 		projection, err = capture(runCtx, principal)
 	}
@@ -146,6 +142,9 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	if policy.InputSource == "business-static-intent" {
 		binding := projection.RuntimeSnapshot.Facts["configuration_producer"].(map[string]any)
 		binding["static_intent_artifact_id"], binding["static_intent_digest"] = policy.StaticIntentArtifactID, policy.StaticIntentDigest
+		if policy.DNSPolicyArtifactID != "" {
+			binding["dns_policy_artifact_id"], binding["dns_policy_digest"] = policy.DNSPolicyArtifactID, policy.DNSPolicyDigest
+		}
 	}
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot})
 	if err != nil {
@@ -155,7 +154,7 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	if err != nil {
 		return interval, err
 	}
-	result, err := s.materializePlatformCompilation(runCtx, compiled, principal, &inputs, platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest})
+	result, err := s.materializePlatformCompilation(runCtx, compiled, principal, &inputs, platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest})
 	if err != nil {
 		return interval, err
 	}

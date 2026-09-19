@@ -81,7 +81,14 @@ x-fugue-platform-producer:
     modes are paused and shadow. business-static-intent pins a validated signed
     PlatformIntent by exact ID and content digest for static platform routes and
     DNS records; missing, invalid or revoked input never falls back to environment.
-    Other migration inputs remain unchanged in this phase. The producer captures the existing business and
+    Optional pinned DNS policy supplies authority, client rules, probe parameters
+    and rollout cohorts. Consumer identity/base zones come from the same pinned
+    intent; endpoint addresses stay runtime facts. Explicit hosted-zone templates
+    include active business zones without reading workload environment. DNS policy
+    accepts only schema/generation/scope, dns_authorities, dns_client_policies,
+    dns_readiness, tls_readiness and traffic_rollout_cohorts. Its digest and
+    complete ownership are rechecked at publication. Other migration inputs
+    remain unchanged in this phase. The producer captures the existing business and
     migration inputs, compiles immutable intent/policy/route/DNS/TLS artifacts and
     publishes only the global shadow ReleaseSet. The exact normalized runtime
     snapshot is retained in the existing digest-addressed content store and is
@@ -2793,6 +2800,11 @@ paths:
         - in: query
           name: static_intent_artifact_id
           description: Optional exact signed validated global PlatformIntent used instead of ambient platform routes and static DNS. Only static representable records and routes are accepted; an explicit invalid reference is rejected without fallback.
+          schema:
+            type: string
+        - in: query
+          name: producer_policy_artifact_id
+          description: Optional exact validated signed producer policy for preview, mutually exclusive with static_intent_artifact_id. Uses its pinned static/DNS configuration references without activation; invalid references fail without ambient fallback.
           schema:
             type: string
       responses:
@@ -32213,6 +32225,12 @@ components:
                 static_intent_digest:
                   type: string
                   pattern: '^sha256:[a-f0-9]{64}$'
+                dns_policy_artifact_id:
+                  type: string
+                  minLength: 1
+                dns_policy_digest:
+                  type: string
+                  pattern: '^sha256:[a-f0-9]{64}$'
     PlatformConfigCompileRequest:
       type: object
       additionalProperties: false
@@ -32397,6 +32415,24 @@ components:
           type: string
           pattern: '^sha256:[a-f0-9]{64}$'
           description: Exact content_hash of the pinned static intent. Required only for business-static-intent.
+        dns_policy_artifact_id:
+          type: string
+          minLength: 1
+          description: Optional exact validated global PolicySnapshot holding the DNS configuration subset. Requires business-static-intent and DNS consumers in the pinned intent.
+        dns_policy_digest:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+        hosted_zone_templates:
+          type: array
+          maxItems: 256
+          description: Explicitly includes active business hosted zones for each listed DNS consumer, using the named base zone authority as its template. All consumers must have a template or the array must be empty.
+          items:
+            type: object
+            additionalProperties: false
+            required: [node_id, template_zone]
+            properties:
+              node_id: {type: string, minLength: 1}
+              template_zone: {type: string, minLength: 1}
         target_scope:
           type: string
           enum: [global]

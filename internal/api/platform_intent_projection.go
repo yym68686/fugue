@@ -16,6 +16,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
+	"fugue/internal/platformsafety"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
@@ -76,7 +77,29 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	var projection platformIntentProjectionResponse
 	var err error
 	refs, present := r.URL.Query()["static_intent_artifact_id"]
-	if present {
+	policies, policyPresent := r.URL.Query()["producer_policy_artifact_id"]
+	if present && policyPresent {
+		httpx.WriteError(w, http.StatusBadRequest, "choose one configuration reference")
+		return
+	}
+	if policyPresent {
+		if len(policies) != 1 || strings.TrimSpace(policies[0]) == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "one producer_policy_artifact_id required")
+			return
+		}
+		var a model.PlatformArtifact
+		a, err = s.store.GetPlatformArtifact(policies[0])
+		if err == nil && (a.ID != policies[0] || a.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(a) != nil || !platformsafety.EvaluateArtifactIntegrity(a, s.bundleKeyring()).Pass) {
+			err = errors.New("producer policy reference not trusted")
+		}
+		if err == nil {
+			var p platformproducer.Policy
+			p, err = platformproducer.Decode(a)
+			if err == nil {
+				projection, err = s.capturePlatformIntentForProducer(r.Context(), mustPrincipal(r), p)
+			}
+		}
+	} else if present {
 		if len(refs) != 1 || strings.TrimSpace(refs[0]) == "" {
 			httpx.WriteError(w, http.StatusBadRequest, "one static_intent_artifact_id required")
 			return
@@ -105,6 +128,13 @@ func (s *Server) capturePlatformIntent(ctx context.Context, principal model.Prin
 }
 
 func (s *Server) capturePlatformIntentWithStatic(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput) (platformIntentProjectionResponse, error) {
+	return s.capturePlatformIntentWithInputs(ctx, principal, static, nil, nil)
+}
+
+func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.DNSPolicyInput, templates []platformproducer.HostedZoneTemplate) (platformIntentProjectionResponse, error) {
+	if dnsPolicy == nil && len(static.Consumers) > 0 {
+		return platformIntentProjectionResponse{}, errors.New("declared DNS consumers require pinned DNS policy")
+	}
 	if err := ctx.Err(); err != nil {
 		return platformIntentProjectionResponse{}, err
 	}
@@ -160,23 +190,29 @@ func (s *Server) capturePlatformIntentWithStatic(ctx context.Context, principal 
 			return platformIntentProjectionResponse{}, errors.New("authoritative DNS consumer topology is empty")
 		}
 	}
-	var dnsZones map[string][]string
-	var dnsClientRules map[string][]platformconfig.DNSClientRule
-	var dnsAuthorities map[string]platformconfig.DNSAuthorityPolicy
-	if len(dnsNodes) > 0 {
-		dnsZones, dnsClientRules, dnsAuthorities, err = s.captureDNSConsumerConfiguration(ctx, business.HostedZones)
-		if err != nil {
-			return platformIntentProjectionResponse{}, errors.New("DNS workload zone declarations unavailable")
+	if dnsPolicy != nil {
+		if err := projectPinnedDNSInputs(&projection, static.Consumers, *dnsPolicy, templates, dnsNodes, business.HostedZones, time.Now().UTC()); err != nil {
+			return platformIntentProjectionResponse{}, err
 		}
-	}
-	if err := projectDNSConsumerDeclarations(&projection, dnsNodes, dnsZones, s.dnsBundleTTL, time.Now().UTC()); err != nil {
-		return platformIntentProjectionResponse{}, errors.New("DNS consumer declaration ownership invalid")
-	}
-	if err := projectDNSAuthorityPolicies(&projection, dnsAuthorities); err != nil {
-		return platformIntentProjectionResponse{}, errors.New("DNS authority declarations invalid")
-	}
-	if err := projectDNSClientPolicies(&projection, dnsClientRules); err != nil {
-		return platformIntentProjectionResponse{}, errors.New("DNS client policy declaration invalid")
+	} else {
+		var dnsZones map[string][]string
+		var dnsClientRules map[string][]platformconfig.DNSClientRule
+		var dnsAuthorities map[string]platformconfig.DNSAuthorityPolicy
+		if len(dnsNodes) > 0 {
+			dnsZones, dnsClientRules, dnsAuthorities, err = s.captureDNSConsumerConfiguration(ctx, business.HostedZones)
+			if err != nil {
+				return platformIntentProjectionResponse{}, errors.New("DNS workload zone declarations unavailable")
+			}
+		}
+		if err := projectDNSConsumerDeclarations(&projection, dnsNodes, dnsZones, s.dnsBundleTTL, time.Now().UTC()); err != nil {
+			return platformIntentProjectionResponse{}, errors.New("DNS consumer declaration ownership invalid")
+		}
+		if err := projectDNSAuthorityPolicies(&projection, dnsAuthorities); err != nil {
+			return platformIntentProjectionResponse{}, errors.New("DNS authority declarations invalid")
+		}
+		if err := projectDNSClientPolicies(&projection, dnsClientRules); err != nil {
+			return platformIntentProjectionResponse{}, errors.New("DNS client policy declaration invalid")
+		}
 	}
 	if len(dnsNodes) > 0 {
 		edges, _, edgeErr := s.store.ListEdgeNodes("")
@@ -188,7 +224,7 @@ func (s *Server) capturePlatformIntentWithStatic(ctx context.Context, principal 
 			return platformIntentProjectionResponse{}, errors.New("DNS readiness authoritative topology unavailable")
 		}
 		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
-		if err := projectDNSReadiness(&projection, edges, time.Now().UTC()); err != nil {
+		if err := projectDNSReadinessWithPolicy(&projection, edges, time.Now().UTC(), dnsPolicy); err != nil {
 			return platformIntentProjectionResponse{}, errors.New("DNS readiness topology invalid")
 		}
 	}

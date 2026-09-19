@@ -104,3 +104,39 @@ This stage removes only the two static inputs from the producer. Authority,
 base-domain/default policy and selection capture still follow their existing
 migration paths. Legacy serving paths remain until their traffic cutover and
 recovery checks are complete.
+
+## Pin DNS declarations and policy
+
+Create a new version of the static PlatformIntent that also declares
+`dns_consumers` (physical node ID, group, base zones, probe label and TTL).
+Create a separate validated global `policy_snapshot` containing only
+`schema_version`, `generation`, `scope`, `dns_authorities`,
+`dns_client_policies`, `dns_readiness`, `tls_readiness`, and
+`traffic_rollout_cohorts`. Authority and client policy must completely cover the
+declared consumers and zones. Extra fields are rejected by this input adapter.
+
+Add `dns_policy_artifact_id` and `dns_policy_digest` to the producer policy,
+alongside the new static intent reference. The DNS reference is optional only
+for the older static-only migration mode; declarations with no pinned DNS policy
+fail closed. Each reader and the publication transaction verify both input
+signatures, exact identities, digests, validation status and ownership.
+
+To preserve automatic hosted-zone onboarding, set `hosted_zone_templates` to
+one `{ "node_id": "<consumer>", "template_zone": "<base-zone>" }` per consumer.
+The named base-zone authority supplies NS/SOA parameters for active business
+hosted zones. Empty templates means only explicitly declared base zones. Deleted
+or suspended business zones disappear unless they are independently declared
+base zones. Old heartbeat aliases cannot recreate them. Runtime inventory supplies
+endpoint addresses; it cannot add desired consumers, change ownership, or invent
+authority configuration. Missing or conflicting endpoint facts reject capture.
+
+Preview the complete configuration through
+`routes/project?producer_policy_artifact_id=<exact-validated-policy-id>` before
+publishing the producer policy. Do not combine this selector with the static-only
+selector. Pinned DNS capture never queries DNS DaemonSet environment. The signed
+parent and retained runtime input also record the DNS policy reference so an
+operator replay preserves it. Address collection does not overwrite the pinned
+readiness intervals, freshness, concurrency or rollout cohorts.
+
+Base-domain/default application policy and query selection capture still need
+their remaining migration. This step does not activate serving or grant LKG.

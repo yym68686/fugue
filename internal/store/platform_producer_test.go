@@ -31,7 +31,7 @@ func TestPlatformProducerGuardPostgres(t *testing.T) {
 }
 
 func testPlatformProducerGuard(t *testing.T, dsn string) {
-	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation"} {
+	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation", "dns complete", "dns digest", "dns invalidated", "dns tampered", "dns binding", "dns missing authority", "dns template", "queued dns invalidation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if strings.HasPrefix(scenario, "queued") && dsn == "" {
 				t.Skip("real PostgreSQL queue")
@@ -49,11 +49,15 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			}
 			since := time.Now().UTC()
 			principal := model.Principal{ActorType: model.ActorTypeBootstrap, ActorID: platformproducer.Actor, Scopes: map[string]struct{}{"platform.admin": {}}}
-			var static model.PlatformArtifact
-			staticCase := strings.Contains(scenario, "static")
+			var static, dnsInput model.PlatformArtifact
+			dnsCase := strings.Contains(scenario, "dns")
+			staticCase := strings.Contains(scenario, "static") || dnsCase
 			if staticCase {
 				gen := model.NewID("static")
 				i := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: gen, Routes: []platformconfig.RouteIntent{{Hostname: "static.example.test", UpstreamURL: "http://static:8080", Enabled: true}}}
+				if dnsCase {
+					i.DNSConsumers = []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "edge-group-a", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}}
+				}
 				raw, _ := json.Marshal(i)
 				var content map[string]any
 				json.Unmarshal(raw, &content)
@@ -67,6 +71,26 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					t.Fatal(err)
 				}
 			}
+			if dnsCase {
+				gen := model.NewID("dns-policy")
+				probe := &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
+				p := platformproducer.DNSPolicyInput{SchemaVersion: platformconfig.SchemaVersion, Generation: gen, Scope: "global", Authorities: []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, Clients: []platformconfig.DNSClientPolicy{{NodeID: "dns-a", Rules: []platformconfig.DNSClientRule{}}}, DNSReadiness: probe, TLSReadiness: probe, Cohorts: []platformconfig.TrafficRolloutCohort{{ID: "all", EdgeGroupIDs: []string{"edge-group-a"}}}}
+				if scenario == "dns missing authority" {
+					p.Authorities = nil
+				}
+				raw, _ := json.Marshal(p)
+				var content map[string]any
+				json.Unmarshal(raw, &content)
+				var err error
+				dnsInput, err = s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: "global"}, Generation: gen, Content: content})
+				if err != nil {
+					t.Fatal(err)
+				}
+				dnsInput, err = s.ValidatePlatformArtifact(dnsInput.ID, []model.PlatformArtifactValidationResult{{Name: "dns", Pass: true}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			makePolicy := func(mode string) model.PlatformArtifactRelease {
 				gen := model.NewID("producer-policy")
 				policy := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: gen, Mode: mode, InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 120}
@@ -76,6 +100,17 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					policy.StaticIntentDigest = static.ContentHash
 					if scenario == "static digest" {
 						policy.StaticIntentDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+					}
+				}
+				if dnsCase {
+					policy.DNSPolicyArtifactID = dnsInput.ID
+					policy.DNSPolicyDigest = dnsInput.ContentHash
+					policy.HostedZoneTemplates = []platformproducer.HostedZoneTemplate{{NodeID: "dns-a", TemplateZone: "example.test"}}
+					if scenario == "dns digest" {
+						policy.DNSPolicyDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+					}
+					if scenario == "dns template" {
+						policy.HostedZoneTemplates[0].TemplateZone = "other.test"
 					}
 				}
 				raw, _ := json.Marshal(policy)
@@ -143,6 +178,13 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					delete(parent.Metadata, platformproducer.StaticIntentIDMetadata)
 				}
 			}
+			if dnsCase {
+				parent.Metadata[platformproducer.DNSPolicyIDMetadata] = dnsInput.ID
+				parent.Metadata[platformproducer.DNSPolicyDigestMetadata] = dnsInput.ContentHash
+				if scenario == "dns binding" {
+					delete(parent.Metadata, platformproducer.DNSPolicyIDMetadata)
+				}
+			}
 			parent, err = s.CreatePlatformArtifact(parent)
 			if err != nil {
 				t.Fatal(err)
@@ -174,6 +216,23 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 				}
 			}
 			switch scenario {
+			case "dns invalidated":
+				if _, err := s.ValidatePlatformArtifact(dnsInput.ID, []model.PlatformArtifactValidationResult{{Name: "invalid", Pass: false, Severity: model.RobustnessSeverityBlockPublish}}); err != nil {
+					t.Fatal(err)
+				}
+			case "dns tampered":
+				if dsn != "" {
+					if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json || '{"tampered":true}'::jsonb WHERE id=$1`, dnsInput.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := s.withLockedState(true, func(st *model.State) error {
+						st.PlatformArtifacts[platformArtifactIndex(st.PlatformArtifacts, dnsInput.ID)].Content["tampered"] = true
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
 			case "static revoked validation":
 				if _, err := s.ValidatePlatformArtifact(static.ID, []model.PlatformArtifactValidationResult{{Name: "invalidated", Pass: false, Severity: model.RobustnessSeverityBlockPublish}}); err != nil {
 					t.Fatal(err)
@@ -256,7 +315,11 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					}
 					time.Sleep(10 * time.Millisecond)
 				}
-				if scenario == "queued static invalidation" {
+				if scenario == "queued dns invalidation" {
+					if _, err = tx.Exec(`UPDATE fugue_platform_artifacts SET status='invalid' WHERE id=$1`, dnsInput.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else if scenario == "queued static invalidation" {
 					if _, err = tx.Exec(`UPDATE fugue_platform_artifacts SET status='invalid' WHERE id=$1`, static.ID); err != nil {
 						t.Fatal(err)
 					}
@@ -283,7 +346,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if scenario == "complete" || scenario == "retry" || scenario == "static complete" {
+			if scenario == "complete" || scenario == "retry" || scenario == "static complete" || scenario == "dns complete" {
 				if err != nil || len(after) != len(before)+1 {
 					t.Fatal("valid production failed", err)
 				}
@@ -296,7 +359,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 						t.Fatal("retry added another release")
 					}
 				}
-			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && !reflect.DeepEqual(before, after) {
+			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && scenario != "dns complete" && !reflect.DeepEqual(before, after) {
 				t.Fatal("failed producer mutated ledger", err)
 			}
 		})

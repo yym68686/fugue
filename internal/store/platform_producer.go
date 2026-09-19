@@ -68,10 +68,26 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 		if base.ID != policy.StaticIntentArtifactID || base.ContentHash != policy.StaticIntentDigest || base.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(base, keys).Pass || parent.Metadata[platformproducer.StaticIntentIDMetadata] != base.ID || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != base.ContentHash {
 			return ErrConflict
 		}
-		if _, err := platformproducer.DecodeStaticIntent(base); err != nil {
+		static, err := platformproducer.DecodeStaticIntent(base)
+		if err != nil {
 			return ErrConflict
 		}
-	} else if parent.Metadata[platformproducer.StaticIntentIDMetadata] != "" || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != "" {
+		if policy.DNSPolicyArtifactID != "" {
+			index := platformArtifactIndex(state.PlatformArtifacts, policy.DNSPolicyArtifactID)
+			if index < 0 {
+				return ErrConflict
+			}
+			a := state.PlatformArtifacts[index]
+			if a.ID != policy.DNSPolicyArtifactID || a.ContentHash != policy.DNSPolicyDigest || a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != a.ID || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != a.ContentHash {
+				return ErrConflict
+			}
+			if _, err := platformproducer.DecodeDNSInputs(a, static.Consumers, policy.HostedZoneTemplates); err != nil {
+				return ErrConflict
+			}
+		} else if len(static.Consumers) > 0 || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
+			return ErrConflict
+		}
+	} else if parent.Metadata[platformproducer.StaticIntentIDMetadata] != "" || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
 		return ErrConflict
 	}
 	ids, idsOK := parent.Content["artifact_ids"].([]any)
@@ -168,6 +184,13 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 			return err
 		}
 		state.PlatformArtifacts = append(state.PlatformArtifacts, base)
+	}
+	if policy.DNSPolicyArtifactID != "" {
+		a, err := pgGetPlatformArtifactForUpdate(ctx, tx, policy.DNSPolicyArtifactID, true)
+		if err != nil {
+			return err
+		}
+		state.PlatformArtifacts = append(state.PlatformArtifacts, a)
 	}
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	if !ok || len(ids) != 3 {
