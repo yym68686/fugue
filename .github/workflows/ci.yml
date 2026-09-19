@@ -107,7 +107,7 @@ jobs:
           python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json
           python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json --apply
 
-      - name: Reconcile read-only PostgreSQL capacity observation access
+      - name: Reconcile read-only storage capacity and attachment observation access
         env:
           BASE_SHA: ${{ github.event.before }}
         run: |
@@ -120,7 +120,9 @@ jobs:
           if ! git diff --quiet "${base}" HEAD -- "${config}"; then
             kubectl apply --server-side --dry-run=server --field-manager=fugue-postgres-capacity-observation -f "${config}"
             kubectl apply --server-side --field-manager=fugue-postgres-capacity-observation -f "${config}"
-            kubectl auth can-i list csistoragecapacities.storage.k8s.io --all-namespaces --as=system:serviceaccount:fugue-system:fugue-fugue-control-plane-sa
+            for resource in csistoragecapacities csidrivers csinodes volumeattachments; do
+              kubectl auth can-i list "${resource}.storage.k8s.io" --all-namespaces --as=system:serviceaccount:fugue-system:fugue-fugue-control-plane-sa
+            done
           fi
 
   component-build:

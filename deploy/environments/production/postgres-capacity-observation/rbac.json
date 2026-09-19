@@ -14,7 +14,10 @@
             "storage.k8s.io"
           ],
           "resources": [
-            "csistoragecapacities"
+            "csistoragecapacities",
+            "csidrivers",
+            "csinodes",
+            "volumeattachments"
           ],
           "verbs": [
             "get",

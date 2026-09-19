@@ -172,6 +172,13 @@ func inferredManagedReconcileOperationType(current, desired model.App) string {
 }
 
 func managedAppSpecsEqualExceptReplicas(current, desired model.AppSpec) bool {
+	// ManagedApp stores declarative env while the desired app may already have
+	// passed through Renderer.PrepareApp. Generated identity/telemetry values
+	// must not turn a replica-only transition into an unplanned deployment.
+	// Strip only the reserved generated fields, preserving user env and restart
+	// tokens so a real workload change still goes through the deployment guard.
+	current, _ = model.StripFugueInjectedAppEnvFromSpec(current)
+	desired, _ = model.StripFugueInjectedAppEnvFromSpec(desired)
 	current.Replicas = 0
 	desired.Replicas = 0
 	current.RolloutIntent = ""
@@ -574,6 +581,11 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	desiredKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), desiredScheduling))
 	if liveKey != currentKey && liveKey != desiredKey {
 		return model.App{}, fmt.Errorf("live deployment release key %q matches neither current snapshot %q nor desired snapshot %q", liveKey, currentKey, desiredKey)
+	}
+	if recovered, err := s.unstartedStoragePlacementRecovery(ctx, client, namespace, managed, deployment, current, desired, currentScheduling, desiredScheduling); err != nil {
+		return model.App{}, err
+	} else if recovered {
+		return desired, nil
 	}
 
 	desiredDeployment := s.zeroDowntimeManagedAppDeployment(desired, desiredScheduling)

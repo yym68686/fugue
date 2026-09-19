@@ -28,40 +28,25 @@ func recoveryStorageTargetNode(ctx context.Context, client *kubeClient, targetRu
 	if sc.Provisioner != "driver.longhorn.io" {
 		return requested, nil
 	}
-	var list struct {
-		Items []struct {
-			Metadata struct {
-				Name string `json:"name"`
-			} `json:"metadata"`
-			Status struct {
-				Conditions []kubePodCondition `json:"conditions"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-	if _, err := client.doJSON(ctx, http.MethodGet, "/apis/longhorn.io/v1beta2/nodes", nil, &list); err != nil {
-		return "", fmt.Errorf("observe Longhorn attachment nodes: %w", err)
+	nodes, err := readyLonghornAttachmentNodes(ctx, client)
+	if err != nil {
+		return "", err
 	}
 	selector := runtime.SchedulingForRuntime(targetRuntime).NodeSelector
 	if len(selector) == 0 {
 		return "", fmt.Errorf("recovery target runtime has no managed scheduling constraints")
 	}
 	var candidates []string
-	for _, item := range list.Items {
-		ready := false
-		for _, condition := range item.Status.Conditions {
-			if condition.Type == "Ready" && condition.Status == "True" {
-				ready = true
-			}
-		}
-		if !ready || (requested != "" && item.Metadata.Name != requested) {
+	for nodeName, ready := range nodes {
+		if !ready || (requested != "" && nodeName != requested) {
 			continue
 		}
-		node, found, err := client.getNode(ctx, item.Metadata.Name)
+		node, found, err := client.getNode(ctx, nodeName)
 		if err != nil {
 			return "", err
 		}
 		if found && managedSharedNodeSchedulable(node) && nodeLabelsMatchSelector(node.Metadata.Labels, selector) {
-			candidates = append(candidates, item.Metadata.Name)
+			candidates = append(candidates, nodeName)
 		}
 	}
 	if len(candidates) == 0 {

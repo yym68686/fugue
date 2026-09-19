@@ -27,6 +27,7 @@ type kubeObjectList struct {
 
 type kubeDeployment struct {
 	Metadata struct {
+		UID             string            `json:"uid,omitempty"`
 		Name            string            `json:"name"`
 		Namespace       string            `json:"namespace,omitempty"`
 		ResourceVersion string            `json:"resourceVersion,omitempty"`

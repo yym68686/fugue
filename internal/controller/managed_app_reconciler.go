@@ -76,6 +76,9 @@ func (s *Service) applyManagedAppDesiredStateResult(ctx context.Context, app mod
 		return model.App{}, guardErr
 	}
 	app = preparedApp
+	if err := s.validateAppStoragePlacement(ctx, client, app, scheduling, s.Renderer.BuildManagedAppChildObjects(app, scheduling, nil)); err != nil {
+		return model.App{}, err
+	}
 	objects := runtime.BuildManagedAppStateObjects(app, scheduling)
 	if err := client.applyObjects(ctx, objects); err != nil {
 		return model.App{}, fmt.Errorf("apply managed app state objects: %w", err)
@@ -276,7 +279,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		app = s.Renderer.PrepareApp(app)
 		desiredScheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
 		if err != nil {
-			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve stored managed app scheduling: %w", err))
+			return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve stored managed app scheduling: %w", err))
 		}
 		desiredScheduling = s.onlineDurableRolloutScheduling(ctx, runtime.AppFromManagedApp(managed), app, desiredScheduling)
 		preparedApp, guardErr := s.prepareManagedAppReconcileRolloutWithEvidence(ctx, client, namespace, managed, app, "", desiredScheduling)
@@ -329,6 +332,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve postgres placements: %w", err))
 	}
 	childObjects := s.Renderer.BuildManagedAppChildObjectsWithPlacements(app, managed.Spec.Scheduling, postgresPlacements, ownerRef)
+	if err := s.validateAppStoragePlacement(ctx, client, app, managed.Spec.Scheduling, childObjects); err != nil {
+		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, err)
+	}
 	childObjects = s.preserveManagedAppServingDeploymentTemplate(ctx, client, namespace, app, childObjects)
 	fenceEpoch, err := s.currentAppFenceEpoch(ctx, client, app)
 	if err != nil {

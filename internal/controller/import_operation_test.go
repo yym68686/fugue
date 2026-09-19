@@ -1179,6 +1179,15 @@ func TestExecuteManagedImportOperationResolvesManagedSharedPersistentImageImport
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/api/v1/namespaces/" + runtime.NamespaceForTenant(tenant.ID) + "/persistentvolumeclaims/" + runtime.PersistentStoragePVCName(app, *app.Spec.PersistentStorage):
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"kind":"Status","reason":"NotFound","code":404}`)
+		case "/apis/storage.k8s.io/v1/storageclasses/fugue-workspace-rwo":
+			fmt.Fprint(w, `{"metadata":{"name":"fugue-workspace-rwo"},"provisioner":"local.csi.openebs.io","volumeBindingMode":"WaitForFirstConsumer"}`)
+		case "/apis/storage.k8s.io/v1/csidrivers/local.csi.openebs.io":
+			fmt.Fprint(w, `{"metadata":{"name":"local.csi.openebs.io"}}`)
+		case "/apis/storage.k8s.io/v1/csinodes":
+			fmt.Fprintf(w, `{"items":[{"metadata":{"name":%q},"spec":{"drivers":[{"name":"local.csi.openebs.io","nodeID":%q}]}}]}`, nodeName, nodeName)
 		case "/api/v1/pods":
 			fmt.Fprint(w, `{"items":[]}`)
 		case "/api/v1/nodes":

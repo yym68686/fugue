@@ -27,13 +27,41 @@ func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app mo
 	if err != nil {
 		return runtimepkg.SchedulingConstraints{}, fmt.Errorf("load app runtime %s: %w", app.Spec.RuntimeID, err)
 	}
-	if runtimeObj.Type != model.RuntimeTypeManagedShared {
+	// Stopping a workload must not depend on a new attachment being possible.
+	if app.Spec.Replicas <= 0 {
 		return base, nil
 	}
-	if nodeName, found, err := s.managedSharedPersistentStorageNode(ctx, app); err != nil {
-		return runtimepkg.SchedulingConstraints{}, err
-	} else if found {
-		return schedulingPinnedToNode(base, nodeName), nil
+	if app.Spec.PersistentStorage != nil || app.Spec.Workspace != nil {
+		client, err := s.kubeClient()
+		if err != nil {
+			return runtimepkg.SchedulingConstraints{}, fmt.Errorf("observe app storage placement: %w", err)
+		}
+		if live, found, err := client.getDeployment(ctx, runtimepkg.NamespaceForTenant(app.TenantID), runtimepkg.RuntimeAppResourceName(app)); err != nil {
+			return runtimepkg.SchedulingConstraints{}, fmt.Errorf("observe serving storage placement: %w", err)
+		} else if found && managedDeploymentStatusReady(live, app.Spec.Replicas) {
+			observed := runtimepkg.SchedulingConstraints{NodeSelector: live.Spec.Template.Spec.NodeSelector, Tolerations: live.Spec.Template.Spec.Tolerations}
+			if desiredStringMapSubset(observed.NodeSelector, base.NodeSelector) && deploymentTargetsExpectedRollout(live, s.expectedManagedAppReleaseKey(s.Renderer.PrepareApp(app), observed), strings.TrimSpace(app.Spec.Image)) {
+				return observed, nil
+			}
+		}
+		objects := s.Renderer.BuildManagedAppChildObjects(app, base, nil)
+		storage, err := s.appStoragePlacement(ctx, client, app, objects)
+		if err != nil {
+			return runtimepkg.SchedulingConstraints{}, err
+		}
+		if storage != nil {
+			node, found, err := s.selectManagedAppNode(ctx, app, base, storage)
+			if err != nil {
+				return runtimepkg.SchedulingConstraints{}, err
+			}
+			if !found {
+				return runtimepkg.SchedulingConstraints{}, fmt.Errorf("no eligible storage attachment node for runtime %s", app.Spec.RuntimeID)
+			}
+			return schedulingPinnedToNode(base, node), nil
+		}
+	}
+	if runtimeObj.Type != model.RuntimeTypeManagedShared {
+		return base, nil
 	}
 	if !shouldPinManagedSharedApp(app) {
 		return base, nil
@@ -55,29 +83,6 @@ func shouldPinManagedSharedApp(app model.App) bool {
 	return strings.TrimSpace(app.Spec.RuntimeID) != ""
 }
 
-func (s *Service) managedSharedPersistentStorageNode(ctx context.Context, app model.App) (string, bool, error) {
-	storage := app.Spec.PersistentStorage
-	if storage == nil || model.AppPersistentStorageSpecUsesSharedProjectRWX(storage) {
-		return "", false, nil
-	}
-	claimName := desiredPersistentStorageClaimName(app, *storage)
-	if strings.TrimSpace(claimName) == "" {
-		return "", false, nil
-	}
-	client, err := s.kubeClient()
-	if err != nil {
-		if s.Logger != nil {
-			s.Logger.Printf("initialize persistent storage placement client for app=%s failed, continuing with shared-pool scheduling: %v", app.ID, err)
-		}
-		return "", false, nil
-	}
-	nodeName, found, err := managedSharedPostgresPVCNode(ctx, client, runtimepkg.NamespaceForTenant(app.TenantID), claimName, nil)
-	if err != nil {
-		return "", false, err
-	}
-	return nodeName, found, nil
-}
-
 func schedulingPinnedToNode(base runtimepkg.SchedulingConstraints, nodeName string) runtimepkg.SchedulingConstraints {
 	out := base
 	out.NodeSelector = clonePlacementStringMap(base.NodeSelector)
@@ -89,8 +94,16 @@ func schedulingPinnedToNode(base runtimepkg.SchedulingConstraints, nodeName stri
 }
 
 func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App, selector map[string]string) (string, bool, error) {
+	return s.selectManagedAppNode(ctx, app, runtimepkg.SchedulingConstraints{NodeSelector: selector}, nil)
+}
+
+func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, constraints runtimepkg.SchedulingConstraints, storage *storagePlacement) (string, bool, error) {
+	selector := constraints.NodeSelector
 	client, err := s.kubeClient()
 	if err != nil {
+		if storage != nil {
+			return "", false, err
+		}
 		if s.Logger != nil {
 			s.Logger.Printf("initialize app placement client for app=%s failed, continuing with runtime-only scheduling: %v", app.ID, err)
 		}
@@ -98,6 +111,9 @@ func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App,
 	}
 	pods, hasNodeRequests, err := client.listAllPods(ctx)
 	if err != nil || !hasNodeRequests {
+		if storage != nil {
+			return "", false, fmt.Errorf("observe pod resource and volume usage before storage placement: available=%t error=%v", hasNodeRequests, err)
+		}
 		if s.Logger != nil {
 			s.Logger.Printf("resolve app node request inventory for app=%s failed, continuing with runtime-only scheduling: %v", app.ID, err)
 		}
@@ -115,6 +131,7 @@ func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App,
 	request := managedAppPlacementRequest(app)
 	policy := managedAppPlacementPolicy(app)
 	candidates := make([]managedSharedNodeCandidate, 0, len(nodeNames))
+	var rejected []string
 	for _, nodeName := range nodeNames {
 		node, found, err := client.getNode(ctx, nodeName)
 		if err != nil {
@@ -123,7 +140,14 @@ func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App,
 		if !found || !nodeLabelsMatchSelector(node.Metadata.Labels, selector) {
 			continue
 		}
-		if !managedSharedNodeSchedulable(node) {
+		if !kubeNodeReady(node) || node.Spec.Unschedulable || kubeNodeConditionTrue(node.Status.Conditions, "DiskPressure") || !kubeTaintsTolerated(node.Spec.Taints, constraints.Tolerations) {
+			continue
+		}
+		if reason := storage.rejection(node); reason != "" {
+			if _, serving := readyAppNodesByName[nodeName]; serving {
+				return "", false, fmt.Errorf("preserving serving app on node %s; new storage placement blocked: %s", nodeName, reason)
+			}
+			rejected = append(rejected, nodeName+": "+reason)
 			continue
 		}
 		// Preserve a healthy app's existing node pin even when the node is
@@ -157,6 +181,9 @@ func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App,
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
+		if storage != nil {
+			return "", false, fmt.Errorf("no eligible storage attachment node matches runtime/capacity constraints: %s", strings.Join(rejected, "; "))
+		}
 		return "", false, nil
 	}
 	for _, candidate := range candidates {

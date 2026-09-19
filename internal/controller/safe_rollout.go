@@ -1138,6 +1138,9 @@ func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op
 	revision := safeRolloutCandidateRevision(state.Candidate.ID)
 	objects := s.Renderer.BuildManagedAppRevisionChildObjects(app, scheduling, postgresPlacements, nil, revision)
 	objects = filterSafeRolloutCandidateRevisionObjects(objects, revision)
+	if err := s.validateAppStoragePlacement(ctx, client, app, scheduling, objects); err != nil {
+		return fmt.Errorf("candidate storage placement: %w", err)
+	}
 	if err := client.applyObjects(ctx, objects); err != nil {
 		return fmt.Errorf("apply candidate revision objects: %w", err)
 	}
