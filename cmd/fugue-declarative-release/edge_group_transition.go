@@ -445,7 +445,7 @@ func stageAndCommitEdgeGroupAuthority(ctx context.Context, runtime edgeGroupTran
 			return nil, nil, nil, err
 		}
 		observed, snapshotErr := runtime.Snapshot(ctx)
-		if snapshotErr != nil || !edgeRestagingPreservesTraffic(plan.before, observed, transition) {
+		if snapshotErr != nil || !edgeRestagingPreservesTraffic(plan.before, observed, transition, release.SupersedesFailedConfigSHA != "") {
 			return nil, nil, nil, errors.Join(err, errors.New("configuration restaging cannot prove the unchanged active code authority"), snapshotErr)
 		}
 		plan.before = observed
@@ -453,7 +453,7 @@ func stageAndCommitEdgeGroupAuthority(ctx context.Context, runtime edgeGroupTran
 	return nil, nil, nil, errEdgeCandidateConfigurationAdvanced
 }
 
-func edgeRestagingPreservesTraffic(before, observed edgeGroupState, transition declarativerelease.EdgeGroupABTransition) bool {
+func edgeRestagingPreservesTraffic(before, observed edgeGroupState, transition declarativerelease.EdgeGroupABTransition, allowDegradedRecovery bool) bool {
 	a, b := before.FrontActivation, observed.FrontActivation
 	if a == nil || b == nil || a.Schema != edgeActivationStateSchema || b.Schema != a.Schema || a.Generation == 0 ||
 		a.Authority != edgeActivationAuthority || !edgeSourceSHAPattern.MatchString(a.WorkerSourceCommit) || !edgePromotionDigestPattern.MatchString(a.WorkerImageDigest) ||
@@ -462,7 +462,7 @@ func edgeRestagingPreservesTraffic(before, observed edgeGroupState, transition d
 		a.Generation != b.Generation || a.ActiveSlot != b.ActiveSlot || a.BundleGeneration != b.BundleGeneration ||
 		a.WorkerSourceCommit != b.WorkerSourceCommit || a.WorkerImageDigest != b.WorkerImageDigest || a.Authority != b.Authority ||
 		!sameEdgeNodes(before.Front, observed.Front) || len(observed.Front) != transition.ExpectedNodes ||
-		validateActiveEdgeGroupAuthority(observed, transition) != nil {
+		!edgeRestagingAuthorityIsUnchanged(observed, transition, allowDegradedRecovery) {
 		return false
 	}
 	oldWorkers, newWorkers := edgeWorkerPods(before, before.ActiveSlot), edgeWorkerPods(observed, observed.ActiveSlot)
@@ -474,6 +474,27 @@ func edgeRestagingPreservesTraffic(before, observed edgeGroupState, transition d
 		digest, err := immutableDigestFromRef(worker.ImageRef)
 		if err != nil || !worker.Ready || worker.RestartCount != 0 || worker.SourceCommit != prior.SourceCommit || worker.ImageRef != prior.ImageRef ||
 			worker.SourceCommit != a.WorkerSourceCommit || digest != a.WorkerImageDigest || worker.PublicationSequence < prior.PublicationSequence {
+			return false
+		}
+	}
+	return true
+}
+
+// A superseding recovery may be retried while an unchanged active Worker has
+// a temporarily unavailable inventory heartbeat. This keeps the recovery
+// proof narrow: all group-authority facts still have to match, and only the
+// inventory freshness sub-check is allowed to be degraded.
+func edgeRestagingAuthorityIsUnchanged(state edgeGroupState, transition declarativerelease.EdgeGroupABTransition, allowDegradedRecovery bool) bool {
+	if err := validateActiveEdgeGroupAuthority(state, transition); err == nil {
+		return true
+	} else if !allowDegradedRecovery || !errors.Is(err, errEdgeInventoryHeartbeatUnavailable) {
+		return false
+	}
+	if state.ActiveSlot != "a" && state.ActiveSlot != "b" || transition.GroupID == "" {
+		return false
+	}
+	for _, pod := range edgeWorkerPods(state, state.ActiveSlot) {
+		if !edgePodHasGroupAuthority(pod) || !pod.InventoryProducerActive {
 			return false
 		}
 	}
@@ -804,7 +825,7 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidate(ctx context.Context, befo
 					return edgeCandidateStageReceipt{}, errors.Join(lastErr, errors.New("candidate retry snapshot reader is unavailable"))
 				}
 				observed, snapshotErr := snapshot(ctx)
-				if snapshotErr != nil || !edgeRestagingPreservesTraffic(before, observed, runtime.transition) {
+				if snapshotErr != nil || !edgeRestagingPreservesTraffic(before, observed, runtime.transition, !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "") {
 					return edgeCandidateStageReceipt{}, errors.Join(lastErr, errors.New("candidate retry cannot prove unchanged active code authority"), snapshotErr)
 				}
 				before, refreshedServingFacts = observed, true
@@ -1066,7 +1087,7 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidateOnce(ctx context.Context, 
 	if !strings.HasPrefix(recordDigest, "sha256:") || len(recordDigest) != 71 {
 		return edgeCandidateStageReceipt{}, errors.New("Guardian release record digest is invalid")
 	}
-	servingAuthority, err := runtime.readServingAuthorityWitness(ctx, before, status)
+	servingAuthority, err := runtime.readServingAuthorityWitness(ctx, before, status, !standbyOnly && runtime.release.SupersedesFailedConfigSHA != "")
 	if err != nil {
 		return edgeCandidateStageReceipt{}, err
 	}
@@ -1092,19 +1113,19 @@ func (runtime *kubectlEdgeGroupRuntime) stageCandidateOnce(ctx context.Context, 
 	return postEdgeCandidateStage(ctx, runtime.transition.CandidateStageURL, request)
 }
 
-func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.Context, before edgeGroupState, status edgeCandidateStageStatus) (*edgeServingAuthorityWitness, error) {
+func (runtime *kubectlEdgeGroupRuntime) readServingAuthorityWitness(ctx context.Context, before edgeGroupState, status edgeCandidateStageStatus, allowDegradedRecovery bool) (*edgeServingAuthorityWitness, error) {
 	current, object, err := runtime.readCurrentAuthority(ctx)
 	if err != nil || object == nil {
 		return nil, err
 	}
-	witness, err := edgeServingAuthorityWitnessFromCurrentWithRecoveryAuthorities(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), runtime.release.SupersedesFailedConfigSHA != "", runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest, runtime.release.SupersedesFailedConfigSHA)
+	witness, err := edgeServingAuthorityWitnessFromCurrentWithRecoveryAuthorities(before, current, runtime.transition.GroupID, string(object.GetUID()), object.GetResourceVersion(), allowDegradedRecovery, runtime.release.ExpectedPreviousConfigSHA, runtime.release.ExpectedPreviousImageDigest, runtime.release.SupersedesFailedConfigSHA)
 	if err != nil || witness == nil {
 		return witness, err
 	}
-	return edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, time.Now().UTC())
+	return edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, time.Now().UTC(), allowDegradedRecovery)
 }
 
-func edgeServingAuthorityWitnessWithCurrentPublication(before edgeGroupState, witness *edgeServingAuthorityWitness, status edgeCandidateStageStatus, now time.Time) (*edgeServingAuthorityWitness, error) {
+func edgeServingAuthorityWitnessWithCurrentPublication(before edgeGroupState, witness *edgeServingAuthorityWitness, status edgeCandidateStageStatus, now time.Time, allowDegradedRecovery bool) (*edgeServingAuthorityWitness, error) {
 	if witness == nil || !status.Ready || !status.ServingHealthy || status.PublicationDecision != "published" || status.LKGState != "current" ||
 		status.BundleGeneration == "" || status.CurrentPublicationSequence == 0 || status.PublishedBundleDigest == "" {
 		return witness, nil
@@ -1118,7 +1139,7 @@ func edgeServingAuthorityWitnessWithCurrentPublication(before edgeGroupState, wi
 		digest, err := immutableDigestFromRef(worker.ImageRef)
 		generation, publication, recovery, versionOK := parseEdgePublicationVersion(worker.BundleGeneration)
 		if err != nil || !worker.Ready || worker.RestartCount != 0 || worker.SourceCommit != witness.WorkerSourceSHA ||
-			digest != witness.WorkerImageDigest || !edgePodHasGroupAuthority(worker) || !edgePodHasActiveInventoryAt(worker, now) ||
+			digest != witness.WorkerImageDigest || !edgePodHasGroupAuthority(worker) || !worker.InventoryProducerActive || (!allowDegradedRecovery && !edgePodHasActiveInventoryAt(worker, now)) ||
 			!versionOK || generation != status.BundleGeneration || worker.ServingGeneration != generation ||
 			worker.PublicationSequence != publication || publication > status.CurrentPublicationSequence || recovery > status.RecoveryEpoch {
 			return witness, nil

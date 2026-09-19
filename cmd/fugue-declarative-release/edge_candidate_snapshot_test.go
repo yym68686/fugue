@@ -21,7 +21,7 @@ import (
 )
 
 func TestStageCandidateRefreshesWorkerFactsWithoutRecoveringHealthyConfig(t *testing.T) {
-	for _, scenario := range []string{"fresh publication", "changed grant", "changed code", "stale facts", "regressed publication", "snapshot unavailable", "conflict budget"} {
+	for _, scenario := range []string{"fresh publication", "changed grant", "changed code", "stale facts", "recovery stale facts", "recovery missing facts", "regressed publication", "snapshot unavailable", "conflict budget"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("7", 64))
 			now := time.Now().UTC()
@@ -85,12 +85,15 @@ func TestStageCandidateRefreshesWorkerFactsWithoutRecoveringHealthyConfig(t *tes
 					CandidateEpoch: 12, CandidateRecordDigest: "sha256:" + strings.Repeat("8", 64), CandidateBundleGeneration: "new-config",
 					ReleaseRecordDigest: staged.ReleaseRecordDigest, WorkerSourceSHA: staged.WorkerSourceSHA, WorkerImageDigest: staged.WorkerImageDigest,
 					WorkerSlot: staged.TargetWorkerSlot, CurrentWorkerSlot: staged.ExpectedCurrentWorkerSlot,
-					CurrentPublishedBundleDigest: staged.ExpectedPublishedBundleDigest, CurrentPublicationSequence: 11, CurrentRecoveryEpoch: 2, AllowDegradedPrevious: true})
+					CurrentPublishedBundleDigest: staged.ExpectedPublishedBundleDigest, CurrentPublicationSequence: 11, CurrentRecoveryEpoch: 2, AllowDegradedPrevious: staged.AllowDegradedPrevious})
 			}))
 			defer server.Close()
 			transition.CandidateStageURL = server.URL + edgeCandidateStagePath
 			r := kubectlEdgeGroupRuntime{client: client, transition: transition, release: declarativerelease.PlanRelease{
 				SupersedesFailedConfigSHA: strings.Repeat("f", 40), Workload: declarativerelease.Workload{Namespace: "test-system"}}}
+			if scenario == "stale facts" {
+				r.release.SupersedesFailedConfigSHA = ""
+			}
 			readSnapshot := func(context.Context) (edgeGroupState, error) {
 				snapshots++
 				if scenario == "snapshot unavailable" {
@@ -105,8 +108,11 @@ func TestStageCandidateRefreshesWorkerFactsWithoutRecoveringHealthyConfig(t *tes
 					state.Generation++
 				} else if scenario == "changed code" {
 					fresh.SourceCommit = target.ConfigSHA
-				} else if scenario == "stale facts" {
+				} else if scenario == "stale facts" || scenario == "recovery stale facts" {
 					fresh.InventoryHeartbeatAt = now.Add(-time.Hour)
+				} else if scenario == "recovery missing facts" {
+					fresh.InventoryHeartbeatAt = time.Time{}
+					fresh.InventoryHeartbeatGeneration = 0
 				} else if scenario == "regressed publication" {
 					fresh.BundleGeneration, fresh.PublicationSequence = "new-config.p9.r2", 9
 				}
@@ -114,11 +120,11 @@ func TestStageCandidateRefreshesWorkerFactsWithoutRecoveringHealthyConfig(t *tes
 				return observed, nil
 			}
 			_, err := r.stageCandidate(context.Background(), before, "b", target, false, readSnapshot)
-			if (err == nil) != (scenario == "fresh publication") || recoveryPosts != 0 {
+			if (err == nil) != (scenario == "fresh publication" || strings.HasPrefix(scenario, "recovery ")) || recoveryPosts != 0 {
 				t.Fatalf("scenario=%s error=%v stages=%d recoveries=%d snapshots=%d", scenario, err, posts, recoveryPosts, snapshots)
 			}
 			expectedPosts, expectedSnapshots := 1, 1
-			if scenario == "fresh publication" {
+			if scenario == "fresh publication" || strings.HasPrefix(scenario, "recovery ") {
 				expectedPosts = 2
 			} else if scenario == "conflict budget" {
 				expectedPosts, expectedSnapshots = edgeCandidateStageAttempts, edgeCandidateStageAttempts-1

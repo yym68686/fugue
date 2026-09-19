@@ -707,6 +707,54 @@ func TestServingAuthorityWitnessAllowsSupersededPreviousAuthorityWithWorkerProof
 	}
 }
 
+func TestEdgeRestagingPreservesTrafficAllowsOnlyDegradedRecoveryHeartbeat(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	activation := edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID,
+		Generation: 7, ActiveSlot: "a", BundleGeneration: "bundle.p7.r1", WorkerSourceCommit: old.ConfigSHA,
+		WorkerImageDigest: digestFromTarget(t, old), Authority: edgeActivationAuthority}
+	before := edgeStateFixture("a", old, edgeFrontHealthFromActivation(activation))
+	before.FrontActivation = &activation
+	observed := before
+	observed.WorkerA = map[string]edgeGroupPod{}
+	for node, pod := range before.WorkerA {
+		pod.InventoryHeartbeatGeneration = 0
+		pod.InventoryHeartbeatAt = time.Time{}
+		observed.WorkerA[node] = pod
+	}
+	if edgeRestagingPreservesTraffic(before, observed, transition, false) {
+		t.Fatal("stale active inventory was accepted for an ordinary candidate retry")
+	}
+	if !edgeRestagingPreservesTraffic(before, observed, transition, true) {
+		t.Fatal("unchanged active authority was rejected for a superseding recovery retry")
+	}
+	for name, mutate := range map[string]func(*edgeGroupState, *edgeGroupPod){
+		"changed source":          func(_ *edgeGroupState, p *edgeGroupPod) { p.SourceCommit = strings.Repeat("2", 40) },
+		"changed image":           func(_ *edgeGroupState, p *edgeGroupPod) { p.ImageRef = edgeTargetFixture("1", "b").ImageRef },
+		"missing group authority": func(_ *edgeGroupState, p *edgeGroupPod) { p.RouteBundleSource = "" },
+		"inactive producer":       func(_ *edgeGroupState, p *edgeGroupPod) { p.InventoryProducerActive = false },
+		"not ready":               func(_ *edgeGroupState, p *edgeGroupPod) { p.Ready = false },
+		"restarted":               func(_ *edgeGroupState, p *edgeGroupPod) { p.RestartCount = 1 },
+		"regressed publication":   func(_ *edgeGroupState, p *edgeGroupPod) { p.PublicationSequence = 0 },
+		"changed slot":            func(s *edgeGroupState, _ *edgeGroupPod) { s.ActiveSlot = "b" },
+		"changed activation": func(s *edgeGroupState, _ *edgeGroupPod) {
+			activation := *s.FrontActivation
+			activation.Generation++
+			s.FrontActivation = &activation
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := observed
+			pod := observed.WorkerA["node-1"]
+			mutate(&changed, &pod)
+			changed.WorkerA = map[string]edgeGroupPod{"node-1": pod}
+			if edgeRestagingPreservesTraffic(before, changed, transition, true) {
+				t.Fatal("changed traffic authority was accepted during degraded recovery")
+			}
+		})
+	}
+}
+
 func TestServingAuthorityWitnessUsesWorkerActivationEvidenceWhenFrontMetadataLags(t *testing.T) {
 	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
 		GroupID: "edge-group-country-de", CurrentRecordDigest: "sha256:" + strings.Repeat("1", 64),
@@ -773,14 +821,14 @@ func TestServingAuthorityWitnessUsesCurrentWorkerPublicationAfterAuthorityBundle
 	status := edgeCandidateStageStatus{Ready: true, ServingHealthy: true, PublicationDecision: "published", LKGState: "current",
 		BundleGeneration: "edgegroupbundle_current", CurrentPublicationSequence: 26750, RecoveryEpoch: 513,
 		PublishedBundleDigest: "sha256:" + strings.Repeat("c", 64)}
-	updated, err := edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, now)
+	updated, err := edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, now, false)
 	if err != nil || updated.BundleVersion != worker.BundleGeneration || updated.WorkerSlot != witness.WorkerSlot ||
 		updated.WorkerSourceSHA != source || updated.WorkerImageDigest != image {
 		t.Fatalf("current publication witness=%+v err=%v", updated, err)
 	}
 	worker.SourceCommit = strings.Repeat("d", 40)
 	before.WorkerA["edge-de"] = worker
-	unchanged, err := edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, now)
+	unchanged, err := edgeServingAuthorityWitnessWithCurrentPublication(before, witness, status, now, false)
 	if err != nil || unchanged.BundleVersion != witness.BundleVersion {
 		t.Fatalf("mismatched worker identity changed witness: witness=%+v err=%v", unchanged, err)
 	}

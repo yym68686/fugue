@@ -300,11 +300,12 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusConflict {
 		var failure struct {
-			Error string `json:"error"`
+			Schema string `json:"schema"`
+			Error  string `json:"error"`
 		}
 		decoder := json.NewDecoder(io.LimitReader(response.Body, maxInventoryProducerResponseBytes+1))
 		decoder.DisallowUnknownFields()
-		if decoder.Decode(&failure) == nil && decoder.Decode(&struct{}{}) == io.EOF && failure.Error == "sequence_conflict" {
+		if decoder.Decode(&failure) == nil && decoder.Decode(&struct{}{}) == io.EOF && failure.Schema == "edge-control-error/v1" && failure.Error == "sequence_conflict" {
 			return errInventoryProducerCAS
 		}
 		return fmt.Errorf("Edge inventory producer heartbeat returned status %d", response.StatusCode)

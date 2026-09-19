@@ -362,7 +362,7 @@ func TestInventoryProducerTransportFailureDoesNotExposeProjectedIdentity(t *test
 }
 
 func TestInventoryProducerRetriesWithFreshCursor(t *testing.T) {
-	for _, failure := range []string{"transport", "sequence_conflict", "persistent_conflict", "unknown_conflict"} {
+	for _, failure := range []string{"transport", "sequence_conflict", "persistent_conflict", "unknown_conflict", "wrong_schema", "missing_schema"} {
 		t.Run(failure, func(t *testing.T) { testInventoryProducerRetry(t, failure) })
 	}
 }
@@ -398,7 +398,14 @@ func testInventoryProducerRetry(t *testing.T, failure string) {
 		}
 		attempt := postAttempts.Add(1)
 		if failure == "unknown_conflict" {
-			return inventoryJSONResponse(http.StatusConflict, map[string]string{"error": "other_conflict"}), nil
+			return inventoryJSONResponse(http.StatusConflict, map[string]string{"schema": "edge-control-error/v1", "error": "other_conflict"}), nil
+		}
+		if failure == "wrong_schema" || failure == "missing_schema" {
+			schema := ""
+			if failure == "wrong_schema" {
+				schema = "other/v1"
+			}
+			return inventoryJSONResponse(http.StatusConflict, map[string]string{"schema": schema, "error": "sequence_conflict"}), nil
 		}
 		if attempt == 1 {
 			firstHeartbeat = heartbeat
@@ -407,7 +414,7 @@ func testInventoryProducerRetry(t *testing.T, failure string) {
 			if failure == "transport" {
 				return nil, &url.Error{Op: "Post", URL: request.URL.String(), Err: errors.New("timeout")}
 			}
-			return inventoryJSONResponse(http.StatusConflict, map[string]string{"error": "sequence_conflict"}), nil
+			return inventoryJSONResponse(http.StatusConflict, map[string]string{"schema": "edge-control-error/v1", "error": "sequence_conflict"}), nil
 		}
 		if request.Header.Get("Authorization") == "" || heartbeat.ExpectedSequence != firstHeartbeat.ExpectedSequence+1 ||
 			heartbeat.ProducerGeneration != firstHeartbeat.ProducerGeneration+1 || heartbeat.Nonce == firstHeartbeat.Nonce {
@@ -425,9 +432,9 @@ func testInventoryProducerRetry(t *testing.T, failure string) {
 	service.mu.Unlock()
 
 	err := service.InventoryHeartbeatOnce(context.Background())
-	if failure == "persistent_conflict" || failure == "unknown_conflict" {
+	if failure == "persistent_conflict" || failure == "unknown_conflict" || failure == "wrong_schema" || failure == "missing_schema" {
 		want := int32(inventoryProducerRequestAttempts)
-		if failure == "unknown_conflict" {
+		if failure != "persistent_conflict" {
 			want = 1
 		}
 		if err == nil || postAttempts.Load() != want || getAttempts.Load() != want || service.Status().InventoryHeartbeatGeneration != 0 || service.Status().InventoryHeartbeatAt != nil {
