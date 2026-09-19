@@ -13,13 +13,18 @@ import (
 	"fugue/internal/routeproof"
 )
 
-type DNSReadinessPolicy struct {
+// ReadinessProbePolicy supplies shared bounded transport and evidence limits.
+// Each observer has an independent signed policy and runtime facts.
+type ReadinessProbePolicy struct {
 	ProbeIntervalSeconds int `json:"probe_interval_seconds"`
 	ProbeTimeoutSeconds  int `json:"probe_timeout_seconds"`
 	FactFreshnessSeconds int `json:"fact_freshness_seconds"`
 	MaxConcurrency       int `json:"max_concurrency"`
 	MaxProbes            int `json:"max_probes"`
 }
+
+// DNSReadinessPolicy preserves the existing DNS policy wire contract.
+type DNSReadinessPolicy = ReadinessProbePolicy
 
 type DNSEdgeEndpoint struct {
 	EdgeID      string    `json:"edge_id"`
@@ -61,11 +66,15 @@ type DNSReadinessPlan struct {
 }
 
 func ValidateDNSReadinessPolicy(p *DNSReadinessPolicy) error {
+	return ValidateReadinessProbePolicy(p)
+}
+
+func ValidateReadinessProbePolicy(p *ReadinessProbePolicy) error {
 	if p == nil {
 		return nil
 	}
 	if p.ProbeIntervalSeconds < 10 || p.ProbeIntervalSeconds > 300 || p.ProbeTimeoutSeconds < 1 || p.ProbeTimeoutSeconds > 10 || p.FactFreshnessSeconds < 20 || p.FactFreshnessSeconds > 600 || p.FactFreshnessSeconds < p.ProbeIntervalSeconds+p.ProbeTimeoutSeconds || p.MaxConcurrency < 1 || p.MaxConcurrency > 16 || p.MaxProbes < 1 || p.MaxProbes > 4096 {
-		return fmt.Errorf("DNS readiness policy is outside bounded limits")
+		return fmt.Errorf("readiness probe policy is outside bounded limits")
 	}
 	return nil
 }

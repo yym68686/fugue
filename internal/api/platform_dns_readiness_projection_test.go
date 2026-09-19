@@ -17,7 +17,7 @@ func TestDNSReadinessProjectionSeparatesTopologyFromHeartbeatHealth(t *testing.T
 	if err := projectDNSReadiness(&result, nodes, now); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.RuntimeSnapshot.DNSEdgeEndpoints) != 2 || result.Policy.DNSReadiness == nil || result.RuntimeSnapshot.PolicyGeneration != result.Policy.Generation {
+	if len(result.RuntimeSnapshot.DNSEdgeEndpoints) != 2 || result.Policy.DNSReadiness == nil || result.Policy.TLSReadiness == nil || result.Policy.TLSReadiness == result.Policy.DNSReadiness || result.RuntimeSnapshot.PolicyGeneration != result.Policy.Generation {
 		t.Fatal("missing topology or policy binding")
 	}
 	prior := result

@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v23"
+	CompilerVersion = "platform-config-compiler/v24"
 	GlobalScopeKey  = "global"
 )
 
@@ -126,6 +126,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	TLSReadiness             *ReadinessProbePolicy     `json:"tls_readiness,omitempty"`
 	DNSClientPolicies        []DNSClientPolicy         `json:"dns_client_policies,omitempty"`
 	DNSAnswerRules           []DNSAnswerRule           `json:"dns_answer_rules,omitempty"`
 	DNSReadiness             *DNSReadinessPolicy       `json:"dns_readiness,omitempty"`
@@ -283,6 +284,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	runtimeSnapshot.DNSSelections = normalizeDNSSelections(runtimeSnapshot.DNSSelections)
 	runtimeSnapshot.TLSDomains = append([]TLSDomainObservation(nil), runtimeSnapshot.TLSDomains...)
 	sort.Slice(runtimeSnapshot.TLSDomains, func(i, j int) bool { return runtimeSnapshot.TLSDomains[i].Ref < runtimeSnapshot.TLSDomains[j].Ref })
+	if policy.TLSReadiness != nil && len(intent.TLS) > policy.TLSReadiness.MaxProbes {
+		return CompileResult{}, fmt.Errorf("TLS readiness exceeds the policy probe limit")
+	}
 	tlsAllowlist, err := CompileTLSDomains(intent, runtimeSnapshot)
 	if err != nil {
 		return CompileResult{}, err
@@ -510,6 +514,10 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out.DNSAnswerRules = normalizeDNSAnswerRules(in.DNSAnswerRules)
 	out.DNSClientPolicies = normalizeDNSClientPolicies(in.DNSClientPolicies)
 
+	if in.TLSReadiness != nil {
+		p := *in.TLSReadiness
+		out.TLSReadiness = &p
+	}
 	if in.DNSReadiness != nil {
 		p := *in.DNSReadiness
 		out.DNSReadiness = &p
@@ -629,6 +637,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := ValidateReadinessProbePolicy(in.TLSReadiness); err != nil {
+		return fmt.Errorf("TLS %w", err)
+	}
 	if err := ValidateDNSClientPolicies(in.DNSClientPolicies); err != nil {
 		return err
 	}

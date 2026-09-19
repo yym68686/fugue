@@ -41,6 +41,7 @@ func projectDNSReadiness(result *platformIntentProjectionResponse, nodes []model
 	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].EdgeID < endpoints[j].EdgeID })
 	policy := result.Policy
 	policy.DNSReadiness = &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
+	policy.TLSReadiness = &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 	generation, err := platformconfig.PolicySnapshotGeneration(policy)
 	if err != nil {
 		return err

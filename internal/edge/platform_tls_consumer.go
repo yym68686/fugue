@@ -23,22 +23,23 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-// TLS shadow validation never attests live certificates or changes Caddy.
+// TLS shadow evidence never attests artifact apply or changes serving authority.
 type PlatformTLSCandidateStatus struct {
-	State            string    `json:"state"`
-	ArtifactID       string    `json:"artifact_id,omitempty"`
-	Digest           string    `json:"digest,omitempty"`
-	ReleaseSetID     string    `json:"release_set_id,omitempty"`
-	RouteArtifactID  string    `json:"route_artifact_id,omitempty"`
-	RouteDigest      string    `json:"route_digest,omitempty"`
-	CertificateCount int       `json:"certificate_count"`
-	AllowlistCount   int       `json:"allowlist_count"`
-	Sequence         int64     `json:"sequence,omitempty"`
-	VerifiedAt       time.Time `json:"verified_at,omitempty"`
-	ReportedAt       time.Time `json:"reported_at,omitempty"`
-	LastError        string    `json:"last_error,omitempty"`
-	Serving          bool      `json:"serving"`
-	TLSVerified      bool      `json:"tls_verified"`
+	Readiness        *TLSReadinessStatus `json:"readiness,omitempty"`
+	State            string              `json:"state"`
+	ArtifactID       string              `json:"artifact_id,omitempty"`
+	Digest           string              `json:"digest,omitempty"`
+	ReleaseSetID     string              `json:"release_set_id,omitempty"`
+	RouteArtifactID  string              `json:"route_artifact_id,omitempty"`
+	RouteDigest      string              `json:"route_digest,omitempty"`
+	CertificateCount int                 `json:"certificate_count"`
+	AllowlistCount   int                 `json:"allowlist_count"`
+	Sequence         int64               `json:"sequence,omitempty"`
+	VerifiedAt       time.Time           `json:"verified_at,omitempty"`
+	ReportedAt       time.Time           `json:"reported_at,omitempty"`
+	LastError        string              `json:"last_error,omitempty"`
+	Serving          bool                `json:"serving"`
+	TLSVerified      bool                `json:"tls_verified"`
 }
 
 type platformTLSCandidatePayload struct {
@@ -143,6 +144,8 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 	if selection.candidate {
 		s.mu.Lock()
 		s.platformTLSCandidate.State, s.platformTLSCandidate.ReportedAt = "inactive", time.Time{}
+		s.platformTLSReadiness = nil
+		s.platformTLSCandidate.TLSVerified = false
 		s.mu.Unlock()
 		return nil
 	}
@@ -175,6 +178,11 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 	if prev.Assignment.FencingToken > a.FencingToken || prev.Assignment.GenerationSequence > a.GenerationSequence {
 		return errors.New("TLS candidate replay rejected")
 	}
+	readiness, err := s.observePlatformTLSReadiness(ctx, c, route, payload)
+	if err != nil {
+		return err
+	}
+	c.TLSReadiness = readiness
 	if err := client.CheckAssignment(ctx, id, a); err != nil {
 		return err
 	}
@@ -211,6 +219,7 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 		return errors.New("TLS heartbeat receipt mismatch")
 	}
 	s.mu.Lock()
+	s.platformTLSReadiness = readiness
 	s.platformTLSCandidate = PlatformTLSCandidateStatus{State: "shadow_verified", ArtifactID: a.ArtifactID, Digest: a.ContentHash, ReleaseSetID: a.ReleaseSetID, RouteArtifactID: route.ID, RouteDigest: route.ContentHash, CertificateCount: len(payload.Certificates), AllowlistCount: len(payload.TLSAllowlist), Sequence: c.Sequence, VerifiedAt: c.VerifiedAt, ReportedAt: time.Now().UTC()}
 	s.mu.Unlock()
 	return nil

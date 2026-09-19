@@ -112,6 +112,7 @@ type Service struct {
 	walActionLast         map[string]time.Time
 	platformConsumerMu    sync.Mutex
 	platformCandidate     PlatformCandidateStatus
+	platformTLSReadiness  *platformTLSReadinessReceipt
 	platformTLSCandidate  PlatformTLSCandidateStatus
 }
 
@@ -968,6 +969,14 @@ func (s *Service) Status() Status {
 	out := s.snapshot
 	out.PlatformCandidate = s.platformCandidate
 	out.PlatformTLSCandidate = s.platformTLSCandidate
+	bundleVersion := ""
+	if s.bundle != nil && s.snapshot.CaddyAppliedVersion == s.bundle.Version && s.platformTLSCandidate.State == "shadow_verified" {
+		bundleVersion = s.bundle.Version
+	}
+	out.PlatformTLSCandidate.Readiness = summarizePlatformTLSReadiness(s.platformTLSReadiness, bundleVersion, time.Now().UTC())
+	if readiness := out.PlatformTLSCandidate.Readiness; readiness != nil {
+		out.PlatformTLSCandidate.TLSVerified = readiness.Probes > 0 && readiness.ReadyProbes == readiness.Probes
+	}
 	return out
 }
 

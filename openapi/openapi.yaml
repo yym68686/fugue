@@ -49,8 +49,22 @@ x-fugue-tls-shadow-consumer:
     shadow ReleaseSet, including scope, release, fence, lineage, policy, hostname
     ownership and matching TLS allowlists. Its independent durable TLS cursor
     and local platform_tls_candidate status report staged/shadow_validated only.
-    Historical domain lifecycle events do not prove fresh certificate readiness;
-    this validation neither loads Caddy nor changes serving, certificates or LKG.
+    Historical domain lifecycle events do not prove fresh certificate readiness.
+    Optional signed tls_readiness policy controls bounded TLS handshakes to the
+    local Caddy listener for hostnames in its group route projection also
+    authorized by the current
+    immutable serving bundle. A handshake verifies the certificate chain, SNI
+    hostname and validity; its evidence records the leaf fingerprint and expiry.
+    Unknown or differently owned hosts are not probed. This observer installs no
+    certificates and does not load Caddy, alter artifacts or advance serving/LKG;
+    ordinary certificate maintenance remains owned by the current serving bundle.
+    Local platform_tls_candidate.readiness reports fresh/failed/expired counts
+    and an assignment-bound receipt. Partial failures remain negative facts.
+    Evidence expires at the earliest policy freshness, verified chain expiry and
+    original serving bundle deadline. Assignment or activation changes reject
+    publication, and persisted observations are never reused after restart.
+    Fresh local TLS evidence alone does not attest route apply or full serving;
+    trusted heartbeat fields remain staged/shadow_validated.
 x-fugue-custom-domain-tls-continuity:
   semantics: >-
     A stopped custom-domain route may maintain TLS independently of its origin
@@ -31446,6 +31460,8 @@ components:
           maxItems: 4096
           items: {$ref: "#/components/schemas/PlatformDNSSelectionCandidate"}
     PlatformDNSReadinessPolicy:
+      $ref: "#/components/schemas/PlatformReadinessProbePolicy"
+    PlatformReadinessProbePolicy:
       type: object
       additionalProperties: false
       required: [probe_interval_seconds, probe_timeout_seconds, fact_freshness_seconds, max_concurrency, max_probes]
@@ -31480,6 +31496,8 @@ components:
           items: {$ref: "#/components/schemas/PlatformDNSAnswerRule"}
         dns_readiness:
           $ref: "#/components/schemas/PlatformDNSReadinessPolicy"
+        tls_readiness:
+          $ref: "#/components/schemas/PlatformReadinessProbePolicy"
         schema_version:
           type: string
         generation:

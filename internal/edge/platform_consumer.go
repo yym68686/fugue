@@ -39,6 +39,7 @@ type PlatformCandidateStatus struct {
 }
 
 type edgePlatformCandidate struct {
+	TLSReadiness     *platformTLSReadinessReceipt     `json:"tls_readiness,omitempty"`
 	Artifact         model.PlatformArtifact           `json:"artifact"`
 	Assignment       model.PlatformConsumerAssignment `json:"assignment"`
 	Release          model.PlatformArtifactRelease    `json:"release"`
@@ -101,6 +102,8 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 		if err := s.SyncPlatformTLSShadowOnce(ctx); err != nil && ctx.Err() == nil {
 			s.mu.Lock()
 			s.platformTLSCandidate.State = "failed"
+			s.platformTLSReadiness = nil
+			s.platformTLSCandidate.TLSVerified = false
 			s.platformTLSCandidate.LastError = err.Error()
 			s.mu.Unlock()
 			s.Logger.Printf("edge platform TLS candidate failed: %v", err)
