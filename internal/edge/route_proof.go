@@ -1,6 +1,8 @@
 package edge
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
@@ -57,6 +59,14 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(routeproof.ExpiryHeader, index.validUntil.UTC().Format(time.RFC3339Nano))
 	w.Header().Set(routeproof.EdgeHeader, s.Config.EdgeID)
 	w.Header().Set(routeproof.GroupHeader, s.Config.EdgeGroupID)
+	if index.trafficRelease != nil {
+		raw, err := json.Marshal(index.trafficRelease)
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set(routeproof.TrafficHeader, base64.RawURLEncoding.EncodeToString(raw))
+	}
 	if expectedState != "" {
 		w.Header().Set(routeproof.StateHeader, expectedState)
 	}

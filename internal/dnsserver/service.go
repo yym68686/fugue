@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	miekgdns "github.com/miekg/dns"
@@ -62,12 +63,17 @@ type edgeDNSLiveHealthFunc func(string, string) bool
 type edgeDNSPeerHealthFunc func(model.EdgeDNSAnswerCandidate) string
 
 type Service struct {
-	PlatformTokenFile  string
-	platformConsumerMu sync.Mutex
-	platformCandidate  PlatformCandidateStatus
-	Config             config.DNSConfig
-	HTTPClient         *http.Client
-	Logger             *log.Logger
+	platformServing         atomic.Pointer[dnsServingState]
+	platformServingBound    atomic.Bool
+	platformServingReported time.Time
+	platformServingError    string
+	platformParent          *Service
+	PlatformTokenFile       string
+	platformConsumerMu      sync.Mutex
+	platformCandidate       PlatformCandidateStatus
+	Config                  config.DNSConfig
+	HTTPClient              *http.Client
+	Logger                  *log.Logger
 
 	mu          sync.Mutex
 	snapshot    Status
@@ -102,6 +108,7 @@ type Service struct {
 }
 
 type Status struct {
+	PlatformServing        *DNSServingStatus        `json:"platform_serving,omitempty"`
 	PlatformCandidate      *PlatformCandidateStatus `json:"platform_candidate,omitempty"`
 	Status                 string                   `json:"status"`
 	Healthy                bool                     `json:"healthy"`
@@ -318,6 +325,7 @@ func (s *Service) newZoneServices(cfg config.DNSConfig) map[string]*Service {
 		childCfg.DNSNodeID = dnsZoneScopedNodeID(cfg.DNSNodeID, zone)
 		childCfg.CachePath = dnsZoneCachePath(cfg.CachePath, zone)
 		children[zone] = NewService(childCfg, s.Logger)
+		children[zone].platformParent = s
 	}
 	if len(children) == 0 {
 		return nil
@@ -354,10 +362,15 @@ func (s *Service) newZoneService(zone string) *Service {
 	childCfg.PhysicalNodeID = firstNonEmpty(s.Config.PhysicalNodeID, s.Config.DNSNodeID)
 	childCfg.DNSNodeID = dnsZoneScopedNodeID(s.Config.DNSNodeID, zone)
 	childCfg.CachePath = dnsZoneCachePath(s.Config.CachePath, zone)
-	return NewService(childCfg, s.Logger)
+	child := NewService(childCfg, s.Logger)
+	child.platformParent = s
+	return child
 }
 
 func (s *Service) reconcileHostedZoneServices(ctx context.Context, startLoops bool) {
+	if s.platformServingBound.Load() {
+		return
+	}
 	bundle := s.currentBundle()
 	if bundle == nil {
 		return
@@ -633,6 +646,9 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) SyncOnce(ctx context.Context) (err error) {
+	if s.platformServingBound.Load() || (s.platformParent != nil && s.platformParent.platformServingBound.Load()) {
+		return nil
+	}
 	started := time.Now()
 	result := "error"
 	defer func() {
@@ -806,6 +822,27 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
+	if s.platformServingBound.Load() {
+		st := s.platformServing.Load()
+		if st == nil {
+			reply := new(miekgdns.Msg)
+			reply.SetRcode(r, miekgdns.RcodeServerFailure)
+			_ = w.WriteMsg(reply)
+			return
+		}
+		remote := ""
+		if w.RemoteAddr() != nil {
+			remote = w.RemoteAddr().String()
+		}
+		reply := st.answer(r, remote, time.Now().UTC())
+		qtype := "unknown"
+		if len(r.Question) > 0 {
+			qtype = miekgdns.TypeToString[r.Question[0].Qtype]
+		}
+		s.recordQuery(qtype, miekgdns.RcodeToString[reply.Rcode])
+		_ = w.WriteMsg(reply)
+		return
+	}
 	resp := new(miekgdns.Msg)
 	resp.SetReply(r)
 	resp.Authoritative = true
@@ -941,6 +978,9 @@ func (s *Service) serviceForQuestionName(name string) *Service {
 }
 
 func (s *Service) LoadCache() error {
+	if found, err := s.loadDNSServingCache(); found || err != nil {
+		return err
+	}
 	path := strings.TrimSpace(s.Config.CachePath)
 	if path == "" {
 		s.recordCacheLoad("miss")
@@ -990,6 +1030,41 @@ func (s *Service) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.snapshot
+	if s.PlatformTokenFile != "" {
+		status.PlatformServing = &DNSServingStatus{State: "awaiting_release", LastError: s.platformServingError}
+	}
+	if s.platformServingBound.Load() {
+		st := s.platformServing.Load()
+		status.Healthy = false
+		status.Status = "degraded"
+		status.StaleCache = true
+		if st == nil {
+			status.LastError = "DNS positive serving checkpoint unavailable"
+			status.PlatformServing = &DNSServingStatus{State: "recovery_failed", LastError: status.LastError}
+			return status
+		}
+		c := st.record.Candidate
+		digest, _ := platformconfig.Digest(st.payload.Plan)
+		readiness := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, st.facts, digest, st.checkedAt, time.Now().UTC())
+		readiness.Serving = true
+		status.Healthy = dnsServingReady(st, time.Now())
+		status.StaleCache = st.fallback != "" || !status.Healthy
+		if status.Healthy {
+			status.Status = "ok"
+		}
+		status.BundleVersion, status.ServingGeneration, status.LKGGeneration = c.Artifact.Generation, c.Artifact.Generation, c.Artifact.Generation
+		status.RecordCount = 0
+		for _, z := range st.zones {
+			for _, rows := range z.records {
+				status.RecordCount += len(rows)
+			}
+		}
+		status.Zones = nil
+		status.LastError = s.platformServingError
+		status.DegradedReason = st.fallback
+		status.PlatformServing = &DNSServingStatus{State: "serving", ReleaseSetID: c.Assignment.ReleaseSetID, ArtifactID: c.Artifact.ID, Digest: c.Artifact.ContentHash, ReleaseChannel: c.Release.ReleaseChannel, FencingToken: c.Release.FencingToken, Zones: len(st.zones), Readiness: &readiness, FallbackReason: st.fallback, LastError: s.platformServingError, ReportedAt: s.platformServingReported}
+		return status
+	}
 	if s.PlatformTokenFile != "" {
 		candidate := s.platformCandidate
 		status.PlatformCandidate = &candidate

@@ -130,6 +130,18 @@ func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *tes
 		if err != nil || head.Bundle == nil || trafficbinding.ValidateGroup(head.Bundle.TrafficRelease, "edge-group-test-a", true) != nil {
 			t.Fatal("group lost authorized provenance")
 		}
+		keys := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "dns", Keys: map[string]string{"dns": "synthetic-dns-serving-selection"}}
+		server.auth.PlatformComponentIdentityKeyring = keys
+		dnsToken, err := platformcontrol.IssuePlatformComponentIdentity(keys, platformcontrol.PlatformComponentIdentityClaims{CredentialID: "dns-reader", Component: model.PlatformConsumerComponentDNSServer, NodeID: "dns-a", ScopeKey: "global", ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle}}, time.Now().UTC(), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := performJSONRequest(t, server, http.MethodGet, "/v1/platform-state/consumers/assignment?serving_only=true", dnsToken, nil)
+		var serving model.PlatformConsumerAssignmentResponse
+		mustDecodeJSON(t, response, &serving)
+		if response.Code != 200 || len(serving.Assignments) != 1 || serving.Assignments[0].ArtifactReleaseID != release.ID {
+			t.Fatal("DNS and Group Authority selected different releases", response.Code, response.Body.String())
+		}
 	}
 	assertSource(gray)
 	shadow := compile("shadow", "shadow.example.test")

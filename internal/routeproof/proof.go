@@ -21,6 +21,7 @@ const (
 	EdgeHeader    = "X-Fugue-Route-Edge-Id"
 	GroupHeader   = "X-Fugue-Route-Edge-Group"
 	StateHeader   = "X-Fugue-Route-Probe-State"
+	TrafficHeader = "X-Fugue-Traffic-Release"
 )
 
 func ValidNonce(nonce string) bool {

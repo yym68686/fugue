@@ -125,25 +125,29 @@ func projectDNSConsumerDeclarations(result *platformIntentProjectionResponse, no
 // Workload configuration is read only by this bounded migration capture. The
 // deterministic compiler and DNS consumers never query Kubernetes or business
 // state. Hosted zones come from the same frozen business snapshot as records.
-func (s *Server) captureDNSConsumerConfiguration(ctx context.Context, hosted []model.HostedZone) (map[string][]string, map[string][]platformconfig.DNSClientRule, error) {
+func (s *Server) captureDNSConsumerConfiguration(ctx context.Context, hosted []model.HostedZone) (map[string][]string, map[string][]platformconfig.DNSClientRule, map[string]platformconfig.DNSAuthorityPolicy, error) {
 	client, err := s.requireClusterNodeClient()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer client.closeIdleConnections()
 	if s.controlPlaneNamespace == "" {
-		return nil, nil, fmt.Errorf("DNS workload namespace is unavailable")
+		return nil, nil, nil, fmt.Errorf("DNS workload namespace is unavailable")
 	}
 	var workloads appsv1.DaemonSetList
 	if err = client.doJSON(ctx, http.MethodGet, "/apis/apps/v1/namespaces/"+url.PathEscape(s.controlPlaneNamespace)+"/daemonsets", &workloads); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	zones, err := dnsConsumerZonesFromWorkloads(workloads.Items, hosted)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	rules, err := dnsClientRulesFromWorkloads(workloads.Items)
-	return zones, rules, err
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	authorities, err := dnsAuthorityFromWorkloads(workloads.Items)
+	return zones, rules, authorities, err
 }
 
 func dnsConsumerZonesFromWorkloads(workloads []appsv1.DaemonSet, hosted []model.HostedZone) (map[string][]string, error) {

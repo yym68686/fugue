@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,12 +56,20 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
-		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
+		if err := s.SyncPlatformDNSServingOnce(ctx); err != nil && ctx.Err() == nil {
 			s.mu.Lock()
-			s.platformCandidate.State = "failed"
-			s.platformCandidate.LastError = err.Error()
+			s.platformServingError = err.Error()
 			s.mu.Unlock()
-			s.Logger.Printf("dns platform candidate failed: %v", err)
+			s.Logger.Printf("DNS traffic serving sync failed: %v", err)
+		}
+		if !s.platformServingBound.Load() {
+			if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
+				s.mu.Lock()
+				s.platformCandidate.State = "failed"
+				s.platformCandidate.LastError = err.Error()
+				s.mu.Unlock()
+				s.Logger.Printf("dns platform candidate failed: %v", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -183,7 +192,7 @@ type dnsCandidateCounts struct{ records, views, probes int }
 
 func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.PlatformConsumerAssignment) (dnsCandidateCounts, error) {
 	if !reflect.DeepEqual(a, c.Assignment) || a.ExpectedConsumerSetID == "" ||
-		a.FencingToken <= 0 || a.GenerationSequence <= 0 || a.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
+		a.FencingToken <= 0 || a.GenerationSequence <= 0 || !slices.Contains([]string{"shadow", "gray", "full"}, a.ReleaseChannel) {
 		return dnsCandidateCounts{}, errors.New("DNS candidate assignment mismatch")
 	}
 	artifact := c.Artifact
@@ -196,7 +205,7 @@ func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.Pla
 	if c.Release.ID != a.ArtifactReleaseID || c.Release.ArtifactID != a.ReleaseSetID ||
 		c.Release.ArtifactKind != model.PlatformArtifactKindReleaseSet ||
 		artifact.Metadata["release_set_generation"] != c.Release.Generation ||
-		c.Release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
+		c.Release.ReleaseChannel != a.ReleaseChannel ||
 		c.Release.FencingToken != a.FencingToken || c.Release.Status != model.PlatformArtifactReleaseStatusActive {
 		return dnsCandidateCounts{}, errors.New("DNS candidate release binding mismatch")
 	}

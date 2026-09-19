@@ -177,7 +177,7 @@ func selectionCandidate(c DNSSelectionCandidate) model.EdgeDNSAnswerCandidate {
 }
 
 func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNSReadinessPlan, snapshot RuntimeSnapshot, policy PolicySnapshot) ([]DNSQueryView, error) {
-	if len(policy.DNSAnswerRules) == 0 && len(snapshot.DNSSelections) == 0 {
+	if len(policy.DNSAnswerRules) == 0 && len(snapshot.DNSSelections) == 0 && len(policy.DNSAuthorities) == 0 {
 		return nil, nil
 	}
 	if err := ValidateDNSAnswerRules(policy.DNSAnswerRules); err != nil {

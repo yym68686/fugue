@@ -1,11 +1,15 @@
 package routeprobe
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -13,20 +17,23 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/routeproof"
+	"fugue/internal/trafficbinding"
 )
 
 // Proof is a newly collected HTTPS observation. ValidUntil is bounded by
 // the original serving bundle and the certificate chain, never renewed here.
 type Proof struct {
-	Digest     string    `json:"digest"`
-	Version    string    `json:"version"`
-	EdgeID     string    `json:"edge_id"`
-	GroupID    string    `json:"group_id"`
-	State      string    `json:"state,omitempty"`
-	ValidUntil time.Time `json:"valid_until"`
-	CheckedAt  time.Time `json:"checked_at"`
+	TrafficRelease *model.TrafficReleaseBinding `json:"traffic_release,omitempty"`
+	Digest         string                       `json:"digest"`
+	Version        string                       `json:"version"`
+	EdgeID         string                       `json:"edge_id"`
+	GroupID        string                       `json:"group_id"`
+	State          string                       `json:"state,omitempty"`
+	ValidUntil     time.Time                    `json:"valid_until"`
+	CheckedAt      time.Time                    `json:"checked_at"`
 }
 
 func Probe(ctx context.Context, host, path, address, expectedState string, timeout time.Duration) (Proof, error) {
@@ -117,5 +124,20 @@ func ParseResponse(response *http.Response, nonce string, now time.Time) (Proof,
 	if err != nil || !expires.After(now) {
 		return Proof{}, fail
 	}
-	return Proof{Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires, State: state}, nil
+	var binding *model.TrafficReleaseBinding
+	if values, ok := response.Header[http.CanonicalHeaderKey(routeproof.TrafficHeader)]; ok {
+		if len(values) != 1 || len(values[0]) > 8192 {
+			return Proof{}, fail
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(values[0])
+		if err != nil {
+			return Proof{}, fail
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&binding) != nil || binding == nil || dec.Decode(&struct{}{}) != io.EOF || trafficbinding.ValidateGroup(binding, response.Header.Get(routeproof.GroupHeader), true) != nil {
+			return Proof{}, fail
+		}
+	}
+	return Proof{TrafficRelease: binding, Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires, State: state}, nil
 }

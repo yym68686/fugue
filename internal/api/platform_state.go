@@ -1215,6 +1215,41 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	if values, ok := r.URL.Query()["serving_only"]; ok {
+		if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
+			httpx.WriteError(w, http.StatusBadRequest, "serving_only must be one boolean")
+			return
+		}
+		if values[0] == "true" {
+			selected := []consumerArtifactLookup{}
+			for _, item := range resolved {
+				if item.Release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
+					continue
+				}
+				set, err := s.store.GetPlatformExpectedConsumerSet(item.Assignment.ExpectedConsumerSetID)
+				if err != nil {
+					httpx.WriteError(w, http.StatusServiceUnavailable, "serving topology unavailable")
+					return
+				}
+				group := ""
+				for _, c := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
+					if c.ConsumerID == claims.Component+":"+claims.NodeID {
+						group = c.Cohort
+						break
+					}
+				}
+				projection, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease(group)
+				if err != nil {
+					httpx.WriteError(w, http.StatusServiceUnavailable, "serving release unavailable")
+					return
+				}
+				if found && projection.TrafficRelease.ReleaseID == item.Release.ID {
+					selected = append(selected, item)
+				}
+			}
+			resolved = selected
+		}
+	}
 	if len(resolved) == 0 {
 		httpx.WriteError(w, http.StatusNotFound, "no expected consumer assignment found")
 		return

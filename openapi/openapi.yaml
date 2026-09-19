@@ -50,6 +50,18 @@ x-fugue-traffic-serving-evidence:
     Durable receipts record artifact references and fresh probe results; restarts
     always probe again. These receipts do not promote a verified LKG. Failed or
     stale observations never become applied/passed, and shadow remains separate.
+x-fugue-dns-artifact-serving:
+  semantics: >-
+    DNS serving uses a verified ReleaseSet child and explicit signed authority
+    and client policies for every owned zone. One immutable physical consumer
+    snapshot replaces all zones atomically. Every answer rechecks original
+    route/TLS proof deadlines and quorum; static value expiry, empty NOERROR,
+    CNAME and longest-zone ownership retain their wire semantics. Serving route
+    proofs carry the exact traffic parent, route digest, release and fence.
+    Failed download, validation, probe or persistence preserves the previous
+    snapshot. Local authenticated positive checkpoints retain signed inputs;
+    restart discards transient readiness and refreshes it independently. Legacy
+    sync and ambient overrides cannot replace a bound artifact snapshot.
 x-fugue-edge-candidate-execution:
   schema: fugue.edge.candidate-execution/v1
   semantics: >-
@@ -3295,6 +3307,11 @@ paths:
       x-fugue-handler: handleGetPlatformConsumerAssignment
       security:
         - PlatformComponentBearerAuth: []
+      parameters:
+        - in: query
+          name: serving_only
+          description: Select only the newest applicable gray/full TrafficReleaseSet using immutable consumer group ownership. Shadow never authorizes serving. An incomplete selected topology fails closed.
+          schema: {type: boolean, default: false}
       responses:
         '200':
           description: Assignments bound to the verified component identity.
@@ -31481,6 +31498,18 @@ components:
           maxItems: 128
           items:
             $ref: "#/components/schemas/CachePolicy"
+    PlatformDNSAuthorityPolicy:
+      type: object
+      additionalProperties: false
+      required: [node_id, zone, nameservers, ttl_seconds, refresh_seconds, retry_seconds, expire_seconds]
+      properties:
+        node_id: {type: string}
+        zone: {type: string}
+        nameservers: {type: array, minItems: 1, maxItems: 16, items: {type: string}}
+        ttl_seconds: {type: integer, minimum: 1, maximum: 3600}
+        refresh_seconds: {type: integer, minimum: 1, maximum: 86400}
+        retry_seconds: {type: integer, minimum: 1, maximum: 86400}
+        expire_seconds: {type: integer, minimum: 1, maximum: 604800}
     PlatformDNSConsumerIntent:
       type: object
       additionalProperties: false
@@ -31642,6 +31671,11 @@ components:
           type: array
           maxItems: 65
           items: {$ref: "#/components/schemas/PlatformTrafficRolloutCohort"}
+        dns_authorities:
+          type: array
+          maxItems: 16384
+          items:
+            $ref: "#/components/schemas/PlatformDNSAuthorityPolicy"
         dns_client_policies:
           type: array
           maxItems: 256

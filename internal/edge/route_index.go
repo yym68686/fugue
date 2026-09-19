@@ -5,18 +5,20 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/trafficbinding"
 )
 
 // edgeRouteIndex is immutable after publication. Bundle updates build a new
 // index and atomically replace the previous snapshot, so proxy requests never
 // contend with bundle lifecycle or telemetry updates.
 type edgeRouteIndex struct {
-	bundleVersion string
-	validUntil    time.Time
-	edgeGroupID   string
-	publication   routePublicationMetadata
-	byHost        map[string][]edgeIndexedRoute
-	tlsAllowlist  []model.EdgeTLSAllowlistEntry
+	trafficRelease *model.TrafficReleaseBinding
+	bundleVersion  string
+	validUntil     time.Time
+	edgeGroupID    string
+	publication    routePublicationMetadata
+	byHost         map[string][]edgeIndexedRoute
+	tlsAllowlist   []model.EdgeTLSAllowlistEntry
 }
 
 type edgeIndexedRoute struct {
@@ -26,12 +28,13 @@ type edgeIndexedRoute struct {
 
 func buildEdgeRouteIndex(bundle model.EdgeRouteBundle, edgeGroupID string, publication routePublicationMetadata) *edgeRouteIndex {
 	index := &edgeRouteIndex{
-		bundleVersion: strings.TrimSpace(bundle.Version),
-		validUntil:    bundle.ValidUntil,
-		edgeGroupID:   strings.TrimSpace(edgeGroupID),
-		publication:   publication,
-		byHost:        make(map[string][]edgeIndexedRoute),
-		tlsAllowlist:  append([]model.EdgeTLSAllowlistEntry(nil), bundle.TLSAllowlist...),
+		trafficRelease: trafficbinding.Clone(bundle.TrafficRelease),
+		bundleVersion:  strings.TrimSpace(bundle.Version),
+		validUntil:     bundle.ValidUntil,
+		edgeGroupID:    strings.TrimSpace(edgeGroupID),
+		publication:    publication,
+		byHost:         make(map[string][]edgeIndexedRoute),
+		tlsAllowlist:   append([]model.EdgeTLSAllowlistEntry(nil), bundle.TLSAllowlist...),
 	}
 	for _, route := range bundle.Routes {
 		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {

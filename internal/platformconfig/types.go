@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v25"
+	CompilerVersion = "platform-config-compiler/v26"
 	GlobalScopeKey  = "global"
 )
 
@@ -126,6 +126,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	DNSAuthorities           []DNSAuthorityPolicy      `json:"dns_authorities,omitempty"`
 	TrafficRolloutCohorts    []TrafficRolloutCohort    `json:"traffic_rollout_cohorts,omitempty"`
 	TLSReadiness             *ReadinessProbePolicy     `json:"tls_readiness,omitempty"`
 	DNSClientPolicies        []DNSClientPolicy         `json:"dns_client_policies,omitempty"`
@@ -318,6 +319,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, err
 	}
 	if err := ValidateDNSClientPolicyOwnership(policy.DNSClientPolicies, intent.DNSConsumers); err != nil {
+		return CompileResult{}, err
+	}
+	if err := ValidateDNSAuthorityOwnership(policy.DNSAuthorities, intent.DNSConsumers); err != nil {
 		return CompileResult{}, err
 	}
 	dnsViews, err := CompileDNSConsumerViews(intent.DNSConsumers, runtimeSnapshot, compiledDNS)
@@ -514,6 +518,7 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 
 func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out := in
+	out.DNSAuthorities = normalizeDNSAuthorities(in.DNSAuthorities)
 	out.TrafficRolloutCohorts = NormalizeTrafficRolloutCohorts(in.TrafficRolloutCohorts)
 	out.DNSAnswerRules = normalizeDNSAnswerRules(in.DNSAnswerRules)
 	out.DNSClientPolicies = normalizeDNSClientPolicies(in.DNSClientPolicies)
@@ -641,6 +646,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := ValidateDNSAuthorities(in.DNSAuthorities); err != nil {
+		return err
+	}
 	if err := ValidateTrafficRolloutCohorts(in.TrafficRolloutCohorts); err != nil {
 		return err
 	}

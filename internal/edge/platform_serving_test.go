@@ -6,11 +6,14 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fugue/internal/trafficbinding"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,6 +202,21 @@ func TestTrafficServingRouteProbeUsesTLSAndNonce(t *testing.T) {
 	proof, err := s.probePlatformServingRouteWithRoots(context.Background(), route, time.Second, roots)
 	if err != nil || proof.Version != "serving" || proof.EdgeID != "edge" {
 		t.Fatal("real TLS route proof failed", proof, err)
+	}
+	// Bind the same real HTTPS path to a traffic release. The parser must
+	// preserve immutable provenance and refuse malformed/shadow bindings.
+	d := "sha256:" + strings.Repeat("a", 64)
+	binding := &model.TrafficReleaseBinding{Schema: trafficbinding.Schema, ReleaseSetID: "parent", ReleaseSetDigest: d, ReleaseSetGeneration: "parent-gen", RouteArtifactID: "route", RouteArtifactDigest: d, RouteArtifactGeneration: "route-gen", RouteArtifactSequence: 1, ReleaseID: "release", ReleaseChannel: "full", FencingToken: 1, ScopeKey: "global", IntentDigest: d, PolicyDigest: d, InputSnapshotDigest: d, CompilerVersion: "compiler", ProjectionDigest: d}
+	s.recordSyncSuccess(model.EdgeRouteBundle{Version: "bound", ValidUntil: now.Add(time.Minute), TrafficRelease: binding, Routes: []model.EdgeRouteBinding{route}}, "", now, false)
+	proof, err = s.probePlatformServingRouteWithRoots(context.Background(), route, time.Second, roots)
+	if err != nil || !reflect.DeepEqual(proof.TrafficRelease, binding) {
+		t.Fatal("HTTPS traffic proof lost release binding", proof, err)
+	}
+	binding = trafficbinding.Clone(binding)
+	binding.ReleaseChannel = "shadow"
+	s.recordSyncSuccess(model.EdgeRouteBundle{Version: "invalid", ValidUntil: now.Add(time.Minute), TrafficRelease: binding, Routes: []model.EdgeRouteBinding{route}}, "", now, false)
+	if _, err = s.probePlatformServingRouteWithRoots(context.Background(), route, time.Second, roots); err == nil {
+		t.Fatal("shadow traffic proof accepted")
 	}
 	if _, err = s.probePlatformServingRoute(context.Background(), route, time.Second); err == nil {
 		t.Fatal("untrusted TLS accepted")

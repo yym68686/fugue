@@ -14,6 +14,8 @@ import (
 )
 
 type DNSQueryStatus struct {
+	AuthorityPolicies  int       `json:"authority_policies,omitempty"`
+	WireSnapshotProbes int       `json:"wire_snapshot_probes,omitempty"`
 	ClientPolicyDigest string    `json:"client_policy_digest,omitempty"`
 	ClientPolicyRules  int       `json:"client_policy_rules"`
 	ViewDigest         string    `json:"view_digest"`
@@ -150,6 +152,23 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 	}
 	if len(owned) == 0 {
 		return nil, errors.New("DNS consumer has no query view")
+	}
+	if len(payload.Policy.DNSAuthorities) > 0 {
+		// Run the future serving answerer against the same signed snapshot and
+		// current facts, detached from both live pointer and positive cache.
+		st, err := buildDNSServingState(dnsServingCheckpoint{Candidate: c, AppliedAt: now}, dnsServingPayload{Queries: payload.Views, Plan: payload.Plan, Policy: payload.Policy}, "", s.Config.DNSNodeID, s.Config.EdgeGroupID, readiness.Facts, now)
+		if err != nil {
+			return nil, err
+		}
+		if err = probeDNSServingSnapshot(st); err != nil {
+			return nil, err
+		}
+		receipt.Status.AuthorityPolicies = len(st.zones)
+		for _, z := range st.zones {
+			for _, rows := range z.records {
+				receipt.Status.WireSnapshotProbes += len(rows)
+			}
+		}
 	}
 	receipt.Status.ViewDigest, err = platformconfig.Digest(owned)
 	if err != nil {

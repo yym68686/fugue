@@ -26,6 +26,12 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
+var ErrNoServingAssignment = errors.New("no serving traffic assignment")
+
+func (c Client) SyncServing(ctx context.Context, component, nodeID, scope, kind string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
+	return c.syncChannel(ctx, component, nodeID, scope, kind, "serving")
+}
+
 type Identity struct {
 	Token         string    `json:"token"`
 	ExpiresAt     time.Time `json:"expires_at"`
@@ -42,8 +48,11 @@ func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string)
 // SyncChannel downloads exactly one declared lane. It never chooses a newer
 // lane, falls back to another channel, applies the artifact or grants serving.
 func (c Client) SyncChannel(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
+	return c.syncChannel(ctx, component, nodeID, scope, kind, channel)
+}
+func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
 	switch channel {
-	case model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull:
+	case "serving", model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull:
 	default:
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform release channel is invalid")
 	}
@@ -65,13 +74,21 @@ func (c Client) SyncChannel(ctx context.Context, component, nodeID, scope, kind,
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform credential identity mismatch")
 	}
 	var assignments model.PlatformConsumerAssignmentResponse
-	if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/assignment", id.Token, http.MethodGet, nil, &assignments); err != nil {
+	query := ""
+	if channel == "serving" {
+		query = "?serving_only=true"
+	}
+	if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/assignment"+query, id.Token, http.MethodGet, nil, &assignments); err != nil {
+		var status *responseStatusError
+		if channel == "serving" && errors.As(err, &status) && status.Code == http.StatusNotFound {
+			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoServingAssignment
+		}
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
 	var chosen *model.PlatformConsumerAssignment
 	for i := range assignments.Assignments {
 		a := &assignments.Assignments[i]
-		if a.ScopeKey == scope && a.ArtifactKind == kind && a.ReleaseChannel == channel {
+		if a.ScopeKey == scope && a.ArtifactKind == kind && (a.ReleaseChannel == channel || (channel == "serving" && (a.ReleaseChannel == "gray" || a.ReleaseChannel == "full"))) {
 			if chosen != nil {
 				return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("ambiguous platform release assignment")
 			}
@@ -79,6 +96,9 @@ func (c Client) SyncChannel(ctx context.Context, component, nodeID, scope, kind,
 		}
 	}
 	if chosen == nil {
+		if channel == "serving" {
+			return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrNoServingAssignment
+		}
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform release assignment unavailable")
 	}
 	var envelope struct {
@@ -99,8 +119,18 @@ func (c Client) SyncChannel(ctx context.Context, component, nodeID, scope, kind,
 // CheckAssignment prevents a completed observation from being reported against
 // a release or topology revision replaced while the consumer was working.
 func (c Client) CheckAssignment(ctx context.Context, identity Identity, assignment model.PlatformConsumerAssignment) error {
+	return c.checkAssignment(ctx, identity, assignment, false)
+}
+func (c Client) CheckServingAssignment(ctx context.Context, identity Identity, assignment model.PlatformConsumerAssignment) error {
+	return c.checkAssignment(ctx, identity, assignment, true)
+}
+func (c Client) checkAssignment(ctx context.Context, identity Identity, assignment model.PlatformConsumerAssignment, serving bool) error {
 	var current model.PlatformConsumerAssignmentResponse
-	if err := c.requestJSON(ctx, "/v1/platform-state/consumers/assignment", identity.Token, http.MethodGet, nil, &current); err != nil {
+	path := "/v1/platform-state/consumers/assignment"
+	if serving {
+		path += "?serving_only=true"
+	}
+	if err := c.requestJSON(ctx, path, identity.Token, http.MethodGet, nil, &current); err != nil {
 		return err
 	}
 	matches := 0
@@ -128,7 +158,12 @@ func (c Client) requestJSON(ctx context.Context, path, token, method string, in,
 		return errors.New("platform API endpoint is invalid")
 	}
 	base.RawQuery, base.Fragment = "", ""
-	base.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(path, "/")
+	rel, err := url.Parse(path)
+	if err != nil || rel.Host != "" || rel.Scheme != "" || rel.Fragment != "" {
+		return errors.New("platform request path invalid")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(rel.Path, "/")
+	base.RawQuery = rel.RawQuery
 	return c.json(ctx, base.String(), token, method, in, out)
 }
 
@@ -162,7 +197,7 @@ func (c Client) json(ctx context.Context, endpoint, token, method string, in, ou
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("platform request rejected: HTTP %d", resp.StatusCode)
+		return &responseStatusError{Code: resp.StatusCode}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
 	if err != nil || len(raw) > 8<<20 {
@@ -173,6 +208,12 @@ func (c Client) json(ctx context.Context, endpoint, token, method string, in, ou
 		return errors.New("platform response invalid")
 	}
 	return nil
+}
+
+type responseStatusError struct{ Code int }
+
+func (e *responseStatusError) Error() string {
+	return fmt.Sprintf("platform request rejected: HTTP %d", e.Code)
 }
 
 func ReadFile(path string, limit int64) ([]byte, error) {
