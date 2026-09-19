@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -647,7 +648,7 @@ func TestScheduleOrphanImageCachePruneSkipsWhenPruneAlreadyActive(t *testing.T) 
 	}
 }
 
-func TestScheduleOrphanImageCachePruneHaltsAfterControllerFailure(t *testing.T) {
+func TestScheduleOrphanImageCachePrunePausesAfterControllerFailure(t *testing.T) {
 	t.Parallel()
 
 	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
@@ -656,6 +657,13 @@ func TestScheduleOrphanImageCachePruneHaltsAfterControllerFailure(t *testing.T) 
 		t.Fatalf("enroll updater: %v", err)
 	}
 	upsertControllerImageCacheManifest(t, stateStore)
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID: "tenant_1", AppID: "app_1",
+		ImageRef:       "registry.fugue.internal:5000/fugue-apps/demo:old",
+		LifecycleState: model.ImageLifecycleDeleted,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	task, err := stateStore.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, "", "", model.NodeUpdateTaskTypePruneImageCache, map[string]string{
 		"prune_reason": "image-cache-orphan",
 	})
@@ -709,12 +717,186 @@ func TestControllerImageCachePruneDoesNotHaltAfterPreExecutionRefusal(t *testing
 		t.Fatalf("refuse prune task: %v", err)
 	}
 	svc := &Service{Store: stateStore}
-	failed, halted, err := svc.controllerImageCacheAutomaticPruneFailedTask()
+	failed, err := svc.controllerImageCacheAutomaticPruneFailedTasks()
 	if err != nil {
 		t.Fatalf("inspect failed prune tasks: %v", err)
 	}
-	if halted {
+	if len(failed) != 0 {
 		t.Fatalf("pre-execution refusal permanently halted automation: %+v", failed)
+	}
+}
+
+func TestScheduleOrphanImageCachePruneFailureRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		inventory time.Duration
+		protected bool
+		otherNode bool
+		partial   bool
+		pruneAck  bool
+		dryRunAck bool
+		wantTasks int
+	}{
+		{name: "fresh inventory recovers", inventory: -time.Minute, wantTasks: 1},
+		{name: "inventory before failure remains blocked", inventory: -90 * time.Minute},
+		{name: "expired inventory remains blocked", inventory: -3 * time.Hour},
+		{name: "new protection is respected", inventory: -time.Minute, protected: true},
+		{name: "partial inventory remains blocked", inventory: -time.Minute, partial: true},
+		{name: "successful prune post inventory recovers", inventory: -time.Minute, pruneAck: true, wantTasks: 1},
+		{name: "dry run is not inventory evidence", inventory: -time.Minute, pruneAck: true, dryRunAck: true},
+		{name: "unrecovered failure does not block other node", inventory: -90 * time.Minute, otherNode: true, wantTasks: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stateStore, nodeSecret, path := newImageCacheControllerTestStoreWithPath(t)
+			updater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache})
+			if err != nil {
+				t.Fatal(err)
+			}
+			upsertControllerImageCacheManifest(t, stateStore)
+			lifecycle := model.ImageLifecycleDeleted
+			if tc.protected {
+				lifecycle = model.ImageLifecycleAvailable
+			}
+			if _, err := stateStore.UpsertImage(model.Image{
+				TenantID: "tenant_1", AppID: "app_1",
+				ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:old",
+				CanonicalDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				LifecycleState:  lifecycle,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			task, err := stateStore.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, "", "", model.NodeUpdateTaskTypePruneImageCache, map[string]string{
+				"prune_reason": "image-cache-orphan", "targets_json": `[{"repo":"fugue-apps/obsolete","target":"never-replay"}]`,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := stateStore.FailNodeUpdateTask(task.ID, updater.ID, "node update task timed out", "timeout"); err != nil {
+				t.Fatal(err)
+			}
+			// Model a prior process failure without sleeping or changing the
+			// production clock. The reopened file store is the durable history.
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state model.State
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			finished := now.Add(-time.Hour)
+			for i := range state.NodeUpdateTasks {
+				if state.NodeUpdateTasks[i].ID == task.ID {
+					state.NodeUpdateTasks[i].CompletedAt = &finished
+					state.NodeUpdateTasks[i].UpdatedAt = finished
+				}
+			}
+			for i := range state.ImageCacheNodes {
+				state.ImageCacheNodes[i].ObservedAt = now.Add(tc.inventory)
+				state.ImageCacheNodes[i].ReportedByNodeUpdaterID = updater.ID
+			}
+			completed := now
+			if tc.partial {
+				completed = now.Add(-2 * time.Minute)
+			}
+			ack := model.NodeUpdateTask{
+				ID: "inventory-success", NodeUpdaterID: updater.ID,
+				Type: model.NodeUpdateTaskTypeReportImageCache, Status: model.NodeUpdateTaskStatusCompleted,
+				CreatedAt: now.Add(-5 * time.Minute), CompletedAt: &completed,
+			}
+			if tc.pruneAck {
+				ack.Type = model.NodeUpdateTaskTypePruneImageCache
+				ack.Payload = map[string]string{"allow_delete": "true", "dry_run": "false"}
+				if tc.dryRunAck {
+					ack.Payload["dry_run"] = "true"
+				}
+			}
+			state.NodeUpdateTasks = append(state.NodeUpdateTasks, ack)
+			raw, err = json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.otherNode {
+				if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-2", "https://worker-2.example.com", nil, "machine-2", "fingerprint-worker-2", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+					NodeID: "machine-2", ClusterNodeName: "worker-2", ObservedAt: now, Status: "reported",
+					UnreferencedBlobCount: 1, UnreferencedBlobBytes: 100,
+					UnreferencedBlobs: []model.ImageCachePruneBlobCandidate{{Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", SizeBytes: 100, Reason: "unreferenced_blob"}},
+				}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			svc := &Service{Store: stateStore, Config: config.ControllerConfig{
+				ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
+				ImageStoreOrphanPruneGracePeriod:           time.Hour,
+				ImageStoreOrphanPruneMaxTargetsPerNode:     10,
+				ImageStoreOrphanPruneMaxDeleteBytesPerNode: "1Gi",
+				ImageStoreOrphanPruneMinReplicaCount:       1,
+				ImageCacheInventoryTTL:                     2 * time.Hour,
+			}}
+			if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+			if err != nil || len(tasks) != tc.wantTasks {
+				t.Fatalf("pending tasks=%+v, error=%v; want %d", tasks, err, tc.wantTasks)
+			}
+			if len(tasks) == 1 {
+				wantNode := "worker-1"
+				if tc.otherNode {
+					wantNode = "worker-2"
+				}
+				if tasks[0].ClusterNodeName != wantNode || tasks[0].Payload["targets_json"] == task.Payload["targets_json"] || tasks[0].Payload["allow_delete"] != "true" {
+					t.Fatalf("recovery did not schedule a fresh safe plan on %s: %+v", wantNode, tasks[0])
+				}
+			}
+		})
+	}
+}
+
+func TestControllerImageCachePruneRecoveryRequiresNodeEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-time.Hour)
+	recent := now.Add(-time.Minute)
+	updater := model.NodeUpdater{ID: "updater-current"}
+	node := model.ImageCacheNodeInventory{NodeID: "machine-1", ClusterNodeName: "worker-1", ReportedByNodeUpdaterID: updater.ID, ObservedAt: now}
+	failure := model.NodeUpdateTask{ID: "failed", NodeUpdaterID: "updater-previous", ClusterNodeName: node.ClusterNodeName, CompletedAt: &old}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*model.ImageCacheNodeInventory, *[]model.NodeUpdateTask)
+		want   string
+	}{
+		{name: "reenrolled node recovers with fresh evidence"},
+		{name: "old reporter cannot authorize recovery", mutate: func(n *model.ImageCacheNodeInventory, _ *[]model.NodeUpdateTask) {
+			n.ReportedByNodeUpdaterID = "updater-previous"
+		}, want: "awaiting_post_failure_inventory"},
+		{name: "inventory at failure is insufficient", mutate: func(n *model.ImageCacheNodeInventory, _ *[]model.NodeUpdateTask) { n.ObservedAt = old }, want: "awaiting_post_failure_inventory"},
+		{name: "future observation is insufficient", mutate: func(n *model.ImageCacheNodeInventory, _ *[]model.NodeUpdateTask) { n.ObservedAt = now.Add(time.Minute) }, want: "awaiting_post_failure_inventory"},
+		{name: "inventory error is insufficient", mutate: func(n *model.ImageCacheNodeInventory, _ *[]model.NodeUpdateTask) { n.LastError = "incomplete scan" }, want: "awaiting_post_failure_inventory"},
+		{name: "latest completion wins over creation order", mutate: func(_ *model.ImageCacheNodeInventory, fs *[]model.NodeUpdateTask) {
+			f := failure
+			f.ID = "new-failure"
+			f.CompletedAt = &recent
+			*fs = append(*fs, f)
+		}, want: "failure_cooldown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, failures := node, []model.NodeUpdateTask{failure}
+			if tc.mutate != nil {
+				tc.mutate(&n, &failures)
+			}
+			_, reason := controllerImageCachePruneRecoveryBlock(n, updater, failures, now)
+			if reason != tc.want {
+				t.Fatalf("recovery reason=%q, want %q", reason, tc.want)
+			}
+		})
 	}
 }
 
@@ -968,7 +1150,14 @@ func TestControllerImageCachePrunePlanRetiresAuthorizedManifestGraph(t *testing.
 
 func newImageCacheControllerTestStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore, nodeSecret, _ := newImageCacheControllerTestStoreWithPath(t)
+	return stateStore, nodeSecret
+}
+
+func newImageCacheControllerTestStoreWithPath(t *testing.T) (*store.Store, string, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(path)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -980,7 +1169,7 @@ func newImageCacheControllerTestStore(t *testing.T) (*store.Store, string) {
 	if err != nil {
 		t.Fatalf("create node key: %v", err)
 	}
-	return stateStore, nodeSecret
+	return stateStore, nodeSecret, path
 }
 
 func upsertControllerImageCacheManifest(t *testing.T, stateStore *store.Store) {

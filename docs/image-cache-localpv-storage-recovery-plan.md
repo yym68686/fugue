@@ -490,11 +490,21 @@ FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MIN_REPLICA_COUNT=1
 Production canary and rollout coverage has passed on `v2202605354515455529`,
 `ns101351`, and the full-node observe pass. The formal automation default is
 low-speed `delete`: each node gets a small per-run delete budget, every delete
-task must be followed by a post-prune inventory report, and automation halts
-before issuing delete tasks if a previous controller orphan-prune task failed,
-if a prune task is already pending/running on that node, or if any plan contains
-candidate reasons outside the default orphan set (`missing_control_plane_image`,
-`lost_image`).
+task must be followed by a post-prune inventory report. A failed controller
+orphan-prune task pauses only its affected node. Automatic deletion can resume
+after the 30-minute node cooldown only when the current node updater has reported
+a fresh inventory observed strictly after the latest failure completed, and its
+inventory task (or a delete task with mandatory post-prune inventory) has
+completed successfully. A dry-run task is not inventory evidence. An in-progress or failed chunked
+report cannot inherit an older task acknowledgement. Recovery
+recomputes the protected set and a new bounded plan; it never replays failed
+targets or clears failure history. A missing, stale, future-dated, or old-updater
+inventory cannot authorize recovery. Other nodes continue independently.
+
+Pending/running prune tasks still block another prune on the same node. Candidate
+reasons outside the default automatic set (`missing_control_plane_image`,
+`lost_image`) remain excluded, and claim-time and node-local reference checks
+continue to protect current workloads, pins, shared blobs, and manifest graphs.
 
 ### 4.9 CLI surface
 
@@ -905,8 +915,8 @@ operator maintenance steps; this code change keeps production defaults in
       image was selected.
 - [x] Gradually raise budgets only after multiple successful runs.
 - [x] Promote orphan cleanup into formal low-speed automation with post-delete
-      inventory and halt gates for unsafe candidate reasons, active prune tasks,
-      and failed controller prune tasks.
+      inventory and node-scoped recovery gates for failed controller prune tasks,
+      plus exclusions for unsafe candidate reasons and active prune tasks.
 
 ### P6: LVM LocalPV inventory
 

@@ -91,18 +91,6 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 	if mode == "" {
 		return nil
 	}
-	if mode == model.ImageCachePruneModeDelete {
-		failedTask, halted, err := s.controllerImageCacheAutomaticPruneFailedTask()
-		if err != nil {
-			return err
-		}
-		if halted {
-			if s.Logger != nil {
-				s.Logger.Printf("halt image-cache orphan auto prune: previous controller prune task failed task=%s node=%s error=%s", failedTask.ID, failedTask.ClusterNodeName, failedTask.ErrorMessage)
-			}
-			return nil
-		}
-	}
 	ttl := s.Config.ImageCacheInventoryTTL
 	if ttl <= 0 {
 		ttl = 2 * time.Hour
@@ -142,6 +130,13 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 	updaters, err := s.Store.ListNodeUpdaters("", true)
 	if err != nil {
 		return err
+	}
+	var failedTasks []model.NodeUpdateTask
+	if mode == model.ImageCachePruneModeDelete {
+		failedTasks, err = s.controllerImageCacheAutomaticPruneFailedTasks()
+		if err != nil {
+			return err
+		}
 	}
 	activeGlobal, err := s.controllerImageCacheRunningPruneTaskCount()
 	if err != nil {
@@ -183,6 +178,22 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		if active {
 			if s.Logger != nil {
 				s.Logger.Printf("skip image-cache orphan prune for node=%s updater=%s: prune task already pending or running", plan.ClusterNodeName, updater.ID)
+			}
+			continue
+		}
+		failedTask, recoveryReason := controllerImageCachePruneRecoveryBlock(node, updater, failedTasks, time.Now().UTC())
+		if failedTask.ID != "" && recoveryReason == "" {
+			confirmed, err := s.controllerImageCacheHasCompletedInventory(node, updater.ID)
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				recoveryReason = "awaiting_completed_inventory_task"
+			}
+		}
+		if recoveryReason != "" {
+			if s.Logger != nil {
+				s.Logger.Printf("wait for image-cache orphan prune recovery: node=%s task=%s reason=%s", plan.ClusterNodeName, failedTask.ID, recoveryReason)
 			}
 			continue
 		}
@@ -238,31 +249,89 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) controllerImageCacheAutomaticPruneFailedTask() (model.NodeUpdateTask, bool, error) {
+func (s *Service) controllerImageCacheAutomaticPruneFailedTasks() ([]model.NodeUpdateTask, error) {
 	if s == nil || s.Store == nil {
-		return model.NodeUpdateTask{}, false, nil
+		return nil, nil
 	}
 	tasks, err := s.Store.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusFailed)
 	if err != nil {
-		return model.NodeUpdateTask{}, false, err
+		return nil, err
 	}
-	principal := controllerImageCachePrunePrincipal()
+	failed := make([]model.NodeUpdateTask, 0)
 	for _, task := range tasks {
-		if task.Type != model.NodeUpdateTaskTypePruneImageCache {
-			continue
-		}
-		if strings.TrimSpace(task.RequestedByID) != principal.ActorID {
-			continue
-		}
-		if strings.TrimSpace(task.Payload["prune_reason"]) != "image-cache-orphan" {
+		if !controllerImageCacheControllerPruneTask(task) {
 			continue
 		}
 		if strings.TrimSpace(task.ResultMessage) == controllerImageCacheRefusedBeforeExecutionResult {
 			continue
 		}
-		return task, true, nil
+		failed = append(failed, task)
 	}
-	return model.NodeUpdateTask{}, false, nil
+	return failed, nil
+}
+
+// A failed deletion leaves the node's cache contents uncertain. Keep that node
+// paused until a later inventory proves its current state, rather than letting
+// one historical failure permanently stop cleanup throughout the cluster.
+// The caller only supplies fresh inventories and recomputes the protected set
+// and delete plan; it never replays the failed task's targets.
+func controllerImageCachePruneRecoveryBlock(node model.ImageCacheNodeInventory, updater model.NodeUpdater, failures []model.NodeUpdateTask, now time.Time) (model.NodeUpdateTask, string) {
+	var latest model.NodeUpdateTask
+	var finished time.Time
+	for _, task := range failures {
+		matches := task.NodeUpdaterID != "" && task.NodeUpdaterID == updater.ID ||
+			task.ClusterNodeName != "" && task.ClusterNodeName == node.ClusterNodeName ||
+			task.MachineID != "" && task.MachineID == node.NodeID
+		if !matches {
+			continue
+		}
+		at := controllerImageCachePruneTaskFinishedAt(task)
+		if latest.ID == "" || at.After(finished) {
+			latest, finished = task, at
+		}
+	}
+	if latest.ID == "" {
+		return model.NodeUpdateTask{}, ""
+	}
+	if finished.IsZero() {
+		return latest, "missing_failure_timestamp"
+	}
+	if now.Before(finished.Add(defaultImageCachePruneNodeCooldown)) {
+		return latest, "failure_cooldown"
+	}
+	if node.LastError != "" || node.ReportedByNodeUpdaterID != updater.ID || !node.ObservedAt.After(finished) || node.ObservedAt.After(now) {
+		return latest, "awaiting_post_failure_inventory"
+	}
+	return latest, ""
+}
+
+func (s *Service) controllerImageCacheHasCompletedInventory(node model.ImageCacheNodeInventory, updaterID string) (bool, error) {
+	tasks, err := s.Store.ListNodeUpdateTasks("", true, updaterID, model.NodeUpdateTaskStatusCompleted)
+	if err != nil {
+		return false, err
+	}
+	// Inventories arrive in chunks and the node row is updated for each chunk.
+	// Only task completion proves all chunks were reported successfully; a newer
+	// partial report must not inherit an older task's successful acknowledgement.
+	for _, task := range tasks {
+		reportsInventory := task.Type == model.NodeUpdateTaskTypeReportImageCache ||
+			task.Type == model.NodeUpdateTaskTypePruneImageCache && task.Payload["allow_delete"] == "true" && task.Payload["dry_run"] == "false"
+		if reportsInventory && task.ErrorMessage == "" && task.CompletedAt != nil &&
+			!task.CreatedAt.After(node.ObservedAt) && !task.CompletedAt.Before(node.ObservedAt) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func controllerImageCachePruneTaskFinishedAt(task model.NodeUpdateTask) time.Time {
+	if task.CompletedAt != nil {
+		return task.CompletedAt.UTC()
+	}
+	if !task.UpdatedAt.IsZero() {
+		return task.UpdatedAt.UTC()
+	}
+	return task.CreatedAt.UTC()
 }
 
 func (s *Service) controllerImageCacheHasActivePruneTask(updaterID string) (bool, error) {
@@ -356,13 +425,7 @@ func (s *Service) controllerImageCacheNodePruneCoolingDown(updaterID string) (bo
 			if !controllerImageCacheControllerPruneTask(task) {
 				continue
 			}
-			finished := task.UpdatedAt
-			if task.CompletedAt != nil {
-				finished = *task.CompletedAt
-			}
-			if finished.IsZero() {
-				finished = task.CreatedAt
-			}
+			finished := controllerImageCachePruneTaskFinishedAt(task)
 			cooldownUntil := finished.UTC().Add(defaultImageCachePruneNodeCooldown)
 			if cooldownUntil.After(now) {
 				return true, cooldownUntil, nil
