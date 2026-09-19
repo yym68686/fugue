@@ -351,12 +351,20 @@ func firstServicePort(spec model.AppSpec) int {
 }
 
 func (s *Server) isReservedAppHostname(host string) bool {
+	return s.legacyApplicationDomains().isReservedAppHostname(host)
+}
+
+func (cfg applicationDomainConfig) isReservedAppHostname(host string) bool {
 	host = strings.TrimSpace(strings.ToLower(host))
 	if host == "" {
 		return false
 	}
-	_, exists := s.reservedAppHosts[host]
-	return exists
+	for _, reserved := range cfg.ReservedHostnames {
+		if reserved == host {
+			return true
+		}
+	}
+	return false
 }
 
 func registryHostFromPushBase(raw string) string {

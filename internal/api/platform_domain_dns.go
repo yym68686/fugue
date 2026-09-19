@@ -16,6 +16,10 @@ func (s *Server) projectPlatformDomainDNS(result *platformIntentProjectionRespon
 }
 
 func (s *Server) projectPlatformDomainDNSWithStatic(result *platformIntentProjectionResponse, domains []model.AppDomain, configuredRecords []model.EdgeDNSRecord) error {
+	return projectPlatformDomainDNSWithDomains(result, domains, configuredRecords, s.legacyApplicationDomains())
+}
+
+func projectPlatformDomainDNSWithDomains(result *platformIntentProjectionResponse, domains []model.AppDomain, configuredRecords []model.EdgeDNSRecord, domainsConfig applicationDomainConfig) error {
 	routes := make(map[string][]platformconfig.RouteIntent)
 	for _, route := range result.Intent.Routes {
 		routes[route.Hostname] = append(routes[route.Hostname], route)
@@ -23,7 +27,7 @@ func (s *Server) projectPlatformDomainDNSWithStatic(result *platformIntentProjec
 	desired := make(map[string]platformconfig.DNSIntent)
 	for _, domain := range domains {
 		host := normalizeExternalAppDomain(domain.Hostname)
-		if domain.Status != model.AppDomainStatusVerified || !s.isPlatformOwnedDomainBinding(host) {
+		if domain.Status != model.AppDomainStatusVerified || !domainsConfig.isPlatformOwnedDomainBinding(host) {
 			continue
 		}
 		if _, exists := desired[host]; exists || domain.AppID == "" || domain.TenantID == "" || len(routes[host]) == 0 {
@@ -41,7 +45,7 @@ func (s *Server) projectPlatformDomainDNSWithStatic(result *platformIntentProjec
 		if !ownerFound {
 			return fmt.Errorf("platform domain DNS binding owner is absent from its routes")
 		}
-		desired[host] = platformconfig.DNSIntent{Hostname: host, Type: "FUGUE_ROUTE", Values: []string{}, TTL: edgeDNSPolicyTTL(s.dnsBundleTTL),
+		desired[host] = platformconfig.DNSIntent{Hostname: host, Type: "FUGUE_ROUTE", Values: []string{}, TTL: domainsConfig.DefaultDNSTTL,
 			RecordKind: model.EdgeDNSRecordKindPlatformDomain, AppID: domain.AppID, TenantID: domain.TenantID,
 			Route: &platformconfig.DNSRouteIntent{Hostnames: []string{host}, Bindings: bindings, DNSApplicationIntent: platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}}
 	}

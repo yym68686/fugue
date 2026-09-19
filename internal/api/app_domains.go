@@ -1472,8 +1472,12 @@ func missingMessage(present bool, message string) string {
 }
 
 func (s *Server) customDomainTargets(app model.App, legacyTargets ...string) []string {
+	return s.legacyApplicationDomains().customDomainTargets(app, legacyTargets...)
+}
+
+func (cfg applicationDomainConfig) customDomainTargets(app model.App, legacyTargets ...string) []string {
 	targets := make([]string, 0, 2+len(legacyTargets))
-	if host := s.dedicatedCustomDomainTarget(app); host != "" {
+	if host := cfg.dedicatedCustomDomainTarget(app); host != "" {
 		targets = append(targets, host)
 	}
 	if app.Route != nil {
@@ -1486,10 +1490,14 @@ func (s *Server) customDomainTargets(app model.App, legacyTargets ...string) []s
 }
 
 func (s *Server) primaryCustomDomainTarget(app model.App) string {
-	if host := s.dedicatedCustomDomainTarget(app); host != "" {
+	return s.legacyApplicationDomains().primaryCustomDomainTarget(app)
+}
+
+func (cfg applicationDomainConfig) primaryCustomDomainTarget(app model.App) string {
+	if host := cfg.dedicatedCustomDomainTarget(app); host != "" {
 		return host
 	}
-	targets := s.customDomainTargets(app)
+	targets := cfg.customDomainTargets(app)
 	if len(targets) == 0 {
 		return ""
 	}
@@ -1497,7 +1505,11 @@ func (s *Server) primaryCustomDomainTarget(app model.App) string {
 }
 
 func (s *Server) dedicatedCustomDomainTarget(app model.App) string {
-	base := normalizeExternalAppDomain(s.customDomainBaseDomain)
+	return s.legacyApplicationDomains().dedicatedCustomDomainTarget(app)
+}
+
+func (cfg applicationDomainConfig) dedicatedCustomDomainTarget(app model.App) string {
+	base := normalizeExternalAppDomain(cfg.CustomDomainBaseDomain)
 	if base == "" {
 		return ""
 	}
@@ -1548,18 +1560,22 @@ func defaultCustomDomainBaseDomain(appBaseDomain string) string {
 }
 
 func (s *Server) managedEdgeCustomDomain(hostname string) bool {
+	return s.legacyApplicationDomains().managedEdgeCustomDomain(hostname)
+}
+
+func (cfg applicationDomainConfig) managedEdgeCustomDomain(hostname string) bool {
 	hostname = normalizeExternalAppDomain(hostname)
 	if hostname == "" {
 		return false
 	}
-	if s.isReservedAppHostname(hostname) {
+	if cfg.isReservedAppHostname(hostname) {
 		return false
 	}
-	appBase := normalizeExternalAppDomain(s.appBaseDomain)
+	appBase := normalizeExternalAppDomain(cfg.AppBaseDomain)
 	if appBase != "" && hostname != appBase && strings.HasSuffix(hostname, "."+appBase) {
 		return false
 	}
-	customBase := normalizeExternalAppDomain(s.customDomainBaseDomain)
+	customBase := normalizeExternalAppDomain(cfg.CustomDomainBaseDomain)
 	if customBase != "" && (hostname == customBase || strings.HasSuffix(hostname, "."+customBase)) {
 		return false
 	}

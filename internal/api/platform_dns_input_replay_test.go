@@ -15,7 +15,7 @@ func TestPinnedDNSReferencesPersistThroughOperatorReplay(t *testing.T) {
 	state, s, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	p, c, nodes := pinnedDNSFixture()
 	now := time.Now().UTC()
-	baseIntent := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: "base-dns", DNSConsumers: c}
+	baseIntent := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: "base-dns", DNSConsumers: c, ApplicationDomains: &platformconfig.ApplicationDomainsIntent{AppBaseDomain: "example.test", CustomDomainBaseDomain: "dns.example.test", ReservedHostnames: []string{"api.example.test"}, DefaultDNSTTL: 180}}
 	base, err := state.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPlatformIntent, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: "global"}, Generation: baseIntent.Generation, Content: mustPlatformIntentContent(baseIntent)})
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func TestPinnedDNSReferencesPersistThroughOperatorReplay(t *testing.T) {
 	if response.Code != 200 {
 		t.Fatal(response.Body.String())
 	}
-	control := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-control", Mode: "shadow", InputSource: "business-static-intent", TargetScope: "global", IntervalSeconds: 60, RefreshSeconds: 600, StaticIntentArtifactID: base.ID, StaticIntentDigest: base.ContentHash, DNSPolicyArtifactID: a.ID, DNSPolicyDigest: a.ContentHash, HostedZoneTemplates: []platformproducer.HostedZoneTemplate{{NodeID: "dns-a", TemplateZone: "example.test"}}}
+	control := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-control", Mode: "shadow", RequireApplicationDomains: true, InputSource: "business-static-intent", TargetScope: "global", IntervalSeconds: 60, RefreshSeconds: 600, StaticIntentArtifactID: base.ID, StaticIntentDigest: base.ContentHash, DNSPolicyArtifactID: a.ID, DNSPolicyDigest: a.ContentHash, HostedZoneTemplates: []platformproducer.HostedZoneTemplate{{NodeID: "dns-a", TemplateZone: "example.test"}}}
 	raw, _ = json.Marshal(control)
 	// Reset the decoded map so the two different policy schemas cannot mix.
 	content = map[string]any{}

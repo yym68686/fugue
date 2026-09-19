@@ -13,6 +13,10 @@ import (
 // the aliases' external zones. Health is never used to edit desired membership.
 // The collector must subsequently prove every referenced hostname and path.
 func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse, domains []model.AppDomain, apps map[string]model.App) error {
+	return projectCustomDomainDNSWithDomains(result, domains, apps, s.legacyApplicationDomains())
+}
+
+func projectCustomDomainDNSWithDomains(result *platformIntentProjectionResponse, domains []model.AppDomain, apps map[string]model.App, domainsConfig applicationDomainConfig) error {
 	routes := map[string][]platformconfig.RouteIntent{}
 	for _, route := range result.Intent.Routes {
 		routes[route.Hostname] = append(routes[route.Hostname], route)
@@ -34,7 +38,7 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 	add := func(target, host string, app model.App, domainOwner string) {
 		_, valid := dns.IsDomainName(dns.Fqdn(target))
 		if target == "" || !valid || strings.ContainsAny(target, "* \t\r\n") ||
-			(!edgeDNSTargetWithinZone(target, s.appBaseDomain) && !edgeDNSTargetWithinZone(target, s.customDomainBaseDomain)) {
+			(!edgeDNSTargetWithinZone(target, domainsConfig.AppBaseDomain) && !edgeDNSTargetWithinZone(target, domainsConfig.CustomDomainBaseDomain)) {
 			issue("dns_custom_domain_target_invalid", host, "target is not a name in configured authoritative base domains")
 			return
 		}
@@ -77,7 +81,7 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 	})
 	for _, domain := range ordered {
 		host := normalizeExternalAppDomain(domain.Hostname)
-		if domain.Status != model.AppDomainStatusVerified || !s.managedEdgeCustomDomain(host) {
+		if domain.Status != model.AppDomainStatusVerified || !domainsConfig.managedEdgeCustomDomain(host) {
 			continue
 		}
 		app, found := apps[domain.AppID]
@@ -90,7 +94,7 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 			continue
 		}
 		if target == "" {
-			target = normalizeExternalAppDomain(s.primaryCustomDomainTarget(app))
+			target = normalizeExternalAppDomain(domainsConfig.primaryCustomDomainTarget(app))
 		}
 		add(target, host, app, domain.TenantID)
 	}
@@ -105,10 +109,10 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 			continue
 		}
 		host := normalizeExternalAppDomain(app.Route.Hostname)
-		if host == "" || !edgeDNSTargetWithinZone(host, s.appBaseDomain) {
+		if host == "" || !edgeDNSTargetWithinZone(host, domainsConfig.AppBaseDomain) {
 			continue
 		}
-		target := normalizeExternalAppDomain(s.primaryCustomDomainTarget(app))
+		target := normalizeExternalAppDomain(domainsConfig.primaryCustomDomainTarget(app))
 		if targets[target] != nil {
 			continue
 		}
@@ -155,7 +159,7 @@ func (s *Server) projectCustomDomainDNS(result *platformIntentProjectionResponse
 			continue
 		}
 		result.Intent.DNS = append(result.Intent.DNS, platformconfig.DNSIntent{
-			Hostname: target, Type: "FUGUE_ROUTE", Values: []string{}, TTL: edgeDNSPolicyTTL(s.dnsBundleTTL),
+			Hostname: target, Type: "FUGUE_ROUTE", Values: []string{}, TTL: domainsConfig.DefaultDNSTTL,
 			RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, AppID: t.app.ID, TenantID: t.app.TenantID,
 			Route: &platformconfig.DNSRouteIntent{Hostnames: hosts, DNSApplicationIntent: platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}},
 		})

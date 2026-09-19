@@ -14,23 +14,24 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v26"
+	CompilerVersion = "platform-config-compiler/v27"
 	GlobalScopeKey  = "global"
 )
 
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
-	DNSConsumers   []DNSConsumerIntent   `json:"dns_consumers,omitempty"`
-	ACMEChallenges []ACMEChallengeIntent `json:"acme_challenges,omitempty"`
-	SchemaVersion  string                `json:"schema_version"`
-	Generation     string                `json:"generation"`
-	Scope          string                `json:"scope"`
-	Routes         []RouteIntent         `json:"routes,omitempty"`
-	DNS            []DNSIntent           `json:"dns,omitempty"`
-	TLS            []TLSIntent           `json:"tls,omitempty"`
-	CachePolicies  []model.CachePolicy   `json:"cache_policies,omitempty"`
-	CreatedAt      time.Time             `json:"created_at,omitempty"`
+	ApplicationDomains *ApplicationDomainsIntent `json:"application_domains,omitempty"`
+	DNSConsumers       []DNSConsumerIntent       `json:"dns_consumers,omitempty"`
+	ACMEChallenges     []ACMEChallengeIntent     `json:"acme_challenges,omitempty"`
+	SchemaVersion      string                    `json:"schema_version"`
+	Generation         string                    `json:"generation"`
+	Scope              string                    `json:"scope"`
+	Routes             []RouteIntent             `json:"routes,omitempty"`
+	DNS                []DNSIntent               `json:"dns,omitempty"`
+	TLS                []TLSIntent               `json:"tls,omitempty"`
+	CachePolicies      []model.CachePolicy       `json:"cache_policies,omitempty"`
+	CreatedAt          time.Time                 `json:"created_at,omitempty"`
 }
 
 type RouteIntent struct {
@@ -450,6 +451,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 
 func normalizeIntent(in PlatformIntent) PlatformIntent {
 	out := in
+	out.ApplicationDomains = CloneApplicationDomains(in.ApplicationDomains)
 	out.DNSConsumers = normalizeDNSConsumers(in.DNSConsumers)
 	out.SchemaVersion = firstNonEmpty(strings.TrimSpace(in.SchemaVersion), SchemaVersion)
 	out.Scope = firstNonEmpty(strings.TrimSpace(in.Scope), GlobalScopeKey)
@@ -565,6 +567,9 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 }
 
 func validateIntent(in PlatformIntent) error {
+	if err := ValidateApplicationDomains(in.ApplicationDomains); err != nil {
+		return err
+	}
 	if err := ValidateDNSConsumers(in.DNSConsumers); err != nil {
 		return err
 	}

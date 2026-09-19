@@ -21,6 +21,9 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 	if err != nil {
 		return platformIntentProjectionResponse{}, err
 	}
+	if policy.RequireApplicationDomains && static.ApplicationDomains == nil {
+		return platformIntentProjectionResponse{}, fmt.Errorf("pinned application domain intent required")
+	}
 	var dns *platformproducer.DNSPolicyInput
 	if policy.DNSPolicyArtifactID != "" {
 		a, err := s.store.GetPlatformArtifact(policy.DNSPolicyArtifactID)

@@ -2832,7 +2832,7 @@ paths:
             type: string
       responses:
         '200':
-          description: Auditable PlatformIntent generated from legacy serving environment values
+          description: Auditable PlatformIntent generated from legacy serving environment values and effective application domain settings
           content:
             application/json:
               schema:
@@ -2844,7 +2844,7 @@ paths:
     post:
       operationId: importPlatformEnvironment
       summary: Import Legacy Serving Environment
-      description: Validates legacy serving environment values and persists one immutable validated PlatformIntent draft tagged with env-migration. The operation never promotes serving traffic.
+      description: Validates legacy serving environment values and effective application domain settings (base domains, reserved hostnames and DNS TTL), includes both in source_digest, and persists one immutable validated PlatformIntent draft tagged with env-migration. The operation never promotes serving traffic.
       tags: [Admin]
       x-fugue-handler: handlePlatformConfigEnvironmentImport
       security:
@@ -31599,6 +31599,20 @@ components:
         verified_at: {type: string, format: date-time, nullable: true}
         tls_last_checked_at: {type: string, format: date-time, nullable: true}
         tls_ready_at: {type: string, format: date-time, nullable: true}
+    PlatformApplicationDomains:
+      type: object
+      additionalProperties: false
+      required: [app_base_domain, custom_domain_base_domain, reserved_hostnames, default_dns_ttl]
+      description: Explicit business domain namespace in a base PlatformIntent. The producer expands this into concrete route, DNS and TLS intent; empty base domains disable that namespace. No process configuration is consulted when present.
+      properties:
+        app_base_domain: {type: string}
+        custom_domain_base_domain: {type: string}
+        reserved_hostnames:
+          type: array
+          maxItems: 4096
+          uniqueItems: true
+          items: {type: string, minLength: 1}
+        default_dns_ttl: {type: integer, minimum: 1, maximum: 86400}
     PlatformConfigIntent:
       type: object
       additionalProperties: false
@@ -31610,6 +31624,8 @@ components:
           type: string
         scope:
           type: string
+        application_domains:
+          $ref: "#/components/schemas/PlatformApplicationDomains"
         dns_consumers:
           type: array
           maxItems: 4096
@@ -32422,6 +32438,10 @@ components:
         dns_policy_digest:
           type: string
           pattern: '^sha256:[a-f0-9]{64}$'
+        require_application_domains:
+          type: boolean
+          default: false
+          description: Requires business-static-intent and explicit application_domains in that exact signed base intent. Missing or invalid declarations reject capture and publication without ambient fallback.
         hosted_zone_templates:
           type: array
           maxItems: 256

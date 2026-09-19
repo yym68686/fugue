@@ -72,6 +72,9 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 		if err != nil {
 			return ErrConflict
 		}
+		if policy.RequireApplicationDomains && static.ApplicationDomains == nil {
+			return ErrConflict
+		}
 		if policy.DNSPolicyArtifactID != "" {
 			index := platformArtifactIndex(state.PlatformArtifacts, policy.DNSPolicyArtifactID)
 			if index < 0 {

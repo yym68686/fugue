@@ -9,12 +9,13 @@ import (
 )
 
 func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
-	for _, scenario := range []string{"valid", "paused", "static", "static missing id", "static bad digest", "migration with ref", "scope", "generation", "schema", "source", "target", "mode", "interval", "refresh", "short refresh", "unknown action", "dns", "dns missing digest", "dns without static", "template without policy", "duplicate template"} {
+	for _, scenario := range []string{"valid", "domains", "domains without static", "paused", "static", "static missing id", "static bad digest", "migration with ref", "scope", "generation", "schema", "source", "target", "mode", "interval", "refresh", "short refresh", "unknown action", "dns", "dns missing digest", "dns without static", "template without policy", "duplicate template"} {
 		t.Run(scenario, func(t *testing.T) {
 			p := Policy{SchemaVersion: Schema, Generation: "policy", Mode: "shadow", InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 60, RefreshSeconds: 300}
 			a := model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, ScopeKey: Scope, Generation: p.Generation}
 			switch scenario {
-			case "static", "static missing id", "static bad digest":
+			case "static", "domains", "static missing id", "static bad digest":
+				p.RequireApplicationDomains = scenario == "domains"
 				p.InputSource = "business-static-intent"
 				p.StaticIntentArtifactID = "artifact-static"
 				p.StaticIntentDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -24,6 +25,8 @@ func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
 				if scenario == "static bad digest" {
 					p.StaticIntentDigest = "sha256:invalid"
 				}
+			case "domains without static":
+				p.RequireApplicationDomains = true
 			case "migration with ref":
 				p.StaticIntentArtifactID = "ignored-ref"
 			case "paused":
@@ -75,7 +78,7 @@ func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
 				a.Content["command"] = "arbitrary action"
 			}
 			_, err := Decode(a)
-			if (scenario == "valid" || scenario == "paused" || scenario == "static" || scenario == "dns") != (err == nil) {
+			if (scenario == "domains" || scenario == "valid" || scenario == "paused" || scenario == "static" || scenario == "dns") != (err == nil) {
 				t.Fatal("policy admission differs", err)
 			}
 		})

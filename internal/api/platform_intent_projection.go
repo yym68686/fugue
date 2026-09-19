@@ -132,6 +132,10 @@ func (s *Server) capturePlatformIntentWithStatic(ctx context.Context, principal 
 }
 
 func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.DNSPolicyInput, templates []platformproducer.HostedZoneTemplate) (platformIntentProjectionResponse, error) {
+	domainsConfig, err := s.applicationDomainsForProjection(static.ApplicationDomains)
+	if err != nil {
+		return platformIntentProjectionResponse{}, err
+	}
 	if dnsPolicy == nil && len(static.Consumers) > 0 {
 		return platformIntentProjectionResponse{}, errors.New("declared DNS consumers require pinned DNS policy")
 	}
@@ -144,11 +148,11 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	}
 	source := &platformProjectionSource{edgeRouteIntentSource: routeBusinessSource{business}}
 	observed := map[string]model.App{}
-	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithStatic(ctx, source, func(apps []model.App) {
+	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithDomains(ctx, source, func(apps []model.App) {
 		for _, app := range apps {
 			observed[app.ID] = app
 		}
-	}, static.Routes)
+	}, static.Routes, domainsConfig)
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route projection unavailable")
 	}
@@ -161,16 +165,16 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("TLS domain lifecycle projection invalid")
 	}
-	if err := projectPlatformEntryDNS(&projection, static.Routes, static.DNS, []string{s.appBaseDomain, s.customDomainBaseDomain}); err != nil {
+	if err := projectPlatformEntryDNS(&projection, static.Routes, static.DNS, []string{domainsConfig.AppBaseDomain, domainsConfig.CustomDomainBaseDomain}); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("platform DNS entry migration configuration invalid")
 	}
-	if err := s.projectPlatformDomainDNSWithStatic(&projection, business.Domains, static.DNS); err != nil {
+	if err := projectPlatformDomainDNSWithDomains(&projection, business.Domains, static.DNS, domainsConfig); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("platform domain DNS ownership projection invalid")
 	}
-	if err := projectDefaultAppDNS(&projection, s.appBaseDomain, s.dnsBundleTTL); err != nil {
+	if err := projectDefaultAppDNSWithTTL(&projection, domainsConfig.AppBaseDomain, domainsConfig.DefaultDNSTTL); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("application DNS route migration configuration invalid")
 	}
-	if err := s.projectCustomDomainDNS(&projection, business.Domains, source.apps); err != nil {
+	if err := projectCustomDomainDNSWithDomains(&projection, business.Domains, source.apps, domainsConfig); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("managed custom-domain DNS projection invalid")
 	}
 	if err := projectACMEChallengeIntents(&projection, business.ACMEChallenges); err != nil {
@@ -204,7 +208,7 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 				return platformIntentProjectionResponse{}, errors.New("DNS workload zone declarations unavailable")
 			}
 		}
-		if err := projectDNSConsumerDeclarations(&projection, dnsNodes, dnsZones, s.dnsBundleTTL, time.Now().UTC()); err != nil {
+		if err := projectDNSConsumerDeclarations(&projection, dnsNodes, dnsZones, domainsConfig.DefaultDNSTTL, time.Now().UTC()); err != nil {
 			return platformIntentProjectionResponse{}, errors.New("DNS consumer declaration ownership invalid")
 		}
 		if err := projectDNSAuthorityPolicies(&projection, dnsAuthorities); err != nil {

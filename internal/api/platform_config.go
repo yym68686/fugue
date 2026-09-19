@@ -220,7 +220,7 @@ func (s *Server) handlePlatformConfigEnvironmentImportPreview(w http.ResponseWri
 			env[key] = value
 		}
 	}
-	result, err := platformconfig.ImportEnvironment(env, generation)
+	result, err := s.importPlatformEnvironment(env, generation)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -250,7 +250,7 @@ func (s *Server) handlePlatformConfigEnvironmentImport(w http.ResponseWriter, r 
 			env[key] = value
 		}
 	}
-	result, err := platformconfig.ImportEnvironment(env, request.Generation)
+	result, err := s.importPlatformEnvironment(env, request.Generation)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return

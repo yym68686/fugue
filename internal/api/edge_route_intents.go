@@ -126,6 +126,10 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithObservations(ctx context.Conte
 }
 
 func (s *Server) deriveEdgeRouteIntentSnapshotWithStatic(ctx context.Context, source edgeRouteIntentSource, capture func([]model.App), configuredRoutes []model.PlatformRoute) (model.EdgeRouteIntentSnapshot, error) {
+	return s.deriveEdgeRouteIntentSnapshotWithDomains(ctx, source, capture, configuredRoutes, s.legacyApplicationDomains())
+}
+
+func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, source edgeRouteIntentSource, capture func([]model.App), configuredRoutes []model.PlatformRoute, domainsConfig applicationDomainConfig) (model.EdgeRouteIntentSnapshot, error) {
 	apps, err := source.ListAppsMetadata("", true)
 	if err != nil {
 		return model.EdgeRouteIntentSnapshot{}, err
@@ -227,10 +231,10 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithStatic(ctx context.Context, so
 		routeKind := model.EdgeRouteKindCustomDomain
 		tlsPolicy := model.EdgeRouteTLSPolicyCustomDomain
 		switch {
-		case s.isPlatformOwnedDomainBinding(hostname):
+		case domainsConfig.isPlatformOwnedDomainBinding(hostname):
 			routeKind = model.EdgeRouteKindPlatformDomain
 			tlsPolicy = model.EdgeRouteTLSPolicyPlatform
-		case s.managedEdgeCustomDomain(hostname):
+		case domainsConfig.managedEdgeCustomDomain(hostname):
 		default:
 			continue
 		}
@@ -246,7 +250,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithStatic(ctx context.Context, so
 				continue
 			}
 			hostname := normalizeExternalAppDomain(routeBinding.Hostname)
-			routeKind, tlsPolicy, domain, ok := s.projectRouteEdgePolicy(hostname, domainByHostname)
+			routeKind, tlsPolicy, domain, ok := domainsConfig.projectRouteEdgePolicy(hostname, domainByHostname)
 			if !ok {
 				continue
 			}

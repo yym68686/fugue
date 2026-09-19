@@ -320,15 +320,19 @@ func (s *Server) normalizeRequestedPlatformDomainBinding(raw string) (string, st
 }
 
 func (s *Server) isPlatformOwnedDomainBinding(hostname string) bool {
+	return s.legacyApplicationDomains().isPlatformOwnedDomainBinding(hostname)
+}
+
+func (cfg applicationDomainConfig) isPlatformOwnedDomainBinding(hostname string) bool {
 	hostname = normalizeExternalAppDomain(hostname)
-	if hostname == "" || s.isReservedAppHostname(hostname) {
+	if hostname == "" || cfg.isReservedAppHostname(hostname) {
 		return false
 	}
-	appBase := normalizeExternalAppDomain(s.appBaseDomain)
+	appBase := normalizeExternalAppDomain(cfg.AppBaseDomain)
 	if appBase == "" || (hostname != appBase && !strings.HasSuffix(hostname, "."+appBase)) {
 		return false
 	}
-	customBase := normalizeExternalAppDomain(s.customDomainBaseDomain)
+	customBase := normalizeExternalAppDomain(cfg.CustomDomainBaseDomain)
 	if customBase != "" && (hostname == customBase || strings.HasSuffix(hostname, "."+customBase)) {
 		return false
 	}

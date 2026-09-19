@@ -13,9 +13,10 @@ import (
 // environment, workload, or business table. Unsupported fields reject the input
 // instead of silently dropping executable intent during migration.
 type StaticIntentInput struct {
-	Routes    []model.PlatformRoute
-	DNS       []model.EdgeDNSRecord
-	Consumers []platformconfig.DNSConsumerIntent
+	ApplicationDomains *platformconfig.ApplicationDomainsIntent
+	Routes             []model.PlatformRoute
+	DNS                []model.EdgeDNSRecord
+	Consumers          []platformconfig.DNSConsumerIntent
 }
 
 func DecodeStaticIntent(a model.PlatformArtifact) (StaticIntentInput, error) {
@@ -38,7 +39,7 @@ func DecodeStaticIntent(a model.PlatformArtifact) (StaticIntentInput, error) {
 	if intent.SchemaVersion != platformconfig.SchemaVersion || intent.Scope != a.ScopeKey || intent.Generation != a.Generation || platformconfig.ValidatePlatformIntent(intent) != nil || len(intent.ACMEChallenges) > 0 || len(intent.TLS) > 0 || len(intent.CachePolicies) > 0 {
 		return fail()
 	}
-	out := StaticIntentInput{Consumers: platformconfig.NormalizePlatformIntent(intent).DNSConsumers}
+	out := StaticIntentInput{ApplicationDomains: platformconfig.CloneApplicationDomains(intent.ApplicationDomains), Consumers: platformconfig.NormalizePlatformIntent(intent).DNSConsumers}
 	for _, r := range intent.Routes {
 		if r.PathPrefix != "" && r.PathPrefix != "/" || r.ServicePort != 0 || r.Streaming != nil || len(r.Upstreams) > 0 || r.CachePolicyID != "" || r.CacheNamespace != "" || r.DeploymentGeneration != "" || len(r.RequestBodyPolicies) > 0 || r.AppID != "" || r.TenantID != "" || r.RuntimeID != "" || r.OriginRef != "" {
 			return fail()

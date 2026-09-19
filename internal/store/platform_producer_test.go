@@ -31,7 +31,7 @@ func TestPlatformProducerGuardPostgres(t *testing.T) {
 }
 
 func testPlatformProducerGuard(t *testing.T, dsn string) {
-	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation", "dns complete", "dns digest", "dns invalidated", "dns tampered", "dns binding", "dns missing authority", "dns template", "queued dns invalidation"} {
+	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static domains complete", "static domains missing", "static domains invalid", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation", "dns complete", "dns digest", "dns invalidated", "dns tampered", "dns binding", "dns missing authority", "dns template", "queued dns invalidation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if strings.HasPrefix(scenario, "queued") && dsn == "" {
 				t.Skip("real PostgreSQL queue")
@@ -55,6 +55,12 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			if staticCase {
 				gen := model.NewID("static")
 				i := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: gen, Routes: []platformconfig.RouteIntent{{Hostname: "static.example.test", UpstreamURL: "http://static:8080", Enabled: true}}}
+				if scenario == "static domains complete" || scenario == "static domains invalid" {
+					i.ApplicationDomains = &platformconfig.ApplicationDomainsIntent{AppBaseDomain: "example.test", ReservedHostnames: []string{}, DefaultDNSTTL: 180}
+					if scenario == "static domains invalid" {
+						i.ApplicationDomains.DefaultDNSTTL = 0
+					}
+				}
 				if dnsCase {
 					i.DNSConsumers = []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "edge-group-a", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}}
 				}
@@ -96,6 +102,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 				policy := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: gen, Mode: mode, InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 120}
 				if staticCase {
 					policy.InputSource = "business-static-intent"
+					policy.RequireApplicationDomains = strings.HasPrefix(scenario, "static domains")
 					policy.StaticIntentArtifactID = static.ID
 					policy.StaticIntentDigest = static.ContentHash
 					if scenario == "static digest" {
@@ -346,7 +353,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if scenario == "complete" || scenario == "retry" || scenario == "static complete" || scenario == "dns complete" {
+			if scenario == "complete" || scenario == "retry" || scenario == "static complete" || scenario == "static domains complete" || scenario == "dns complete" {
 				if err != nil || len(after) != len(before)+1 {
 					t.Fatal("valid production failed", err)
 				}
@@ -359,7 +366,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 						t.Fatal("retry added another release")
 					}
 				}
-			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && scenario != "dns complete" && !reflect.DeepEqual(before, after) {
+			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && scenario != "static domains complete" && scenario != "dns complete" && !reflect.DeepEqual(before, after) {
 				t.Fatal("failed producer mutated ledger", err)
 			}
 		})

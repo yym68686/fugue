@@ -106,18 +106,22 @@ func (s *Server) edgeRouteBindingInput(ctx context.Context, app model.App, hostn
 }
 
 func (s *Server) projectRouteEdgePolicy(hostname string, domainByHostname map[string]model.AppDomain) (string, string, *model.AppDomain, bool) {
+	return s.legacyApplicationDomains().projectRouteEdgePolicy(hostname, domainByHostname)
+}
+
+func (cfg applicationDomainConfig) projectRouteEdgePolicy(hostname string, domainByHostname map[string]model.AppDomain) (string, string, *model.AppDomain, bool) {
 	hostname = normalizeExternalAppDomain(hostname)
 	if hostname == "" {
 		return "", "", nil, false
 	}
-	if s.projectRouteHostnameUsesPlatformTLS(hostname) {
-		if s.isPlatformOwnedDomainBinding(hostname) {
+	if cfg.projectRouteHostnameUsesPlatformTLS(hostname) {
+		if cfg.isPlatformOwnedDomainBinding(hostname) {
 			return model.EdgeRouteKindPlatformDomain, model.EdgeRouteTLSPolicyPlatform, nil, true
 		}
 		return model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, nil, true
 	}
 	domain, ok := domainByHostname[hostname]
-	if !ok || !s.managedEdgeCustomDomain(hostname) {
+	if !ok || !cfg.managedEdgeCustomDomain(hostname) {
 		return "", "", nil, false
 	}
 	return model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, &domain, true

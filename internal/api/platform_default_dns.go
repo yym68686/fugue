@@ -12,6 +12,13 @@ import (
 // same route rows. Project them as symbolic references only when no explicit
 // hosted FUGUE_APP RRset already owns the name.
 func projectDefaultAppDNS(result *platformIntentProjectionResponse, appBaseDomain string, ttl int) error {
+	return projectDefaultAppDNSWithTTL(result, appBaseDomain, edgeDNSPolicyTTL(ttl))
+}
+
+func projectDefaultAppDNSWithTTL(result *platformIntentProjectionResponse, appBaseDomain string, ttl int) error {
+	if ttl < 1 || ttl > 86400 {
+		return fmt.Errorf("default application DNS TTL invalid")
+	}
 	base := normalizeExternalAppDomain(appBaseDomain)
 	if base == "" {
 		return nil
@@ -40,7 +47,7 @@ func projectDefaultAppDNS(result *platformIntentProjectionResponse, appBaseDomai
 	sort.Strings(keys)
 	for _, host := range keys {
 		route := routes[host]
-		result.Intent.DNS = append(result.Intent.DNS, platformconfig.DNSIntent{Hostname: host, Type: "FUGUE_ROUTE", Values: []string{}, TTL: edgeDNSPolicyTTL(ttl), RecordKind: model.EdgeDNSRecordKindPlatform, AppID: route.AppID, TenantID: route.TenantID, Status: route.Status, Route: &platformconfig.DNSRouteIntent{Hostnames: []string{host}, DNSApplicationIntent: platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}})
+		result.Intent.DNS = append(result.Intent.DNS, platformconfig.DNSIntent{Hostname: host, Type: "FUGUE_ROUTE", Values: []string{}, TTL: ttl, RecordKind: model.EdgeDNSRecordKindPlatform, AppID: route.AppID, TenantID: route.TenantID, Status: route.Status, Route: &platformconfig.DNSRouteIntent{Hostnames: []string{host}, DNSApplicationIntent: platformconfig.DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}})
 	}
 	if len(keys) == 0 {
 		return nil

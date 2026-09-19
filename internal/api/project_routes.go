@@ -238,13 +238,17 @@ func (s *Server) validateProjectRouteBindings(project model.Project, bindings []
 }
 
 func (s *Server) projectRouteHostnameUsesPlatformTLS(hostname string) bool {
+	return s.legacyApplicationDomains().projectRouteHostnameUsesPlatformTLS(hostname)
+}
+
+func (cfg applicationDomainConfig) projectRouteHostnameUsesPlatformTLS(hostname string) bool {
 	hostname = normalizeExternalAppDomain(hostname)
 	if hostname == "" {
 		return false
 	}
-	if s.isPlatformOwnedDomainBinding(hostname) {
+	if cfg.isPlatformOwnedDomainBinding(hostname) {
 		return true
 	}
-	baseDomain := normalizeExternalAppDomain(s.appBaseDomain)
+	baseDomain := normalizeExternalAppDomain(cfg.AppBaseDomain)
 	return baseDomain != "" && (hostname == baseDomain || strings.HasSuffix(hostname, "."+baseDomain))
 }
