@@ -14,6 +14,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 )
 
 const (
@@ -279,7 +280,12 @@ func evaluateArtifactPublication(
 			Message:   "full release requires a pinned verified rollback generation",
 		})
 	}
-	if channel == model.PlatformArtifactReleaseChannelGray && !CanaryScopeRefValid(canaryRuleRef) {
+	canaryValid := CanaryScopeRefValid(canaryRuleRef)
+	if channel == model.PlatformArtifactReleaseChannelGray && artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+		_, err := platformconfig.ResolveTrafficCanary(artifact, canaryRuleRef)
+		canaryValid = err == nil
+	}
+	if channel == model.PlatformArtifactReleaseChannelGray && !canaryValid {
 		violations = append(violations, Violation{
 			Invariant: InvariantCanaryScopeIsolation,
 			Message:   "gray release requires one bounded canary scope",

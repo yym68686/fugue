@@ -83,6 +83,18 @@ x-fugue-consumer-release-evidence:
     cursor. Legacy expectations without an artifact release reference cannot
     establish ReleaseSet convergence. Fences are lane-scoped; publication time
     orders active releases across channels, never a cross-lane fence comparison.
+x-fugue-traffic-canary-targeting:
+  semantics: >-
+    A gray TrafficReleaseSet requires a canonical cohort=<id> reference to an
+    explicit traffic_rollout_cohorts entry in its signed PolicySnapshot. Each
+    cohort lists bounded Edge group identities captured in the configuration.
+    Unknown cohorts, unbound policy digests and arbitrary free-form selectors
+    are rejected, including on rollback and with soft or break-glass overrides.
+    Assignment discovery and download expose gray artifacts only to immutable
+    expected members of a selected group. Unselected members retain their other
+    channel assignments. Expected sets still describe the complete topology and
+    cannot shrink the full-promotion gate to the canary subset. This selection
+    grants no applied/probed/serving or LKG evidence by itself.
 x-fugue-release-set-atomic-convergence:
   semantics: >-
     Full ReleaseSet publication re-evaluates every child artifact, the newest
@@ -31515,11 +31527,27 @@ components:
         observed_at: {type: string, format: date-time}
         a: {type: array, maxItems: 16, items: {type: string, format: ipv4}}
         aaaa: {type: array, maxItems: 16, items: {type: string, format: ipv6}}
+    PlatformTrafficRolloutCohort:
+      type: object
+      additionalProperties: false
+      required: [id, edge_group_ids]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 128, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'}
+        edge_group_ids:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items: {type: string, pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'}
     PlatformConfigPolicySnapshot:
       type: object
       additionalProperties: false
       required: [generation]
       properties:
+        traffic_rollout_cohorts:
+          type: array
+          maxItems: 65
+          items: {$ref: "#/components/schemas/PlatformTrafficRolloutCohort"}
         dns_client_policies:
           type: array
           maxItems: 256
@@ -31677,6 +31705,11 @@ components:
       additionalProperties: false
       required: [schema_version, generation, scope, artifact_ids, artifact_kinds, lineage]
       properties:
+        traffic_rollout_cohorts:
+          type: array
+          maxItems: 65
+          description: Immutable projection of the signed PolicySnapshot cohorts; every child policy must match.
+          items: {$ref: "#/components/schemas/PlatformTrafficRolloutCohort"}
         schema_version:
           type: string
         generation:

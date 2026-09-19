@@ -5,12 +5,15 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 )
 
 // ConsumerReleaseBinding comes from verified artifacts and the authoritative
 // active release, never from the reporting consumer. It is evaluation context,
 // not a mutable field added to an immutable expected set or runtime receipt.
 type ConsumerReleaseBinding struct {
+	ReleaseChannel     string
+	CanaryEdgeGroups   []string
 	ReleaseSetID       string
 	ArtifactReleaseID  string
 	ArtifactKind       string
@@ -32,6 +35,9 @@ func assessConsumerReleaseBinding(set model.PlatformExpectedConsumerSet, consume
 		add(model.InvariantEvidenceStateUnknown, "authoritative release and artifact binding unavailable")
 		return
 	}
+	if binding.ReleaseChannel == model.PlatformArtifactReleaseChannelGray && !TrafficCanaryConsumerAllowed(set, consumer.ConsumerID, binding) {
+		add(model.InvariantEvidenceStateFail, "consumer is outside the signed traffic canary cohort")
+	}
 	if assessment.Observed == nil {
 		return
 	}
@@ -48,4 +54,19 @@ func assessConsumerReleaseBinding(set model.PlatformExpectedConsumerSet, consume
 	if consumer.Sequence <= 0 || consumer.IssuedAt == nil || consumer.IssuedAt.IsZero() || consumer.Nonce == "" || err != nil || len(hash) != 32 || len(consumer.EvidenceHash) != 71 || !strings.HasPrefix(consumer.EvidenceHash, "sha256:") {
 		add(model.InvariantEvidenceStateUnknown, "consumer receipt lacks trusted sequence or evidence identity")
 	}
+}
+
+func TrafficCanaryConsumerAllowed(set model.PlatformExpectedConsumerSet, consumerID string, binding *ConsumerReleaseBinding) bool {
+	if binding == nil {
+		return false
+	}
+	if binding.ReleaseChannel != model.PlatformArtifactReleaseChannelGray {
+		return true
+	}
+	for _, c := range ProjectExpectedConsumerOwners(set).Consumers {
+		if c.ConsumerID == consumerID {
+			return platformconfig.TrafficCanaryContains(binding.CanaryEdgeGroups, c.Cohort)
+		}
+	}
+	return false
 }

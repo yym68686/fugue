@@ -410,6 +410,11 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelGray {
+		if err := s.pgValidateTrafficCanary(ctx, tx, artifact, req.CanaryRuleRef); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
 	decision := platformsafety.EvaluateArtifactReleaseWithOverride(
 		artifact,
 		channel,
@@ -543,6 +548,11 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 		}
 		canaryRuleRef = activeRelease.CanaryRuleRef
+	}
+	if target.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelGray {
+		if err := s.pgValidateTrafficCanary(ctx, tx, target, canaryRuleRef); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
 	}
 	decision := platformsafety.EvaluateArtifactRollbackWithOverride(
 		target,

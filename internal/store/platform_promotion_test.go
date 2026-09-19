@@ -22,7 +22,7 @@ type promotionFixture struct {
 func preparePromotionFixture(t *testing.T, s *Store, scope string) promotionFixture {
 	t.Helper()
 	now := time.Now().UTC()
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now}})
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "test", EdgeGroupIDs: []string{"edge-group-a"}}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestFullReleaseSetRechecksStoredFactsAndPreservesLedgerOnFailure(t *testing
 			}
 			// Simulate changes after the API preflight, before store publication.
 			if scenario == "new publication" {
-				if _, _, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "edge=edge-a", IdempotencyKey: "new-gray"}, testPlatformPrincipal()); err != nil {
+				if _, _, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=test", IdempotencyKey: "new-gray"}, testPlatformPrincipal()); err != nil {
 					t.Fatal(err)
 				}
 			} else if scenario == "changed topology" {

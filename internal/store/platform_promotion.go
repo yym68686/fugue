@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 )
@@ -44,6 +45,14 @@ func validateFullReleaseSetInState(state *model.State, parent model.PlatformArti
 	if latest == nil {
 		return fail("no active consumer publication")
 	}
+	var canary []string
+	if latest.ReleaseChannel == model.PlatformArtifactReleaseChannelGray {
+		var err error
+		canary, err = platformconfig.ResolveTrafficCanary(parent, latest.CanaryRuleRef)
+		if err != nil {
+			return fail("canary policy unavailable")
+		}
+	}
 	ids, okIDs := parent.Content["artifact_ids"].([]any)
 	kinds, okKinds := parent.Content["artifact_kinds"].([]any)
 	if !okIDs || !okKinds || len(ids) == 0 || len(ids) > 64 || len(ids) != len(kinds) {
@@ -70,6 +79,9 @@ func validateFullReleaseSetInState(state *model.State, parent model.PlatformArti
 				return fail("child lineage differs")
 			}
 		}
+		if err := platformconfig.ValidateTrafficCohortProjection(parent, child); err != nil {
+			return fail("child cohort policy differs")
+		}
 		var latestSet *model.PlatformExpectedConsumerSet
 		for _, set := range state.ExpectedConsumerSets {
 			if set.ReleaseSetID != parent.ID || set.ArtifactReleaseID != latest.ID || set.ArtifactKind != kind || set.ScopeKey != parent.ScopeKey {
@@ -92,7 +104,7 @@ func validateFullReleaseSetInState(state *model.State, parent model.PlatformArti
 				consumers = append(consumers, consumer)
 			}
 		}
-		binding := &platformcontrol.ConsumerReleaseBinding{ReleaseSetID: parent.ID, ArtifactReleaseID: latest.ID, ArtifactKind: kind, ScopeKey: parent.ScopeKey, Generation: child.Generation, FencingToken: latest.FencingToken, GenerationSequence: child.GenerationSequence}
+		binding := &platformcontrol.ConsumerReleaseBinding{ReleaseChannel: latest.ReleaseChannel, CanaryEdgeGroups: canary, ReleaseSetID: parent.ID, ArtifactReleaseID: latest.ID, ArtifactKind: kind, ScopeKey: parent.ScopeKey, Generation: child.Generation, FencingToken: latest.FencingToken, GenerationSequence: child.GenerationSequence}
 		status := platformcontrol.EvaluateConsumerConvergence(*latestSet, consumers, now, binding)
 		if !status.Pass {
 			return fail("required consumers are not currently applied and probed for " + kind)

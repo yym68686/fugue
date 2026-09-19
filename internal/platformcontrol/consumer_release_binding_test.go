@@ -65,3 +65,21 @@ func TestReleaseSetConvergenceRequiresAuthoritativeExactReceiptBinding(t *testin
 		t.Fatal("other release context accepted")
 	}
 }
+
+func TestCanarySubsetNeverPassesCompleteTrafficConvergence(t *testing.T) {
+	now := time.Now().UTC()
+	set := mustBuildExpectedConsumerSet(t, ExpectedConsumerSetBuildRequest{ReleaseSetID: "set", ArtifactReleaseID: "release", ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: "global", Generation: "generation", Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "node-a", EdgeGroupID: "edge-group-a"}, {ID: "node-b", EdgeGroupID: "edge-group-b"}}}})
+	binding := &ConsumerReleaseBinding{ReleaseSetID: set.ReleaseSetID, ArtifactReleaseID: set.ArtifactReleaseID, ArtifactKind: set.ArtifactKind, ScopeKey: set.ScopeKey, Generation: set.ExpectedGeneration, FencingToken: 4, GenerationSequence: 7, ReleaseChannel: "gray", CanaryEdgeGroups: []string{"edge-group-a"}}
+	consumers := []model.PlatformConsumerInstance{}
+	for _, c := range set.Consumers {
+		consumers = append(consumers, boundPassingConsumer(set, c, now))
+	}
+	status := EvaluateConsumerConvergence(set, consumers, now, binding)
+	if status.Pass || status.RequiredExpected != 2 || status.RequiredPassing != 1 {
+		t.Fatal("partial canary passed complete topology", status)
+	}
+	binding.CanaryEdgeGroups = append(binding.CanaryEdgeGroups, "edge-group-b")
+	if status := EvaluateConsumerConvergence(set, consumers, now, binding); !status.Pass {
+		t.Fatal("complete signed cohort rejected", status)
+	}
+}

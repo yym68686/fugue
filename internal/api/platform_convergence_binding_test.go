@@ -43,11 +43,11 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 	server.auth.PlatformComponentIdentityKeyring = identityKeyring
 	server.heartbeatAuditKeyring = trustedHeartbeatAuditTestKeyring()
 	now := time.Now().UTC()
-	node := model.EdgeNode{ID: "edge-node", EdgeGroupID: "group-a", LastHeartbeatAt: &now, LastSeenAt: &now, Healthy: true, Status: model.EdgeHealthHealthy}
+	node := model.EdgeNode{ID: "edge-node", EdgeGroupID: "edge-group-a", LastHeartbeatAt: &now, LastSeenAt: &now, Healthy: true, Status: model.EdgeHealthHealthy}
 	if _, _, err := state.CreateEdgeNodeToken(node); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := state.UpdateDNSHeartbeat(model.DNSNode{ID: "dns-node", EdgeGroupID: "group-a", Zone: "example.test", Healthy: true}); err != nil {
+	if _, err := state.UpdateDNSHeartbeat(model.DNSNode{ID: "dns-node", EdgeGroupID: "edge-group-a", Zone: "example.test", Healthy: true}); err != nil {
 		t.Fatal(err)
 	}
 	// Advance shadow's independent fence counter before this ReleaseSet.
@@ -61,7 +61,7 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 	if seedRelease.Code != 200 {
 		t.Fatal(seedRelease.Body.String())
 	}
-	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, map[string]any{"intent": map[string]any{"generation": "binding-intent", "scope": "global", "routes": []any{map[string]any{"hostname": "app.example.test", "upstream_url": "http://origin:8080", "enabled": true}}}, "policy": map[string]any{"generation": "binding-policy", "scope": "global"}})
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, map[string]any{"intent": map[string]any{"generation": "binding-intent", "scope": "global", "routes": []any{map[string]any{"hostname": "app.example.test", "upstream_url": "http://origin:8080", "enabled": true}}}, "policy": map[string]any{"generation": "binding-policy", "scope": "global", "traffic_rollout_cohorts": []any{map[string]any{"id": "complete", "edge_group_ids": []string{"edge-group-a"}}}}})
 	if response.Code != 201 {
 		t.Fatal(response.Body.String())
 	}
@@ -69,7 +69,7 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 	mustDecodeJSON(t, response, &compiled)
 	release := func(channel string) model.PlatformArtifactRelease {
 		t.Helper()
-		r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+compiled.ReleaseArtifact.ID+"/release", admin, model.PlatformArtifactReleaseRequest{ReleaseChannel: channel, Reason: "consumer binding regression", IdempotencyKey: channel, CanaryRuleRef: "edge=edge-node"})
+		r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+compiled.ReleaseArtifact.ID+"/release", admin, model.PlatformArtifactReleaseRequest{ReleaseChannel: channel, Reason: "consumer binding regression", IdempotencyKey: channel, CanaryRuleRef: "cohort=complete"})
 		if r.Code != 200 {
 			t.Fatal(r.Code, r.Body.String())
 		}

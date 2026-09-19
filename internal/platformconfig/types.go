@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v24"
+	CompilerVersion = "platform-config-compiler/v25"
 	GlobalScopeKey  = "global"
 )
 
@@ -126,6 +126,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	TrafficRolloutCohorts    []TrafficRolloutCohort    `json:"traffic_rollout_cohorts,omitempty"`
 	TLSReadiness             *ReadinessProbePolicy     `json:"tls_readiness,omitempty"`
 	DNSClientPolicies        []DNSClientPolicy         `json:"dns_client_policies,omitempty"`
 	DNSAnswerRules           []DNSAnswerRule           `json:"dns_answer_rules,omitempty"`
@@ -167,13 +168,14 @@ type Lineage struct {
 }
 
 type ReleaseSet struct {
-	SchemaVersion string               `json:"schema_version"`
-	Generation    string               `json:"generation"`
-	Scope         string               `json:"scope"`
-	ArtifactIDs   []string             `json:"artifact_ids"`
-	ArtifactKinds []string             `json:"artifact_kinds"`
-	Dependencies  []ArtifactDependency `json:"dependencies"`
-	Lineage       Lineage              `json:"lineage"`
+	TrafficRolloutCohorts []TrafficRolloutCohort `json:"traffic_rollout_cohorts,omitempty"`
+	SchemaVersion         string                 `json:"schema_version"`
+	Generation            string                 `json:"generation"`
+	Scope                 string                 `json:"scope"`
+	ArtifactIDs           []string               `json:"artifact_ids"`
+	ArtifactKinds         []string               `json:"artifact_kinds"`
+	Dependencies          []ArtifactDependency   `json:"dependencies"`
+	Lineage               Lineage                `json:"lineage"`
 }
 
 type ArtifactDependency struct {
@@ -411,9 +413,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	tlsArtifact := buildArtifact(model.PlatformArtifactKindCaddyRouteConfig, intent.Scope, "tls-"+configurationGeneration, tlsPayload, metadata, now)
 
 	releaseSet := ReleaseSet{
-		SchemaVersion: SchemaVersion,
-		Generation:    releaseSetGeneration,
-		Scope:         firstNonEmpty(intent.Scope, GlobalScopeKey),
+		TrafficRolloutCohorts: NormalizeTrafficRolloutCohorts(policy.TrafficRolloutCohorts),
+		SchemaVersion:         SchemaVersion,
+		Generation:            releaseSetGeneration,
+		Scope:                 firstNonEmpty(intent.Scope, GlobalScopeKey),
 		ArtifactKinds: []string{
 			model.PlatformArtifactKindEdgeRouteBundle,
 			model.PlatformArtifactKindDNSAnswerBundle,
@@ -511,6 +514,7 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 
 func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out := in
+	out.TrafficRolloutCohorts = NormalizeTrafficRolloutCohorts(in.TrafficRolloutCohorts)
 	out.DNSAnswerRules = normalizeDNSAnswerRules(in.DNSAnswerRules)
 	out.DNSClientPolicies = normalizeDNSClientPolicies(in.DNSClientPolicies)
 
@@ -637,6 +641,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := ValidateTrafficRolloutCohorts(in.TrafficRolloutCohorts); err != nil {
+		return err
+	}
 	if err := ValidateReadinessProbePolicy(in.TLSReadiness); err != nil {
 		return fmt.Errorf("TLS %w", err)
 	}

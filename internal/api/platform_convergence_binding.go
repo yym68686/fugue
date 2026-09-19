@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 )
 
@@ -31,7 +32,14 @@ func (s *Server) platformConvergenceBinding(set model.PlatformExpectedConsumerSe
 	if err != nil || child.Status != model.PlatformArtifactStatusValidated || child.ScopeKey != set.ScopeKey || child.Generation != set.ExpectedGeneration || child.GenerationSequence <= 0 || s.store.VerifyPlatformArtifactIntegrity(child) != nil {
 		return nil
 	}
-	return &platformcontrol.ConsumerReleaseBinding{ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactKind: child.ArtifactKind, ScopeKey: child.ScopeKey, Generation: child.Generation, FencingToken: release.FencingToken, GenerationSequence: child.GenerationSequence}
+	var canary []string
+	if release.ReleaseChannel == model.PlatformArtifactReleaseChannelGray {
+		canary, err = platformconfig.ResolveTrafficCanary(parent, release.CanaryRuleRef)
+		if err != nil {
+			return nil
+		}
+	}
+	return &platformcontrol.ConsumerReleaseBinding{ReleaseChannel: release.ReleaseChannel, CanaryEdgeGroups: canary, ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactKind: child.ArtifactKind, ScopeKey: child.ScopeKey, Generation: child.Generation, FencingToken: release.FencingToken, GenerationSequence: child.GenerationSequence}
 }
 
 // A full promotion must account for every member of the newest active release

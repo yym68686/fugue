@@ -262,6 +262,9 @@ func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) m
 		if policyDigest != "" && child.Metadata["policy_digest"] != "" && child.Metadata["policy_digest"] != policyDigest {
 			return model.PlatformArtifactValidationResult{Name: "release_set.lineage", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set child policy digest does not match", Evidence: map[string]string{"artifact_id": id}}
 		}
+		if err := platformconfig.ValidateTrafficCohortProjection(artifact, child); err != nil {
+			return model.PlatformArtifactValidationResult{Name: "release_set.cohorts", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: err.Error()}
+		}
 		if child.Metadata["release_set_generation"] != releaseSetGeneration {
 			return model.PlatformArtifactValidationResult{Name: "release_set.lineage", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set child release generation does not match", Evidence: map[string]string{"artifact_id": id, "expected_release_set_generation": releaseSetGeneration, "actual_release_set_generation": child.Metadata["release_set_generation"]}}
 		}
@@ -350,6 +353,12 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 		}
 		if leased {
 			httpx.WriteError(w, http.StatusConflict, "DNS value expiration requires consumer support before traffic promotion")
+			return
+		}
+	}
+	if releaseArtifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && req.ReleaseChannel == model.PlatformArtifactReleaseChannelGray {
+		if _, err := platformconfig.ResolveTrafficCanary(releaseArtifact, req.CanaryRuleRef); err != nil {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
 			return
 		}
 	}
@@ -711,6 +720,26 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 		s.writeStoreError(w, err)
 		return
 	}
+	if release.ReleaseChannel == model.PlatformArtifactReleaseChannelGray {
+		groups, err := platformconfig.ResolveTrafficCanary(releaseSet, release.CanaryRuleRef)
+		if err != nil {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
+		for _, group := range groups {
+			edge, dns := false, false
+			for _, n := range topology.EdgeNodes {
+				edge = edge || n.EdgeGroupID == group
+			}
+			for _, n := range topology.DNSNodes {
+				dns = dns || n.EdgeGroupID == group
+			}
+			if !edge || !dns {
+				httpx.WriteError(w, http.StatusConflict, "traffic canary group lacks complete declared Edge and DNS topology")
+				return
+			}
+		}
+	}
 	ids, okIDs := releaseSet.Content["artifact_ids"].([]any)
 	kinds, okKinds := releaseSet.Content["artifact_kinds"].([]any)
 	if !okIDs || !okKinds || len(ids) != len(kinds) {
@@ -1059,7 +1088,7 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 	}
 	if set.ArtifactReleaseID != "" {
 		binding := s.platformConvergenceBinding(set)
-		if binding == nil || heartbeat.FencingToken != binding.FencingToken || heartbeat.GenerationSequence != binding.GenerationSequence {
+		if binding == nil || !platformcontrol.TrafficCanaryConsumerAllowed(set, claims.Component+":"+claims.NodeID, binding) || heartbeat.FencingToken != binding.FencingToken || heartbeat.GenerationSequence != binding.GenerationSequence {
 			httpx.WriteError(w, http.StatusConflict, "heartbeat release or artifact binding is not current")
 			return
 		}
@@ -1119,6 +1148,13 @@ func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.Platf
 			!s.validateReleaseSetReferences(releaseSet).Pass {
 			return nil, errors.New("consumer release assignment is inconsistent")
 		}
+		var canaryGroups []string
+		if channel == model.PlatformArtifactReleaseChannelGray {
+			canaryGroups, err = platformconfig.ResolveTrafficCanary(releaseSet, release.CanaryRuleRef)
+			if err != nil {
+				return nil, errors.New("consumer canary policy unavailable")
+			}
+		}
 		// Query the active release and authorized scope, rather than taking a
 		// global top-N window that can silently hide this consumer's assignment.
 		for _, kind := range claims.ArtifactKinds {
@@ -1141,6 +1177,9 @@ func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.Platf
 			// assignment by filtering consumer membership before revision selection.
 			owned := platformcontrol.ProjectExpectedConsumerOwners(*latest)
 			for _, expected := range owned.Consumers {
+				if channel == model.PlatformArtifactReleaseChannelGray && !platformconfig.TrafficCanaryContains(canaryGroups, expected.Cohort) {
+					continue
+				}
 				if expected.ConsumerID != claims.Component+":"+claims.NodeID || expected.Component != claims.Component ||
 					expected.NodeID != claims.NodeID || expected.ScopeKey != claims.ScopeKey || expected.ArtifactKind != kind {
 					continue

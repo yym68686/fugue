@@ -40,6 +40,18 @@ func projectDNSReadiness(result *platformIntentProjectionResponse, nodes []model
 	}
 	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].EdgeID < endpoints[j].EdgeID })
 	policy := result.Policy
+	groups := map[string]bool{}
+	for _, node := range nodes {
+		groups[node.EdgeGroupID] = true
+	}
+	policy.TrafficRolloutCohorts = nil
+	allGroups := make([]string, 0, len(groups))
+	for group := range groups {
+		policy.TrafficRolloutCohorts = append(policy.TrafficRolloutCohorts, platformconfig.TrafficRolloutCohort{ID: group, EdgeGroupIDs: []string{group}})
+		allGroups = append(allGroups, group)
+	}
+	policy.TrafficRolloutCohorts = append(policy.TrafficRolloutCohorts, platformconfig.TrafficRolloutCohort{ID: "complete", EdgeGroupIDs: allGroups})
+	policy.TrafficRolloutCohorts = platformconfig.NormalizeTrafficRolloutCohorts(policy.TrafficRolloutCohorts)
 	policy.DNSReadiness = &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 	policy.TLSReadiness = &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 	generation, err := platformconfig.PolicySnapshotGeneration(policy)

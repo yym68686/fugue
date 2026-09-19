@@ -414,6 +414,11 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 		if err != nil {
 			return err
 		}
+		if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelGray {
+			if err := validateTrafficCanary(artifact, req.CanaryRuleRef, state.PlatformArtifacts, s.platformArtifactSigningKeyring()); err != nil {
+				return err
+			}
+		}
 		decision := platformsafety.EvaluateArtifactReleaseWithOverride(
 			artifact,
 			channel,
@@ -533,6 +538,11 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 		if channel == model.PlatformArtifactReleaseChannelGray && canaryRuleRef == "" {
 			if activeRelease, ok := activePlatformReleaseForScope(state.PlatformArtifactReleases, current.ArtifactKind, current.ScopeKey, channel); ok {
 				canaryRuleRef = activeRelease.CanaryRuleRef
+			}
+		}
+		if target.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelGray {
+			if err := validateTrafficCanary(target, canaryRuleRef, state.PlatformArtifacts, s.platformArtifactSigningKeyring()); err != nil {
+				return err
 			}
 		}
 		decision := platformsafety.EvaluateArtifactRollbackWithOverride(
