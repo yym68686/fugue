@@ -13,6 +13,8 @@ Unavailable observations block a new placement before workload writes. An unchan
 
 An incompatible placement may be repaired automatically only when the workload has no serving history, all observed Pods are unstarted and match the Deployment template and owner UID chain, no ready endpoint exists, and no attachment remains. Running or previously serving RWO workloads must use the fenced migration workflow. The controller does not expand the Longhorn manager's installation scope or change disk policy.
 
+Existing PVC allocation is monotonic during reconciliation: preserve the larger of its requested size and allocated capacity when recorded intent asks for less. This also applies to Pending claims, and does not prevent a requested expansion. Shrinking requires an explicit data migration to a new claim.
+
 Replica-only intent is compared after removing Fugue-generated environment fields. User environment changes and restart tokens remain significant. A requested replica count of zero is an intentional stop, including for a Pending workload; it does not need a healthy storage target and preserves the PVC.
 
 ## Release and verification

@@ -395,9 +395,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, app, postgresPlacements, releaseKey, recoverStoredBaseline)
 }
 
-// Kubernetes makes a bound PVC's storageClassName immutable. Validate that
-// invariant before applying the child-object set so a harmless app re-enable
-// cannot become a late 422 after other objects have been considered.
+// Preserve irreversible storage allocation and validate immutable class
+// changes before applying the child-object set. A smaller recorded request
+// must not block unrelated reconciliation, especially stopping a workload.
 func (s *Service) validatePersistentStorageClassMutation(ctx context.Context, client *kubeClient, namespace string, objects []map[string]any) error {
 	if client == nil {
 		return nil
@@ -415,19 +415,47 @@ func (s *Service) validatePersistentStorageClassMutation(ctx context.Context, cl
 		desiredSpec := normalizeKubeMap(object["spec"])
 		desiredClass, _ := desiredSpec["storageClassName"].(string)
 		desiredClass = strings.TrimSpace(desiredClass)
-		if desiredClass == "" {
-			continue
-		}
 		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, name)
 		if err != nil {
 			return fmt.Errorf("preflight persistent volume claim %s/%s: %w", namespace, name, err)
 		}
-		if !found || strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+		if !found {
 			continue
 		}
 		currentClass := strings.TrimSpace(pvc.Spec.StorageClassName)
-		if currentClass != "" && currentClass != desiredClass {
+		if strings.TrimSpace(pvc.Spec.VolumeName) != "" && desiredClass != "" && currentClass != "" && currentClass != desiredClass {
 			return fmt.Errorf("persistent volume claim %s/%s is already bound to storage class %q; storage class cannot be changed to %q after binding (create a new claim or keep %q)", namespace, name, currentClass, desiredClass, currentClass)
+		}
+		if err := preservePersistentStorageAllocation(object, pvc); err != nil {
+			return fmt.Errorf("preserve persistent volume claim %s/%s allocation: %w", namespace, name, err)
+		}
+	}
+	return nil
+}
+
+func preservePersistentStorageAllocation(object map[string]any, pvc kubePersistentVolumeClaim) error {
+	requests, _ := nestedObjectValue(object, "spec", "resources", "requests").(map[string]any)
+	desiredSize, _ := requests["storage"].(string)
+	if desiredSize == "" {
+		return nil
+	}
+	desired, err := resource.ParseQuantity(desiredSize)
+	if err != nil {
+		return err
+	}
+	// The request can exceed capacity while expansion is pending; capacity
+	// can exceed the request due to provisioner rounding. Preserve both.
+	for _, size := range []string{pvc.Spec.Resources.Requests["storage"], pvc.Status.Capacity["storage"]} {
+		if strings.TrimSpace(size) == "" {
+			continue
+		}
+		observed, err := resource.ParseQuantity(size)
+		if err != nil {
+			return err
+		}
+		if observed.Cmp(desired) > 0 {
+			requests["storage"] = size
+			desired = observed
 		}
 	}
 	return nil
