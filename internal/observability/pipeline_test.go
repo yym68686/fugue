@@ -988,3 +988,42 @@ func TestEventFromLogLineDropsStructuredSecrets(t *testing.T) {
 		t.Fatalf("message was not redacted: %q", event.Message)
 	}
 }
+
+type byteBoundTestExporter struct{ batches chan []Event }
+
+func (e byteBoundTestExporter) Name() string { return "test" }
+func (e byteBoundTestExporter) Export(_ context.Context, events []Event) error {
+	e.batches <- append([]Event(nil), events...)
+	return nil
+}
+func TestBatchExporterFlushesByBytesBeforeRecordLimit(t *testing.T) {
+	p := NewPipeline(Config{Enabled: true, QueueSize: 32, BatchSize: 16, MemoryLimitBytes: 32 << 10}, nil)
+	exporter := byteBoundTestExporter{batches: make(chan []Event, 10)}
+	p.exporter = exporter
+	if err := p.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop(context.Background())
+	for i := 0; i < 8; i++ {
+		if !p.Ingest(t.Context(), Event{Kind: EventKindLog, Message: strings.Repeat("x", 2100)}) {
+			t.Fatal("fixture rejected")
+		}
+	}
+	received := 0
+	for received < 8 {
+		select {
+		case batch := <-exporter.batches:
+			size := 0
+			for _, e := range batch {
+				b, _ := json.Marshal(e)
+				size += len(b)
+			}
+			if size > 8192 || len(batch) >= 16 {
+				t.Fatalf("byte limit exceeded: %d bytes, %d events", size, len(batch))
+			}
+			received += len(batch)
+		case <-time.After(3 * time.Second):
+			t.Fatal("batch did not flush")
+		}
+	}
+}

@@ -765,12 +765,17 @@ func (p *Pipeline) runBatchExporter() {
 	defer ticker.Stop()
 
 	batch := make([]Event, 0, p.cfg.BatchSize)
+	var batchBytes int64
+	// Bound decoded batch size independently of its record count. One oversized
+	// event is flushed alone; the remaining batch stays below this queue fraction.
+	batchByteLimit := max(int64(1), p.cfg.MemoryLimitBytes/4)
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
 		p.exportBatch(batch)
 		batch = make([]Event, 0, p.cfg.BatchSize)
+		batchBytes = 0
 	}
 	for {
 		select {
@@ -783,6 +788,9 @@ func (p *Pipeline) runBatchExporter() {
 			if !queued.critical {
 				p.ordinaryQueuedSlots.Add(-1)
 			}
+			if len(batch) > 0 && batchBytes+int64(len(queued.payload)) > batchByteLimit {
+				flush()
+			}
 			var event Event
 			if err := json.Unmarshal(queued.payload, &event); err != nil {
 				p.dropped.Add(1)
@@ -790,7 +798,8 @@ func (p *Pipeline) runBatchExporter() {
 				continue
 			}
 			batch = append(batch, event)
-			if len(batch) >= p.cfg.BatchSize {
+			batchBytes += int64(len(queued.payload))
+			if len(batch) >= p.cfg.BatchSize || batchBytes >= batchByteLimit {
 				flush()
 			}
 		case <-ticker.C:

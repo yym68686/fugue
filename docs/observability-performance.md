@@ -125,7 +125,7 @@ grew. The 4,000-line bound leaves catch-up capacity without changing the
 
 The final log reader budgets each cycle against available ordinary queue slots,
 leaving one export batch of spare capacity for concurrent ingress. The telemetry
-export batch ceiling is 64 rather than 32 records, reducing sequential exporter
+export batch ceiling is 128 rather than 32 records, reducing sequential exporter
 round trips. Queue capacity, its critical reserve, the 16 MiB queued-byte limit
 and the 160 MiB Go memory target remain unchanged.
 
@@ -134,3 +134,7 @@ an idle source cursor. It is published only after the complete collection
 cycle, retaining known pending records from targets not visited this cycle.
 `fugue_telemetry_pipeline_kubernetes_log_deferred_targets` makes incomplete
 traversal visible; zero observed backlog alone is not a completeness claim.
+
+Export batches also flush before their serialized event bytes exceed one quarter
+of the queued-byte budget (4 MiB for this agent). A single larger event flushes
+alone. This decouples catch-up throughput from the memory cost of large logs.
