@@ -84,7 +84,11 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 			if a.ID != policy.DNSPolicyArtifactID || a.ContentHash != policy.DNSPolicyDigest || a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != a.ID || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != a.ContentHash {
 				return ErrConflict
 			}
-			if _, err := platformproducer.DecodeDNSInputs(a, static.Consumers, policy.HostedZoneTemplates); err != nil {
+			input, err := platformproducer.DecodeProjectionPolicy(a, static.Consumers, policy.HostedZoneTemplates)
+			if err != nil {
+				return ErrConflict
+			}
+			if _, present, err := input.RouteDefaults(); err != nil || policy.RequireRouteDefaults && !present {
 				return ErrConflict
 			}
 		} else if len(static.Consumers) > 0 || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {

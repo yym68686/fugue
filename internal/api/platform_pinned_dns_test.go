@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-func pinnedDNSFixture() (platformproducer.DNSPolicyInput, []platformconfig.DNSConsumerIntent, []model.DNSNode) {
+func pinnedDNSFixture() (platformproducer.ProjectionPolicyInput, []platformconfig.DNSConsumerIntent, []model.DNSNode) {
 	probe := &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
-	p := platformproducer.DNSPolicyInput{SchemaVersion: platformconfig.SchemaVersion, Generation: "policy", Scope: "global", Authorities: []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, Clients: []platformconfig.DNSClientPolicy{{NodeID: "dns-a", Rules: []platformconfig.DNSClientRule{}}}, DNSReadiness: probe, TLSReadiness: probe, Cohorts: []platformconfig.TrafficRolloutCohort{{ID: "edge-group-a", EdgeGroupIDs: []string{"edge-group-a"}}, {ID: "complete", EdgeGroupIDs: []string{"edge-group-a"}}}}
+	p := platformproducer.ProjectionPolicyInput{SchemaVersion: platformconfig.SchemaVersion, Generation: "policy", Scope: "global", Authorities: []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, Clients: []platformconfig.DNSClientPolicy{{NodeID: "dns-a", Rules: []platformconfig.DNSClientRule{}}}, DNSReadiness: probe, TLSReadiness: probe, Cohorts: []platformconfig.TrafficRolloutCohort{{ID: "edge-group-a", EdgeGroupIDs: []string{"edge-group-a"}}, {ID: "complete", EdgeGroupIDs: []string{"edge-group-a"}}}}
 	c := []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "edge-group-a", Zones: []string{"example.test"}, ProbeLabel: defaultEdgeDNSProbeLabel, ProbeTTL: 60}}
 	nodes := []model.DNSNode{{ID: "dns-a", PhysicalNodeID: "dns-a", EdgeGroupID: "edge-group-a", Zone: "example.test", PublicIPv4: "8.8.8.8"}}
 	return p, c, nodes

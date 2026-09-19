@@ -32434,10 +32434,14 @@ components:
         dns_policy_artifact_id:
           type: string
           minLength: 1
-          description: Optional exact validated global PolicySnapshot holding the DNS configuration subset. Requires business-static-intent and DNS consumers in the pinned intent.
+          description: Optional exact validated global PolicySnapshot holding DNS declarations and optional route defaults. Supported fields are schema_version, generation, scope, dns_authorities, dns_client_policies, dns_readiness, tls_readiness, traffic_rollout_cohorts; the optional route defaults group must include all four of minimum_healthy_edges (1..10000), max_stale_seconds (1..604800), route_constraints and dns_route_state_constraints. Explicit empty arrays are allowed; null, partial groups and unknown fields are rejected. Base route_constraints are defaults by hostname; an explicit business route policy takes precedence. Requires business-static-intent and DNS consumers in the pinned intent.
         dns_policy_digest:
           type: string
           pattern: '^sha256:[a-f0-9]{64}$'
+        require_route_defaults:
+          type: boolean
+          default: false
+          description: Requires the paired pinned policy reference to supply the complete route defaults group. Missing defaults reject capture and transactional publication without hardcoded fallback. Defaults expand into the compiled PolicySnapshot; no new policy source or release lane is introduced.
         require_application_domains:
           type: boolean
           default: false

@@ -17,7 +17,7 @@ func projectDNSReadiness(result *platformIntentProjectionResponse, nodes []model
 	return projectDNSReadinessWithPolicy(result, nodes, captured, nil)
 }
 
-func projectDNSReadinessWithPolicy(result *platformIntentProjectionResponse, nodes []model.EdgeNode, captured time.Time, input *platformproducer.DNSPolicyInput) error {
+func projectDNSReadinessWithPolicy(result *platformIntentProjectionResponse, nodes []model.EdgeNode, captured time.Time, input *platformproducer.ProjectionPolicyInput) error {
 	endpoints := []platformconfig.DNSEdgeEndpoint{}
 	if len(nodes) == 0 || len(nodes) > 4096 {
 		return fmt.Errorf("DNS readiness requires bounded edge topology")

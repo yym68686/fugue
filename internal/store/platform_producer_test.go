@@ -31,7 +31,7 @@ func TestPlatformProducerGuardPostgres(t *testing.T) {
 }
 
 func testPlatformProducerGuard(t *testing.T, dsn string) {
-	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static domains complete", "static domains missing", "static domains invalid", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation", "dns complete", "dns digest", "dns invalidated", "dns tampered", "dns binding", "dns missing authority", "dns template", "queued dns invalidation"} {
+	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static domains complete", "static domains missing", "static domains invalid", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation", "dns defaults complete", "dns defaults missing", "dns defaults invalid", "dns complete", "dns digest", "dns invalidated", "dns tampered", "dns binding", "dns missing authority", "dns template", "queued dns invalidation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if strings.HasPrefix(scenario, "queued") && dsn == "" {
 				t.Skip("real PostgreSQL queue")
@@ -80,7 +80,19 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			if dnsCase {
 				gen := model.NewID("dns-policy")
 				probe := &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
-				p := platformproducer.DNSPolicyInput{SchemaVersion: platformconfig.SchemaVersion, Generation: gen, Scope: "global", Authorities: []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, Clients: []platformconfig.DNSClientPolicy{{NodeID: "dns-a", Rules: []platformconfig.DNSClientRule{}}}, DNSReadiness: probe, TLSReadiness: probe, Cohorts: []platformconfig.TrafficRolloutCohort{{ID: "all", EdgeGroupIDs: []string{"edge-group-a"}}}}
+				p := platformproducer.ProjectionPolicyInput{SchemaVersion: platformconfig.SchemaVersion, Generation: gen, Scope: "global", Authorities: []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, Clients: []platformconfig.DNSClientPolicy{{NodeID: "dns-a", Rules: []platformconfig.DNSClientRule{}}}, DNSReadiness: probe, TLSReadiness: probe, Cohorts: []platformconfig.TrafficRolloutCohort{{ID: "all", EdgeGroupIDs: []string{"edge-group-a"}}}}
+				if scenario == "dns defaults complete" || scenario == "dns defaults invalid" {
+					minimum, stale := 2, 90
+					rules := []platformconfig.RoutePolicyConstraint{}
+					states := []platformconfig.DNSRouteStateConstraint{}
+					p.MinimumHealthyEdges = &minimum
+					p.MaxStaleSeconds = &stale
+					p.RouteConstraints = &rules
+					p.DNSRouteStateConstraints = &states
+					if scenario == "dns defaults invalid" {
+						minimum = 0
+					}
+				}
 				if scenario == "dns missing authority" {
 					p.Authorities = nil
 				}
@@ -110,6 +122,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					}
 				}
 				if dnsCase {
+					policy.RequireRouteDefaults = strings.HasPrefix(scenario, "dns defaults")
 					policy.DNSPolicyArtifactID = dnsInput.ID
 					policy.DNSPolicyDigest = dnsInput.ContentHash
 					policy.HostedZoneTemplates = []platformproducer.HostedZoneTemplate{{NodeID: "dns-a", TemplateZone: "example.test"}}
@@ -353,7 +366,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if scenario == "complete" || scenario == "retry" || scenario == "static complete" || scenario == "static domains complete" || scenario == "dns complete" {
+			if scenario == "complete" || scenario == "retry" || scenario == "static complete" || scenario == "static domains complete" || scenario == "dns complete" || scenario == "dns defaults complete" {
 				if err != nil || len(after) != len(before)+1 {
 					t.Fatal("valid production failed", err)
 				}
@@ -366,7 +379,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 						t.Fatal("retry added another release")
 					}
 				}
-			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && scenario != "static domains complete" && scenario != "dns complete" && !reflect.DeepEqual(before, after) {
+			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && scenario != "static domains complete" && scenario != "dns complete" && scenario != "dns defaults complete" && !reflect.DeepEqual(before, after) {
 				t.Fatal("failed producer mutated ledger", err)
 			}
 		})

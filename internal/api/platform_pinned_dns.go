@@ -24,7 +24,7 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 	if policy.RequireApplicationDomains && static.ApplicationDomains == nil {
 		return platformIntentProjectionResponse{}, fmt.Errorf("pinned application domain intent required")
 	}
-	var dns *platformproducer.DNSPolicyInput
+	var dns *platformproducer.ProjectionPolicyInput
 	if policy.DNSPolicyArtifactID != "" {
 		a, err := s.store.GetPlatformArtifact(policy.DNSPolicyArtifactID)
 		if err != nil {
@@ -33,16 +33,24 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 		if a.ID != policy.DNSPolicyArtifactID || a.ContentHash != policy.DNSPolicyDigest || a.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(a) != nil || !platformsafety.EvaluateArtifactIntegrity(a, s.bundleKeyring()).Pass {
 			return platformIntentProjectionResponse{}, fmt.Errorf("DNS policy reference is not trusted")
 		}
-		p, err := platformproducer.DecodeDNSInputs(a, static.Consumers, policy.HostedZoneTemplates)
+		p, err := platformproducer.DecodeProjectionPolicy(a, static.Consumers, policy.HostedZoneTemplates)
 		if err != nil {
 			return platformIntentProjectionResponse{}, err
 		}
 		dns = &p
 	}
+	if policy.RequireRouteDefaults {
+		if dns == nil {
+			return platformIntentProjectionResponse{}, fmt.Errorf("pinned route defaults required")
+		}
+		if _, present, err := dns.RouteDefaults(); err != nil || !present {
+			return platformIntentProjectionResponse{}, fmt.Errorf("pinned route defaults required")
+		}
+	}
 	return s.capturePlatformIntentWithInputs(ctx, principal, static, dns, policy.HostedZoneTemplates)
 }
 
-func projectPinnedDNSInputs(result *platformIntentProjectionResponse, declared []platformconfig.DNSConsumerIntent, p platformproducer.DNSPolicyInput, templates []platformproducer.HostedZoneTemplate, nodes []model.DNSNode, hosted []model.HostedZone, now time.Time) error {
+func projectPinnedDNSInputs(result *platformIntentProjectionResponse, declared []platformconfig.DNSConsumerIntent, p platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate, nodes []model.DNSNode, hosted []model.HostedZone, now time.Time) error {
 	consumers := platformconfig.NormalizePlatformIntent(platformconfig.PlatformIntent{DNSConsumers: declared}).DNSConsumers
 	authority := append([]platformconfig.DNSAuthorityPolicy(nil), p.Authorities...)
 	zones := edgeDNSPublishableHostedZoneNames(hosted)

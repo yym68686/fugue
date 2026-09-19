@@ -131,7 +131,7 @@ func (s *Server) capturePlatformIntentWithStatic(ctx context.Context, principal 
 	return s.capturePlatformIntentWithInputs(ctx, principal, static, nil, nil)
 }
 
-func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.DNSPolicyInput, templates []platformproducer.HostedZoneTemplate) (platformIntentProjectionResponse, error) {
+func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate) (platformIntentProjectionResponse, error) {
 	domainsConfig, err := s.applicationDomainsForProjection(static.ApplicationDomains)
 	if err != nil {
 		return platformIntentProjectionResponse{}, err
@@ -156,7 +156,17 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route projection unavailable")
 	}
-	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, static.Routes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords, static.DNS)
+	var defaults *platformconfig.PolicySnapshot
+	if dnsPolicy != nil {
+		value, present, err := dnsPolicy.RouteDefaults()
+		if err != nil {
+			return platformIntentProjectionResponse{}, err
+		}
+		if present {
+			defaults = &value
+		}
+	}
+	projection, err := projectBusinessRouteDraftWithPolicy(snapshot, source.apps, observed, static.Routes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords, static.DNS, defaults)
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route draft cannot be captured")
 	}
@@ -320,6 +330,10 @@ func (source routeBusinessSource) ListAppReleases(filter model.AppReleaseFilter)
 // Unsupported migration semantics are explicit issues until a complete
 // business/constraint/fact snapshot can be frozen and compared.
 func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, releases []model.AppRelease, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord, staticRecords []model.EdgeDNSRecord) (platformIntentProjectionResponse, error) {
+	return projectBusinessRouteDraftWithPolicy(snapshot, apps, observed, platformRoutes, routePolicies, trafficPolicies, releases, hostedZones, dnsRecords, staticRecords, nil)
+}
+
+func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, releases []model.AppRelease, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord, staticRecords []model.EdgeDNSRecord, defaults *platformconfig.PolicySnapshot) (platformIntentProjectionResponse, error) {
 	result := platformIntentProjectionResponse{SourceGeneration: snapshot.Generation, CapturedAt: snapshot.GeneratedAt,
 		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "dns_output_equivalence_not_verified"}, {Code: "dns_acme_not_projected"}},
 		OmittedRuntimeFields: []string{"selected_edge_group", "decision_id", "exclusion_evidence"},
@@ -486,32 +500,55 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 		a, b := result.Issues[i], result.Issues[j]
 		return a.Code+"\x00"+a.Hostname+"\x00"+a.PathPrefix < b.Code+"\x00"+b.Hostname+"\x00"+b.PathPrefix
 	})
-	policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}, referencedRoutePolicies, referencedTrafficPolicies, "policy-draft")
+	base := platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: platformconfig.GlobalScopeKey, MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}
+	if defaults != nil {
+		base = *defaults
+	}
+	policy, err := platformconfig.ProjectPolicySnapshot(base, referencedRoutePolicies, referencedTrafficPolicies, "policy-draft")
 	if err != nil {
 		return result, err
 	}
-	// Freeze legacy per-route redundancy defaults into desired policy during
-	// migration. Runtime counts and readiness never become policy parameters.
-	constraints := map[string]bool{}
-	for _, rule := range policy.RouteConstraints {
-		constraints[rule.Hostname] = true
-	}
-	for _, route := range intent.Routes {
-		if constraints[route.Hostname] {
-			continue
+	if defaults == nil {
+		// Legacy migration alone imports historical code defaults. A pinned source
+		// must express all exceptions with explicit hostname constraints.
+		constraints := map[string]bool{}
+		for _, rule := range policy.RouteConstraints {
+			constraints[rule.Hostname] = true
 		}
-		minimum := defaultMinHealthyEdgeNodesForBinding(model.EdgeRouteBinding{RouteKind: route.Kind})
-		if minimum <= policy.MinimumHealthyEdges {
-			continue
+		for _, route := range intent.Routes {
+			if constraints[route.Hostname] {
+				continue
+			}
+			minimum := defaultMinHealthyEdgeNodesForBinding(model.EdgeRouteBinding{RouteKind: route.Kind})
+			if minimum <= policy.MinimumHealthyEdges {
+				continue
+			}
+			policy.RouteConstraints = append(policy.RouteConstraints, platformconfig.RoutePolicyConstraint{ID: "migration-default:" + route.Hostname, Hostname: route.Hostname, AppID: route.AppID, TenantID: route.TenantID, MinHealthyEdgeNodes: minimum, RoutePolicy: route.RoutePolicy, Enabled: route.Enabled})
+			constraints[route.Hostname] = true
 		}
-		policy.RouteConstraints = append(policy.RouteConstraints, platformconfig.RoutePolicyConstraint{ID: "migration-default:" + route.Hostname, Hostname: route.Hostname, AppID: route.AppID, TenantID: route.TenantID, MinHealthyEdgeNodes: minimum, RoutePolicy: route.RoutePolicy, Enabled: route.Enabled})
-		constraints[route.Hostname] = true
+		policy.DNSRouteStateConstraints = []platformconfig.DNSRouteStateConstraint{{RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, InactiveBehavior: "serve_error_page"}}
+	} else {
+		explicit := map[string]bool{}
+		for _, rule := range policy.RouteConstraints {
+			explicit[rule.Hostname] = true
+		}
+		hosts := map[string]bool{}
+		for _, route := range intent.Routes {
+			hosts[route.Hostname] = true
+		}
+		for _, rule := range defaults.RouteConstraints {
+			if !hosts[rule.Hostname] {
+				return result, fmt.Errorf("base route policy references a hostname outside the intent")
+			}
+			if !explicit[rule.Hostname] {
+				policy.RouteConstraints = append(policy.RouteConstraints, rule)
+			}
+		}
 	}
 	policy = platformconfig.NormalizePolicySnapshot(policy)
-	// Legacy managed targets remain resolvable when Edge serves a stopped or
-	// unavailable application's local error page. Freeze that behavior as policy;
-	// the new compiler still requires independent exact-state/TLS evidence.
-	policy.DNSRouteStateConstraints = []platformconfig.DNSRouteStateConstraint{{RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, InactiveBehavior: "serve_error_page"}}
+	if err := platformconfig.ValidatePolicySnapshot(policy); err != nil {
+		return result, err
+	}
 	policy.Generation, err = platformconfig.PolicySnapshotGeneration(policy)
 	if err != nil {
 		return result, err
