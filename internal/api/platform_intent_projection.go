@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -70,118 +72,114 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
 		return
 	}
-	business, err := s.store.CaptureRouteBusinessSnapshot(r.Context())
+	projection, err := s.capturePlatformIntent(r.Context(), mustPrincipal(r))
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "business route snapshot unavailable")
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(w, http.StatusOK, projection)
+}
+
+// capturePlatformIntent freezes business input and captures runtime observations
+// independently. This entry point can be called without an HTTP request; it
+// neither publishes artifacts nor changes serving or recovery state.
+func (s *Server) capturePlatformIntent(ctx context.Context, principal model.Principal) (platformIntentProjectionResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return platformIntentProjectionResponse{}, err
+	}
+	business, err := s.store.CaptureRouteBusinessSnapshot(ctx)
+	if err != nil {
+		return platformIntentProjectionResponse{}, errors.New("business route snapshot unavailable")
 	}
 	source := &platformProjectionSource{edgeRouteIntentSource: routeBusinessSource{business}}
 	observed := map[string]model.App{}
-	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithObservations(r, source, func(apps []model.App) {
+	snapshot, err := s.deriveEdgeRouteIntentSnapshotWithObservations(ctx, source, func(apps []model.App) {
 		for _, app := range apps {
 			observed[app.ID] = app
 		}
 	})
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "business route projection unavailable")
-		return
+		return platformIntentProjectionResponse{}, errors.New("business route projection unavailable")
 	}
 	projection, err := projectBusinessRouteDraft(snapshot, source.apps, observed, s.platformRoutes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords, s.dnsStaticRecords)
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "business route draft cannot be captured")
-		return
+		return platformIntentProjectionResponse{}, errors.New("business route draft cannot be captured")
 	}
 	projection.BusinessSnapshotRevision = business.Revision
 	projection.BusinessSnapshotAt = business.CapturedAt
 	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "TLS domain lifecycle projection invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("TLS domain lifecycle projection invalid")
 	}
 	if err := projectPlatformEntryDNS(&projection, s.platformRoutes, s.dnsStaticRecords, []string{s.appBaseDomain, s.customDomainBaseDomain}); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "platform DNS entry migration configuration invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("platform DNS entry migration configuration invalid")
 	}
 	if err := s.projectPlatformDomainDNS(&projection, business.Domains); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "platform domain DNS ownership projection invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("platform domain DNS ownership projection invalid")
 	}
 	if err := projectDefaultAppDNS(&projection, s.appBaseDomain, s.dnsBundleTTL); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "application DNS route migration configuration invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("application DNS route migration configuration invalid")
 	}
 	if err := s.projectCustomDomainDNS(&projection, business.Domains, source.apps); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "managed custom-domain DNS projection invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("managed custom-domain DNS projection invalid")
 	}
 	if err := projectACMEChallengeIntents(&projection, business.ACMEChallenges); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "ACME migration configuration invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("ACME migration configuration invalid")
 	}
 	dnsNodes, err := s.store.ListDNSNodes("")
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS consumer declarations unavailable")
-		return
+		return platformIntentProjectionResponse{}, errors.New("DNS consumer declarations unavailable")
 	}
 	if len(dnsNodes) > 0 {
-		nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), mustPrincipal(r))
+		nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal)
 		if policyErr != nil || len(nodePolicies) == 0 {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "authoritative DNS consumer topology unavailable")
-			return
+			return platformIntentProjectionResponse{}, errors.New("authoritative DNS consumer topology unavailable")
 		}
 		dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
 		if len(dnsNodes) == 0 {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "authoritative DNS consumer topology is empty")
-			return
+			return platformIntentProjectionResponse{}, errors.New("authoritative DNS consumer topology is empty")
 		}
 	}
 	var dnsZones map[string][]string
 	var dnsClientRules map[string][]platformconfig.DNSClientRule
 	var dnsAuthorities map[string]platformconfig.DNSAuthorityPolicy
 	if len(dnsNodes) > 0 {
-		dnsZones, dnsClientRules, dnsAuthorities, err = s.captureDNSConsumerConfiguration(r.Context(), business.HostedZones)
+		dnsZones, dnsClientRules, dnsAuthorities, err = s.captureDNSConsumerConfiguration(ctx, business.HostedZones)
 		if err != nil {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS workload zone declarations unavailable")
-			return
+			return platformIntentProjectionResponse{}, errors.New("DNS workload zone declarations unavailable")
 		}
 	}
 	if err := projectDNSConsumerDeclarations(&projection, dnsNodes, dnsZones, s.dnsBundleTTL, time.Now().UTC()); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS consumer declaration ownership invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("DNS consumer declaration ownership invalid")
 	}
 	if err := projectDNSAuthorityPolicies(&projection, dnsAuthorities); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS authority declarations invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("DNS authority declarations invalid")
 	}
 	if err := projectDNSClientPolicies(&projection, dnsClientRules); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS client policy declaration invalid")
-		return
+		return platformIntentProjectionResponse{}, errors.New("DNS client policy declaration invalid")
 	}
 	if len(dnsNodes) > 0 {
 		edges, _, edgeErr := s.store.ListEdgeNodes("")
 		if edgeErr != nil {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS readiness edge topology unavailable")
-			return
+			return platformIntentProjectionResponse{}, errors.New("DNS readiness edge topology unavailable")
 		}
-		nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), mustPrincipal(r))
+		nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal)
 		if policyErr != nil || len(nodePolicies) == 0 {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS readiness authoritative topology unavailable")
-			return
+			return platformIntentProjectionResponse{}, errors.New("DNS readiness authoritative topology unavailable")
 		}
 		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
 		if err := projectDNSReadiness(&projection, edges, time.Now().UTC()); err != nil {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "DNS readiness topology invalid")
-			return
+			return platformIntentProjectionResponse{}, errors.New("DNS readiness topology invalid")
 		}
 	}
 	if len(dnsNodes) > 0 {
 		if err := s.projectDNSQueryRules(&projection, dnsNodes); err != nil {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "signed DNS query migration input unavailable")
-			return
+			return platformIntentProjectionResponse{}, errors.New("signed DNS query migration input unavailable")
 		}
 	}
 	resolver := newHostedDNSFlattenResolver()
-	captureDNSFlattenFacts(r.Context(), &projection, resolver.resolve)
-	s.capturePlatformPlacements(r.Context(), &projection)
+	captureDNSFlattenFacts(ctx, &projection, resolver.resolve)
+	s.capturePlatformPlacements(ctx, &projection)
 	issues := projection.Issues[:0]
 	for _, issue := range projection.Issues {
 		if issue.Code != "transaction_snapshot_not_frozen" {
@@ -189,8 +187,10 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	projection.Issues = issues
-	w.Header().Set("Cache-Control", "no-store")
-	httpx.WriteJSON(w, http.StatusOK, projection)
+	if err := ctx.Err(); err != nil {
+		return platformIntentProjectionResponse{}, err
+	}
+	return projection, nil
 }
 
 // Only the captured data is visible through this adapter. The compiler-side
