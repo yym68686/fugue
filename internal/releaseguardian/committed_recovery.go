@@ -13,7 +13,7 @@ func CommittedMonitorRecoveryEligible(s Snapshot) bool {
 	p := s.PreviousStatus
 	r := s.Bundle.Release
 	if !s.Managed || s.DesiredRecordMissing || s.Record.Validate() != nil || s.Key != s.Record.Key() ||
-		s.Desired.Key() != s.Key || s.Desired.RecordDigest != s.Record.RecordDigest ||
+		s.Desired.Key() != s.Key || s.Desired.RecordDigest != s.Record.RecordDigest || s.CurrentRecordDigest == s.Desired.RecordDigest ||
 		s.LastSuccessfulLKG != s.CurrentRecordDigest || s.Bundle.Prepared.ConfigSHA != s.Record.ConfigSHA || s.Bundle.Prepared.Component != s.Key.Component ||
 		r.ComponentID != s.Key.Component || r.Delivery == nil || r.Delivery.Writer != "guardian" || r.Delivery.Group != s.Key.Group ||
 		r.Transition == nil || r.Transition.Type != "edge-group-ab" || r.Transition.EdgeGroupAB == nil ||

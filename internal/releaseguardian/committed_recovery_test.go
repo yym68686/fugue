@@ -138,8 +138,8 @@ func TestCommittedRecoveryResumesExactVerifiedMonitorBeforeDesiredCAS(t *testing
 	}
 	s.CurrentRecordDigest = record.RecordDigest
 	s.LastSuccessfulLKG = record.RecordDigest
-	if !CommittedMonitorRecoveryEligible(s) {
-		t.Fatal("published candidate alias cannot finish Desired CAS")
+	if CommittedMonitorRecoveryEligible(s) {
+		t.Fatal("verified published candidate attempted redundant recovery")
 	}
 	s.Record = canonical
 	s.Desired.RecordDigest = canonical.RecordDigest
