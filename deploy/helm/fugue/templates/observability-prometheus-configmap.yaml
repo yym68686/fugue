@@ -43,14 +43,8 @@ data:
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
             regex: {{ .Release.Name | quote }}
             action: keep
-          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
-            regex: "api|controller|edge|dns|telemetry-agent|observability-prometheus|.*-front"
-            action: keep
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component, __meta_kubernetes_pod_container_port_name]
-            regex: "api;http"
-            action: drop
-          - source_labels: [__meta_kubernetes_pod_container_port_name]
-            regex: "http|metrics|health"
+            regex: "api;metrics|controller;metrics|telemetry-agent;http|observability-prometheus;http|dns;http|dns-country-[a-z0-9-]+;http|edge;health|edge-worker-[ab];health|edge-country-[a-z0-9-]+-worker-[ab];health|edge-front;health|edge-country-[a-z0-9-]+-front;health|fugue-ssh-front;http|fugue-ssh-front-country-[a-z0-9-]+;http"
             action: keep
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
             target_label: component

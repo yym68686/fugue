@@ -490,6 +490,9 @@ func TestRobustnessMetricsExposeGuardiansGenerationAndRepairEvents(t *testing.T)
 	}
 
 	recorder := httptest.NewRecorder()
+	if err := server.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	for _, want := range []string{

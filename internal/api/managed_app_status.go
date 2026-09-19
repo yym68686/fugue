@@ -1927,7 +1927,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 		for _, app := range apps {
 			appIDs = append(appIDs, strings.TrimSpace(app.ID))
 		}
-		storeSnapshot, snapshotErr := s.loadManagedAppStoreSnapshot(ctx, appIDs...)
+		storeSnapshot, snapshotErr := s.loadManagedAppStoreSnapshotScoped(ctx, apps, items, appIDs...)
 		if snapshotErr != nil {
 			return managedAppStatusListCacheEntry{}, snapshotErr
 		}

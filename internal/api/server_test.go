@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,6 +144,9 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
 
 	recorder := httptest.NewRecorder()
+	if err := server.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
@@ -163,6 +167,9 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 
 	server.SetReady(false)
 	recorder = httptest.NewRecorder()
+	if err := server.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if !strings.Contains(recorder.Body.String(), `fugue_api_ready 0.000000`) {
 		t.Fatalf("expected not-ready gauge after SetReady(false), got:\n%s", recorder.Body.String())

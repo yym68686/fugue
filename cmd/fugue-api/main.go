@@ -50,6 +50,7 @@ func main() {
 	authenticator.EdgeRouteIntentIdentityKeyring = edgeRouteIntentIdentityKeyringFromEnv()
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
+		BackupInventory:                 api.BackupInventoryConfigFromEnv(),
 		DatabaseURL:                     cfg.DatabaseURL,
 		ObjectStorageUsageTimeout:       cfg.ObjectStorageUsageTimeout,
 		ControlPlaneNamespace:           cfg.ControlPlaneNamespace,
@@ -144,6 +145,8 @@ func main() {
 	go server.StartBackgroundEdgeDNSArtifacts(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)
 	go server.StartBackgroundBackups(ctx)
+	go server.StartBackgroundBackupInventory(ctx)
+	go server.StartBackgroundMetrics(ctx)
 	go server.StartBackgroundAutomationShadowLoop(ctx)
 
 	var metricsServer *http.Server

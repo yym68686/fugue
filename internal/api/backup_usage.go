@@ -33,11 +33,6 @@ type backupUsageObservedObject struct {
 	observedAt   time.Time
 }
 
-type backupUsageObjectInventory struct {
-	objects    []dataObjectInfo
-	observedAt time.Time
-}
-
 func (s *Server) loadBackupUsage(ctx context.Context, tenantID string, platformAdmin bool) (backupusage.Usage, error) {
 	recordedUsage, err := s.store.BackupUsage(tenantID, platformAdmin)
 	if err != nil {
@@ -172,6 +167,7 @@ func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID st
 	sort.Strings(groupKeys)
 	observed := map[string]backupUsageObservedObject{}
 	measuredNamespaces := map[string]time.Time{}
+	observedWanted := map[string]bool{}
 	for _, groupKey := range groupKeys {
 		group := groupsByKey[groupKey]
 		sort.Slice(group.backends, func(i, j int) bool { return group.backends[i].ID < group.backends[j].ID })
@@ -196,22 +192,67 @@ func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID st
 				lastErr = fmt.Errorf("backup backend %s has no exact measurable R2 namespace", backend.ID)
 				continue
 			}
-			inventory, listErr := s.backupUsageObjectInventoryCache.do(groupKey, func() (backupUsageObjectInventory, error) {
-				listed, err := candidate.listObjects(ctx, "")
-				if err != nil {
-					return backupUsageObjectInventory{}, err
-				}
-				return backupUsageObjectInventory{objects: listed, observedAt: time.Now().UTC()}, nil
-			})
+			cp, listErr := s.readBackupInventory(ctx, groupKey)
 			if listErr != nil {
 				lastErr = listErr
 				continue
 			}
+			reconciliation.Refreshing = reconciliation.Refreshing || cp.Current != nil
+			if !cp.LastAttempt.IsZero() {
+				t := cp.LastAttempt
+				reconciliation.LastAttemptAt = &t
+			}
+			reconciliation.ScanError = cp.Error
+			progress := cp.Current
+			if progress == nil {
+				progress = cp.Complete
+			}
+			if progress != nil {
+				reconciliation.ScannedPages += progress.Pages
+				reconciliation.ScannedObjects += progress.Objects
+				reconciliation.ScanGeneration = progress.Generation
+			}
+			if cp.Complete == nil {
+				lastErr = fmt.Errorf("physical inventory scan is not complete")
+				continue
+			}
+			complete := cp.Complete
+			for key := range complete.Wanted {
+				observedWanted[backupUsagePhysicalObjectID(candidate.backend, key)] = true
+			}
 			objectBackend = candidate
-			objects = inventory.objects
-			inventoryObservedAt = inventory.observedAt
-			if reconciliation.ObservedAt.IsZero() || inventory.observedAt.Before(reconciliation.ObservedAt) {
-				reconciliation.ObservedAt = inventory.observedAt
+			inventoryObservedAt = complete.StartedAt
+			reconciliation.ScanStartedAt = &complete.StartedAt
+			reconciliation.ScanFinishedAt = complete.FinishedAt
+			reconciliation.LastSuccessAt = complete.FinishedAt
+			reconciliation.Stale = reconciliation.Stale || cp.Error != "" || time.Since(*complete.FinishedAt) > 2*s.backupInventoryConfig.normalized().RefreshInterval
+			owns := platformAdmin || (tenantID != "" && complete.NamespaceOwner == tenantID)
+			totalKey := "all"
+			if !owns {
+				totalKey = "tenant:" + tenantID
+			}
+			totals := complete.Totals[totalKey]
+			for _, object := range complete.References {
+				logical, ok := candidate.logicalObjectKey(object.Key)
+				if !owns && (!ok || !backupUsageTenantOwnsLogicalObject(tenantID, logical)) {
+					continue
+				}
+				objects = append(objects, object)
+				totals.Count--
+				totals.Bytes -= object.Size
+				if backupUsageObjectWithinCleanupGrace(object.LastModified, object.ObservedAt) {
+					totals.ProvisionalCount--
+					totals.ProvisionalBytes -= object.Size
+				}
+			}
+			reconciliation.UnreferencedObjectCount += totals.Count
+			reconciliation.UnreferencedBytes += totals.Bytes
+			reconciliation.ProvisionalObjectCount += totals.ProvisionalCount
+			reconciliation.ProvisionalBytes += totals.ProvisionalBytes
+			reconciliation.OrphanedObjectCount += totals.Count - totals.ProvisionalCount
+			reconciliation.OrphanedBytes += totals.Bytes - totals.ProvisionalBytes
+			if reconciliation.ObservedAt.IsZero() || inventoryObservedAt.Before(reconciliation.ObservedAt) {
+				reconciliation.ObservedAt = inventoryObservedAt
 			}
 			break
 		}
@@ -219,9 +260,7 @@ func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID st
 			for _, backend := range group.backends {
 				unresolvedBackends[backend.ID] = struct{}{}
 			}
-			if s.log != nil {
-				s.log.Printf("backup usage reconciliation R2 namespace unavailable backends=%d: %v", len(group.backends), lastErr)
-			}
+			_ = lastErr
 			continue
 		}
 		reconciliation.MeasuredBackendCount += len(group.backends)
@@ -269,7 +308,7 @@ func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID st
 				}
 				continue
 			}
-			observed[objectID] = backupUsageObservedObject{size: object.Size, lastModified: object.LastModified, observedAt: inventoryObservedAt}
+			observed[objectID] = backupUsageObservedObject{size: object.Size, lastModified: object.LastModified, observedAt: object.ObservedAt}
 		}
 	}
 
@@ -339,7 +378,7 @@ func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID st
 			continue
 		}
 		observedAt, measured := measuredNamespaces[reference.namespaceKey]
-		if !measured {
+		if !measured || !observedWanted[objectID] {
 			continue
 		}
 		artifact := reference.artifact
@@ -360,21 +399,7 @@ func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID st
 		reconciliation.ObservedAt = now
 	}
 	reconciliation.Status, reconciliation.Message = summarizeBackupUsageReconciliation(reconciliation)
-	if platformAdmin && s.log != nil && reconciliation.Status != backupusage.ReconciliationStatusComplete {
-		s.log.Printf("backup usage reconciliation status=%s physical_backends=%d/%d orphaned_objects=%d orphaned_bytes=%d missing_active=%d overdue_deletion=%d lingering_deleted=%d invalid_references=%d size_mismatches=%d unresolved_backends=%d",
-			reconciliation.Status,
-			reconciliation.MeasuredBackendCount,
-			reconciliation.BackendCount,
-			reconciliation.OrphanedObjectCount,
-			reconciliation.OrphanedBytes,
-			reconciliation.MissingActiveObjectCount,
-			reconciliation.OverdueDeletionObjectCount,
-			reconciliation.LingeringDeletedObjectCount,
-			reconciliation.InvalidReferenceCount,
-			reconciliation.SizeMismatchCount,
-			reconciliation.UnresolvedBackendCount,
-		)
-	}
+
 	return reconciliation, nil
 }
 

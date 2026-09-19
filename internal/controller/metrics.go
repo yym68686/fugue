@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"fugue/internal/store"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -56,6 +58,25 @@ func (s *Service) MetricsHandler() http.Handler {
 func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	observability.WriteComponentRuntimeMetrics(w, "controller", s.metricsStartedAt)
+	s.metricsSnapshot.Write(w, "controller")
+}
+
+func (s *Service) StartBackgroundMetrics(ctx context.Context) {
+	s.metricsSnapshot.Run(ctx, 15*time.Second, s.collectMetrics)
+}
+func (s *Service) refreshMetrics(ctx context.Context) error {
+	return s.metricsSnapshot.Refresh(ctx, s.collectMetrics)
+}
+func (s *Service) collectMetrics(parent context.Context, w io.Writer) error {
+	var releaseSnapshot store.ReleaseMetricsSnapshot
+	if s.Store != nil {
+		var err error
+		releaseSnapshot, err = s.Store.LoadReleaseMetricsSnapshot(parent, 500)
+		if err != nil {
+			return err
+		}
+	}
+
 	observability.WriteGaugeMetric(w, "fugue_controller_leader_election_enabled", "Whether controller leader election is enabled.", nil, boolGauge(s.Config.LeaderElectionEnabled))
 	observability.WriteGaugeMetric(w, "fugue_controller_kubectl_apply_enabled", "Whether the controller applies Kubernetes resources.", nil, boolGauge(s.Config.KubectlApply))
 	observability.WriteGaugeMetric(w, "fugue_controller_poll_interval_seconds", "Configured foreground controller poll interval.", nil, s.Config.PollInterval.Seconds())
@@ -94,15 +115,15 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteMetricSample(w, "fugue_controller_leader_active", map[string]string{"identity": leaderIdentity}, boolGauge(leaderActive))
 	s.writeImageTrackingMetrics(w)
 	s.writeOperationEvidenceMetrics(w)
-	s.writeReleaseAttemptMetrics(w)
-	s.writeSafeRolloutMetrics(w)
+	s.writeReleaseAttemptMetrics(w, releaseSnapshot)
+	s.writeSafeRolloutMetrics(w, releaseSnapshot)
 	observability.WriteMetricHeader(w, "fugue_controller_workers_configured", "Configured controller worker slots by lane; zero means unbounded.", "gauge")
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_import"}, float64(s.Config.ForegroundImportWorkers))
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_activate"}, float64(s.Config.ForegroundActivateWorkers))
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "github_sync_import"}, float64(s.Config.GitHubSyncImportWorkers))
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "github_sync_activate"}, float64(s.Config.GitHubSyncActivateWorkers))
 
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	registry := registryMaintenanceStatus{}
 	if s.readRegistryMaintenance != nil {
@@ -110,42 +131,38 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	} else {
 		registry = s.readRegistryMaintenanceStatus(ctx)
 	}
-	observability.WriteMetricHeader(w, "fugue_registry_janitor_present", "Whether the configured registry maintenance CronJob exists and is not suspended.", "gauge")
-	observability.WriteMetricSample(w, "fugue_registry_janitor_present", map[string]string{"job": "retention"}, boolGauge(registry.JanitorPresent))
-	observability.WriteMetricSample(w, "fugue_registry_janitor_present", map[string]string{"job": "gc"}, boolGauge(registry.GCCronJobPresent))
-	observability.WriteGaugeMetric(w, "fugue_registry_gc_running", "Whether protected registry garbage collection is currently running.", nil, boolGauge(registry.GCRunning))
-	observability.WriteGaugeMetric(w, "fugue_registry_gc_requested", "Whether image deletion requested a registry garbage collection newer than the last successful run.", nil, boolGauge(registry.GCRequested))
-	lastGCTimestamp := float64(0)
-	if !registry.LastGCTimestamp.IsZero() {
-		lastGCTimestamp = float64(registry.LastGCTimestamp.Unix())
+	observability.WriteGaugeMetric(w, "fugue_registry_maintenance_applicable", "Whether bundled registry maintenance applies to the configured image store.", nil, boolGauge(registry.Applicable))
+	observability.WriteGaugeMetric(w, "fugue_registry_maintenance_collection_success", "Whether registry maintenance was read successfully; unknown is not absence.", nil, boolGauge(registry.Available))
+	if registry.Available && registry.Applicable {
+		observability.WriteMetricHeader(w, "fugue_registry_janitor_present", "Whether the configured registry maintenance CronJob exists and is not suspended.", "gauge")
+		observability.WriteMetricSample(w, "fugue_registry_janitor_present", map[string]string{"job": "retention"}, boolGauge(registry.JanitorPresent))
+		observability.WriteMetricSample(w, "fugue_registry_janitor_present", map[string]string{"job": "gc"}, boolGauge(registry.GCCronJobPresent))
+		observability.WriteGaugeMetric(w, "fugue_registry_gc_running", "Whether protected registry garbage collection is currently running.", nil, boolGauge(registry.GCRunning))
+		observability.WriteGaugeMetric(w, "fugue_registry_gc_requested", "Whether image deletion requested a registry garbage collection newer than the last successful run.", nil, boolGauge(registry.GCRequested))
+		lastGCTimestamp := float64(0)
+		if !registry.LastGCTimestamp.IsZero() {
+			lastGCTimestamp = float64(registry.LastGCTimestamp.Unix())
+		}
+		observability.WriteGaugeMetric(w, "fugue_registry_gc_last_success_timestamp_seconds", "Unix timestamp of the last successful protected registry garbage collection.", nil, lastGCTimestamp)
+		observability.WriteGaugeMetric(w, "fugue_registry_storage_used_bytes", "Bytes used on the dedicated registry storage filesystem at the last maintenance scan.", nil, float64(registry.StorageUsedBytes))
+		observability.WriteGaugeMetric(w, "fugue_registry_storage_capacity_bytes", "Capacity of the dedicated registry storage filesystem at the last maintenance scan.", nil, float64(registry.StorageCapacityBytes))
+		observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_bytes", "Registry blob bytes not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobBytes))
+		observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_count", "Registry blobs not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobCount))
+		observability.WriteGaugeMetric(w, "fugue_registry_protected_workload_digests", "Current workload image digests included in the registry GC keep set at the last maintenance scan.", nil, float64(registry.ProtectedDigestCount))
 	}
-	observability.WriteGaugeMetric(w, "fugue_registry_gc_last_success_timestamp_seconds", "Unix timestamp of the last successful protected registry garbage collection.", nil, lastGCTimestamp)
-	observability.WriteGaugeMetric(w, "fugue_registry_storage_used_bytes", "Bytes used on the dedicated registry storage filesystem at the last maintenance scan.", nil, float64(registry.StorageUsedBytes))
-	observability.WriteGaugeMetric(w, "fugue_registry_storage_capacity_bytes", "Capacity of the dedicated registry storage filesystem at the last maintenance scan.", nil, float64(registry.StorageCapacityBytes))
-	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_bytes", "Registry blob bytes not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobBytes))
-	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_count", "Registry blobs not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobCount))
-	observability.WriteGaugeMetric(w, "fugue_registry_protected_workload_digests", "Current workload image digests included in the registry GC keep set at the last maintenance scan.", nil, float64(registry.ProtectedDigestCount))
 	s.writeImageCacheLocalPVMetrics(w)
+	return parent.Err()
 }
 
-func (s *Service) writeSafeRolloutMetrics(w http.ResponseWriter) {
+func (s *Service) writeSafeRolloutMetrics(w io.Writer, snapshot store.ReleaseMetricsSnapshot) {
 	if s == nil || s.Store == nil {
 		return
 	}
-	attempts, err := s.Store.ListReleaseAttempts(model.ReleaseAttemptFilter{PlatformAdmin: true, Limit: 500})
-	if err != nil {
-		if s.Logger != nil {
-			s.Logger.Printf("safe rollout metrics unavailable: %v", err)
-		}
-		return
-	}
+	attempts := snapshot.Attempts
 	stepCounts := map[string]int{}
 	abortCounts := map[string]int{}
 	for _, attempt := range attempts {
-		steps, err := s.Store.ListReleaseSteps(attempt.TenantID, true, attempt.ID)
-		if err != nil {
-			continue
-		}
+		steps := snapshot.Steps[attempt.ID]
 		for _, step := range steps {
 			phase, _ := step.Payload["phase"].(string)
 			phase = strings.TrimSpace(phase)
@@ -205,7 +222,7 @@ func safeRolloutMetricPhase(phase string) bool {
 	}
 }
 
-func (s *Service) writeOperationEvidenceMetrics(w http.ResponseWriter) {
+func (s *Service) writeOperationEvidenceMetrics(w io.Writer) {
 	if s == nil || s.Store == nil {
 		return
 	}
@@ -239,7 +256,7 @@ func (s *Service) writeOperationEvidenceMetrics(w http.ResponseWriter) {
 	}
 }
 
-func (s *Service) writeReleaseAttemptMetrics(w http.ResponseWriter) {
+func (s *Service) writeReleaseAttemptMetrics(w io.Writer, snapshot store.ReleaseMetricsSnapshot) {
 	if s == nil || s.Store == nil {
 		return
 	}
@@ -257,17 +274,11 @@ func (s *Service) writeReleaseAttemptMetrics(w http.ResponseWriter) {
 			"status":       safeMetricLabelValue(item.Status, "unknown"),
 		}, float64(item.Count))
 	}
-	s.writeReleaseDurationMetrics(w)
+	s.writeReleaseDurationMetrics(w, snapshot)
 }
 
-func (s *Service) writeReleaseDurationMetrics(w http.ResponseWriter) {
-	attempts, err := s.Store.ListReleaseAttempts(model.ReleaseAttemptFilter{PlatformAdmin: true, Limit: 500})
-	if err != nil {
-		if s.Logger != nil {
-			s.Logger.Printf("release duration metrics unavailable: %v", err)
-		}
-		return
-	}
+func (s *Service) writeReleaseDurationMetrics(w io.Writer, snapshot store.ReleaseMetricsSnapshot) {
+	attempts := snapshot.Attempts
 	attemptDurations := map[string]durationMetricAggregate{}
 	importToDeploy := map[string]durationMetricAggregate{}
 	deployToReady := map[string]durationMetricAggregate{}
@@ -278,10 +289,7 @@ func (s *Service) writeReleaseDurationMetrics(w http.ResponseWriter) {
 			key := trigger + "\x00" + status
 			attemptDurations[key] = attemptDurations[key].add(attempt.FinishedAt.Sub(attempt.StartedAt).Seconds(), map[string]string{"trigger_type": trigger, "status": status})
 		}
-		steps, err := s.Store.ListReleaseSteps(attempt.TenantID, true, attempt.ID)
-		if err != nil {
-			continue
-		}
+		steps := snapshot.Steps[attempt.ID]
 		if seconds, ok := releaseStepDurationSeconds(steps, model.ReleaseStepTypeImageImport, model.ReleaseStepTypeDeployQueued); ok {
 			importToDeploy[status] = importToDeploy[status].add(seconds, map[string]string{"status": status})
 		}
@@ -310,7 +318,7 @@ func (a durationMetricAggregate) add(seconds float64, labels map[string]string) 
 	return a
 }
 
-func writeAverageDurationMetric(w http.ResponseWriter, name, help string, values map[string]durationMetricAggregate) {
+func writeAverageDurationMetric(w io.Writer, name, help string, values map[string]durationMetricAggregate) {
 	observability.WriteMetricHeader(w, name, help, "gauge")
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -459,7 +467,7 @@ func (s *Service) imageTrackingSyncMetricsSnapshot() (bool, time.Time, time.Time
 		strings.TrimSpace(s.imageTrackingLastSyncError)
 }
 
-func (s *Service) writeImageTrackingMetrics(w http.ResponseWriter) {
+func (s *Service) writeImageTrackingMetrics(w io.Writer) {
 	counts, lastCheckAt, lastQueuedAt, lastErrorAt, _ := s.imageTrackingMetricsSnapshot()
 	syncRunning, syncStartedAt, syncFinishedAt, syncDuration, syncErrorAt, _ := s.imageTrackingSyncMetricsSnapshot()
 	observability.WriteMetricHeader(w, "fugue_image_tracking_decisions_total", "Image tracking check decisions made by this controller process.", "counter")
@@ -540,7 +548,7 @@ func boolGauge(value bool) float64 {
 	return 0
 }
 
-func (s *Service) writeImageCacheLocalPVMetrics(w http.ResponseWriter) {
+func (s *Service) writeImageCacheLocalPVMetrics(w io.Writer) {
 	if s == nil || s.Store == nil {
 		return
 	}
@@ -649,7 +657,7 @@ func latestImageCachePrunePlansByMetricLabels(plans []model.ImageCachePrunePlan)
 	return out
 }
 
-func (s *Service) writeImageCachePruneTaskResultMetrics(w http.ResponseWriter) {
+func (s *Service) writeImageCachePruneTaskResultMetrics(w io.Writer) {
 	if s == nil || s.Store == nil {
 		return
 	}

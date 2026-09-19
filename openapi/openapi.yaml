@@ -13949,6 +13949,33 @@ components:
         observed_at:
           type: string
           format: date-time
+        scan_started_at:
+          type: string
+          format: date-time
+          description: Start of the paginated observation interval; LIST is not a transactional snapshot.
+        scan_finished_at:
+          type: string
+          format: date-time
+        refreshing:
+          type: boolean
+          description: A newer inventory scan is in progress. Existing measurements retain their original observation time.
+        stale:
+          type: boolean
+        last_attempt_at:
+          type: string
+          format: date-time
+        last_success_at:
+          type: string
+          format: date-time
+        scanned_pages:
+          type: integer
+        scanned_objects:
+          type: integer
+        scan_generation:
+          type: string
+        scan_error:
+          type: string
+          description: Low-cardinality classification of the last scan error, without credentials or object names.
         message:
           type: string
     BackupUsage:

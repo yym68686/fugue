@@ -1,0 +1,93 @@
+# Metrics and inventory collection
+
+API and Controller metric requests render process metrics and a previously
+collected immutable byte snapshot. Scrapes never start an R2 listing, a
+database aggregation, or a Kubernetes maintenance probe. Background refreshes
+run every 15 seconds, with a 30-second context budget; refresh failure retains
+the last complete body and its original observation time. The
+`fugue_metrics_snapshot_*` metrics distinguish cold start, failed refresh and
+stale observations. Component readiness is separate from inventory freshness.
+
+Backup inventories use `observation/v1/` checkpoints in the existing metadata
+store (a separate locked sidecar file for the file-backed Store). These are
+rebuildable runtime facts, not serving configuration or artifact authority.
+Each bounded transaction coordinates one LIST page and the corresponding
+cursor across API replicas. A canceled transaction cannot advance the cursor.
+The identity includes backend namespace, ownership and credentials; changing
+that boundary cannot reuse another scope's observation. Credentials are never
+persisted in a checkpoint or returned in scan errors.
+
+Unreferenced objects are reduced to namespace/tenant counters. Only known
+artifact references retain per-object metadata, keeping memory proportional
+to known references and owners rather than bucket size. Pagination may span
+many minutes. Completion publishes a new generation atomically; an unfinished
+or failed scan never overwrites the previous complete generation. Scan start,
+finish and per-page object observation times are preserved. LIST is not a
+transactional snapshot, so metadata created after the scan boundary is not
+evidence of a missing object. Inventory measurements do not authorize object
+deletion, change the billing ledger, or change positive serving LKG.
+
+The independently configurable background settings are:
+
+| Environment variable | Default |
+|---|---|
+| `FUGUE_BACKUP_INVENTORY_REFRESH_INTERVAL` | `15m` |
+| `FUGUE_BACKUP_INVENTORY_PAGE_TIMEOUT` | `10s` |
+| `FUGUE_BACKUP_INVENTORY_RETRY_INTERVAL` | `30s` |
+| `FUGUE_BACKUP_INVENTORY_MAX_SCAN_AGE` | `24h` |
+
+The backup usage API preserves its original measurement timestamp while a
+new generation scans. `refreshing`, `stale`, scan progress, last attempt and
+last success describe the observation independently of its physical totals.
+Unavailable physical measurements are not presented as zero. A stale
+reconciliation cannot pass the robustness check.
+
+Controller release metrics use a repeatable-read projection of the same
+latest 500 attempts as before and one batch of their steps. This replaces two
+500-query loops with two queries; no desired source or full step payload is
+needed. The duration and safe-rollout aggregators share this projection.
+Registry maintenance reports applicability and read success separately:
+unknown or inapplicable maintenance is not represented as a missing CronJob.
+
+Managed application observations query exact tenant/app/runtime/image
+identities needed by the current managed object and serving release, including
+source aliases. Present, pulling, missing and failed evidence keeps its age
+and precedence. A refresh cannot substitute an unrelated historical image or
+another migration runtime's positive evidence.
+
+# Kubernetes log collection
+
+The API-based collector reads forward from per-container-instance timestamps,
+without `TailLines`. A bounded eight-worker pool uses the existing global
+cycle budget and per-target line bound. An inclusive boundary and occurrence
+counts preserve multiple identical records at the same timestamp. Queue
+rejection leaves the cursor before the rejected record. Completed previous
+container instances are also eligible. Cursor identity includes Pod UID and
+container ID; current and previous views of the same instance share a cursor.
+
+Cycle duration, backlog age and retention gaps are exposed. A truncation now
+means a bounded read has more backlog to resume, not permission to skip that
+backlog. Cursors live for the collector process; a new process replays the
+latest five minutes. Queue admission is not an exactly-once exporter receipt:
+process loss, source rotation, configured sampling and exporter exhaustion
+remain explicit limits of this existing in-memory pipeline. The collector
+does not claim that `dropped=0` proves end-to-end completeness.
+
+# Scrape policy release
+
+`deploy/environments/production/observability/scrape-policy.json` is the
+explicit component/port contract for public system telemetry. It includes
+the A/B workers and regional DNS, and excludes tenant application ports,
+Caddy public listeners and DNS port 53. Helm rendering uses the same contract.
+The `observability_configuration` lane in the single `ci.yml` entrypoint is
+independent of code builds. It validates with the running `promtool`, updates
+only the selected job with a resource-version precondition, waits for the
+mounted ConfigMap, sends SIGHUP and verifies the loaded configuration. It does
+not replace the Prometheus Pod or discard its existing TSDB.
+
+Regression coverage includes canceled and failed refreshes, cross-replica
+inventory resume, tenant separation, invalid pagination, two-query release
+projection, negative image evidence, equal-timestamp log boundaries and queue
+rejection. Production acceptance compares scrape latency and success,
+inventory progress, target coverage, log backlog, CPU and allocation profiles
+against the original live-diagnostics observations.

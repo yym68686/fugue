@@ -49,7 +49,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "postgres_protection", "prepush", "traffic_safety_stage0",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -63,6 +63,15 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	if yamlMappingValue(t, protection, "environment").Value != "production" {
 		t.Fatal("database protection must use the protected production environment")
+	}
+	observabilityConfig := yamlMappingValue(t, jobs, "observability_configuration")
+	for _, key := range yamlMappingKeys(t, observabilityConfig) {
+		if key == "needs" {
+			t.Fatal("observability configuration must remain recoverable independently of code builds")
+		}
+	}
+	if yamlMappingValue(t, observabilityConfig, "environment").Value != "production" {
+		t.Fatal("configuration lane requires production environment")
 	}
 	for _, required := range []string{
 		"\"${RELEASE_TOOL}\" plan",

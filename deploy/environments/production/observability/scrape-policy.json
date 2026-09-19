@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "namespace": "fugue-system",
+  "configMap": "fugue-fugue-observability-prometheus",
+  "deployment": "fugue-fugue-observability-prometheus",
+  "container": "prometheus",
+  "configPath": "/etc/prometheus/prometheus.yml",
+  "job": "fugue-control-plane-pods",
+  "componentPorts": [
+    "api;metrics",
+    "controller;metrics",
+    "telemetry-agent;http",
+    "observability-prometheus;http",
+    "dns;http",
+    "dns-country-[a-z0-9-]+;http",
+    "edge;health",
+    "edge-worker-[ab];health",
+    "edge-country-[a-z0-9-]+-worker-[ab];health",
+    "edge-front;health",
+    "edge-country-[a-z0-9-]+-front;health",
+    "fugue-ssh-front;http",
+    "fugue-ssh-front-country-[a-z0-9-]+;http"
+  ]
+}

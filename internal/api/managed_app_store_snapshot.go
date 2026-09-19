@@ -7,7 +7,10 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
+	"fugue/internal/store"
 	"golang.org/x/sync/errgroup"
+	"strings"
 )
 
 // A refresh observes the whole cluster. Load its durable evidence once instead
@@ -19,6 +22,9 @@ type managedAppStoreSnapshot struct {
 }
 
 func (s *Server) loadManagedAppStoreSnapshot(ctx context.Context, appIDs ...string) (*managedAppStoreSnapshot, error) {
+	return s.loadManagedAppStoreSnapshotScoped(ctx, nil, nil, appIDs...)
+}
+func (s *Server) loadManagedAppStoreSnapshotScoped(ctx context.Context, apps []model.App, observed map[string]runtime.ManagedAppObject, appIDs ...string) (*managedAppStoreSnapshot, error) {
 	started := time.Now()
 	defer func() { serverTimingFromContext(ctx).Add("observation_store_snapshot", time.Since(started)) }()
 	var policies []model.AppTrafficPolicy
@@ -41,20 +47,22 @@ func (s *Server) loadManagedAppStoreSnapshot(ctx context.Context, appIDs ...stri
 	})
 	// The store treats an empty status as Present. Read every explicit status
 	// so the batch preserves negative and pending evidence as well.
-	var locationsMu sync.Mutex
-	for _, status := range []string{model.ImageLocationStatusPresent, model.ImageLocationStatusPulling, model.ImageLocationStatusMissing, model.ImageLocationStatusFailed} {
-		group.Go(func() error {
-			started := time.Now()
-			defer func() { serverTimingFromContext(ctx).Add("observation_locations_"+status, time.Since(started)) }()
-			items, err := s.store.ListImageLocations(model.ImageLocationFilter{PlatformAdmin: true, Status: status, AppIDs: appIDs})
-			if err != nil {
-				return err
-			}
-			locationsMu.Lock()
-			locations = append(locations, items...)
-			locationsMu.Unlock()
-			return nil
-		})
+	if apps == nil {
+		var locationsMu sync.Mutex
+		for _, status := range []string{model.ImageLocationStatusPresent, model.ImageLocationStatusPulling, model.ImageLocationStatusMissing, model.ImageLocationStatusFailed} {
+			group.Go(func() error {
+				started := time.Now()
+				defer func() { serverTimingFromContext(ctx).Add("observation_locations_"+status, time.Since(started)) }()
+				items, err := s.store.ListImageLocations(model.ImageLocationFilter{PlatformAdmin: true, Status: status, AppIDs: appIDs})
+				if err != nil {
+					return err
+				}
+				locationsMu.Lock()
+				locations = append(locations, items...)
+				locationsMu.Unlock()
+				return nil
+			})
+		}
 	}
 	if err := group.Wait(); err != nil {
 		return nil, fmt.Errorf("load runtime observation store snapshot: %w", err)
@@ -69,6 +77,33 @@ func (s *Server) loadManagedAppStoreSnapshot(ctx context.Context, appIDs ...stri
 	}
 	for _, release := range releases {
 		result.releases[release.ID] = release
+	}
+	if apps != nil {
+		var scopes []store.ImageLocationScope
+		for _, app := range apps {
+			imageRef, runtimeID := app.Spec.Image, app.Spec.RuntimeID
+			if managed, ok := observed[app.ID]; ok {
+				imageRef = managed.Spec.AppSpec.Image
+				if strings.TrimSpace(managed.Spec.AppSpec.RuntimeID) != "" {
+					runtimeID = managed.Spec.AppSpec.RuntimeID
+				}
+			}
+			if release, ok := s.servingReleaseTrafficTargetWithSnapshot(app, result); ok {
+				imageRef = release.ResolvedImageRef
+			}
+			refs := []string{imageRef}
+			if app.Source != nil {
+				refs = append(refs, app.Source.ImageRef, app.Source.ResolvedImageRef)
+			}
+			for _, ref := range refs {
+				scopes = append(scopes, store.ImageLocationScope{TenantID: app.TenantID, AppID: app.ID, RuntimeID: runtimeID, ImageRef: ref})
+			}
+		}
+		var err error
+		locations, err = s.store.ListImageLocationObservations(ctx, scopes)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for _, location := range locations {
 		result.locations[location.AppID] = append(result.locations[location.AppID], location)

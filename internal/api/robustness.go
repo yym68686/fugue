@@ -715,7 +715,7 @@ func (s *Server) robustnessBackupChecks(ctx context.Context) ([]model.Robustness
 	posture := s.platformBackupPosture(policies, usage)
 	checks := make([]model.RobustnessCheck, 0, len(posture)+2)
 	reconciliation := usage.Reconciliation
-	reconciliationPass := reconciliation != nil && (reconciliation.Status == backupusage.ReconciliationStatusComplete || reconciliation.Status == backupusage.ReconciliationStatusReconciling)
+	reconciliationPass := reconciliation != nil && !reconciliation.Stale && (reconciliation.Status == backupusage.ReconciliationStatusComplete || reconciliation.Status == backupusage.ReconciliationStatusReconciling)
 	reconciliationObserved := "status=unavailable"
 	reconciliationMessage := "backup object-store reconciliation is unavailable"
 	if reconciliation != nil {

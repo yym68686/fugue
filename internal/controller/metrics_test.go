@@ -31,6 +31,9 @@ func TestMetricsHandlerReportsControllerConfiguration(t *testing.T) {
 	}, nil)
 
 	recorder := httptest.NewRecorder()
+	if err := service.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	service.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
@@ -93,6 +96,9 @@ func TestMetricsHandlerDeduplicatesImageCachePrunePlanSamples(t *testing.T) {
 	service := New(stateStore, config.ControllerConfig{}, nil)
 
 	recorder := httptest.NewRecorder()
+	if err := service.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	service.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	labels := `{cluster_node_name="worker-1",mode="observe",node_id="machine-1",runtime_id="runtime-1",status="planned"}`
@@ -123,6 +129,7 @@ func TestMetricsHandlerReportsRegistryMaintenanceStatus(t *testing.T) {
 	service := New(nil, config.ControllerConfig{}, nil)
 	service.readRegistryMaintenance = func(context.Context) registryMaintenanceStatus {
 		return registryMaintenanceStatus{
+			Applicable: true, Available: true,
 			JanitorPresent:        true,
 			GCCronJobPresent:      true,
 			GCRequested:           true,
@@ -136,6 +143,9 @@ func TestMetricsHandlerReportsRegistryMaintenanceStatus(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
+	if err := service.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	service.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	for _, want := range []string{

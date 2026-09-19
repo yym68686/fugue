@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -418,6 +419,9 @@ func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
 		t.Fatalf("expected stored legacy edge token to be preserved, got %+v", node)
 	}
 	metrics := httptest.NewRecorder()
+	if err := server.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	server.MetricsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if !strings.Contains(metrics.Body.String(), `fugue_node_updater_edge_identity_lookup_total{outcome="matched"} 1.000000`) {
 		t.Fatalf("expected exact edge identity lookup metric, got:\n%s", metrics.Body.String())
@@ -446,6 +450,9 @@ func TestNodeUpdaterEdgeCredentialFailsClosedWhenIdentityIsMissing(t *testing.T)
 		t.Fatalf("expected missing edge identity to fail closed, credential=%+v warnings=%v", credential, warnings)
 	}
 	metrics := httptest.NewRecorder()
+	if err := server.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	server.MetricsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := metrics.Body.String()
 	if !strings.Contains(body, `fugue_node_updater_edge_identity_lookup_total{outcome="missing"} 1.000000`) {

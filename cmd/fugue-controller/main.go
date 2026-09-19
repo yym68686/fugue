@@ -50,6 +50,7 @@ func main() {
 	}
 
 	service := controller.New(store, cfg, logger)
+	go service.StartBackgroundMetrics(ctx)
 	if err := service.StartMetricsServer(ctx, cfg.MetricsBindAddr); err != nil {
 		logger.Fatalf("start controller metrics server: %v", err)
 	}

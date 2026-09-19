@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -172,7 +173,7 @@ func TestBackupUsageReconciliationReportsExactTenantPhysicalBytes(t *testing.T) 
 	fake.put("backup-root/apps/tenant_a/project_a/app_a/backup_run_orphan/database.dump", 70, now.Add(-2*time.Hour))
 	fake.put("backup-root/apps/tenant_b/project_b/app_b/backup_run_other/database.dump", 999, now.Add(-2*time.Hour))
 
-	usage, err := server.loadBackupUsage(t.Context(), "tenant_a", false)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
 	if err != nil {
 		t.Fatalf("load tenant usage: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestBackupUsageReconciliationReportsExactTenantPhysicalBytes(t *testing.T) 
 	if reconciliation.MissingActiveObjectCount != 0 || reconciliation.OverdueDeletionObjectCount != 0 {
 		t.Fatalf("unexpected reconciliation anomalies: %+v", reconciliation)
 	}
-	otherTenantUsage, err := server.loadBackupUsage(t.Context(), "tenant_b", false)
+	otherTenantUsage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_b", false)
 	if err != nil {
 		t.Fatalf("load other tenant usage: %v", err)
 	}
@@ -213,7 +214,7 @@ func TestBackupUsageReconciliationTreatsRecentUnreferencedUploadAsReconciling(t 
 	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
 	fake.put("backup-root/apps/tenant_a/project_a/app_a/backup_run_upload/database.dump", 42, time.Now().UTC().Add(-time.Minute))
 
-	usage, err := server.loadBackupUsage(t.Context(), "tenant_a", false)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
 	if err != nil {
 		t.Fatalf("load tenant usage: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestBackupUsageReconciliationCountsUnsafeKeysInsidePhysicalNamespace(t *tes
 	fake.put("backup-root//unsafe-object", 41, now)
 	fake.put("backup-root-old/not-in-fugue-namespace", 99, now)
 
-	usage, err := server.loadBackupUsage(t.Context(), "", true)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "", true)
 	if err != nil {
 		t.Fatalf("load platform usage: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestBackupUsageReconciliationCountsUnsafeKeysInsidePhysicalNamespace(t *tes
 	if usage.Reconciliation == nil || usage.Reconciliation.Status != backupusage.ReconciliationStatusDrift || usage.Reconciliation.OrphanedObjectCount != 1 || usage.Reconciliation.OrphanedBytes != 41 {
 		t.Fatalf("unsafe physical key was not reported as orphaned drift: %+v", usage.Reconciliation)
 	}
-	tenantUsage, err := server.loadBackupUsage(t.Context(), "tenant_a", false)
+	tenantUsage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
 	if err != nil {
 		t.Fatalf("load tenant usage: %v", err)
 	}
@@ -262,7 +263,7 @@ func TestBackupUsageReconciliationDoesNotCompareNewMetadataToOlderInventory(t *t
 
 	// Prime only the shared physical inventory. A later tenant reconciliation
 	// must not claim an artifact created after this snapshot is missing.
-	if _, err := server.loadBackupUsage(t.Context(), "", true); err != nil {
+	if _, err := loadBackupUsageAfterScan(t, server, t.Context(), "", true); err != nil {
 		t.Fatalf("prime platform inventory: %v", err)
 	}
 	createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
@@ -278,7 +279,7 @@ func TestBackupUsageReconciliationDoesNotCompareNewMetadataToOlderInventory(t *t
 		Status:            model.BackupArtifactStatusActive,
 	})
 
-	usage, err := server.loadBackupUsage(t.Context(), "tenant_a", false)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
 	if err != nil {
 		t.Fatalf("load tenant usage: %v", err)
 	}
@@ -308,14 +309,14 @@ func TestBackupUsageReconciliationDoesNotReportCleanupNewerThanCachedInventoryAs
 	})
 	fake.put("backup-root/"+artifact.ObjectKey, 100, now.Add(-time.Hour))
 	fake.put("backup-root/"+artifact.ManifestObjectKey, 17, now.Add(-time.Hour))
-	if _, err := server.loadBackupUsage(t.Context(), "", true); err != nil {
+	if _, err := loadBackupUsageAfterScan(t, server, t.Context(), "", true); err != nil {
 		t.Fatalf("prime platform inventory: %v", err)
 	}
 	if err := stateStore.MarkBackupArtifactPhysicalDeleted(artifact.ID, time.Now().UTC().Add(time.Millisecond)); err != nil {
 		t.Fatalf("mark physical cleanup: %v", err)
 	}
 
-	usage, err := server.loadBackupUsage(t.Context(), "tenant_a", false)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
 	if err != nil {
 		t.Fatalf("load tenant usage: %v", err)
 	}
@@ -342,7 +343,7 @@ func TestBackupUsageReconciliationOmitsPhysicalTotalsWhenR2IsUnavailable(t *test
 		Status:            model.BackupArtifactStatusActive,
 	})
 
-	usage, err := server.loadBackupUsage(t.Context(), "", true)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "", true)
 	if err != nil {
 		t.Fatalf("load platform usage: %v", err)
 	}
@@ -372,7 +373,7 @@ func TestBackupUsageReconciliationFailsClosedForArtifactWithoutBackend(t *testin
 		Status:            model.BackupArtifactStatusActive,
 	})
 
-	usage, err := server.loadBackupUsage(t.Context(), "tenant_a", false)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
 	if err != nil {
 		t.Fatalf("load tenant usage: %v", err)
 	}
@@ -387,7 +388,6 @@ func TestBackupUsageReconciliationMarksMixedBackendMeasurementPartial(t *testing
 	unavailable.failList = true
 	stateStore, _, server := newBackupUsageTestServer(t, measured)
 	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
-	server.backupUsageObjectInventoryCache = newExpiringResponseCache[backupUsageObjectInventory](0)
 	_, err := stateStore.CreateBackupBackend(model.BackupBackend{
 		ID:           "backup_backend_usage_unavailable",
 		Name:         "usage-r2-unavailable",
@@ -409,7 +409,7 @@ func TestBackupUsageReconciliationMarksMixedBackendMeasurementPartial(t *testing
 	}
 	measured.put("backup-root/platform/registry/backup_run_orphan/registry.tar.gz", 64, time.Now().UTC().Add(-2*time.Hour))
 
-	usage, err := server.loadBackupUsage(t.Context(), "", true)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "", true)
 	if err != nil {
 		t.Fatalf("load platform usage: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestBackupUsageReconciliationDetectsMissingOverdueAndLingeringObjects(t *te
 	fake.put("backup-root/"+lingering.ObjectKey, 25, now.Add(-2*time.Hour))
 	fake.put("backup-root/"+lingering.ManifestObjectKey, 9, now.Add(-2*time.Hour))
 
-	usage, err := server.loadBackupUsage(t.Context(), "tenant_a", false)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
 	if err != nil {
 		t.Fatalf("load tenant usage: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestBackupUsageReconciliationIgnoresInvalidMetadataAlreadyPhysicallyDeleted
 		t.Fatalf("mark legacy artifact physically deleted: %v", err)
 	}
 
-	usage, err := server.loadBackupUsage(t.Context(), "tenant_a", false)
+	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
 	if err != nil {
 		t.Fatalf("load tenant usage: %v", err)
 	}
@@ -506,6 +506,9 @@ func TestBackupUsageEndpointAndMetricsExposeCompletePhysicalInventory(t *testing
 	fake.put("backup-root/"+artifact.ManifestObjectKey, 17, now.Add(-time.Hour))
 	fake.put("backup-root-old/not-in-fugue-namespace", 999, now.Add(-time.Hour))
 
+	if err := server.advanceBackupInventories(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/backups/usage", "bootstrap-secret", nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("backup usage status=%d body=%s", recorder.Code, recorder.Body.String())
@@ -519,6 +522,9 @@ func TestBackupUsageEndpointAndMetricsExposeCompletePhysicalInventory(t *testing
 	}
 
 	metrics := httptest.NewRecorder()
+	if err := server.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	server.MetricsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	for _, want := range []string{
 		"fugue_backup_physical_bytes 117.000000",
@@ -610,4 +616,12 @@ func TestBackupUsageR2NamespaceMustRoundTripExactly(t *testing.T) {
 			}
 		})
 	}
+}
+
+func loadBackupUsageAfterScan(t *testing.T, s *Server, ctx context.Context, tenant string, admin bool) (backupusage.Usage, error) {
+	t.Helper()
+	if err := s.advanceBackupInventories(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return s.loadBackupUsage(ctx, tenant, admin)
 }

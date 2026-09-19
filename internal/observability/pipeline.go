@@ -119,6 +119,10 @@ type telemetryTenantMeterSnapshot struct {
 }
 
 type Pipeline struct {
+	kubernetesLogCycleMillis   atomic.Int64
+	kubernetesLogBacklogMillis atomic.Int64
+	kubernetesLogCursorGaps    atomic.Uint64
+
 	cfg        Config
 	logger     *log.Logger
 	queue      chan queuedEvent
@@ -512,6 +516,9 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_errors_total{source=\"prometheus_scrape\"} %d\n", snap.PrometheusScrapeErrors)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_lines_total Kubernetes pod log lines ingested by the telemetry pipeline.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_lines_total counter")
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_cycle_seconds %f\n", float64(p.kubernetesLogCycleMillis.Load())/1000)
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_backlog_max_seconds %f\n", float64(p.kubernetesLogBacklogMillis.Load())/1000)
+	writeMetric("fugue_telemetry_pipeline_kubernetes_log_cursor_gaps_total", p.kubernetesLogCursorGaps.Load())
 	writeMetric("fugue_telemetry_pipeline_kubernetes_log_lines_total", snap.KubernetesLogLines)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_pods Last Kubernetes pod count considered by the log collector.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_pods gauge")

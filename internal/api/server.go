@@ -36,6 +36,8 @@ type Server struct {
 	auth                                   *auth.Authenticator
 	log                                    *log.Logger
 	metricsStartedAt                       time.Time
+	metricsSnapshot                        observability.MetricSnapshot
+	backupInventoryConfig                  BackupInventoryConfig
 	controlPlaneDatabaseURL                string
 	objectStorageUsageTimeout              time.Duration
 	controlPlaneNamespace                  string
@@ -103,7 +105,6 @@ type Server struct {
 	requestRegistryGC                      func(context.Context, string) error
 	projectImageUsageCache                 expiringResponseCache[projectImageUsageResponse]
 	backupUsageReconciliationCache         expiringResponseCache[backupusage.Reconciliation]
-	backupUsageObjectInventoryCache        expiringResponseCache[backupUsageObjectInventory]
 	readinessKubernetesAPICache            expiringResponseCache[readinessCheckResult]
 	clusterNodeInventoryCache              expiringResponseCache[[]clusterNodeSnapshot]
 	persistentVolumeUsageCache             expiringResponseCache[persistentVolumeUsagePolicies]
@@ -206,6 +207,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		auth:                            authn,
 		log:                             logger,
 		metricsStartedAt:                time.Now().UTC(),
+		backupInventoryConfig:           cfg.BackupInventory.normalized(),
 		controlPlaneDatabaseURL:         strings.TrimSpace(cfg.DatabaseURL),
 		objectStorageUsageTimeout:       normalizeObjectStorageUsageTimeout(cfg.ObjectStorageUsageTimeout),
 		controlPlaneNamespace:           strings.TrimSpace(cfg.ControlPlaneNamespace),
@@ -273,7 +275,6 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		appImageRegistry:                       newRemoteAppImageRegistry(),
 		projectImageUsageCache:                 newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
 		backupUsageReconciliationCache:         newExpiringResponseCache[backupusage.Reconciliation](defaultBackupUsageReconciliationCacheTTL),
-		backupUsageObjectInventoryCache:        newExpiringResponseCache[backupUsageObjectInventory](defaultBackupUsageReconciliationCacheTTL),
 		readinessKubernetesAPICache:            newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
 		clusterNodeInventoryCache:              newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
 		persistentVolumeUsageCache:             newExpiringResponseCache[persistentVolumeUsagePolicies](persistentVolumeUsageCacheTTL),
@@ -391,7 +392,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	status := s.observabilityConfig.Normalize().Status()
 	observability.WriteGaugeMetric(w, "fugue_api_observability_enabled", "Whether Fugue Observability is enabled for the API process.", nil, boolMetric(status.Enabled))
 	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
-	s.writeBackupMetrics(r.Context(), w)
+	s.metricsSnapshot.Write(w, "api")
+}
+
+func (s *Server) collectMetrics(ctx context.Context, w io.Writer) error {
+	if err := s.writeBackupMetrics(ctx, w); err != nil {
+		return err
+	}
 	s.writeRobustnessMetrics(w)
 	s.writeAutomationShadowLoopMetrics(w)
 	s.writeEdgeQualityRollupMetrics(w)
@@ -401,6 +408,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.writeEdgeRouteSourceMetrics(w)
 	s.writeEdgeAuthMetrics(w)
 	s.writeNodeUpdaterEdgeIdentityMetrics(w)
+	return ctx.Err()
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {

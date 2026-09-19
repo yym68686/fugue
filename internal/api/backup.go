@@ -3998,9 +3998,12 @@ func looksExternalPlatformEndpoint(raw string) bool {
 		!strings.HasPrefix(value, "100.64.")
 }
 
-func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) {
+func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) error {
 	policies, err := s.store.ListBackupPolicies(store.BackupPolicyFilter{IncludeDisabled: true, PlatformAdmin: true, Limit: 500})
-	if err == nil {
+	if err != nil {
+		return err
+	}
+	{
 		policyCounts := map[string]float64{}
 		for _, policy := range policies {
 			key := strings.Join([]string{policy.Status, policy.Scope, policy.Target.Type}, "\x00")
@@ -4017,7 +4020,10 @@ func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) {
 		}
 	}
 	runs, err := s.store.ListBackupRuns(store.BackupRunFilter{PlatformAdmin: true, Limit: 500})
-	if err == nil {
+	if err != nil {
+		return err
+	}
+	{
 		runCounts := map[string]float64{}
 		for _, run := range runs {
 			key := strings.Join([]string{run.Status, run.Target.Type}, "\x00")
@@ -4033,7 +4039,10 @@ func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) {
 		}
 	}
 	artifacts, err := s.store.ListBackupArtifacts(store.BackupArtifactFilter{PlatformAdmin: true, Limit: 500})
-	if err == nil {
+	if err != nil {
+		return err
+	}
+	{
 		artifactCounts := map[string]float64{}
 		artifactBytes := map[string]float64{}
 		for _, artifact := range artifacts {
@@ -4051,7 +4060,10 @@ func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) {
 		}
 	}
 	restoreRuns, err := s.store.ListBackupRestoreRuns("", true, 500)
-	if err == nil {
+	if err != nil {
+		return err
+	}
+	{
 		restoreCounts := map[string]float64{}
 		for _, run := range restoreRuns {
 			key := strings.Join([]string{run.Status, run.Mode}, "\x00")
@@ -4067,7 +4079,10 @@ func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) {
 		}
 	}
 	usage, err := s.loadBackupUsage(ctx, "", true)
-	if err == nil {
+	if err != nil {
+		return err
+	}
+	{
 		observability.WriteGaugeMetric(w, "fugue_backup_billable_bytes", "Billable backup storage bytes metered by Fugue.", map[string]string{
 			"provider":       usage.Provider,
 			"markup_percent": strconv.Itoa(usage.MarkupPercent),
@@ -4079,24 +4094,39 @@ func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) {
 			observability.WriteGaugeMetric(w, "fugue_backup_physical_objects", "Exact physical objects observed in reconciled R2 backup object storage.", nil, float64(*usage.PhysicalObjectCount))
 		}
 		if reconciliation := usage.Reconciliation; reconciliation != nil {
+			observability.WriteGaugeMetric(w, "fugue_backup_inventory_refreshing", "Whether an inventory scan is in progress.", nil, boolMetric(reconciliation.Refreshing))
+			observability.WriteGaugeMetric(w, "fugue_backup_inventory_stale", "Whether the last complete inventory is stale or refresh failed.", nil, boolMetric(reconciliation.Stale))
+			observability.WriteGaugeMetric(w, "fugue_backup_inventory_scanned_pages", "Pages completed in the current or most recent scan.", nil, float64(reconciliation.ScannedPages))
+			observability.WriteGaugeMetric(w, "fugue_backup_inventory_scanned_objects", "Objects examined in the current or most recent scan.", nil, float64(reconciliation.ScannedObjects))
+			observability.WriteGaugeMetric(w, "fugue_backup_inventory_scan_error", "Whether the last scan failed, with bounded error classification.", map[string]string{"reason": reconciliation.ScanError}, boolMetric(reconciliation.ScanError != ""))
+			if reconciliation.LastSuccessAt != nil {
+				observability.WriteGaugeMetric(w, "fugue_backup_inventory_last_success_timestamp_seconds", "Finish time of the last complete inventory.", nil, float64(reconciliation.LastSuccessAt.Unix()))
+			}
+			if reconciliation.LastAttemptAt != nil {
+				observability.WriteGaugeMetric(w, "fugue_backup_inventory_last_attempt_timestamp_seconds", "Start time of the last inventory page attempt.", nil, float64(reconciliation.LastAttemptAt.Unix()))
+			}
+
 			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_status", "Current backup object reconciliation status.", map[string]string{"status": reconciliation.Status}, 1)
 			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_backends", "R2 backup backends included in reconciliation.", map[string]string{"state": "configured"}, float64(reconciliation.BackendCount))
 			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_backends", "R2 backup backends included in reconciliation.", map[string]string{"state": "measured"}, float64(reconciliation.MeasuredBackendCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_unreferenced_bytes", "Physical R2 backup bytes without artifact metadata.", nil, float64(reconciliation.UnreferencedBytes))
-			observability.WriteGaugeMetric(w, "fugue_backup_provisional_objects", "Unreferenced R2 backup objects still inside failed-upload cleanup grace.", nil, float64(reconciliation.ProvisionalObjectCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_provisional_bytes", "Unreferenced R2 backup bytes still inside failed-upload cleanup grace.", nil, float64(reconciliation.ProvisionalBytes))
-			observability.WriteGaugeMetric(w, "fugue_backup_orphaned_bytes", "Physical R2 backup bytes without artifact metadata after cleanup grace.", nil, float64(reconciliation.OrphanedBytes))
-			observability.WriteGaugeMetric(w, "fugue_backup_orphaned_objects", "Physical R2 backup objects without artifact metadata after cleanup grace.", nil, float64(reconciliation.OrphanedObjectCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_missing_active_objects", "Active artifact objects missing from physical R2 inventory.", nil, float64(reconciliation.MissingActiveObjectCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_overdue_deletion_objects", "Deleted artifact objects still present after physical cleanup grace.", nil, float64(reconciliation.OverdueDeletionObjectCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_lingering_deleted_objects", "R2 backup objects still observed after durable physical-deletion success.", nil, float64(reconciliation.LingeringDeletedObjectCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_duplicate_references", "Duplicate durable references to one physical R2 backup object.", nil, float64(reconciliation.DuplicateReferenceCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_invalid_references", "Durable backup object references that cannot be safely reconciled.", nil, float64(reconciliation.InvalidReferenceCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_size_mismatches", "R2 backup objects whose physical size differs from durable artifact metadata.", nil, float64(reconciliation.SizeMismatchCount))
+			if reconciliation.MeasuredBackendCount > 0 || reconciliation.BackendCount == 0 {
+				observability.WriteGaugeMetric(w, "fugue_backup_unreferenced_bytes", "Physical R2 backup bytes without artifact metadata.", nil, float64(reconciliation.UnreferencedBytes))
+				observability.WriteGaugeMetric(w, "fugue_backup_provisional_objects", "Unreferenced R2 backup objects still inside failed-upload cleanup grace.", nil, float64(reconciliation.ProvisionalObjectCount))
+				observability.WriteGaugeMetric(w, "fugue_backup_provisional_bytes", "Unreferenced R2 backup bytes still inside failed-upload cleanup grace.", nil, float64(reconciliation.ProvisionalBytes))
+				observability.WriteGaugeMetric(w, "fugue_backup_orphaned_bytes", "Physical R2 backup bytes without artifact metadata after cleanup grace.", nil, float64(reconciliation.OrphanedBytes))
+				observability.WriteGaugeMetric(w, "fugue_backup_orphaned_objects", "Physical R2 backup objects without artifact metadata after cleanup grace.", nil, float64(reconciliation.OrphanedObjectCount))
+				observability.WriteGaugeMetric(w, "fugue_backup_missing_active_objects", "Active artifact objects missing from physical R2 inventory.", nil, float64(reconciliation.MissingActiveObjectCount))
+				observability.WriteGaugeMetric(w, "fugue_backup_overdue_deletion_objects", "Deleted artifact objects still present after physical cleanup grace.", nil, float64(reconciliation.OverdueDeletionObjectCount))
+				observability.WriteGaugeMetric(w, "fugue_backup_lingering_deleted_objects", "R2 backup objects still observed after durable physical-deletion success.", nil, float64(reconciliation.LingeringDeletedObjectCount))
+				observability.WriteGaugeMetric(w, "fugue_backup_duplicate_references", "Duplicate durable references to one physical R2 backup object.", nil, float64(reconciliation.DuplicateReferenceCount))
+				observability.WriteGaugeMetric(w, "fugue_backup_invalid_references", "Durable backup object references that cannot be safely reconciled.", nil, float64(reconciliation.InvalidReferenceCount))
+				observability.WriteGaugeMetric(w, "fugue_backup_size_mismatches", "R2 backup objects whose physical size differs from durable artifact metadata.", nil, float64(reconciliation.SizeMismatchCount))
+			}
 			observability.WriteGaugeMetric(w, "fugue_backup_unresolved_backends", "Backup backends required by durable metadata but unavailable to reconciliation.", nil, float64(reconciliation.UnresolvedBackendCount))
-			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_drift", "Whether backup storage reconciliation found drift or incomplete measurement.", nil, boolMetric(reconciliation.Status == backupusage.ReconciliationStatusDrift || reconciliation.Status == backupusage.ReconciliationStatusPartial || reconciliation.Status == backupusage.ReconciliationStatusUnavailable))
+			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_drift", "Whether backup storage reconciliation found drift or incomplete measurement.", nil, boolMetric(reconciliation.Status == backupusage.ReconciliationStatusDrift || reconciliation.Status == backupusage.ReconciliationStatusPartial || reconciliation.Status == backupusage.ReconciliationStatusUnavailable || reconciliation.Stale))
 		}
 	}
+	return nil
 }
 
 func boolLabel(value bool) string {

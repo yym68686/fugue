@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -177,6 +178,9 @@ func TestEdgeHeartbeatRouteSourceMetricsAreLowCardinality(t *testing.T) {
 		}
 	}
 	recorder := httptest.NewRecorder()
+	if err := server.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	metrics := recorder.Body.String()
 	for _, want := range []string{
@@ -208,6 +212,9 @@ func TestEdgeAuthenticationMethodMetricsAreLowCardinality(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
+	if err := server.refreshMetrics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	metrics := recorder.Body.String()
 	for _, want := range []string{

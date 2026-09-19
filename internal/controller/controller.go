@@ -14,6 +14,7 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
+	"fugue/internal/observability"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
@@ -59,6 +60,7 @@ type Service struct {
 	importImageInspectMaxAttempts   int
 	now                             func() time.Time
 	metricsStartedAt                time.Time
+	metricsSnapshot                 observability.MetricSnapshot
 	controllerHealthMu              sync.RWMutex
 	activeLoopRunning               bool
 	activeLoopStartedAt             time.Time

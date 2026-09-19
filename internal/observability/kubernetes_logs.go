@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -34,14 +35,18 @@ const (
 )
 
 type kubernetesLogCollector struct {
-	pipeline *Pipeline
-	client   kubernetes.Interface
-	deduper  *logLineDeduper
+	pipeline     *Pipeline
+	client       kubernetes.Interface
+	deduper      *logLineDeduper
+	cursorsMu    sync.Mutex
+	cursors      map[string]kubernetesLogCursor
+	targetOffset int
 }
 
 type kubernetesLogTarget struct {
 	pod       corev1.Pod
 	container string
+	previous  bool
 }
 
 type kubernetesLogIngestResult struct {
@@ -111,26 +116,61 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	if !ok {
 		return
 	}
-	linesPerContainer := c.kubernetesLogLinesPerContainer(len(targets))
-	priorityTargets := 0
+	unique := targets[:0]
+	seenTargets := map[string]bool{}
 	for _, target := range targets {
-		if ctx.Err() != nil {
-			return
+		key := logTargetKey(target)
+		if seenTargets[key] {
+			continue
 		}
-		priority := kubernetesLogPriorityTarget(target)
-		if priority {
+		seenTargets[key] = true
+		unique = append(unique, target)
+	}
+	targets = unique
+	if len(targets) == 0 {
+		return
+	}
+	started := time.Now()
+	c.pipeline.kubernetesLogBacklogMillis.Store(0)
+	budget := int64(c.pipeline.cfg.KubernetesLogMaxLinesPerCycle)
+	var remaining atomic.Int64
+	remaining.Store(budget)
+	workers := min(8, len(targets))
+	jobs := make(chan kubernetesLogTarget)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for target := range jobs {
+				c.collectCursorTarget(ctx, target, &remaining)
+			}
+		}()
+	}
+	priorityTargets := 0
+	for i := range targets {
+		target := targets[(i+c.targetOffset)%len(targets)]
+		if kubernetesLogPriorityTarget(target) {
 			priorityTargets++
 		}
-		result := c.collectContainerLogs(ctx, target.pod, target.container, linesPerContainer)
-		if priority {
-			tailLines := kubernetesLogTailLinesForRequest(c.pipeline.cfg, linesPerContainer)
-			if tailLines > 0 && result.scanned >= int(tailLines) {
-				c.pipeline.kubernetesPriorityTruncations.Add(1)
-			}
+		select {
+		case jobs <- target:
+		case <-ctx.Done():
 		}
 	}
+	close(jobs)
+	wg.Wait()
+	c.targetOffset = (c.targetOffset + 1) % len(targets)
+	c.cursorsMu.Lock()
+	for key, cur := range c.cursors {
+		if time.Since(cur.Visited) > time.Hour {
+			delete(c.cursors, key)
+		}
+	}
+	c.cursorsMu.Unlock()
 	c.pipeline.kubernetesPriorityTargets.Store(int64(priorityTargets))
 	c.pipeline.kubernetesLogPods.Store(int64(podCount))
+	c.pipeline.kubernetesLogCycleMillis.Store(time.Since(started).Milliseconds())
 }
 
 func (c *kubernetesLogCollector) kubernetesLogTargets(ctx context.Context, labelSelector string, enforcePodLimit bool) ([]kubernetesLogTarget, int, bool) {
@@ -170,6 +210,12 @@ func (c *kubernetesLogCollector) kubernetesLogTargets(ctx context.Context, label
 				continue
 			}
 			targets = append(targets, kubernetesLogTarget{pod: pod, container: container})
+			for _, status := range append(append([]corev1.ContainerStatus(nil), pod.Status.ContainerStatuses...), pod.Status.InitContainerStatuses...) {
+				if status.Name == container && status.LastTerminationState.Terminated != nil {
+					targets = append(targets, kubernetesLogTarget{pod: pod, container: container, previous: true})
+					break
+				}
+			}
 		}
 	}
 	return targets, podCount, true

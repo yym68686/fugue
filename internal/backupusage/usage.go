@@ -35,6 +35,17 @@ type Usage struct {
 // Reconciliation describes exact object-level correspondence between durable
 // artifact metadata and the measured R2 namespace.
 type Reconciliation struct {
+	ScanStartedAt  *time.Time `json:"scan_started_at,omitempty"`
+	ScanFinishedAt *time.Time `json:"scan_finished_at,omitempty"`
+	Refreshing     bool       `json:"refreshing,omitempty"`
+	Stale          bool       `json:"stale,omitempty"`
+	LastAttemptAt  *time.Time `json:"last_attempt_at,omitempty"`
+	LastSuccessAt  *time.Time `json:"last_success_at,omitempty"`
+	ScannedPages   int        `json:"scanned_pages,omitempty"`
+	ScannedObjects int        `json:"scanned_objects,omitempty"`
+	ScanGeneration string     `json:"scan_generation,omitempty"`
+	ScanError      string     `json:"scan_error,omitempty"`
+
 	Status                      string    `json:"status"`
 	BackendCount                int       `json:"backend_count"`
 	MeasuredBackendCount        int       `json:"measured_backend_count"`

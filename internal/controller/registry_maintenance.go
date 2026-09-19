@@ -25,6 +25,8 @@ const (
 var errRegistryGCRunning = errors.New("registry garbage collection is running")
 
 type registryMaintenanceStatus struct {
+	Applicable            bool
+	Available             bool
 	JanitorPresent        bool
 	GCCronJobPresent      bool
 	GCRunning             bool
@@ -134,27 +136,45 @@ func (s *Service) readRegistryMaintenanceStatus(ctx context.Context) registryMai
 	if s == nil {
 		return status
 	}
+	status.Applicable = s.imageStoreRegistryFallbackEnabled()
+	if !status.Applicable {
+		status.Available = true
+		return status
+	}
 	client, err := s.kubeClient()
 	if err != nil {
 		return status
 	}
 	namespace := s.Config.KubectlNamespace
 	if name := strings.TrimSpace(s.Config.RegistryJanitorCronJobName); name != "" {
-		if cronJob, found, err := client.getCronJob(ctx, namespace, name); err == nil && found {
+		cronJob, found, err := client.getCronJob(ctx, namespace, name)
+		if err != nil {
+			return status
+		}
+		if found {
 			status.JanitorPresent = cronJob.Spec.Suspend == nil || !*cronJob.Spec.Suspend
 		}
 	}
 	if name := strings.TrimSpace(s.Config.RegistryGCCronJobName); name != "" {
-		if cronJob, found, err := client.getCronJob(ctx, namespace, name); err == nil && found {
+		cronJob, found, err := client.getCronJob(ctx, namespace, name)
+		if err != nil {
+			return status
+		}
+		if found {
 			status.GCCronJobPresent = cronJob.Spec.Suspend == nil || !*cronJob.Spec.Suspend
 		}
 	}
+	status.Available = true
 	leaseName := strings.TrimSpace(s.Config.RegistryGCLeaseName)
 	if leaseName == "" {
 		return status
 	}
 	lease, found, err := client.getLease(ctx, namespace, leaseName)
-	if err != nil || !found {
+	if err != nil {
+		status.Available = false
+		return status
+	}
+	if !found {
 		return status
 	}
 	annotations := lease.Metadata.Annotations

@@ -43,6 +43,7 @@ type dataObjectBackend struct {
 }
 
 type dataObjectInfo struct {
+	ObservedAt   time.Time
 	Key          string
 	Size         int64
 	LastModified time.Time
