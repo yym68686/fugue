@@ -10,7 +10,7 @@ import (
 // issued-at and artifact sequence constraints remain intact. Callers load
 // these release records and lock the new lane in the consumer transaction.
 func consumerCursorForLaneTransition(previous model.PlatformConsumerInstance, cursor *platformcontrol.PlatformConsumerHeartbeatCursor, oldSet, nextSet model.PlatformExpectedConsumerSet, oldRelease, nextRelease model.PlatformArtifactRelease, lane model.PlatformReleaseLane, nextFence int64) (*platformcontrol.PlatformConsumerHeartbeatCursor, error) {
-	if cursor == nil || nextFence >= cursor.FencingToken {
+	if cursor == nil || nextFence > cursor.FencingToken || nextFence == cursor.FencingToken && oldSet.ArtifactReleaseID == nextSet.ArtifactReleaseID {
 		return cursor, nil
 	}
 	validSet := func(set model.PlatformExpectedConsumerSet, r model.PlatformArtifactRelease) bool {

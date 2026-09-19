@@ -36,7 +36,7 @@ func testTrafficCanaryPublication(t *testing.T, address string) {
 				t.Fatal(err)
 			}
 			scope := "canary-" + model.NewID("test")
-			f := preparePromotionFixture(t, s, scope)
+			f := prepareTrafficLKGFixture(t, s, scope, "shadow", false)
 			for _, override := range []bool{false, true} {
 				principal := testPlatformPrincipal()
 				if override {

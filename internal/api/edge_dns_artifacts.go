@@ -324,7 +324,7 @@ type edgeDNSArtifactReleaseReconciliation struct {
 func (s *Server) reconcileEdgeDNSArtifactRelease(node model.DNSNode, options edgeDNSBundleOptions, now time.Time) (edgeDNSArtifactReleaseReconciliation, error) {
 	result := edgeDNSArtifactReleaseReconciliation{}
 	scopeKey := edgeDNSBundleArtifactScopeKey(options)
-	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey)
+	lkg, err := s.store.GetStandalonePlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey)
 	if err != nil {
 		return result, fmt.Errorf("load verified LKG: %w", err)
 	}

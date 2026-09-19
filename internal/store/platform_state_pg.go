@@ -323,7 +323,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
-	if err := pgLockReleaseSetMutation(ctx, tx, id, NormalizePlatformReleaseChannel(req.ReleaseChannel) == model.PlatformArtifactReleaseChannelFull); err != nil {
+	if err := pgLockPlatformReleaseMutation(ctx, tx, id, NormalizePlatformReleaseChannel(req.ReleaseChannel) == model.PlatformArtifactReleaseChannelFull); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 
@@ -491,7 +491,7 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
-	if err := pgLockReleaseSetMutation(ctx, tx, id, false); err != nil {
+	if err := pgLockPlatformReleaseMutation(ctx, tx, id, false); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 
@@ -623,6 +623,11 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
+	// Serialize all verified recovery pointers in this scope and exclude
+	// heartbeat/topology/publication writers until the evidence is committed.
+	if err = pgLockPromotionScope(ctx, tx, releaseSnapshot.ScopeKey, true); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
 	// Release/rollback transactions lock LKG -> lane -> active release. Keep the
 	// same order here so verification cannot deadlock with a newer release.
 	currentLKG, err := s.pgGetVerifiedPlatformLKGForUpdate(ctx, tx, releaseSnapshot.ArtifactKind, releaseSnapshot.ScopeKey, time.Now().UTC())
@@ -675,6 +680,28 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	now := time.Now().UTC()
+	var memberSnapshots []model.PlatformLKGSnapshot
+	var recoveryState *model.State
+	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+		state, err := s.pgFullReleaseSetSnapshot(ctx, tx, artifact)
+		if err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+		policy, err := pgGetPlatformArtifactByGenerationForUpdate(ctx, tx, model.PlatformArtifactKindPolicySnapshot, artifact.ScopeKey, artifact.Metadata["policy_generation"])
+		if err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+		}
+		state.PlatformArtifacts = append(state.PlatformArtifacts, policy)
+		recoveryState = state
+		members, err := trafficLKGMembers(state, artifact, release, s.platformArtifactSigningKeyring(), now)
+		if err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+		memberSnapshots, err = buildTrafficMemberLKGs(members, release.ID, requestEvidenceHash, now, s.platformArtifactSigningKeyring())
+		if err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
 	snapshot, err := buildPlatformLKGSnapshot(
 		artifact,
 		release.ID,
@@ -697,6 +724,23 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
+	for _, member := range memberSnapshots {
+		previous, readErr := pgGetPlatformLKGForUpdate(ctx, tx, member.ArtifactKind, member.ScopeKey)
+		if readErr != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, readErr
+		}
+		if previous != nil {
+			if err = pgInsertPlatformLKGHistorySnapshot(ctx, tx, *previous); err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			}
+		}
+		if err = pgInsertPlatformLKGHistorySnapshot(ctx, tx, member); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+		if _, err = pgUpsertPlatformLKGSnapshot(ctx, tx, member); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
 	release.VerificationState = model.PlatformArtifactVerificationStateVerified
 	release.VerificationEvidence = platformsafety.VerificationEvidenceMap(req)
 	release.VerifiedLKGGeneration = artifact.Generation
@@ -711,6 +755,11 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 	message := buildPlatformReleaseMessage(artifact, release, model.PlatformReleaseMessageTypeVerifiedLKG, now)
 	if _, err := pgInsertPlatformReleaseMessage(ctx, tx, message); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if recoveryState != nil {
+		if _, err := trafficLKGMembers(recoveryState, artifact, release, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -1556,28 +1605,30 @@ FOR UPDATE`, bound.ConsumerID, bound.ArtifactKind, bound.ScopeKey))
 		if err != nil {
 			return model.PlatformConsumerInstance{}, err
 		}
-		if previous != nil && bound.FencingToken < previous.FencingToken {
-			nextRelease, readErr := pgGetPlatformArtifactRelease(ctx, tx, expectedSet.ArtifactReleaseID, false)
-			if readErr != nil {
-				return model.PlatformConsumerInstance{}, readErr
-			}
-			lane, readErr := pgGetPlatformReleaseLaneForUpdate(ctx, tx, nextRelease.LaneKey)
-			if readErr != nil {
-				return model.PlatformConsumerInstance{}, readErr
-			}
+		if previous != nil && (bound.FencingToken < previous.FencingToken || bound.FencingToken == previous.FencingToken && candidate.ExpectedConsumerSetID != expectedSet.ID) {
 			oldSet, readErr := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, `SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json, expected_generation, topology_revision, revision, requires_consumers, required_cardinality, optional_cardinality, heartbeat_deadline, convergence_deadline, consumers_json, created_at, updated_at FROM fugue_platform_expected_consumer_sets WHERE id=$1`, candidate.ExpectedConsumerSetID))
 			if readErr != nil {
 				return model.PlatformConsumerInstance{}, mapDBErr(readErr)
 			}
-			oldRelease, readErr := pgGetPlatformArtifactRelease(ctx, tx, oldSet.ArtifactReleaseID, false)
-			if readErr != nil {
-				return model.PlatformConsumerInstance{}, readErr
+			if bound.FencingToken < previous.FencingToken || oldSet.ArtifactReleaseID != expectedSet.ArtifactReleaseID {
+				nextRelease, readErr := pgGetPlatformArtifactRelease(ctx, tx, expectedSet.ArtifactReleaseID, false)
+				if readErr != nil {
+					return model.PlatformConsumerInstance{}, readErr
+				}
+				lane, readErr := pgGetPlatformReleaseLaneForUpdate(ctx, tx, nextRelease.LaneKey)
+				if readErr != nil {
+					return model.PlatformConsumerInstance{}, readErr
+				}
+				oldRelease, readErr := pgGetPlatformArtifactRelease(ctx, tx, oldSet.ArtifactReleaseID, false)
+				if readErr != nil {
+					return model.PlatformConsumerInstance{}, readErr
+				}
+				previous, err = consumerCursorForLaneTransition(candidate, previous, oldSet, expectedSet, oldRelease, nextRelease, lane, bound.FencingToken)
+				if err != nil {
+					return model.PlatformConsumerInstance{}, err
+				}
+				verifiedLaneTransition = true
 			}
-			previous, err = consumerCursorForLaneTransition(candidate, previous, oldSet, expectedSet, oldRelease, nextRelease, lane, bound.FencingToken)
-			if err != nil {
-				return model.PlatformConsumerInstance{}, err
-			}
-			verifiedLaneTransition = true
 		}
 	}
 

@@ -21,9 +21,21 @@ type promotionFixture struct {
 
 func preparePromotionFixture(t *testing.T, s *Store, scope string) promotionFixture {
 	t.Helper()
+	return prepareTrafficLKGFixture(t, s, scope, "gray", true)
+}
+
+func prepareTrafficLKGFixture(t *testing.T, s *Store, scope, channel string, seed bool) promotionFixture {
+	t.Helper()
 	now := time.Now().UTC()
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "test", EdgeGroupIDs: []string{"edge-group-a"}}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now}})
 	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := s.CreatePlatformArtifact(compiled.PolicyArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ValidatePlatformArtifact(policy.ID, []model.PlatformArtifactValidationResult{{Name: "compiler", Pass: true, Severity: model.RobustnessSeverityInfo}}); err != nil {
 		t.Fatal(err)
 	}
 	children := []model.PlatformArtifact{}
@@ -47,10 +59,13 @@ func preparePromotionFixture(t *testing.T, s *Store, scope string) promotionFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedVerifiedPlatformLKG(t, s, parent)
-	_, release, found, err := s.GetActivePlatformArtifact(parent.ArtifactKind, parent.ScopeKey, "shadow")
-	if err != nil || !found {
-		t.Fatal("fixture has no shadow publication", err)
+	request := model.PlatformArtifactReleaseRequest{ReleaseChannel: channel, IdempotencyKey: "initial"}
+	if channel == "gray" {
+		request.CanaryRuleRef = "cohort=test"
+	}
+	_, release, _, _, err := s.ReleasePlatformArtifact(parent.ID, request, testPlatformPrincipal())
+	if err != nil {
+		t.Fatal(err)
 	}
 	fixture := promotionFixture{parent: parent, release: release}
 	topology := platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "edge-a", EdgeGroupID: "edge-group-a"}}, DNSNodes: []model.DNSNode{{ID: "dns-a", PhysicalNodeID: "dns-a", EdgeGroupID: "edge-group-a", Zone: "example.test"}}}
@@ -87,6 +102,13 @@ func preparePromotionFixture(t *testing.T, s *Store, scope string) promotionFixt
 			fixture.consumers = append(fixture.consumers, fact)
 		}
 	}
+	if seed {
+		if _, verified, _, _, err := s.VerifyPlatformArtifactReleaseLKG(release.ID, completePlatformVerificationRequest(release.FencingToken, true), testPlatformPrincipal()); err != nil {
+			t.Fatal(err)
+		} else {
+			fixture.release = verified
+		}
+	}
 	return fixture
 }
 
@@ -106,7 +128,7 @@ func TestFullReleaseSetRechecksStoredFactsAndPreservesLedgerOnFailure(t *testing
 			}
 			// Simulate changes after the API preflight, before store publication.
 			if scenario == "new publication" {
-				if _, _, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=test", IdempotencyKey: "new-gray"}, testPlatformPrincipal()); err != nil {
+				if _, _, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "new-shadow"}, testPlatformPrincipal()); err != nil {
 					t.Fatal(err)
 				}
 			} else if scenario == "changed topology" {

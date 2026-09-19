@@ -87,7 +87,7 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 // business-table projection remains a fallback until a verified artifact is
 // available, but it is never consulted once the artifact path is active.
 func (s *Server) edgeRouteIntentSnapshotFromVerifiedArtifact() (model.EdgeRouteIntentSnapshot, bool, error) {
-	lkg, err := s.store.GetPlatformLKG(model.PlatformArtifactKindEdgeRouteBundle, "global")
+	lkg, err := s.store.GetStandalonePlatformLKG(model.PlatformArtifactKindEdgeRouteBundle, "global")
 	if err != nil || lkg == nil {
 		return model.EdgeRouteIntentSnapshot{}, false, err
 	}

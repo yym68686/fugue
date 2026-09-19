@@ -4,7 +4,8 @@
 
 Use this after a Platform Artifact release is serving as
 `serving_unverified`, or when explicitly bootstrapping the first LKG from a
-shadow release.
+shadow release for non-traffic artifacts. A TrafficReleaseSet requires real
+gray serving convergence; shadow evidence cannot establish its LKG.
 
 ## Required Evidence
 
@@ -35,7 +36,23 @@ fugue admin artifact verify-lkg <release-id> \
   --reason "<why this generation is verified>"
 ```
 
-Add `--allow-initial-lkg` only for the first shadow generation in a scope.
+Add `--allow-initial-lkg` only for the first verified generation in a scope.
+For TrafficReleaseSet, use an explicit signed `cohort=<id>` gray publication
+with current authenticated applied/passed route, DNS and TLS evidence. The
+store rechecks the exact release, fence, latest immutable expectations and
+fresh facts in the same transaction. Caller assertions cannot bypass them.
+The signed typed policy must match the policy embedded in all three children.
+Verification commits five recovery references atomically: parent, route, DNS,
+TLS and policy. All share the verification release and evidence hash. Failure
+preserves every previous reference. Later replacement requires full serving
+and fresh full-publication evidence; prior gray facts are insufficient.
+
+Member recovery references do not authorize traffic outside a gray cohort.
+Legacy route/DNS readers retain their latest independently verified release
+until a parent traffic publication selects them. These are filtered views of
+the existing ledger, not another release state machine.
+
+Other artifact kinds retain their explicit initial shadow-seed workflow.
 
 ## Verification
 

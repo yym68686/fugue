@@ -33,14 +33,6 @@ func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *tes
 	seedVerifiedPlatformArtifactAPI(t, server, admin, baseline.RouteArtifact.ID)
 	compiled := compile("candidate", "candidate.example.test")
 	principal := model.Principal{ActorType: "test", ActorID: "test"}
-	_, seed, _, _, err := state.ReleasePlatformArtifact(compiled.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "test-bootstrap"}, principal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _, _, _, err = state.VerifyPlatformArtifactReleaseLKG(seed.ID, model.PlatformArtifactVerifyLKGRequest{FencingToken: seed.FencingToken, AllowInitialLKG: true, Reason: "synthetic test seed", Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true, EvidenceRefs: []string{"synthetic-bootstrap"}}}, principal)
-	if err != nil {
-		t.Fatal(err)
-	}
 	_, gray, _, _, err := state.ReleasePlatformArtifact(compiled.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=first", IdempotencyKey: "first"}, principal)
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +147,17 @@ func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *tes
 		t.Fatal("removed group resurrected")
 	}
 	prepare(gray, "edge-group-test-a", true)
+	_, _, _, _, err = state.VerifyPlatformArtifactReleaseLKG(gray.ID, model.PlatformArtifactVerifyLKGRequest{FencingToken: gray.FencingToken, AllowInitialLKG: true, Reason: "verified initial gray", Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true, EvidenceRefs: []string{"synthetic-bootstrap"}}}, principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Member LKGs must not leak the gray artifact into the unselected group.
+	unselected := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents?edge_group_id=edge-group-test-b", token, nil)
+	var unchanged model.EdgeRouteIntentSnapshot
+	mustDecodeJSON(t, unselected, &unchanged)
+	if unselected.Code != 200 || unchanged.Generation != baseline.RouteArtifact.Generation || unchanged.TrafficRelease != nil {
+		t.Fatal("gray verification changed unselected serving", unselected.Body.String())
+	}
 	_, full, _, _, err := state.ReleasePlatformArtifact(compiled.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full", IdempotencyKey: "full"}, principal)
 	if err != nil {
 		t.Fatal("full release failed", err)

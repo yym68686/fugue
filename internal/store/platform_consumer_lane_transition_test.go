@@ -27,6 +27,12 @@ func TestConsumerLaneTransitionRetainsGlobalReplayCursor(t *testing.T) {
 	if err != nil || got.FencingToken != 1 || got.Sequence != 40 || got.GenerationSequence != 12 || !got.IssuedAt.Equal(cursor.IssuedAt) || !reflect.DeepEqual(got.RecentNonces, cursor.RecentNonces) || cursor.FencingToken != 9 {
 		t.Fatal("lane transition reset global replay evidence", got, err)
 	}
+	// Different channels can legitimately have the same numeric fence.
+	equalOld, equalPrevious, equalCursor := old, previous, *cursor
+	equalOld.FencingToken, equalPrevious.FencingToken, equalCursor.FencingToken = 1, 1, 1
+	if got, err := consumerCursorForLaneTransition(equalPrevious, &equalCursor, oldSet, nextSet, equalOld, next, lane, 1); err != nil || got.Sequence != cursor.Sequence {
+		t.Fatal("equal numeric fence rejected a proven channel transition", err)
+	}
 	for name, mutate := range map[string]func(*model.PlatformArtifactRelease, *model.PlatformReleaseLane, *model.PlatformExpectedConsumerSet){
 		"same lane": func(r *model.PlatformArtifactRelease, l *model.PlatformReleaseLane, s *model.PlatformExpectedConsumerSet) {
 			r.ReleaseChannel = old.ReleaseChannel

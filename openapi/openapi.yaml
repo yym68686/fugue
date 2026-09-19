@@ -50,6 +50,22 @@ x-fugue-traffic-serving-evidence:
     Durable receipts record artifact references and fresh probe results; restarts
     always probe again. These receipts do not promote a verified LKG. Failed or
     stale observations never become applied/passed, and shadow remains separate.
+x-fugue-traffic-verified-recovery:
+  semantics: >-
+    A TrafficReleaseSet can establish its first verified LKG from an explicit
+    gray release only after every required route, DNS and TLS consumer has
+    current authenticated applied/passed evidence for that exact publication.
+    Shadow cannot establish a traffic serving LKG. Later LKG replacement requires
+    full publication. Verification atomically retains the parent, all three
+    members and the exact signed typed policy as one recovery result. The store
+    rechecks immutable topology, signatures, lineage and runtime evidence under
+    the publication transaction; a caller's boolean assertions are insufficient.
+    Member recovery references do not authorize standalone serving: legacy route
+    and DNS readers retain their last independently verified release until a
+    parent traffic publication selects their group. Numeric fences belong to
+    each release lane: changing channels with an equal fence requires the same
+    current-publication proof as changing to a lower fence; global heartbeat
+    sequence, artifact sequence, timestamps and nonce replay checks stay intact.
 x-fugue-dns-artifact-serving:
   semantics: >-
     DNS serving uses a verified ReleaseSet child and explicit signed authority
@@ -32378,6 +32394,11 @@ components:
           minLength: 1
         allow_initial_lkg:
           type: boolean
+          description: >-
+            Explicitly seed the first verified LKG. TrafficReleaseSet requires
+            current trusted applied/probed evidence from a gray publication;
+            shadow evidence is insufficient. Other kinds retain initial shadow
+            seeding. Later replacement requires full publication.
         evidence:
           $ref: "#/components/schemas/PlatformArtifactVerificationEvidence"
     PlatformConsumerHeartbeatRequest:

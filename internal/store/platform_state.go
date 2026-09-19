@@ -618,6 +618,10 @@ func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 		if release.Status != model.PlatformArtifactReleaseStatusActive {
 			return ErrConflict
 		}
+		lane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, release.LaneKey)
+		if !ok || lane.Frozen || lane.ActiveReleaseID != release.ID || lane.FencingToken != release.FencingToken {
+			return ErrConflict
+		}
 		currentLKG := verifiedPlatformLKGSnapshotFromState(
 			state,
 			release.ArtifactKind,
@@ -642,10 +646,6 @@ func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 			}
 			return ErrConflict
 		}
-		lane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, release.LaneKey)
-		if !ok || lane.Frozen || lane.ActiveReleaseID != release.ID || lane.FencingToken != release.FencingToken {
-			return ErrConflict
-		}
 		artifactIndex := platformArtifactIndex(state.PlatformArtifacts, release.ArtifactID)
 		if artifactIndex < 0 {
 			return ErrNotFound
@@ -658,6 +658,14 @@ func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 			return ErrConflict
 		}
 		now := time.Now().UTC()
+		members, err := trafficLKGMembers(state, artifact, release, s.platformArtifactSigningKeyring(), now)
+		if err != nil {
+			return err
+		}
+		memberSnapshots, err := buildTrafficMemberLKGs(members, release.ID, requestEvidenceHash, now, s.platformArtifactSigningKeyring())
+		if err != nil {
+			return err
+		}
 		snapshot, err := buildPlatformLKGSnapshot(
 			artifact,
 			release.ID,
@@ -669,6 +677,9 @@ func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 			return err
 		}
 		state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, snapshot)
+		for _, member := range memberSnapshots {
+			state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, member)
+		}
 		lkg = &snapshot
 		release.VerificationState = model.PlatformArtifactVerificationStateVerified
 		release.VerificationEvidence = platformsafety.VerificationEvidenceMap(req)
@@ -1798,7 +1809,7 @@ func acceptTrustedPlatformConsumerHeartbeatInState(
 		if err != nil {
 			return model.PlatformConsumerInstance{}, err
 		}
-		if cursor != nil && bound.FencingToken < cursor.FencingToken {
+		if cursor != nil && (bound.FencingToken < cursor.FencingToken || bound.FencingToken == cursor.FencingToken && candidate.ExpectedConsumerSetID != expectedSet.ID) {
 			cursor, err = consumerLaneTransitionInState(state, candidate, cursor, expectedSet, bound.FencingToken)
 			if err != nil {
 				return model.PlatformConsumerInstance{}, err

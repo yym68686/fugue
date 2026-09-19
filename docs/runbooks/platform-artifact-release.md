@@ -14,8 +14,11 @@ failure contract releases.
    signature. Artifact creation fails closed if no signing key is available.
 3. Validate schema, invariant, compatibility, and secret safety.
 4. Release to shadow.
-5. For the first generation in a scope, explicitly verify the shadow release and
-   seed the initial verified LKG.
+5. For non-traffic artifacts, explicitly verify the first shadow release to
+   seed the LKG. TrafficReleaseSet instead requires a signed gray cohort with
+   current authenticated applied/passed evidence for all required route, DNS
+   and TLS consumers; shadow can never seed its serving LKG. See
+   `verified-lkg-promotion.md` for the atomic parent/member/policy verification.
 6. Release later generations to gray or full with the current verified LKG
    pinned as the rollback target.
 7. Verify consumer convergence, local probes, public synthetics, watch window,

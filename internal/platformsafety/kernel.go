@@ -795,17 +795,18 @@ func EvaluateLKGPromotion(release model.PlatformArtifactRelease, req model.Platf
 	violations := []Violation{}
 	initialShadowSeed := !hasExistingLKG &&
 		req.AllowInitialLKG &&
-		release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow
+		release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow && release.ArtifactKind != model.PlatformArtifactKindReleaseSet
+	initialTrafficSeed := !hasExistingLKG && req.AllowInitialLKG && release.ArtifactKind == model.PlatformArtifactKindReleaseSet && release.ReleaseChannel == model.PlatformArtifactReleaseChannelGray
 	if hasExistingLKG && release.ReleaseChannel != model.PlatformArtifactReleaseChannelFull {
 		violations = append(violations, Violation{
 			Invariant: InvariantFullPinnedRollback,
 			Message:   "only a full release can replace an existing verified LKG",
 		})
 	}
-	if !hasExistingLKG && !initialShadowSeed {
+	if !hasExistingLKG && !initialShadowSeed && !initialTrafficSeed {
 		violations = append(violations, Violation{
 			Invariant: InvariantFullPinnedRollback,
-			Message:   "initial verified LKG requires an explicit shadow seed",
+			Message:   "initial verified LKG requires an explicit seed; traffic requires applied gray convergence",
 		})
 	}
 	if req.FencingToken <= 0 || req.FencingToken != release.FencingToken {

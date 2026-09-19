@@ -103,7 +103,9 @@ may only move a gate toward `shadow` or `disabled`; it cannot promote a gate.
 3. If a signing key was rotated, keep the previous key configured during the
    overlap window. Revoked key ids are rejected even when their key material is
    still present.
-4. If no verified LKG exists, release a validated generation to shadow.
+4. If no verified LKG exists, release a validated generation to shadow. For a
+   TrafficReleaseSet, then apply an explicit signed gray cohort and collect
+   authenticated serving evidence; shadow alone cannot seed its LKG.
 5. Collect the required evidence and explicitly seed the initial LKG with
    `--allow-initial-lkg`.
 6. If the pinned rollback artifact is missing, expired, corrupt, or

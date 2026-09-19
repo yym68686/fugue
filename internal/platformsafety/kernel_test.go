@@ -495,3 +495,16 @@ func TestLKGPromotionRequiresCurrentFenceAndCompleteEvidence(t *testing.T) {
 		t.Fatalf("shadow release must not replace an existing verified LKG: %+v", decision)
 	}
 }
+
+func TestTrafficLKGRequiresExplicitGrayBootstrapAndFullReplacement(t *testing.T) {
+	req := model.PlatformArtifactVerifyLKGRequest{FencingToken: 1, Reason: "verified serving", AllowInitialLKG: true, Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true}}
+	for _, channel := range []string{"shadow", "gray", "full"} {
+		for _, existing := range []bool{false, true} {
+			release := model.PlatformArtifactRelease{ArtifactKind: model.PlatformArtifactKindReleaseSet, ReleaseChannel: channel, FencingToken: 1}
+			want := !existing && channel == "gray" || existing && channel == "full"
+			if got := EvaluateLKGPromotion(release, req, existing).Pass; got != want {
+				t.Fatalf("channel=%s existing=%v got=%v", channel, existing, got)
+			}
+		}
+	}
+}

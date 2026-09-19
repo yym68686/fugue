@@ -124,14 +124,14 @@ func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent
 
 // Resolve immutable identity without a row lock, acquire the scope lock first,
 // then let the caller lock/reload the artifact. All publication paths use this
-// ordering, including rollback between two different ReleaseSets.
-func pgLockReleaseSetMutation(ctx context.Context, tx *sql.Tx, id string, exclusive bool) error {
+// ordering, including standalone members and rollback between two different ReleaseSets.
+func pgLockPlatformReleaseMutation(ctx context.Context, tx *sql.Tx, id string, exclusive bool) error {
 	var kind, scope string
 	if err := tx.QueryRowContext(ctx, `SELECT artifact_kind, scope_key FROM fugue_platform_artifacts WHERE id=$1 OR generation=$1 ORDER BY updated_at DESC, id ASC LIMIT 1`, id).Scan(&kind, &scope); err != nil {
 		return mapDBErr(err)
 	}
 	if kind != model.PlatformArtifactKindReleaseSet {
-		return nil
+		exclusive = false
 	}
 	return pgLockPromotionScope(ctx, tx, scope, exclusive)
 }
