@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,4 +254,43 @@ func TestProducerPolicyAPIRejectsInvalidModes(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestPlatformProducerBackgroundCancellationAndIndependentWriter(t *testing.T) {
+	state, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	started := make(chan struct{}, 1)
+	server.log = log.New(producerLeadershipLog{started}, "", 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { server.StartBackgroundPlatformConfiguration(ctx); close(done) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("producer never acquired leadership")
+	}
+	if acquired, err := state.WithAdvisoryLock(context.Background(), "unrelated-config-writer", nil); !acquired || err != nil {
+		t.Fatal("producer blocked unrelated writer", err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled background producer did not stop")
+	}
+	if acquired, err := state.WithAdvisoryLock(context.Background(), platformproducer.Actor, nil); !acquired || err != nil {
+		t.Fatal("canceled producer retained leadership", err)
+	}
+}
+
+type producerLeadershipLog struct{ started chan struct{} }
+
+func (w producerLeadershipLog) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "leadership acquired") {
+		select {
+		case w.started <- struct{}{}:
+		default:
+		}
+	}
+	return len(p), nil
 }

@@ -38,6 +38,7 @@ type Store struct {
 	dbReady     bool
 
 	advisoryLockMu sync.Mutex
+	advisoryLocks  map[string]bool
 
 	// backupArtifactPhysicalCleanup tracks successful object deletion for the
 	// file-backed store. PostgreSQL persists this marker in the artifact row;

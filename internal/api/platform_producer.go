@@ -24,6 +24,9 @@ func (s *Server) StartBackgroundPlatformConfiguration(ctx context.Context) {
 	}
 	for ctx.Err() == nil {
 		_, err := s.store.WithAdvisoryLock(ctx, platformproducer.Actor, func() error {
+			if s.log != nil {
+				s.log.Printf("platform configuration producer leadership acquired")
+			}
 			var nextRun time.Time
 			lastAuthority := ""
 			for ctx.Err() == nil {
