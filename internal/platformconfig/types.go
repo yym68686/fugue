@@ -228,6 +228,7 @@ type ReleaseObservation struct {
 }
 
 type CompileResult struct {
+	InputSnapshot   RuntimeSnapshot
 	IntentArtifact  model.PlatformArtifact
 	PolicyArtifact  model.PlatformArtifact
 	RouteArtifact   model.PlatformArtifact
@@ -341,7 +342,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	}
 	snapshotDigest := ""
 	if runtimeSnapshot.Facts != nil || runtimeSnapshot.IntentGeneration != "" || runtimeSnapshot.PolicyGeneration != "" {
-		snapshotDigest, err = Digest(runtimeSnapshot)
+		snapshotDigest, err = RuntimeSnapshotDigest(runtimeSnapshot)
 		if err != nil {
 			return CompileResult{}, fmt.Errorf("digest compiler input snapshot: %w", err)
 		}
@@ -435,6 +436,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	releaseSet.ArtifactIDs = []string{routeArtifact.ID, dnsArtifact.ID, tlsArtifact.ID}
 	releaseArtifact := buildArtifact(model.PlatformArtifactKindReleaseSet, intent.Scope, releaseSet.Generation, releaseSet, metadata, now)
 	return CompileResult{
+		InputSnapshot:   runtimeSnapshot,
 		IntentArtifact:  intentArtifact,
 		PolicyArtifact:  policyArtifact,
 		RouteArtifact:   routeArtifact,
@@ -803,6 +805,10 @@ func Digest(value any) (string, error) {
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
+
+// RuntimeSnapshotDigest is the canonical digest used by compiler lineage and
+// the digest-addressed content store. It hashes the typed snapshot directly.
+func RuntimeSnapshotDigest(snapshot RuntimeSnapshot) (string, error) { return Digest(snapshot) }
 
 func LineageFromArtifact(artifact model.PlatformArtifact) Lineage {
 	return Lineage{

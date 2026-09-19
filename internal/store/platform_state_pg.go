@@ -11,6 +11,7 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 )
 
@@ -315,7 +316,7 @@ RETURNING id, artifact_kind, scope_key, scope_json, schema_version, generation, 
 	return out, nil
 }
 
-func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactReleaseRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -323,7 +324,12 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
-	if err := pgLockPlatformReleaseMutation(ctx, tx, id, NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow); err != nil {
+	if guard != nil {
+		if err := pgLockPromotionScope(ctx, tx, platformproducer.Scope, true); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
+	if err := pgLockPlatformReleaseMutation(ctx, tx, id, guard != nil || NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 
@@ -334,6 +340,12 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
+	if err := validateProducerPolicyPublication(artifact, channel); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if err := s.pgProducerReleaseGuard(ctx, tx, artifact, req, principal, guard); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
 	overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -512,6 +524,9 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	}
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
+	if err := validateProducerPolicyPublication(target, channel); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
 	overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err

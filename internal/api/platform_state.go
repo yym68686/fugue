@@ -17,6 +17,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 	"fugue/internal/store"
 )
@@ -154,6 +155,10 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 }
 
 func validatePlatformPolicyArtifact(artifact model.PlatformArtifact) error {
+	if artifact.ScopeKey == platformproducer.Scope {
+		_, err := platformproducer.Decode(artifact)
+		return err
+	}
 	raw, err := json.Marshal(artifact.Content)
 	if err != nil {
 		return fmt.Errorf("policy snapshot content is not JSON: %w", err)
@@ -700,31 +705,35 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 		s.writeStoreError(w, err)
 		return
 	}
-	if release.ArtifactID != releaseSet.ID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet ||
-		release.ScopeKey != releaseSet.ScopeKey || release.Generation != releaseSet.Generation ||
-		release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken <= 0 {
-		httpx.WriteError(w, http.StatusConflict, "artifact release does not match the active release set")
+	sets, err := s.preparePlatformReleaseSetConsumers(r.Context(), principal, releaseSet, release)
+	if err != nil {
+		s.writePlatformConfigMaterializationError(w, err)
 		return
 	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"release_set_id": releaseSet.ID, "artifact_release_id": request.ArtifactReleaseID, "expected_consumer_sets": sets, "generated_at": time.Now().UTC()})
+}
+
+func (s *Server) preparePlatformReleaseSetConsumers(ctx context.Context, principal model.Principal, releaseSet model.PlatformArtifact, release model.PlatformArtifactRelease) ([]model.PlatformExpectedConsumerSet, error) {
+	if releaseSet.Status != model.PlatformArtifactStatusValidated || release.ArtifactID != releaseSet.ID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet ||
+		release.ScopeKey != releaseSet.ScopeKey || release.Generation != releaseSet.Generation ||
+		release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken <= 0 {
+		return nil, &platformConfigReferenceError{"artifact release does not match the active release set"}
+	}
 	if s.store.VerifyPlatformArtifactIntegrity(releaseSet) != nil || !s.validateReleaseSetReferences(releaseSet).Pass {
-		httpx.WriteError(w, http.StatusConflict, "release set references or integrity are invalid")
-		return
+		return nil, &platformConfigReferenceError{"release set references or integrity are invalid"}
 	}
 	activeParent, activeRelease, found, activeErr := s.store.GetActivePlatformArtifact(releaseSet.ArtifactKind, releaseSet.ScopeKey, release.ReleaseChannel)
 	if activeErr != nil || !found || activeParent.ID != releaseSet.ID || activeRelease.ID != release.ID || activeRelease.FencingToken != release.FencingToken {
-		httpx.WriteError(w, http.StatusConflict, "consumer expectations require the active release authority")
-		return
+		return nil, &platformConfigReferenceError{"consumer expectations require the active release authority"}
 	}
-	topology, err := s.platformConsumerTopology(r.Context(), principal)
+	topology, err := s.platformConsumerTopology(ctx, principal)
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
+		return nil, err
 	}
 	if release.ReleaseChannel == model.PlatformArtifactReleaseChannelGray {
 		groups, err := platformconfig.ResolveTrafficCanary(releaseSet, release.CanaryRuleRef)
 		if err != nil {
-			httpx.WriteError(w, http.StatusConflict, err.Error())
-			return
+			return nil, &platformConfigReferenceError{err.Error()}
 		}
 		for _, group := range groups {
 			edge, dns := false, false
@@ -735,22 +744,19 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 				dns = dns || n.EdgeGroupID == group
 			}
 			if !edge || !dns {
-				httpx.WriteError(w, http.StatusConflict, "traffic canary group lacks complete declared Edge and DNS topology")
-				return
+				return nil, &platformConfigReferenceError{"traffic canary group lacks complete declared Edge and DNS topology"}
 			}
 		}
 	}
 	ids, okIDs := releaseSet.Content["artifact_ids"].([]any)
 	kinds, okKinds := releaseSet.Content["artifact_kinds"].([]any)
 	if !okIDs || !okKinds || len(ids) != len(kinds) {
-		httpx.WriteError(w, http.StatusConflict, "release set references are invalid")
-		return
+		return nil, &platformConfigReferenceError{"release set references are invalid"}
 	}
 	sets := make([]model.PlatformExpectedConsumerSet, 0, len(kinds))
 	history, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: releaseSet.ID})
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
+		return nil, err
 	}
 	var revision int64
 	latest := map[string]model.PlatformExpectedConsumerSet{}
@@ -765,27 +771,22 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 	for i, rawKind := range kinds {
 		kind, ok := rawKind.(string)
 		if !ok {
-			httpx.WriteError(w, http.StatusConflict, "release set artifact kind is invalid")
-			return
+			return nil, &platformConfigReferenceError{"release set artifact kind is invalid"}
 		}
 		artifactID, ok := ids[i].(string)
 		if !ok {
-			httpx.WriteError(w, http.StatusConflict, "release set artifact ID is invalid")
-			return
+			return nil, &platformConfigReferenceError{"release set artifact ID is invalid"}
 		}
 		child, childErr := s.store.GetPlatformArtifact(artifactID)
 		if childErr != nil {
-			s.writeStoreError(w, childErr)
-			return
+			return nil, childErr
 		}
 		if revision == math.MaxInt64 {
-			httpx.WriteError(w, http.StatusConflict, "expected consumer revision exhausted")
-			return
+			return nil, &platformConfigReferenceError{"expected consumer revision exhausted"}
 		}
-		set, buildErr := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: releaseSet.ID, ArtifactReleaseID: request.ArtifactReleaseID, ArtifactKind: kind, Scope: child.Scope, ScopeKey: child.ScopeKey, Generation: child.Generation, Revision: revision + 1, PreparedAt: time.Now().UTC(), Topology: topology})
+		set, buildErr := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: releaseSet.ID, ArtifactReleaseID: release.ID, ArtifactKind: kind, Scope: child.Scope, ScopeKey: child.ScopeKey, Generation: child.Generation, Revision: revision + 1, PreparedAt: time.Now().UTC(), Topology: topology})
 		if buildErr != nil {
-			httpx.WriteError(w, http.StatusConflict, buildErr.Error())
-			return
+			return nil, &platformConfigReferenceError{buildErr.Error()}
 		}
 		if prior, ok := latest[kind]; ok && prior.TopologyRevision == set.TopologyRevision && prior.ExpectedGeneration == set.ExpectedGeneration && prior.ScopeKey == set.ScopeKey {
 			sets = append(sets, prior)
@@ -802,13 +803,11 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 					}
 				}
 				if listErr != nil || same == nil || same.TopologyRevision != set.TopologyRevision || same.ExpectedGeneration != set.ExpectedGeneration || same.ScopeKey != set.ScopeKey {
-					httpx.WriteError(w, http.StatusConflict, "expected consumer set already exists with conflicting identity")
-					return
+					return nil, &platformConfigReferenceError{"expected consumer set already exists with conflicting identity"}
 				}
 				created = *same
 			} else {
-				s.writeStoreError(w, createErr)
-				return
+				return nil, createErr
 			}
 		}
 		if created.Revision > revision {
@@ -816,7 +815,7 @@ func (s *Server) handlePreparePlatformReleaseSetConsumers(w http.ResponseWriter,
 		}
 		sets = append(sets, created)
 	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"release_set_id": releaseSet.ID, "artifact_release_id": request.ArtifactReleaseID, "expected_consumer_sets": sets, "generated_at": time.Now().UTC()})
+	return sets, nil
 }
 
 func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r *http.Request) {

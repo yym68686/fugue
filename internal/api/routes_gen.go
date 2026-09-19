@@ -17,6 +17,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/artifacts", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformArtifacts)))
 	mux.Handle("POST /v1/admin/artifacts", s.auth.RequireAPI(http.HandlerFunc(s.handleCreatePlatformArtifact)))
 	mux.Handle("GET /v1/admin/artifacts/{artifact_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformArtifact)))
+	mux.Handle("GET /v1/admin/artifacts/{artifact_id}/compiler-input", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformArtifactCompilerInput)))
 	mux.Handle("GET /v1/admin/artifacts/{artifact_id}/consumers", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformArtifactConsumers)))
 	mux.Handle("GET /v1/admin/artifacts/{artifact_id}/lineage", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformArtifactLineage)))
 	mux.Handle("GET /v1/admin/artifacts/{artifact_id}/lkg", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformArtifactLKG)))

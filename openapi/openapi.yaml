@@ -73,6 +73,24 @@ x-fugue-traffic-verified-recovery:
     each release lane: changing channels with an equal fence requires the same
     current-publication proof as changing to a lower fence; global heartbeat
     sequence, artifact sequence, timestamps and nonce replay checks stay intact.
+x-fugue-platform-producer:
+  policy_schema: '#/components/schemas/PlatformProducerPolicy'
+  semantics: >-
+    A validated signed policy_snapshot in scope platform-config-producer controls
+    the built-in migration producer through its current shadow release. The only
+    modes are paused and shadow. The producer captures the existing business and
+    migration inputs, compiles immutable intent/policy/route/DNS/TLS artifacts and
+    publishes only the global shadow ReleaseSet. The exact normalized runtime
+    snapshot is retained in the existing digest-addressed content store and is
+    readable through its signed artifact reference for deterministic replay.
+    It never promotes serving or LKG.
+    Publication rechecks the policy release and expected previous target release
+    in the store transaction. Disabled, superseded, frozen or invalid policy and
+    concurrent target changes preserve the existing release. Replicas share the
+    existing advisory-lock mechanism and release ledger. Unchanged desired inputs
+    are reused until the configured runtime snapshot refresh interval. This is
+    the business migration writer; removing legacy serving input sources and
+    enabling verified serving promotion remain separate migration steps.
 x-fugue-leased-traffic-admission:
   semantics: >-
     DNS artifacts carrying value expirations enter serving only through a
@@ -2573,7 +2591,7 @@ paths:
     post:
       operationId: compilePlatformConfig
       summary: Compile Platform Intent And Policy
-      description: Deterministically compiles typed platform intent and policy into immutable intent, policy, route, DNS, TLS, and release-set artifacts. The operation does not promote serving traffic.
+      description: Deterministically compiles typed platform intent and policy into immutable intent, policy, route, DNS, TLS, and release-set artifacts. The normalized runtime input is retained by digest. Identical immutable artifacts retain their original creator even when replayed by another platform administrator. The operation does not promote serving traffic.
       tags: [Admin]
       x-fugue-handler: handleCompilePlatformConfig
       security:
@@ -2597,7 +2615,7 @@ paths:
     post:
       operationId: compilePlatformConfigFromArtifacts
       summary: Compile Platform Artifacts
-      description: Verifies both stored artifacts before replaying them into a deterministic ReleaseSet. Signed content, artifact kind, validation state, generation, scope and typed schema must agree. Rejected inputs produce no output artifacts. Inline serving configuration and business tables are not read.
+      description: Verifies both stored artifacts before replaying them into a deterministic ReleaseSet. Signed content, artifact kind, validation state, generation, scope and typed schema must agree. Rejected inputs produce no output artifacts. Inline serving configuration and business tables are not read. The normalized runtime input is retained by digest, and producer provenance plus original creators are preserved when an identical artifact is reused.
       tags: [Admin]
       x-fugue-handler: handleCompilePlatformConfigFromArtifacts
       security:
@@ -2831,6 +2849,39 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts/{artifact_id}/compiler-input:
+    get:
+      operationId: getPlatformArtifactCompilerInput
+      summary: Read Frozen Compiler Runtime Input
+      description: Platform administrators with artifact.read can retrieve the exact normalized runtime snapshot bound by a trusted artifact's input_snapshot_digest. Recomputes the digest and checks intent/policy generation binding. Older artifacts without a retained snapshot return 404; missing or corrupt input never falls back to live business data.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformArtifactCompilerInput
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Immutable runtime snapshot bound by the artifact lineage.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [artifact_id, input_snapshot_digest, runtime_snapshot]
+                properties:
+                  artifact_id:
+                    type: string
+                  input_snapshot_digest:
+                    type: string
+                  runtime_snapshot:
+                    $ref: '#/components/schemas/PlatformRuntimeSnapshot'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
   /v1/admin/artifacts/{artifact_id}/lineage:
     get:
       operationId: getPlatformArtifactLineage
@@ -32134,6 +32185,19 @@ components:
         facts:
           type: object
           additionalProperties: true
+          properties:
+            configuration_producer:
+              type: object
+              additionalProperties: false
+              required: [policy_release_id, source_digest]
+              description: Reserved producer provenance. Replays retain the binding and the original artifact creator; these fields grant no serving authority.
+              properties:
+                policy_release_id:
+                  type: string
+                  minLength: 1
+                source_digest:
+                  type: string
+                  pattern: '^sha256:[a-f0-9]{64}$'
     PlatformConfigCompileRequest:
       type: object
       additionalProperties: false
@@ -32292,6 +32356,36 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PlatformArtifactLineageDependency"
+    PlatformProducerPolicy:
+      type: object
+      additionalProperties: false
+      required: [schema_version, generation, mode, input_source, target_scope, interval_seconds, refresh_seconds]
+      description: Signed operational policy stored as policy_snapshot in the platform-config-producer scope. Activate or pause through the existing artifact shadow release API; a draft has no effect.
+      properties:
+        schema_version:
+          type: string
+          enum: [fugue.platform.producer/v1]
+        generation:
+          type: string
+          minLength: 1
+        mode:
+          type: string
+          enum: [paused, shadow]
+        input_source:
+          type: string
+          enum: [business-migration]
+        target_scope:
+          type: string
+          enum: [global]
+        interval_seconds:
+          type: integer
+          minimum: 30
+          maximum: 900
+        refresh_seconds:
+          type: integer
+          minimum: 120
+          maximum: 3600
+          description: Must be at least interval_seconds; bounds reuse of the previous runtime snapshot when desired intent and policy are unchanged.
     PlatformArtifactCreateRequest:
       type: object
       additionalProperties: false

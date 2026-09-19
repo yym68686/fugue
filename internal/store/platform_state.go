@@ -203,6 +203,34 @@ func platformArtifactHasIdentity(artifact model.PlatformArtifact, kind, scopeKey
 		strings.TrimSpace(artifact.Generation) == strings.TrimSpace(generation)
 }
 
+func (s *Store) GetPlatformArtifactByIdentity(kind, scope, generation string) (model.PlatformArtifact, error) {
+	kind = NormalizePlatformArtifactKind(kind)
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	generation = strings.TrimSpace(generation)
+	if kind == "" || scope == "" || generation == "" {
+		return model.PlatformArtifact{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgGetPlatformArtifactByIdentity(kind, scope, generation)
+	}
+	var result model.PlatformArtifact
+	err := s.withLockedState(false, func(st *model.State) error {
+		for _, a := range st.PlatformArtifacts {
+			if platformArtifactHasIdentity(a, kind, scope, generation) {
+				if result.ID != "" {
+					return ErrConflict
+				}
+				result = a
+			}
+		}
+		if result.ID == "" {
+			return ErrNotFound
+		}
+		return nil
+	})
+	return result, err
+}
+
 func ensurePlatformArtifactEquivalent(existing, candidate model.PlatformArtifact, keyring bundleauth.Keyring) error {
 	decision := platformsafety.EvaluateArtifactIntegrity(existing, keyring)
 	if !decision.Pass {
@@ -342,12 +370,16 @@ func (s *Store) ValidatePlatformArtifact(id string, results []model.PlatformArti
 }
 
 func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactReleaseRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+	return s.releasePlatformArtifact(id, req, principal, nil)
+}
+
+func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
 	if channel == "" {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgReleasePlatformArtifact(id, req, principal)
+		return s.pgReleasePlatformArtifact(id, req, principal, guard)
 	}
 	var artifact model.PlatformArtifact
 	var release model.PlatformArtifactRelease
@@ -359,6 +391,12 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 			return ErrNotFound
 		}
 		artifact = state.PlatformArtifacts[index]
+		if err := validateProducerPolicyPublication(artifact, channel); err != nil {
+			return err
+		}
+		if err := validateProducerReleaseGuard(state, artifact, req, principal, s.platformArtifactSigningKeyring(), guard); err != nil {
+			return err
+		}
 		now := time.Now().UTC()
 		overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
 		if err != nil {
@@ -507,6 +545,9 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 			return ErrNotFound
 		}
 		target = state.PlatformArtifacts[targetIndex]
+		if err := validateProducerPolicyPublication(target, channel); err != nil {
+			return err
+		}
 		now := time.Now().UTC()
 		overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
 		if err != nil {
