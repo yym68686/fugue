@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,7 +56,7 @@ type platformTLSCandidatePayload struct {
 func (s *Service) verifyPlatformTLSCandidate(tls, route edgePlatformCandidate) (platformTLSCandidatePayload, error) {
 	var payload platformTLSCandidatePayload
 	a, artifact, release := tls.Assignment, tls.Artifact, tls.Release
-	if a.ExpectedConsumerSetID == "" || a.GenerationSequence <= 0 || a.FencingToken <= 0 || a.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
+	if a.ExpectedConsumerSetID == "" || a.GenerationSequence <= 0 || a.FencingToken <= 0 || !slices.Contains([]string{"shadow", "gray", "full"}, a.ReleaseChannel) ||
 		a.ArtifactKind != model.PlatformArtifactKindCaddyRouteConfig || artifact.ArtifactKind != a.ArtifactKind || artifact.ID != a.ArtifactID || artifact.ScopeKey != a.ScopeKey ||
 		artifact.Generation != a.ExpectedGeneration || artifact.GenerationSequence != a.GenerationSequence || artifact.ContentHash != a.ContentHash || artifact.Status != model.PlatformArtifactStatusValidated ||
 		release.ID != a.ArtifactReleaseID || release.ArtifactID != a.ReleaseSetID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet || release.ScopeKey != a.ScopeKey ||

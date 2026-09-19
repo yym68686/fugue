@@ -106,3 +106,37 @@ func ValidateGroup(b *model.TrafficReleaseBinding, id string, serving bool) erro
 	}
 	return nil
 }
+
+// Once a group serves a ReleaseSet, absence of a release cannot re-enable a
+// mutable configuration source. Rollback is a new fenced release of the old
+// artifact; artifact sequence alone must not forbid that recovery.
+func ValidateTransition(current, next *model.TrafficReleaseBinding) error {
+	if err := Validate(next); err != nil {
+		return err
+	}
+	if current == nil {
+		return nil
+	}
+	if next == nil {
+		return errors.New("traffic authority cannot downgrade to an unbound source")
+	}
+	if err := Validate(current); err != nil {
+		return err
+	}
+	if current.ScopeKey != next.ScopeKey {
+		return errors.New("traffic authority scope changed")
+	}
+	if current.ReleaseChannel == next.ReleaseChannel {
+		if next.FencingToken < current.FencingToken {
+			return errors.New("traffic authority fence moved backwards")
+		}
+		if next.FencingToken == current.FencingToken {
+			a, _ := json.Marshal(current)
+			b, _ := json.Marshal(next)
+			if string(a) != string(b) {
+				return errors.New("traffic authority reused a fence for different provenance")
+			}
+		}
+	}
+	return nil
+}

@@ -43,4 +43,29 @@ func TestTrafficBindingRejectsMalformedAndAmbiguousScope(t *testing.T) {
 	if err := ValidateGroup(nil, "legacy", true); err != nil {
 		t.Fatal("legacy compatibility lost")
 	}
+	for _, mode := range []string{"renew", "rollback", "replay", "reuse-fence", "legacy", "wrong-scope"} {
+		t.Run(mode, func(t *testing.T) {
+			current := Clone(&valid)
+			current.FencingToken = 4
+			next := Clone(current)
+			switch mode {
+			case "rollback":
+				next.FencingToken++
+				next.ReleaseID = "rollback"
+				next.RouteArtifactGeneration = "old-generation"
+			case "replay":
+				next.FencingToken--
+			case "reuse-fence":
+				next.ReleaseID = "other"
+			case "legacy":
+				next = nil
+			case "wrong-scope":
+				next.ScopeKey = "foreign"
+			}
+			err := ValidateTransition(current, next)
+			if (err == nil) != (mode == "renew" || mode == "rollback") {
+				t.Fatal("unexpected transition", mode, err)
+			}
+		})
+	}
 }

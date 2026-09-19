@@ -40,6 +40,26 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusForbidden, "platform component identity is not authorized for edge route intents")
 		return
 	}
+	groups, present := r.URL.Query()["edge_group_id"]
+	group := ""
+	if present {
+		if len(groups) != 1 || len(groups[0]) > 128 || !trafficSourceGroup.MatchString(groups[0]) {
+			httpx.WriteError(w, http.StatusBadRequest, "one canonical edge_group_id is required")
+			return
+		}
+		group = groups[0]
+	}
+	if snapshot, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease(group); err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "traffic release recovery state is unavailable; retain the current serving bundle")
+		return
+	} else if found {
+		w.Header().Set("ETag", edgeRouteBundleETag(snapshot.Generation))
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("X-Fugue-Route-Intent-Source", "traffic-release")
+		w.Header().Set("X-Fugue-Route-Intent-Generation", snapshot.Generation)
+		httpx.WriteJSON(w, http.StatusOK, snapshot)
+		return
+	}
 	if snapshot, found, err := s.edgeRouteIntentSnapshotFromVerifiedArtifact(); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "route artifact recovery state is unavailable; retain the current serving bundle")
 		return

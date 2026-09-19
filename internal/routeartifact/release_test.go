@@ -18,7 +18,7 @@ import (
 func releaseFixture(t *testing.T) (model.PlatformArtifact, model.PlatformArtifact, model.PlatformConsumerAssignment, model.PlatformArtifactRelease, bundleauth.Keyring) {
 	t.Helper()
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{
-		Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}},
+		Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true, CachePolicyID: "assets", CacheNamespace: "v1"}}, CachePolicies: []model.CachePolicy{{ID: "assets", Kind: model.CachePolicyKindStaticAssets, HostnameScope: "app.example.test", TTLSeconds: 60}}},
 		Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global", TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{"edge-group-test-a"}}}},
 	})
 	if err != nil {
@@ -145,6 +145,17 @@ func TestGroupCompilerPreservesReleaseProvenanceAndSeparatesRollouts(t *testing.
 			t.Fatalf("signed serving authorization mismatch: %s %v", channel, err)
 		}
 		if channel != "shadow" {
+			original := append([]model.CachePolicy(nil), signed.CachePolicies...)
+			signed.CachePolicies = append([]model.CachePolicy(nil), original...)
+			signed.CachePolicies[0].TTLSeconds++
+			if err := bundleauth.VerifyEdgeRouteBundleWithKeyring(signed, keys, now); err == nil {
+				t.Fatal("tampered cache policy retained valid signature")
+			}
+			signed.CachePolicies = nil
+			if err := bundleauth.VerifyEdgeRouteBundleWithKeyring(signed, keys, now); err == nil {
+				t.Fatal("removed cache policies retained valid signature")
+			}
+			signed.CachePolicies = original
 			signed.TrafficRelease = nil
 			if err := bundleauth.VerifyEdgeRouteBundleWithKeyring(signed, keys, now); err == nil {
 				t.Fatal("signed provenance stripped into legacy interpretation")

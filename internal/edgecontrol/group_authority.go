@@ -291,6 +291,11 @@ func (publisher GroupAuthorityPublisher) publishGroup(ctx context.Context, route
 	if err := trafficbinding.ValidateGroup(candidate.Bundle.TrafficRelease, groupID, true); err != nil {
 		return fail(GroupAuthorityFailureCandidateRead, candidate.Sequence)
 	}
+	if state.PublishedExists {
+		if err := trafficbinding.ValidateTransition(state.Published.Bundle.TrafficRelease, candidate.Bundle.TrafficRelease); err != nil {
+			return fail(GroupAuthorityFailureCandidateRead, candidate.Sequence)
+		}
+	}
 	bundle := cloneEdgeRouteBundle(*candidate.Bundle)
 	bundle.Issuer = groupAuthorityIssuer
 	bundle.GeneratedAt = now
@@ -675,6 +680,11 @@ func prepareGroupAuthorityAppend(groupID string, expectedSequence uint64, entrie
 			return GroupAuthorityLedgerEntry{}, nil, errors.New("failed edge-control group authority entry changed published LKG")
 		}
 	} else {
+		if current != nil && signed != nil {
+			if err := trafficbinding.ValidateTransition(current.Bundle.TrafficRelease, signed.TrafficRelease); err != nil {
+				return GroupAuthorityLedgerEntry{}, nil, err
+			}
+		}
 		if signed == nil || candidate == nil || candidate.Sequence == 0 || candidate.Sequence != entry.CandidateLedgerSequence ||
 			candidate.Status != GroupShadowStatusCompiled || candidate.Bundle == nil || candidate.BundleGeneration != signed.Generation ||
 			candidate.RouteIntentGeneration != entry.RouteIntentGeneration || candidate.InventoryGeneration != entry.InventoryGeneration ||

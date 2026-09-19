@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -95,21 +96,37 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
-		if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
+		bundle, _ := s.Bundle()
+		// Runtime projection has one owner. Once a traffic release serves,
+		// an older shadow observation must not overwrite its applied receipt
+		// or move the consumer back to shadow's independent fence domain.
+		if bundle.TrafficRelease == nil {
+			if err := s.SyncPlatformShadowOnce(ctx); err != nil && ctx.Err() == nil {
+				s.mu.Lock()
+				s.platformCandidate.State = "failed"
+				s.platformCandidate.LastError = err.Error()
+				s.mu.Unlock()
+				s.Logger.Printf("edge platform candidate failed: %v", err)
+			}
+			if err := s.SyncPlatformTLSShadowOnce(ctx); err != nil && ctx.Err() == nil {
+				s.mu.Lock()
+				s.platformTLSCandidate.State = "failed"
+				s.platformTLSReadiness = nil
+				s.platformTLSCandidate.TLSVerified = false
+				s.platformTLSCandidate.LastError = err.Error()
+				s.mu.Unlock()
+				s.Logger.Printf("edge platform TLS candidate failed: %v", err)
+			}
+		} else {
 			s.mu.Lock()
-			s.platformCandidate.State = "failed"
-			s.platformCandidate.LastError = err.Error()
+			s.platformCandidate.State, s.platformTLSCandidate.State = "inactive", "inactive"
 			s.mu.Unlock()
-			s.Logger.Printf("edge platform candidate failed: %v", err)
 		}
-		if err := s.SyncPlatformTLSShadowOnce(ctx); err != nil && ctx.Err() == nil {
+		if err := s.SyncPlatformServingOnce(ctx); err != nil && ctx.Err() == nil {
 			s.mu.Lock()
-			s.platformTLSCandidate.State = "failed"
-			s.platformTLSReadiness = nil
-			s.platformTLSCandidate.TLSVerified = false
-			s.platformTLSCandidate.LastError = err.Error()
+			s.platformServing.State, s.platformServing.LastError = "failed", err.Error()
 			s.mu.Unlock()
-			s.Logger.Printf("edge platform TLS candidate failed: %v", err)
+			s.Logger.Printf("edge traffic serving verification failed: %v", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -227,7 +244,7 @@ type platformRouteCandidatePayload struct {
 }
 
 func (s *Service) verifyPlatformRouteCandidate(artifact model.PlatformArtifact, assignment model.PlatformConsumerAssignment, release model.PlatformArtifactRelease) (payload platformRouteCandidatePayload, err error) {
-	if assignment.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || assignment.ExpectedConsumerSetID == "" || assignment.ReleaseSetID == "" || assignment.ArtifactReleaseID == "" || assignment.GenerationSequence <= 0 || assignment.FencingToken <= 0 || artifact.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || artifact.ScopeKey != assignment.ScopeKey || artifact.GenerationSequence != assignment.GenerationSequence || artifact.ID != assignment.ArtifactID || artifact.Status != model.PlatformArtifactStatusValidated || artifact.ContentHash != assignment.ContentHash || artifact.Generation != assignment.ExpectedGeneration || release.ID != assignment.ArtifactReleaseID || release.ArtifactID != assignment.ReleaseSetID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet || release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken != assignment.FencingToken || release.Generation == "" || artifact.Metadata["release_set_generation"] != release.Generation {
+	if !slices.Contains([]string{"shadow", "gray", "full"}, assignment.ReleaseChannel) || assignment.ExpectedConsumerSetID == "" || assignment.ReleaseSetID == "" || assignment.ArtifactReleaseID == "" || assignment.GenerationSequence <= 0 || assignment.FencingToken <= 0 || artifact.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || artifact.ScopeKey != assignment.ScopeKey || artifact.GenerationSequence != assignment.GenerationSequence || artifact.ID != assignment.ArtifactID || artifact.Status != model.PlatformArtifactStatusValidated || artifact.ContentHash != assignment.ContentHash || artifact.Generation != assignment.ExpectedGeneration || release.ID != assignment.ArtifactReleaseID || release.ArtifactID != assignment.ReleaseSetID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet || release.ReleaseChannel != assignment.ReleaseChannel || release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken != assignment.FencingToken || release.Generation == "" || artifact.Metadata["release_set_generation"] != release.Generation {
 		return payload, errors.New("edge platform candidate binding mismatch")
 	}
 	if !platformsafety.EvaluateArtifactIntegrity(artifact, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)).Pass {

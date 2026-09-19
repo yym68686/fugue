@@ -67,6 +67,12 @@ func (runtime *AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeB
 	if err != nil {
 		return AuthorityRuntimeBatch{}, false, err
 	}
+	if snapshot.TrafficRelease != nil {
+		current, err := runtime.RouteIntents.FetchRouteIntents(ctx)
+		if err != nil || routeIntentSemanticDigest(current) != routeIntentSemanticDigest(snapshot) {
+			return AuthorityRuntimeBatch{}, false, errors.New("traffic release changed before group publication; retain serving artifact")
+		}
+	}
 	published, err := runtime.Publisher.Publish(ctx, compiled)
 	if err != nil {
 		return AuthorityRuntimeBatch{}, false, err

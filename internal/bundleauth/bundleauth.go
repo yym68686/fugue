@@ -389,6 +389,7 @@ func bundleSignature(issuer, keyID, signature string, generatedAt, validUntil ti
 }
 
 type bundleSigningPayload struct {
+	CachePolicies       []model.CachePolicy          `json:"cache_policies,omitempty"`
 	TrafficRelease      *model.TrafficReleaseBinding `json:"traffic_release,omitempty"`
 	SchemaVersion       string                       `json:"schema_version,omitempty"`
 	Version             string                       `json:"version,omitempty"`
@@ -451,6 +452,11 @@ func cloneBundleForSigning[T any](bundle T, validUntil time.Time, keyID string) 
 			EdgeGroupID:        typed.EdgeGroupID,
 			Routes:             typed.Routes,
 			TLSAllowlist:       typed.TLSAllowlist,
+		}
+		// Bound traffic projections authenticate every executable cache policy.
+		// Legacy signatures retain their original payload during migration.
+		if typed.TrafficRelease != nil {
+			payload.CachePolicies = typed.CachePolicies
 		}
 	case model.EdgeSSHRouteBundle:
 		payload = bundleSigningPayload{

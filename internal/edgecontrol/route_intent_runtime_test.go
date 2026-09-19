@@ -49,7 +49,7 @@ func TestRouteIntentClientAuthenticatesAndBindsVersion(t *testing.T) {
 	var requests atomic.Int32
 	server, caFile, serverName, dialAddress := newRouteIntentTLSServer(t, now, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		requests.Add(1)
-		if request.Method != http.MethodGet || request.URL.Path != RouteIntentPathV1 || request.URL.RawQuery != "" || request.ProtoMajor != 1 || request.TLS == nil || request.TLS.Version != tls.VersionTLS13 || request.TLS.ServerName != routeIntentTestServerName {
+		if request.Method != http.MethodGet || request.URL.Path != RouteIntentPathV1 || request.URL.RawQuery != "edge_group_id=edge-group-test-a" || request.ProtoMajor != 1 || request.TLS == nil || request.TLS.Version != tls.VersionTLS13 || request.TLS.ServerName != routeIntentTestServerName {
 			t.Errorf("unexpected request target %s %s", request.Method, request.URL.String())
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
@@ -67,7 +67,7 @@ func TestRouteIntentClientAuthenticatesAndBindsVersion(t *testing.T) {
 	defer server.Close()
 
 	client, err := NewRouteIntentClient(RouteIntentClientConfig{
-		Endpoint: server.URL + RouteIntentPathV1, IssuerFile: tokenFile, IdentityNodeID: "edge-control-test", CAFile: caFile, ServerName: serverName, Now: func() time.Time { return now },
+		Endpoint: server.URL + RouteIntentPathV1, EdgeGroupID: "edge-group-test-a", IssuerFile: tokenFile, IdentityNodeID: "edge-control-test", CAFile: caFile, ServerName: serverName, Now: func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatal(err)

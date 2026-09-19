@@ -95,28 +95,31 @@ type Service struct {
 	caddyWarmupIdentity           string
 	caddyWarmupSequence           uint64
 
-	mu                    sync.Mutex
-	snapshot              Status
-	bundle                *model.EdgeRouteBundle
-	routeIndex            atomic.Pointer[edgeRouteIndex]
-	routeHealthMode       edgeRouteHealthMode
-	etag                  string
-	routePublication      routePublicationMetadata
-	metrics               telemetry
-	performanceBaseline   telemetry
-	cacheRevalidating     map[string]struct{}
-	bodyBufferActiveMu    sync.Mutex
-	activeBodyBufferReads map[string]edgeActiveRequestBodyBuffer
-	activeProxyRequests   int64
-	walMu                 sync.Mutex
-	walActionLast         map[string]time.Time
-	platformConsumerMu    sync.Mutex
-	platformCandidate     PlatformCandidateStatus
-	platformTLSReadiness  *platformTLSReadinessReceipt
-	platformTLSCandidate  PlatformTLSCandidateStatus
+	mu                      sync.Mutex
+	snapshot                Status
+	bundle                  *model.EdgeRouteBundle
+	routeIndex              atomic.Pointer[edgeRouteIndex]
+	routeHealthMode         edgeRouteHealthMode
+	etag                    string
+	routePublication        routePublicationMetadata
+	metrics                 telemetry
+	performanceBaseline     telemetry
+	cacheRevalidating       map[string]struct{}
+	bodyBufferActiveMu      sync.Mutex
+	activeBodyBufferReads   map[string]edgeActiveRequestBodyBuffer
+	activeProxyRequests     int64
+	walMu                   sync.Mutex
+	walActionLast           map[string]time.Time
+	platformConsumerMu      sync.Mutex
+	platformServingEvidence *platformServingReceipt
+	platformServing         PlatformServingStatus
+	platformCandidate       PlatformCandidateStatus
+	platformTLSReadiness    *platformTLSReadinessReceipt
+	platformTLSCandidate    PlatformTLSCandidateStatus
 }
 
 type Status struct {
+	PlatformServing              *PlatformServingStatus     `json:"platform_serving,omitempty"`
 	Status                       string                     `json:"status"`
 	Healthy                      bool                       `json:"healthy"`
 	EdgeID                       string                     `json:"edge_id,omitempty"`
@@ -968,6 +971,10 @@ func (s *Service) Status() Status {
 	defer s.mu.Unlock()
 	out := s.snapshot
 	out.PlatformCandidate = s.platformCandidate
+	if s.PlatformTokenFile != "" {
+		serving := s.platformServing
+		out.PlatformServing = &serving
+	}
 	out.PlatformTLSCandidate = s.platformTLSCandidate
 	bundleVersion := ""
 	if s.bundle != nil && s.snapshot.CaddyAppliedVersion == s.bundle.Version && s.platformTLSCandidate.State == "shadow_verified" {

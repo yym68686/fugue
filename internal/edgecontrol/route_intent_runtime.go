@@ -22,6 +22,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/trafficbinding"
 )
 
 const (
@@ -49,6 +50,7 @@ type RouteIntentSource interface {
 }
 
 type RouteIntentClientConfig struct {
+	EdgeGroupID    string
 	Endpoint       string
 	IssuerFile     string
 	IdentityNodeID string
@@ -63,6 +65,7 @@ type RouteIntentClientConfig struct {
 // binds the response body to the exact v1 path, schema, generation header,
 // and strong ETag.
 type RouteIntentClient struct {
+	groupID    string
 	endpoint   *url.URL
 	issuerFile string
 	nodeID     string
@@ -110,13 +113,16 @@ func NewRouteIntentClient(config RouteIntentClientConfig) (*RouteIntentClient, e
 	if config.Now != nil {
 		now = func() time.Time { return config.Now().UTC() }
 	}
-	return &RouteIntentClient{endpoint: endpoint, issuerFile: issuerFile, nodeID: strings.TrimSpace(config.IdentityNodeID), client: client, now: now}, nil
+	return &RouteIntentClient{endpoint: endpoint, groupID: config.EdgeGroupID, issuerFile: issuerFile, nodeID: strings.TrimSpace(config.IdentityNodeID), client: client, now: now}, nil
 }
 
 // ValidateRouteIntentClientConfig validates immutable names and paths without
 // reading credentials. NewRouteIntentClient additionally loads and validates
 // the explicit private CA at process startup.
 func ValidateRouteIntentClientConfig(config RouteIntentClientConfig) error {
+	if config.EdgeGroupID != "" && (len(config.EdgeGroupID) > 128 || !edgeGroupIDPattern.MatchString(config.EdgeGroupID)) {
+		return errors.New("edge-control route source requires a canonical group")
+	}
 	endpoint, err := url.Parse(strings.TrimSpace(config.Endpoint))
 	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Opaque != "" || endpoint.EscapedPath() != RouteIntentPathV1 {
 		return errors.New("edge-control RouteIntent endpoint must be exact HTTPS /v1/edge/route-intents without userinfo, query, or fragment")
@@ -193,7 +199,13 @@ func (client *RouteIntentClient) FetchRouteIntents(ctx context.Context) (model.E
 	if err != nil {
 		return model.EdgeRouteIntentSnapshot{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, client.endpoint.String(), nil)
+	endpoint := *client.endpoint
+	if client.groupID != "" {
+		query := endpoint.Query()
+		query.Set("edge_group_id", client.groupID)
+		endpoint.RawQuery = query.Encode()
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("%w: construct request", ErrRouteIntentFetch)
 	}
@@ -236,6 +248,11 @@ func (client *RouteIntentClient) FetchRouteIntents(ctx context.Context) (model.E
 	}
 	if err := validateRouteIntentSnapshot(snapshot); err != nil {
 		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("%w: schema", ErrRouteIntentVersionBinding)
+	}
+	if snapshot.TrafficRelease != nil {
+		if err := trafficbinding.ValidateGroup(snapshot.TrafficRelease, client.groupID, true); err != nil {
+			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("%w: traffic release group", ErrRouteIntentVersionBinding)
+		}
 	}
 	generation := strings.TrimSpace(snapshot.Generation)
 	if strings.TrimSpace(response.Header.Get(RouteIntentGenerationHeader)) != generation || response.Header.Get("ETag") != strconv.Quote(generation) {

@@ -290,7 +290,8 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 		return nil, nil, err
 	}
 	client, err := edgecontrol.NewRouteIntentClient(edgecontrol.RouteIntentClientConfig{
-		Endpoint: cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
+		EdgeGroupID: cfg.AuthorityGroupIDs[0],
+		Endpoint:    cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
 	})
 	if err != nil {
 		return nil, nil, err

@@ -38,6 +38,18 @@ x-fugue-traffic-release-binding:
     bundles without the field remain readable. An invalid binding cannot fall
     back to a legacy interpretation. Route shadow receipts retain the signed
     parent and binding; isolated execution remains non-serving.
+x-fugue-traffic-serving-evidence:
+  semantics: >-
+    Active Edge Workers observe the exact gray/full assignment already applied
+    through Group Authority. They never install an independent configuration.
+    Positive route evidence requires matching signed parent/child provenance,
+    a durable verified bundle, matching route index and Caddy applied version,
+    and fresh nonce-bound HTTPS route proofs through the local Caddy listener.
+    TLS evidence additionally verifies every locally owned certificate reference.
+    Assignment, activation and serving bundle are rechecked before heartbeat.
+    Durable receipts record artifact references and fresh probe results; restarts
+    always probe again. These receipts do not promote a verified LKG. Failed or
+    stale observations never become applied/passed, and shadow remains separate.
 x-fugue-edge-candidate-execution:
   schema: fugue.edge.candidate-execution/v1
   semantics: >-
@@ -489,10 +501,28 @@ paths:
         Artifact-backed serving and candidate validation share one route
         projection. Cache references resolve case-insensitively to the declared
         policy ID; disabled cache policies are not materialized as active bindings.
+        With edge_group_id, the newest applicable gray/full TrafficReleaseSet
+        selects serving routes; gray applies only to its signed cohort. A newer
+        full supersedes an older gray lane. Without an applicable release the
+        verified route LKG remains the migration fallback. A selected
+        release must have immutable expected topology for that group and verified
+        parent/child integrity and lineage. Invalid or unprepared selected releases
+        return 503 without falling back to business data. Shadow releases never
+        select serving configuration. A legacy request without a group is rejected
+        while a gray or full TrafficReleaseSet is active. Group projections retain
+        traffic_release provenance; their signatures include cache policies.
       tags: [Edge]
       x-fugue-handler: handleEdgeRouteIntents
       security:
         - EdgeRouteIntentComponentBearerAuth: []
+      parameters:
+        - in: query
+          name: edge_group_id
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+            pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'
       responses:
         '200':
           description: Successful response
