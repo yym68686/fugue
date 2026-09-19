@@ -152,6 +152,8 @@ func (a telemetryAgent) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintln(w, "# HELP fugue_telemetry_agent_retention_seconds Configured observability retention window in seconds.")
 	_, _ = fmt.Fprintln(w, "# TYPE fugue_telemetry_agent_retention_seconds gauge")
 	_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_retention_seconds %.0f\n", cfg.Retention.Seconds())
+	_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_kubernetes_log_qps %g\n", cfg.KubernetesLogQPS)
+	_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_kubernetes_log_burst %d\n", cfg.KubernetesLogBurst)
 	for _, exporter := range []string{"metrics", "logs", "analytics", "otlp"} {
 		configured := 0
 		if containsExporter(cfg.Exporters(), exporter) {

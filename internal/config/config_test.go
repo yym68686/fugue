@@ -118,6 +118,8 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES", "fg-")
 	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR", "app.kubernetes.io/managed-by=fugue")
 	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL", "7s")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_QPS", "12.5")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_BURST", "25")
 	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES", "33")
 	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS", "44")
 	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE", "55")
@@ -158,7 +160,7 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	if len(cfg.KubernetesLogNamespaces) != 2 || cfg.KubernetesLogNamespaces[0] != "fugue-system" || cfg.KubernetesLogNamespaces[1] != "fg-tenant" {
 		t.Fatalf("expected Kubernetes log namespaces to be parsed, got %+v", cfg.KubernetesLogNamespaces)
 	}
-	if cfg.KubernetesLogLabelSelector != "app.kubernetes.io/managed-by=fugue" || cfg.KubernetesLogPollInterval != 7*time.Second || cfg.KubernetesLogTailLines != 33 || cfg.KubernetesLogMaxPods != 44 || cfg.KubernetesLogMaxLinesPerCycle != 55 {
+	if cfg.KubernetesLogLabelSelector != "app.kubernetes.io/managed-by=fugue" || cfg.KubernetesLogPollInterval != 7*time.Second || cfg.KubernetesLogQPS != 12.5 || cfg.KubernetesLogBurst != 25 || cfg.KubernetesLogTailLines != 33 || cfg.KubernetesLogMaxPods != 44 || cfg.KubernetesLogMaxLinesPerCycle != 55 {
 		t.Fatalf("expected Kubernetes log settings from env, got %+v", cfg)
 	}
 	if cfg.QueueSize != 66 || cfg.BatchSize != 11 || cfg.ClickHouseQueryMaxPayloadBytes != 888 || cfg.MemoryLimitBytes != 777 {

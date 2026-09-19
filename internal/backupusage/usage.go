@@ -46,33 +46,35 @@ type Reconciliation struct {
 	ScanGeneration string     `json:"scan_generation,omitempty"`
 	ScanError      string     `json:"scan_error,omitempty"`
 
-	Status                      string    `json:"status"`
-	BackendCount                int       `json:"backend_count"`
-	MeasuredBackendCount        int       `json:"measured_backend_count"`
-	ExpectedObjectCount         int       `json:"expected_object_count"`
-	ReferencedObjectCount       int       `json:"referenced_object_count"`
-	ReferencedBytes             int64     `json:"referenced_bytes"`
-	ActiveObjectCount           int       `json:"active_object_count"`
-	ActiveBytes                 int64     `json:"active_bytes"`
-	PendingDeletionObjectCount  int       `json:"pending_deletion_object_count"`
-	PendingDeletionBytes        int64     `json:"pending_deletion_bytes"`
-	UnreferencedObjectCount     int       `json:"unreferenced_object_count"`
-	UnreferencedBytes           int64     `json:"unreferenced_bytes"`
-	ProvisionalObjectCount      int       `json:"provisional_object_count"`
-	ProvisionalBytes            int64     `json:"provisional_bytes"`
-	OrphanedObjectCount         int       `json:"orphaned_object_count"`
-	OrphanedBytes               int64     `json:"orphaned_bytes"`
-	MissingActiveObjectCount    int       `json:"missing_active_object_count"`
-	OverdueDeletionObjectCount  int       `json:"overdue_deletion_object_count"`
-	OverdueDeletionBytes        int64     `json:"overdue_deletion_bytes"`
-	LingeringDeletedObjectCount int       `json:"lingering_deleted_object_count"`
-	LingeringDeletedBytes       int64     `json:"lingering_deleted_bytes"`
-	DuplicateReferenceCount     int       `json:"duplicate_reference_count"`
-	InvalidReferenceCount       int       `json:"invalid_reference_count"`
-	SizeMismatchCount           int       `json:"size_mismatch_count"`
-	UnresolvedBackendCount      int       `json:"unresolved_backend_count"`
-	ObservedAt                  time.Time `json:"observed_at"`
-	Message                     string    `json:"message,omitempty"`
+	Status                       string    `json:"status"`
+	BackendCount                 int       `json:"backend_count"`
+	MeasuredBackendCount         int       `json:"measured_backend_count"`
+	ExpectedObjectCount          int       `json:"expected_object_count"`
+	ReferencedObjectCount        int       `json:"referenced_object_count"`
+	ReferencedBytes              int64     `json:"referenced_bytes"`
+	ActiveObjectCount            int       `json:"active_object_count"`
+	ActiveBytes                  int64     `json:"active_bytes"`
+	PendingDeletionObjectCount   int       `json:"pending_deletion_object_count"`
+	PendingDeletionBytes         int64     `json:"pending_deletion_bytes"`
+	UnreferencedObjectCount      int       `json:"unreferenced_object_count"`
+	UnreferencedBytes            int64     `json:"unreferenced_bytes"`
+	RepositoryManagedObjectCount int       `json:"repository_managed_object_count,omitempty"`
+	RepositoryManagedBytes       int64     `json:"repository_managed_bytes,omitempty"`
+	ProvisionalObjectCount       int       `json:"provisional_object_count"`
+	ProvisionalBytes             int64     `json:"provisional_bytes"`
+	OrphanedObjectCount          int       `json:"orphaned_object_count"`
+	OrphanedBytes                int64     `json:"orphaned_bytes"`
+	MissingActiveObjectCount     int       `json:"missing_active_object_count"`
+	OverdueDeletionObjectCount   int       `json:"overdue_deletion_object_count"`
+	OverdueDeletionBytes         int64     `json:"overdue_deletion_bytes"`
+	LingeringDeletedObjectCount  int       `json:"lingering_deleted_object_count"`
+	LingeringDeletedBytes        int64     `json:"lingering_deleted_bytes"`
+	DuplicateReferenceCount      int       `json:"duplicate_reference_count"`
+	InvalidReferenceCount        int       `json:"invalid_reference_count"`
+	SizeMismatchCount            int       `json:"size_mismatch_count"`
+	UnresolvedBackendCount       int       `json:"unresolved_backend_count"`
+	ObservedAt                   time.Time `json:"observed_at"`
+	Message                      string    `json:"message,omitempty"`
 }
 
 func FromModel(usage model.BackupUsage) Usage {

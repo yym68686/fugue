@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"fugue/internal/backupusage"
+	"fugue/internal/model"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -90,5 +91,48 @@ func TestBackupInventoryRejectsBrokenPagination(t *testing.T) {
 		if cp.Complete != nil || cp.Error != "invalid_pagination" {
 			t.Fatalf("bad pagination accepted: %+v", cp)
 		}
+	}
+}
+
+func TestInventorySeparatesDeclaredRepositoryBlocksFromArtifactObjects(t *testing.T) {
+	fake := newBackupUsageS3(t)
+	state, backend, s := newBackupUsageTestServer(t, fake)
+	artifact := createBackupUsageArtifact(t, state, model.BackupArtifact{
+		ID: "snapshot_a", RunID: "run_a", BackendID: backend.ID, Kind: model.BackupArtifactKindLonghornSnapshot,
+		ManifestObjectKey: "control-plane/run_a/manifest.json", SizeBytes: 1000000,
+		Status:   model.BackupArtifactStatusActive,
+		Manifest: model.BackupManifest{Metadata: map[string]string{"backup_target_url": "s3://bucket@auto/backup-root/shared-repository"}},
+	})
+	old := time.Now().Add(-48 * time.Hour)
+	fake.put("backup-root/"+artifact.ManifestObjectKey, 123, old)
+	fake.put("backup-root/shared-repository/blocks/chunk", 456, old)
+	fake.put("backup-root/shared-repository-old/not-owned", 7, old)
+	groups, err := s.backupInventoryGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range groups {
+		due, err := s.advanceBackupInventoryScheduled(t.Context(), g)
+		if err != nil || time.Until(due) < 14*time.Minute {
+			t.Fatalf("completed scan should sleep until refresh: %v %v", due, err)
+		}
+	}
+	usage, err := s.loadBackupUsage(t.Context(), "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := usage.Reconciliation
+	if usage.PhysicalBytes == nil || *usage.PhysicalBytes != 586 || r.RepositoryManagedBytes != 456 || r.RepositoryManagedObjectCount != 1 || r.OrphanedObjectCount != 1 || r.OrphanedBytes != 7 || r.SizeMismatchCount != 0 {
+		t.Fatalf("repository blocks or snapshot upload size misclassified: %+v", usage)
+	}
+	for _, raw := range []string{"s3://foreign@auto/backup-root/shared", "s3://bucket@auto/other", "s3://bucket@auto/backup-root", "s3://bucket@auto/backup-root/a/../b"} {
+		artifact.Manifest.Metadata["backup_target_url"] = raw
+		if prefix := backupRepositoryPrefix(artifact, model.BackupBackendAsDataBackend(backend)); prefix != "" {
+			t.Fatalf("unsafe repository boundary accepted: %q", raw)
+		}
+	}
+	tenant, err := s.loadBackupUsage(t.Context(), "tenant_a", false)
+	if err != nil || tenant.Reconciliation.RepositoryManagedBytes != 0 {
+		t.Fatalf("shared blocks attributed to tenant: %+v %v", tenant, err)
 	}
 }

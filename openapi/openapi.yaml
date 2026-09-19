@@ -13913,6 +13913,13 @@ components:
         unreferenced_bytes:
           type: integer
           format: int64
+        repository_managed_object_count:
+          type: integer
+          description: Physical objects under a shared backup repository declared by durable snapshot metadata. Included in physical totals, excluded from direct-artifact orphan checks; internal repository reachability is not validated by this inventory.
+        repository_managed_bytes:
+          type: integer
+          format: int64
+          description: Physical bytes managed by the snapshot repository engine, without per-tenant attribution for a shared namespace.
         provisional_object_count:
           type: integer
           description: Unreferenced objects whose last-modified time remains within failed-upload cleanup grace.

@@ -91,3 +91,27 @@ projection, negative image evidence, equal-timestamp log boundaries and queue
 rejection. Production acceptance compares scrape latency and success,
 inventory progress, target coverage, log backlog, CPU and allocation profiles
 against the original live-diagnostics observations.
+
+# Live acceptance follow-up
+
+The first production inventory completed 97 pages / 96,866 objects. It also
+exposed a pre-existing classification error: Longhorn owns a shared block
+repository, so its blocks are not direct artifact orphans, and its newly
+uploaded byte count is not the manifest object's size. Inventory derives
+repository boundaries from durable snapshot metadata, reports their physical
+bytes separately, and leaves internal block reachability to the engine.
+Shared repository bytes are not assigned to an arbitrary tenant. This changes
+neither billing nor deletion authorization. Checkpoint identity v2 requires a
+fresh complete generation for the new classification. Completed scanners
+sleep until their configured refresh deadline instead of decoding a large
+checkpoint every second.
+
+The Kubernetes client now uses explicit bounded rate settings:
+`FUGUE_OBSERVABILITY_KUBERNETES_LOG_QPS` (40) and
+`FUGUE_OBSERVABILITY_KUBERNETES_LOG_BURST` (80), with eight workers and the same
+line/memory limits. At about 400 container targets the implicit client-go
+5 QPS setting alone imposed an 80-second cycle. Drained terminated instances
+are no longer polled. Untimestamped kubelet unavailable-log responses are
+counted once per instance and retried after five minutes; old terminated
+instances outside the bootstrap window are not read. Source GC remains a real
+limit, not evidence that previously unavailable history was recovered.

@@ -20,6 +20,8 @@ const (
 	DefaultMemoryLimit                    = 128 << 20
 	DefaultRetryAttempts                  = 3
 	DefaultKubernetesLogPollInterval      = 15 * time.Second
+	DefaultKubernetesLogQPS               = 40.0
+	DefaultKubernetesLogBurst             = 80
 	DefaultKubernetesLogTailLines         = 2000
 	DefaultKubernetesLogMaxPods           = 500
 	DefaultKubernetesLogMaxLinesPerCycle  = 20000
@@ -44,6 +46,8 @@ type Config struct {
 	KubernetesLogNamespacePrefixes []string
 	KubernetesLogLabelSelector     string
 	KubernetesLogPollInterval      time.Duration
+	KubernetesLogQPS               float64
+	KubernetesLogBurst             int
 	KubernetesLogTailLines         int64
 	KubernetesLogMaxPods           int
 	KubernetesLogMaxLinesPerCycle  int
@@ -122,6 +126,12 @@ func (c Config) Normalize() Config {
 	}
 	if c.KubernetesLogPollInterval <= 0 {
 		c.KubernetesLogPollInterval = DefaultKubernetesLogPollInterval
+	}
+	if c.KubernetesLogQPS <= 0 {
+		c.KubernetesLogQPS = DefaultKubernetesLogQPS
+	}
+	if c.KubernetesLogBurst <= 0 {
+		c.KubernetesLogBurst = DefaultKubernetesLogBurst
 	}
 	if c.KubernetesLogTailLines <= 0 {
 		c.KubernetesLogTailLines = DefaultKubernetesLogTailLines

@@ -71,6 +71,8 @@ func newKubernetesLogCollector(p *Pipeline) (*kubernetesLogCollector, error) {
 		return nil, err
 	}
 	restConfig.UserAgent = "fugue-telemetry-agent"
+	restConfig.QPS = float32(p.cfg.KubernetesLogQPS)
+	restConfig.Burst = p.cfg.KubernetesLogBurst
 	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, err
@@ -148,19 +150,32 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		}()
 	}
 	priorityTargets := 0
-	for i := range targets {
-		target := targets[(i+c.targetOffset)%len(targets)]
+	for _, target := range targets {
 		if kubernetesLogPriorityTarget(target) {
 			priorityTargets++
 		}
+	}
+	scheduled := 0
+	for i := range targets {
+		target := targets[(i+c.targetOffset)%len(targets)]
+		if remaining.Load() <= 0 || ctx.Err() != nil {
+			break
+		}
 		select {
 		case jobs <- target:
+			scheduled++
 		case <-ctx.Done():
 		}
 	}
 	close(jobs)
 	wg.Wait()
-	c.targetOffset = (c.targetOffset + 1) % len(targets)
+	// Resume after the last scheduled target when the global budget runs out.
+	// Rotating by only one would starve the far end of a large target list.
+	if scheduled < len(targets) {
+		c.targetOffset = (c.targetOffset + scheduled) % len(targets)
+	} else {
+		c.targetOffset = (c.targetOffset + 1) % len(targets)
+	}
 	c.cursorsMu.Lock()
 	for key, cur := range c.cursors {
 		if time.Since(cur.Visited) > time.Hour {

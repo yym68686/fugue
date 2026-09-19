@@ -13,9 +13,29 @@ import (
 )
 
 type kubernetesLogCursor struct {
-	Time     time.Time
-	Boundary map[[32]byte]int
-	Visited  time.Time
+	Time              time.Time
+	Boundary          map[[32]byte]int
+	Visited           time.Time
+	DrainedThrough    time.Time
+	Complete          bool
+	NextAttempt       time.Time
+	SourceUnavailable bool
+}
+
+func logTargetFinishedAt(t kubernetesLogTarget) time.Time {
+	for _, s := range append(append(append([]corev1.ContainerStatus(nil), t.pod.Status.ContainerStatuses...), t.pod.Status.InitContainerStatuses...), t.pod.Status.EphemeralContainerStatuses...) {
+		if s.Name != t.container {
+			continue
+		}
+		state := s.State
+		if t.previous {
+			state = s.LastTerminationState
+		}
+		if state.Terminated != nil {
+			return state.Terminated.FinishedAt.Time
+		}
+	}
+	return time.Time{}
 }
 
 func logTargetKey(t kubernetesLogTarget) string {
@@ -61,12 +81,25 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 	if !exists {
 		cur = kubernetesLogCursor{Time: now.Add(-5 * time.Minute), Boundary: map[[32]byte]int{}}
 	}
+	finished := logTargetFinishedAt(target)
+	if cur.Complete || now.Before(cur.NextAttempt) || (!finished.IsZero() && finished.Before(cur.Time)) {
+		cur.Visited = now
+		if !finished.IsZero() && finished.Before(cur.Time) {
+			cur.Complete = true
+		}
+		c.cursorsMu.Lock()
+		c.cursors[key] = cur
+		c.cursorsMu.Unlock()
+		return
+	}
 	// Runtime retention is a finite bound, not permission to silently skip an
 	// unbounded backlog. Make any gap visible before resetting the lower bound.
 	if maxAge := c.pipeline.cfg.Retention; maxAge > 0 && now.Sub(cur.Time) > maxAge {
 		cur.Time = now.Add(-maxAge)
 		cur.Boundary = map[[32]byte]int{}
-		c.pipeline.kubernetesLogCursorGaps.Add(1)
+		if cur.DrainedThrough.Before(cur.Time) {
+			c.pipeline.kubernetesLogCursorGaps.Add(1)
+		}
 	}
 	original := cur.Time
 	boundary := cur.Boundary
@@ -89,10 +122,18 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 	scanner.Buffer(make([]byte, 0, 64<<10), int(c.pipeline.cfg.MaxPayloadBytes))
 	n := 0
 	truncated := false
+	invalid := false
 	for scanner.Scan() {
 		ts, msg := splitKubernetesLogLine(scanner.Text())
 		if ts.IsZero() {
-			c.pipeline.kubernetesLogCursorGaps.Add(1)
+			// Kubelet can return HTTP 200 with an untimestamped unavailable-log
+			// message after container GC. Count the loss once and retry with backoff.
+			if !cur.SourceUnavailable {
+				c.pipeline.kubernetesLogCursorGaps.Add(1)
+			}
+			cur.SourceUnavailable = true
+			cur.NextAttempt = now.Add(5 * time.Minute)
+			invalid = true
 			break
 		}
 		if ts.Before(original) {
@@ -133,6 +174,12 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 	if err = scanner.Err(); err != nil && parent.Err() == nil {
 		c.pipeline.kubernetesLogErrors.Add(1)
 		c.pipeline.recordError(fmt.Errorf("scan Kubernetes cursor logs: %w", err))
+	}
+	if err == nil && !invalid && !truncated {
+		cur.DrainedThrough = now
+		cur.Complete = !finished.IsZero()
+		cur.SourceUnavailable = false
+		cur.NextAttempt = time.Time{}
 	}
 	if truncated {
 		if kubernetesLogPriorityTarget(target) {

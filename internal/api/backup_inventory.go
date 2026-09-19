@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -53,19 +55,22 @@ type backupInventoryTotals struct {
 	Bytes            int64
 	ProvisionalCount int
 	ProvisionalBytes int64
+	RepositoryCount  int
+	RepositoryBytes  int64
 }
 type backupInventoryScan struct {
-	NamespaceOwner string
-	Generation     string
-	StartedAt      time.Time
-	FinishedAt     *time.Time
-	Cursor         string
-	LastKey        string
-	Pages          int
-	Objects        int
-	Wanted         map[string]bool
-	References     map[string]dataObjectInfo
-	Totals         map[string]backupInventoryTotals
+	NamespaceOwner     string
+	Generation         string
+	StartedAt          time.Time
+	FinishedAt         *time.Time
+	Cursor             string
+	LastKey            string
+	Pages              int
+	Objects            int
+	Wanted             map[string]bool
+	References         map[string]dataObjectInfo
+	Totals             map[string]backupInventoryTotals
+	RepositoryPrefixes []string
 }
 type backupInventoryCheckpoint struct {
 	Version     int
@@ -91,7 +96,29 @@ func backupInventoryKey(backends []model.BackupBackend) string {
 	sort.Slice(copyBackends, func(i, j int) bool { return copyBackends[i].ID < copyBackends[j].ID })
 	b, _ := json.Marshal(copyBackends)
 	h := sha256.Sum256(b)
-	return "backup-inventory/v1/" + hex.EncodeToString(h[:])
+	return "backup-inventory/v2/" + hex.EncodeToString(h[:])
+}
+
+// Repository blocks are owned by the snapshot engine, not by a single artifact.
+// Derive the boundary from durable engine metadata, never a hardcoded directory.
+func backupRepositoryPrefix(artifact model.BackupArtifact, backend model.DataBackend) string {
+	if artifact.Kind != model.BackupArtifactKindLonghornSnapshot {
+		return ""
+	}
+	u, err := url.Parse(artifact.Manifest.Metadata["backup_target_url"])
+	if err != nil || u.Scheme != "s3" || u.User == nil || u.User.Username() != backend.Bucket || u.RawQuery != "" || u.Fragment != "" {
+		return ""
+	}
+	prefix := strings.TrimPrefix(u.Path, "/")
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" || path.Clean(prefix) != prefix || strings.ContainsRune(prefix, '\x00') {
+		return ""
+	}
+	root := strings.Trim(backend.Prefix, "/")
+	if root != "" && !strings.HasPrefix(prefix, root+"/") {
+		return ""
+	}
+	return prefix + "/"
 }
 func (s *Server) backupInventoryGroups() (map[string]*backupInventoryGroup, error) {
 	backends, err := s.store.ListBackupBackends("", true)
@@ -122,11 +149,34 @@ func (s *Server) backupInventoryGroups() (map[string]*backupInventoryGroup, erro
 func (s *Server) StartBackgroundBackupInventory(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	next := map[string]time.Time{}
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := s.advanceBackupInventories(ctx); err != nil && ctx.Err() == nil && s.log != nil {
+		groups, err := s.backupInventoryGroups()
+		if err == nil {
+			live := map[string]bool{}
+			for _, g := range groups {
+				live[g.key] = true
+				if time.Now().Before(next[g.key]) {
+					continue
+				}
+				var due time.Time
+				due, err = s.advanceBackupInventoryScheduled(ctx, g)
+				if err != nil {
+					next[g.key] = time.Now().Add(s.backupInventoryConfig.normalized().RetryInterval)
+					break
+				}
+				next[g.key] = due
+			}
+			for key := range next {
+				if !live[key] {
+					delete(next, key)
+				}
+			}
+		}
+		if err != nil && ctx.Err() == nil && s.log != nil {
 			s.log.Printf("backup inventory checkpoint refresh failed: %v", err)
 		}
 		select {
@@ -149,8 +199,14 @@ func (s *Server) advanceBackupInventories(ctx context.Context) error {
 	return nil
 }
 func (s *Server) advanceBackupInventory(parent context.Context, g *backupInventoryGroup) error {
+	_, err := s.advanceBackupInventoryScheduled(parent, g)
+	return err
+}
+
+func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *backupInventoryGroup) (time.Time, error) {
 	cfg := s.backupInventoryConfig.normalized()
 	now := time.Now().UTC()
+	var next time.Time
 	ctx, cancel := context.WithTimeout(parent, cfg.PageTimeout+5*time.Second)
 	defer cancel()
 	_, err := s.store.UpdateObservationCheckpoint(ctx, g.key, func(raw []byte) ([]byte, error) {
@@ -164,9 +220,11 @@ func (s *Server) advanceBackupInventory(parent context.Context, g *backupInvento
 			}
 		}
 		if now.Before(cp.NextAttempt) {
+			next = cp.NextAttempt
 			return nil, nil
 		}
 		if cp.Current == nil && cp.Complete != nil && cp.Complete.FinishedAt != nil && now.Sub(*cp.Complete.FinishedAt) < cfg.RefreshInterval {
+			next = cp.Complete.FinishedAt.Add(cfg.RefreshInterval)
 			return nil, nil
 		}
 		backend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(g.backends[0]))
@@ -197,6 +255,18 @@ func (s *Server) advanceBackupInventory(parent context.Context, g *backupInvento
 			for _, a := range artifacts {
 				if !ids[a.Artifact.BackendID] {
 					continue
+				}
+				if prefix := backupRepositoryPrefix(a.Artifact, backend.backend); prefix != "" {
+					found := false
+					for _, p := range cp.Current.RepositoryPrefixes {
+						if p == prefix {
+							found = true
+							break
+						}
+					}
+					if !found {
+						cp.Current.RepositoryPrefixes = append(cp.Current.RepositoryPrefixes, prefix)
+					}
 				}
 				keys, err := backupArtifactObjectKeysForDeletion(a.Artifact)
 				if err != nil {
@@ -236,12 +306,14 @@ func (s *Server) advanceBackupInventory(parent context.Context, g *backupInvento
 				cp.Error = "page_timeout"
 			}
 			cp.NextAttempt = now.Add(cfg.RetryInterval)
+			next = cp.NextAttempt
 			return json.Marshal(cp)
 		}
-		next := aws.ToString(response.NextContinuationToken)
-		if aws.ToBool(response.IsTruncated) && (next == "" || next == scan.Cursor) {
+		nextCursor := aws.ToString(response.NextContinuationToken)
+		if aws.ToBool(response.IsTruncated) && (nextCursor == "" || nextCursor == scan.Cursor) {
 			cp.Error = "invalid_pagination"
 			cp.NextAttempt = now.Add(cfg.RetryInterval)
+			next = cp.NextAttempt
 			return json.Marshal(cp)
 		}
 		objects := make([]dataObjectInfo, 0, len(response.Contents))
@@ -270,6 +342,14 @@ func (s *Server) advanceBackupInventory(parent context.Context, g *backupInvento
 				v := scan.Totals[key]
 				v.Count++
 				v.Bytes += o.Size
+				for _, prefix := range scan.RepositoryPrefixes {
+					if !scan.Wanted[o.Key] && strings.HasPrefix(o.Key, prefix) {
+						v.RepositoryCount++
+						v.RepositoryBytes += o.Size
+						scan.Totals[key] = v
+						return
+					}
+				}
 				if backupUsageObjectWithinCleanupGrace(o.LastModified, o.ObservedAt) {
 					v.ProvisionalCount++
 					v.ProvisionalBytes += o.Size
@@ -285,7 +365,7 @@ func (s *Server) advanceBackupInventory(parent context.Context, g *backupInvento
 			}
 		}
 		scan.Pages++
-		scan.Cursor = next
+		scan.Cursor = nextCursor
 		cp.Error = ""
 		cp.NextAttempt = time.Time{}
 		if !aws.ToBool(response.IsTruncated) {
@@ -294,10 +374,11 @@ func (s *Server) advanceBackupInventory(parent context.Context, g *backupInvento
 			scan.Cursor = ""
 			cp.Complete = scan
 			cp.Current = nil
+			next = scan.FinishedAt.Add(cfg.RefreshInterval)
 		}
 		return json.Marshal(cp)
 	})
-	return err
+	return next, err
 }
 
 func (s *Server) readBackupInventory(ctx context.Context, groupKey string) (backupInventoryCheckpoint, error) {

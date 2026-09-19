@@ -51,8 +51,8 @@ func (s *Server) loadBackupUsage(ctx context.Context, tenantID string, platformA
 	}
 	usage.Reconciliation = &reconciliation
 	if reconciliationMeasuredCompletely(reconciliation) {
-		physicalBytes := reconciliation.ReferencedBytes + reconciliation.UnreferencedBytes
-		physicalObjects := reconciliation.ReferencedObjectCount + reconciliation.UnreferencedObjectCount
+		physicalBytes := reconciliation.ReferencedBytes + reconciliation.UnreferencedBytes + reconciliation.RepositoryManagedBytes
+		physicalObjects := reconciliation.ReferencedObjectCount + reconciliation.UnreferencedObjectCount + reconciliation.RepositoryManagedObjectCount
 		usage.PhysicalBytes = &physicalBytes
 		usage.PhysicalObjectCount = &physicalObjects
 	}
@@ -135,7 +135,7 @@ func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID st
 			objectID := backupUsagePhysicalObjectID(keyBackend.backend, physicalKey)
 			manifest := logicalKey == strings.Trim(strings.TrimSpace(artifact.ManifestObjectKey), "/")
 			var expectedSize *int64
-			if !manifest || artifact.Kind == model.BackupArtifactKindDataSnapshot || strings.TrimSpace(artifact.ObjectKey) == "" {
+			if artifact.Kind != model.BackupArtifactKindLonghornSnapshot && (!manifest || artifact.Kind == model.BackupArtifactKindDataSnapshot || strings.TrimSpace(artifact.ObjectKey) == "") {
 				size := artifact.SizeBytes
 				expectedSize = &size
 			}
@@ -232,6 +232,10 @@ func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID st
 				totalKey = "tenant:" + tenantID
 			}
 			totals := complete.Totals[totalKey]
+			reconciliation.RepositoryManagedObjectCount += totals.RepositoryCount
+			reconciliation.RepositoryManagedBytes += totals.RepositoryBytes
+			totals.Count -= totals.RepositoryCount
+			totals.Bytes -= totals.RepositoryBytes
 			for _, object := range complete.References {
 				logical, ok := candidate.logicalObjectKey(object.Key)
 				if !owns && (!ok || !backupUsageTenantOwnsLogicalObject(tenantID, logical)) {

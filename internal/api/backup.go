@@ -4110,6 +4110,8 @@ func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) error {
 			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_backends", "R2 backup backends included in reconciliation.", map[string]string{"state": "configured"}, float64(reconciliation.BackendCount))
 			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_backends", "R2 backup backends included in reconciliation.", map[string]string{"state": "measured"}, float64(reconciliation.MeasuredBackendCount))
 			if reconciliation.MeasuredBackendCount > 0 || reconciliation.BackendCount == 0 {
+				observability.WriteGaugeMetric(w, "fugue_backup_repository_managed_objects", "Objects in a declared shared backup repository; internal block reachability is owned by the repository engine.", nil, float64(reconciliation.RepositoryManagedObjectCount))
+				observability.WriteGaugeMetric(w, "fugue_backup_repository_managed_bytes", "Physical bytes in a declared shared backup repository.", nil, float64(reconciliation.RepositoryManagedBytes))
 				observability.WriteGaugeMetric(w, "fugue_backup_unreferenced_bytes", "Physical R2 backup bytes without artifact metadata.", nil, float64(reconciliation.UnreferencedBytes))
 				observability.WriteGaugeMetric(w, "fugue_backup_provisional_objects", "Unreferenced R2 backup objects still inside failed-upload cleanup grace.", nil, float64(reconciliation.ProvisionalObjectCount))
 				observability.WriteGaugeMetric(w, "fugue_backup_provisional_bytes", "Unreferenced R2 backup bytes still inside failed-upload cleanup grace.", nil, float64(reconciliation.ProvisionalBytes))
