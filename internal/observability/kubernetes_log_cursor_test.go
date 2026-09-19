@@ -143,3 +143,26 @@ func TestCollectionBackpressureDefersReadsUntilQueueDrains(t *testing.T) {
 		t.Fatal("deferred source did not resume without loss")
 	}
 }
+
+func TestBacklogUsesUnreadRecordTimeInsteadOfIdleCursor(t *testing.T) {
+	var budget atomic.Int64
+	budget.Store(1)
+	ts := time.Now().UTC().Add(-time.Second).Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A concurrent reader spends the shared budget after this source opens.
+		budget.Store(0)
+		fmt.Fprintf(w, "%s newly-arrived\n", ts.Format(time.RFC3339Nano))
+	}))
+	defer server.Close()
+	client, _ := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	p := NewPipeline(Config{Enabled: true}, nil)
+	c := newKubernetesLogCollectorWithClient(p, client)
+	target := kubernetesLogTarget{pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "idle"}}, container: "app"}
+	old := ts.Add(-time.Hour)
+	c.cursors = map[string]kubernetesLogCursor{logTargetKey(target): {Time: old, Boundary: map[[32]byte]int{}}}
+	c.collectCursorTarget(t.Context(), target, &budget)
+	cur := c.cursors[logTargetKey(target)]
+	if !cur.Time.Equal(old) || !cur.PendingAt.Equal(ts) {
+		t.Fatalf("idle period reported as backlog or cursor advanced: %+v", cur)
+	}
+}

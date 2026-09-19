@@ -128,3 +128,9 @@ leaving one export batch of spare capacity for concurrent ingress. The telemetry
 export batch ceiling is 64 rather than 32 records, reducing sequential exporter
 round trips. Queue capacity, its critical reserve, the 16 MiB queued-byte limit
 and the 160 MiB Go memory target remain unchanged.
+
+Backlog age is the oldest observed unread record timestamp, not the age of
+an idle source cursor. It is published only after the complete collection
+cycle, retaining known pending records from targets not visited this cycle.
+`fugue_telemetry_pipeline_kubernetes_log_deferred_targets` makes incomplete
+traversal visible; zero observed backlog alone is not a completeness claim.

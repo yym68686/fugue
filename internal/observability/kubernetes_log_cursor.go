@@ -20,6 +20,7 @@ type kubernetesLogCursor struct {
 	Complete          bool
 	NextAttempt       time.Time
 	SourceUnavailable bool
+	PendingAt         time.Time
 }
 
 func logTargetFinishedAt(t kubernetesLogTarget) time.Time {
@@ -70,6 +71,7 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 	if budget.Load() <= 0 || parent.Err() != nil {
 		return
 	}
+	c.cycleVisited.Add(1)
 	key := logTargetKey(target)
 	now := time.Now().UTC()
 	c.cursorsMu.Lock()
@@ -148,18 +150,22 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 		}
 		if n >= int(c.pipeline.cfg.KubernetesLogTailLines) {
 			truncated = true
+			cur.PendingAt = ts
 			break
 		}
 		if budget.Add(-1) < 0 {
 			budget.Add(1)
 			truncated = true
+			cur.PendingAt = ts
 			break
 		}
 		if !c.pipeline.IngestLogLineWithAttributes(ctx, source, msg, attrs, ts) {
 			budget.Add(1)
 			truncated = true
+			cur.PendingAt = ts
 			break
 		}
+		cur.PendingAt = time.Time{}
 		n++
 		c.pipeline.kubernetesLogLines.Add(1)
 		if kubernetesLogPriorityMessage(msg) {
@@ -176,6 +182,7 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 		c.pipeline.recordError(fmt.Errorf("scan Kubernetes cursor logs: %w", err))
 	}
 	if err == nil && !invalid && !truncated {
+		cur.PendingAt = time.Time{}
 		cur.DrainedThrough = now
 		cur.Complete = !finished.IsZero()
 		cur.SourceUnavailable = false
@@ -184,9 +191,6 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 	if truncated {
 		if kubernetesLogPriorityTarget(target) {
 			c.pipeline.kubernetesPriorityTruncations.Add(1)
-		}
-		lag := time.Since(cur.Time).Milliseconds()
-		for old := c.pipeline.kubernetesLogBacklogMillis.Load(); lag > old && !c.pipeline.kubernetesLogBacklogMillis.CompareAndSwap(old, lag); old = c.pipeline.kubernetesLogBacklogMillis.Load() {
 		}
 	}
 	cur.Visited = now

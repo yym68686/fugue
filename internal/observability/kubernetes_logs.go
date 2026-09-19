@@ -41,6 +41,7 @@ type kubernetesLogCollector struct {
 	cursorsMu    sync.Mutex
 	cursors      map[string]kubernetesLogCursor
 	targetOffset int
+	cycleVisited atomic.Int64
 }
 
 type kubernetesLogTarget struct {
@@ -133,7 +134,7 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		return
 	}
 	started := time.Now()
-	c.pipeline.kubernetesLogBacklogMillis.Store(0)
+	c.cycleVisited.Store(0)
 	budget := int64(c.pipeline.cfg.KubernetesLogMaxLinesPerCycle)
 	// Pull only what can enter the ordinary queue. Keep one exporter batch
 	// of spare slots for concurrent OTLP traffic; critical capacity stays reserved.
@@ -186,6 +187,14 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		c.targetOffset = (c.targetOffset + 1) % len(targets)
 	}
 	c.cursorsMu.Lock()
+	var backlog int64
+	for _, target := range targets {
+		if cur, ok := c.cursors[logTargetKey(target)]; ok && !cur.PendingAt.IsZero() {
+			backlog = max(backlog, time.Since(cur.PendingAt).Milliseconds())
+		}
+	}
+	c.pipeline.kubernetesLogBacklogMillis.Store(backlog)
+	c.pipeline.kubernetesLogDeferredTargets.Store(max(int64(0), int64(len(targets))-c.cycleVisited.Load()))
 	for key, cur := range c.cursors {
 		if time.Since(cur.Visited) > time.Hour {
 			delete(c.cursors, key)
