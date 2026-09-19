@@ -108,7 +108,7 @@ checkpoint every second.
 
 The Kubernetes client now uses explicit bounded rate settings:
 `FUGUE_OBSERVABILITY_KUBERNETES_LOG_QPS` (40) and
-`FUGUE_OBSERVABILITY_KUBERNETES_LOG_BURST` (80), with eight workers, a global 2,000-line cycle limit and the same memory
+`FUGUE_OBSERVABILITY_KUBERNETES_LOG_BURST` (80), with eight workers, a global 4,000-line cycle limit and the same memory
 limits. The per-container ceiling is 1,000 lines; the previous 200-line
 ceiling could not keep up with a measured 1,072-line/minute source on a
 15-second interval. Busy sources borrow otherwise unused global capacity;
@@ -118,3 +118,7 @@ are no longer polled. Untimestamped kubelet unavailable-log responses are
 counted once per instance and retried after five minutes; old terminated
 instances outside the bootstrap window are not read. Source GC remains a real
 limit, not evidence that previously unavailable history was recovered.
+
+Live follow-up showed every 2,000-line cycle saturated while aggregate backlog
+grew. The 4,000-line bound leaves catch-up capacity without changing the
+15-second polling interval, Kubernetes QPS, queue size or memory bound.

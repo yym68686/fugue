@@ -24,7 +24,7 @@ const (
 	telemetryAgentBatchSize                    = 32
 	telemetryAgentKubernetesLogTailLines int64 = 1000
 	telemetryAgentKubernetesLogMaxPods         = observability.DefaultKubernetesLogMaxPods
-	telemetryAgentKubernetesLogMaxLines        = 2000
+	telemetryAgentKubernetesLogMaxLines        = 4000
 )
 
 func main() {
