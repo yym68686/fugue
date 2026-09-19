@@ -121,6 +121,7 @@ func TestPGListBackupUsageArtifactsIsUnpaginatedAndIncludesPhysicalState(t *test
 	physicalAttemptedAt := physicalDeletedAt.Add(-time.Minute)
 	artifact := model.NormalizeBackupArtifact(model.BackupArtifact{
 		ID:                "artifact_usage_pg",
+		Manifest:          model.BackupManifest{Metadata: map[string]string{"backup_target_url": "s3://bucket@auto/root/repository"}},
 		RunID:             "backup_run_usage_pg",
 		TenantID:          "tenant_usage_pg",
 		Target:            model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant_usage_pg", AppID: "app_usage_pg"},
@@ -134,7 +135,7 @@ func TestPGListBackupUsageArtifactsIsUnpaginatedAndIncludesPhysicalState(t *test
 		DeletedAt:         &deletedAt,
 	})
 
-	mock.ExpectQuery(`(?s)SELECT .*physical_deleted_at, physical_delete_attempted_at, physical_delete_error FROM fugue_backup_artifacts WHERE tenant_id = \$1 ORDER BY created_at ASC, id ASC$`).
+	mock.ExpectQuery(`(?s)SELECT .*physical_deleted_at, physical_delete_attempted_at, physical_delete_error, COALESCE\(manifest_json->'metadata'->>'backup_target_url', ''\) AS repository_target_url FROM fugue_backup_artifacts WHERE tenant_id = \$1 ORDER BY created_at ASC, id ASC$`).
 		WithArgs(artifact.TenantID).
 		WillReturnRows(backupUsageArtifactRows(physicalDeletedAt, physicalAttemptedAt, "", artifact))
 
@@ -144,6 +145,9 @@ func TestPGListBackupUsageArtifactsIsUnpaginatedAndIncludesPhysicalState(t *test
 	}
 	if len(artifacts) != 1 || artifacts[0].Artifact.ID != artifact.ID {
 		t.Fatalf("unexpected artifacts: %+v", artifacts)
+	}
+	if artifacts[0].Artifact.Manifest.Metadata["backup_target_url"] != "s3://bucket@auto/root/repository" {
+		t.Fatalf("lost narrow repository metadata projection: %+v", artifacts[0].Artifact.Manifest)
 	}
 	if artifacts[0].PhysicalDeletedAt == nil || !artifacts[0].PhysicalDeletedAt.Equal(physicalDeletedAt) || artifacts[0].PhysicalDeleteAttemptedAt == nil || !artifacts[0].PhysicalDeleteAttemptedAt.Equal(physicalAttemptedAt) {
 		t.Fatalf("physical state was not scanned: %+v", artifacts[0])
@@ -289,7 +293,7 @@ func backupGCRestorePlanRows(plans ...model.BackupRestorePlan) *sqlmock.Rows {
 }
 
 func backupUsageArtifactRows(physicalDeletedAt, physicalAttemptedAt time.Time, physicalError string, artifacts ...model.BackupArtifact) *sqlmock.Rows {
-	columns := []string{"id", "run_id", "tenant_id", "backend_id", "kind", "object_key", "manifest_object_key", "size_bytes", "status", "protected", "billable", "created_at", "deleted_at", "physical_deleted_at", "physical_delete_attempted_at", "physical_delete_error"}
+	columns := []string{"id", "run_id", "tenant_id", "backend_id", "kind", "object_key", "manifest_object_key", "size_bytes", "status", "protected", "billable", "created_at", "deleted_at", "physical_deleted_at", "physical_delete_attempted_at", "physical_delete_error", "repository_target_url"}
 	rows := sqlmock.NewRows(columns)
 	for _, artifact := range artifacts {
 		artifact = model.NormalizeBackupArtifact(artifact)
@@ -310,6 +314,7 @@ func backupUsageArtifactRows(physicalDeletedAt, physicalAttemptedAt time.Time, p
 			physicalDeletedAt,
 			physicalAttemptedAt,
 			physicalError,
+			artifact.Manifest.Metadata["backup_target_url"],
 		)
 	}
 	return rows

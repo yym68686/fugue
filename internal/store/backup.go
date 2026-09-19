@@ -3362,8 +3362,8 @@ func scanBackupUsageArtifact(scanner sqlRowScanner) (BackupUsageArtifact, error)
 	var artifact model.BackupArtifact
 	var tenantID, runID, backendID sql.NullString
 	var deletedAt, physicalDeletedAt, physicalDeleteAttemptedAt sql.NullTime
-	var physicalDeleteError string
-	if err := scanner.Scan(&artifact.ID, &runID, &tenantID, &backendID, &artifact.Kind, &artifact.ObjectKey, &artifact.ManifestObjectKey, &artifact.SizeBytes, &artifact.Status, &artifact.Protected, &artifact.Billable, &artifact.CreatedAt, &deletedAt, &physicalDeletedAt, &physicalDeleteAttemptedAt, &physicalDeleteError); err != nil {
+	var physicalDeleteError, repositoryTargetURL string
+	if err := scanner.Scan(&artifact.ID, &runID, &tenantID, &backendID, &artifact.Kind, &artifact.ObjectKey, &artifact.ManifestObjectKey, &artifact.SizeBytes, &artifact.Status, &artifact.Protected, &artifact.Billable, &artifact.CreatedAt, &deletedAt, &physicalDeletedAt, &physicalDeleteAttemptedAt, &physicalDeleteError, &repositoryTargetURL); err != nil {
 		return BackupUsageArtifact{}, mapDBErr(err)
 	}
 	if runID.Valid {
@@ -3377,6 +3377,9 @@ func scanBackupUsageArtifact(scanner sqlRowScanner) (BackupUsageArtifact, error)
 	}
 	if deletedAt.Valid {
 		artifact.DeletedAt = &deletedAt.Time
+	}
+	if repositoryTargetURL != "" {
+		artifact.Manifest.Metadata = map[string]string{"backup_target_url": repositoryTargetURL}
 	}
 	usageArtifact := BackupUsageArtifact{Artifact: model.NormalizeBackupArtifact(artifact), PhysicalDeleteError: physicalDeleteError}
 	if physicalDeletedAt.Valid {
@@ -5191,7 +5194,7 @@ func (s *Store) pgListBackupUsageArtifacts(tenantID string, platformAdmin bool) 
 	// Reconciliation needs only object identity and lifecycle fields. Avoid
 	// loading or decoding large manifest_json/target_json payloads for the
 	// complete, unpaginated history scan.
-	query := `SELECT id, run_id, tenant_id, backend_id, kind, object_key, manifest_object_key, size_bytes, status, protected, billable, created_at, deleted_at, physical_deleted_at, physical_delete_attempted_at, physical_delete_error FROM fugue_backup_artifacts`
+	query := `SELECT id, run_id, tenant_id, backend_id, kind, object_key, manifest_object_key, size_bytes, status, protected, billable, created_at, deleted_at, physical_deleted_at, physical_delete_attempted_at, physical_delete_error, COALESCE(manifest_json->'metadata'->>'backup_target_url', '') AS repository_target_url FROM fugue_backup_artifacts`
 	args := []any{}
 	if !platformAdmin {
 		args = append(args, tenantID)

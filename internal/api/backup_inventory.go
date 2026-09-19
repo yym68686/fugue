@@ -96,7 +96,7 @@ func backupInventoryKey(backends []model.BackupBackend) string {
 	sort.Slice(copyBackends, func(i, j int) bool { return copyBackends[i].ID < copyBackends[j].ID })
 	b, _ := json.Marshal(copyBackends)
 	h := sha256.Sum256(b)
-	return "backup-inventory/v2/" + hex.EncodeToString(h[:])
+	return "backup-inventory/v3/" + hex.EncodeToString(h[:])
 }
 
 // Repository blocks are owned by the snapshot engine, not by a single artifact.
