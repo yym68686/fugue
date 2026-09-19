@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +17,12 @@ const (
 	edgeControlRouteIntentTLSBindAddr  = ":8443"
 	edgeControlRouteIntentTLSDirectory = "/var/run/secrets/fugue-api-tls"
 )
+
+var edgeControlRouteIntentQuery = regexp.MustCompile(`^edge_group_id=edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+func validEdgeControlRouteIntentQuery(raw string) bool {
+	return raw == "" || (len(raw) <= len("edge_group_id=")+128 && edgeControlRouteIntentQuery.MatchString(raw))
+}
 
 type edgeControlRouteIntentTLSConfig struct {
 	BindAddr      string
@@ -74,7 +81,7 @@ func edgeControlRouteIntentTLSHandler(next http.Handler, serverName string) (htt
 			sni = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.TLS.ServerName)), ".")
 		}
 		if r.TLS == nil || sni != serverName || r.Method != http.MethodGet || r.URL.Path != edgeControlRouteIntentPathV1 ||
-			r.URL.RawQuery != "" || host != serverName {
+			!validEdgeControlRouteIntentQuery(r.URL.RawQuery) || host != serverName {
 			http.NotFound(w, r)
 			return
 		}

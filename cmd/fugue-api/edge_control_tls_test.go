@@ -38,6 +38,20 @@ func TestEdgeControlRouteIntentTLSHandlerExposesOnlyExactGET(t *testing.T) {
 	if recorder.Code != http.StatusNoContent || calls.Load() != 1 {
 		t.Fatalf("exact RouteIntent request was not served: status=%d calls=%d", recorder.Code, calls.Load())
 	}
+	request.URL.RawQuery = "edge_group_id=edge-group-test"
+	groupRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(groupRecorder, request)
+	if groupRecorder.Code != http.StatusNoContent || calls.Load() != 2 {
+		t.Fatalf("documented group query rejected by TLS boundary: status=%d calls=%d", groupRecorder.Code, calls.Load())
+	}
+	for _, query := range []string{"edge_group_id=", "edge_group_id=other", "edge_group_id=edge-group-test&scope=global", "edge_group_id=edge-group-test&edge_group_id=edge-group-other", "edge_group_id=%65dge-group-test", "edge_group_id=edge-group-TEST", "edge_group_id=edge-group-test;scope=global"} {
+		request.URL.RawQuery = query
+		bad := httptest.NewRecorder()
+		handler.ServeHTTP(bad, request)
+		if bad.Code != http.StatusNotFound {
+			t.Fatalf("unexpected TLS query admitted: %s status=%d", query, bad.Code)
+		}
+	}
 
 	for _, test := range []struct {
 		method string
@@ -70,7 +84,7 @@ func TestEdgeControlRouteIntentTLSHandlerExposesOnlyExactGET(t *testing.T) {
 	if wrongSNIRecorder.Code != http.StatusNotFound {
 		t.Fatalf("wrong SNI reached RouteIntent handler: status=%d", wrongSNIRecorder.Code)
 	}
-	if calls.Load() != 1 {
+	if calls.Load() != 2 {
 		t.Fatalf("rejected request reached API handler: calls=%d", calls.Load())
 	}
 }
