@@ -104,3 +104,42 @@ func TestCursorUnavailableLogBodyIsCountedOnceAndBacksOff(t *testing.T) {
 		t.Fatal("unavailable body replayed or ingested")
 	}
 }
+
+func TestCollectionBackpressureDefersReadsUntilQueueDrains(t *testing.T) {
+	var logReads atomic.Int32
+	ts := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/pods" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"namespace":"ns","name":"pod"},"spec":{"containers":[{"name":"app"}]}}]}`)
+			return
+		}
+		logReads.Add(1)
+		for i := 0; i < 4; i++ {
+			fmt.Fprintf(w, "%s pending-%d\n", ts.Add(time.Duration(i)*time.Second).Format(time.RFC3339Nano), i)
+		}
+	}))
+	defer server.Close()
+	client, _ := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	p := NewPipeline(Config{Enabled: true, QueueSize: 8, BatchSize: 2}, nil)
+	for i := 0; i < 7; i++ {
+		if !p.IngestLogLine(t.Context(), "test", "queued") {
+			t.Fatal("fixture queue admission failed")
+		}
+	}
+	c := newKubernetesLogCollectorWithClient(p, client)
+	c.collectOnce(t.Context())
+	if logReads.Load() != 0 || p.dropped.Load() != 0 {
+		t.Fatal("full queue caused speculative reads/drops")
+	}
+	for len(p.queue) > 0 {
+		q := <-p.queue
+		p.ordinaryQueuedSlots.Add(-1)
+		p.queueDepth.Add(-1)
+		p.queuedBytes.Add(-int64(len(q.payload)))
+	}
+	c.collectOnce(t.Context())
+	if logReads.Load() != 1 || p.kubernetesLogLines.Load() != 4 || p.dropped.Load() != 0 {
+		t.Fatal("deferred source did not resume without loss")
+	}
+}

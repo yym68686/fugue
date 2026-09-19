@@ -122,3 +122,9 @@ limit, not evidence that previously unavailable history was recovered.
 Live follow-up showed every 2,000-line cycle saturated while aggregate backlog
 grew. The 4,000-line bound leaves catch-up capacity without changing the
 15-second polling interval, Kubernetes QPS, queue size or memory bound.
+
+The final log reader budgets each cycle against available ordinary queue slots,
+leaving one export batch of spare capacity for concurrent ingress. The telemetry
+export batch ceiling is 64 rather than 32 records, reducing sequential exporter
+round trips. Queue capacity, its critical reserve, the 16 MiB queued-byte limit
+and the 160 MiB Go memory target remain unchanged.

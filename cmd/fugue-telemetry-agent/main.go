@@ -21,7 +21,7 @@ const (
 	telemetryAgentGoMemoryLimitBytes     int64 = 160 << 20
 	telemetryAgentMemoryLimitBytes       int64 = 16 << 20
 	telemetryAgentQueueSize                    = 4096
-	telemetryAgentBatchSize                    = 32
+	telemetryAgentBatchSize                    = 64
 	telemetryAgentKubernetesLogTailLines int64 = 1000
 	telemetryAgentKubernetesLogMaxPods         = observability.DefaultKubernetesLogMaxPods
 	telemetryAgentKubernetesLogMaxLines        = 4000

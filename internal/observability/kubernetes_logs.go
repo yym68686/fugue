@@ -135,6 +135,15 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	started := time.Now()
 	c.pipeline.kubernetesLogBacklogMillis.Store(0)
 	budget := int64(c.pipeline.cfg.KubernetesLogMaxLinesPerCycle)
+	// Pull only what can enter the ordinary queue. Keep one exporter batch
+	// of spare slots for concurrent OTLP traffic; critical capacity stays reserved.
+	ordinaryLimit := int64(cap(c.pipeline.queue))
+	if ordinaryLimit >= telemetryCriticalQueueReserveDivisor {
+		ordinaryLimit -= ordinaryLimit / telemetryCriticalQueueReserveDivisor
+	}
+	spare := min(int64(c.pipeline.cfg.BatchSize), ordinaryLimit/8)
+	available := max(int64(0), ordinaryLimit-c.pipeline.ordinaryQueuedSlots.Load()-spare)
+	budget = min(budget, available)
 	var remaining atomic.Int64
 	remaining.Store(budget)
 	workers := min(8, len(targets))
