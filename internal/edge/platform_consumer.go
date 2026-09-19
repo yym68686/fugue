@@ -123,9 +123,6 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 			s.mu.Unlock()
 		}
 		if err := s.SyncPlatformServingOnce(ctx); err != nil && ctx.Err() == nil {
-			s.mu.Lock()
-			s.platformServing.State, s.platformServing.LastError = "failed", err.Error()
-			s.mu.Unlock()
 			s.Logger.Printf("edge traffic serving verification failed: %v", err)
 		}
 		select {

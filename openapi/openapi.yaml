@@ -50,6 +50,13 @@ x-fugue-traffic-serving-evidence:
     Durable receipts record artifact references and fresh probe results; restarts
     always probe again. These receipts do not promote a verified LKG. Failed or
     stale observations never become applied/passed, and shadow remains separate.
+    Once signed route/TLS inputs and policy are verified, failed apply, durable
+    cache or probe checks promptly report failed route and TLS facts for the
+    still-current serving assignment. Replaced assignments, inactive workers,
+    changed bundles and unverified inputs cannot report against another release.
+    Positive and negative reports share a durable monotonic cursor, while
+    negative reports preserve the last positive receipt and serving bundle.
+    Failed observation discards volatile positive evidence before any retry.
 x-fugue-traffic-verified-recovery:
   semantics: >-
     A TrafficReleaseSet can establish its first verified LKG from an explicit

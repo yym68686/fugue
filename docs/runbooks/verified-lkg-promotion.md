@@ -115,3 +115,18 @@ fresh evidence even when restoring an older artifact. A replay, frozen lane,
 changed topology, bad signature or revoked publication preserves the previous
 trusted fact. PostgreSQL serializes backwards transitions with publication and
 verification; it never upgrades a shared advisory lock while holding row locks.
+
+### Failed Edge serving observations
+
+Active Workers read the current applicable serving assignment, including gray/full
+precedence. After signed parent, route, TLS and policy validation, an apply, cache
+or readiness failure promptly submits failed route and TLS heartbeats. These
+facts carry no unverified actual/LKG generation. The observer rechecks assignment,
+activation and loaded binding before reporting; an inactive or superseded Worker
+cannot revoke another publication's facts.
+
+Success and failure share a durable monotonic cursor. Failures retain the last
+positive receipt and existing serving bundle, discard volatile positive evidence,
+and force fresh probing on recovery. If credentials, immutable inputs or cursor
+persistence are unavailable, no success is claimed; central freshness expiry
+remains the fallback when a negative fact cannot be delivered.

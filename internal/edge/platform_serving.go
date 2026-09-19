@@ -60,9 +60,19 @@ func (s *Service) SyncPlatformServingOnce(ctx context.Context) error {
 	return s.syncPlatformServingOnce(ctx, s.probePlatformServingRoute, probePlatformTLS)
 }
 
-func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platformServingRouteProbe, tlsProbe platformTLSProbe) error {
+func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platformServingRouteProbe, tlsProbe platformTLSProbe) (result error) {
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
+	defer func() {
+		if result != nil {
+			s.platformServingEvidence = nil
+			if ctx.Err() == nil {
+				s.mu.Lock()
+				s.platformServing.State, s.platformServing.LastError = "failed", result.Error()
+				s.mu.Unlock()
+			}
+		}
+	}()
 	selection, err := s.selectRouteBundleSource()
 	if err != nil {
 		return err
@@ -79,7 +89,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		return err
 	}
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
-	id, a, artifact, release, err := client.SyncChannel(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindEdgeRouteBundle, b.ReleaseChannel)
+	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
 	}
@@ -98,7 +108,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	if _, err = s.verifyPlatformRouteCandidate(artifact, a, release); err != nil {
 		return err
 	}
-	_, ta, tlsArtifact, tr, err := client.SyncChannel(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindCaddyRouteConfig, b.ReleaseChannel)
+	_, ta, tlsArtifact, tr, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindCaddyRouteConfig)
 	if err != nil {
 		return err
 	}
@@ -126,6 +136,19 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	if policy == nil || platformconfig.ValidateReadinessProbePolicy(policy) != nil {
 		return errors.New("serving verification requires signed probe policy")
 	}
+	// Only verified immutable inputs authorize facts. Runtime failures below
+	// revoke positive convergence promptly, without changing the executor or LKG.
+	defer func() {
+		if result == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if reportErr := s.reportPlatformServingFailure(ctx, client, id, bundle, selection, []model.PlatformConsumerAssignment{a, ta}); reportErr != nil {
+			result = errors.Join(result, reportErr)
+		}
+	}()
 	if err = s.validatePlatformServingBundle(bundle, projection); err != nil {
 		return err
 	}
@@ -157,10 +180,10 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	if readiness == nil || readiness.Probes == 0 || readiness.ReadyProbes != readiness.Probes {
 		return errors.New("traffic TLS readiness is incomplete")
 	}
-	if err = client.CheckAssignment(ctx, id, a); err != nil {
+	if err = client.CheckServingAssignment(ctx, id, a); err != nil {
 		return err
 	}
-	if err = client.CheckAssignment(ctx, id, ta); err != nil {
+	if err = client.CheckServingAssignment(ctx, id, ta); err != nil {
 		return err
 	}
 	currentSelection, err := s.selectRouteBundleSource()
@@ -174,16 +197,12 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	if strings.TrimSpace(s.Config.CachePath) == "" {
 		return errors.New("traffic serving receipt path unavailable")
 	}
-	var previous platformServingReceipt
-	if raw, e := platformconsumer.ReadFile(path, 16<<20); e == nil {
-		if json.Unmarshal(raw, &previous) != nil || previous.Sequence <= 0 || previous.Sequence == math.MaxInt64 {
-			return errors.New("traffic serving cursor corrupt")
-		}
-	} else if !errors.Is(e, os.ErrNotExist) {
-		return e
+	sequence, err := s.nextPlatformServingSequence()
+	if err != nil {
+		return err
 	}
 	tlsCandidate.TLSReadiness = tlsEvidence
-	receipt := platformServingReceipt{Schema: "fugue.edge.traffic-serving/v1", Route: routeCandidate, TLS: tlsCandidate, BundleVersion: bundle.Version, Probes: probes, Sequence: max(previous.Sequence+1, time.Now().UnixNano()), VerifiedAt: verifiedAt}
+	receipt := platformServingReceipt{Schema: "fugue.edge.traffic-serving/v1", Route: routeCandidate, TLS: tlsCandidate, BundleVersion: bundle.Version, Probes: probes, Sequence: sequence, VerifiedAt: verifiedAt}
 	raw, err := json.Marshal(receipt)
 	if err != nil {
 		return err
@@ -199,7 +218,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		if err = s.validatePlatformServingBundle(bundle, projection); err != nil {
 			return err
 		}
-		if err = client.CheckAssignment(ctx, id, assigned); err != nil {
+		if err = client.CheckServingAssignment(ctx, id, assigned); err != nil {
 			return err
 		}
 		for _, proof := range probes {
@@ -211,27 +230,114 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		if fresh == nil || fresh.ReadyProbes != fresh.Probes {
 			return errors.New("traffic TLS evidence expired before report")
 		}
-		nonce := make([]byte, 16)
-		if _, err = rand.Read(nonce); err != nil {
+		if err = s.reportPlatformServingFact(ctx, client, id, assigned, receipt.Sequence, true); err != nil {
 			return err
-		}
-		h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.Component + ":" + id.NodeID, Component: id.Component, NodeID: id.NodeID, ArtifactKind: assigned.ArtifactKind, ScopeKey: assigned.ScopeKey, ReleaseSetID: assigned.ReleaseSetID, ExpectedConsumerSetID: assigned.ExpectedConsumerSetID, FencingToken: assigned.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", CompatibilityCapabilities: []string{"caddy_apply_probe"}, Sequence: receipt.Sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assigned.GenerationSequence, DesiredGeneration: assigned.ExpectedGeneration, ActualGeneration: assigned.ExpectedGeneration, LKGGeneration: s.Status().LKGGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
-		h.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
-		if err != nil {
-			return err
-		}
-		var accepted model.PlatformConsumerHeartbeatResponse
-		if err = client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id.Token, h, &accepted); err != nil {
-			return err
-		}
-		if !accepted.Consumer.IdentityVerified || accepted.Consumer.ConsumerID != h.ConsumerID || accepted.Consumer.Sequence != h.Sequence || accepted.Consumer.EvidenceHash != h.EvidenceHash || accepted.Consumer.ExpectedConsumerSetID != h.ExpectedConsumerSetID {
-			return errors.New("traffic serving receipt acknowledgement mismatch")
 		}
 	}
 	s.platformServingEvidence = &receipt
 	s.mu.Lock()
 	s.platformServing = PlatformServingStatus{State: "serving_verified", TrafficRelease: trafficbinding.Clone(b), BundleVersion: bundle.Version, RouteProbes: len(probes), TLSProbes: readiness.Probes, VerifiedAt: receipt.VerifiedAt, ReportedAt: time.Now().UTC()}
 	s.mu.Unlock()
+	return nil
+}
+
+// Success and failure facts share a cursor, independent of the positive receipt.
+// The previous receipt supplies the migration floor but is never overwritten by
+// a failure. The caller holds platformConsumerMu through persistence/reporting.
+func (s *Service) nextPlatformServingSequence() (int64, error) {
+	if strings.TrimSpace(s.Config.CachePath) == "" {
+		return 0, errors.New("traffic serving cursor path unavailable")
+	}
+	var previous platformServingReceipt
+	if raw, err := platformconsumer.ReadFile(s.Config.CachePath+".platform-serving.json", 16<<20); err == nil {
+		if json.Unmarshal(raw, &previous) != nil || previous.Sequence <= 0 {
+			return 0, errors.New("traffic serving receipt cursor corrupt")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	path := s.Config.CachePath + ".platform-serving-cursor.json"
+	var persisted int64
+	if raw, err := platformconsumer.ReadFile(path, 1024); err == nil {
+		if json.Unmarshal(raw, &persisted) != nil || persisted <= 0 {
+			return 0, errors.New("traffic serving cursor corrupt")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	last := max(previous.Sequence, persisted)
+	if last == math.MaxInt64 {
+		return 0, errors.New("traffic serving cursor exhausted")
+	}
+	sequence := max(last+1, time.Now().UnixNano())
+	raw, _ := json.Marshal(sequence)
+	if err := lkgcache.AtomicWriteFile(path, raw, 0600); err != nil {
+		return 0, err
+	}
+	return sequence, nil
+}
+
+func (s *Service) reportPlatformServingFailure(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, bundle model.EdgeRouteBundle, selection routeSourceSelection, assignments []model.PlatformConsumerAssignment) error {
+	current := func() error {
+		selected, err := s.selectRouteBundleSource()
+		actual, ok := s.Bundle()
+		if err != nil || selected != selection || selected.candidate || !ok || actual.Version != bundle.Version || !reflect.DeepEqual(actual.TrafficRelease, bundle.TrafficRelease) {
+			return errors.New("traffic failure observation activation or bundle changed")
+		}
+		return nil
+	}
+	if err := current(); err != nil {
+		return err
+	}
+	for _, a := range assignments {
+		if err := client.CheckServingAssignment(ctx, id, a); err != nil {
+			return err
+		}
+	}
+	sequence, err := s.nextPlatformServingSequence()
+	if err != nil {
+		return err
+	}
+	var reports error
+	for _, a := range assignments {
+		if err := current(); err != nil {
+			return errors.Join(reports, err)
+		}
+		if err := client.CheckServingAssignment(ctx, id, a); err != nil {
+			return errors.Join(reports, err)
+		}
+		reports = errors.Join(reports, s.reportPlatformServingFact(ctx, client, id, a, sequence, false))
+	}
+	if reports == nil {
+		s.mu.Lock()
+		s.platformServing.ReportedAt = time.Now().UTC()
+		s.mu.Unlock()
+	}
+	return reports
+}
+
+func (s *Service) reportPlatformServingFact(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, assigned model.PlatformConsumerAssignment, sequence int64, positive bool) error {
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return err
+	}
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.Component + ":" + id.NodeID, Component: id.Component, NodeID: id.NodeID, ArtifactKind: assigned.ArtifactKind, ScopeKey: assigned.ScopeKey, ReleaseSetID: assigned.ReleaseSetID, ExpectedConsumerSetID: assigned.ExpectedConsumerSetID, FencingToken: assigned.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", CompatibilityCapabilities: []string{"caddy_apply_probe"}, Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assigned.GenerationSequence, DesiredGeneration: assigned.ExpectedGeneration, ApplyStatus: "failed", ProbeStatus: "failed", LastError: "traffic serving apply, cache or readiness verification failed"}
+	if positive {
+		h.ActualGeneration, h.LKGGeneration = assigned.ExpectedGeneration, s.Status().LKGGeneration
+		h.ApplyStatus, h.ProbeStatus, h.LastError = "applied", "passed", ""
+	}
+	var err error
+	h.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
+	if err != nil {
+		return err
+	}
+	var accepted model.PlatformConsumerHeartbeatResponse
+	if err = client.PostJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id.Token, h, &accepted); err != nil {
+		return err
+	}
+	if !accepted.Consumer.IdentityVerified || accepted.Consumer.ConsumerID != h.ConsumerID || accepted.Consumer.Sequence != h.Sequence || accepted.Consumer.EvidenceHash != h.EvidenceHash || accepted.Consumer.ExpectedConsumerSetID != h.ExpectedConsumerSetID {
+		return errors.New("traffic serving receipt acknowledgement mismatch")
+	}
 	return nil
 }
 
