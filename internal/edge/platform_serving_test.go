@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,9 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 					var h platformcontrol.PlatformConsumerHeartbeatEnvelope
 					if err := json.NewDecoder(r.Body).Decode(&h); err != nil {
 						t.Fatal(err)
+					}
+					if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) {
+						t.Error("executor capability missing")
 					}
 					reports = append(reports, h)
 					if rejectReport && h.ArtifactKind == route.ArtifactKind {

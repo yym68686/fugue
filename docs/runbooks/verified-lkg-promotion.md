@@ -130,3 +130,16 @@ positive receipt and existing serving bundle, discard volatile positive evidence
 and force fresh probing on recovery. If credentials, immutable inputs or cursor
 persistence are unavailable, no success is claimed; central freshness expiry
 remains the fallback when a negative fact cannot be delivered.
+
+### Executor compatibility evidence
+
+The versioned `traffic_release_v1` capability is declared by the executor in its
+trusted heartbeat, including shadow observations. It is scoped to the reported
+artifact kind: route/TLS declares signed parent authority, durable Caddy apply,
+actual probes, negative facts and recovery; DNS declares atomic zone snapshots,
+value expiration, answer-time proof expiry and recovery. Capability data is part
+of the heartbeat evidence hash. It never establishes applied/passed or LKG and
+must not be copied from a desired assignment. Admission must combine fresh,
+authenticated capability evidence with the current required topology and all
+existing release checks; this declaration alone does not remove the DNS lease
+publication guard.

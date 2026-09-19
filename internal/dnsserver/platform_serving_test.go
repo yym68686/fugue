@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +144,9 @@ func TestDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T) 
 		case "/v1/platform-state/consumers/trusted-heartbeat":
 			var h platformcontrol.PlatformConsumerHeartbeatEnvelope
 			json.NewDecoder(r.Body).Decode(&h)
+			if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) {
+				t.Error("executor capability missing")
+			}
 			if h.ApplyStatus != "applied" || (h.ProbeStatus != "passed" && !(allowFailed && h.ProbeStatus == "failed")) {
 				t.Error("invalid receipt")
 			}

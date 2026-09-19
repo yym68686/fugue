@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -153,7 +154,7 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 				return
 			}
 			hash, _ := platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
-			if h.Sequence <= lastSequence || hash != h.EvidenceHash || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.ActualGeneration == h.DesiredGeneration {
+			if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) || h.Sequence <= lastSequence || hash != h.EvidenceHash || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.ActualGeneration == h.DesiredGeneration {
 				t.Errorf("false shadow evidence: %+v", h)
 			}
 			lastSequence = h.Sequence

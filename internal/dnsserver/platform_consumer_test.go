@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -111,7 +112,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 				t.Fatal("heartbeat decode")
 			}
 			digest, _ := platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
-			if h.Sequence <= lastSequence || h.EvidenceHash != digest || h.ApplyStatus != "staged" || h.ProbeStatus == "passed" || h.ActualGeneration != "legacy-generation" || h.DesiredGeneration != assignment.ExpectedGeneration {
+			if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) || h.Sequence <= lastSequence || h.EvidenceHash != digest || h.ApplyStatus != "staged" || h.ProbeStatus == "passed" || h.ActualGeneration != "legacy-generation" || h.DesiredGeneration != assignment.ExpectedGeneration {
 				t.Errorf("shadow produced false serving evidence: %+v", h)
 			}
 			lastSequence = h.Sequence

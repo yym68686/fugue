@@ -205,8 +205,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return err
 	}
 	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.Component + ":" + id.NodeID, Component: id.Component, NodeID: id.NodeID, ArtifactKind: assignment.ArtifactKind, ScopeKey: assignment.ScopeKey, ReleaseSetID: assignment.ReleaseSetID, ExpectedConsumerSetID: assignment.ExpectedConsumerSetID, FencingToken: assignment.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1, Sequence: c.Sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assignment.GenerationSequence, DesiredGeneration: assignment.ExpectedGeneration, ActualGeneration: status.ServingGeneration, CandidateGeneration: assignment.ExpectedGeneration, LKGGeneration: status.LKGGeneration, ApplyStatus: "staged", ProbeStatus: "shadow_validated", ServingLKG: status.StaleCache, LKGExpired: status.MaxStaleExceeded}
+	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1}
 	if strings.TrimSpace(status.CaddyAppliedVersion) == strings.TrimSpace(status.BundleVersion) && strings.TrimSpace(status.CaddyLastError) == "" && s.metricSnapshot().Metrics.CaddyRouteCount > 0 {
-		h.CompatibilityCapabilities = []string{"caddy_apply_probe"}
+		h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, "caddy_apply_probe")
 	}
 	h.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	if err != nil {

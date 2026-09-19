@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -164,7 +165,7 @@ func TestTLSShadowConsumerPreservesServingAndDurableCursor(t *testing.T) {
 				t.Fatal("invalid heartbeat")
 			}
 			hash, _ := platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
-			if h.Sequence <= lastSequence || hash != h.EvidenceHash || h.ArtifactKind != tls.Artifact.ArtifactKind || h.ExpectedConsumerSetID != tls.Assignment.ExpectedConsumerSetID || h.CandidateGeneration != tls.Artifact.Generation || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.ActualGeneration != "" || h.LKGGeneration != "" || h.ServingLKG || len(h.CompatibilityCapabilities) != 0 {
+			if h.Sequence <= lastSequence || hash != h.EvidenceHash || h.ArtifactKind != tls.Artifact.ArtifactKind || h.ExpectedConsumerSetID != tls.Assignment.ExpectedConsumerSetID || h.CandidateGeneration != tls.Artifact.Generation || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.ActualGeneration != "" || h.LKGGeneration != "" || h.ServingLKG || !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) {
 				t.Errorf("false TLS shadow evidence: %+v", h)
 			}
 			lastSequence = h.Sequence

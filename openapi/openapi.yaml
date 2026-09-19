@@ -73,6 +73,18 @@ x-fugue-traffic-verified-recovery:
     each release lane: changing channels with an equal fence requires the same
     current-publication proof as changing to a lower fence; global heartbeat
     sequence, artifact sequence, timestamps and nonce replay checks stay intact.
+x-fugue-traffic-consumer-capability:
+  semantics: >-
+    traffic_release_v1 in a verified consumer heartbeat declares support for
+    that heartbeat's artifact kind under signed parent ReleaseSet authority,
+    current serving assignment, explicit rollback and persistent recovery.
+    For DNS this includes per-value expiration, answer-time route/TLS lease
+    checks and atomic multi-zone serving. Edge includes durable Caddy apply,
+    local route/TLS probes and prompt negative facts. Capability is included
+    in the authenticated evidence hash and can be observed in shadow before
+    activation; it is not proof of apply, probe success or a positive LKG.
+    Only the executor declares support; clients cannot inherit capabilities
+    from desired assignments. Existing staged/shadow facts remain non-passing.
 x-fugue-traffic-consumer-rollback:
   semantics: >-
     A trusted traffic consumer can report an older artifact generation only

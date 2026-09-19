@@ -374,6 +374,7 @@ func (s *Service) reportDNSServingState(ctx context.Context, client platformcons
 		return err
 	}
 	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.Component + ":" + id.NodeID, Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
+	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1}
 	if !positive {
 		h.ProbeStatus = "failed"
 		h.LastError = "DNS serving readiness or listener probe failed"

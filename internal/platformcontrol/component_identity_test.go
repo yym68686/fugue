@@ -366,6 +366,13 @@ func TestValidatePlatformConsumerHeartbeatRejectsBadTimeAndEvidence(t *testing.T
 			wantErr: ErrPlatformConsumerHeartbeatStale,
 		},
 		{
+			name: "tampered executor capability",
+			mutate: func(candidate *PlatformConsumerHeartbeatEnvelope) {
+				candidate.CompatibilityCapabilities = []string{TrafficReleaseCapabilityV1}
+			},
+			wantErr: ErrPlatformConsumerHeartbeatEvidence,
+		},
+		{
 			name: "tampered evidence",
 			mutate: func(candidate *PlatformConsumerHeartbeatEnvelope) {
 				candidate.ActualGeneration = "generation-tampered"
