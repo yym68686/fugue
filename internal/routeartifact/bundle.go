@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/routebinding"
+	"fugue/internal/trafficbinding"
 )
 
 // MaterializeForGroup builds detached executor input from an immutable artifact.
@@ -20,12 +21,25 @@ func MaterializeForGroup(artifact model.PlatformArtifact, groupID string) (model
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
+	return MaterializeSnapshotForGroup(snapshot, groupID)
+}
+
+func MaterializeSnapshotForGroup(snapshot model.EdgeRouteIntentSnapshot, groupID string) (model.EdgeRouteBundle, error) {
+	if !platformRouteArtifactGroupID.MatchString(groupID) || snapshot.Generation == "" {
+		return model.EdgeRouteBundle{}, fmt.Errorf("route materialization requires group and generation")
+	}
+	if err := trafficbinding.ValidateProjection(snapshot); err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
+	if err := trafficbinding.ValidateGroup(snapshot.TrafficRelease, groupID, false); err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
 	if len(snapshot.Routes) == 0 {
 		return model.EdgeRouteBundle{}, fmt.Errorf("candidate route index is empty")
 	}
 	bundle := model.EdgeRouteBundle{
-		SchemaVersion: model.BundleSchemaVersionV1, Version: artifact.Generation,
-		Generation: artifact.Generation, EdgeGroupID: groupID,
+		SchemaVersion: model.BundleSchemaVersionV1, Version: snapshot.Generation,
+		Generation: snapshot.Generation, TrafficRelease: trafficbinding.Clone(snapshot.TrafficRelease), EdgeGroupID: groupID,
 		Routes: make([]model.EdgeRouteBinding, 0, len(snapshot.Routes)),
 	}
 	used := map[string]bool{}

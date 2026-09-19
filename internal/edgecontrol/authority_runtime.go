@@ -57,7 +57,7 @@ func (runtime *AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeB
 		}
 	}
 	now := time.Now().UTC()
-	if runtime.cachedBatchValid(snapshot.Generation, inventoryDigest, inventoryKnown, now) {
+	if runtime.cachedBatchValid(routeIntentSemanticDigest(snapshot), inventoryDigest, inventoryKnown, now) {
 		runtime.mu.Lock()
 		batch := runtime.lastBatch
 		runtime.mu.Unlock()
@@ -73,7 +73,7 @@ func (runtime *AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeB
 	}
 	batch := AuthorityRuntimeBatch{Compiled: compiled, Published: published}
 	runtime.mu.Lock()
-	runtime.lastRouteIntentGen = snapshot.Generation
+	runtime.lastRouteIntentGen = routeIntentSemanticDigest(snapshot)
 	runtime.lastInventoryDigest = inventoryDigest
 	runtime.lastInventoryKnown = inventoryKnown
 	runtime.lastReconcileAt = now

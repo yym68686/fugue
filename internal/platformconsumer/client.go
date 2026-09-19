@@ -187,3 +187,29 @@ func ReadFile(path string, limit int64) ([]byte, error) {
 	}
 	return raw, nil
 }
+
+// ReleaseSet downloads the exact signed parent through an existing child
+// assignment; this never broadens the caller's scope or artifact capability.
+func (c Client) ReleaseSet(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease) (model.PlatformArtifact, error) {
+	if a.ReleaseSetID == "" || a.ExpectedConsumerSetID == "" || id.ScopeKey != a.ScopeKey || !slices.Contains(id.ArtifactKinds, a.ArtifactKind) {
+		return model.PlatformArtifact{}, errors.New("parent assignment identity invalid")
+	}
+	base, err := url.Parse(strings.TrimSpace(c.BaseURL))
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil {
+		return model.PlatformArtifact{}, errors.New("platform API endpoint is invalid")
+	}
+	base.RawQuery, base.Fragment = "", ""
+	endpoint := strings.TrimRight(base.String(), "/") + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(a.ReleaseSetID) + "?expected_consumer_set_id=" + url.QueryEscape(a.ExpectedConsumerSetID)
+	var reply struct {
+		Artifact   model.PlatformArtifact           `json:"artifact"`
+		Assignment model.PlatformConsumerAssignment `json:"assignment"`
+		Release    model.PlatformArtifactRelease    `json:"release"`
+	}
+	if err := c.json(ctx, endpoint, id.Token, http.MethodGet, nil, &reply); err != nil {
+		return model.PlatformArtifact{}, err
+	}
+	if !reflect.DeepEqual(reply.Assignment, a) || !reflect.DeepEqual(reply.Release, r) || reply.Artifact.ID != a.ReleaseSetID || reply.Artifact.ArtifactKind != model.PlatformArtifactKindReleaseSet || reply.Artifact.ScopeKey != a.ScopeKey {
+		return model.PlatformArtifact{}, errors.New("parent release binding changed")
+	}
+	return reply.Artifact, nil
+}

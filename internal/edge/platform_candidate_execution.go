@@ -20,7 +20,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
-	"fugue/internal/routeartifact"
 	"fugue/internal/routeproof"
 )
 
@@ -30,27 +29,28 @@ const candidateRouteHeader = "X-Fugue-Candidate-Route"
 
 // This receipt attests a completed isolated execution, never a serving LKG.
 type PlatformCandidateExecution struct {
-	Schema                string    `json:"schema"`
-	Mode                  string    `json:"mode"`
-	Result                string    `json:"result"`
-	ArtifactID            string    `json:"artifact_id"`
-	ArtifactDigest        string    `json:"artifact_digest"`
-	ArtifactGeneration    string    `json:"artifact_generation"`
-	NodeID                string    `json:"node_id"`
-	EdgeGroupID           string    `json:"edge_group_id"`
-	ReleaseSetID          string    `json:"release_set_id"`
-	ExpectedConsumerSetID string    `json:"expected_consumer_set_id"`
-	GenerationSequence    int64     `json:"generation_sequence"`
-	FencingToken          int64     `json:"fencing_token"`
-	RouteIndexDigest      string    `json:"route_index_digest"`
-	CaddyConfigDigest     string    `json:"caddy_config_digest"`
-	ProbeCount            int       `json:"probe_count"`
-	ObservedAt            time.Time `json:"observed_at"`
-	ExpiresAt             time.Time `json:"expires_at"`
-	Serving               bool      `json:"serving"`
-	TLSVerified           bool      `json:"tls_verified"`
-	OriginVerified        bool      `json:"origin_verified"`
-	ReceiptDigest         string    `json:"receipt_digest,omitempty"`
+	TrafficRelease        *model.TrafficReleaseBinding `json:"traffic_release,omitempty"`
+	Schema                string                       `json:"schema"`
+	Mode                  string                       `json:"mode"`
+	Result                string                       `json:"result"`
+	ArtifactID            string                       `json:"artifact_id"`
+	ArtifactDigest        string                       `json:"artifact_digest"`
+	ArtifactGeneration    string                       `json:"artifact_generation"`
+	NodeID                string                       `json:"node_id"`
+	EdgeGroupID           string                       `json:"edge_group_id"`
+	ReleaseSetID          string                       `json:"release_set_id"`
+	ExpectedConsumerSetID string                       `json:"expected_consumer_set_id"`
+	GenerationSequence    int64                        `json:"generation_sequence"`
+	FencingToken          int64                        `json:"fencing_token"`
+	RouteIndexDigest      string                       `json:"route_index_digest"`
+	CaddyConfigDigest     string                       `json:"caddy_config_digest"`
+	ProbeCount            int                          `json:"probe_count"`
+	ObservedAt            time.Time                    `json:"observed_at"`
+	ExpiresAt             time.Time                    `json:"expires_at"`
+	Serving               bool                         `json:"serving"`
+	TLSVerified           bool                         `json:"tls_verified"`
+	OriginVerified        bool                         `json:"origin_verified"`
+	ReceiptDigest         string                       `json:"receipt_digest,omitempty"`
 }
 
 func (receipt PlatformCandidateExecution) digest() (string, error) {
@@ -71,7 +71,7 @@ func (receipt PlatformCandidateExecution) matches(artifact model.PlatformArtifac
 		!receipt.Serving && !receipt.TLSVerified && !receipt.OriginVerified
 }
 
-func (s *Service) executePlatformCandidate(ctx context.Context, artifact model.PlatformArtifact, assignment model.PlatformConsumerAssignment, indexDigest string) (*PlatformCandidateExecution, error) {
+func (s *Service) executePlatformCandidate(ctx context.Context, artifact model.PlatformArtifact, assignment model.PlatformConsumerAssignment, indexDigest string, snapshots ...model.EdgeRouteIntentSnapshot) (*PlatformCandidateExecution, error) {
 	if !s.Config.CaddyEnabled {
 		return nil, nil
 	}
@@ -81,7 +81,7 @@ func (s *Service) executePlatformCandidate(ctx context.Context, artifact model.P
 	if previous != nil && previous.matches(artifact, assignment, s.Config.EdgeID, s.Config.EdgeGroupID, indexDigest, time.Now().UTC()) {
 		return previous, nil
 	}
-	bundle, err := routeartifact.MaterializeForGroup(artifact, s.Config.EdgeGroupID)
+	bundle, err := materializePlatformRouteCandidate(artifact, s.Config.EdgeGroupID, snapshots...)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,8 @@ func (s *Service) executePlatformCandidate(ctx context.Context, artifact model.P
 	}
 	now := time.Now().UTC()
 	receipt := &PlatformCandidateExecution{
-		Schema: candidateExecutionSchema, Mode: "isolated_http", Result: "passed",
+		TrafficRelease: bundle.TrafficRelease,
+		Schema:         candidateExecutionSchema, Mode: "isolated_http", Result: "passed",
 		ArtifactID: artifact.ID, ArtifactDigest: artifact.ContentHash,
 		ArtifactGeneration: artifact.Generation, NodeID: s.Config.EdgeID, EdgeGroupID: s.Config.EdgeGroupID,
 		ReleaseSetID: assignment.ReleaseSetID, ExpectedConsumerSetID: assignment.ExpectedConsumerSetID,

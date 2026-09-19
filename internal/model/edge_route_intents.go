@@ -13,12 +13,13 @@ const (
 // projection. Edge health, epoch, slot, selection, redundancy, and serving
 // availability are deliberately absent; those belong to Edge Control.
 type EdgeRouteIntentSnapshot struct {
-	SchemaVersion string                  `json:"schema_version"`
-	Generation    string                  `json:"generation"`
-	GeneratedAt   time.Time               `json:"generated_at"`
-	Routes        []EdgeRouteIntent       `json:"routes"`
-	TLSAllowlist  []EdgeTLSAllowlistEntry `json:"tls_allowlist"`
-	CachePolicies []CachePolicy           `json:"cache_policies,omitempty"`
+	TrafficRelease *TrafficReleaseBinding  `json:"traffic_release,omitempty"`
+	SchemaVersion  string                  `json:"schema_version"`
+	Generation     string                  `json:"generation"`
+	GeneratedAt    time.Time               `json:"generated_at"`
+	Routes         []EdgeRouteIntent       `json:"routes"`
+	TLSAllowlist   []EdgeTLSAllowlistEntry `json:"tls_allowlist"`
+	CachePolicies  []CachePolicy           `json:"cache_policies,omitempty"`
 }
 
 type EdgeRouteIntent struct {

@@ -220,6 +220,7 @@ func NormalizeEdgeTLSStatus(status string) string {
 }
 
 type EdgeRouteBundle struct {
+	TrafficRelease     *TrafficReleaseBinding  `json:"traffic_release,omitempty"`
 	SchemaVersion      string                  `json:"schema_version,omitempty"`
 	Version            string                  `json:"version"`
 	Generation         string                  `json:"generation,omitempty"`

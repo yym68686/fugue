@@ -25,20 +25,23 @@ import (
 )
 
 type PlatformCandidateStatus struct {
-	State            string                      `json:"state"`
-	ArtifactID       string                      `json:"artifact_id,omitempty"`
-	Digest           string                      `json:"digest,omitempty"`
-	ReleaseSetID     string                      `json:"release_set_id,omitempty"`
-	RouteCount       int                         `json:"route_count"`
-	RouteIndexDigest string                      `json:"route_index_digest,omitempty"`
-	Sequence         int64                       `json:"sequence,omitempty"`
-	VerifiedAt       time.Time                   `json:"verified_at,omitempty"`
-	ReportedAt       time.Time                   `json:"reported_at,omitempty"`
-	LastError        string                      `json:"last_error,omitempty"`
-	Execution        *PlatformCandidateExecution `json:"execution,omitempty"`
+	TrafficRelease   *model.TrafficReleaseBinding `json:"traffic_release,omitempty"`
+	State            string                       `json:"state"`
+	ArtifactID       string                       `json:"artifact_id,omitempty"`
+	Digest           string                       `json:"digest,omitempty"`
+	ReleaseSetID     string                       `json:"release_set_id,omitempty"`
+	RouteCount       int                          `json:"route_count"`
+	RouteIndexDigest string                       `json:"route_index_digest,omitempty"`
+	Sequence         int64                        `json:"sequence,omitempty"`
+	VerifiedAt       time.Time                    `json:"verified_at,omitempty"`
+	ReportedAt       time.Time                    `json:"reported_at,omitempty"`
+	LastError        string                       `json:"last_error,omitempty"`
+	Execution        *PlatformCandidateExecution  `json:"execution,omitempty"`
 }
 
 type edgePlatformCandidate struct {
+	ReleaseSet       *model.PlatformArtifact          `json:"release_set,omitempty"`
+	TrafficRelease   *model.TrafficReleaseBinding     `json:"traffic_release,omitempty"`
 	TLSReadiness     *platformTLSReadinessReceipt     `json:"tls_readiness,omitempty"`
 	Artifact         model.PlatformArtifact           `json:"artifact"`
 	Assignment       model.PlatformConsumerAssignment `json:"assignment"`
@@ -52,8 +55,8 @@ type edgePlatformCandidate struct {
 // validatePlatformCandidateIndex probes a detached bundle using the same
 // projection and lookup semantics as serving. It never loads Caddy, publishes
 // the index, or changes the serving cache, so its evidence remains shadow-only.
-func validatePlatformCandidateIndex(artifact model.PlatformArtifact, edgeGroupID string) (string, error) {
-	bundle, err := routeartifact.MaterializeForGroup(artifact, edgeGroupID)
+func validatePlatformCandidateIndex(artifact model.PlatformArtifact, edgeGroupID string, snapshots ...model.EdgeRouteIntentSnapshot) (string, error) {
+	bundle, err := materializePlatformRouteCandidate(artifact, edgeGroupID, snapshots...)
 	if err != nil {
 		return "", err
 	}
@@ -143,7 +146,15 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	routeIndexDigest, err := validatePlatformCandidateIndex(artifact, s.Config.EdgeGroupID)
+	parent, err := client.ReleaseSet(ctx, id, assignment, release)
+	if err != nil {
+		return err
+	}
+	projection, err := routeartifact.ProjectRelease(parent, artifact, assignment, release, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs))
+	if err != nil {
+		return err
+	}
+	routeIndexDigest, err := validatePlatformCandidateIndex(artifact, s.Config.EdgeGroupID, projection)
 	if err != nil {
 		return err
 	}
@@ -159,14 +170,14 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if prev.Assignment.FencingToken > assignment.FencingToken || prev.Assignment.GenerationSequence > assignment.GenerationSequence {
 		return errors.New("edge platform candidate replay rejected")
 	}
-	execution, err := s.executePlatformCandidate(ctx, artifact, assignment, routeIndexDigest)
+	execution, err := s.executePlatformCandidate(ctx, artifact, assignment, routeIndexDigest, projection)
 	if err != nil {
 		return err
 	}
 	if err := client.CheckAssignment(ctx, id, assignment); err != nil {
 		return err
 	}
-	c := edgePlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release, Sequence: max(prev.Sequence+1, time.Now().UnixNano()), VerifiedAt: time.Now().UTC(), RouteIndexDigest: routeIndexDigest, Execution: execution}
+	c := edgePlatformCandidate{ReleaseSet: &parent, TrafficRelease: projection.TrafficRelease, Artifact: artifact, Assignment: assignment, Release: release, Sequence: max(prev.Sequence+1, time.Now().UnixNano()), VerifiedAt: time.Now().UTC(), RouteIndexDigest: routeIndexDigest, Execution: execution}
 	b, err := json.Marshal(c)
 	if err != nil {
 		return errors.New("encode edge platform candidate failed")
@@ -199,7 +210,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return errors.New("edge platform heartbeat receipt mismatch")
 	}
 	s.mu.Lock()
-	s.platformCandidate = PlatformCandidateStatus{State: "shadow_verified", ArtifactID: assignment.ArtifactID, Digest: assignment.ContentHash, ReleaseSetID: assignment.ReleaseSetID, RouteCount: len(payload.Routes), RouteIndexDigest: routeIndexDigest, Sequence: c.Sequence, VerifiedAt: c.VerifiedAt, ReportedAt: time.Now().UTC(), Execution: execution}
+	s.platformCandidate = PlatformCandidateStatus{TrafficRelease: projection.TrafficRelease, State: "shadow_verified", ArtifactID: assignment.ArtifactID, Digest: assignment.ContentHash, ReleaseSetID: assignment.ReleaseSetID, RouteCount: len(payload.Routes), RouteIndexDigest: routeIndexDigest, Sequence: c.Sequence, VerifiedAt: c.VerifiedAt, ReportedAt: time.Now().UTC(), Execution: execution}
 	s.mu.Unlock()
 	s.Logger.Printf("edge platform candidate verified; artifact=%s digest=%s routes=%d sequence=%d serving=%s", assignment.ArtifactID, assignment.ContentHash, len(payload.Routes), c.Sequence, status.ServingGeneration)
 	return nil
@@ -248,4 +259,19 @@ func (s *Service) verifyPlatformRouteCandidate(artifact model.PlatformArtifact, 
 		}
 	}
 	return payload, nil
+}
+
+func materializePlatformRouteCandidate(artifact model.PlatformArtifact, group string, snapshots ...model.EdgeRouteIntentSnapshot) (model.EdgeRouteBundle, error) {
+	if len(snapshots) == 0 {
+		return routeartifact.MaterializeForGroup(artifact, group)
+	}
+	if len(snapshots) != 1 {
+		return model.EdgeRouteBundle{}, errors.New("ambiguous traffic projection")
+	}
+	snapshot := snapshots[0]
+	b := snapshot.TrafficRelease
+	if b == nil || b.RouteArtifactID != artifact.ID || b.RouteArtifactDigest != artifact.ContentHash || b.RouteArtifactGeneration != artifact.Generation || b.RouteArtifactSequence != artifact.GenerationSequence {
+		return model.EdgeRouteBundle{}, errors.New("traffic projection child differs")
+	}
+	return routeartifact.MaterializeSnapshotForGroup(snapshot, group)
 }

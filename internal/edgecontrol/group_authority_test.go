@@ -18,7 +18,56 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
+	"fugue/internal/trafficbinding"
 )
+
+func TestGroupAuthorityRejectsShadowReleaseAndPreservesServing(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 5, 2, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	state, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.StoreGroupInventoryCAS(ctx, groupID, 0, groupInventoryFixture(groupID, "b", "epoch", "inventory", false)); err != nil {
+		t.Fatal(err)
+	}
+	dir := privateFixtureDir(t)
+	writeGroupSigningFixture(t, dir, groupID, bytes.Repeat([]byte{0x33}, 32), now)
+	signer, err := NewProjectedGroupBundleSigner(dir, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := GroupShadowCompiler{Inventory: state, Ledger: state, Now: func() time.Time { return now }}
+	publisher := GroupAuthorityPublisher{Store: state, Signer: signer, Now: func() time.Time { return now }}
+	snapshot := routeIntentFixture()
+	compiled, err := compiler.Reconcile(ctx, snapshot, []string{groupID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := publisher.Publish(ctx, compiled)
+	if err != nil || result.Published != 1 {
+		t.Fatalf("initial publication failed: %+v %v", result, err)
+	}
+	before, err := state.ReadGroupAuthority(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := "sha256:" + strings.Repeat("a", 64)
+	snapshot.TrafficRelease = &model.TrafficReleaseBinding{Schema: trafficbinding.Schema, ReleaseSetID: "parent", ReleaseSetDigest: d, ReleaseSetGeneration: "parent-gen", RouteArtifactID: "route", RouteArtifactDigest: d, RouteArtifactGeneration: snapshot.Generation, RouteArtifactSequence: 1, ReleaseID: "release", ReleaseChannel: "shadow", FencingToken: 1, ScopeKey: "global", IntentDigest: d, PolicyDigest: d, InputSnapshotDigest: d, CompilerVersion: "compiler", ProjectionDigest: trafficbinding.ProjectionDigest(snapshot)}
+	compiled, err = compiler.Reconcile(ctx, snapshot, []string{groupID})
+	if err != nil || compiled.Succeeded != 1 {
+		t.Fatalf("shadow compilation failed: %+v %v", compiled, err)
+	}
+	result, err = publisher.Publish(ctx, compiled)
+	if err != nil || result.Failed != 1 || result.Published != 0 {
+		t.Fatalf("shadow became serving authority: %+v %v", result, err)
+	}
+	after, err := state.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !after.PublishedExists || after.Published.Bundle.Version != before.Published.Bundle.Version || after.Published.Bundle.Signature != before.Published.Bundle.Signature {
+		t.Fatal("shadow rejection changed serving artifact", err)
+	}
+}
 
 func TestGroupAuthorityPublishesAndPreservesLKGWithoutCrossGroupTransaction(t *testing.T) {
 	t.Parallel()

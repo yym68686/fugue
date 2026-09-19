@@ -24,6 +24,20 @@ x-fugue-dns-placement-constraints:
     it together with intent placement, exclusions, route/TLS readiness, quorum
     and absolute evidence expiry. Missing or mismatched fixed evidence fails
     compilation. Conflicting intent and policy group constraints are rejected.
+x-fugue-traffic-release-binding:
+  semantics: >-
+    Consumers independently verify the signed parent ReleaseSet and child route
+    artifact, exact membership, policy and complete lineage before producing a
+    group projection. traffic_release binds parent/child digests, generations,
+    sequence, release identity, channel, fence, scope and projected route digest.
+    Group compilation preserves this binding in its signed bundle and generation;
+    runtime inventory cannot replace it. Shadow bindings are never publishable
+    as group authority. A gray binding authorizes only the signed cohort groups.
+    The binding is provenance and scope evidence, not an applied/probed receipt
+    or a replacement for current release and rollback authorization. Legacy
+    bundles without the field remain readable. An invalid binding cannot fall
+    back to a legacy interpretation. Route shadow receipts retain the signed
+    parent and binding; isolated execution remains non-serving.
 x-fugue-edge-candidate-execution:
   schema: fugue.edge.candidate-execution/v1
   semantics: >-
@@ -3270,7 +3284,7 @@ paths:
     get:
       operationId: getPlatformConsumerArtifact
       summary: Pull an artifact assigned to a trusted consumer
-      description: Returns a validated, signed child artifact only when the verified component identity is currently present in the active ReleaseSet expected topology. The endpoint is read-only and never records runtime facts.
+      description: Returns a validated signed child artifact or its exact signed ReleaseSet parent only when the verified component identity is currently present in that child assignment. Parent reads require the same expected_consumer_set_id and retain the child assignment and release envelope; arbitrary parents and nonselected canary members are denied. The endpoint is read-only and never records runtime facts.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerArtifact
       security:
@@ -16047,11 +16061,41 @@ components:
         ttl:
           type: integer
           format: int32
+    TrafficReleaseBinding:
+      type: object
+      additionalProperties: false
+      required: [schema, release_set_id, release_set_digest, release_set_generation, route_artifact_id, route_artifact_digest, route_artifact_generation, route_artifact_sequence, release_id, release_channel, fencing_token, scope_key, intent_digest, policy_digest, input_snapshot_digest, compiler_version, projection_digest]
+      properties:
+        schema: {type: string, enum: [fugue.traffic-release-binding/v1]}
+        release_set_id: {type: string}
+        release_set_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        release_set_generation: {type: string}
+        route_artifact_id: {type: string}
+        route_artifact_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        route_artifact_generation: {type: string}
+        route_artifact_sequence: {type: integer, format: int64, minimum: 1}
+        release_id: {type: string}
+        release_channel: {type: string, enum: [shadow, gray, full]}
+        fencing_token: {type: integer, format: int64, minimum: 1}
+        scope_key: {type: string}
+        intent_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        policy_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        input_snapshot_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        compiler_version: {type: string}
+        projection_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        canary_rule_ref: {type: string}
+        edge_group_ids:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items: {type: string, pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'}
     EdgeRouteBundle:
       type: object
       additionalProperties: false
       required: [version, generated_at, routes, tls_allowlist]
       properties:
+        traffic_release:
+          $ref: "#/components/schemas/TrafficReleaseBinding"
         schema_version:
           type: string
         version:
@@ -16097,6 +16141,8 @@ components:
       additionalProperties: false
       required: [schema_version, generation, generated_at, routes, tls_allowlist]
       properties:
+        traffic_release:
+          $ref: "#/components/schemas/TrafficReleaseBinding"
         schema_version:
           type: string
           enum: [edge-route-intent/v1]

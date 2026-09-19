@@ -56,6 +56,21 @@ func TestTrafficCanaryAssignmentsDownloadAndHeartbeatAreGroupBound(t *testing.T)
 			if downloaded.Code != code {
 				t.Fatal("download escaped cohort", expected.ConsumerID, downloaded.Code, downloaded.Body.String())
 			}
+			parent := performJSONRequest(t, server, http.MethodGet, "/v1/platform-state/consumers/artifacts/"+compiled.ReleaseArtifact.ID+"?expected_consumer_set_id="+set.ID, token, nil)
+			if parent.Code != code {
+				t.Fatal("parent download escaped cohort", expected.ConsumerID, parent.Code, parent.Body.String())
+			}
+			if selected {
+				var reply consumerArtifactLookup
+				mustDecodeJSON(t, parent, &reply)
+				if reply.Artifact.ID != compiled.ReleaseArtifact.ID || reply.Assignment.ArtifactID != child.ID || reply.Release.ID != released.ID {
+					t.Fatal("parent response lost child authorization")
+				}
+			}
+			foreign := performJSONRequest(t, server, http.MethodGet, "/v1/platform-state/consumers/artifacts/"+compiled.ReleaseArtifact.ID+"?expected_consumer_set_id=foreign", token, nil)
+			if foreign.Code != 404 {
+				t.Fatal("parent accepted foreign expected set", foreign.Code)
+			}
 			if !selected {
 				heartbeat := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: expected.ConsumerID, Component: expected.Component, NodeID: expected.NodeID, ArtifactKind: child.ArtifactKind, ScopeKey: "global", ExpectedConsumerSetID: set.ID, ReleaseSetID: compiled.ReleaseArtifact.ID, FencingToken: released.FencingToken, GenerationSequence: child.GenerationSequence}
 				result := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", token, heartbeat)

@@ -20,6 +20,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
+	"fugue/internal/trafficbinding"
 )
 
 const (
@@ -287,6 +288,9 @@ func (publisher GroupAuthorityPublisher) publishGroup(ctx context.Context, route
 		}
 	}
 
+	if err := trafficbinding.ValidateGroup(candidate.Bundle.TrafficRelease, groupID, true); err != nil {
+		return fail(GroupAuthorityFailureCandidateRead, candidate.Sequence)
+	}
 	bundle := cloneEdgeRouteBundle(*candidate.Bundle)
 	bundle.Issuer = groupAuthorityIssuer
 	bundle.GeneratedAt = now

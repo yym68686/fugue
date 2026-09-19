@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/trafficbinding"
 )
 
 var (
@@ -122,6 +123,9 @@ func VerifyEdgeRouteBundle(bundle model.EdgeRouteBundle, key, keyID string, now 
 }
 
 func VerifyEdgeRouteBundleWithKeyring(bundle model.EdgeRouteBundle, keyring Keyring, now time.Time) error {
+	if err := trafficbinding.ValidateGroup(bundle.TrafficRelease, bundle.EdgeGroupID, true); err != nil {
+		return err
+	}
 	if err := validateBundleSchemaVersion(bundle.SchemaVersion); err != nil {
 		return err
 	}
@@ -385,28 +389,29 @@ func bundleSignature(issuer, keyID, signature string, generatedAt, validUntil ti
 }
 
 type bundleSigningPayload struct {
-	SchemaVersion       string            `json:"schema_version,omitempty"`
-	Version             string            `json:"version,omitempty"`
-	Generation          string            `json:"generation,omitempty"`
-	PreviousGeneration  string            `json:"previous_generation,omitempty"`
-	GeneratedAt         time.Time         `json:"generated_at,omitempty"`
-	ValidUntil          time.Time         `json:"valid_until,omitempty"`
-	Issuer              string            `json:"issuer,omitempty"`
-	KeyID               string            `json:"key_id,omitempty"`
-	EdgeID              string            `json:"edge_id,omitempty"`
-	EdgeGroupID         string            `json:"edge_group_id,omitempty"`
-	Routes              any               `json:"routes,omitempty"`
-	TLSAllowlist        any               `json:"tls_allowlist,omitempty"`
-	Records             any               `json:"records,omitempty"`
-	APIEndpoints        any               `json:"api_endpoints,omitempty"`
-	Kubernetes          any               `json:"kubernetes,omitempty"`
-	Registry            any               `json:"registry,omitempty"`
-	EdgeGroups          any               `json:"edge_groups,omitempty"`
-	EdgeNodes           any               `json:"edge_nodes,omitempty"`
-	EdgeSelectionPolicy any               `json:"edge_selection_policy,omitempty"`
-	DNSNodes            any               `json:"dns_nodes,omitempty"`
-	PlatformRoutes      any               `json:"platform_routes,omitempty"`
-	PublicRuntimeEnv    map[string]string `json:"public_runtime_env,omitempty"`
+	TrafficRelease      *model.TrafficReleaseBinding `json:"traffic_release,omitempty"`
+	SchemaVersion       string                       `json:"schema_version,omitempty"`
+	Version             string                       `json:"version,omitempty"`
+	Generation          string                       `json:"generation,omitempty"`
+	PreviousGeneration  string                       `json:"previous_generation,omitempty"`
+	GeneratedAt         time.Time                    `json:"generated_at,omitempty"`
+	ValidUntil          time.Time                    `json:"valid_until,omitempty"`
+	Issuer              string                       `json:"issuer,omitempty"`
+	KeyID               string                       `json:"key_id,omitempty"`
+	EdgeID              string                       `json:"edge_id,omitempty"`
+	EdgeGroupID         string                       `json:"edge_group_id,omitempty"`
+	Routes              any                          `json:"routes,omitempty"`
+	TLSAllowlist        any                          `json:"tls_allowlist,omitempty"`
+	Records             any                          `json:"records,omitempty"`
+	APIEndpoints        any                          `json:"api_endpoints,omitempty"`
+	Kubernetes          any                          `json:"kubernetes,omitempty"`
+	Registry            any                          `json:"registry,omitempty"`
+	EdgeGroups          any                          `json:"edge_groups,omitempty"`
+	EdgeNodes           any                          `json:"edge_nodes,omitempty"`
+	EdgeSelectionPolicy any                          `json:"edge_selection_policy,omitempty"`
+	DNSNodes            any                          `json:"dns_nodes,omitempty"`
+	PlatformRoutes      any                          `json:"platform_routes,omitempty"`
+	PublicRuntimeEnv    map[string]string            `json:"public_runtime_env,omitempty"`
 }
 
 func cloneBundleForSigning[T any](bundle T, validUntil time.Time, keyID string) bundleSigningPayload {
@@ -433,6 +438,7 @@ func cloneBundleForSigning[T any](bundle T, validUntil time.Time, keyID string) 
 		}
 	case model.EdgeRouteBundle:
 		payload = bundleSigningPayload{
+			TrafficRelease:     typed.TrafficRelease,
 			SchemaVersion:      typed.SchemaVersion,
 			Version:            typed.Version,
 			Generation:         typed.Generation,

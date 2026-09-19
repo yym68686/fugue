@@ -1244,6 +1244,18 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 		return
 	}
 	for _, result := range resolved {
+		if result.Assignment.ReleaseSetID == r.PathValue("artifact_id") && result.Assignment.ExpectedConsumerSetID == setIDs[0] {
+			parent, err := s.store.GetPlatformArtifact(result.Assignment.ReleaseSetID)
+			if err != nil || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || !s.validateReleaseSetReferences(parent).Pass {
+				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer parent artifact unavailable")
+				return
+			}
+			result.Artifact = parent
+			w.Header().Set("Cache-Control", "private, no-store")
+			w.Header().Set("ETag", strconv.Quote(parent.ContentHash))
+			httpx.WriteJSON(w, http.StatusOK, result)
+			return
+		}
 		if result.Artifact.ID == r.PathValue("artifact_id") && result.Assignment.ExpectedConsumerSetID == setIDs[0] {
 			w.Header().Set("Cache-Control", "private, no-store")
 			w.Header().Set("ETag", strconv.Quote(result.Artifact.ContentHash))

@@ -98,8 +98,15 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 	if err != nil {
 		t.Fatal(err)
 	}
-	assignment := model.PlatformConsumerAssignment{ExpectedConsumerSetID: "route-set", ArtifactReleaseID: "release-1", ReleaseSetID: "release-set-1", ArtifactID: a.ID, ArtifactKind: a.ArtifactKind, ScopeKey: "global", ExpectedGeneration: a.Generation, ContentHash: a.ContentHash, GenerationSequence: 1, FencingToken: 1, ReleaseChannel: "shadow"}
-	original := edgePlatformCandidate{Artifact: a, Assignment: assignment, Release: model.PlatformArtifactRelease{ID: "release-1", ArtifactID: "release-set-1", ArtifactKind: model.PlatformArtifactKindReleaseSet, Generation: a.Metadata["release_set_generation"], ReleaseChannel: "shadow", Status: model.PlatformArtifactReleaseStatusActive, FencingToken: 1}}
+	assignment := model.PlatformConsumerAssignment{ExpectedConsumerSetID: "route-set", ArtifactReleaseID: "release-1", ReleaseSetID: "release-set-1", ArtifactID: a.ID, ArtifactKind: a.ArtifactKind, ScopeKey: "global", Revision: 1, ExpectedGeneration: a.Generation, ContentHash: a.ContentHash, GenerationSequence: 1, FencingToken: 1, ReleaseChannel: "shadow"}
+	original := edgePlatformCandidate{Artifact: a, Assignment: assignment, Release: model.PlatformArtifactRelease{ID: "release-1", ArtifactID: "release-set-1", ArtifactKind: model.PlatformArtifactKindReleaseSet, Generation: a.Metadata["release_set_generation"], ScopeKey: "global", ReleaseChannel: "shadow", Status: model.PlatformArtifactReleaseStatusActive, FencingToken: 1}}
+	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, []string{a.ID, "dns-candidate", "tls-candidate"}, time.Now().UTC())
+	parent.ID, parent.ScopeKey, parent.Status, parent.GenerationSequence = "release-set-1", "global", model.PlatformArtifactStatusValidated, 1
+	parent.ContentHash, _ = platformconfig.Digest(parent.Content)
+	parent, err = platformsafety.SignPlatformArtifact(parent, keyring)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var candidate edgePlatformCandidate
 	reset := func() {
 		raw, _ := json.Marshal(original)
@@ -125,6 +132,8 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 				t.Error("assignment credential mismatch")
 			}
 			json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{assignment}})
+		case "/v1/platform-state/consumers/artifacts/release-set-1":
+			json.NewEncoder(w).Encode(map[string]any{"artifact": parent, "assignment": candidate.Assignment, "release": candidate.Release})
 		case "/v1/platform-state/consumers/artifacts/route-candidate":
 			if onDownload != nil {
 				onDownload()

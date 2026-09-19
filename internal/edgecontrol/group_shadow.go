@@ -16,6 +16,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/routebinding"
+	"fugue/internal/trafficbinding"
 )
 
 const (
@@ -454,6 +455,9 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot, all
 
 func compileGroupShadowCandidate(snapshot model.EdgeRouteIntentSnapshot, inventory GroupInventorySnapshot, inventoryDigest string, view groupInventoryView, previousGeneration string, now time.Time) (model.EdgeRouteBundle, error) {
 	groupID := normalizeGroupID(inventory.GroupID)
+	if err := trafficbinding.ValidateGroup(snapshot.TrafficRelease, groupID, false); err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
 	routes := append([]model.EdgeRouteIntent(nil), snapshot.Routes...)
 	sort.Slice(routes, func(i, j int) bool {
 		left, right := routes[i], routes[j]
@@ -513,13 +517,14 @@ func compileGroupShadowCandidate(snapshot model.EdgeRouteIntentSnapshot, invento
 	tlsAllowlist := filterTLSAllowlist(snapshot.TLSAllowlist, routeHostnames)
 	cachePolicies := filterCachePolicies(snapshot.CachePolicies, usedCachePolicies)
 	bundle := model.EdgeRouteBundle{
-		SchemaVersion: model.BundleSchemaVersionV1,
-		GeneratedAt:   now,
-		Issuer:        groupShadowIssuer,
-		EdgeGroupID:   groupID,
-		Routes:        bindings,
-		TLSAllowlist:  tlsAllowlist,
-		CachePolicies: cachePolicies,
+		SchemaVersion:  model.BundleSchemaVersionV1,
+		GeneratedAt:    now,
+		Issuer:         groupShadowIssuer,
+		TrafficRelease: trafficbinding.Clone(snapshot.TrafficRelease),
+		EdgeGroupID:    groupID,
+		Routes:         bindings,
+		TLSAllowlist:   tlsAllowlist,
+		CachePolicies:  cachePolicies,
 	}
 	bundle.Version = groupShadowBundleGeneration(bundle, snapshot.Generation, inventoryDigest)
 	bundle.Generation = bundle.Version
@@ -575,6 +580,9 @@ func routeIntentAppliesToGroup(intent model.EdgeRouteIntent, groupID string) (bo
 }
 
 func validateRouteIntentSnapshot(snapshot model.EdgeRouteIntentSnapshot) error {
+	if err := trafficbinding.ValidateProjection(snapshot); err != nil {
+		return err
+	}
 	if snapshot.SchemaVersion != model.EdgeRouteIntentSchemaVersionV1 {
 		return fmt.Errorf("edge-control requires RouteIntent schema %q", model.EdgeRouteIntentSchemaVersionV1)
 	}
@@ -771,12 +779,13 @@ func routeIntentSemanticDigest(snapshot model.EdgeRouteIntentSnapshot) string {
 	})
 	cache := filterCachePolicies(snapshot.CachePolicies, cachePolicyIDSet(snapshot.CachePolicies))
 	return digestJSON(struct {
-		SchemaVersion string                        `json:"schema_version"`
-		Generation    string                        `json:"generation"`
-		Routes        []model.EdgeRouteIntent       `json:"routes"`
-		TLSAllowlist  []model.EdgeTLSAllowlistEntry `json:"tls_allowlist"`
-		CachePolicies []model.CachePolicy           `json:"cache_policies,omitempty"`
-	}{snapshot.SchemaVersion, strings.TrimSpace(snapshot.Generation), routes, tls, cache})
+		SchemaVersion  string                        `json:"schema_version"`
+		Generation     string                        `json:"generation"`
+		Routes         []model.EdgeRouteIntent       `json:"routes"`
+		TLSAllowlist   []model.EdgeTLSAllowlistEntry `json:"tls_allowlist"`
+		CachePolicies  []model.CachePolicy           `json:"cache_policies,omitempty"`
+		TrafficRelease *model.TrafficReleaseBinding  `json:"traffic_release,omitempty"`
+	}{snapshot.SchemaVersion, strings.TrimSpace(snapshot.Generation), routes, tls, cache, snapshot.TrafficRelease})
 }
 
 func cachePolicyIDSet(values []model.CachePolicy) map[string]struct{} {
@@ -1034,6 +1043,7 @@ func cloneGroupShadowLedgerEntry(entry GroupShadowLedgerEntry) GroupShadowLedger
 }
 
 func cloneEdgeRouteBundle(bundle model.EdgeRouteBundle) model.EdgeRouteBundle {
+	bundle.TrafficRelease = trafficbinding.Clone(bundle.TrafficRelease)
 	bundle.Signatures = append([]model.BundleSignature(nil), bundle.Signatures...)
 	bundle.Routes = append([]model.EdgeRouteBinding(nil), bundle.Routes...)
 	for index := range bundle.Routes {
