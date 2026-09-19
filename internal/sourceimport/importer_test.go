@@ -151,7 +151,7 @@ func TestKanikoDestinationArgsIncludeInsecureFlagsForClusterService(t *testing.T
 	if !strings.Contains(joined, "--insecure") {
 		t.Fatalf("expected --insecure in args: %v", args)
 	}
-	if !strings.Contains(joined, "--insecure-registry=fugue-fugue-registry.fugue-system.svc.cluster.local") {
+	if !strings.Contains(joined, "--insecure-registry=fugue-fugue-registry.fugue-system.svc.cluster.local:5000") {
 		t.Fatalf("expected --insecure-registry in args: %v", args)
 	}
 }

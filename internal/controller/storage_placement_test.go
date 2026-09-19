@@ -15,6 +15,7 @@ import (
 	"fugue/internal/store"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -31,6 +32,7 @@ type storagePlacementFixture struct {
 	volumeNode  string
 	volumeState string
 	attachments storagev1.VolumeAttachmentList
+	capacities  storagev1.CSIStorageCapacityList
 	pods        []kubePod
 	failPath    string
 	reads       map[string]int
@@ -79,6 +81,8 @@ func newStoragePlacementFixture(t *testing.T) *storagePlacementFixture {
 				list.Items = append(list.Items, storagev1.CSINode{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: storagev1.CSINodeSpec{Drivers: []storagev1.CSINodeDriver{{Name: longhornCSIDriver, NodeID: name}}}})
 			}
 			obj = list
+		case r.URL.Path == "/apis/storage.k8s.io/v1/csistoragecapacities":
+			obj = f.capacities
 		case r.URL.Path == "/apis/longhorn.io/v1beta2/nodes":
 			items := []any{}
 			for _, name := range f.ready {
@@ -377,5 +381,51 @@ func TestStoragePlacementErrorsNameTheClaimAndNode(t *testing.T) {
 	reason := p.rejection(storageFixtureNode("worker"))
 	if !strings.Contains(reason, "workspace") || !strings.Contains(reason, longhornCSIDriver) {
 		t.Fatal(fmt.Sprintf("unhelpful rejection %q", reason))
+	}
+}
+
+func TestStoragePlacementRejectsInsufficientCSIStorageCapacity(t *testing.T) {
+	selector := &metav1.LabelSelector{MatchLabels: map[string]string{kubeHostnameLabelKey: "storage-ready"}}
+	p := &storagePlacement{
+		claims:     []storagePlacementClaim{{name: "data", requestedBytes: 10 * 1024 * 1024 * 1024, class: storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "network-storage"}}, singleNode: true, attachedNodes: map[string]bool{}}},
+		capacities: []storagev1.CSIStorageCapacity{{StorageClassName: "network-storage", Capacity: resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), NodeTopology: selector}},
+	}
+	n := storageFixtureNode("storage-ready")
+	if reason := p.rejection(n); !strings.Contains(reason, "CSIStorageCapacity") {
+		t.Fatalf("expected capacity rejection, got %q", reason)
+	}
+}
+
+func TestStoragePlacementLoadsRequestedSizeAndCapacityTopology(t *testing.T) {
+	f := newStoragePlacementFixture(t)
+	f.pvc.Spec.VolumeName = ""
+	f.capacities.Items = []storagev1.CSIStorageCapacity{{StorageClassName: f.class.Name, Capacity: resource.NewQuantity(5<<30, resource.BinarySI), NodeTopology: &metav1.LabelSelector{MatchLabels: map[string]string{kubeHostnameLabelKey: "storage-ready"}}}}
+	plan, err := loadStoragePlacement(context.Background(), f.client, "tenant", []storageClaimRequest{{Name: "data", Class: f.class.Name, RequestedBytes: 10 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := plan.rejection(storageFixtureNode("storage-ready")); !strings.Contains(reason, "CSIStorageCapacity") {
+		t.Fatalf("oversized claim accepted: %s", reason)
+	}
+	// Separate pools in the same topology are alternatives, not one shared pool.
+	enough := f.capacities.Items[0]
+	enough.Capacity = resource.NewQuantity(20<<30, resource.BinarySI)
+	plan.capacities = append(plan.capacities, enough)
+	if reason := plan.rejection(storageFixtureNode("storage-ready")); reason != "" {
+		t.Fatalf("available pool rejected: %s", reason)
+	}
+	plan.capacities = plan.capacities[1:]
+	plan.capacities[0].MaximumVolumeSize = resource.NewQuantity(1<<30, resource.BinarySI)
+	if reason := plan.rejection(storageFixtureNode("storage-ready")); !strings.Contains(reason, "CSIStorageCapacity") {
+		t.Fatalf("maximum volume size ignored: %s", reason)
+	}
+	plan.capacities = nil
+	if reason := plan.rejection(storageFixtureNode("storage-ready")); reason != "" {
+		t.Fatalf("unknown capacity treated as zero: %s", reason)
+	}
+	plan.claims[0].pv = &f.pv
+	plan.capacities = f.capacities.Items
+	if reason := plan.rejection(storageFixtureNode("storage-ready")); reason != "" {
+		t.Fatalf("existing allocation charged again: %s", reason)
 	}
 }

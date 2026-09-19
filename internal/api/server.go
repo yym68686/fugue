@@ -1422,6 +1422,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	spec = s.applyManagedPostgresDefaultsForDeploy(app, spec)
 	spec = s.applyPersistentStorageDefaultsForDeploy(recoveredSpec, spec)
+	if err := validatePersistentStorageUpdate(recoveredSpec.PersistentStorage, spec.PersistentStorage); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,

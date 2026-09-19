@@ -617,6 +617,14 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		if err != nil {
 			return model.App{}, err
 		}
+		podFailure := false
+		if !readyEndpoint && deployment.Status.ReadyReplicas == 0 && deployment.Status.AvailableReplicas == 0 && !hasDeploymentFailureCondition(deployment.Status.Conditions) {
+			pods, podErr := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(current))
+			if podErr != nil {
+				return model.App{}, fmt.Errorf("read live workload pods before unavailable recovery: %w", podErr)
+			}
+			podFailure = managedAppPodFailureMessage(pods, nil) != ""
+		}
 		deploymentReady := managedDeploymentStatusReady(deployment, liveReplicas)
 		failedCandidateRecovery := false
 		if !deploymentReady && liveKey != desiredKey && readyEndpoint && model.AppHasClusterService(desired.Spec) {
@@ -646,6 +654,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 				current.Spec,
 				desired.Spec,
 				readyEndpoint,
+				podFailure,
 			)
 			if !deploymentReady && !unavailableRecovery && !failedCandidateRecovery {
 				return model.App{}, fmt.Errorf("live deployment is not fully ready before an online replacement")
@@ -954,18 +963,21 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 // that would repair it because the online rollout guard first requires the old
 // release to be healthy. Live Kubernetes evidence remains authoritative: the
 // Deployment must be fully observed, have no ready or available replicas, have
-// no ready Service endpoint, and report a failed rollout condition. Workloads
+// no ready Service endpoint, and report a failed rollout condition or a live
+// Pod failure (including a CrashLoop after a previously successful rollout). Workloads
 // whose current or desired state cannot mount concurrently remain fail-closed.
 func managedAppAllowsUnavailableRecovery(
 	deployment kubeDeployment,
 	current, desired model.AppSpec,
 	readyEndpoint bool,
+	podFailure bool,
 ) bool {
 	if readyEndpoint ||
 		deployment.Status.ObservedGeneration < deployment.Metadata.Generation ||
 		deployment.Status.ReadyReplicas > 0 ||
 		deployment.Status.AvailableReplicas > 0 ||
-		!hasDeploymentFailureCondition(deployment.Status.Conditions) {
+		!hasDeploymentFailureCondition(deployment.Status.Conditions) &&
+			!podFailure {
 		return false
 	}
 	return controllerAppSupportsConcurrentStorage(current) &&

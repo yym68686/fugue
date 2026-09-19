@@ -324,6 +324,22 @@ func TestManagedAppReconcileGuardAllowsRecoveryFromInitialFailure(t *testing.T) 
 	}
 }
 
+func TestManagedAppAllowsRecoveryFromCrashLoopAfterPreviouslySuccessfulRelease(t *testing.T) {
+	var deployment kubeDeployment
+	deployment.Metadata.Generation = 4
+	deployment.Status.ObservedGeneration = 4
+	deployment.Status.Conditions = []runtime.ManagedAppCondition{
+		{Type: "Progressing", Status: "True", Reason: "NewReplicaSetAvailable"},
+		{Type: "Available", Status: "False", Reason: "MinimumReplicasUnavailable"},
+	}
+	current := model.AppSpec{Image: "example.test/app:v1", Replicas: 1, NetworkMode: model.AppNetworkModeBackground}
+	desired := current
+	desired.Image = "example.test/app:v2"
+	if !managedAppAllowsUnavailableRecovery(deployment, current, desired, false, true) {
+		t.Fatal("CrashLoop pod evidence should permit stateless recovery")
+	}
+}
+
 func zeroDowntimeGuardTestApp(storageClass string) model.App {
 	return model.App{
 		ID:       "app_demo",

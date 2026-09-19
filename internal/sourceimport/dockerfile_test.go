@@ -82,3 +82,45 @@ func TestBuildKanikoJobObjectPushesToBuilderRegistryWhenConfigured(t *testing.T)
 		t.Fatalf("expected builder-local destination, got args: %v", args)
 	}
 }
+
+func TestBuilderJobsMapLogicalRegistryToConfiguredEndpoint(t *testing.T) {
+	for _, endpoint := range []string{"127.0.0.1:5000", "192.0.2.12:5000", "cache.platform.svc:5000", "secure.example:5443"} {
+		for _, builder := range []string{"dockerfile", "nixpacks"} {
+			t.Run(endpoint+"/"+builder, func(t *testing.T) {
+				logical := "registry.fugue.internal:5000/builds/demo:tag"
+				destination := endpoint + "/builds/demo:tag"
+				var job map[string]any
+				var err error
+				if builder == "dockerfile" {
+					job, err = buildKanikoJobObject("platform", "build-demo", dockerfileBuildRequest{ImageRef: logical, DestinationImageRef: destination, DockerfilePath: "Dockerfile", RepoURL: "https://github.com/example/demo"})
+				} else {
+					job, err = buildNixpacksJobObject("platform", "build-demo", nixpacksBuildRequest{ImageRef: logical, DestinationImageRef: destination, RepoURL: "https://github.com/example/demo"})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				pod := job["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+				var args []string
+				for _, c := range pod["containers"].([]map[string]any) {
+					if c["name"] == "kaniko" {
+						args = c["args"].([]string)
+					}
+				}
+				joined := strings.Join(args, " ")
+				if !strings.Contains(joined, "--registry-map=registry.fugue.internal:5000="+endpoint) {
+					t.Fatalf("missing mapping: %v", args)
+				}
+				if !strings.Contains(joined, "--destination="+destination) {
+					t.Fatalf("destination changed: %v", args)
+				}
+				insecure := isInsecureRegistryHost(registryHostFromImageRef(destination))
+				if strings.Contains(joined, "--insecure-registry="+endpoint) != insecure {
+					t.Fatalf("wrong HTTP pull setting: %v", args)
+				}
+				if endpoint == "127.0.0.1:5000" && pod["hostNetwork"] != true {
+					t.Fatal("loopback cache requires host network")
+				}
+			})
+		}
+	}
+}

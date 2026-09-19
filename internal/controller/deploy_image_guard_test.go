@@ -345,6 +345,40 @@ func TestBackgroundReconcileQueuesSingleMissingImageRebuild(t *testing.T) {
 	}
 }
 
+func TestMissingInternalImageDoesNotQueueUnrebuildableImport(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := stateStore.CreateTenant("internal image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := "registry.fugue.internal:5000/fugue-apps/runtime:missing"
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "runtime", "", model.AppSpec{Image: ref, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID}, model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: ref, ResolvedImageRef: ref}, model.AppRoute{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0), registryPushBase: "registry.fugue.internal:5000", registryPullBase: "registry.fugue.internal:5000"}
+	err = svc.handleMissingDeployImage(context.Background(), model.Operation{}, app, deployImageTarget{RuntimeID: app.Spec.RuntimeID}, ref, "managed image")
+	if err == nil || !strings.Contains(err.Error(), "no rebuildable source") {
+		t.Fatalf("expected unrebuildable source rejection, got %v", err)
+	}
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if op.Type == model.OperationTypeImport {
+			t.Fatalf("unexpected rebuild operation: %+v", op)
+		}
+	}
+}
+
 func TestHandleClaimedOperationFailsDeployWhenRuntimeImageIsMissingFromRegistry(t *testing.T) {
 	t.Parallel()
 
@@ -1912,5 +1946,32 @@ func TestScheduleImageHydrationNormalizesLegacyManagedRegistryRef(t *testing.T) 
 	}
 	if tasks[0].Payload["images"] != wantRef || tasks[0].Payload["image_ref"] != wantRef {
 		t.Fatalf("expected normalized hydrate image %q, got %+v", wantRef, tasks[0].Payload)
+	}
+}
+
+func TestDeployImageRebuildSourceDistinguishesOriginAndCachedOutput(t *testing.T) {
+	svc := &Service{registryPushBase: "cache.example:5000", registryPullBase: "registry.example:5000"}
+	cached := &model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "cache.example:5000/apps/demo:missing"}
+	for _, tc := range []struct {
+		name          string
+		build, origin *model.AppSource
+		want          string
+	}{
+		{name: "internal only", build: cached},
+		{name: "external with internal output", build: &model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "ghcr.io/example/demo:latest", ResolvedImageRef: cached.ImageRef}, want: model.AppSourceTypeDockerImage},
+		{name: "origin archive", build: cached, origin: &model.AppSource{Type: model.AppSourceTypeUpload, UploadID: "upload-demo"}, want: model.AppSourceTypeUpload},
+		{name: "origin repo", build: cached, origin: &model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://github.com/example/demo"}, want: model.AppSourceTypeGitHubPublic},
+		{name: "resolved output only", build: &model.AppSource{Type: model.AppSourceTypeDockerImage, ResolvedImageRef: cached.ImageRef}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := svc.deployImageRebuildSource(model.App{BuildSource: tc.build, OriginSource: tc.origin})
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("unexpected rebuild source: %+v", got)
+				}
+			} else if got == nil || got.Type != tc.want {
+				t.Fatalf("source=%+v want type=%s", got, tc.want)
+			}
+		})
 	}
 }

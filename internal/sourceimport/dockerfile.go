@@ -516,6 +516,7 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 		"--context=dir:///workspace/repo",
 		"--dockerfile=/workspace/repo/"+filepath.ToSlash(strings.TrimSpace(req.DockerfilePath)),
 	)
+	args = appendKanikoRegistryMappingArgs(args, req.ImageRef, destinationImageRef)
 	if strings.TrimSpace(req.BuildContextDir) != "" && strings.TrimSpace(req.BuildContextDir) != "." {
 		args = append(args, "--context-sub-path="+req.BuildContextDir)
 	}

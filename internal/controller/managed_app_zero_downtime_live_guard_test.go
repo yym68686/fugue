@@ -101,6 +101,50 @@ func TestManagedAppLiveGuardAllowsTerminalUnavailableStatelessRecovery(t *testin
 	}
 }
 
+func TestManagedAppLiveGuardRecoversCrashLoopAfterSuccessfulRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		endpoint, readyPod, stale bool
+		wantError                 bool
+	}{
+		{name: "crash loop"},
+		{name: "serving endpoint", endpoint: true, wantError: true},
+		{name: "ready replica", readyPod: true, wantError: true},
+		{name: "unobserved generation", stale: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := managedAppLiveGuardTestApp(nil)
+			desired := current
+			desired.Spec.Image = "registry.example/live-guard:v2"
+			managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
+			svc := &Service{Renderer: runtime.Renderer{}}
+			live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(current), runtime.SchedulingConstraints{})
+			if !found {
+				t.Fatal("missing deployment")
+			}
+			managedAppLiveGuardMarkTerminalUnavailable(&live)
+			live.Status.Conditions = []runtime.ManagedAppCondition{
+				{Type: "Progressing", Status: "True", Reason: "NewReplicaSetAvailable"},
+				{Type: "Available", Status: "False", Reason: "MinimumReplicasUnavailable"},
+			}
+			if tc.readyPod {
+				live.Status.ReadyReplicas = 1
+			}
+			if tc.stale {
+				live.Metadata.Generation++
+			}
+			var pod kubePod
+			pod.Metadata.Name = "live-guard-crashing"
+			pod.Status.ContainerStatuses = []kubeContainerStatus{{Name: "app", State: kubeRuntimeState{Waiting: &kubeStateDetail{Reason: "CrashLoopBackOff"}}}}
+			client := managedAppLiveGuardClientWithPods(t, managed, live, true, tc.endpoint, []kubePod{pod}, nil)
+			prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(context.Background(), client, managed.Metadata.Namespace, managed, desired, model.OperationTypeDeploy, runtime.SchedulingConstraints{})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("prepared=%+v error=%v wantError=%t", prepared, err, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestManagedAppLiveGuardAllowsTerminalUnavailableAuxiliaryTemplateRecoveryWithoutOnlineIntent(t *testing.T) {
 	app := managedAppLiveGuardTestApp(nil)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})

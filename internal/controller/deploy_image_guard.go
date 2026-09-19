@@ -549,9 +549,9 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 	} else if err != nil && s.Logger != nil {
 		s.Logger.Printf("inspect missing deploy image inventory app=%s image=%s failed: %v", app.ID, imageRef, err)
 	}
-	source := model.AppBuildSource(app)
-	if !deployImageSourceCanRebuild(source) {
-		return fmt.Errorf("deploy blocked because %s %s is missing and app has no rebuildable source", label, imageRef)
+	source := s.deployImageRebuildSource(app)
+	if source == nil {
+		return fmt.Errorf("deploy blocked because %s %s is missing and app has no rebuildable source; provide an external image or source archive", label, imageRef)
 	}
 	if backgroundReconcile && (s == nil || s.Store == nil) {
 		return fmt.Errorf("deploy blocked because %s %s is missing and needs rebuild", label, imageRef)
@@ -614,6 +614,37 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 		return fmt.Errorf("deploy blocked because %s %s is missing; queued image rebuild operation %s", label, imageRef, rebuildOp.ID)
 	}
 	return errOperationNoLongerActive
+}
+
+// Artifact metadata may point at an internal cached image while immutable
+// origin intent still contains the source needed to recreate it. A resolved
+// output is never an upstream source, but it must not invalidate an external
+// ImageRef that remains usable.
+func (s *Service) deployImageRebuildSource(app model.App) *model.AppSource {
+	for _, source := range []*model.AppSource{model.AppBuildSource(app), model.AppOriginSource(app)} {
+		if !deployImageSourceCanRebuild(source) {
+			continue
+		}
+		if strings.TrimSpace(source.Type) == model.AppSourceTypeDockerImage && s.imageRefUsesConfiguredInternalRegistry(source.ImageRef) {
+			continue
+		}
+		return source
+	}
+	return nil
+}
+
+func (s *Service) imageRefUsesConfiguredInternalRegistry(ref string) bool {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || s == nil {
+		return false
+	}
+	for _, base := range []string{s.registryPushBase, s.registryPullBase} {
+		base = strings.Trim(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(base), "https://"), "http://"), "/")
+		if base != "" && strings.HasPrefix(ref, base+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) imageRebuildRetryAt(app model.App) (time.Time, bool, error) {

@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +49,26 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("termination_grace_period_seconds must be between 0 and %d", model.MaxAppTerminationGracePeriodSeconds),
 		)
 		return
+	}
+
+	// Validate storage before synchronous settings are mutated by a combined
+	// patch. A rejected shrink must not partially apply the rest of the patch.
+	var normalizedPersistentStorage *model.AppPersistentStorageSpec
+	if req.PersistentStorage != nil {
+		baseline, _, err := s.recoverAppDeployBaseline(app)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		normalizedPersistentStorage, err = s.normalizeImportedPersistentStorage(req.PersistentStorage, baseline.Files)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validatePersistentStorageUpdate(baseline.PersistentStorage, normalizedPersistentStorage); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	currentApp := app
@@ -125,11 +146,6 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.PersistentStorage != nil {
-			normalizedPersistentStorage, err := s.normalizeImportedPersistentStorage(req.PersistentStorage, spec.Files)
-			if err != nil {
-				httpx.WriteError(w, http.StatusBadRequest, err.Error())
-				return
-			}
 			spec.PersistentStorage = normalizedPersistentStorage
 			if !appPersistentStorageEqual(currentPersistentStorage, spec.PersistentStorage) {
 				deployChanged = true
@@ -203,6 +219,36 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		response["operation"] = sanitizeOperationForAPI(*operation)
 	}
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+// Preserve an omitted allocation and reject shrinking the existing PVC before
+// an operation is queued. The controller still protects live PVC allocations
+// when an older stored intent is smaller than Kubernetes runtime facts.
+func validatePersistentStorageUpdate(current, desired *model.AppPersistentStorageSpec) error {
+	if desired == nil {
+		return nil
+	}
+	if current != nil && strings.TrimSpace(desired.StorageSize) == "" {
+		desired.StorageSize = current.StorageSize
+	}
+	if strings.TrimSpace(desired.StorageSize) == "" {
+		return nil
+	}
+	desiredSize, err := resource.ParseQuantity(desired.StorageSize)
+	if err != nil || desiredSize.Sign() <= 0 {
+		return fmt.Errorf("persistent storage size must be a positive Kubernetes quantity")
+	}
+	if current == nil || strings.TrimSpace(current.StorageSize) == "" {
+		return nil
+	}
+	currentSize, err := resource.ParseQuantity(current.StorageSize)
+	if err != nil {
+		return fmt.Errorf("invalid current persistent storage size: %w", err)
+	}
+	if desiredSize.Cmp(currentSize) < 0 {
+		return fmt.Errorf("persistent storage cannot be shrunk from %s to %s; create a new claim or keep the current size", current.StorageSize, desired.StorageSize)
+	}
+	return nil
 }
 
 func normalizeAppVolumeReplicationSpec(spec *model.AppVolumeReplicationSpec) (*model.AppVolumeReplicationSpec, error) {

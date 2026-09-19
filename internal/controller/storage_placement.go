@@ -13,6 +13,7 @@ import (
 	"fugue/internal/runtime"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 )
@@ -25,16 +26,18 @@ type storagePlacement struct {
 	claims        []storagePlacementClaim
 	csiNodes      map[string]map[string]bool
 	longhornNodes map[string]bool
+	capacities    []storagev1.CSIStorageCapacity
 }
 
 type storagePlacementClaim struct {
-	name          string
-	driver        string
-	pv            *corev1.PersistentVolume
-	class         storagev1.StorageClass
-	selectedNode  string
-	attachedNodes map[string]bool
-	singleNode    bool
+	name           string
+	requestedBytes int64
+	driver         string
+	pv             *corev1.PersistentVolume
+	class          storagev1.StorageClass
+	selectedNode   string
+	attachedNodes  map[string]bool
+	singleNode     bool
 }
 
 type longhornPlacementVolume struct {
@@ -52,14 +55,15 @@ type longhornPlacementVolume struct {
 }
 
 type storageClaimRequest struct {
-	Name  string
-	Class string
+	Name           string
+	Class          string
+	RequestedBytes int64
 }
 
 // Read the actual rendered mounts, including legacy workspaces and shared
 // claims. Do not assume that every workload will forever have exactly one PVC.
 func appStorageClaimRequests(objects []map[string]any) ([]storageClaimRequest, error) {
-	classes := map[string]string{}
+	renderedClaims := map[string]storageClaimRequest{}
 	for _, obj := range objects {
 		if objectStringField(obj, "kind") != "PersistentVolumeClaim" {
 			continue
@@ -72,9 +76,11 @@ func appStorageClaimRequests(objects []map[string]any) ([]storageClaimRequest, e
 		if err := json.Unmarshal(data, &pvc); err != nil {
 			return nil, err
 		}
+		request := storageClaimRequest{Name: pvc.Name, RequestedBytes: pvc.Spec.Resources.Requests.Storage().Value()}
 		if pvc.Spec.StorageClassName != nil {
-			classes[pvc.Name] = *pvc.Spec.StorageClassName
+			request.Class = *pvc.Spec.StorageClassName
 		}
+		renderedClaims[pvc.Name] = request
 	}
 	names := map[string]bool{}
 	for _, obj := range objects {
@@ -103,7 +109,9 @@ func appStorageClaimRequests(objects []map[string]any) ([]storageClaimRequest, e
 	}
 	out := make([]storageClaimRequest, 0, len(names))
 	for name := range names {
-		out = append(out, storageClaimRequest{Name: name, Class: classes[name]})
+		request := renderedClaims[name]
+		request.Name = name
+		out = append(out, request)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -129,7 +137,10 @@ func loadStoragePlacement(ctx context.Context, client *kubeClient, namespace str
 			}
 			className = *pvc.Spec.StorageClassName
 		}
-		claim := storagePlacementClaim{name: request.Name, selectedNode: pvc.Annotations[pvcSelectedNodeAnnotation], singleNode: true, attachedNodes: map[string]bool{}}
+		if liveBytes := pvc.Spec.Resources.Requests.Storage().Value(); liveBytes > request.RequestedBytes {
+			request.RequestedBytes = liveBytes
+		}
+		claim := storagePlacementClaim{name: request.Name, requestedBytes: request.RequestedBytes, selectedNode: pvc.Annotations[pvcSelectedNodeAnnotation], singleNode: true, attachedNodes: map[string]bool{}}
 		for _, mode := range pvc.Spec.AccessModes {
 			if mode == corev1.ReadWriteMany || mode == corev1.ReadOnlyMany {
 				claim.singleNode = false
@@ -212,6 +223,18 @@ func loadStoragePlacement(ctx context.Context, client *kubeClient, namespace str
 			}
 			p.csiNodes[node.Name] = drivers
 		}
+	}
+	for _, claim := range p.claims {
+		if claim.pv != nil || claim.requestedBytes <= 0 {
+			continue
+		}
+		var list storagev1.CSIStorageCapacityList
+		status, err := client.doJSON(ctx, http.MethodGet, "/apis/storage.k8s.io/v1/csistoragecapacities", nil, &list)
+		if err != nil && status != http.StatusNotFound {
+			return nil, fmt.Errorf("observe CSI storage capacities: %w", err)
+		}
+		p.capacities = list.Items
+		break
 	}
 	if needsLonghorn {
 		var err error
@@ -324,6 +347,32 @@ func (p *storagePlacement) rejection(node kubeNode) string {
 	}
 	for _, c := range p.claims {
 		prefix := "claim " + c.name + ": "
+		if c.pv == nil && c.requestedBytes > 0 {
+			observed, fits := false, false
+			for _, capacity := range p.capacities {
+				if capacity.StorageClassName != c.class.Name || capacity.NodeTopology == nil {
+					continue
+				}
+				selector, err := metav1.LabelSelectorAsSelector(capacity.NodeTopology)
+				if err != nil || !selector.Matches(labels.Set(node.Metadata.Labels)) {
+					continue
+				}
+				if capacity.Capacity == nil && capacity.MaximumVolumeSize == nil {
+					continue
+				}
+				observed = true
+				if (capacity.Capacity == nil || capacity.Capacity.Value() >= c.requestedBytes) &&
+					(capacity.MaximumVolumeSize == nil || capacity.MaximumVolumeSize.Value() >= c.requestedBytes) {
+					fits = true
+					break
+				}
+			}
+			// Unknown capacity does not prove a shortage. Multiple observations
+			// can describe separate pools: one suitable pool is sufficient.
+			if observed && !fits {
+				return prefix + "CSIStorageCapacity is below requested volume size"
+			}
+		}
 		if c.pv == nil && c.selectedNode != "" && c.selectedNode != node.Metadata.Name {
 			return prefix + "selected-node requires " + c.selectedNode
 		}

@@ -6505,6 +6505,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppPatchResponse"
+        '400':
+          description: Invalid patch, including a persistent storage size smaller than the current allocation. No deploy operation is queued for a rejected shrink.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
     delete:
@@ -8900,6 +8906,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationResponse"
+        '400':
+          $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/runtime-state:
@@ -19222,6 +19230,11 @@ components:
           type: string
         storage_size:
           type: string
+          description: >-
+            Requested PVC allocation. When updating an existing app through PATCH,
+            deploy, or source upload, an explicit reduction is rejected with HTTP
+            400; omission preserves the current requested size. Kubernetes PVCs
+            cannot be shrunk in place.
         storage_class_name:
           type: string
           description: >-
@@ -23180,6 +23193,11 @@ components:
         startup_command:
           type: string
         persistent_storage:
+          description: >-
+            Updates the existing app volume. Explicit storage_size reductions are
+            rejected with HTTP 400 before a deploy is queued. Omitted storage_size
+            preserves the current requested allocation; removing all mounts disables
+            the volume without shrinking the existing PVC.
           $ref: "#/components/schemas/AppPersistentStorageSpec"
         volume_replication:
           $ref: "#/components/schemas/AppVolumeReplicationSpec"

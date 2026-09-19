@@ -993,6 +993,78 @@ func TestPatchAppPersistentStorageQueuesCombinedDeployOperation(t *testing.T) {
 	}
 }
 
+func TestPatchAppPersistentStorageRejectsShrink(t *testing.T) {
+	t.Parallel()
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image: "ghcr.io/example/demo:latest", Ports: []int{8080}, Replicas: 1,
+		RuntimeID: "runtime_managed_shared",
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mode:             model.AppPersistentStorageModeMovableRWO,
+			StorageClassName: defaultImportedMovableRWOStorageClassName,
+			StorageSize:      "256Mi",
+			Mounts:           []model.AppPersistentStorageMount{{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/var/lib/data"}},
+		},
+	})
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"image_mirror_limit": 17,
+		"persistent_storage": map[string]any{
+			"mode": model.AppPersistentStorageModeMovableRWO, "storage_size": "128Mi",
+			"mounts": []map[string]any{{"kind": "directory", "path": "/var/lib/data"}},
+		},
+	})
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "cannot be shrunk") {
+		t.Fatalf("expected storage shrink rejection, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	unchanged, err := s.GetApp(app.ID)
+	if err != nil || unchanged.Spec.ImageMirrorLimit != app.Spec.ImageMirrorLimit {
+		t.Fatalf("rejected shrink partially changed settings: %+v err=%v", unchanged.Spec, err)
+	}
+	ops, err := s.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil || len(ops) != 0 {
+		t.Fatalf("rejected shrink queued operations: %+v err=%v", ops, err)
+	}
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"persistent_storage": map[string]any{"mounts": []map[string]any{{"kind": "directory", "path": "/new-data"}}},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("omitted size rejected: %d %s", recorder.Code, recorder.Body.String())
+	}
+	ops, err = s.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil || len(ops) != 1 || ops[0].DesiredSpec.PersistentStorage.StorageSize != "256Mi" {
+		t.Fatalf("omitted size lost allocation: %+v err=%v", ops, err)
+	}
+}
+
+func TestAppStorageUpdateRejectsShrinkThroughDeployAndUpload(t *testing.T) {
+	for _, endpoint := range []string{"deploy", "upload"} {
+		t.Run(endpoint, func(t *testing.T) {
+			s, server, key, app := setupAppConfigTestServer(t, model.AppSpec{Image: "ghcr.io/example/demo:latest", Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID,
+				PersistentStorage: &model.AppPersistentStorageSpec{Mode: model.AppPersistentStorageModeMovableRWO, StorageClassName: defaultImportedMovableRWOStorageClassName, StorageSize: "256Mi", Mounts: []model.AppPersistentStorageMount{{Path: "/data", Kind: model.AppPersistentStorageMountKindDirectory}}},
+			})
+			desired := cloneAppSpec(app.Spec)
+			desired.PersistentStorage.StorageSize = "128Mi"
+			var recorder *httptest.ResponseRecorder
+			if endpoint == "deploy" {
+				recorder = performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/deploy", key, map[string]any{"spec": desired})
+			} else {
+				body, contentType := newImportUploadMultipartBody(t, importUploadRequest{AppID: app.ID, BuildStrategy: model.AppBuildStrategyStaticSite, PersistentStorage: desired.PersistentStorage}, "demo.tgz", mustTarGz(t, map[string]string{"index.html": "demo"}))
+				req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+				req.Header.Set("Authorization", "Bearer "+key)
+				req.Header.Set("Content-Type", contentType)
+				recorder = httptest.NewRecorder()
+				server.Handler().ServeHTTP(recorder, req)
+			}
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "cannot be shrunk") {
+				t.Fatalf("shrink accepted: %d %s", recorder.Code, recorder.Body.String())
+			}
+			ops, err := s.ListOperationsByApp(app.TenantID, false, app.ID)
+			if err != nil || len(ops) != 0 {
+				t.Fatalf("shrink queued operations: %+v err=%v", ops, err)
+			}
+		})
+	}
+}
+
 func TestPatchAppVolumeReplicationQueuesDeployOperation(t *testing.T) {
 	t.Parallel()
 

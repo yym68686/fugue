@@ -188,9 +188,24 @@ func kanikoDestinationArgs(imageRef string, baseArgs ...string) []string {
 	if registryHost := registryHostFromImageRef(imageRef); isInsecureRegistryHost(registryHost) {
 		args = append(args,
 			"--insecure",
-			"--insecure-registry="+registryHost,
+			"--insecure-registry="+registryAuthorityFromImageRef(imageRef),
 		)
 	}
+	return args
+}
+
+// Map the logical output registry to the actual builder endpoint. Dockerfile
+// FROM/COPY --from references use that same logical registry, while node-level
+// containerd registry aliases are not inherited by Kaniko. Derive the mapping
+// from explicit build configuration so distributed caches and custom releases
+// do not depend on a hard-coded central registry Service.
+func appendKanikoRegistryMappingArgs(args []string, imageRef, destinationImageRef string) []string {
+	logical := registryAuthorityFromImageRef(imageRef)
+	destination := registryAuthorityFromImageRef(destinationImageRef)
+	if logical == "" || destination == "" || logical == destination {
+		return args
+	}
+	args = append(args, "--registry-map="+logical+"="+destination)
 	return args
 }
 

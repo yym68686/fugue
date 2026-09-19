@@ -329,6 +329,10 @@ func (s *Server) importUploadDecoded(w http.ResponseWriter, r *http.Request, req
 				httpx.WriteError(w, http.StatusBadRequest, err.Error())
 				return
 			}
+			if err := validatePersistentStorageUpdate(app.Spec.PersistentStorage, normalizedPersistentStorage); err != nil {
+				httpx.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			spec.PersistentStorage = normalizedPersistentStorage
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
