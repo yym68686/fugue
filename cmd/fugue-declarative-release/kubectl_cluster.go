@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/declarativerelease"
@@ -95,16 +96,18 @@ func emergencyOwnershipManager(manager string) bool {
 }
 
 type kubectlCluster struct {
-	kubectl        string
-	verifier       string
-	timeout        time.Duration
-	readTimeout    time.Duration
-	readAttempts   int
-	readRetryDelay time.Duration
-	serviceHTTPURL func(string, string, int) string
-	metadata       metadataclient.Interface
-	resources      dynamic.Interface
-	trustedCurrent *declarativerelease.ArtifactReceipt
+	kubectl          string
+	verifier         string
+	timeout          time.Duration
+	readTimeout      time.Duration
+	readAttempts     int
+	readRetryDelay   time.Duration
+	serviceHTTPURL   func(string, string, int) string
+	metadata         metadataclient.Interface
+	resources        dynamic.Interface
+	trustedCurrent   *declarativerelease.ArtifactReceipt
+	registryMu       sync.Mutex
+	registryVerified map[string]declarativerelease.RegistryVerification
 }
 
 type healthSoakTracker struct {
@@ -614,6 +617,21 @@ func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarat
 
 func (cluster *kubectlCluster) verifyRuntimeArtifact(ctx context.Context, image, revision string) (declarativerelease.RegistryVerification, error) {
 	image, revision = strings.TrimSpace(image), strings.TrimSpace(revision)
+	if err := ctx.Err(); err != nil {
+		return declarativerelease.RegistryVerification{}, err
+	}
+	// The manifest/config identity is immutable under an exact digest. Reuse
+	// successful verification only inside this one release execution; all pod,
+	// authority, health and resource-CAS observations are still read afresh.
+	key := image + "\x00" + revision
+	cluster.registryMu.Lock()
+	defer cluster.registryMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return declarativerelease.RegistryVerification{}, err
+	}
+	if prior, ok := cluster.registryVerified[key]; ok {
+		return prior, nil
+	}
 	if artifact := cluster.trustedCurrent; artifact != nil && artifact.ImmutableRef == image && artifact.OCIRevision == revision {
 		return declarativerelease.RegistryVerification{
 			Image: image, IndexDigest: artifact.TopDigest, ManifestDigest: artifact.PlatformManifestDigest,
@@ -634,6 +652,14 @@ func (cluster *kubectlCluster) verifyRuntimeArtifact(ctx context.Context, image,
 	}
 	if verification.Image != image || verification.OCIRevision != revision {
 		return declarativerelease.RegistryVerification{}, errors.New("registry target identity mismatch")
+	}
+	if cluster.registryVerified == nil {
+		cluster.registryVerified = make(map[string]declarativerelease.RegistryVerification)
+	}
+	// A component atom needs only a few identities. Keep malformed callers
+	// from turning this short-lived optimization into an unbounded cache.
+	if len(cluster.registryVerified) < 64 {
+		cluster.registryVerified[key] = verification
 	}
 	return verification, nil
 }
