@@ -22,7 +22,7 @@ const (
 	telemetryAgentMemoryLimitBytes       int64 = 16 << 20
 	telemetryAgentQueueSize                    = 4096
 	telemetryAgentBatchSize                    = 32
-	telemetryAgentKubernetesLogTailLines int64 = 200
+	telemetryAgentKubernetesLogTailLines int64 = 1000
 	telemetryAgentKubernetesLogMaxPods         = observability.DefaultKubernetesLogMaxPods
 	telemetryAgentKubernetesLogMaxLines        = 2000
 )
@@ -152,6 +152,8 @@ func (a telemetryAgent) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintln(w, "# HELP fugue_telemetry_agent_retention_seconds Configured observability retention window in seconds.")
 	_, _ = fmt.Fprintln(w, "# TYPE fugue_telemetry_agent_retention_seconds gauge")
 	_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_retention_seconds %.0f\n", cfg.Retention.Seconds())
+	_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_kubernetes_log_per_container_limit %d\n", cfg.KubernetesLogTailLines)
+	_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_kubernetes_log_cycle_limit %d\n", cfg.KubernetesLogMaxLinesPerCycle)
 	_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_kubernetes_log_qps %g\n", cfg.KubernetesLogQPS)
 	_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_kubernetes_log_burst %d\n", cfg.KubernetesLogBurst)
 	for _, exporter := range []string{"metrics", "logs", "analytics", "otlp"} {

@@ -101,15 +101,18 @@ uploaded byte count is not the manifest object's size. Inventory derives
 repository boundaries from durable snapshot metadata, reports their physical
 bytes separately, and leaves internal block reachability to the engine.
 Shared repository bytes are not assigned to an arbitrary tenant. This changes
-neither billing nor deletion authorization. Checkpoint identity v2 requires a
+neither billing nor deletion authorization. Checkpoint identity v3 requires a
 fresh complete generation for the new classification. Completed scanners
 sleep until their configured refresh deadline instead of decoding a large
 checkpoint every second.
 
 The Kubernetes client now uses explicit bounded rate settings:
 `FUGUE_OBSERVABILITY_KUBERNETES_LOG_QPS` (40) and
-`FUGUE_OBSERVABILITY_KUBERNETES_LOG_BURST` (80), with eight workers and the same
-line/memory limits. At about 400 container targets the implicit client-go
+`FUGUE_OBSERVABILITY_KUBERNETES_LOG_BURST` (80), with eight workers, a global 2,000-line cycle limit and the same memory
+limits. The per-container ceiling is 1,000 lines; the previous 200-line
+ceiling could not keep up with a measured 1,072-line/minute source on a
+15-second interval. Busy sources borrow otherwise unused global capacity;
+queue rejection still preserves the cursor. At about 400 container targets the implicit client-go
 5 QPS setting alone imposed an 80-second cycle. Drained terminated instances
 are no longer polled. Untimestamped kubelet unavailable-log responses are
 counted once per instance and retried after five minutes; old terminated
