@@ -872,7 +872,7 @@ func (s *Store) acceptTrustedPlatformConsumerHeartbeat(
 	var out model.PlatformConsumerInstance
 	err := s.withLockedState(true, func(state *model.State) error {
 		consumer, err := acceptTrustedPlatformConsumerHeartbeatInState(
-			state, claims, expectedSetID, heartbeat, receivedAt, policy,
+			state, claims, expectedSetID, heartbeat, receivedAt, policy, s.platformArtifactSigningKeyring(),
 		)
 		if err != nil {
 			return err
@@ -1773,6 +1773,7 @@ func acceptTrustedPlatformConsumerHeartbeatInState(
 	heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope,
 	receivedAt time.Time,
 	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
+	keyrings ...bundleauth.Keyring,
 ) (model.PlatformConsumerInstance, error) {
 	expectedSetID = strings.TrimSpace(expectedSetID)
 	if state == nil || expectedSetID == "" {
@@ -1809,7 +1810,15 @@ func acceptTrustedPlatformConsumerHeartbeatInState(
 		if err != nil {
 			return model.PlatformConsumerInstance{}, err
 		}
-		if cursor != nil && (bound.FencingToken < cursor.FencingToken || bound.FencingToken == cursor.FencingToken && candidate.ExpectedConsumerSetID != expectedSet.ID) {
+		if cursor != nil && bound.GenerationSequence < cursor.GenerationSequence {
+			if len(keyrings) != 1 {
+				return model.PlatformConsumerInstance{}, platformcontrol.ErrPlatformConsumerHeartbeatGenerationBack
+			}
+			cursor, err = consumerCursorForTrafficRollback(state, candidate, cursor, expectedSet, bound, keyrings[0])
+			if err != nil {
+				return model.PlatformConsumerInstance{}, err
+			}
+		} else if cursor != nil && (bound.FencingToken < cursor.FencingToken || bound.FencingToken == cursor.FencingToken && candidate.ExpectedConsumerSetID != expectedSet.ID) {
 			cursor, err = consumerLaneTransitionInState(state, candidate, cursor, expectedSet, bound.FencingToken)
 			if err != nil {
 				return model.PlatformConsumerInstance{}, err

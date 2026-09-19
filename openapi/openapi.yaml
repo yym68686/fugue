@@ -66,6 +66,18 @@ x-fugue-traffic-verified-recovery:
     each release lane: changing channels with an equal fence requires the same
     current-publication proof as changing to a lower fence; global heartbeat
     sequence, artifact sequence, timestamps and nonce replay checks stay intact.
+x-fugue-traffic-consumer-rollback:
+  semantics: >-
+    A trusted traffic consumer can report an older artifact generation only
+    when its exact signed child belongs to the current explicit rollback
+    publication. The store verifies the rollback ledger message, parent and
+    child integrity, scope, latest expected topology, signed cohort, current
+    release lane and fence in one transaction. A normal publication's pinned
+    rollback target is not rollback authorization. Newer applicable serving
+    publications and frozen or superseded lanes reject the transition.
+    Only artifact generation and the proven lane's fence comparison domain
+    change; heartbeat sequence, issued-at, evidence and nonce replay checks
+    remain enforced. Failure preserves the previous trusted consumer fact.
 x-fugue-group-traffic-recovery:
   semantics: >-
     Once Group Authority carries a traffic ReleaseSet binding, a code recovery

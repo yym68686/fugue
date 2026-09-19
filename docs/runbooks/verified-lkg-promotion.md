@@ -99,3 +99,19 @@ under a new fence. It reaches Group Authority through the ordinary route
 publication path. Current-bundle lease renewal remains available without
 changing the traffic binding. Recovery of existing unbound legacy bundles
 retains its previous behavior during migration.
+
+## Consumer evidence after an older-artifact rollback
+
+Use the explicit parent rollback operation, then prepare immutable consumer
+expectations for that new publication. A lower child generation is accepted
+only for its exact signed parent/child and the current rollback ledger message,
+lane, fence, signed cohort and latest expected set. A newer applicable full or
+gray release supersedes that permission. The `rollback_target_generation`
+field on a normal release is a pinned recovery target, not rollback authority.
+
+The transition keeps the authenticated heartbeat sequence, timestamp and nonce
+checks. Consumers must advance their durable heartbeat cursor and generate
+fresh evidence even when restoring an older artifact. A replay, frozen lane,
+changed topology, bad signature or revoked publication preserves the previous
+trusted fact. PostgreSQL serializes backwards transitions with publication and
+verification; it never upgrades a shared advisory lock while holding row locks.

@@ -120,6 +120,9 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testin
 	verified.ID = platformConsumerInstanceID(verified.ConsumerID, verified.ArtifactKind, verified.ScopeKey)
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM fugue_platform_consumer_instances`).
+		WithArgs(claims.Component+":"+claims.NodeID, heartbeat.ArtifactKind, claims.ScopeKey, heartbeat.GenerationSequence).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
 		WithArgs(set.ID).
@@ -169,6 +172,9 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatWithAuditCommitsAtomicall
 	chainID := platformConsumerHeartbeatAuditChainID(verified)
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM fugue_platform_consumer_instances`).
+		WithArgs(claims.Component+":"+claims.NodeID, heartbeat.ArtifactKind, claims.ScopeKey, heartbeat.GenerationSequence).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
 		WithArgs(set.ID).
@@ -228,6 +234,9 @@ func TestPostgresTrustedHeartbeatRejectsConcurrentReplayAtUpsert(t *testing.T) {
 	}
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM fugue_platform_consumer_instances`).
+		WithArgs(claims.Component+":"+claims.NodeID, heartbeat.ArtifactKind, claims.ScopeKey, heartbeat.GenerationSequence).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
 		WithArgs(set.ID).
@@ -272,6 +281,9 @@ func TestPostgresTrustedHeartbeatRejectsReplayBeforeWrite(t *testing.T) {
 	existing.ID = platformConsumerInstanceID(existing.ConsumerID, existing.ArtifactKind, existing.ScopeKey)
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM fugue_platform_consumer_instances`).
+		WithArgs(claims.Component+":"+claims.NodeID, heartbeat.ArtifactKind, claims.ScopeKey, heartbeat.GenerationSequence).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
 		WithArgs(set.ID).
