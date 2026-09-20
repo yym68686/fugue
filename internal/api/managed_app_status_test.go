@@ -183,7 +183,14 @@ func TestOverlayManagedAppStatusesPublishesCompleteRuntimeEvidence(t *testing.T)
 }
 
 func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T) {
-	t.Parallel()
+	testOverlayManagedAppReleaseIdentity(t, false)
+}
+
+func TestOverlayManagedAppStatusesObservesImplicitCanonicalStableRelease(t *testing.T) {
+	testOverlayManagedAppReleaseIdentity(t, true)
+}
+
+func testOverlayManagedAppReleaseIdentity(t *testing.T, implicit bool) {
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {
@@ -230,6 +237,18 @@ func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T
 	if err != nil {
 		t.Fatalf("create serving release: %v", err)
 	}
+	if implicit {
+		release.RuntimeID = app.Spec.RuntimeID
+		release.DeploymentName = ""
+		release.ServiceName = ""
+		release.UpstreamURL = "http://" + canonicalServiceName + "." + namespace + ".svc.cluster.local:8080"
+		spec := app.Spec
+		release.SpecSnapshot = &spec
+		release, err = stateStore.UpdateAppRelease(release)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := stateStore.UpsertAppTrafficPolicy(model.AppTrafficPolicy{
 		TenantID:        app.TenantID,
 		AppID:           app.ID,
@@ -240,6 +259,7 @@ func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T
 		t.Fatalf("create stable traffic policy: %v", err)
 	}
 
+	var endpointMissing atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if writeManagedAppClusterIdentity(w, r) {
 			return
@@ -262,6 +282,10 @@ func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T
 		case "/api/v1/services":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"metadata": map[string]any{"name": canonicalServiceName, "namespace": namespace}}}})
 		case "/api/v1/endpoints":
+			if endpointMissing.Load() {
+				_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
 				"metadata": map[string]any{"name": canonicalServiceName, "namespace": namespace},
 				"subsets":  []map[string]any{{"addresses": []map[string]any{{"ip": "10.0.0.2"}}}},
@@ -288,6 +312,19 @@ func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T
 	}
 	if !slices.Contains(observed.ObservedStatus.EvidenceSources, "app_release_traffic_policy") {
 		t.Fatalf("serving release evidence source missing: %+v", observed.ObservedStatus.EvidenceSources)
+	}
+	if implicit {
+		persisted, err := stateStore.GetAppRelease(app.TenantID, true, release.ID)
+		if err != nil || persisted.DeploymentName != "" || persisted.ServiceName != "" {
+			t.Fatal("observation rewrote historical release", err)
+		}
+		endpointMissing.Store(true)
+		apiServer.managedAppStatusCache.invalidate()
+		failed := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
+		if failed.ObservedStatus == nil || failed.ObservedStatus.ServingReleaseID != "" || appObservedReadyForServing(failed, time.Now().UTC()) {
+			t.Fatal("implicit identity bypassed independent endpoint readiness")
+		}
+
 	}
 }
 

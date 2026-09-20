@@ -18,6 +18,7 @@ import (
 
 	"fugue/internal/appimages"
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
@@ -1551,6 +1552,7 @@ func (s *Server) servingReleaseTrafficTargetWithSnapshot(app model.App, snapshot
 	} else {
 		release = snapshot.releases[policy.StableReleaseID]
 	}
+	release = releaseflow.CanonicalStableTarget(app, release)
 	if err != nil || strings.TrimSpace(release.AppID) != strings.TrimSpace(app.ID) ||
 		!strings.EqualFold(strings.TrimSpace(release.Role), model.AppReleaseRoleStable) ||
 		!(strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusServing) || strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusReady)) ||

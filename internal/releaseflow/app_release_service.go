@@ -105,7 +105,7 @@ func (s AppReleaseService) EnsureStableRelease(ctx context.Context, app model.Ap
 	}
 	now := s.now()
 	spec := app.Spec
-	return s.Store.CreateAppRelease(model.AppRelease{
+	return s.Store.CreateAppRelease(CanonicalStableTarget(app, model.AppRelease{
 		TenantID:         app.TenantID,
 		AppID:            app.ID,
 		Role:             model.AppReleaseRoleStable,
@@ -116,7 +116,7 @@ func (s AppReleaseService) EnsureStableRelease(ctx context.Context, app model.Ap
 		Status:           status,
 		SpecSnapshot:     &spec,
 		ReadyAt:          &now,
-	})
+	}))
 }
 
 func (s AppReleaseService) CreateRelease(ctx context.Context, app model.App, req CreateReleaseRequest) (model.AppRelease, error) {
@@ -145,7 +145,7 @@ func (s AppReleaseService) CreateRelease(ctx context.Context, app model.App, req
 		spec := app.Spec
 		specSnapshot = &spec
 	}
-	return s.Store.CreateAppRelease(model.AppRelease{
+	return s.Store.CreateAppRelease(CanonicalStableTarget(app, model.AppRelease{
 		TenantID:         app.TenantID,
 		AppID:            app.ID,
 		Role:             role,
@@ -162,7 +162,7 @@ func (s AppReleaseService) CreateRelease(ctx context.Context, app model.App, req
 		RetentionUntil:   req.RetentionUntil,
 		SpecSnapshot:     specSnapshot,
 		ReadyAt:          readyAt,
-	})
+	}))
 }
 
 func (s AppReleaseService) PatchTrafficPolicy(ctx context.Context, principal model.Principal, app model.App, patch TrafficPatch) (model.AppTrafficPolicy, error) {

@@ -6876,6 +6876,7 @@ paths:
     post:
       operationId: createAppRelease
       summary: Create App Release
+      description: Stable releases matching the current app identity, runtime, image and canonical service URL acquire canonical deployment/service names when both are omitted. Any provided spec snapshot must agree on image and runtime. This supplies workload identity only; runtime readiness must still be independently observed.
       tags: [Apps]
       x-fugue-handler: handleCreateAppRelease
       security:
