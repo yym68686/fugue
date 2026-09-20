@@ -89,7 +89,11 @@ func TestConsumerPlacementCaptureDoesNotNeedAnyServingBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A server with no store cannot perform the old network/inventory capture.
+	r.Issues = []platformProjectionIssue{{Code: "dns_app_placement_not_projected"}, {Code: "dns_output_equivalence_not_verified"}}
 	(&Server{}).capturePlatformPlacements(context.Background(), &r)
+	if len(r.Issues) != 1 || r.Issues[0].Code != "dns_output_equivalence_not_verified" {
+		t.Fatal("consumer planning retained the obsolete capture warning or lost an execution diagnostic")
+	}
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: r.Intent, Policy: r.Policy, RuntimeSnapshot: r.RuntimeSnapshot})
 	if err != nil {
 		t.Fatal("new route depends on old serving proof", err)

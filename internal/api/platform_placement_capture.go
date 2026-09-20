@@ -21,6 +21,9 @@ func (s *Server) capturePlatformPlacements(rctx context.Context, result *platfor
 	if result.Policy.DNSPlacementMode == platformconfig.DNSPlacementConsumerReadiness {
 		// Desired addresses are compiled from the already frozen endpoint
 		// topology. Only the DNS consumer can prove its eventual serving state.
+		result.Issues = slices.DeleteFunc(result.Issues, func(issue platformProjectionIssue) bool {
+			return issue.Code == "dns_app_placement_not_projected"
+		})
 		return
 	}
 	found := false
