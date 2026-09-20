@@ -307,8 +307,8 @@ jobs:
   diagnostics_configuration:
     # Configuration recovery can reuse the last verified runner even when a
     # component or probe code build fails. No API/controller rollout is needed.
-    needs: diagnostic_packages
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [prepush, diagnostic_packages]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.diagnostic_packages.result == 'success' || needs.diagnostic_packages.result == 'skipped') }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-diagnostics-configuration, cancel-in-progress: false}
