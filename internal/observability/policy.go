@@ -51,14 +51,21 @@ var secretFieldTokens = []string{
 	"credential",
 }
 
-var secretTextPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(authorization\s*[:=]\s*)([^,\s]+)`),
-	regexp.MustCompile(`(?i)(cookie\s*[:=]\s*)([^,\s]+)`),
-	regexp.MustCompile(`(?i)(set-cookie\s*[:=]\s*)([^,\s]+)`),
-	regexp.MustCompile(`(?i)(x-api-key\s*[:=]\s*)([^,\s]+)`),
-	regexp.MustCompile(`(?i)((?:access_|refresh_)?token\s*[:=]\s*)([^,\s]+)`),
-	regexp.MustCompile(`(?i)(password\s*[:=]\s*)([^,\s]+)`),
-	regexp.MustCompile(`(?i)(database_url\s*[:=]\s*)([^,\s]+)`),
+// literal is a necessary ASCII substring of every match of pattern.
+// Unicode case folding is handled by the regexp fallback in RedactText.
+type secretTextRule struct {
+	literal string
+	pattern *regexp.Regexp
+}
+
+var secretTextPatterns = []secretTextRule{
+	{"authorization", regexp.MustCompile(`(?i)(authorization\s*[:=]\s*)([^,\s]+)`)},
+	{"cookie", regexp.MustCompile(`(?i)(cookie\s*[:=]\s*)([^,\s]+)`)},
+	{"set-cookie", regexp.MustCompile(`(?i)(set-cookie\s*[:=]\s*)([^,\s]+)`)},
+	{"x-api-key", regexp.MustCompile(`(?i)(x-api-key\s*[:=]\s*)([^,\s]+)`)},
+	{"token", regexp.MustCompile(`(?i)((?:access_|refresh_)?token\s*[:=]\s*)([^,\s]+)`)},
+	{"password", regexp.MustCompile(`(?i)(password\s*[:=]\s*)([^,\s]+)`)},
+	{"database_url", regexp.MustCompile(`(?i)(database_url\s*[:=]\s*)([^,\s]+)`)},
 }
 
 type SummaryPolicy struct {
@@ -117,10 +124,30 @@ func RedactFields(fields map[string]string) map[string]string {
 }
 
 func RedactText(value string) (string, bool) {
+	// All existing rules require a literal assignment/header separator.
+	if !strings.ContainsAny(value, ":=") {
+		return value, false
+	}
+	ascii := true
+	for i := range value {
+		if value[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	folded := ""
+	if ascii {
+		folded = strings.ToLower(value)
+	}
 	redacted := value
 	changed := false
-	for _, pattern := range secretTextPatterns {
-		next := pattern.ReplaceAllString(redacted, "${1}[REDACTED]")
+	for _, rule := range secretTextPatterns {
+		// Replacements cannot introduce a rule's literal, so the original text
+		// remains a safe negative filter even after an earlier rule redacts it.
+		if ascii && !strings.Contains(folded, rule.literal) {
+			continue
+		}
+		next := rule.pattern.ReplaceAllString(redacted, "${1}[REDACTED]")
 		if next != redacted {
 			changed = true
 			redacted = next

@@ -203,6 +203,10 @@ func validatePlatformIntentArtifact(artifact model.PlatformArtifact) error {
 }
 
 func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {
+	return validateReleaseSetReferences(artifact, s.store.GetPlatformArtifact)
+}
+
+func validateReleaseSetReferences(artifact model.PlatformArtifact, readArtifact func(string) (model.PlatformArtifact, error)) model.PlatformArtifactValidationResult {
 	ids, idsOK := artifact.Content["artifact_ids"].([]any)
 	kinds, kindsOK := artifact.Content["artifact_kinds"].([]any)
 	if !idsOK || !kindsOK || len(ids) == 0 || len(ids) != len(kinds) {
@@ -253,7 +257,7 @@ func (s *Server) validateReleaseSetReferences(artifact model.PlatformArtifact) m
 			return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set contains duplicate artifact ids", Evidence: map[string]string{"artifact_id": id}}
 		}
 		seen[id] = struct{}{}
-		child, err := s.store.GetPlatformArtifact(id)
+		child, err := readArtifact(id)
 		if err != nil {
 			return model.PlatformArtifactValidationResult{Name: "release_set.references", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set references an unknown artifact", Evidence: map[string]string{"artifact_id": id}}
 		}
@@ -1128,9 +1132,32 @@ type consumerArtifactLookup struct {
 	Release    model.PlatformArtifactRelease    `json:"release"`
 }
 
+// A request may validate the same immutable child while resolving its owner,
+// selecting it, and checking a parent download. Reuse that request's artifact
+// observation, while keeping lane, fence and expected-topology reads fresh.
+// Do not retain this reader across requests or use it for a mutation path.
+func newConsumerArtifactReader(load func(string) (model.PlatformArtifact, error)) func(string) (model.PlatformArtifact, error) {
+	observed := map[string]model.PlatformArtifact{}
+	return func(id string) (model.PlatformArtifact, error) {
+		id = strings.TrimSpace(id)
+		if artifact, ok := observed[id]; ok {
+			return artifact, nil
+		}
+		artifact, err := load(id)
+		if err == nil {
+			observed[id] = artifact
+		}
+		return artifact, err
+	}
+}
+
 // Both discovery and download enforce the same active release and topology
 // binding. Desired assignments never count as observed apply/probe results.
 func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.PlatformComponentIdentityClaims) ([]consumerArtifactLookup, error) {
+	return s.resolvePlatformConsumerAssignmentsWithReader(claims, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+}
+
+func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcontrol.PlatformComponentIdentityClaims, readArtifact func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, error) {
 	assignments := make([]consumerArtifactLookup, 0)
 	for _, channel := range []string{model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull} {
 		releaseSet, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel)
@@ -1144,7 +1171,7 @@ func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.Platf
 			release.Status != model.PlatformArtifactReleaseStatusActive || release.ReleaseChannel != channel ||
 			release.Generation != releaseSet.Generation || release.ScopeKey != claims.ScopeKey || release.FencingToken <= 0 ||
 			releaseSet.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(releaseSet) != nil ||
-			!s.validateReleaseSetReferences(releaseSet).Pass {
+			!validateReleaseSetReferences(releaseSet, readArtifact).Pass {
 			return nil, errors.New("consumer release assignment is inconsistent")
 		}
 		var canaryGroups []string
@@ -1183,7 +1210,7 @@ func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.Platf
 					expected.NodeID != claims.NodeID || expected.ScopeKey != claims.ScopeKey || expected.ArtifactKind != kind {
 					continue
 				}
-				child, err := s.consumerAssignmentChild(releaseSet, kind)
+				child, err := consumerAssignmentChild(releaseSet, kind, readArtifact)
 				if err != nil || child.ScopeKey != claims.ScopeKey || child.Generation != latest.ExpectedGeneration ||
 					child.Generation != expected.ExpectedGeneration || s.store.VerifyPlatformArtifactIntegrity(child) != nil {
 					return nil, errors.New("consumer artifact assignment is inconsistent")
@@ -1272,15 +1299,16 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 		httpx.WriteError(w, http.StatusBadRequest, "one expected_consumer_set_id is required")
 		return
 	}
-	resolved, err := s.resolvePlatformConsumerAssignments(claims)
+	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	for _, result := range resolved {
 		if result.Assignment.ReleaseSetID == r.PathValue("artifact_id") && result.Assignment.ExpectedConsumerSetID == setIDs[0] {
-			parent, err := s.store.GetPlatformArtifact(result.Assignment.ReleaseSetID)
-			if err != nil || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || !s.validateReleaseSetReferences(parent).Pass {
+			parent, err := readArtifact(result.Assignment.ReleaseSetID)
+			if err != nil || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || !validateReleaseSetReferences(parent, readArtifact).Pass {
 				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer parent artifact unavailable")
 				return
 			}
@@ -1301,6 +1329,10 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 }
 
 func (s *Server) consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string) (model.PlatformArtifact, error) {
+	return consumerAssignmentChild(releaseSet, kind, s.store.GetPlatformArtifact)
+}
+
+func consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string, readArtifact func(string) (model.PlatformArtifact, error)) (model.PlatformArtifact, error) {
 	ids, idsOK := releaseSet.Content["artifact_ids"].([]any)
 	kinds, kindsOK := releaseSet.Content["artifact_kinds"].([]any)
 	if !idsOK || !kindsOK || len(ids) != len(kinds) {
@@ -1314,7 +1346,7 @@ func (s *Server) consumerAssignmentChild(releaseSet model.PlatformArtifact, kind
 		if !ok {
 			return model.PlatformArtifact{}, store.ErrConflict
 		}
-		return s.store.GetPlatformArtifact(id)
+		return readArtifact(id)
 	}
 	return model.PlatformArtifact{}, store.ErrNotFound
 }

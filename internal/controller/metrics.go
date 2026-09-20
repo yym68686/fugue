@@ -150,7 +150,7 @@ func (s *Service) collectMetrics(parent context.Context, w io.Writer) error {
 		observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_count", "Registry blobs not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobCount))
 		observability.WriteGaugeMetric(w, "fugue_registry_protected_workload_digests", "Current workload image digests included in the registry GC keep set at the last maintenance scan.", nil, float64(registry.ProtectedDigestCount))
 	}
-	s.writeImageCacheLocalPVMetrics(w)
+	s.writeImageCacheLocalPVMetrics(parent, w)
 	return parent.Err()
 }
 
@@ -548,7 +548,7 @@ func boolGauge(value bool) float64 {
 	return 0
 }
 
-func (s *Service) writeImageCacheLocalPVMetrics(w io.Writer) {
+func (s *Service) writeImageCacheLocalPVMetrics(ctx context.Context, w io.Writer) {
 	if s == nil || s.Store == nil {
 		return
 	}
@@ -570,7 +570,7 @@ func (s *Service) writeImageCacheLocalPVMetrics(w io.Writer) {
 			observability.WriteMetricSample(w, "fugue_image_cache_unreferenced_blob_bytes", labels, float64(node.UnreferencedBlobBytes))
 		}
 	}
-	if plans, err := s.Store.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Limit: 200}); err == nil {
+	if plans, err := s.Store.ListImageCachePrunePlanMetrics(ctx, 200); err == nil {
 		observability.WriteMetricHeader(w, "fugue_image_cache_candidate_manifest_count", "Candidate manifest count in recent image-cache prune plans.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_image_cache_candidate_blob_count", "Candidate unreferenced blob count in recent image-cache prune plans.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_image_cache_candidate_blob_bytes", "Candidate unreferenced blob bytes in recent image-cache prune plans.", "gauge")
@@ -591,7 +591,7 @@ func (s *Service) writeImageCacheLocalPVMetrics(w io.Writer) {
 			}
 		}
 	}
-	s.writeImageCachePruneTaskResultMetrics(w)
+	s.writeImageCachePruneTaskResultMetrics(ctx, w)
 	if inventories, err := s.Store.ListLocalPVInventories(model.LocalPVInventoryFilter{}); err == nil {
 		observability.WriteMetricHeader(w, "fugue_localpv_inventory_age_seconds", "Age of the latest LVM LocalPV inventory report.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_backing_file_bytes", "LVM LocalPV backing file size reported by each node.", "gauge")
@@ -657,11 +657,11 @@ func latestImageCachePrunePlansByMetricLabels(plans []model.ImageCachePrunePlan)
 	return out
 }
 
-func (s *Service) writeImageCachePruneTaskResultMetrics(w io.Writer) {
+func (s *Service) writeImageCachePruneTaskResultMetrics(ctx context.Context, w io.Writer) {
 	if s == nil || s.Store == nil {
 		return
 	}
-	tasks, err := s.Store.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusCompleted)
+	tasks, err := s.Store.ListImageCachePruneTaskMetrics(ctx)
 	if err != nil {
 		if s.Logger != nil {
 			s.Logger.Printf("image-cache prune task result metrics unavailable: %v", err)

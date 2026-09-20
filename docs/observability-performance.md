@@ -138,3 +138,32 @@ traversal visible; zero observed backlog alone is not a completeness claim.
 Export batches also flush before their serialized event bytes exceed one quarter
 of the queued-byte budget (4 MiB for this agent). A single larger event flushes
 alone. This decouples catch-up throughput from the memory cost of large logs.
+
+# Request and metrics allocation follow-up
+
+Live Diagnostics identified the controller's 15-second metrics refresh as a
+large reader of completed node maintenance history and detailed prune plans.
+Metrics now use dedicated read-only projections: completed prune tasks retain
+only their label/result fields, and the same most recent 200 plans retain only
+counters and protection summaries. Task logs, image manifests and deletion
+candidates are not transferred or decoded. Selection still chooses the latest
+task per label set before testing its reason, so a later non-orphan task cannot
+resurrect an older orphan result. The full diagnostic and execution APIs keep
+all of their evidence. PostgreSQL integration tests compare these projections
+against the previous full reads; neither pruning nor runtime policy is changed.
+
+Consumer assignment and artifact download handlers share repeated artifact
+reads only within one request. Release channels, active fences and expected
+consumer revisions are still queried on every request, and signature, child
+status, lineage and cohort checks still run. The reader is not a cross-request
+cache and never participates in mutations. Missing or failed reads are not
+retained. Supersession and consumer removal remain covered by the assignment
+and download authorization tests.
+
+Telemetry redaction keeps its original ordered regex rules. An ASCII-only
+negative filter skips rules whose mandatory literal is absent, and strings
+without either assignment separator skip all rules. Non-ASCII text falls back
+to the existing Unicode case-folding behavior. Differential fuzzing includes
+Unicode folds, malformed UTF-8, nested assignments and mixed case. This removes
+unnecessary scans and temporary copies without sampling away or weakening
+redaction of log data.
