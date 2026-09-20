@@ -88,6 +88,9 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 			if err != nil {
 				return ErrConflict
 			}
+			if policy.RequireDNSQueryPolicy && input.DNSQueryPolicy == nil {
+				return ErrConflict
+			}
 			if _, present, err := input.RouteDefaults(); err != nil || policy.RequireRouteDefaults && !present {
 				return ErrConflict
 			}

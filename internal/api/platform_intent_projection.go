@@ -242,7 +242,11 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 			return platformIntentProjectionResponse{}, errors.New("DNS readiness topology invalid")
 		}
 	}
-	if len(dnsNodes) > 0 {
+	if len(dnsNodes) > 0 && dnsPolicy != nil && dnsPolicy.DNSQueryPolicy != nil {
+		if err := s.captureDirectDNSQueries(ctx, &projection, *dnsPolicy.DNSQueryPolicy); err != nil {
+			return platformIntentProjectionResponse{}, err
+		}
+	} else if len(dnsNodes) > 0 {
 		if err := s.projectDNSQueryRules(&projection, dnsNodes); err != nil {
 			return platformIntentProjectionResponse{}, errors.New("signed DNS query migration input unavailable")
 		}

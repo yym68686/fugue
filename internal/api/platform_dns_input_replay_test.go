@@ -14,6 +14,7 @@ import (
 func TestPinnedDNSReferencesPersistThroughOperatorReplay(t *testing.T) {
 	state, s, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	p, c, nodes := pinnedDNSFixture()
+	p.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", ECSEnabled: true, ExplorationPercent: 5, SwitchCooldownSeconds: 1800, MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
 	minimum, stale := 2, 120
 	rules := []platformconfig.RoutePolicyConstraint{}
 	states := []platformconfig.DNSRouteStateConstraint{}
@@ -42,7 +43,7 @@ func TestPinnedDNSReferencesPersistThroughOperatorReplay(t *testing.T) {
 	if response.Code != 200 {
 		t.Fatal(response.Body.String())
 	}
-	control := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-control", Mode: "shadow", RequireApplicationDomains: true, RequireRouteDefaults: true, InputSource: "business-static-intent", TargetScope: "global", IntervalSeconds: 60, RefreshSeconds: 600, StaticIntentArtifactID: base.ID, StaticIntentDigest: base.ContentHash, DNSPolicyArtifactID: a.ID, DNSPolicyDigest: a.ContentHash, HostedZoneTemplates: []platformproducer.HostedZoneTemplate{{NodeID: "dns-a", TemplateZone: "example.test"}}}
+	control := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-control", Mode: "shadow", RequireApplicationDomains: true, RequireRouteDefaults: true, RequireDNSQueryPolicy: true, InputSource: "business-static-intent", TargetScope: "global", IntervalSeconds: 60, RefreshSeconds: 600, StaticIntentArtifactID: base.ID, StaticIntentDigest: base.ContentHash, DNSPolicyArtifactID: a.ID, DNSPolicyDigest: a.ContentHash, HostedZoneTemplates: []platformproducer.HostedZoneTemplate{{NodeID: "dns-a", TemplateZone: "example.test"}}}
 	raw, _ = json.Marshal(control)
 	// Reset the decoded map so the two different policy schemas cannot mix.
 	content = map[string]any{}
@@ -63,6 +64,7 @@ func TestPinnedDNSReferencesPersistThroughOperatorReplay(t *testing.T) {
 	if err != nil || !present {
 		t.Fatal(err)
 	}
+	defaults.DNSQueryPolicy = p.DNSQueryPolicy
 	draft := platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global"}, Policy: defaults}
 	if err = projectPinnedDNSInputs(&draft, c, p, control.HostedZoneTemplates, nodes, nil, now); err != nil {
 		t.Fatal(err)

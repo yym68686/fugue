@@ -39,6 +39,9 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 		}
 		dns = &p
 	}
+	if policy.RequireDNSQueryPolicy && (dns == nil || dns.DNSQueryPolicy == nil) {
+		return platformIntentProjectionResponse{}, fmt.Errorf("pinned DNS query policy required")
+	}
 	if policy.RequireRouteDefaults {
 		if dns == nil {
 			return platformIntentProjectionResponse{}, fmt.Errorf("pinned route defaults required")

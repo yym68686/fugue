@@ -12,6 +12,7 @@ import (
 // ProjectionPolicyInput is the supported producer subset of PolicySnapshot.
 // Unused fields are rejected rather than silently ignored.
 type ProjectionPolicyInput struct {
+	DNSQueryPolicy           *platformconfig.DNSQueryPolicy            `json:"dns_query_policy,omitempty"`
 	MinimumHealthyEdges      *int                                      `json:"minimum_healthy_edges,omitempty"`
 	MaxStaleSeconds          *int                                      `json:"max_stale_seconds,omitempty"`
 	RouteConstraints         *[]platformconfig.RoutePolicyConstraint   `json:"route_constraints,omitempty"`
@@ -44,6 +45,12 @@ func DecodeProjectionPolicy(a model.PlatformArtifact, consumers []platformconfig
 		if value, present := a.Content[key]; present && value == nil {
 			return fail()
 		}
+	}
+	if value, present := a.Content["dns_query_policy"]; present && value == nil {
+		return fail()
+	}
+	if platformconfig.ValidateDNSQueryPolicy(p.DNSQueryPolicy) != nil {
+		return fail()
 	}
 	if _, _, err := p.RouteDefaults(); err != nil {
 		return fail()

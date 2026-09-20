@@ -9,7 +9,7 @@ import (
 )
 
 func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
-	for _, scenario := range []string{"valid", "route defaults", "route defaults without policy", "domains", "domains without static", "paused", "static", "static missing id", "static bad digest", "migration with ref", "scope", "generation", "schema", "source", "target", "mode", "interval", "refresh", "short refresh", "unknown action", "dns", "dns missing digest", "dns without static", "template without policy", "duplicate template"} {
+	for _, scenario := range []string{"valid", "query", "query missing policy", "route defaults", "route defaults without policy", "domains", "domains without static", "paused", "static", "static missing id", "static bad digest", "migration with ref", "scope", "generation", "schema", "source", "target", "mode", "interval", "refresh", "short refresh", "unknown action", "dns", "dns missing digest", "dns without static", "template without policy", "duplicate template"} {
 		t.Run(scenario, func(t *testing.T) {
 			p := Policy{SchemaVersion: Schema, Generation: "policy", Mode: "shadow", InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 60, RefreshSeconds: 300}
 			a := model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, ScopeKey: Scope, Generation: p.Generation}
@@ -25,6 +25,8 @@ func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
 				if scenario == "static bad digest" {
 					p.StaticIntentDigest = "sha256:invalid"
 				}
+			case "query missing policy":
+				p.RequireDNSQueryPolicy = true
 			case "route defaults without policy":
 				p.RequireRouteDefaults = true
 			case "domains without static":
@@ -53,10 +55,11 @@ func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
 				p.IntervalSeconds = 600
 				p.RefreshSeconds = 300
 			}
-			if scenario == "route defaults" || strings.HasPrefix(scenario, "dns") || strings.Contains(scenario, "template") {
+			if scenario == "query" || scenario == "route defaults" || strings.HasPrefix(scenario, "dns") || strings.Contains(scenario, "template") {
 				p.InputSource = "business-static-intent"
 				p.StaticIntentArtifactID = "base"
 				p.StaticIntentDigest = "sha256:" + strings.Repeat("a", 64)
+				p.RequireDNSQueryPolicy = scenario == "query"
 				p.RequireRouteDefaults = scenario == "route defaults"
 				p.DNSPolicyArtifactID = "dns"
 				p.DNSPolicyDigest = "sha256:" + strings.Repeat("b", 64)
@@ -81,7 +84,7 @@ func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
 				a.Content["command"] = "arbitrary action"
 			}
 			_, err := Decode(a)
-			if (scenario == "route defaults" || scenario == "domains" || scenario == "valid" || scenario == "paused" || scenario == "static" || scenario == "dns") != (err == nil) {
+			if (scenario == "query" || scenario == "route defaults" || scenario == "domains" || scenario == "valid" || scenario == "paused" || scenario == "static" || scenario == "dns") != (err == nil) {
 				t.Fatal("policy admission differs", err)
 			}
 		})

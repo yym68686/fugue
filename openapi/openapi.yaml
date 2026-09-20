@@ -31653,6 +31653,19 @@ components:
           maxItems: 128
           items:
             $ref: "#/components/schemas/CachePolicy"
+    PlatformDNSQueryPolicy:
+      type: object
+      additionalProperties: false
+      required: [ranking_mode, preference_mode, ecs_enabled, exploration_percent, switch_cooldown_seconds, minimum_ttl_seconds, maximum_ttl_seconds]
+      description: Producer query strategy, independent of runtime ranking, locality and candidate eligibility. The producer observes inventory and ranking directly, expands concrete DNSAnswerRules, and never reads legacy DNS bundles when this policy is present. Readiness remains independently proven.
+      properties:
+        ranking_mode: {type: string, enum: [active, shadow, disabled]}
+        preference_mode: {type: string, enum: [runtime_locality]}
+        ecs_enabled: {type: boolean}
+        exploration_percent: {type: integer, minimum: 0, maximum: 50}
+        switch_cooldown_seconds: {type: integer, minimum: 0, maximum: 86400}
+        minimum_ttl_seconds: {type: integer, minimum: 1, maximum: 3600}
+        maximum_ttl_seconds: {type: integer, minimum: 1, maximum: 3600}
     PlatformDNSAuthorityPolicy:
       type: object
       additionalProperties: false
@@ -31835,6 +31848,8 @@ components:
           type: array
           maxItems: 256
           items: {$ref: "#/components/schemas/PlatformDNSClientPolicy"}
+        dns_query_policy:
+          $ref: "#/components/schemas/PlatformDNSQueryPolicy"
         dns_answer_rules:
           type: array
           maxItems: 20000
@@ -32434,10 +32449,14 @@ components:
         dns_policy_artifact_id:
           type: string
           minLength: 1
-          description: Optional exact validated global PolicySnapshot holding DNS declarations and optional route defaults. Supported fields are schema_version, generation, scope, dns_authorities, dns_client_policies, dns_readiness, tls_readiness, traffic_rollout_cohorts; the optional route defaults group must include all four of minimum_healthy_edges (1..10000), max_stale_seconds (1..604800), route_constraints and dns_route_state_constraints. Explicit empty arrays are allowed; null, partial groups and unknown fields are rejected. Base route_constraints are defaults by hostname; an explicit business route policy takes precedence. Requires business-static-intent and DNS consumers in the pinned intent.
+          description: Optional exact validated global PolicySnapshot holding DNS declarations and optional route defaults. Supported fields are schema_version, generation, scope, dns_authorities, dns_client_policies, dns_readiness, tls_readiness, traffic_rollout_cohorts, dns_query_policy; the optional route defaults group must include all four of minimum_healthy_edges (1..10000), max_stale_seconds (1..604800), route_constraints and dns_route_state_constraints. Explicit empty arrays are allowed; null, partial groups and unknown fields are rejected. Base route_constraints are defaults by hostname; an explicit business route policy takes precedence. Requires business-static-intent and DNS consumers in the pinned intent.
         dns_policy_digest:
           type: string
           pattern: '^sha256:[a-f0-9]{64}$'
+        require_dns_query_policy:
+          type: boolean
+          default: false
+          description: Requires dns_query_policy in the exact signed projection policy. Missing declarations reject capture and transactional publication; no legacy bundle fallback.
         require_route_defaults:
           type: boolean
           default: false

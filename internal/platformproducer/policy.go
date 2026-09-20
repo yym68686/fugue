@@ -23,6 +23,7 @@ const (
 )
 
 type Policy struct {
+	RequireDNSQueryPolicy     bool                 `json:"require_dns_query_policy,omitempty"`
 	RequireRouteDefaults      bool                 `json:"require_route_defaults,omitempty"`
 	RequireApplicationDomains bool                 `json:"require_application_domains,omitempty"`
 	SchemaVersion             string               `json:"schema_version"`
@@ -73,7 +74,7 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	default:
 		return p, fmt.Errorf("producer source unsupported")
 	}
-	if p.RequireRouteDefaults && (p.InputSource != "business-static-intent" || p.DNSPolicyArtifactID == "" || !ValidDigest(p.DNSPolicyDigest)) {
+	if (p.RequireRouteDefaults || p.RequireDNSQueryPolicy) && (p.InputSource != "business-static-intent" || p.DNSPolicyArtifactID == "" || !ValidDigest(p.DNSPolicyDigest)) {
 		return p, fmt.Errorf("route defaults require paired pinned policy reference")
 	}
 	if p.RequireApplicationDomains && p.InputSource != "business-static-intent" {

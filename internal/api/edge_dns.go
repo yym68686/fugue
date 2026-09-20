@@ -1730,6 +1730,10 @@ func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample, dec
 }
 
 func (builder *edgeDNSLatencyProfileBuilder) finish(decisions []model.EdgeDNSRoutingDecision, now time.Time) (edgeDNSLatencyProfileCatalog, []model.EdgeDNSRoutingDecision) {
+	return builder.finishWithCooldown(decisions, now, edgeDNSDecisionCooldown, false)
+}
+
+func (builder *edgeDNSLatencyProfileBuilder) finishWithCooldown(decisions []model.EdgeDNSRoutingDecision, now time.Time, cooldown time.Duration, explicit bool) (edgeDNSLatencyProfileCatalog, []model.EdgeDNSRoutingDecision) {
 	byHostnameScope := builder.byHostnameScope
 
 	decisionByKey := make(map[string]model.EdgeDNSRoutingDecision, len(decisions))
@@ -1765,7 +1769,7 @@ func (builder *edgeDNSLatencyProfileBuilder) finish(decisions []model.EdgeDNSRou
 				continue
 			}
 			decisionKey := edgeDNSRoutingDecisionKey(hostname, scopeKey)
-			profile, decision := applyEdgeDNSRoutingDecision(profile, decisionByKey[decisionKey], now)
+			profile, decision := applyEdgeDNSRoutingDecisionWithCooldown(profile, decisionByKey[decisionKey], now, cooldown, explicit)
 			updates = append(updates, decision)
 			if profile.Scope.global() {
 				catalog.Global[hostname] = profile
@@ -2082,8 +2086,15 @@ func buildEdgeDNSLatencyProfile(hostname string, scope edgeDNSLatencyScope, grou
 }
 
 func applyEdgeDNSRoutingDecision(profile *edgeDNSLatencyProfile, existing model.EdgeDNSRoutingDecision, now time.Time) (*edgeDNSLatencyProfile, model.EdgeDNSRoutingDecision) {
+	return applyEdgeDNSRoutingDecisionWithCooldown(profile, existing, now, edgeDNSDecisionCooldown, false)
+}
+
+func applyEdgeDNSRoutingDecisionWithCooldown(profile *edgeDNSLatencyProfile, existing model.EdgeDNSRoutingDecision, now time.Time, cooldown time.Duration, explicit bool) (*edgeDNSLatencyProfile, model.EdgeDNSRoutingDecision) {
 	if profile == nil {
 		return profile, model.EdgeDNSRoutingDecision{}
+	}
+	if explicit && !existing.SwitchedAt.IsZero() {
+		existing.CooldownUntil = existing.SwitchedAt.Add(cooldown)
 	}
 	previous := strings.TrimSpace(existing.SelectedEdgeGroupID)
 	selected := strings.TrimSpace(profile.BestEdgeGroupID)
@@ -2092,7 +2103,7 @@ func applyEdgeDNSRoutingDecision(profile *edgeDNSLatencyProfile, existing model.
 	cooldownUntil := existing.CooldownUntil
 	switchedAt := existing.SwitchedAt
 	if previous == "" {
-		cooldownUntil = now.Add(edgeDNSDecisionCooldown)
+		cooldownUntil = now.Add(cooldown)
 		switchedAt = now
 	} else if previous != selected {
 		if now.Before(existing.CooldownUntil) {
@@ -2104,7 +2115,7 @@ func applyEdgeDNSRoutingDecision(profile *edgeDNSLatencyProfile, existing model.
 				profile.promoteSelected(previous, "latency_cooldown_hold")
 			}
 		} else {
-			cooldownUntil = now.Add(edgeDNSDecisionCooldown)
+			cooldownUntil = now.Add(cooldown)
 			switchedAt = now
 		}
 	}
@@ -2112,7 +2123,7 @@ func applyEdgeDNSRoutingDecision(profile *edgeDNSLatencyProfile, existing model.
 		selected = profile.BestEdgeGroupID
 	}
 	if cooldownUntil.IsZero() {
-		cooldownUntil = now.Add(edgeDNSDecisionCooldown)
+		cooldownUntil = now.Add(cooldown)
 	}
 	if switchedAt.IsZero() {
 		switchedAt = now

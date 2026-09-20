@@ -31,7 +31,7 @@ func TestPlatformProducerGuardPostgres(t *testing.T) {
 }
 
 func testPlatformProducerGuard(t *testing.T, dsn string) {
-	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static domains complete", "static domains missing", "static domains invalid", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation", "dns defaults complete", "dns defaults missing", "dns defaults invalid", "dns complete", "dns digest", "dns invalidated", "dns tampered", "dns binding", "dns missing authority", "dns template", "queued dns invalidation"} {
+	for _, scenario := range []string{"complete", "retry", "paused", "superseded", "policy frozen", "target frozen", "target changed", "tampered member", "member lineage", "wrong actor", "queued policy freeze", "queued target freeze", "static domains complete", "static domains missing", "static domains invalid", "static complete", "static digest", "static revoked validation", "static binding", "static tampered", "queued static invalidation", "dns query complete", "dns query missing", "dns query invalid", "dns defaults complete", "dns defaults missing", "dns defaults invalid", "dns complete", "dns digest", "dns invalidated", "dns tampered", "dns binding", "dns missing authority", "dns template", "queued dns invalidation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if strings.HasPrefix(scenario, "queued") && dsn == "" {
 				t.Skip("real PostgreSQL queue")
@@ -93,6 +93,12 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 						minimum = 0
 					}
 				}
+				if scenario == "dns query complete" || scenario == "dns query invalid" {
+					p.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", ECSEnabled: true, ExplorationPercent: 5, SwitchCooldownSeconds: 1800, MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
+					if scenario == "dns query invalid" {
+						p.DNSQueryPolicy.RankingMode = "shell"
+					}
+				}
 				if scenario == "dns missing authority" {
 					p.Authorities = nil
 				}
@@ -122,6 +128,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					}
 				}
 				if dnsCase {
+					policy.RequireDNSQueryPolicy = strings.HasPrefix(scenario, "dns query")
 					policy.RequireRouteDefaults = strings.HasPrefix(scenario, "dns defaults")
 					policy.DNSPolicyArtifactID = dnsInput.ID
 					policy.DNSPolicyDigest = dnsInput.ContentHash
@@ -366,7 +373,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if scenario == "complete" || scenario == "retry" || scenario == "static complete" || scenario == "static domains complete" || scenario == "dns complete" || scenario == "dns defaults complete" {
+			if scenario == "complete" || scenario == "retry" || scenario == "static complete" || scenario == "static domains complete" || scenario == "dns complete" || scenario == "dns defaults complete" || scenario == "dns query complete" {
 				if err != nil || len(after) != len(before)+1 {
 					t.Fatal("valid production failed", err)
 				}
@@ -379,7 +386,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 						t.Fatal("retry added another release")
 					}
 				}
-			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && scenario != "static domains complete" && scenario != "dns complete" && scenario != "dns defaults complete" && !reflect.DeepEqual(before, after) {
+			} else if !strings.HasPrefix(scenario, "queued") && !errors.Is(err, ErrConflict) || scenario != "complete" && scenario != "retry" && scenario != "static complete" && scenario != "static domains complete" && scenario != "dns complete" && scenario != "dns defaults complete" && scenario != "dns query complete" && !reflect.DeepEqual(before, after) {
 				t.Fatal("failed producer mutated ledger", err)
 			}
 		})

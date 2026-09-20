@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v27"
+	CompilerVersion = "platform-config-compiler/v28"
 	GlobalScopeKey  = "global"
 )
 
@@ -127,6 +127,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	DNSQueryPolicy           *DNSQueryPolicy           `json:"dns_query_policy,omitempty"`
 	DNSAuthorities           []DNSAuthorityPolicy      `json:"dns_authorities,omitempty"`
 	TrafficRolloutCohorts    []TrafficRolloutCohort    `json:"traffic_rollout_cohorts,omitempty"`
 	TLSReadiness             *ReadinessProbePolicy     `json:"tls_readiness,omitempty"`
@@ -522,6 +523,10 @@ func normalizeIntent(in PlatformIntent) PlatformIntent {
 
 func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 	out := in
+	if in.DNSQueryPolicy != nil {
+		p := *in.DNSQueryPolicy
+		out.DNSQueryPolicy = &p
+	}
 	out.DNSAuthorities = normalizeDNSAuthorities(in.DNSAuthorities)
 	out.TrafficRolloutCohorts = NormalizeTrafficRolloutCohorts(in.TrafficRolloutCohorts)
 	out.DNSAnswerRules = normalizeDNSAnswerRules(in.DNSAnswerRules)
@@ -653,6 +658,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := ValidateDNSQueryPolicy(in.DNSQueryPolicy); err != nil {
+		return err
+	}
 	if err := ValidateDNSAuthorities(in.DNSAuthorities); err != nil {
 		return err
 	}
