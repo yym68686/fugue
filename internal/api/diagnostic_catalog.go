@@ -1,5 +1,7 @@
 package api
 
+// Registered probe reads and session admission stay separate from serving configuration.
+
 import (
 	"context"
 	"encoding/json"
