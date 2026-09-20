@@ -29,6 +29,16 @@ func TestLeasedTrafficAdmissionPostgres(t *testing.T) {
 }
 
 func testLeasedTrafficAdmission(t *testing.T, address string) {
+	for _, planning := range []bool{false, true} {
+		name := "content_expiration"
+		if planning {
+			name = "consumer_readiness_without_content_expiration"
+		}
+		t.Run(name, func(t *testing.T) { testTrafficExecutionAdmission(t, address, planning) })
+	}
+}
+
+func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) {
 	for _, scenario := range []string{"supported", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"} {
 		t.Run(scenario, func(t *testing.T) {
 			if scenario == "queued revocation" && address == "" {
@@ -45,6 +55,17 @@ func testLeasedTrafficAdmission(t *testing.T, address string) {
 			scope := model.NewID("leased-admission")
 			now := time.Now().UTC()
 			input := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}, ACMEChallenges: []platformconfig.ACMEChallengeIntent{{ID: "challenge", Zone: "example.test", Hostname: "_acme-challenge.example.test", Value: "synthetic-proof", TTL: 60, ExpiresAt: now.Add(time.Hour)}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "test", EdgeGroupIDs: []string{"edge-group-a"}}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now}}
+			if planning {
+				input.Intent.ACMEChallenges = nil
+				input.Intent.DNSConsumers = []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "edge-group-a", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}}
+				input.RuntimeSnapshot.DNSConsumers = []platformconfig.DNSConsumerObservation{{NodeID: "dns-a", EdgeGroupID: "edge-group-a", ObservedAt: now, A: []string{"8.8.8.8"}}}
+				input.Policy.DNSPlacementMode = platformconfig.DNSPlacementConsumerReadiness
+				input.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "disabled", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
+				probe := &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}
+				input.Policy.DNSReadiness, input.Policy.TLSReadiness = probe, probe
+				input.Policy.DNSClientPolicies = []platformconfig.DNSClientPolicy{{NodeID: "dns-a"}}
+				input.Policy.DNSAuthorities = []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}
+			}
 			f := prepareTrafficLKGFixture(t, s, scope, "shadow", false, input)
 			for _, old := range f.consumers {
 				claims := platformcontrol.PlatformComponentIdentityClaims{Version: "v1", CredentialID: "credential", TokenID: "token", Component: old.Component, NodeID: old.NodeID, ScopeKey: scope, ArtifactKinds: []string{old.ArtifactKind}}

@@ -2,11 +2,14 @@ package platformconfig
 
 import "fugue/internal/model"
 
-// DNSArtifactHasValueExpirations detects expiration semantics in both global
-// records and per-consumer views before they enter serving.
-func DNSArtifactHasValueExpirations(a model.PlatformArtifact) bool {
+// DNSArtifactRequiresTrafficRelease detects semantics that require the bound
+// traffic executor, including live-readiness candidates and content expiration.
+func DNSArtifactRequiresTrafficRelease(a model.PlatformArtifact) bool {
 	if a.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
 		return false
+	}
+	if p, ok := a.Content["policy"].(map[string]any); ok && p["dns_placement_mode"] == DNSPlacementConsumerReadiness {
+		return true
 	}
 	has := func(rows any) bool {
 		items, _ := rows.([]any)

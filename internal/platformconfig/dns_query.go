@@ -320,7 +320,7 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 
 func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNSConsumerView, plan *DNSReadinessPlan, policy PolicySnapshot) error {
 	if len(query) == 0 {
-		if len(policy.DNSAnswerRules) > 0 {
+		if len(policy.DNSAnswerRules) > 0 || policy.DNSPlacementMode == DNSPlacementConsumerReadiness {
 			return fmt.Errorf("DNS query views missing")
 		}
 		return nil

@@ -61,6 +61,8 @@ func projectDNSReadinessWithPolicy(result *platformIntentProjectionResponse, nod
 		policy.DNSReadiness = &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 		policy.TLSReadiness = &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 	} else {
+		policy.DNSPlacementMode = input.DNSPlacementMode
+		policy.DNSQueryPolicy = input.DNSQueryPolicy
 		policy.DNSReadiness = input.DNSReadiness
 		policy.TLSReadiness = input.TLSReadiness
 		policy.TrafficRolloutCohorts = input.Cohorts

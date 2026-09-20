@@ -78,7 +78,7 @@ func TestDNSArtifactAnswersRecheckQuorumExpiryAndZoneOwnership(t *testing.T) {
 	}
 }
 
-func dnsServingFixture(t *testing.T) (model.PlatformArtifact, dnsPlatformCandidate) {
+func dnsServingFixture(t *testing.T, consumerMode ...bool) (model.PlatformArtifact, dnsPlatformCandidate) {
 	t.Helper()
 	now := time.Now().UTC()
 	zone := "example.test"
@@ -94,6 +94,12 @@ func dnsServingFixture(t *testing.T) (model.PlatformArtifact, dnsPlatformCandida
 		t.Fatal(err)
 	}
 	r.RuntimeSnapshot.DNSPlacements = []platformconfig.DNSPlacementObservation{{InputDigest: digest, CheckedAt: now, Status: "resolved", TargetTTL: 60, Candidates: []platformconfig.DNSPlacementCandidate{{EdgeID: "edge-a", EdgeGroupID: group, ServingGeneration: "serving", ObservedAt: now, ValidUntil: now.Add(time.Minute), Healthy: true, RouteReady: true, TLSReady: true, A: []string{"8.8.8.8"}}}}}
+	if len(consumerMode) > 0 && consumerMode[0] {
+		r.Policy.DNSPlacementMode = platformconfig.DNSPlacementConsumerReadiness
+		r.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "disabled", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
+		r.Policy.TLSReadiness = r.Policy.DNSReadiness
+		r.RuntimeSnapshot.DNSPlacements = nil
+	}
 	compiled, err := platformconfig.Compile(r)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +121,17 @@ func dnsServingFixture(t *testing.T) (model.PlatformArtifact, dnsPlatformCandida
 }
 
 func TestDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T) {
-	parent, candidate := dnsServingFixture(t)
+	for _, consumerMode := range []bool{false, true} {
+		name := "captured_readiness"
+		if consumerMode {
+			name = "consumer_readiness"
+		}
+		t.Run(name, func(t *testing.T) { testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t, consumerMode) })
+	}
+}
+
+func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, consumerMode bool) {
+	parent, candidate := dnsServingFixture(t, consumerMode)
 	var reports int
 	offline, changed := false, false
 	allowFailed := false

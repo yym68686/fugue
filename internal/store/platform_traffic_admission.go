@@ -23,7 +23,7 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 		return fmt.Errorf("%w: leased traffic compatibility: %s", ErrConflict, reason)
 	}
 	if parent.ArtifactKind != model.PlatformArtifactKindReleaseSet {
-		if platformconfig.DNSArtifactHasValueExpirations(parent) {
+		if platformconfig.DNSArtifactRequiresTrafficRelease(parent) {
 			return fail("DNS value expiration requires a complete traffic ReleaseSet")
 		}
 		return nil
@@ -39,7 +39,7 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 		if index < 0 {
 			return fail("member unavailable")
 		}
-		leased = leased || platformconfig.DNSArtifactHasValueExpirations(state.PlatformArtifacts[index])
+		leased = leased || platformconfig.DNSArtifactRequiresTrafficRelease(state.PlatformArtifacts[index])
 	}
 	if !leased {
 		return nil

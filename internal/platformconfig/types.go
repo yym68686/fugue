@@ -14,7 +14,7 @@ import (
 
 const (
 	SchemaVersion   = "fugue.platform.config/v1"
-	CompilerVersion = "platform-config-compiler/v28"
+	CompilerVersion = "platform-config-compiler/v29"
 	GlobalScopeKey  = "global"
 )
 
@@ -127,6 +127,7 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	DNSPlacementMode         string                    `json:"dns_placement_mode,omitempty"`
 	DNSQueryPolicy           *DNSQueryPolicy           `json:"dns_query_policy,omitempty"`
 	DNSAuthorities           []DNSAuthorityPolicy      `json:"dns_authorities,omitempty"`
 	TrafficRolloutCohorts    []TrafficRolloutCohort    `json:"traffic_rollout_cohorts,omitempty"`
@@ -658,6 +659,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := ValidateDNSPlacementMode(in); err != nil {
+		return err
+	}
 	if err := ValidateDNSQueryPolicy(in.DNSQueryPolicy); err != nil {
 		return err
 	}

@@ -135,6 +135,9 @@ func validateDNSPlacementObservation(fact DNSPlacementObservation, captured *tim
 // ResolveDNSPlacements is a pure transformation. Required route/TLS readiness
 // and finite address leases are safety invariants, independent of soft gates.
 func ResolveDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapshot RuntimeSnapshot, policy PolicySnapshot) ([]DNSIntent, error) {
+	if policy.DNSPlacementMode == DNSPlacementConsumerReadiness {
+		return planDNSPlacements(intent, routes, snapshot, policy)
+	}
 	if len(snapshot.DNSPlacements) > 10000 {
 		return nil, fmt.Errorf("too many DNS placement observations")
 	}

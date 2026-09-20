@@ -65,6 +65,39 @@ func TestDirectDNSQueriesMatchLegacyFixedObservationsWithoutBundle(t *testing.T)
 		t.Fatal("missing inventory created candidates")
 	}
 }
+
+func TestConsumerPlacementCaptureDoesNotNeedAnyServingBundle(t *testing.T) {
+	state, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	r, edges, strategy, _ := directQueryFixture()
+	r.RuntimeSnapshot.Origins[0].ObservedAt = time.Now().UTC()
+	strategy.RankingMode = "disabled"
+	input, consumers, dnsNodes := pinnedDNSFixture()
+	input.DNSPlacementMode, input.DNSQueryPolicy = platformconfig.DNSPlacementConsumerReadiness, &strategy
+	for _, edge := range edges {
+		// No heartbeat, bundle version, TLS status, or Caddy state exists.
+		if _, _, err := state.CreateEdgeNodeToken(edge); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := projectPinnedDNSInputs(&r, consumers, input, nil, dnsNodes, nil, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectDNSReadinessWithPolicy(&r, edges, time.Now().UTC(), &input); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.captureDirectDNSQueries(context.Background(), &r, strategy); err != nil {
+		t.Fatal(err)
+	}
+	// A server with no store cannot perform the old network/inventory capture.
+	(&Server{}).capturePlatformPlacements(context.Background(), &r)
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: r.Intent, Policy: r.Policy, RuntimeSnapshot: r.RuntimeSnapshot})
+	if err != nil {
+		t.Fatal("new route depends on old serving proof", err)
+	}
+	if len(r.RuntimeSnapshot.DNSPlacements) != 0 || len(r.RuntimeSnapshot.DNSSelections) != 1 || len(compiled.DNSArtifact.Content) == 0 {
+		t.Fatal("planning fabricated placement facts or omitted candidates")
+	}
+}
 func TestDirectDNSQueriesPolicyChangesAndNewNames(t *testing.T) {
 	r, nodes, p, now := directQueryFixture()
 	second := r.Intent.DNS[0]

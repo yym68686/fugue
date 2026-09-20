@@ -35,7 +35,7 @@ func projectACMEChallengeIntents(result *platformIntentProjectionResponse, chall
 // traffic. Standalone DNS remains blocked; ReleaseSet publication also checks
 // fresh executor capabilities within the store transaction.
 func (s *Server) platformArtifactHasDNSLeases(artifact model.PlatformArtifact) (bool, error) {
-	if platformconfig.DNSArtifactHasValueExpirations(artifact) {
+	if platformconfig.DNSArtifactRequiresTrafficRelease(artifact) {
 		return true, nil
 	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {

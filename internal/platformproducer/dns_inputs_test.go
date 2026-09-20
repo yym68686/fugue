@@ -8,13 +8,20 @@ import (
 )
 
 func TestDNSInputsRequireCompleteOwnedConfiguration(t *testing.T) {
-	for _, scenario := range []string{"valid", "null minimum", "null staleness", "null rules", "null states", "extra field", "no authority", "no clients", "wrong owner", "no probe policy", "wrong scope", "wrong generation", "unknown template", "partial template"} {
+	for _, scenario := range []string{"valid", "consumer mode", "mode without query", "unknown mode", "null mode", "empty mode", "null minimum", "null staleness", "null rules", "null states", "extra field", "no authority", "no clients", "wrong owner", "no probe policy", "wrong scope", "wrong generation", "unknown template", "partial template"} {
 		t.Run(scenario, func(t *testing.T) {
 			consumers := []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "edge-group-a", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 45}}
 			probe := &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 90, MaxConcurrency: 4, MaxProbes: 1024}
 			p := ProjectionPolicyInput{SchemaVersion: platformconfig.SchemaVersion, Generation: "policy", Scope: "global", Authorities: []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 45, RefreshSeconds: 600, RetrySeconds: 90, ExpireSeconds: 7200}}, Clients: []platformconfig.DNSClientPolicy{{NodeID: "dns-a", Rules: []platformconfig.DNSClientRule{}}}, DNSReadiness: probe, TLSReadiness: probe, Cohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{"edge-group-a"}}}}
 			templates := []HostedZoneTemplate{{NodeID: "dns-a", TemplateZone: "example.test"}}
 			switch scenario {
+			case "consumer mode":
+				p.DNSPlacementMode = platformconfig.DNSPlacementConsumerReadiness
+				p.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "disabled", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
+			case "mode without query":
+				p.DNSPlacementMode = platformconfig.DNSPlacementConsumerReadiness
+			case "unknown mode":
+				p.DNSPlacementMode = "bypass"
 			case "no authority":
 				p.Authorities = nil
 			case "no clients":
@@ -39,6 +46,10 @@ func TestDNSInputsRequireCompleteOwnedConfiguration(t *testing.T) {
 				a.Content["route_constraints"] = []any{}
 			}
 			switch scenario {
+			case "null mode":
+				a.Content["dns_placement_mode"] = nil
+			case "empty mode":
+				a.Content["dns_placement_mode"] = ""
 			case "null minimum":
 				a.Content["minimum_healthy_edges"] = nil
 			case "null staleness":
@@ -49,7 +60,7 @@ func TestDNSInputsRequireCompleteOwnedConfiguration(t *testing.T) {
 				a.Content["dns_route_state_constraints"] = nil
 			}
 			_, err := DecodeProjectionPolicy(a, consumers, templates)
-			if (scenario == "valid") != (err == nil) {
+			if (scenario == "valid" || scenario == "consumer mode") != (err == nil) {
 				t.Fatal("invalid DNS policy boundary", err)
 			}
 		})

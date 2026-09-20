@@ -18,15 +18,25 @@ func (s *Server) captureDirectDNSQueries(ctx context.Context, result *platformIn
 		return err
 	}
 	now := time.Now().UTC()
-	nodes, _, err := s.store.ListActiveEdgeNodes("")
+	list := s.store.ListActiveEdgeNodes
+	if result.Policy.DNSPlacementMode == platformconfig.DNSPlacementConsumerReadiness {
+		list = s.store.ListEdgeNodes
+	}
+	nodes, _, err := list("")
 	if err != nil {
 		return err
 	}
-	live := s.edgeLiveServingByNode(ctx, now)
 	eligible := make([]model.EdgeNode, 0, len(nodes))
-	for _, node := range nodes {
-		if edgeNodeRouteServingCapableWithLive(node, now, live) && edgeNodeDNSEligible(node) && edgeNodeDNSCacheValid(node) {
-			eligible = append(eligible, node)
+	if result.Policy.DNSPlacementMode == platformconfig.DNSPlacementConsumerReadiness {
+		// projectDirectDNSQueries restricts these to the frozen authoritative
+		// node/group/address topology. No serving health is inferred here.
+		eligible = nodes
+	} else {
+		live := s.edgeLiveServingByNode(ctx, now)
+		for _, node := range nodes {
+			if edgeNodeRouteServingCapableWithLive(node, now, live) && edgeNodeDNSEligible(node) && edgeNodeDNSCacheValid(node) {
+				eligible = append(eligible, node)
+			}
 		}
 	}
 	catalog := edgeDNSLatencyProfileCatalog{}

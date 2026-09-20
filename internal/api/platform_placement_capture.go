@@ -18,6 +18,11 @@ import (
 )
 
 func (s *Server) capturePlatformPlacements(rctx context.Context, result *platformIntentProjectionResponse) {
+	if result.Policy.DNSPlacementMode == platformconfig.DNSPlacementConsumerReadiness {
+		// Desired addresses are compiled from the already frozen endpoint
+		// topology. Only the DNS consumer can prove its eventual serving state.
+		return
+	}
 	found := false
 	for _, record := range result.Intent.DNS {
 		found = found || platformconfig.DNSPlacementOptions(record) != nil
