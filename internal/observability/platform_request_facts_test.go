@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/model"
 )
 
 func TestPlatformRequestFactRetainsErrorsWithoutInventingTenantOwnership(t *testing.T) {
@@ -24,13 +26,23 @@ func TestPlatformRequestFactRetainsErrorsWithoutInventingTenantOwnership(t *test
 	defer server.Close()
 	event := Event{Timestamp: time.Now().UTC(), Kind: EventKindLog, Attributes: map[string]string{
 		"event_type": "request_fact", "trace_id": "trace-platform", "edge_id": "edge-a", "route_id": "platform-route-a",
-		"hostname": "api.example.test", "path_template": "/healthz", "status_code": "503", "summary_json": `{"route_kind":"platform"}`,
+		"hostname": "api.example.test", "path_template": "/healthz", "status_code": "503", "summary_json": `{"route_kind":"control-plane-api"}`,
 	}}
 	if err := NewClickHouseExporter(server.URL, server.Client()).Export(context.Background(), []Event{event}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(query, ".request_facts ") || row["status_code"] != float64(503) || row["app_id"] != "" || row["tenant_id"] != "" {
 		t.Fatalf("platform fact lost/misattributed: %s %+v", query, row)
+	}
+	for _, kind := range []string{model.EdgeRouteKindControlPlaneAPI, model.EdgeRouteKindPlatformRoute, model.EdgeRouteKindPlatform, model.EdgeRouteKindCustomDomain, model.EdgeRouteKindPlatformDomain, "unknown"} {
+		attrs := cloneEventAttributes(event.Attributes)
+		attrs["summary_json"] = `{"route_kind":"` + kind + `"}`
+		candidate := event
+		candidate.Attributes = attrs
+		want := kind == model.EdgeRouteKindControlPlaneAPI || kind == model.EdgeRouteKindPlatformRoute
+		if requestFactEventComplete(candidate) != want {
+			t.Fatalf("route kind %q has wrong ownership classification", kind)
+		}
 	}
 	for _, key := range []string{"hostname", "edge_id", "route_id", "trace_id", "path_template", "status_code", "summary_json"} {
 		attrs := cloneEventAttributes(event.Attributes)

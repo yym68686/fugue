@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/model"
+
 	"github.com/golang/snappy"
 )
 
@@ -1011,7 +1013,8 @@ func requestFactHasOwner(event Event) bool {
 	if kind == "" {
 		kind = summaryString(legacyRequestFactSummary(eventAttr(event, "summary_json")), "route_kind")
 	}
-	return kind == "platform" && eventAttr(event, "tenant_id") == "" &&
+	platformOwned := kind == model.EdgeRouteKindControlPlaneAPI || kind == model.EdgeRouteKindPlatformRoute
+	return platformOwned && eventAttr(event, "tenant_id") == "" &&
 		eventAttr(event, "project_id") == "" && eventAttr(event, "hostname") != "" &&
 		eventAttr(event, "edge_id") != "" && eventAttr(event, "route_id") != ""
 }
