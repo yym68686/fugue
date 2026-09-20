@@ -472,7 +472,7 @@ func (s *Service) waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx context.Contex
 		return true
 	}
 	observer := s.edgeBundleObserverForSafeRollout()
-	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, since)
+	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, weight, since)
 	payload := map[string]any{
 		"candidate_weight": weight,
 		"observation":      observation.Summary,
@@ -516,7 +516,7 @@ func (s *Service) waitSafeRolloutEdgeRouteBundleApplied(ctx context.Context, op 
 	if state.Candidate.PromotedAt != nil {
 		since = state.Candidate.PromotedAt.UTC()
 	}
-	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, since)
+	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, 0, since)
 	payload := map[string]any{
 		"observation": observation.Summary,
 	}
@@ -553,7 +553,7 @@ func (s *Service) waitSafeRolloutStableReleaseEdgeRouteBundleApplied(ctx context
 		return true
 	}
 	observer := s.edgeBundleObserverForSafeRollout()
-	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, since)
+	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, 0, since)
 	payload := map[string]any{
 		"observation": observation.Summary,
 	}
@@ -593,7 +593,7 @@ func (s *Service) edgeBundleObserverForSafeRollout() safeRolloutEdgeBundleObserv
 	if s != nil {
 		sleep = s.safeRolloutSleep
 	}
-	return storeSafeRolloutEdgeBundleObserver{Store: s.Store, Sleep: sleep}
+	return storeSafeRolloutEdgeBundleObserver{Store: s.Store, Traffic: s.Store, Sleep: sleep}
 }
 
 func (s *Service) recheckSafeRolloutCandidateBeforeRetire(ctx context.Context, op model.Operation, state *safeRolloutState, phase string) bool {

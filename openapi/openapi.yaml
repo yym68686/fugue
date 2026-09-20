@@ -337,6 +337,7 @@ x-fugue-edge-route-probe:
     success: 204
     headers:
       X-Fugue-Route-Proof: sha256 digest of the loaded route under fugue.edge.route-proof/v1 canonicalization
+      X-Fugue-App-Traffic-Proof: Optional sha256 digest under fugue.edge.app-traffic-proof/v1; only emitted for an active application route with explicit release weights and the exact current bundle successfully applied to Caddy.
       X-Fugue-Route-Probe-Nonce: The request nonce
       X-Fugue-Route-Bundle-Version: Loaded immutable bundle version
       X-Fugue-Route-Valid-Until: Original signed bundle expiry in RFC3339Nano
@@ -366,6 +367,18 @@ x-fugue-edge-route-probe:
     sorted and deduplicated. Upstream StatusReason is zeroed; upstream order is
     preserved. New behavioral fields require a new proof version when changing
     this canonical representation. A client uses the shared routeproof package.
+    The optional application traffic proof binds hostname, normalized path, app
+    and tenant ownership and the ordered release upstreams (role, release ID,
+    weight, upstream kind/scope/URL, service port, runtime ID and deployment
+    generation). Positive weights must total 100, release IDs must be unique,
+    and every target must be active. Only the digest is returned. The canonical
+    material is Go encoding/json of {schema,hostname,path,app_id,tenant_id,upstreams}
+    under fugue.edge.app-traffic-proof/v1 using the shared routeproof helper.
+    An application proof additionally requires the current non-candidate index,
+    unexpired healthy bundle and exact Caddy applied version with no apply error.
+    Missing application proof is not successful release/weight evidence. This
+    extension does not change the existing route digest or grant origin health,
+    LKG, publication or retirement authorization on its own.
 tags:
   - name: System
     description: Health checks, install helpers, and contract endpoints.

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestSafeRolloutEdgeObserverAcceptsAppliedGroupPublication(t *testing.T) {
 		}}},
 		Now: func() time.Time { return heartbeat },
 	}
-	observation, err := observer.observe(model.App{ID: "app"}, model.AppRelease{ID: "release"}, now)
+	observation, err := observer.observe(context.Background(), model.App{ID: "app"}, model.AppRelease{ID: "release"}, 0, now)
 	if err != nil || !observation.Ready || observation.RequiredNodes != 1 || observation.ReadyNodes != 1 {
 		t.Fatalf("an applied publication of the serving generation must be ready: observation=%+v err=%v", observation, err)
 	}

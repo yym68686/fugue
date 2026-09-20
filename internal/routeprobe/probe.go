@@ -26,14 +26,15 @@ import (
 // Proof is a newly collected HTTPS observation. ValidUntil is bounded by
 // the original serving bundle and the certificate chain, never renewed here.
 type Proof struct {
-	TrafficRelease *model.TrafficReleaseBinding `json:"traffic_release,omitempty"`
-	Digest         string                       `json:"digest"`
-	Version        string                       `json:"version"`
-	EdgeID         string                       `json:"edge_id"`
-	GroupID        string                       `json:"group_id"`
-	State          string                       `json:"state,omitempty"`
-	ValidUntil     time.Time                    `json:"valid_until"`
-	CheckedAt      time.Time                    `json:"checked_at"`
+	AppTrafficDigest string                       `json:"app_traffic_digest,omitempty"`
+	TrafficRelease   *model.TrafficReleaseBinding `json:"traffic_release,omitempty"`
+	Digest           string                       `json:"digest"`
+	Version          string                       `json:"version"`
+	EdgeID           string                       `json:"edge_id"`
+	GroupID          string                       `json:"group_id"`
+	State            string                       `json:"state,omitempty"`
+	ValidUntil       time.Time                    `json:"valid_until"`
+	CheckedAt        time.Time                    `json:"checked_at"`
 }
 
 func Probe(ctx context.Context, host, path, address, expectedState string, timeout time.Duration) (Proof, error) {
@@ -125,6 +126,13 @@ func ParseResponse(response *http.Response, nonce string, now time.Time) (Proof,
 		return Proof{}, fail
 	}
 	var binding *model.TrafficReleaseBinding
+	appTraffic := response.Header.Get(routeproof.AppTrafficHeader)
+	if values, ok := response.Header[http.CanonicalHeaderKey(routeproof.AppTrafficHeader)]; ok {
+		decoded, err := hex.DecodeString(strings.TrimPrefix(appTraffic, "sha256:"))
+		if len(values) != 1 || err != nil || len(decoded) != 32 || len(appTraffic) != 71 || !strings.HasPrefix(appTraffic, "sha256:") || strings.ToLower(appTraffic) != appTraffic || state != "" {
+			return Proof{}, fail
+		}
+	}
 	if values, ok := response.Header[http.CanonicalHeaderKey(routeproof.TrafficHeader)]; ok {
 		if len(values) != 1 || len(values[0]) > 8192 {
 			return Proof{}, fail
@@ -139,5 +147,5 @@ func ParseResponse(response *http.Response, nonce string, now time.Time) (Proof,
 			return Proof{}, fail
 		}
 	}
-	return Proof{TrafficRelease: binding, Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires, State: state}, nil
+	return Proof{AppTrafficDigest: appTraffic, TrafficRelease: binding, Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires, State: state}, nil
 }

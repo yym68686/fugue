@@ -1369,7 +1369,7 @@ func TestSafeRolloutEdgeObserverRejectsServingLKGAndStaleHeartbeat(t *testing.T)
 		}},
 		Now: func() time.Time { return now },
 	}
-	observation, err := observer.observe(model.App{ID: "app"}, model.AppRelease{ID: "rel"}, now)
+	observation, err := observer.observe(context.Background(), model.App{ID: "app"}, model.AppRelease{ID: "rel"}, 0, now)
 	if err != nil {
 		t.Fatalf("wait edge bundle: %v", err)
 	}
@@ -1421,7 +1421,7 @@ type staticSafeRolloutEdgeObserver struct {
 	err         error
 }
 
-func (o staticSafeRolloutEdgeObserver) WaitForSafeRolloutEdgeRouteBundle(context.Context, model.App, model.AppRelease, time.Time) (safeRolloutEdgeBundleObservation, error) {
+func (o staticSafeRolloutEdgeObserver) WaitForSafeRolloutEdgeRouteBundle(context.Context, model.App, model.AppRelease, int, time.Time) (safeRolloutEdgeBundleObservation, error) {
 	return o.observation, o.err
 }
 

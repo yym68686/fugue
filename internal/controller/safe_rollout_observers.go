@@ -15,6 +15,8 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/observability"
+	"fugue/internal/routeprobe"
+	"fugue/internal/routeproof"
 )
 
 const (
@@ -26,7 +28,7 @@ const (
 )
 
 type safeRolloutEdgeBundleObserver interface {
-	WaitForSafeRolloutEdgeRouteBundle(ctx context.Context, app model.App, release model.AppRelease, since time.Time) (safeRolloutEdgeBundleObservation, error)
+	WaitForSafeRolloutEdgeRouteBundle(ctx context.Context, app model.App, release model.AppRelease, targetCandidateWeight int, since time.Time) (safeRolloutEdgeBundleObservation, error)
 }
 
 type safeRolloutEdgeBundleObservation struct {
@@ -38,6 +40,13 @@ type safeRolloutEdgeBundleObservation struct {
 	ServingVersions []string
 	Summary         map[string]any
 }
+
+type safeRolloutTrafficStore interface {
+	GetAppTrafficPolicy(tenantID string, platformAdmin bool, appID string) (model.AppTrafficPolicy, error)
+	ListAppReleases(filter model.AppReleaseFilter) ([]model.AppRelease, error)
+}
+
+type safeRolloutRouteProbe func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
 
 type safeRolloutDrainMetricsQuerier interface {
 	QuerySafeRolloutDrainMetrics(ctx context.Context, app model.App, previous model.AppRelease, since time.Time) (safeRolloutDrainMetrics, error)
@@ -61,13 +70,15 @@ type storeSafeRolloutEdgeBundleObserver struct {
 	Interval time.Duration
 	Sleep    func(context.Context, time.Duration) error
 	Now      func() time.Time
+	Traffic  safeRolloutTrafficStore
+	Probe    safeRolloutRouteProbe
 }
 
 type edgeNodeLister interface {
 	ListActiveEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.EdgeGroup, error)
 }
 
-func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ctx context.Context, app model.App, release model.AppRelease, since time.Time) (safeRolloutEdgeBundleObservation, error) {
+func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ctx context.Context, app model.App, release model.AppRelease, targetCandidateWeight int, since time.Time) (safeRolloutEdgeBundleObservation, error) {
 	if o.Store == nil {
 		return safeRolloutEdgeBundleObservation{}, fmt.Errorf("edge node store is not configured")
 	}
@@ -82,7 +93,7 @@ func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ct
 	deadline := o.now().Add(timeout)
 	var last safeRolloutEdgeBundleObservation
 	for {
-		observation, err := o.observe(app, release, since)
+		observation, err := o.observe(ctx, app, release, targetCandidateWeight, since)
 		if err != nil {
 			return observation, err
 		}
@@ -96,28 +107,54 @@ func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ct
 	}
 }
 
-func (o storeSafeRolloutEdgeBundleObserver) observe(app model.App, release model.AppRelease, since time.Time) (safeRolloutEdgeBundleObservation, error) {
+func (o storeSafeRolloutEdgeBundleObserver) observe(ctx context.Context, app model.App, release model.AppRelease, targetCandidateWeight int, since time.Time) (safeRolloutEdgeBundleObservation, error) {
 	nodes, _, err := o.Store.ListActiveEdgeNodes("")
 	if err != nil {
 		return safeRolloutEdgeBundleObservation{}, err
 	}
+	now := o.now()
+	relevant := make([]model.EdgeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if safeRolloutEdgeNodeRelevant(node, now) {
+			relevant = append(relevant, node)
+		}
+	}
+	if len(relevant) == 0 {
+		return safeRolloutEdgeBundleObservation{Ready: true, ObservedNodes: len(nodes), WaitingNodes: []string{}, Summary: map[string]any{"release_id": release.ID, "app_id": app.ID, "reason": "no active edge route nodes require bundle confirmation"}}, nil
+	}
+	trafficDigest := ""
+	if o.Traffic != nil {
+		var err error
+		trafficDigest, err = o.expectedAppTrafficDigest(app, release, targetCandidateWeight)
+		if err != nil {
+			return safeRolloutEdgeBundleObservation{}, err
+		}
+	}
 	observation := safeRolloutEdgeBundleObservation{
 		Ready:         true,
 		WaitingNodes:  []string{},
-		Summary:       map[string]any{"release_id": release.ID, "app_id": app.ID},
+		Summary:       map[string]any{"release_id": release.ID, "app_id": app.ID, "target_candidate_weight": targetCandidateWeight, "expected_app_traffic_digest": trafficDigest},
 		ObservedNodes: len(nodes),
+		RequiredNodes: len(relevant),
 	}
 	versions := map[string]struct{}{}
-	now := o.now()
-	for _, node := range nodes {
-		if !safeRolloutEdgeNodeRelevant(node, now) {
-			continue
-		}
-		observation.RequiredNodes++
+	for _, node := range relevant {
 		ready, reason := safeRolloutEdgeNodeBundleApplied(node, since)
 		version := firstNonEmptyString(strings.TrimSpace(node.RouteBundleVersion), strings.TrimSpace(node.ServingGeneration), strings.TrimSpace(node.CaddyAppliedVersion))
 		if version != "" {
 			versions[version] = struct{}{}
+		}
+		if ready && trafficDigest != "" {
+			proof, probeErr := o.probeNode(ctx, app, node)
+			if probeErr != nil {
+				ready, reason = false, "app_traffic_probe_failed"
+			} else if proof.AppTrafficDigest != trafficDigest {
+				ready, reason = false, "app_traffic_proof_mismatch"
+			} else if proof.EdgeID != node.ID || proof.GroupID != node.EdgeGroupID {
+				ready, reason = false, "app_traffic_identity_mismatch"
+			} else if strings.TrimSpace(node.RouteBundleVersion) != "" && proof.Version != strings.TrimSpace(node.RouteBundleVersion) {
+				ready, reason = false, "app_traffic_bundle_mismatch"
+			}
 		}
 		if ready {
 			observation.ReadyNodes++
@@ -136,6 +173,77 @@ func (o storeSafeRolloutEdgeBundleObserver) observe(app model.App, release model
 	observation.Summary["waiting_nodes"] = observation.WaitingNodes
 	observation.Summary["serving_versions"] = observation.ServingVersions
 	return observation, nil
+}
+
+func (o storeSafeRolloutEdgeBundleObserver) expectedAppTrafficDigest(app model.App, release model.AppRelease, targetCandidateWeight int) (string, error) {
+	if o.Traffic == nil {
+		return "", fmt.Errorf("traffic policy store is not configured")
+	}
+	if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
+		return "", fmt.Errorf("safe rollout app route is missing")
+	}
+	policy, err := o.Traffic.GetAppTrafficPolicy(app.TenantID, true, app.ID)
+	if err != nil {
+		return "", fmt.Errorf("read app traffic policy for edge proof: %w", err)
+	}
+	if targetCandidateWeight < 0 || targetCandidateWeight > 100 || policy.CandidateWeight != targetCandidateWeight {
+		return "", fmt.Errorf("app traffic policy candidate weight does not match rollout target")
+	}
+	if targetCandidateWeight > 0 && (policy.CandidateReleaseID != release.ID || policy.StableReleaseID == "" || policy.StableWeight+policy.CandidateWeight != 100) {
+		return "", fmt.Errorf("app traffic policy release identities do not match candidate rollout")
+	}
+	if targetCandidateWeight == 0 && (policy.StableReleaseID != release.ID || policy.StableWeight != 100 || policy.CandidateReleaseID != "") {
+		return "", fmt.Errorf("app traffic policy does not identify promoted stable release")
+	}
+	if policy.StickyHeader != "" || (policy.StickyCookie != "" && policy.StickyCookie != "Fugue-Release-Stickiness") {
+		return "", fmt.Errorf("app traffic policy uses unsupported sticky semantics")
+	}
+	releases, err := o.Traffic.ListAppReleases(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, IncludeRetired: false, PlatformAdmin: true})
+	if err != nil {
+		return "", fmt.Errorf("read app releases for edge proof: %w", err)
+	}
+	byID := make(map[string]model.AppRelease, len(releases))
+	for _, item := range releases {
+		byID[item.ID] = item
+	}
+	upstreams := make([]model.EdgeRouteUpstream, 0, 2)
+	for _, target := range []struct {
+		id, role string
+		weight   int
+	}{{policy.StableReleaseID, model.AppReleaseRoleStable, policy.StableWeight}, {policy.CandidateReleaseID, model.AppReleaseRoleCandidate, policy.CandidateWeight}} {
+		if target.weight <= 0 {
+			continue
+		}
+		item, ok := byID[target.id]
+		if !ok || item.AppID != app.ID || item.TenantID != app.TenantID || strings.TrimSpace(item.UpstreamURL) == "" {
+			return "", fmt.Errorf("app traffic policy references an unavailable release")
+		}
+		upstreams = append(upstreams, model.EdgeRouteUpstream{Role: target.role, ReleaseID: item.ID, Weight: target.weight, UpstreamKind: model.EdgeRouteUpstreamKindKubernetesService, UpstreamScope: model.EdgeRouteUpstreamScopeLocalService, UpstreamURL: item.UpstreamURL, ServicePort: app.Route.ServicePort, RuntimeID: item.RuntimeID, DeploymentGeneration: firstNonEmptyString(item.ResolvedImageRef, item.SourceRef)})
+	}
+	route := model.EdgeRouteBinding{Hostname: app.Route.Hostname, PathPrefix: app.Route.PathPrefix, AppID: app.ID, TenantID: app.TenantID, Upstreams: upstreams}
+	digest, err := routeproof.AppTrafficDigest(route)
+	if err != nil {
+		return "", fmt.Errorf("build expected app traffic proof: %w", err)
+	}
+	return digest, nil
+}
+
+func (o storeSafeRolloutEdgeBundleObserver) probeNode(ctx context.Context, app model.App, node model.EdgeNode) (routeprobe.Proof, error) {
+	if app.Route == nil {
+		return routeprobe.Proof{}, fmt.Errorf("safe rollout app route is missing")
+	}
+	address := strings.TrimSpace(node.PublicIPv4)
+	if address == "" {
+		address = strings.TrimSpace(node.PublicIPv6)
+	}
+	if address == "" {
+		return routeprobe.Proof{}, fmt.Errorf("edge node has no public probe address")
+	}
+	probe := o.Probe
+	if probe == nil {
+		probe = routeprobe.Probe
+	}
+	return probe(ctx, app.Route.Hostname, model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix), address, "", 5*time.Second)
 }
 
 func safeRolloutEdgeNodeRelevant(node model.EdgeNode, now time.Time) bool {
