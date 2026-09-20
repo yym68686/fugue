@@ -120,8 +120,8 @@ func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy 
 					continue
 				}
 				ips := []string{}
-				for ip, c := range candidates {
-					if (family == "AAAA") != strings.Contains(ip, ":") || !platformconfig.DNSPlacementAllowsEdge(record, owners, c.EdgeID, c.EdgeGroupID) {
+				for ip := range candidates {
+					if (family == "AAAA") != strings.Contains(ip, ":") {
 						continue
 					}
 					ips = append(ips, ip)
@@ -137,6 +137,24 @@ func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy 
 						continue
 					}
 					seenHosts[owner.Hostname] = true
+					memberRoutes := []platformconfig.CompiledRoute{}
+					for _, r := range owners {
+						if r.Hostname == owner.Hostname {
+							memberRoutes = append(memberRoutes, r)
+						}
+					}
+					memberIPs := []string{}
+					for _, ip := range ips {
+						c := candidates[ip]
+						if platformconfig.DNSPlacementAllowsEdge(record, memberRoutes, c.EdgeID, c.EdgeGroupID) {
+							memberIPs = append(memberIPs, ip)
+						}
+					}
+					if len(memberIPs) == 0 {
+						records = nil
+						break
+					}
+
 					// Shared target routing chooses among member profiles using the same
 					// stable traffic-class ordering as the existing selector.
 					primary, fallback := "", ""
@@ -160,21 +178,24 @@ func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy 
 						profile = nil
 					}
 					ttl := max(strategy.MinimumTTLSeconds, min(strategy.MaximumTTLSeconds, record.TTL))
-					policy := edgeDNSAnswerPolicy(edgeDNSBundleOptions{EdgeGroupID: consumer.EdgeGroupID}, primary, fallback, ips, candidates, profile, ttl, active)
+					policy := edgeDNSAnswerPolicy(edgeDNSBundleOptions{EdgeGroupID: consumer.EdgeGroupID}, primary, fallback, memberIPs, candidates, profile, ttl, active)
 					policy.TTLSeconds, policy.ECSEnabled, policy.ExplorationPercent, policy.SwitchCooldownSec = ttl, strategy.ECSEnabled, strategy.ExplorationPercent, strategy.SwitchCooldownSeconds
 					scoped := []model.EdgeDNSScopedAnswerCandidates(nil)
 					if active {
-						scoped = catalog.scopedProfiles(owner.Hostname, ips, candidates, nil, primary, fallback, true)
+						scoped = catalog.scopedProfiles(owner.Hostname, memberIPs, candidates, nil, primary, fallback, true)
 					}
-					value := model.EdgeDNSRecord{Name: record.Hostname, Type: family, Values: ips, TTL: ttl, RecordKind: record.RecordKind, Status: record.Status, StatusReason: record.StatusReason, AppID: record.AppID, TenantID: record.TenantID, EdgeGroupID: primary, FallbackEdgeGroupID: fallback, AnswerPolicy: policy, Candidates: edgeDNSCandidatesForAnswerIPs(ips, candidates, nil, primary, fallback, profile, active), ScopedCandidates: scoped}
+					value := model.EdgeDNSRecord{Name: record.Hostname, Type: family, Values: memberIPs, TTL: ttl, RecordKind: record.RecordKind, Status: record.Status, StatusReason: record.StatusReason, AppID: record.AppID, TenantID: record.TenantID, EdgeGroupID: primary, FallbackEdgeGroupID: fallback, AnswerPolicy: policy, Candidates: edgeDNSCandidatesForAnswerIPs(memberIPs, candidates, nil, primary, fallback, profile, active), ScopedCandidates: scoped}
 					records = append(records, value)
 				}
 				if len(records) == 0 {
-					return fmt.Errorf("DNS query has no route owner")
+					continue
 				}
 				selected := records[0]
 				if len(records) > 1 {
 					selected = mergeSharedEdgeDNSTargetRecords(records)
+				}
+				if len(selected.Values) == 0 {
+					continue
 				}
 				policy := selected.AnswerPolicy
 				scopedMode := ""

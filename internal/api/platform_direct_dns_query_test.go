@@ -231,3 +231,30 @@ func TestSharedTargetPolicyChoiceIgnoresReadinessAndHeartbeatGeneration(t *testi
 		t.Fatal("stable tie break replaced non-static traffic priority")
 	}
 }
+
+func TestDirectDNSSharedTargetChoosesMemberBeforeIntersectingAddresses(t *testing.T) {
+	r, nodes, p, now := directQueryFixture()
+	second := r.Intent.Routes[0]
+	second.Hostname = "alias.example.test"
+	second.OriginRef = "origin-b"
+	r.Intent.Routes = append(r.Intent.Routes, second)
+	r.RuntimeSnapshot.Origins = append(r.RuntimeSnapshot.Origins, platformconfig.OriginObservation{Ref: "origin-b", RuntimeID: "runtime", RuntimeEdgeGroupID: "edge-group-a", ObservedAt: now, Status: model.EdgeRouteStatusActive})
+	r.Intent.DNS[0].Hostname = "shared.example.test"
+	r.Intent.DNS[0].RecordKind = model.EdgeDNSRecordKindCustomDomainTarget
+	r.Intent.DNS[0].Route.Hostnames = []string{"app.example.test", "alias.example.test"}
+	r.Policy.RouteConstraints = []platformconfig.RoutePolicyConstraint{{ID: "exclude", Hostname: second.Hostname, TenantID: "tenant", AppID: "app", RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true, ExcludedEdgeIDs: []string{"edge-a"}}}
+	catalog := edgeDNSLatencyProfileCatalog{Global: map[string]*edgeDNSLatencyProfile{
+		"app.example.test":   {Hostname: "app.example.test", Enabled: true, BestEdgeGroupID: "edge-group-b", Candidates: map[string]edgeDNSLatencyCandidateProfile{"edge-group-a": {Weight: 20, Score: 200, TrafficClass: "small_api"}, "edge-group-b": {Weight: 200, Score: 100, TrafficClass: "static_cacheable"}}},
+		"alias.example.test": {Hostname: "alias.example.test", Enabled: true, BestEdgeGroupID: "edge-group-b", Candidates: map[string]edgeDNSLatencyCandidateProfile{"edge-group-b": {Weight: 200, Score: 300, TrafficClass: "static_cacheable"}}},
+	}}
+	if err := projectDirectDNSQueries(&r, p, nodes, catalog, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.RuntimeSnapshot.DNSSelections) != 1 {
+		t.Fatal("shared query missing")
+	}
+	f := r.RuntimeSnapshot.DNSSelections[0]
+	if len(f.Candidates) != 1 || f.Candidates[0].EdgeID != "edge-b" || f.Candidates[0].Score != 100 || !reflect.DeepEqual(r.Policy.DNSAnswerRules[0].PreferredEdgeGroups, []string{"edge-group-b"}) {
+		t.Fatal("intersection changed selected member or retained forbidden address", f, r.Policy.DNSAnswerRules)
+	}
+}
