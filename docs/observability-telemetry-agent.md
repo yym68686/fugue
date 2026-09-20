@@ -181,3 +181,26 @@ observability outages or disabled mode into request-path failures.
 - Add edge request facts and operation/deploy/runtime event producers.
 - Build first-pass diagnosis window aggregation and rule producers.
 - Add request summary streaming and alerting surfaces.
+
+### Oversized Loki entries
+
+The exporter bounds each serialized log entry to 256 KiB, matching Loki's default
+line limit. Ordinary entries keep their existing representation. Oversized
+messages or attributes are preserved as UTF-8 JSON fragments in separate entries
+with the original stream labels and timestamp. This prevents one oversized entry
+from rejecting an export batch without raising the server's limit or truncating
+the event.
+
+Fragment bodies use `source=telemetry_chunk` and these attributes:
+
+- `log_chunk_encoding=loki-line-json-v1`
+- `log_chunk_sha256`: SHA-256 of the complete original serialized log entry
+- `log_chunk_index`: zero-based fragment index
+- `log_chunk_count`: expected number of fragments
+
+To reconstruct an entry, group by stream, timestamp and hash, order by index,
+concatenate the `message` strings, verify the SHA-256, then decode the resulting
+JSON using the ordinary log-entry schema. Chunk identifiers are body fields,
+never stream labels. Existing log viewers show the fragments individually;
+ordinary entries and other exporter outputs are unchanged. This prevents future
+size rejections; it does not replay batches rejected before the fix.

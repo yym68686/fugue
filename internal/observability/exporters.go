@@ -385,14 +385,16 @@ func (e LokiExporter) Export(ctx context.Context, events []Event) error {
 			stream = &lokiStream{Stream: labels}
 			streamsByKey[key] = stream
 		}
-		line, err := json.Marshal(lokiLogLine(event))
+		lines, err := lokiLogLines(event)
 		if err != nil {
 			return fmt.Errorf("marshal Loki log line: %w", err)
 		}
-		stream.Values = append(stream.Values, [2]string{
-			strconv.FormatInt(event.Timestamp.UTC().UnixNano(), 10),
-			string(line),
-		})
+		for _, line := range lines {
+			stream.Values = append(stream.Values, [2]string{
+				strconv.FormatInt(event.Timestamp.UTC().UnixNano(), 10),
+				line,
+			})
+		}
 	}
 	if len(streamsByKey) == 0 {
 		return nil
