@@ -34,7 +34,7 @@ func redactEmbeddedAppState(value any) any {
 	case map[string]any:
 		for k, child := range v {
 			switch k {
-			case "app", "apps", "operation", "operations", "source", "spec", "desired_spec", "origin_source", "build_source", "desired_source", "desired_origin_source":
+			case "app", "apps", "operation", "operations", "source", "spec", "spec_snapshot", "desired_spec", "origin_source", "build_source", "desired_source", "desired_origin_source":
 				if spec, ok := child.(map[string]any); ok && (spec["template"] != nil || spec["containers"] != nil || spec["initContainers"] != nil) {
 					v[k] = redactEmbeddedAppState(child)
 				} else {
