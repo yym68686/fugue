@@ -1980,7 +1980,7 @@ func TestHelmCPUOwnershipTransferKeepsExactScalarAndCASBoundary(t *testing.T) {
 	if err != nil || !found || !reflect.DeepEqual(patch, expected) {
 		t.Fatalf("CPU transfer escaped exact CAS boundary: patch=%v found=%v err=%v", patch, found, err)
 	}
-	for _, field := range []string{"resources/limits/memory", "resources", "image", "resources/limits/vendor.example~1device"} {
+	for _, field := range []string{"resources/limits/ephemeral-storage", "resources", "image", "resources/limits/vendor.example~1device"} {
 		outside := "/spec/template/spec/containers[name=worker]/" + field
 		failure := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: ` + ssaFieldForPointer(outside))
 		if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer, outside}, "workload-declarative", failure); err == nil {
@@ -1989,6 +1989,49 @@ func TestHelmCPUOwnershipTransferKeepsExactScalarAndCASBoundary(t *testing.T) {
 	}
 	if err := validateEmergencyOwnershipConflictEvidence(desired, live, nil, "workload-declarative", applyErr); err == nil {
 		t.Fatal("undeclared CPU quantity was admitted")
+	}
+}
+
+func TestHelmMemoryOwnershipTransferKeepsExactScalarAndCASBoundary(t *testing.T) {
+	for _, class := range []string{"requests", "limits"} {
+		t.Run(class, func(t *testing.T) {
+			pointer := "/spec/template/spec/containers[name=worker]/resources/" + class + "/memory"
+			desired := map[string]any{
+				"metadata": map[string]any{"uid": "workload-uid", "resourceVersion": "42"},
+				"spec": map[string]any{"replicas": 2, "template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+					"name": "worker", "resources": map[string]any{class: map[string]any{"cpu": "1", "memory": "512Mi"}},
+				}}}}},
+			}
+			live := deepCopyJSONMap(t, desired)
+			mapField(live, "metadata")["managedFields"] = []any{map[string]any{
+				"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1",
+				"fieldsV1": managedFieldsTree(t, []string{pointer, "/spec/replicas"}),
+			}}
+			container := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+			mapField(mapField(container, "resources"), class)["memory"] = "256Mi"
+			applyErr := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: ` + ssaFieldForPointer(pointer))
+			if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "workload-declarative", applyErr); err != nil {
+				t.Fatal(err)
+			}
+			patch, found, err := nextOwnershipTransferPatch(desired, live, []string{pointer}, "workload-declarative", applyErr)
+			expected := []map[string]any{
+				{"op": "test", "path": "/metadata/uid", "value": "workload-uid"},
+				{"op": "test", "path": "/metadata/resourceVersion", "value": "42"},
+				{"op": "test", "path": "/spec/template/spec/containers/0/name", "value": "worker"},
+				{"op": "test", "path": "/spec/template/spec/containers/0/resources/" + class + "/memory", "value": "256Mi"},
+				{"op": "replace", "path": "/spec/template/spec/containers/0/resources/" + class + "/memory", "value": "512Mi"},
+			}
+			if err != nil || !found || !reflect.DeepEqual(patch, expected) {
+				t.Fatalf("memory transfer escaped exact CAS boundary: patch=%v found=%v err=%v", patch, found, err)
+			}
+			if err := validateEmergencyOwnershipConflictEvidence(desired, live, nil, "workload-declarative", applyErr); err == nil {
+				t.Fatal("undeclared memory quantity was admitted")
+			}
+			mapField(desired, "metadata")["uid"] = "another-workload"
+			if err := validateEmergencyOwnershipConflictEvidence(desired, live, []string{pointer}, "workload-declarative", applyErr); err == nil {
+				t.Fatal("changed workload identity was admitted")
+			}
+		})
 	}
 }
 

@@ -163,9 +163,22 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Detect memory policy configuration changes
+        id: changed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          changed=true
+          if [[ "$EVENT_NAME" == "push" ]] && git diff --quiet "$BASE_SHA" HEAD -- deploy/environments/production/workload-memory scripts/reconcile_workload_memory.py scripts/test_reconcile_workload_memory.py; then
+            changed=false
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
       - name: Validate memory admission policy
+        if: steps.changed.outputs.changed == 'true'
         run: python3 -m unittest scripts.test_reconcile_workload_memory
       - name: Reconcile independent memory requests without container restarts
+        if: steps.changed.outputs.changed == 'true'
         run: |
           git fetch origin main
           if ! git diff --quiet HEAD origin/main -- deploy/environments/production/workload-memory scripts/reconcile_workload_memory.py; then

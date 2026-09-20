@@ -59,7 +59,7 @@ var emergencyOwnershipManagers = map[string]bool{
 	"kubectl-set":   true,
 }
 
-// Helm may still own declared environment values and CPU quantities on
+// Helm may still own declared environment values and CPU/memory quantities on
 // workloads created before declarative ownership. Transfer only those leaves
 // through the UID/RV-bound scalar bridge. Images, annotations, probes, other
 // resources and structural fields remain outside this legacy boundary.
@@ -1801,7 +1801,7 @@ func emergencyEnvValuePointer(pointer string) bool {
 	return ok
 }
 
-// CPU quantities already belong to the reviewed emergency rollback boundary.
+// CPU and memory quantities belong to the reviewed emergency rollback boundary.
 // Extending legacy Helm convergence to those same leaves allows a configuration
 // correction without taking ownership of a whole container or resource map.
 func legacyScalarOwnershipPointer(pointer string) bool {
@@ -1813,7 +1813,7 @@ func legacyScalarOwnershipPointer(pointer string) bool {
 		return false
 	}
 	_, resource, ok := resourceQuantityTail(tail)
-	return ok && resource == "cpu"
+	return ok && (resource == "cpu" || resource == "memory")
 }
 
 func ownershipTransferPointer(pointer string) bool {
