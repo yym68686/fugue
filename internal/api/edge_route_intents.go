@@ -168,7 +168,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, s
 		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
 	}
 	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(ctx)
-	apps, _ = s.overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps, runtimeByID)
+	apps, provenanceByAppID := s.overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps, runtimeByID)
 	if capture != nil {
 		capture(apps)
 	}
@@ -280,6 +280,7 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithDomains(ctx context.Context, s
 		}
 	}
 	snapshot.Generation = edgeRouteIntentSnapshotGeneration(snapshot)
+	s.logEdgeRouteIntentObservations(snapshot, appByID, provenanceByAppID)
 	return snapshot, nil
 }
 

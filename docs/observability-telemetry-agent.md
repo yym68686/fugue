@@ -204,3 +204,27 @@ JSON using the ordinary log-entry schema. Chunk identifiers are body fields,
 never stream labels. Existing log viewers show the fragments individually;
 ordinary entries and other exporter outputs are unchanged. This prevents future
 size rejections; it does not replay batches rejected before the fix.
+
+### Route-intent observation evidence
+
+The API business-route projection emits `edge_route_intent_observation` into
+`app_events` when the facts for an app route change. Each event carries the
+source intent generation, per-route intent generation, observation timestamps,
+and `material_json`: the cached ManagedApp/Deployment generations, replica and
+endpoint facts, image evidence digests, freshness and invariant violations used
+by that projection. Raw environment values and image references are excluded.
+
+These observations describe projection inputs and output status. They are not
+Edge Control decisions or proof that a source intent was activated. The event
+does not change route hashes, status gates, freshness, or serving LKG. It also
+covers read-only migration previews; `source_stage=business_route_projection`
+keeps that scope explicit. Verified-artifact serving paths do not consult or
+emit a new business projection.
+
+Repeated polls with unchanged facts are suppressed by the existing bounded
+observation cache. Cache-expiry bookkeeping and refreshed image-location times
+alone do not create new events; the original timestamps remain in the event body.
+For an incident, query `app_events` by app, event type and time, then parse
+`attributes_json.material_json`. Missing historical rows remain missing; this
+instrumentation does not reconstruct past Kubernetes state or authorize weaker
+serving checks.

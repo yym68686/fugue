@@ -284,18 +284,22 @@ func (s *Server) edgeRouteDecisionChanged(route model.EdgeRouteBinding) bool {
 	}
 	key := strings.Join(keyParts, "\x00")
 	decisionID := strings.TrimSpace(route.DecisionID)
+	return s.edgeRouteObservationChanged(key, decisionID)
+}
+
+func (s *Server) edgeRouteObservationChanged(key, observationID string) bool {
 	s.edgeRouteDecisionMu.Lock()
 	defer s.edgeRouteDecisionMu.Unlock()
 	if s.edgeRouteDecisionLast == nil {
 		s.edgeRouteDecisionLast = make(map[string]string)
 	}
-	if s.edgeRouteDecisionLast[key] == decisionID {
+	if s.edgeRouteDecisionLast[key] == observationID {
 		return false
 	}
 	if len(s.edgeRouteDecisionLast) >= 4096 {
 		s.edgeRouteDecisionLast = make(map[string]string)
 	}
-	s.edgeRouteDecisionLast[key] = decisionID
+	s.edgeRouteDecisionLast[key] = observationID
 	return true
 }
 
