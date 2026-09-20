@@ -360,7 +360,13 @@ func placementHostnameRoutes(result platformIntentProjectionResponse, host strin
 	}
 	compiled, err = platformconfig.ApplyTrafficPolicyConstraints(compiled, filteredPolicy, snapshot)
 	if err != nil {
-		return nil, nil, err
+		missing := []string{}
+		for _, release := range snapshot.Releases {
+			if release.ObservedAt.IsZero() {
+				missing = append(missing, release.ID+": "+release.StatusReason)
+			}
+		}
+		return nil, nil, fmt.Errorf("DNS hostname %q traffic policy evidence unavailable (unobserved releases %v): %w", host, missing, err)
 	}
 	projection, err := projectPlatformRouteArtifact(model.PlatformArtifact{Generation: result.SourceGeneration, Content: map[string]any{"routes": compiled, "policy": policy, "cache_policies": intent.CachePolicies}})
 	return compiled, projection.Routes, err

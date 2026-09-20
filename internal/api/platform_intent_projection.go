@@ -248,7 +248,7 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 		}
 	} else if len(dnsNodes) > 0 {
 		if err := s.projectDNSQueryRules(&projection, dnsNodes); err != nil {
-			return platformIntentProjectionResponse{}, errors.New("signed DNS query migration input unavailable")
+			return platformIntentProjectionResponse{}, fmt.Errorf("signed DNS query migration input unavailable: %w", err)
 		}
 	}
 	resolver := newHostedDNSFlattenResolver()
