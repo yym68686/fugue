@@ -4,6 +4,29 @@ package api
 // updater. The resulting kubelet configuration survives code release failures.
 func podCapacityShellLibrary() string {
 	return `
+reload_pod_capacity_k3s() {
+  python3 - <<'FUGUE_CAPACITY_RELOAD_PY'
+import subprocess, sys, time, urllib.request
+deadline = time.monotonic() + 90
+try:
+    subprocess.run(['systemctl', 'restart', 'k3s-agent'], check=True, timeout=90)
+    while time.monotonic() < deadline:
+        active = subprocess.run(['systemctl', 'is-active', '--quiet', 'k3s-agent'], timeout=5).returncode == 0
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:10248/healthz', timeout=3) as response:
+                healthy = response.status == 200 and response.read(64).strip() == b'ok'
+        except Exception:
+            healthy = False
+        if active and healthy:
+            sys.exit(0)
+        time.sleep(2)
+    raise RuntimeError('kubelet did not become healthy within 90 seconds')
+except Exception as error:
+    print('capacity reload failed: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+FUGUE_CAPACITY_RELOAD_PY
+}
+
 reconcile_pod_capacity_task() {
   local mode="${FUGUE_NODE_UPDATE_TASK_POD_CAPACITY_MODE:-}"
   local dry_run="${FUGUE_NODE_UPDATE_TASK_DRY_RUN:-true}"
@@ -17,10 +40,13 @@ reconcile_pod_capacity_task() {
   fi
   staged="$(mktemp)"
   if ! python3 - "${config}" "${staged}" "${mode}" <<'FUGUE_POD_CAPACITY_PY'
+` + podCapacityUIDPython() + `
 import pathlib, re, sys
 config, staged, mode = map(str, sys.argv[1:])
 text = pathlib.Path(config).read_text()
-capacity = 2147483647 if mode == 'resources' else 110
+capacity = pod_uid_capacity() if mode == 'resources' else 110
+if re.search(r'^[ \t]*-[ \t]*["\x27]?(?:--)?config(?:-dir)?=', text, re.M):
+    raise SystemExit('custom kubelet config arguments require explicit capacity review; no configuration changed')
 if re.search(r'^[ \t]*kubelet-arg:[ \t]*[^\s#]', text, re.M):
     raise SystemExit('inline kubelet-arg is unsupported; no configuration changed')
 lines = text.splitlines()
@@ -64,9 +90,9 @@ FUGUE_POD_CAPACITY_PY
     return 1
   fi
   rm -f "${staged}"
-  if ! restart_k3s_agent; then
+  if ! reload_pod_capacity_k3s; then
     install -m 0600 "${backup}" "${config}"
-    restart_k3s_agent || true
+    reload_pod_capacity_k3s || true
     rm -f "${backup}"
     repair_record_failure "pod_capacity_config" "L4_guarded_node_repair" "k3s-agent" "capacity reload failed; restored previous configuration"
     return 1
@@ -75,5 +101,50 @@ FUGUE_POD_CAPACITY_PY
   repair_record_success "pod_capacity_config" "L4_guarded_node_repair" "k3s-agent"
   FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="Pod capacity policy applied; kubelet restarted; verify Node allocatable pods"
 }
+`
+}
+
+// Mirrors Kubernetes userns allocation validation. The usable UID range is a
+// physical resource, not an administrative Pod quota. Reserving the first ID
+// block leaves 65,535 slots on a default host, rather than an invalid int32 max.
+func podCapacityUIDPython() string {
+	return `import json, os, pathlib, pwd, shutil, subprocess
+
+def uid_capacity(first, length, per_pod):
+    if per_pod < 65536 or per_pod % 65536 or first < per_pod or first % per_pod or length % per_pod or first + length > 2**32:
+        raise ValueError('invalid kubelet UID/GID allocation range')
+    capacity = length // per_pod
+    if capacity < 1:
+        raise ValueError('kubelet UID/GID allocation range has no Pod capacity')
+    return min(capacity, 2147483647)
+
+def pod_uid_capacity():
+    per_pod = 65536
+    directory = pathlib.Path(os.environ.get('FUGUE_KUBELET_CONFIG_DIR', '/var/lib/rancher/k3s/agent/etc/kubelet.conf.d'))
+    for path in sorted(directory.glob('*.conf')):
+        text = path.read_text()
+        if 'idsPerPod' not in text:
+            continue
+        try:
+            config = json.loads(text)
+            per_pod = int(config.get('userNamespaces', {}).get('idsPerPod', per_pod))
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError('custom user namespace config must be valid JSON for capacity preflight')
+    first, length = per_pod, 2**32 - per_pod
+    try:
+        pwd.getpwnam('kubelet')
+        has_user = True
+    except KeyError:
+        has_user = False
+    if has_user and shutil.which('getsubids'):
+        uids = subprocess.check_output(['getsubids', 'kubelet'], text=True, timeout=10)
+        gids = subprocess.check_output(['getsubids', '-g', 'kubelet'], text=True, timeout=10)
+        if uids != gids or len(uids.strip().splitlines()) != 1:
+            raise ValueError('kubelet subordinate UID/GID mappings differ or are ambiguous')
+        fields = uids.split()
+        if len(fields) != 4:
+            raise ValueError('invalid getsubids output')
+        first, length = int(fields[2]), int(fields[3])
+    return uid_capacity(first, length, per_pod)
 `
 }

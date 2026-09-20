@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion        = "v40"
+	nodeUpdaterScriptVersion        = "v41"
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 	nodeRepairTaskMaxAge            = 45 * time.Minute
@@ -524,8 +524,8 @@ func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.Nod
 			return "", err
 		}
 		version, err := strconv.Atoi(strings.TrimPrefix(updater.UpdaterVersion, "v"))
-		if err != nil || version < 40 {
-			return "pod capacity policy requires node updater v40 or newer", nil
+		if err != nil || version < 41 {
+			return "pod capacity policy requires node updater v41 or newer", nil
 		}
 		if !nodeUpdatePayloadBool(task.Payload["dry_run"]) && !nodeUpdatePayloadBool(task.Payload["allow_restart"]) {
 			return "pod capacity policy requires allow_restart=true outside dry-run", nil

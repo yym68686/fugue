@@ -24833,8 +24833,11 @@ components:
       type: object
       description: |
         refresh-join-config may carry pod_capacity_mode=resources to remove the
-        kubelet default 110-Pod ceiling by setting max-pods to the int32 maximum
-        and disabling pods-per-core. Physical PodCIDR address capacity remains finite. The mode is saved
+        kubelet default 110-Pod quota by deriving max-pods from the host's
+        available UID/GID namespace range (normally 65535) instead of a fixed
+        application count. This requires node updater v41 or newer; v40's int32
+        maximum is not compatible with kubelet user namespace allocation.
+        pods-per-core is disabled. Physical PodCIDR address capacity remains finite. The mode is saved
         independently of the updater binary. This option requires platform-admin,
         a fresh task, and allow_restart=true outside dry-run. Memory requests and
         other scheduler resource constraints remain enforced. It never renumbers

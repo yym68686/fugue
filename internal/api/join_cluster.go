@@ -771,7 +771,7 @@ set -euo pipefail
 
 FUGUE_API_BASE=${FUGUE_API_BASE:-%s}
 FUGUE_JOIN_SCRIPT_VERSION="${FUGUE_JOIN_SCRIPT_VERSION:-v2}"
-FUGUE_KUBELET_MAX_PODS="${FUGUE_KUBELET_MAX_PODS:-2147483647}"
+FUGUE_KUBELET_MAX_PODS="${FUGUE_KUBELET_MAX_PODS:-}"
 FUGUE_K3S_CHANNEL="${FUGUE_K3S_CHANNEL:-stable}"
 FUGUE_K3S_VERSION="${FUGUE_K3S_VERSION:-}"
 FUGUE_LIMIT_CPU="${FUGUE_LIMIT_CPU:-}"
@@ -2931,11 +2931,17 @@ fi
 configure_k3s_api_load_balancer
 
 log_step "Preparing k3s agent configuration..."
+fugue_uid_pod_capacity="$(python3 - <<'FUGUE_CAPACITY_UID_PY'
+__FUGUE_POD_CAPACITY_UID_PYTHON__
+print(pod_uid_capacity())
+FUGUE_CAPACITY_UID_PY
+)" || exit 1
+FUGUE_KUBELET_MAX_PODS="${FUGUE_KUBELET_MAX_PODS:-${fugue_uid_pod_capacity}}"
 case "${FUGUE_KUBELET_MAX_PODS}" in
   ''|*[!0-9]*) echo "FUGUE_KUBELET_MAX_PODS must be a positive int32" >&2; exit 1 ;;
 esac
-if [ "${FUGUE_KUBELET_MAX_PODS}" -le 0 ] || [ "${FUGUE_KUBELET_MAX_PODS}" -gt 2147483647 ]; then
-  echo "FUGUE_KUBELET_MAX_PODS must be a positive int32" >&2
+if [ "${FUGUE_KUBELET_MAX_PODS}" -le 0 ] || [ "${FUGUE_KUBELET_MAX_PODS}" -gt "${fugue_uid_pod_capacity}" ]; then
+  echo "FUGUE_KUBELET_MAX_PODS exceeds the host UID/GID namespace capacity" >&2
   exit 1
 fi
 mkdir -p /etc/rancher/k3s
@@ -3083,5 +3089,6 @@ host_zram_reason=${FUGUE_HOST_ZRAM_REASON:-}
 host_zram_size_bytes=${FUGUE_HOST_ZRAM_SIZE_BYTES:-0}
 EOF
 `, strconv.Quote(apiBase))
+	script = strings.ReplaceAll(script, "__FUGUE_POD_CAPACITY_UID_PYTHON__", podCapacityUIDPython())
 	return strings.ReplaceAll(script, "__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary())
 }
