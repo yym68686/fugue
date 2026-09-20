@@ -332,6 +332,14 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 
 func inventoryProducerHealth(status Status, edgeConfig config.EdgeConfig) (string, bool, bool, bool) {
 	nodeStatus := edgeHealthStatus(status)
+	// A failed configuration fetch or rejected candidate does not invalidate a
+	// verified, still-valid bundle already applied by Caddy. Reporting that
+	// retained serving state as unhealthy would prevent the group compiler from
+	// producing the next recovery candidate. Keep sync degradation observable in
+	// Status, and require the exact active LKG and its original validity here.
+	if retainedGroupLKGServingHealthy(status, edgeConfig, time.Now().UTC()) {
+		nodeStatus = model.EdgeHealthHealthy
+	}
 	servingHealthy := nodeStatus == model.EdgeHealthHealthy && !edgeConfig.Draining && strings.TrimSpace(status.FailureClass) == ""
 	if servingHealthy || !groupBundleBootstrapEligible(status, edgeConfig) {
 		return nodeStatus, status.Healthy, servingHealthy, false
@@ -341,6 +349,15 @@ func inventoryProducerHealth(status Status, edgeConfig config.EdgeConfig) (strin
 	// first group publication. The worker remains non-serving until it installs
 	// and verifies the signed bundle.
 	return model.EdgeHealthHealthy, true, false, true
+}
+
+func retainedGroupLKGServingHealthy(status Status, edgeConfig config.EdgeConfig, now time.Time) bool {
+	return status.Healthy && status.StaleCache && !status.MaxStaleExceeded && !status.CandidateBundleLoaded &&
+		!edgeConfig.Draining && edgeConfig.CaddyEnabled && status.CaddyEnabled && status.CaddyLastError == "" && status.FailureClass == "" &&
+		status.RouteBundleSource == edgeControlRouteSourceV1 && status.BundleVersion != "" && status.CaddyAppliedVersion == status.BundleVersion &&
+		status.ServingGeneration != "" && status.LKGGeneration == status.ServingGeneration &&
+		status.BundleValidUntil != nil && status.BundleValidUntil.After(now) &&
+		status.LastSuccessAt != nil && !status.LastSuccessAt.IsZero() && !status.LastSuccessAt.After(now)
 }
 
 func groupBundleBootstrapEligible(status Status, edgeConfig config.EdgeConfig) bool {

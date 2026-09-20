@@ -68,20 +68,33 @@ func TestEdgeControlRouteSourceSurvivesCoreBlackholeAndRejectsGroupReplayAndBlac
 		_ = json.NewEncoder(w).Encode(observed.bundle)
 	}))
 	defer routeServer.Close()
+	caddy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Error("unexpected Caddy operation", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer caddy.Close()
 
 	service := NewServiceWithRouteBundleSource(config.EdgeConfig{
-		APIURL:              "http://127.0.0.1:1",
-		EdgeDesiredStateURL: "http://127.0.0.1:1/v1/edge/nodes/edge-us-1/desired-state",
-		EdgeToken:           "heartbeat-token",
-		EdgeID:              edgeID,
-		EdgeGroupID:         groupID,
-		CachePath:           cachePath,
-		HTTPTimeout:         100 * time.Millisecond,
+		APIURL:               "http://127.0.0.1:1",
+		EdgeDesiredStateURL:  "http://127.0.0.1:1/v1/edge/nodes/edge-us-1/desired-state",
+		EdgeToken:            "heartbeat-token",
+		EdgeID:               edgeID,
+		EdgeGroupID:          groupID,
+		CachePath:            cachePath,
+		HTTPTimeout:          100 * time.Millisecond,
+		CaddyEnabled:         true,
+		CaddyAdminURL:        caddy.URL,
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: "127.0.0.1:18081",
+		CaddyTLSMode:         caddyTLSModeOff,
 	}, RouteBundleSourceConfig{
 		URL:                 routeServer.URL + edgeControlBundlePath,
 		TokenFile:           tokenFile,
 		VerifierKeyringFile: keyringFile,
 	}, log.New(io.Discard, "", 0))
+	defer service.cancelCurrentCaddyWarmup()
 	if err := service.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("edge-control sync failed while Core was blackholed: %v", err)
 	}
@@ -116,6 +129,10 @@ func TestEdgeControlRouteSourceSurvivesCoreBlackholeAndRejectsGroupReplayAndBlac
 	}
 	if got := service.Status(); got.PublicationSequence != 1 || got.ServingGeneration != "generation-one" || !got.Healthy {
 		t.Fatalf("catastrophic candidate did not preserve the group LKG: %+v", got)
+	}
+	state, healthy, serving, bootstrap := inventoryProducerHealth(service.Status(), service.Config)
+	if state != model.EdgeHealthHealthy || !healthy || !serving || bootstrap || !service.Status().StaleCache {
+		t.Fatal("rejected signed candidate invalidated the applied LKG's serving inventory")
 	}
 
 	// A process restart verifies and restores the independently signed group LKG
