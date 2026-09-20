@@ -1399,7 +1399,7 @@ func robustnessManagedPostgresBackingService(service model.BackingService) bool 
 }
 
 func (s *Server) robustnessOperationChecks() ([]model.RobustnessCheck, error) {
-	ops, err := s.store.ListOperations("", true)
+	ops, err := s.store.ListActiveOperationLifecycles()
 	if err != nil {
 		return nil, err
 	}

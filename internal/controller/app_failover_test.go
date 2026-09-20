@@ -94,6 +94,32 @@ func TestQueueAutomaticFailoversCreatesOperationForOfflineRuntime(t *testing.T) 
 	if got := ops[0].TargetRuntimeID; got != targetRuntime.ID {
 		t.Fatalf("expected target runtime %q, got %q", targetRuntime.ID, got)
 	}
+	// The narrow inventory must still prevent duplicate failovers for every
+	// active status, including a waiting agent that has not started execution.
+	for _, status := range []string{model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent} {
+		current, err := os.ReadFile(storePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(current, &state); err != nil {
+			t.Fatal(err)
+		}
+		state.Operations[0].Status = status
+		current, err = json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(storePath, current, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.queueAutomaticFailovers(context.Background()); err != nil {
+			t.Fatalf("reconcile with %s operation: %v", status, err)
+		}
+		currentOps, err := stateStore.ListOperations(tenant.ID, false)
+		if err != nil || len(currentOps) != 1 {
+			t.Fatalf("duplicate failover while %s: %d %v", status, len(currentOps), err)
+		}
+	}
 }
 
 func TestDecorateManagedAppObjectsWithFenceEpochUpdatesServiceAndDeploymentSelectors(t *testing.T) {

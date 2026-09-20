@@ -277,9 +277,13 @@ func (s *Service) queueAutomaticFailovers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	operations, err := s.Store.ListOperations("", true)
+	operationReadStarted := time.Now()
+	operations, err := s.Store.ListActiveOperationLifecycles()
 	if err != nil {
 		return err
+	}
+	if s.Logger != nil {
+		s.Logger.Printf("runtime recovery operation inventory observed active_operations=%d elapsed_ms=%d", len(operations), time.Since(operationReadStarted).Milliseconds())
 	}
 
 	runtimeByID := make(map[string]model.Runtime, len(runtimes))

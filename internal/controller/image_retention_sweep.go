@@ -118,9 +118,13 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list apps: %w", err)
 	}
-	ops, err := s.Store.ListOperations("", true)
+	operationReadStarted := time.Now()
+	ops, err := s.Store.ListOperationLifecycles()
 	if err != nil {
 		return fmt.Errorf("list operations: %w", err)
+	}
+	if s.Logger != nil {
+		s.Logger.Printf("distributed image retention operation inventory observed operations=%d elapsed_ms=%d", len(ops), time.Since(operationReadStarted).Milliseconds())
 	}
 	opsByAppID := make(map[string][]model.Operation)
 	for _, op := range ops {
