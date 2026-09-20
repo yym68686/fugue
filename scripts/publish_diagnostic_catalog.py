@@ -209,6 +209,15 @@ def publish(config, runner, apply):
     keys = {key_id: base64.b64encode(key[32:]).decode()}
     verify(envelope, keys)
     account = catalog["policy"]["service_account"]
+    api_account = config.get("api_service_account", "")
+    if api_account:
+        if not NAME.fullmatch(api_account):
+            raise ValueError("invalid API service account")
+        role_name = "fugue-diagnostic-catalog-read"
+        role = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": metadata(role_name, namespace), "rules": [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": [CATALOG, TRUST], "verbs": ["get"]}]}
+        binding = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": metadata(role_name, namespace), "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": role_name}, "subjects": [{"kind": "ServiceAccount", "name": api_account, "namespace": namespace}]}
+        put(role, get("role", role_name, namespace))
+        put(binding, get("rolebinding", role_name, namespace))
     objects = [
         ("serviceaccount", {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": metadata(account, namespace), "automountServiceAccountToken": False}, namespace),
         ("clusterrole", {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": metadata(account), "rules": config["reader_rules"]}, None),

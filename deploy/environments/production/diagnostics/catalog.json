@@ -346,5 +346,6 @@
         "watch"
       ]
     }
-  ]
+  ],
+  "api_service_account": "fugue-fugue-control-plane-sa"
 }
