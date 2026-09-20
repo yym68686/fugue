@@ -77,8 +77,9 @@ x-fugue-platform-producer:
   policy_schema: '#/components/schemas/PlatformProducerPolicy'
   semantics: >-
     A validated signed policy_snapshot in scope platform-config-producer controls
-    the built-in migration producer through its current shadow release. The only
-    modes are paused and shadow. business-static-intent pins a validated signed
+    the built-in configuration producer through its current shadow release.
+    Modes are paused, shadow and serving; serving additionally requires bounded
+    explicit promotion settings and complete pinned configuration inputs. business-static-intent pins a validated signed
     PlatformIntent by exact ID and content digest for static platform routes and
     DNS records; missing, invalid or revoked input never falls back to environment.
     Optional pinned DNS policy supplies authority, client rules, probe parameters
@@ -94,17 +95,27 @@ x-fugue-platform-producer:
     complete ownership are rechecked at publication. Other migration inputs
     remain unchanged in this phase. The producer captures the existing business and
     migration inputs, compiles immutable intent/policy/route/DNS/TLS artifacts and
-    publishes only the global shadow ReleaseSet. The exact normalized runtime
+    first publishes the global shadow ReleaseSet. The exact normalized runtime
     snapshot is retained in the existing digest-addressed content store and is
     readable through its signed artifact reference for deterministic replay.
-    It never promotes serving or LKG.
+    Shadow mode never promotes serving or LKG. Serving mode uses the same
+    release ledger to progress gray and full only after an initial full verified
+    LKG exists. Trusted actual consumer convergence, publication age, source
+    authority and CAS are rechecked within every mutation transaction. A pending
+    serving publication that times out or belongs to a superseded serving policy
+    restores the verified baseline, even when its source input is now invalid.
+    The failed release records the source digest and recovery release, blocking
+    retry of that desired source under the current policy authority;
+    neither shadow facts nor caller booleans establish a positive LKG.
     Publication rechecks the policy release and expected previous target release
     in the store transaction. Disabled, superseded, frozen or invalid policy and
     concurrent target changes preserve the existing release. Replicas share the
     existing advisory-lock mechanism and release ledger. Unchanged desired inputs
     are reused until the configured runtime snapshot refresh interval. This is
     the business migration writer; removing legacy serving input sources and
-    enabling verified serving promotion remain separate migration steps.
+    activating serving promotion remain separate migration steps. Paused or shadow
+    mode stops automatic serving mutations; operators retain the existing explicit
+    rollback path. Automatic serving never bootstraps its own initial positive LKG.
 x-fugue-leased-traffic-admission:
   semantics: >-
     DNS artifacts carrying value expirations or consumer_readiness placement
@@ -32459,7 +32470,17 @@ components:
           minLength: 1
         mode:
           type: string
-          enum: [paused, shadow]
+          enum: [paused, shadow, serving]
+        serving:
+          type: object
+          additionalProperties: false
+          required: [canary_rule_ref, gray_min_seconds, full_min_seconds, rollout_timeout_seconds]
+          description: Required in serving mode. Automatic traffic releases require an existing full verified TrafficReleaseSet LKG, complete pinned inputs and consumer_readiness placement. Fresh actual gray convergence gates full, and fresh full convergence gates LKG. Timeout rolls back to the unchanged verified LKG and records failure of that candidate; the same desired source is not retried until it changes. These actions reuse existing release lanes, consumer facts and LKG records.
+          properties:
+            canary_rule_ref: {type: string, pattern: '^cohort=[a-z0-9][a-z0-9_-]{0,63}$'}
+            gray_min_seconds: {type: integer, minimum: 1, maximum: 1800}
+            full_min_seconds: {type: integer, minimum: 1, maximum: 1800}
+            rollout_timeout_seconds: {type: integer, minimum: 30, maximum: 3600}
         input_source:
           type: string
           enum: [business-migration, business-static-intent]

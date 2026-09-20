@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
@@ -13,12 +14,23 @@ import (
 )
 
 type platformProducerReleaseGuard struct {
-	PolicyReleaseID   string
-	PreviousReleaseID string
+	PolicyReleaseID       string
+	PreviousReleaseID     string
+	Phase                 string
+	BaselineArtifactID    string
+	PreviousFullReleaseID string
+	FailedReleaseID       string
 }
 
 func (s *Store) ReleaseProducedPlatformArtifact(id, policyReleaseID, previousReleaseID string, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	return s.releasePlatformArtifact(id, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", Reason: "versioned platform configuration producer", IdempotencyKey: "producer/" + policyReleaseID + "/" + id}, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: previousReleaseID})
+}
+
+func (s *Store) ReleaseProducedTrafficArtifact(id, policyReleaseID, channel, previousReleaseID, previousFullReleaseID, baselineArtifactID, canaryRef string, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+	if channel != model.PlatformArtifactReleaseChannelGray && channel != model.PlatformArtifactReleaseChannelFull {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
+	}
+	return s.releasePlatformArtifact(id, model.PlatformArtifactReleaseRequest{ReleaseChannel: channel, CanaryRuleRef: canaryRef, Reason: "versioned platform configuration serving producer", IdempotencyKey: "producer/" + policyReleaseID + "/" + channel + "/" + id}, principal, &platformProducerReleaseGuard{PolicyReleaseID: policyReleaseID, PreviousReleaseID: previousReleaseID, PreviousFullReleaseID: previousFullReleaseID, BaselineArtifactID: baselineArtifactID, Phase: channel})
 }
 
 func validateProducerPolicyPublication(a model.PlatformArtifact, channel string) error {
@@ -35,7 +47,14 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 	if guard == nil {
 		return nil
 	}
-	if req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || parent.ScopeKey != "global" || principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor || guard.PolicyReleaseID == "" || parent.Metadata[platformproducer.PolicyReleaseMetadata] != guard.PolicyReleaseID || parent.Metadata[platformproducer.SourceDigestMetadata] == "" || parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass {
+	if guard.Phase == "rollback" {
+		i := platformArtifactReleaseIndex(state.PlatformArtifactReleases, guard.FailedReleaseID)
+		if i < 0 {
+			return ErrConflict
+		}
+		req.ReleaseChannel = state.PlatformArtifactReleases[i].ReleaseChannel
+	}
+	if (guard.Phase == "" && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow) || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || parent.ScopeKey != "global" || principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor || guard.PolicyReleaseID == "" || (guard.Phase != "rollback" && parent.Metadata[platformproducer.PolicyReleaseMetadata] != guard.PolicyReleaseID) || parent.Metadata[platformproducer.SourceDigestMetadata] == "" || (guard.Phase != "rollback" && (parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass)) {
 		return ErrConflict
 	}
 	policyLaneKey := platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, model.PlatformArtifactReleaseChannelShadow)
@@ -56,81 +75,94 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 	}
 	artifact := state.PlatformArtifacts[index]
 	policy, err := platformproducer.Decode(artifact)
-	if err != nil || policy.Mode != "shadow" || policyRelease.Generation != artifact.Generation || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
+	if err != nil || (policy.Mode != "shadow" && policy.Mode != "serving") || policyRelease.Generation != artifact.Generation || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
 		return ErrConflict
 	}
-	if policy.InputSource == "business-static-intent" {
-		index := platformArtifactIndex(state.PlatformArtifacts, policy.StaticIntentArtifactID)
-		if index < 0 {
-			return ErrConflict
-		}
-		base := state.PlatformArtifacts[index]
-		if base.ID != policy.StaticIntentArtifactID || base.ContentHash != policy.StaticIntentDigest || base.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(base, keys).Pass || parent.Metadata[platformproducer.StaticIntentIDMetadata] != base.ID || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != base.ContentHash {
-			return ErrConflict
-		}
-		static, err := platformproducer.DecodeStaticIntent(base)
-		if err != nil {
-			return ErrConflict
-		}
-		if policy.RequireApplicationDomains && static.ApplicationDomains == nil {
-			return ErrConflict
-		}
-		if policy.DNSPolicyArtifactID != "" {
-			index := platformArtifactIndex(state.PlatformArtifacts, policy.DNSPolicyArtifactID)
+	// Recovery authorizes only the separately verified baseline. A broken
+	// candidate or revoked source cannot block undoing its publication.
+	if guard.Phase != "rollback" {
+		if policy.InputSource == "business-static-intent" {
+			index := platformArtifactIndex(state.PlatformArtifacts, policy.StaticIntentArtifactID)
 			if index < 0 {
 				return ErrConflict
 			}
-			a := state.PlatformArtifacts[index]
-			if a.ID != policy.DNSPolicyArtifactID || a.ContentHash != policy.DNSPolicyDigest || a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != a.ID || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != a.ContentHash {
+			base := state.PlatformArtifacts[index]
+			if base.ID != policy.StaticIntentArtifactID || base.ContentHash != policy.StaticIntentDigest || base.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(base, keys).Pass || parent.Metadata[platformproducer.StaticIntentIDMetadata] != base.ID || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != base.ContentHash {
 				return ErrConflict
 			}
-			input, err := platformproducer.DecodeProjectionPolicy(a, static.Consumers, policy.HostedZoneTemplates)
+			static, err := platformproducer.DecodeStaticIntent(base)
 			if err != nil {
 				return ErrConflict
 			}
-			if policy.RequireDNSQueryPolicy && input.DNSQueryPolicy == nil {
+			if policy.RequireApplicationDomains && static.ApplicationDomains == nil {
 				return ErrConflict
 			}
-			if _, present, err := input.RouteDefaults(); err != nil || policy.RequireRouteDefaults && !present {
+			if policy.DNSPolicyArtifactID != "" {
+				index := platformArtifactIndex(state.PlatformArtifacts, policy.DNSPolicyArtifactID)
+				if index < 0 {
+					return ErrConflict
+				}
+				a := state.PlatformArtifacts[index]
+				if a.ID != policy.DNSPolicyArtifactID || a.ContentHash != policy.DNSPolicyDigest || a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != a.ID || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != a.ContentHash {
+					return ErrConflict
+				}
+				input, err := platformproducer.DecodeProjectionPolicy(a, static.Consumers, policy.HostedZoneTemplates)
+				if err != nil {
+					return ErrConflict
+				}
+				if policy.Mode == "serving" && input.DNSPlacementMode != platformconfig.DNSPlacementConsumerReadiness {
+					return ErrConflict
+				}
+				if policy.RequireDNSQueryPolicy && input.DNSQueryPolicy == nil {
+					return ErrConflict
+				}
+				if _, present, err := input.RouteDefaults(); err != nil || policy.RequireRouteDefaults && !present {
+					return ErrConflict
+				}
+			} else if len(static.Consumers) > 0 || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
 				return ErrConflict
 			}
-		} else if len(static.Consumers) > 0 || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
+		} else if parent.Metadata[platformproducer.StaticIntentIDMetadata] != "" || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
 			return ErrConflict
 		}
-	} else if parent.Metadata[platformproducer.StaticIntentIDMetadata] != "" || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
-		return ErrConflict
-	}
-	ids, idsOK := parent.Content["artifact_ids"].([]any)
-	kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
-	if !idsOK || !kindsOK || len(ids) != 3 || len(kinds) != 3 {
-		return ErrConflict
-	}
-	seen := map[string]bool{}
-	for i, raw := range ids {
-		id, ok := raw.(string)
-		if !ok {
+		ids, idsOK := parent.Content["artifact_ids"].([]any)
+		kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
+		if !idsOK || !kindsOK || len(ids) != 3 || len(kinds) != 3 {
 			return ErrConflict
 		}
-		index := platformArtifactIndex(state.PlatformArtifacts, id)
-		if index < 0 {
-			return ErrConflict
-		}
-		child := state.PlatformArtifacts[index]
-		if seen[child.ArtifactKind] || kinds[i] != child.ArtifactKind || child.ScopeKey != parent.ScopeKey || child.Status != model.PlatformArtifactStatusValidated || child.Metadata["release_set_generation"] != parent.Generation || !platformsafety.EvaluateArtifactIntegrity(child, keys).Pass {
-			return ErrConflict
-		}
-		for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
-			if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
+		seen := map[string]bool{}
+		for i, raw := range ids {
+			id, ok := raw.(string)
+			if !ok {
 				return ErrConflict
 			}
+			index := platformArtifactIndex(state.PlatformArtifacts, id)
+			if index < 0 {
+				return ErrConflict
+			}
+			child := state.PlatformArtifacts[index]
+			if seen[child.ArtifactKind] || kinds[i] != child.ArtifactKind || child.ScopeKey != parent.ScopeKey || child.Status != model.PlatformArtifactStatusValidated || child.Metadata["release_set_generation"] != parent.Generation || !platformsafety.EvaluateArtifactIntegrity(child, keys).Pass {
+				return ErrConflict
+			}
+			for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
+				if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
+					return ErrConflict
+				}
+			}
+			if platformconfig.ValidateTrafficCohortProjection(parent, child) != nil {
+				return ErrConflict
+			}
+			seen[child.ArtifactKind] = true
 		}
-		if platformconfig.ValidateTrafficCohortProjection(parent, child) != nil {
+		if !seen[model.PlatformArtifactKindEdgeRouteBundle] || !seen[model.PlatformArtifactKindDNSAnswerBundle] || !seen[model.PlatformArtifactKindCaddyRouteConfig] {
 			return ErrConflict
 		}
-		seen[child.ArtifactKind] = true
 	}
-	if !seen[model.PlatformArtifactKindEdgeRouteBundle] || !seen[model.PlatformArtifactKindDNSAnswerBundle] || !seen[model.PlatformArtifactKindCaddyRouteConfig] {
-		return ErrConflict
+
+	if guard.Phase != "" {
+		if err := validateProducerServingPhase(state, parent, req, policy, keys, guard); err != nil {
+			return err
+		}
 	}
 	lane, found := platformReleaseLaneByKey(state.PlatformReleaseLanes, platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, req.ReleaseChannel))
 	if found && lane.Frozen {
@@ -156,7 +188,9 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 	state := &model.State{}
 	for _, key := range []string{
 		platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, model.PlatformArtifactReleaseChannelShadow),
-		platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, req.ReleaseChannel),
+		platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, model.PlatformArtifactReleaseChannelShadow),
+		platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, model.PlatformArtifactReleaseChannelGray),
+		platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, model.PlatformArtifactReleaseChannelFull),
 	} {
 		lane, err := pgGetPlatformReleaseLaneForUpdate(ctx, tx, key)
 		if err == ErrNotFound {
@@ -174,6 +208,25 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
 		}
 	}
+	if guard.Phase != "" {
+		lkg, err := s.pgGetVerifiedPlatformLKGForUpdate(ctx, tx, parent.ArtifactKind, parent.ScopeKey, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if lkg != nil {
+			a, err := pgGetPlatformArtifactForUpdate(ctx, tx, lkg.ArtifactID, true)
+			if err != nil {
+				return err
+			}
+			r, err := pgGetPlatformArtifactRelease(ctx, tx, lkg.VerifiedByReleaseID, false)
+			if err != nil {
+				return err
+			}
+			state.PlatformArtifacts = append(state.PlatformArtifacts, a)
+			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
+			state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, *lkg)
+		}
+	}
 	release, err := pgGetPlatformArtifactRelease(ctx, tx, guard.PolicyReleaseID, false)
 	if err != nil {
 		return err
@@ -183,7 +236,10 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		return err
 	}
 	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
-	state.PlatformArtifacts = []model.PlatformArtifact{artifact}
+	state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
+	if guard.Phase == "rollback" {
+		return validateProducerReleaseGuard(state, parent, req, principal, s.platformArtifactSigningKeyring(), guard)
+	}
 	policy, err := platformproducer.Decode(artifact)
 	if err != nil {
 		return ErrConflict

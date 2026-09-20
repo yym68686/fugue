@@ -42,6 +42,9 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 	if policy.RequireDNSQueryPolicy && (dns == nil || dns.DNSQueryPolicy == nil) {
 		return platformIntentProjectionResponse{}, fmt.Errorf("pinned DNS query policy required")
 	}
+	if policy.Mode == "serving" && (dns == nil || dns.DNSPlacementMode != platformconfig.DNSPlacementConsumerReadiness) {
+		return platformIntentProjectionResponse{}, fmt.Errorf("automatic serving requires consumer readiness placement")
+	}
 	if policy.RequireRouteDefaults {
 		if dns == nil {
 			return platformIntentProjectionResponse{}, fmt.Errorf("pinned route defaults required")

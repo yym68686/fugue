@@ -95,13 +95,18 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	if policy.Mode == "paused" {
 		return interval, nil
 	}
+	if policy.Mode == "serving" {
+		if handled, err := s.reconcilePendingProducedTraffic(ctx, policy, authority); handled || err != nil {
+			return interval, err
+		}
+	}
 	principal := platformProducerPrincipal()
 	current, previous, haveCurrent, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, policy.TargetScope, "shadow")
 	if err != nil {
 		return interval, err
 	}
 	owned := haveCurrent && previous.ReleasedByType == model.ActorTypeBootstrap && previous.ReleasedByID == platformproducer.Actor && current.Metadata[platformproducer.PolicyReleaseMetadata] == authority.ID
-	if owned {
+	if owned && policy.Mode != "serving" {
 		// Complete a prior publication interrupted before expectation preparation.
 		if _, err := s.preparePlatformReleaseSetConsumers(ctx, principal, current, previous); err != nil {
 			return interval, err
@@ -126,7 +131,22 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	if err != nil {
 		return interval, err
 	}
+	if policy.Mode == "serving" {
+		failed, err := s.producedSourcePreviouslyFailed(policy.TargetScope, authority.ID, sourceDigest)
+		if err != nil || failed {
+			return interval, err
+		}
+	}
 	if owned && current.Metadata[platformproducer.SourceDigestMetadata] == sourceDigest && time.Since(previous.ReleasedAt) < time.Duration(policy.RefreshSeconds)*time.Second {
+		if policy.Mode == "serving" {
+			// A rejected older candidate must not block capturing a corrected
+			// source. Prepare only the candidate we are about to reuse, after
+			// checking the durable failed-source marker.
+			if _, err := s.preparePlatformReleaseSetConsumers(ctx, principal, current, previous); err != nil {
+				return interval, err
+			}
+			return interval, s.stageProducedTraffic(ctx, policy, authority, current)
+		}
 		if s.log != nil {
 			s.log.Printf("platform configuration producer unchanged policy_release=%s release=%s source_digest=%s", authority.ID, previous.ID, sourceDigest)
 		}
@@ -171,6 +191,9 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	s.appendAudit(principal, "platform_config.shadow_produced", "platform_release_set", result.ReleaseArtifact.ID, "", map[string]string{"policy_release_id": authority.ID, "source_digest": sourceDigest, "business_snapshot_revision": projection.BusinessSnapshotRevision, "release_id": release.ID})
 	if s.log != nil {
 		s.log.Printf("platform configuration producer published policy_release=%s release=%s artifact=%s source_digest=%s business_revision=%s", authority.ID, release.ID, result.ReleaseArtifact.ID, sourceDigest, projection.BusinessSnapshotRevision)
+	}
+	if policy.Mode == "serving" {
+		return interval, s.stageProducedTraffic(ctx, policy, authority, result.ReleaseArtifact)
 	}
 	return interval, nil
 }

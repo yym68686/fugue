@@ -12,6 +12,7 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 )
 
@@ -520,6 +521,10 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 }
 
 func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRollbackRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+	return s.rollbackPlatformArtifact(id, req, principal, nil)
+}
+
+func (s *Store) rollbackPlatformArtifact(id string, req model.PlatformArtifactRollbackRequest, principal model.Principal, guard *platformProducerReleaseGuard) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	if strings.TrimSpace(req.ToGeneration) == "" || strings.TrimSpace(req.Reason) == "" {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
 	}
@@ -528,7 +533,7 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgRollbackPlatformArtifact(id, req, principal)
+		return s.pgRollbackPlatformArtifact(id, req, principal, guard)
 	}
 	var target model.PlatformArtifact
 	var release model.PlatformArtifactRelease
@@ -545,6 +550,15 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 			return ErrNotFound
 		}
 		target = state.PlatformArtifacts[targetIndex]
+		if guard != nil {
+			if target.ID != guard.BaselineArtifactID {
+				return ErrConflict
+			}
+			if err := validateProducerReleaseGuard(state, current, model.PlatformArtifactReleaseRequest{ReleaseChannel: channel}, principal, s.platformArtifactSigningKeyring(), guard); err != nil {
+				return err
+			}
+		}
+
 		if err := validateProducerPolicyPublication(target, channel); err != nil {
 			return err
 		}
@@ -639,18 +653,40 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 				return err
 			}
 		}
+		if guard != nil {
+			index := platformArtifactReleaseIndex(state.PlatformArtifactReleases, guard.FailedReleaseID)
+			if index < 0 {
+				return ErrConflict
+			}
+			grayLane, _ := platformReleaseLaneByKey(state.PlatformReleaseLanes, platformsafety.ReleaseLaneKey(current.ArtifactKind, current.ScopeKey, model.PlatformArtifactReleaseChannelGray))
+			for i, failed := range state.PlatformArtifactReleases {
+				if failed.ID != guard.FailedReleaseID && !(failed.ID == grayLane.ActiveReleaseID && failed.ArtifactID == current.ID && producerOwnsPublication(failed)) {
+					continue
+				}
+				failed.VerificationState = model.PlatformArtifactVerificationStateFailed
+				failed.VerificationEvidence = map[string]string{"producer_policy_release_id": guard.PolicyReleaseID, "failed_source_digest": current.Metadata[platformproducer.SourceDigestMetadata], "recovered_by_release_id": release.ID}
+				failed.Version++
+				failed.UpdatedAt = now
+				state.PlatformArtifactReleases[i] = failed
+			}
+		}
+
 		return validateLeasedTrafficAdmission(state, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC())
 	})
 	return target, release, message, lkg, err
 }
 
 func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+	return s.verifyPlatformArtifactReleaseLKG(releaseID, req, principal, nil)
+}
+
+func (s *Store) verifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal, guard *platformProducerReleaseGuard) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	releaseID = strings.TrimSpace(releaseID)
 	if releaseID == "" {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgVerifyPlatformArtifactReleaseLKG(releaseID, req, principal)
+		return s.pgVerifyPlatformArtifactReleaseLKG(releaseID, req, principal, guard)
 	}
 	var artifact model.PlatformArtifact
 	var release model.PlatformArtifactRelease
@@ -698,6 +734,10 @@ func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 			return ErrNotFound
 		}
 		artifact = state.PlatformArtifacts[artifactIndex]
+		if err := validateProducerReleaseGuard(state, artifact, model.PlatformArtifactReleaseRequest{ReleaseChannel: release.ReleaseChannel}, principal, s.platformArtifactSigningKeyring(), guard); err != nil {
+			return err
+		}
+
 		if decision := platformsafety.EvaluateArtifactIntegrity(artifact, s.platformArtifactSigningKeyring()); !decision.Pass {
 			return ErrConflict
 		}

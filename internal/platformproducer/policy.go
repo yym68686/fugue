@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"fugue/internal/model"
@@ -23,6 +24,7 @@ const (
 )
 
 type Policy struct {
+	Serving                   *ServingPolicy       `json:"serving,omitempty"`
 	RequireDNSQueryPolicy     bool                 `json:"require_dns_query_policy,omitempty"`
 	RequireRouteDefaults      bool                 `json:"require_route_defaults,omitempty"`
 	RequireApplicationDomains bool                 `json:"require_application_domains,omitempty"`
@@ -39,6 +41,15 @@ type Policy struct {
 	DNSPolicyDigest           string               `json:"dns_policy_digest,omitempty"`
 	HostedZoneTemplates       []HostedZoneTemplate `json:"hosted_zone_templates,omitempty"`
 }
+
+type ServingPolicy struct {
+	CanaryRuleRef         string `json:"canary_rule_ref"`
+	GrayMinSeconds        int    `json:"gray_min_seconds"`
+	FullMinSeconds        int    `json:"full_min_seconds"`
+	RolloutTimeoutSeconds int    `json:"rollout_timeout_seconds"`
+}
+
+var servingCohortRef = regexp.MustCompile(`^cohort=[a-z0-9][a-z0-9_-]{0,63}$`)
 
 type HostedZoneTemplate struct {
 	NodeID       string `json:"node_id"`
@@ -59,8 +70,16 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	if artifact.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || artifact.ScopeKey != Scope || p.SchemaVersion != Schema || strings.TrimSpace(p.Generation) == "" || p.Generation != artifact.Generation {
 		return p, fmt.Errorf("producer policy identity or scope invalid")
 	}
-	if p.Mode != "paused" && p.Mode != "shadow" || p.TargetScope != "global" || p.IntervalSeconds < 30 || p.IntervalSeconds > 900 || p.RefreshSeconds < 120 || p.RefreshSeconds > 3600 || p.RefreshSeconds < p.IntervalSeconds {
+	if p.Mode != "paused" && p.Mode != "shadow" && p.Mode != "serving" || p.TargetScope != "global" || p.IntervalSeconds < 30 || p.IntervalSeconds > 900 || p.RefreshSeconds < 120 || p.RefreshSeconds > 3600 || p.RefreshSeconds < p.IntervalSeconds {
 		return p, fmt.Errorf("producer policy mode, source or schedule invalid")
+	}
+	if p.Mode == "serving" && (p.Serving == nil || p.InputSource != "business-static-intent" || !p.RequireApplicationDomains || !p.RequireRouteDefaults || !p.RequireDNSQueryPolicy) {
+		return p, fmt.Errorf("serving producer requires explicit promotion policy and complete pinned inputs")
+	}
+	if v := p.Serving; v != nil {
+		if !servingCohortRef.MatchString(v.CanaryRuleRef) || v.GrayMinSeconds < 1 || v.GrayMinSeconds > 1800 || v.FullMinSeconds < 1 || v.FullMinSeconds > 1800 || v.RolloutTimeoutSeconds < 30 || v.RolloutTimeoutSeconds > 3600 || v.RolloutTimeoutSeconds < max(v.GrayMinSeconds, v.FullMinSeconds)+p.IntervalSeconds {
+			return p, fmt.Errorf("producer serving policy is outside bounded limits")
+		}
 	}
 	switch p.InputSource {
 	case "business-migration":

@@ -501,7 +501,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	return artifact, release, message, lkg, nil
 }
 
-func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifactRollbackRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifactRollbackRequest, principal model.Principal, guard *platformProducerReleaseGuard) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -509,6 +509,12 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
+	if guard != nil {
+		if err := pgLockPromotionScope(ctx, tx, platformproducer.Scope, true); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
+
 	if err := pgLockPlatformReleaseMutation(ctx, tx, id, NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
@@ -522,6 +528,15 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
+	if guard != nil {
+		if target.ID != guard.BaselineArtifactID {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+		}
+		if err := s.pgProducerReleaseGuard(ctx, tx, current, model.PlatformArtifactReleaseRequest{ReleaseChannel: req.ReleaseChannel}, principal, guard); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
+
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
 	if err := validateProducerPolicyPublication(target, channel); err != nil {
@@ -612,6 +627,38 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 		now,
 	)
 	release := entry.Release
+	if guard != nil {
+		failed, err := pgGetPlatformArtifactRelease(ctx, tx, guard.FailedReleaseID, true)
+		if err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+		failed.VerificationState = model.PlatformArtifactVerificationStateFailed
+		failed.VerificationEvidence = map[string]string{"producer_policy_release_id": guard.PolicyReleaseID, "failed_source_digest": current.Metadata[platformproducer.SourceDigestMetadata], "recovered_by_release_id": release.ID}
+		failed.Version++
+		failed.UpdatedAt = now
+		if _, err = pgUpdatePlatformArtifactReleaseVerification(ctx, tx, failed); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+		grayLane, grayErr := pgGetPlatformReleaseLaneForUpdate(ctx, tx, platformsafety.ReleaseLaneKey(current.ArtifactKind, current.ScopeKey, model.PlatformArtifactReleaseChannelGray))
+		if grayErr != nil && grayErr != ErrNotFound {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, grayErr
+		}
+		if grayErr == nil && grayLane.ActiveReleaseID != "" && grayLane.ActiveReleaseID != failed.ID {
+			gray, err := pgGetPlatformArtifactRelease(ctx, tx, grayLane.ActiveReleaseID, true)
+			if err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			}
+			if gray.ArtifactID == current.ID && producerOwnsPublication(gray) {
+				gray.VerificationState, gray.VerificationEvidence = failed.VerificationState, failed.VerificationEvidence
+				gray.Version++
+				gray.UpdatedAt = now
+				if _, err = pgUpdatePlatformArtifactReleaseVerification(ctx, tx, gray); err != nil {
+					return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+				}
+			}
+		}
+	}
+
 	if err := pgSupersedePlatformReleases(ctx, tx, target.ArtifactKind, target.ScopeKey, channel, now); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
@@ -644,7 +691,7 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	return target, release, message, lkg, nil
 }
 
-func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal, guard *platformProducerReleaseGuard) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
 	_ = principal
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -653,6 +700,12 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	defer tx.Rollback()
+	if guard != nil {
+		if err := pgLockPromotionScope(ctx, tx, platformproducer.Scope, true); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
+
 	releaseSnapshot, err := pgGetPlatformArtifactRelease(ctx, tx, releaseID, false)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
@@ -707,6 +760,10 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
+	if err := s.pgProducerReleaseGuard(ctx, tx, artifact, model.PlatformArtifactReleaseRequest{ReleaseChannel: release.ReleaseChannel}, principal, guard); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+
 	if decision := platformsafety.EvaluateArtifactIntegrity(artifact, s.platformArtifactSigningKeyring()); !decision.Pass {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}

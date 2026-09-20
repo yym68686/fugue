@@ -33,6 +33,11 @@ func TestConsumerLaneTransitionRetainsGlobalReplayCursor(t *testing.T) {
 	if got, err := consumerCursorForLaneTransition(equalPrevious, &equalCursor, oldSet, nextSet, equalOld, next, lane, 1); err != nil || got.Sequence != cursor.Sequence {
 		t.Fatal("equal numeric fence rejected a proven channel transition", err)
 	}
+	newSet, newRelease := nextSet, next
+	newSet.ReleaseSetID, newRelease.ArtifactID = "new-parent", "new-parent"
+	if got, err := consumerCursorForLaneTransition(previous, cursor, oldSet, newSet, old, newRelease, lane, 1); err != nil || got.GenerationSequence != cursor.GenerationSequence || got.Sequence != cursor.Sequence {
+		t.Fatal("new serving parent reset global sequence or compared independent lane counters", err)
+	}
 	for name, mutate := range map[string]func(*model.PlatformArtifactRelease, *model.PlatformReleaseLane, *model.PlatformExpectedConsumerSet){
 		"same lane": func(r *model.PlatformArtifactRelease, l *model.PlatformReleaseLane, s *model.PlatformExpectedConsumerSet) {
 			r.ReleaseChannel = old.ReleaseChannel
