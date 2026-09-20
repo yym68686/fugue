@@ -27,7 +27,7 @@ func (s *Server) pruneExcessManagedAppImages(ctx context.Context, app model.App)
 	if err != nil {
 		return err
 	}
-	allOps, err := s.store.ListOperations("", true)
+	allOps, err := s.store.ListImageRetentionOperations("", true)
 	if err != nil {
 		return err
 	}

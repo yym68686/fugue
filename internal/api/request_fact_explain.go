@@ -135,7 +135,8 @@ func recordedRequestQuery(id string, since, until time.Time) string {
 	}
 	window := "ts >= " + clickHouseDateTime64Literal(since) + " AND ts <= " + clickHouseDateTime64Literal(until)
 	match := "(request_id = " + quoteClickHouseString(id) + " OR trace_id = " + quoteClickHouseString(id) + " OR JSONExtractString(summary_json, 'edge_request_id') = " + quoteClickHouseString(id) + ")"
-	// Platform traffic can lack app_id and is stored as request_fact_incomplete.
+	// Keep N-1 platform facts that were stored as request_fact_incomplete before
+	// the collector supported explicit platform route ownership.
 	// Query both sources so trace IDs shared by multiple requests stay ambiguous.
 	return "SELECT DISTINCT * FROM (" +
 		"SELECT ts, " + strings.Join(fields, ", ") + ", status_code, summary_json, 'request_facts' AS evidence_source FROM request_facts WHERE " + window + " AND " + match +

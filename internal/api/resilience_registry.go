@@ -308,7 +308,10 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 			if observed.EndpointPresent != nil && !*observed.EndpointPresent {
 				status.Blockers = append(status.Blockers, "endpoint missing")
 			}
-			if observed.EndpointReady != nil && !*observed.EndpointReady {
+			// A stopped app has no ready endpoint by design. Keep the other
+			// observation and intent checks, but do not gate platform releases
+			// on availability that the tenant explicitly disabled.
+			if desired > 0 && observed.EndpointReady != nil && !*observed.EndpointReady {
 				status.Blockers = append(status.Blockers, "endpoint not ready")
 			}
 			if observed.ImagePresent != nil && !*observed.ImagePresent {

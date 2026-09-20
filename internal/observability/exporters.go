@@ -998,10 +998,22 @@ func cloneEventAttributes(values map[string]string) map[string]string {
 }
 
 func requestFactEventComplete(event Event) bool {
-	return eventAttr(event, "app_id") != "" &&
-		(firstAttr(event, "request_id", "trace_id") != "") &&
-		firstAttr(event, "path_template", "path", "route") != "" &&
-		uint16Attr(event, "status_code") > 0
+	return len(missingRequestFactFields(event)) == 0
+}
+
+// Platform routes have no tenant app. Keep their explicit route identity rather
+// than inventing an app ID or discarding API/mesh errors from request_facts.
+func requestFactHasOwner(event Event) bool {
+	if eventAttr(event, "app_id") != "" {
+		return true
+	}
+	kind := eventAttr(event, "route_kind")
+	if kind == "" {
+		kind = summaryString(legacyRequestFactSummary(eventAttr(event, "summary_json")), "route_kind")
+	}
+	return kind == "platform" && eventAttr(event, "tenant_id") == "" &&
+		eventAttr(event, "project_id") == "" && eventAttr(event, "hostname") != "" &&
+		eventAttr(event, "edge_id") != "" && eventAttr(event, "route_id") != ""
 }
 
 func clickHouseIncompleteRequestFactAppEventRow(event Event) appEventRow {
@@ -1022,7 +1034,7 @@ func clickHouseIncompleteRequestFactAppEventRow(event Event) appEventRow {
 
 func missingRequestFactFields(event Event) []string {
 	missing := []string{}
-	if eventAttr(event, "app_id") == "" {
+	if !requestFactHasOwner(event) {
 		missing = append(missing, "app_id")
 	}
 	if firstAttr(event, "request_id", "trace_id") == "" {

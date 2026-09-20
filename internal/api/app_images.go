@@ -1057,7 +1057,7 @@ func (s *Server) managedImageStillReferenced(ctx context.Context, app model.App,
 	if err != nil {
 		return false, "", err
 	}
-	allOps, err := s.store.ListOperations("", true)
+	allOps, err := s.store.ListImageRetentionOperations("", true)
 	if err != nil {
 		return false, "", err
 	}

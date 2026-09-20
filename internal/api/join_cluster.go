@@ -771,6 +771,7 @@ set -euo pipefail
 
 FUGUE_API_BASE=${FUGUE_API_BASE:-%s}
 FUGUE_JOIN_SCRIPT_VERSION="${FUGUE_JOIN_SCRIPT_VERSION:-v2}"
+FUGUE_KUBELET_MAX_PODS="${FUGUE_KUBELET_MAX_PODS:-2147483647}"
 FUGUE_K3S_CHANNEL="${FUGUE_K3S_CHANNEL:-stable}"
 FUGUE_K3S_VERSION="${FUGUE_K3S_VERSION:-}"
 FUGUE_LIMIT_CPU="${FUGUE_LIMIT_CPU:-}"
@@ -2930,6 +2931,13 @@ fi
 configure_k3s_api_load_balancer
 
 log_step "Preparing k3s agent configuration..."
+case "${FUGUE_KUBELET_MAX_PODS}" in
+  ''|*[!0-9]*) echo "FUGUE_KUBELET_MAX_PODS must be a positive int32" >&2; exit 1 ;;
+esac
+if [ "${FUGUE_KUBELET_MAX_PODS}" -le 0 ] || [ "${FUGUE_KUBELET_MAX_PODS}" -gt 2147483647 ]; then
+  echo "FUGUE_KUBELET_MAX_PODS must be a positive int32" >&2
+  exit 1
+fi
 mkdir -p /etc/rancher/k3s
 k3s_config_tmp="$(mktemp)"
 {
@@ -2944,15 +2952,17 @@ k3s_config_tmp="$(mktemp)"
   fi
   csv_to_yaml_list node-label "${FUGUE_JOIN_NODE_LABELS:-}"
   csv_to_yaml_list node-taint "${FUGUE_JOIN_NODE_TAINTS:-}"
-  if [ -n "${FUGUE_KUBELET_SYSTEM_RESERVED:-}" ] || [ "${FUGUE_HOST_ZRAM_ELIGIBLE}" = "true" ]; then
+  {
     printf 'kubelet-arg:\n'
+    printf '  - "max-pods=%%s"\n' "${FUGUE_KUBELET_MAX_PODS}"
+    printf '  - "pods-per-core=0"\n'
     if [ -n "${FUGUE_KUBELET_SYSTEM_RESERVED:-}" ]; then
       printf '  - "%%s"\n' "${FUGUE_KUBELET_SYSTEM_RESERVED}"
     fi
     if [ "${FUGUE_HOST_ZRAM_ELIGIBLE}" = "true" ]; then
       printf '  - "fail-swap-on=false"\n'
     fi
-  fi
+  }
 } >"${k3s_config_tmp}"
 
 k3s_config_changed=0

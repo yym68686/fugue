@@ -181,6 +181,7 @@ type managedAppRuntimeEvidence struct {
 	endpointPresent              *bool
 	endpointReady                *bool
 	physicalReplicas             *int
+	servingReplicas              *int
 	physicalDesiredReplicas      *int
 	imagePresent                 *bool
 	imageRef                     string
@@ -1098,6 +1099,7 @@ func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatu
 		EndpointPresent:         entry.evidence.endpointPresent,
 		EndpointReady:           entry.evidence.endpointReady,
 		PhysicalReplicas:        entry.evidence.physicalReplicas,
+		ServingReplicas:         entry.evidence.servingReplicas,
 		PhysicalDesiredReplicas: entry.evidence.physicalDesiredReplicas,
 		ImagePresent:            entry.evidence.imagePresent,
 		ImageRef:                entry.evidence.imageRef,
@@ -1417,7 +1419,9 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 		deployment, deploymentExists := snapshot.deployments[deploymentKey]
 		physicalDesired := 0
 		physicalReady := 0
+		servingReady := 0
 		if deploymentExists {
+			servingReady = minObservedReplicaCount(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
 			evidence.deploymentGeneration = deployment.Metadata.Generation
 			evidence.deploymentObservedGeneration = deployment.Status.ObservedGeneration
 			evidence.deploymentImageDigest = edgeObservationDigest(firstDeploymentContainerImage(deployment))
@@ -1452,6 +1456,7 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 		}
 		evidence.physicalDesiredReplicas = &physicalDesired
 		evidence.physicalReplicas = &physicalReady
+		evidence.servingReplicas = &servingReady
 		if deploymentExists && (deployment.Metadata.Generation <= 0 || deployment.Status.ObservedGeneration < deployment.Metadata.Generation) {
 			evidence.invariantViolations = append(evidence.invariantViolations, "deployment_generation_unobserved")
 		}

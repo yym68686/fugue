@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,3 +180,44 @@ func cacheDisableAppObservation(t *testing.T, server *Server, app model.App, phy
 }
 
 func intPointerForDisableAppTest(value int) *int { return &value }
+
+func TestContinuityDoesNotRequireReadyEndpointForStoppedApp(t *testing.T) {
+	for _, desired := range []int{0, 1} {
+		server, _, app := setupDisableAppTestServer(t)
+		if desired > 0 {
+			op, err := server.store.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeScale, DesiredReplicas: &desired})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = server.store.CompleteManagedOperation(op.ID, "", "test scale intent"); err != nil {
+				t.Fatal(err)
+			}
+			app, err = server.store.GetApp(app.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		now := time.Now().UTC()
+		cacheDisableAppObservation(t, server, app, 0, desired, now, "cluster-test")
+		entry, _, _ := server.managedAppStatusCache.getApp(managedAppStatusCacheKey(app))
+		yes, no := true, false
+		entry.evidence.servicePresent, entry.evidence.endpointPresent = &yes, &yes
+		entry.evidence.endpointReady = &no
+		server.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
+			items:    map[string]runtime.ManagedAppObject{app.ID: entry.managed},
+			evidence: map[string]managedAppRuntimeEvidence{app.ID: entry.evidence},
+			ok:       true, clusterID: "cluster-test", refreshedAt: now, expiresAt: now.Add(time.Minute),
+		})
+		statuses, err := server.buildRuntimeContinuityStatuses()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(statuses) != 1 {
+			t.Fatalf("expected one status, got %d", len(statuses))
+		}
+		hasEndpointBlocker := strings.Contains(strings.Join(statuses[0].Blockers, ";"), "endpoint not ready")
+		if hasEndpointBlocker != (desired > 0) {
+			t.Fatalf("desired=%d endpoint availability classification: %+v", desired, statuses[0])
+		}
+	}
+}

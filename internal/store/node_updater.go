@@ -197,6 +197,15 @@ func (s *Store) NodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtim
 
 func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clusterNodeName, runtimeID, taskType string, payload map[string]string) (model.NodeUpdateTask, error) {
 	taskType = normalizeNodeUpdateTaskType(taskType)
+	if taskType == model.NodeUpdateTaskTypeRefreshJoinConfig && strings.TrimSpace(payload["pod_capacity_mode"]) != "" {
+		mode := strings.TrimSpace(payload["pod_capacity_mode"])
+		if !principal.IsPlatformAdmin() || (mode != "resources" && mode != "default") {
+			return model.NodeUpdateTask{}, fmt.Errorf("%w: pod capacity requires platform admin and resources/default mode", ErrInvalidInput)
+		}
+		if payload["dry_run"] != "true" && payload["allow_restart"] != "true" {
+			return model.NodeUpdateTask{}, fmt.Errorf("%w: pod capacity requires allow_restart=true outside dry-run", ErrInvalidInput)
+		}
+	}
 	if taskType == storagerecovery.ExpandPoolTask && !principal.IsPlatformAdmin() {
 		return model.NodeUpdateTask{}, fmt.Errorf("%w: pool expansion requires platform administrator permission", ErrInvalidInput)
 	}
@@ -387,6 +396,9 @@ func sortNodeUpdateTasksForDelivery(tasks []model.NodeUpdateTask) {
 func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask, now time.Time) int {
 	if task.Type == model.NodeUpdateTaskTypeUpgradeUpdater {
 		return 0
+	}
+	if task.Type == model.NodeUpdateTaskTypeRefreshJoinConfig && task.Payload["pod_capacity_mode"] != "" {
+		return 1
 	}
 	// A stopped database cannot recover while periodic inventory replenishes
 	// the queue. Rescue growth is administrator-only, bounded and preflighted

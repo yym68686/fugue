@@ -49,11 +49,23 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	memoryPolicy := yamlMappingValue(t, jobs, "workload_memory_policy")
+	for _, key := range yamlMappingKeys(t, memoryPolicy) {
+		if key == "needs" {
+			t.Fatal("memory admission policy recovery must not depend on a code build")
+		}
+	}
+	if yamlMappingValue(t, memoryPolicy, "environment").Value != "production" {
+		t.Fatal("memory policy requires the production environment")
+	}
+	if !strings.Contains(source, "scripts/reconcile_workload_memory.py deploy/environments/production/workload-memory/policy.json --apply") {
+		t.Fatal("memory policy must use the versioned configuration reconciler")
+	}
 	// Database configuration recovery must not depend on building application code.
 	protection := yamlMappingValue(t, jobs, "postgres_protection")
 	for _, key := range yamlMappingKeys(t, protection) {

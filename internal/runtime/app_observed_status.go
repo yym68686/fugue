@@ -46,6 +46,7 @@ type AppRuntimeObservation struct {
 	EndpointPresent         *bool
 	EndpointReady           *bool
 	PhysicalReplicas        *int
+	ServingReplicas         *int
 	PhysicalDesiredReplicas *int
 	ImagePresent            *bool
 	ImageRef                string
@@ -109,6 +110,7 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 	status.EndpointPresent = cloneBoolPointer(evidence.EndpointPresent)
 	status.EndpointReady = cloneBoolPointer(evidence.EndpointReady)
 	status.PhysicalReplicas = cloneIntPointer(evidence.PhysicalReplicas)
+	status.ServingReplicas = cloneIntPointer(evidence.ServingReplicas)
 	status.PhysicalDesired = cloneIntPointer(evidence.PhysicalDesiredReplicas)
 	status.ImagePresent = cloneBoolPointer(evidence.ImagePresent)
 	status.ImageRef = strings.TrimSpace(evidence.ImageRef)

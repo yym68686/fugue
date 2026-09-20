@@ -403,6 +403,10 @@ func requestPublicRouteWithHeaders(ctx context.Context, probe canaryProbe) (int,
 		return 0, nil, nil, err
 	}
 	request.Host = probe.Host
+	request.Header.Set("X-Fugue-Health-Probe", "1")
+	request.Header.Set("X-Fugue-Health-Probe-Source", "release-guardian")
+	request.Header.Set("X-Fugue-Health-Probe-Target-IP", probe.Address)
+	request.Header.Set("User-Agent", "fugue-release-guardian/health-probe")
 	response, err := client.Do(request)
 	if err != nil {
 		return 0, nil, nil, err

@@ -46,7 +46,7 @@ func principalAllowsSourceUpload(principal model.Principal, tenantID string) boo
 }
 
 func (s *Server) buildSourceUploadInspection(upload model.SourceUpload) (model.SourceUploadInspection, error) {
-	ops, err := s.store.ListOperations(upload.TenantID, false)
+	ops, err := s.store.ListImageRetentionOperations(upload.TenantID, false)
 	if err != nil {
 		return model.SourceUploadInspection{}, err
 	}

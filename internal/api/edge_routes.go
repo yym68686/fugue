@@ -216,6 +216,9 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 		return model.EdgeRouteStatusUnavailable, "app source exposes a non-HTTP service protocol"
 	default:
 		if observed := app.ObservedStatus; observed != nil {
+			if edgeRouteServingDuringRollout(app, time.Now().UTC()) {
+				return model.EdgeRouteStatusActive, "deployment progressing; verified serving endpoints remain available"
+			}
 			if observed.Phase != "unknown" && !appObservedStatusFresh(observed, time.Now().UTC()) {
 				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "runtime observation is stale")
 			}
@@ -290,6 +293,35 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 		}
 		return model.EdgeRouteStatusUnavailable, "live runtime observation is unavailable"
 	}
+}
+
+// Rollout completion and serving availability are different facts. Keep an
+// established route while a same-runtime replacement has healthy endpoints;
+// never use this exception to publish a new route or hide missing evidence.
+func edgeRouteServingDuringRollout(app model.App, now time.Time) bool {
+	o := app.ObservedStatus
+	if o == nil || o.Phase != "deploying" || app.Spec.Replicas <= 0 ||
+		!appObservedStatusFresh(o, now) || o.ClusterID == "" || o.EvidenceSource == "" ||
+		o.Generation <= 0 || o.ObservedGeneration < o.Generation ||
+		o.RuntimeID == "" || o.RuntimeID != app.Spec.RuntimeID ||
+		o.ServingReplicas == nil || *o.ServingReplicas <= 0 ||
+		app.StoredStatus == nil || app.StoredStatus.CurrentReplicas <= 0 ||
+		app.StoredStatus.CurrentRuntimeID != o.RuntimeID || model.AppHasCurrentFailedOperation(app.Status) {
+		return false
+	}
+	for _, fact := range []*bool{o.RuntimeObjectPresent, o.NamespacePresent, o.ServicePresent, o.EndpointPresent, o.EndpointReady, o.ImagePresent} {
+		if fact == nil || !*fact {
+			return false
+		}
+	}
+	for _, violation := range o.InvariantViolations {
+		switch violation {
+		case "desired_replicas_unready", "physical_replicas_zero", "stored_deployed_but_observed_ready_zero":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func appUsesKnownNonHTTPRouteProtocol(app model.App) bool {

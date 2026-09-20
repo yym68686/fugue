@@ -364,6 +364,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppStorageExpansionErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 	applyCtx := managedAppCloudNativePGApplyContext(ctx, app, stabilizedPostgresStorage)
+	if err := s.ensureNamespaceMemoryPolicy(applyCtx, client, namespace); err != nil {
+		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply namespace memory admission policy: %w", err))
+	}
 	if err := client.applyObjects(applyCtx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}

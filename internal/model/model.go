@@ -2355,6 +2355,7 @@ type AppObservedStatus struct {
 	ServingReleaseID     string    `json:"serving_release_id,omitempty"`
 	DesiredReplicas      int       `json:"desired_replicas"`
 	ReadyReplicas        *int      `json:"ready_replicas,omitempty"`
+	ServingReplicas      *int      `json:"serving_replicas,omitempty"`
 	RuntimeObjectPresent *bool     `json:"runtime_object_present,omitempty"`
 	NamespacePresent     *bool     `json:"namespace_present,omitempty"`
 	ServicePresent       *bool     `json:"service_present,omitempty"`

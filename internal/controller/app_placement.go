@@ -159,6 +159,9 @@ func (s *Service) selectManagedAppNode(ctx context.Context, app model.App, const
 			}
 		}
 		requested := nodeRequestsByName[nodeName]
+		if free, known := availablePodAddresses(node, pods); known && free < int64(app.Spec.Replicas) {
+			continue
+		}
 		if existing := appRequestsByNode[nodeName]; existing != (managedSharedNodeRequests{}) {
 			requested.cpuMilli = maxInt64(0, requested.cpuMilli-existing.cpuMilli)
 			requested.memoryBytes = maxInt64(0, requested.memoryBytes-existing.memoryBytes)

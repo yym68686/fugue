@@ -152,6 +152,29 @@ jobs:
           python3 -m unittest scripts.test_reconcile_prometheus_scrape_policy
           python3 scripts/reconcile_prometheus_scrape_policy.py deploy/environments/production/observability/scrape-policy.json --apply
 
+  workload_memory_policy:
+    # Admission configuration remains recoverable if a component build fails.
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-workload-memory-policy, cancel-in-progress: false}
+    timeout-minutes: 15
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Validate memory admission policy
+        run: python3 -m unittest scripts.test_reconcile_workload_memory
+      - name: Reconcile independent memory requests without container restarts
+        run: |
+          git fetch origin main
+          if ! git diff --quiet HEAD origin/main -- deploy/environments/production/workload-memory scripts/reconcile_workload_memory.py; then
+            echo "A newer memory policy supersedes this configuration run."
+            exit 0
+          fi
+          python3 scripts/reconcile_workload_memory.py deploy/environments/production/workload-memory/policy.json
+          python3 scripts/reconcile_workload_memory.py deploy/environments/production/workload-memory/policy.json --apply
+
   component-build:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.release_count != '0' }}

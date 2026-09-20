@@ -221,7 +221,7 @@ func (s *Server) currentTenantManagedImageStorageGibibytes(ctx context.Context, 
 	if err != nil {
 		return 0, err
 	}
-	ops, err := s.store.ListOperations(tenantID, false)
+	ops, err := s.store.ListImageRetentionOperations(tenantID, false)
 	if err != nil {
 		return 0, err
 	}

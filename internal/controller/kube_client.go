@@ -99,6 +99,7 @@ type kubeNode struct {
 	} `json:"metadata"`
 	Spec struct {
 		Unschedulable bool        `json:"unschedulable,omitempty"`
+		PodCIDR       string      `json:"podCIDR,omitempty"`
 		Taints        []kubeTaint `json:"taints,omitempty"`
 	} `json:"spec"`
 	Status struct {
@@ -287,6 +288,7 @@ func (p *kubePod) UnmarshalJSON(data []byte) error {
 
 type kubePodSpec struct {
 	NodeName                      string                  `json:"nodeName,omitempty"`
+	HostNetwork                   bool                    `json:"hostNetwork,omitempty"`
 	TerminationGracePeriodSeconds *int64                  `json:"terminationGracePeriodSeconds,omitempty"`
 	Tolerations                   []runtimepkg.Toleration `json:"tolerations,omitempty"`
 	Volumes                       []kubePodVolume         `json:"volumes,omitempty"`

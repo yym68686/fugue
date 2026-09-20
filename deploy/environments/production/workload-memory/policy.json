@@ -1,0 +1,1 @@
+{"apiVersion":"constraints.fugue.dev/v1","controlPlaneNamespace":"fugue-system","controllerServiceAccount":"fugue-fugue-control-plane-sa","defaultMemoryRequest":"64Mi","kind":"WorkloadMemoryPolicy","namespacePrefixes":["fg-"],"resizeExisting":true}

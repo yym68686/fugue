@@ -34,7 +34,7 @@ func (s *Service) cleanupDeletedAppImages(ctx context.Context, app model.App) er
 	if err != nil {
 		return err
 	}
-	remainingOps, err := s.Store.ListOperations("", true)
+	remainingOps, err := s.Store.ListImageRetentionOperations("", true)
 	if err != nil {
 		return err
 	}

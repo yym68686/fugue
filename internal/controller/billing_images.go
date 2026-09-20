@@ -23,7 +23,7 @@ func (s *Service) syncTenantBillingImageStorage(ctx context.Context, tenantID st
 	if err != nil {
 		return err
 	}
-	ops, err := s.Store.ListOperations(tenantID, false)
+	ops, err := s.Store.ListImageRetentionOperations(tenantID, false)
 	if err != nil {
 		return err
 	}

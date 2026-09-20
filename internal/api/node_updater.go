@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"fugue/internal/storagerecovery"
 	"net/http"
 	"sort"
 	"strconv"
@@ -20,7 +19,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion        = storagerecovery.NodeUpdaterVersion
+	nodeUpdaterScriptVersion        = "v40"
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 	nodeRepairTaskMaxAge            = 45 * time.Minute
@@ -516,6 +515,22 @@ func (s *Server) handleNodeUpdaterClaimTask(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.NodeUpdateTask) (string, error) {
+	if task.Type == model.NodeUpdateTaskTypeRefreshJoinConfig && task.Payload["pod_capacity_mode"] != "" {
+		if task.CreatedAt.IsZero() || time.Since(task.CreatedAt) > nodeRepairTaskMaxAge {
+			return "pod capacity task expired; enqueue a fresh plan", nil
+		}
+		updater, err := s.nodeUpdaterByPrincipal(mustPrincipal(r))
+		if err != nil {
+			return "", err
+		}
+		version, err := strconv.Atoi(strings.TrimPrefix(updater.UpdaterVersion, "v"))
+		if err != nil || version < 40 {
+			return "pod capacity policy requires node updater v40 or newer", nil
+		}
+		if !nodeUpdatePayloadBool(task.Payload["dry_run"]) && !nodeUpdatePayloadBool(task.Payload["allow_restart"]) {
+			return "pod capacity policy requires allow_restart=true outside dry-run", nil
+		}
+	}
 	if task.Type == model.NodeUpdateTaskTypeReplicateAppImage {
 		return s.refuseUnsafeReplicateAppImageTaskClaim(task)
 	}
@@ -973,6 +988,7 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		"dry_run",
 		"allow_delete",
 		"allow_restart",
+		"pod_capacity_mode",
 		"service",
 		"mode",
 		"size_percent",
@@ -5608,9 +5624,15 @@ FUGUE_LOCALPV_EXPAND_PY
   FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="LocalPV pool expansion verified and inventory refreshed"
 }
 
+__FUGUE_POD_CAPACITY_LIBRARY__
+
 run_task() {
   case "${FUGUE_NODE_UPDATE_TASK_TYPE}" in
     refresh-join-config)
+      if [ -n "${FUGUE_NODE_UPDATE_TASK_POD_CAPACITY_MODE:-}" ]; then
+        reconcile_pod_capacity_task
+        return $?
+      fi
       log_task "refreshing join configuration from discovery bundle"
       if reconcile_node_state; then
         log_task "join configuration refreshed"
@@ -5783,6 +5805,7 @@ esac
 		"__FUGUE_NODE_UPDATER_SCRIPT_VERSION__", nodeUpdaterScriptVersion,
 		"__FUGUE_LOCALPV_EXPAND_PYTHON__", localPVExpandPython,
 		"__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary(),
+		"__FUGUE_POD_CAPACITY_LIBRARY__", podCapacityShellLibrary(),
 		"__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__", hostJournaldPolicyShellLibrary(),
 	).Replace(script)
 }

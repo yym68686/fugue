@@ -14,6 +14,8 @@ type rolloutCapacityCandidate struct {
 	nodeName               string
 	remainingMemoryBytes   int64
 	remainingEphemeralByte int64
+	remainingPodAddresses  int64
+	podAddressesKnown      bool
 }
 
 func (s *Service) preflightManagedAppZeroDowntimeRolloutCapacity(ctx context.Context, app model.App, scheduling runtimepkg.SchedulingConstraints) error {
@@ -76,6 +78,7 @@ func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeCl
 			remainingMemoryBytes:   parseKubeResourceBytes(node.Status.Allocatable["memory"]) - requested.memoryBytes,
 			remainingEphemeralByte: parseKubeResourceBytes(node.Status.Allocatable["ephemeral-storage"]) - requested.ephemeralBytes,
 		}
+		candidate.remainingPodAddresses, candidate.podAddressesKnown = availablePodAddresses(node, pods)
 		if rolloutCapacityCandidateFits(candidate, request) {
 			return "", nil
 		}
@@ -183,6 +186,9 @@ func kubeTaintTolerated(taint kubeTaint, tolerations []runtimepkg.Toleration) bo
 }
 
 func rolloutCapacityCandidateFits(candidate rolloutCapacityCandidate, request managedSharedNodeRequests) bool {
+	if candidate.podAddressesKnown && candidate.remainingPodAddresses < 1 {
+		return false
+	}
 	if candidate.remainingMemoryBytes < request.memoryBytes {
 		return false
 	}
@@ -202,6 +208,9 @@ func formatRolloutCapacityRequest(request managedSharedNodeRequests) string {
 
 func formatRolloutCapacityCandidate(candidate rolloutCapacityCandidate) string {
 	parts := []string{fmt.Sprintf("%dMi memory", bytesToMiB(candidate.remainingMemoryBytes))}
+	if candidate.podAddressesKnown {
+		parts = append(parts, fmt.Sprintf("%d Pod IP addresses", candidate.remainingPodAddresses))
+	}
 	if candidate.remainingEphemeralByte != 0 {
 		parts = append(parts, fmt.Sprintf("%dMi ephemeral-storage", bytesToMiB(candidate.remainingEphemeralByte)))
 	}

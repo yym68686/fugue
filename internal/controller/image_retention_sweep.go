@@ -41,7 +41,7 @@ func (s *Service) sweepManagedAppImageRetention(ctx context.Context) error {
 	if len(apps) == 0 {
 		return nil
 	}
-	ops, err := s.Store.ListOperations("", true)
+	ops, err := s.Store.ListImageRetentionOperations("", true)
 	if err != nil {
 		return fmt.Errorf("list operations: %w", err)
 	}
