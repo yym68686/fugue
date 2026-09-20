@@ -1,4 +1,5 @@
 // Package diagnosticprobe implements an independently released collector pack.
+// The package ABI is intentionally independent from Fugue serving workloads.
 // The Fugue API treats this pack's configuration as an opaque signed payload.
 package diagnosticprobe
 
