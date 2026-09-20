@@ -169,13 +169,41 @@ func safeRolloutEdgeNodeBundleApplied(node model.EdgeNode, since time.Time) (boo
 		strings.TrimSpace(node.LKGGeneration) != "" &&
 		strings.TrimSpace(node.RouteBundleVersion) != "" &&
 		strings.TrimSpace(node.ServingGeneration) == strings.TrimSpace(node.LKGGeneration) &&
-		strings.TrimSpace(node.RouteBundleVersion) != strings.TrimSpace(node.ServingGeneration) {
+		!safeRolloutEdgePublicationMatchesServingGeneration(node) {
 		return false, "serving_lkg"
 	}
 	if !since.IsZero() && node.LastHeartbeatAt != nil && node.LastHeartbeatAt.UTC().Before(since.UTC()) {
 		return false, "heartbeat_before_promotion"
 	}
 	return true, ""
+}
+
+func safeRolloutEdgePublicationMatchesServingGeneration(node model.EdgeNode) bool {
+	version := strings.TrimSpace(node.RouteBundleVersion)
+	generation := strings.TrimSpace(node.ServingGeneration)
+	if version == generation {
+		return true
+	}
+	// Group authority publications identify both the content generation and
+	// the publication/recovery sequence. Edge serving/LKG status reports only
+	// the content generation. Accept that representation only when the proxy
+	// confirms the exact publication and its suffix has the canonical format
+	// emitted by edgecontrol.groupPublicationVersion.
+	if generation == "" || strings.TrimSpace(node.CaddyAppliedVersion) != version {
+		return false
+	}
+	suffix, ok := strings.CutPrefix(version, generation+".p")
+	if !ok {
+		return false
+	}
+	publication, recovery, ok := strings.Cut(suffix, ".r")
+	if !ok {
+		return false
+	}
+	sequence, sequenceErr := strconv.ParseUint(publication, 10, 64)
+	epoch, epochErr := strconv.ParseUint(recovery, 10, 64)
+	return sequenceErr == nil && epochErr == nil && sequence > 0 &&
+		version == fmt.Sprintf("%s.p%d.r%d", generation, sequence, epoch)
 }
 
 func (o storeSafeRolloutEdgeBundleObserver) sleep(ctx context.Context, delay time.Duration) error {
