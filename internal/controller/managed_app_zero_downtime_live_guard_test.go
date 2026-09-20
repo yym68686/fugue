@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -609,6 +610,14 @@ func TestManagedAppLiveGuardRecoversPromotedServingSnapshotDuringBackgroundRecon
 }
 
 func TestManagedAppLiveGuardReplacesFailedCandidateWhileExactLKGServes(t *testing.T) {
+	for _, managedSpecIsCandidate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("managed-spec-is-candidate=%t", managedSpecIsCandidate), func(t *testing.T) {
+			testManagedAppFailedCandidateRecovery(t, managedSpecIsCandidate)
+		})
+	}
+}
+
+func testManagedAppFailedCandidateRecovery(t *testing.T, managedSpecIsCandidate bool) {
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -663,6 +672,9 @@ func TestManagedAppLiveGuardReplacesFailedCandidateWhileExactLKGServes(t *testin
 	fixedSource := model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: desired.Spec.Image, ResolvedImageRef: desired.Spec.Image}
 	model.SetAppSourceState(&desired, &fixedSource, &fixedSource)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
+	if managedSpecIsCandidate {
+		managed = managedAppLiveGuardObject(t, attempted, runtime.SchedulingConstraints{})
+	}
 	managed.Metadata.Generation = 2
 	attemptStartedAt := failed.CreatedAt
 	if failed.StartedAt != nil {

@@ -539,7 +539,13 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 			}
 		}
 	}
-	if liveKey != currentKey && liveKey != desiredKey {
+	// A failed candidate may already be represented by ManagedApp.spec, so
+	// matching currentKey does not prove that it is the serving LKG. Recover
+	// its operation provenance before considering the existing exact-LKG
+	// replacement path; all timestamps, snapshots and cohort checks remain.
+	failedPendingCandidate := hasDeploymentFailureCondition(deployment.Status.Conditions) &&
+		liveKey == strings.TrimSpace(managed.Status.PendingReleaseKey)
+	if (liveKey != currentKey && liveKey != desiredKey) || failedPendingCandidate {
 		recovered, ok, err := s.recoverManagedAppPendingDeploySnapshot(ctx, managed, current, liveKey)
 		if err != nil {
 			return model.App{}, err
