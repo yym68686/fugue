@@ -18,6 +18,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/store"
 )
 
@@ -3073,10 +3074,51 @@ func edgeDNSPreferredSharedTargetRoutingRecord(left, right model.EdgeDNSRecord) 
 		}
 		return right
 	}
-	if edgeDNSRecordGeneration(left) <= edgeDNSRecordGeneration(right) {
+	// Selection identity must not depend on heartbeat generations, readiness
+	// flags, or the transient pre-intersection address set. Compare stable route
+	// preferences first; ranking observations break otherwise identical ties.
+	if edgeDNSSharedTargetPolicyKey(left) != edgeDNSSharedTargetPolicyKey(right) {
+		if edgeDNSSharedTargetPolicyKey(left) < edgeDNSSharedTargetPolicyKey(right) {
+			return left
+		}
+		return right
+	}
+	if edgeDNSSharedTargetRankKey(left) <= edgeDNSSharedTargetRankKey(right) {
 		return left
 	}
 	return right
+}
+
+func edgeDNSSharedTargetPolicyKey(r model.EdgeDNSRecord) string {
+	p := r.AnswerPolicy
+	raw, _ := json.Marshal(struct {
+		Primary     string
+		Fallback    string
+		Preferred   []string
+		Fallbacks   []string
+		Mode        string
+		ECS         bool
+		TTL         int
+		Exploration int
+		Cooldown    int
+	}{r.EdgeGroupID, r.FallbackEdgeGroupID, p.PreferredEdgeGroups, p.FallbackEdgeGroups, p.PolicyKind, p.ECSEnabled, r.TTL, p.ExplorationPercent, p.SwitchCooldownSec})
+	return string(raw)
+}
+func edgeDNSSharedTargetRankKey(r model.EdgeDNSRecord) string {
+	type scope struct {
+		Mode string
+		Fact platformconfig.DNSSelectionScope
+	}
+	scopes := []scope{}
+	for _, s := range r.ScopedCandidates {
+		scopes = append(scopes, scope{Mode: s.PolicyKind, Fact: platformconfig.DNSSelectionScope{ScopeKey: s.ScopeKey, Country: s.Country, Region: s.Region, ASN: s.ASN, SelectedEdgeGroupID: s.SelectedEdgeGroupID, CooldownUntil: s.CooldownUntil, Reason: s.Reason, Candidates: dnsSelectionCandidates(s.Candidates)}})
+	}
+	raw, _ := json.Marshal(struct {
+		Policy     model.DNSAnswerPolicy
+		Candidates []platformconfig.DNSSelectionCandidate
+		Scopes     []scope
+	}{r.AnswerPolicy, dnsSelectionCandidates(r.Candidates), scopes})
+	return string(raw)
 }
 
 func edgeDNSSharedTargetTrafficPriority(record model.EdgeDNSRecord) int {

@@ -25,7 +25,7 @@ import (
 )
 
 func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
-	for _, scenario := range []string{"legacy", "compiled placement", "compiled placement and cache", "compiled domain TLS"} {
+	for _, scenario := range []string{"legacy", "query strategy", "compiled placement", "compiled placement and cache", "compiled domain TLS"} {
 		t.Run(scenario, func(t *testing.T) {
 			testEdgePlatformShadowPreservesServingAndChecksBindings(t, scenario)
 		})
@@ -59,6 +59,9 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 	request := platformconfig.CompileRequest{
 		Intent: platformconfig.PlatformIntent{Generation: "intent-1", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin.example.test:8080", Enabled: true}}},
 		Policy: platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 86400},
+	}
+	if scenario == "query strategy" {
+		request.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", ECSEnabled: true, ExplorationPercent: 5, SwitchCooldownSeconds: 1800, MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
 	}
 	if scenario != "legacy" {
 		captured := time.Now().UTC()

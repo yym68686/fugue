@@ -29,7 +29,7 @@ func TestDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T) {
 	for _, versioned := range []bool{false, true} {
 		name := "legacy policy"
 		if versioned {
-			name = "versioned exclusion policy"
+			name = "versioned exclusion and query policy"
 		}
 		t.Run(name, func(t *testing.T) { testDNSPlatformShadowPreservesServingAndDurableCursor(t, versioned) })
 	}
@@ -39,6 +39,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	const key = "synthetic-dns-platform-signing-key"
 	request := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent-1", Scope: "global", DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", Type: "A", Values: []string{"192.0.2.99"}, TTL: 60, Status: "active"}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}}
 	if versioned {
+		request.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", ECSEnabled: true, ExplorationPercent: 5, SwitchCooldownSeconds: 1800, MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
 		request.Policy.DNSReadiness = &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 		request.Policy.DNSRouteStateConstraints = []platformconfig.DNSRouteStateConstraint{{RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, InactiveBehavior: "serve_error_page"}}
 		captured := time.Now().UTC()

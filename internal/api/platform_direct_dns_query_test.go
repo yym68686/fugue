@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"reflect"
@@ -203,5 +204,30 @@ func TestDirectDNSQueriesSingleTargetPreservesPreferredGroupsAndOwnerRanking(t *
 	}
 	if rule.SelectionMode != "latency_aware" || fact.Candidates[0].Score != 100 {
 		t.Fatal("query ranking must follow declared route hostname, not target or former app alias")
+	}
+}
+
+func TestSharedTargetPolicyChoiceIgnoresReadinessAndHeartbeatGeneration(t *testing.T) {
+	a := model.EdgeDNSRecord{Name: "shared.example.test", Type: "A", EdgeGroupID: "edge-group-a", TTL: 60, AnswerPolicy: model.DNSAnswerPolicy{PolicyKind: "geo", PreferredEdgeGroups: []string{"edge-group-a"}}, Candidates: []model.EdgeDNSAnswerCandidate{{IP: "8.8.8.8", EdgeID: "edge-a", EdgeGroupID: "edge-group-a", Healthy: true, RouteReady: true, TLSReady: true, ServingGeneration: "old"}}}
+	b := a
+	b.EdgeGroupID = "edge-group-b"
+	b.AnswerPolicy.PreferredEdgeGroups = []string{"edge-group-b"}
+	b.Candidates = []model.EdgeDNSAnswerCandidate{{IP: "9.9.9.9", EdgeID: "edge-b", EdgeGroupID: "edge-group-b", Healthy: true, ServingGeneration: "other"}}
+	for i := 0; i < 100; i++ {
+		a.Candidates[0].Healthy = i%2 == 0
+		a.Candidates[0].RouteReady = i%3 == 0
+		a.Candidates[0].ServingGeneration = fmt.Sprint(i)
+		a.Values = []string{fmt.Sprint(i)}
+		for _, pair := range [][2]model.EdgeDNSRecord{{a, b}, {b, a}} {
+			got := edgeDNSPreferredSharedTargetRoutingRecord(pair[0], pair[1])
+			if got.EdgeGroupID != "edge-group-a" {
+				t.Fatal("runtime readiness changed equal-priority selection", i)
+			}
+		}
+	}
+	b.Candidates[0].TrafficClass = "small_api"
+	a.Candidates[0].TrafficClass = "static_cacheable"
+	if got := edgeDNSPreferredSharedTargetRoutingRecord(a, b); got.EdgeGroupID != "edge-group-b" {
+		t.Fatal("stable tie break replaced non-static traffic priority")
 	}
 }
