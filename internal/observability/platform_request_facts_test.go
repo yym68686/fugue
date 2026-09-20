@@ -34,12 +34,12 @@ func TestPlatformRequestFactRetainsErrorsWithoutInventingTenantOwnership(t *test
 	if !strings.Contains(query, ".request_facts ") || row["status_code"] != float64(503) || row["app_id"] != "" || row["tenant_id"] != "" {
 		t.Fatalf("platform fact lost/misattributed: %s %+v", query, row)
 	}
-	for _, kind := range []string{model.EdgeRouteKindControlPlaneAPI, model.EdgeRouteKindPlatformRoute, model.EdgeRouteKindPlatform, model.EdgeRouteKindCustomDomain, model.EdgeRouteKindPlatformDomain, "unknown"} {
+	for _, kind := range []string{model.EdgeRouteKindControlPlaneAPI, model.EdgeRouteKindPlatformRoute, "control-plane-mesh", "control-plane-gateway", model.EdgeRouteKindPlatform, model.EdgeRouteKindCustomDomain, model.EdgeRouteKindPlatformDomain, "control-plane-", "unknown"} {
 		attrs := cloneEventAttributes(event.Attributes)
 		attrs["summary_json"] = `{"route_kind":"` + kind + `"}`
 		candidate := event
 		candidate.Attributes = attrs
-		want := kind == model.EdgeRouteKindControlPlaneAPI || kind == model.EdgeRouteKindPlatformRoute
+		want := kind == model.EdgeRouteKindControlPlaneAPI || kind == model.EdgeRouteKindPlatformRoute || kind == "control-plane-mesh" || kind == "control-plane-gateway"
 		if requestFactEventComplete(candidate) != want {
 			t.Fatalf("route kind %q has wrong ownership classification", kind)
 		}

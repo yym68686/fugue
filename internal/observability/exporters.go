@@ -1013,7 +1013,11 @@ func requestFactHasOwner(event Event) bool {
 	if kind == "" {
 		kind = summaryString(legacyRequestFactSummary(eventAttr(event, "summary_json")), "route_kind")
 	}
-	platformOwned := kind == model.EdgeRouteKindControlPlaneAPI || kind == model.EdgeRouteKindPlatformRoute
+	// Platform configuration gives infrastructure routes descriptive subtypes
+	// (API, mesh, gateway, ...). Honor that namespace without requiring a code
+	// release for each subtype; tenant route kinds remain outside this scope.
+	platformOwned := kind == model.EdgeRouteKindPlatformRoute ||
+		(strings.HasPrefix(kind, "control-plane-") && len(kind) > len("control-plane-"))
 	return platformOwned && eventAttr(event, "tenant_id") == "" &&
 		eventAttr(event, "project_id") == "" && eventAttr(event, "hostname") != "" &&
 		eventAttr(event, "edge_id") != "" && eventAttr(event, "route_id") != ""
