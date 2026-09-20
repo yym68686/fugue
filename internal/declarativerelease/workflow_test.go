@@ -89,8 +89,12 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	if yamlMappingValue(t, diagnosticConfig, "environment").Value != "production" {
 		t.Fatal("diagnostic configuration requires the production environment")
 	}
-	if !strings.Contains(yamlMappingValue(t, diagnosticConfig, "if").Value, "always()") || yamlMappingValue(t, diagnosticConfig, "needs").Value != "diagnostic_packages" {
+	if !strings.Contains(yamlMappingValue(t, diagnosticConfig, "if").Value, "always()") {
 		t.Fatal("diagnostic configuration recovery must run even when a code build fails")
+	}
+	needs := yamlMappingValue(t, diagnosticConfig, "needs")
+	if needs.Kind != yaml.SequenceNode || len(needs.Content) != 2 || needs.Content[0].Value != "prepush" || needs.Content[1].Value != "diagnostic_packages" {
+		t.Fatalf("diagnostic configuration recovery must depend only on prepush and the independent package lane: %s", needs.Value)
 	}
 	if !strings.Contains(source, "scripts/publish_diagnostic_catalog.py deploy/environments/production/diagnostics/catalog.json --runner-image") || !strings.Contains(source, "--tag \"$repository:diagnostic-git-$SOURCE_SHA\"") {
 		t.Fatal("diagnostic package publication must use an independent tag and configuration path")
