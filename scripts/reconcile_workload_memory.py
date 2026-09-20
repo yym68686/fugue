@@ -36,6 +36,19 @@ def limit_range(namespace, memory):
             "spec": {"limits": [{"type": "Container", "defaultRequest": {"memory": memory}}]}}
 
 
+def controller_config_access(policy):
+    namespace = policy["controlPlaneNamespace"]
+    role = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+            "metadata": {"name": MANAGER, "namespace": namespace},
+            "rules": [{"apiGroups": [""], "resources": ["configmaps"],
+                       "resourceNames": [MANAGER], "verbs": ["get"]}]}
+    binding = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+               "metadata": {"name": MANAGER, "namespace": namespace},
+               "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": MANAGER},
+               "subjects": [{"kind": "ServiceAccount", "name": policy["controllerServiceAccount"], "namespace": namespace}]}
+    return role, binding
+
+
 def resize_patch(pod, memory):
     # Increasing only a request does not change a container's memory limit or
     # executable. Existing requests, including intentionally small ones, win.
@@ -76,8 +89,13 @@ def reconcile(policy, apply=False):
     args = ["apply", "--server-side", f"--field-manager={MANAGER}", "-f", "-"]
     if not apply:
         args.append("--dry-run=server")
-    for obj in [role, binding, config]:
+    for obj in [role, binding, *controller_config_access(policy), config]:
         kubectl(*args, body=json.dumps(obj))
+    if apply:
+        # Validate as the actual consumer, not only as the privileged CI writer.
+        kubectl("auth", "can-i", "get", "configmap/" + MANAGER,
+                "-n", policy["controlPlaneNamespace"],
+                "--as=system:serviceaccount:" + policy["controlPlaneNamespace"] + ":" + policy["controllerServiceAccount"])
     namespaces = json.loads(kubectl("get", "namespaces", "-o", "json"))["items"]
     names = sorted(n["metadata"]["name"] for n in namespaces
                    if any(n["metadata"]["name"].startswith(p) for p in policy["namespacePrefixes"])
