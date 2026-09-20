@@ -186,3 +186,22 @@ func TestDirectDNSQueriesCompileReplayAndRequireIndependentReadiness(t *testing.
 		t.Fatal("failed route proofs accepted")
 	}
 }
+
+func TestDirectDNSQueriesSingleTargetPreservesPreferredGroupsAndOwnerRanking(t *testing.T) {
+	r, nodes, p, now := directQueryFixture()
+	r.Policy.RouteConstraints = []platformconfig.RoutePolicyConstraint{{ID: "pin", Hostname: "app.example.test", AppID: "app", TenantID: "tenant", EdgeGroupID: "edge-group-b", RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}
+	profiles := edgeDNSLatencyProfileCatalog{Global: map[string]*edgeDNSLatencyProfile{"app.example.test": {Hostname: "app.example.test", Enabled: true, BestEdgeGroupID: "edge-group-b", Candidates: map[string]edgeDNSLatencyCandidateProfile{"edge-group-a": {Weight: 20, Score: 200}, "edge-group-b": {Weight: 200, Score: 100}}}}}
+	r.Intent.DNS[0].Hostname = "target.example.test"
+	r.Intent.DNS[0].RecordKind = model.EdgeDNSRecordKindCustomDomainTarget
+	if err := projectDirectDNSQueries(&r, p, nodes, profiles, now); err != nil {
+		t.Fatal(err)
+	}
+	rule := r.Policy.DNSAnswerRules[0]
+	fact := r.RuntimeSnapshot.DNSSelections[0]
+	if !reflect.DeepEqual(rule.PreferredEdgeGroups, []string{"edge-group-a", "edge-group-b"}) || len(fact.Candidates) != 1 || fact.Candidates[0].EdgeGroupID != "edge-group-b" {
+		t.Fatal("single target prematurely filtered policy or escaped DNS pin", rule, fact)
+	}
+	if rule.SelectionMode != "latency_aware" || fact.Candidates[0].Score != 100 {
+		t.Fatal("query ranking must follow declared route hostname, not target or former app alias")
+	}
+}

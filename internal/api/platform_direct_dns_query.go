@@ -167,12 +167,15 @@ func projectDirectDNSQueries(result *platformIntentProjectionResponse, strategy 
 						scoped = catalog.scopedProfiles(owner.Hostname, ips, candidates, nil, primary, fallback, true)
 					}
 					value := model.EdgeDNSRecord{Name: record.Hostname, Type: family, Values: ips, TTL: ttl, RecordKind: record.RecordKind, Status: record.Status, StatusReason: record.StatusReason, AppID: record.AppID, TenantID: record.TenantID, EdgeGroupID: primary, FallbackEdgeGroupID: fallback, AnswerPolicy: policy, Candidates: edgeDNSCandidatesForAnswerIPs(ips, candidates, nil, primary, fallback, profile, active), ScopedCandidates: scoped}
-					records = append(records, constrainEdgeDNSRecordToValues(value))
+					records = append(records, value)
 				}
 				if len(records) == 0 {
 					return fmt.Errorf("DNS query has no route owner")
 				}
-				selected := mergeSharedEdgeDNSTargetRecords(records)
+				selected := records[0]
+				if len(records) > 1 {
+					selected = mergeSharedEdgeDNSTargetRecords(records)
+				}
 				policy := selected.AnswerPolicy
 				scopedMode := ""
 				for _, scope := range selected.ScopedCandidates {

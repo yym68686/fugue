@@ -81,7 +81,7 @@ func projectCustomDomainDNSWithDomains(result *platformIntentProjectionResponse,
 	})
 	for _, domain := range ordered {
 		host := normalizeExternalAppDomain(domain.Hostname)
-		if domain.Status != model.AppDomainStatusVerified || !domainsConfig.managedEdgeCustomDomain(host) {
+		if domain.Status != model.AppDomainStatusVerified || domainsConfig.isPlatformOwnedDomainBinding(host) || !domainsConfig.managedEdgeCustomDomain(host) {
 			continue
 		}
 		app, found := apps[domain.AppID]

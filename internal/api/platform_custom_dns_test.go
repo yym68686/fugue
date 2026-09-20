@@ -83,3 +83,16 @@ func TestProjectCustomDomainDNSReportsMissingRoutesAndInvalidTargets(t *testing.
 		t.Fatalf("issues=%+v", r.Issues)
 	}
 }
+
+func TestPlatformOwnedApexDoesNotReplaceDefaultCustomTargetSource(t *testing.T) {
+	s := &Server{appBaseDomain: "example.test", customDomainBaseDomain: "dns.example.test", dnsBundleTTL: 60}
+	app := customDNSApp("app", "tenant", "web.example.test")
+	result := platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Routes: []platformconfig.RouteIntent{{Hostname: "example.test", Kind: model.EdgeRouteKindPlatformDomain, AppID: app.ID, TenantID: app.TenantID, UpstreamURL: "http://origin:80", Enabled: true}, {Hostname: "web.example.test", Kind: model.EdgeRouteKindPlatform, AppID: app.ID, TenantID: app.TenantID, UpstreamURL: "http://origin:80", Enabled: true}}}}
+	domains := []model.AppDomain{customDNSDomain("example.test", app.ID, app.TenantID, "", model.AppDomainDNSModeManaged)}
+	if err := s.projectCustomDomainDNS(&result, domains, map[string]model.App{app.ID: app}); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Intent.DNS) != 1 || !reflect.DeepEqual(result.Intent.DNS[0].Route.Hostnames, []string{"web.example.test"}) {
+		t.Fatal("platform-owned apex replaced default target route and ranking source", result.Intent.DNS)
+	}
+}
