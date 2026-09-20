@@ -249,6 +249,98 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  diagnostic_packages:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {contents: read, packages: write}
+    outputs:
+      runner_image: ${{ steps.build.outputs.runner_image }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Detect independent probe package changes
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          changed=false
+          if ! git diff --quiet "$base" HEAD -- Dockerfile.diagnostics cmd/fugue-diagnostic-probe cmd/fugue-api/diagnostic_agent internal/diagnosticprobe internal/livediagnostics internal/observability internal/model go.mod go.sum .github/workflows/ci.yml; then
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+        if: steps.changed.outputs.changed == 'true'
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the independent diagnostic runtime
+        id: build
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          repository="$(python3 -c 'import json; print(json.load(open("deploy/environments/production/diagnostics/catalog.json"))["repository"])')"
+          docker buildx build --platform linux/amd64 --file Dockerfile.diagnostics \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" --label "org.opencontainers.image.title=fugue-diagnostics" \
+            --tag "$repository:diagnostic-git-$SOURCE_SHA" --metadata-file "$RUNNER_TEMP/diagnostic-build.json" --push .
+          digest="$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/diagnostic-build.json"))["containerimage.digest"])')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          python3 scripts/smoke_diagnostic_package.py "$repository@$digest"
+          echo "runner_image=$repository@$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          name: fugue-diagnostic-package-${{ github.sha }}
+          path: ${{ runner.temp }}/diagnostic-build.json
+          if-no-files-found: error
+          retention-days: 30
+
+  diagnostics_configuration:
+    # Configuration recovery can reuse the last verified runner even when a
+    # component or probe code build fails. No API/controller rollout is needed.
+    needs: diagnostic_packages
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-diagnostics-configuration, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Detect diagnostic configuration or artifact updates
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          RUNNER_IMAGE: ${{ needs.diagnostic_packages.outputs.runner_image }}
+        run: |
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          changed=false
+          if [[ -n "$RUNNER_IMAGE" ]] || ! git diff --quiet "$base" HEAD -- deploy/environments/production/diagnostics scripts/publish_diagnostic_catalog.py scripts/test_publish_diagnostic_catalog.py; then
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      - name: Verify and publish the signed diagnostic catalog
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          RUNNER_IMAGE: ${{ needs.diagnostic_packages.outputs.runner_image }}
+        run: |
+          python3 -m unittest scripts.test_publish_diagnostic_catalog
+          python3 scripts/publish_diagnostic_catalog.py deploy/environments/production/diagnostics/catalog.json --runner-image "$RUNNER_IMAGE"
+          python3 scripts/publish_diagnostic_catalog.py deploy/environments/production/diagnostics/catalog.json --runner-image "$RUNNER_IMAGE" --apply
+
   traffic_safety_stage0:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.traffic_safety_changed == 'true' }}

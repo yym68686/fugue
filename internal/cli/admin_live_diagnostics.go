@@ -65,6 +65,12 @@ func (c *CLI) newAdminDiagnosticsStartCommandForTarget(opts *platformDiagnosticC
 		Use:   "start",
 		Short: "Start a platform live diagnostic session",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if request.ProbeRef != "" {
+				if cmd.Flags().Changed("kind") && request.Kind != livediagnostics.ProbeRegistered {
+					return fmt.Errorf("--probe cannot be combined with a built-in --kind")
+				}
+				request.Kind = livediagnostics.ProbeRegistered
+			}
 			probe := livediagnostics.StartRequest{
 				Kind: request.Kind, DurationSeconds: request.DurationSeconds, FrequencyHz: request.FrequencyHz,
 				SampleIntervalMilliseconds: request.SampleIntervalMilliseconds,
@@ -110,6 +116,8 @@ func (c *CLI) newAdminDiagnosticsStartCommandForTarget(opts *platformDiagnosticC
 	cmd.Flags().StringVar(&request.Target.Container, "container", "", "Exact target container")
 	cmd.Flags().StringVar(&request.Target.Node, "node", "", "Ready node for a node_process target")
 	cmd.Flags().StringVar(&request.Target.ProcessName, "process", "", "Allowlisted host process name")
+	cmd.Flags().StringVar(&request.ProbeRef, "probe", "", "Registered probe reference, optionally pinned by manifest digest")
+	cmd.Flags().StringToStringVar(&request.Parameters, "param", nil, "Probe parameter key=value (repeatable)")
 	cmd.Flags().StringVar((*string)(&request.Kind), "kind", string(request.Kind), "Probe kind (cpu-profile, memory-profile, or process-snapshot)")
 	cmd.Flags().IntVar(&request.DurationSeconds, "duration", request.DurationSeconds, "Diagnostic duration in seconds")
 	cmd.Flags().IntVar(&request.FrequencyHz, "frequency", request.FrequencyHz, "CPU sampling frequency in Hz")
@@ -327,6 +335,21 @@ func formatPlatformDiagnosticTarget(target livediagnostics.Target) string {
 
 func renderPlatformDiagnosticReport(w io.Writer, response platformDiagnosticReportResponse) error {
 	report := response.Report
+	if quality, ok := report["quality"].(map[string]any); ok {
+		if err := writeKeyValues(w, kvPair{Key: "diagnostic_session", Value: response.Session.ID}, kvPair{Key: "probe", Value: response.Session.ProbeRef}, kvPair{Key: "evidence_quality", Value: fmt.Sprint(quality["status"])}, kvPair{Key: "gaps", Value: fmt.Sprint(quality["gaps"])}); err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "SOURCE\tSTATUS\tOBSERVED_AT")
+		if evidence, ok := report["evidence"].([]any); ok {
+			for _, v := range evidence {
+				if e, ok := v.(map[string]any); ok {
+					_, _ = fmt.Fprintf(tw, "%v\t%v\t%v\n", e["name"], e["status"], e["observed_at"])
+				}
+			}
+		}
+		return tw.Flush()
+	}
 	if err := writeKeyValues(w,
 		kvPair{Key: "diagnostic_session", Value: response.Session.ID},
 		kvPair{Key: "status", Value: response.Session.Status},

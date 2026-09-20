@@ -76,6 +76,8 @@ fugue diagnostics node-process start --node ns101351 --process k3s-agent --kind 
 		c.newAdminDiagnosticsCancelCommand(&nodeOpts),
 	)
 
-	cmd.AddCommand(app, platform, node)
+	run := c.newAdminDiagnosticsStartCommandForTarget(&platformOpts, livediagnostics.TargetPlatformComponent)
+	run.Use = "run"
+	cmd.AddCommand(app, platform, node, c.newDiagnosticsProbesCommand(&platformOpts), run, c.newAdminDiagnosticsReportCommand(&platformOpts), c.newAdminDiagnosticsCancelCommand(&platformOpts))
 	return cmd
 }

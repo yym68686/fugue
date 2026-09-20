@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/diagnosticadmission"
 	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
 
@@ -60,6 +61,10 @@ func newDirectPlatformDiagnosticClient(opts platformDiagnosticCommandOptions) (*
 }
 
 func (c *directPlatformDiagnosticClient) Start(ctx context.Context, request platformDiagnosticStartRequest) (platformDiagnosticSessionResponse, error) {
+	if request.ProbeRef != "" {
+		return c.startRegisteredProbe(ctx, request)
+	}
+
 	probe := livediagnostics.StartRequest{
 		Kind: request.Kind, DurationSeconds: request.DurationSeconds, FrequencyHz: request.FrequencyHz,
 		SampleIntervalMilliseconds: request.SampleIntervalMilliseconds,
@@ -90,7 +95,7 @@ func (c *directPlatformDiagnosticClient) Start(ctx context.Context, request plat
 	if err != nil {
 		return platformDiagnosticSessionResponse{}, err
 	}
-	created, err := c.client.BatchV1().Jobs(c.controlNS).Create(ctx, &job, metav1.CreateOptions{})
+	created, err := diagnosticadmission.AdmitJob(ctx, c.client, c.controlNS, &job)
 	if err != nil {
 		return platformDiagnosticSessionResponse{}, fmt.Errorf("create diagnostic session: %w", err)
 	}
@@ -151,6 +156,11 @@ func (c *directPlatformDiagnosticClient) Report(ctx context.Context, sessionID s
 	if err != nil {
 		return platformDiagnosticReportResponse{}, err
 	}
+	if session.Kind == livediagnostics.ProbeRegistered {
+		if err := livediagnostics.ValidateProbeReport(report, job); err != nil {
+			return platformDiagnosticReportResponse{}, err
+		}
+	}
 	return platformDiagnosticReportResponse{Session: session, Report: report}, nil
 }
 
@@ -185,6 +195,12 @@ func (c *directPlatformDiagnosticClient) getJob(ctx context.Context, sessionID s
 }
 
 func (c *directPlatformDiagnosticClient) runnerImage(ctx context.Context) (string, error) {
+	if catalog, err := c.diagnosticCatalog(ctx); err == nil {
+		return catalog.RunnerImage, nil
+	} else if !errors.Is(err, errDirectDiagnosticCatalogAbsent) {
+		return "", err
+	}
+
 	deploymentName := c.releaseInstance + "-fugue-api"
 	deployment, err := c.client.AppsV1().Deployments(c.controlNS).Get(ctx, deploymentName, metav1.GetOptions{})
 	if err != nil {
@@ -292,7 +308,7 @@ func directPlatformDiagnosticJob(job batchv1.Job) bool {
 		return false
 	}
 	targetType := livediagnostics.TargetType(job.Labels[livediagnostics.TargetTypeLabel])
-	return targetType == livediagnostics.TargetPlatformComponent || targetType == livediagnostics.TargetNodeProcess
+	return targetType == livediagnostics.TargetPlatformComponent || targetType == livediagnostics.TargetNodeProcess || targetType == livediagnostics.TargetNode
 }
 
 func directPlatformDiagnosticSession(job batchv1.Job) platformDiagnosticSession {
@@ -327,7 +343,8 @@ func directPlatformDiagnosticSession(job batchv1.Job) platformDiagnosticSession 
 		ProcessName: job.Annotations[livediagnostics.TargetProcessAnnotation], ImageDigest: job.Annotations[livediagnostics.TargetImageAnnotation],
 	}
 	return platformDiagnosticSession{
-		ID: job.Name, Kind: livediagnostics.ProbeKind(job.Labels[livediagnostics.KindLabel]), Status: status, Target: target,
+		RunnerImage: livediagnostics.JobRunnerImage(job), ID: job.Name, Kind: livediagnostics.ProbeKind(job.Labels[livediagnostics.KindLabel]), Status: status, Target: target,
+		ProbeRef: job.Annotations[livediagnostics.ProbeRefAnnotation], ProbeDigest: job.Annotations[livediagnostics.ProbeDigestAnnotation], CatalogDigest: job.Annotations[livediagnostics.CatalogDigestAnnotation],
 		ControlPath: job.Labels[livediagnostics.ControlPathLabel], DurationSeconds: directDiagnosticInt(job.Annotations[livediagnostics.DurationAnnotation]),
 		FrequencyHz:                directDiagnosticInt(job.Annotations[livediagnostics.FrequencyAnnotation]),
 		SampleIntervalMilliseconds: directDiagnosticInt(job.Annotations[livediagnostics.SampleIntervalAnnotation]),
@@ -350,6 +367,12 @@ func directActiveTargetCount(jobs []batchv1.Job, target livediagnostics.Target) 
 	count := 0
 	for _, job := range jobs {
 		if job.Status.Succeeded > 0 || job.Status.Failed > 0 {
+			continue
+		}
+		if target.Type == livediagnostics.TargetNode {
+			if job.Labels[livediagnostics.TargetTypeLabel] == string(target.Type) && job.Annotations[livediagnostics.TargetNodeAnnotation] == target.Node {
+				count++
+			}
 			continue
 		}
 		if target.Type == livediagnostics.TargetNodeProcess {
@@ -383,6 +406,7 @@ func decodeDirectDiagnosticReport(body []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("diagnostic report exceeds %d bytes", directDiagnosticMaxReportBytes)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
 	var report map[string]any
 	if err := decoder.Decode(&report); err != nil {
 		return nil, fmt.Errorf("decode diagnostic report: %w", err)

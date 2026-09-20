@@ -1,0 +1,350 @@
+{
+  "namespace": "fugue-system",
+  "repository": "ghcr.io/yym68686/fugue-api",
+  "catalog": {
+    "protocol": "fugue.diagnostics/v1",
+    "generation": 1,
+    "runner_image": "$runner",
+    "policy": {
+      "namespaces": [
+        "*"
+      ],
+      "profiles": [
+        "host-read",
+        "cluster-read",
+        "process-profile"
+      ],
+      "service_account": "fugue-diagnostic-reader"
+    },
+    "probes": [
+      {
+        "id": "scheduler-pressure",
+        "description": "Node CPU/IO pressure and process scheduling counters; no workload restart",
+        "image": "$runner",
+        "profile": "host-read",
+        "target_types": [
+          "node",
+          "node_process",
+          "platform_component"
+        ],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {
+          "collectors": [
+            {
+              "name": "node-resources",
+              "kind": "node-snapshot",
+              "interval_seconds": 5
+            },
+            {
+              "name": "process-scheduling",
+              "kind": "process-scheduling",
+              "interval_seconds": 5
+            }
+          ]
+        }
+      },
+      {
+        "id": "control-plane-latency",
+        "description": "Correlated apiserver, etcd and node processing metrics",
+        "image": "$runner",
+        "profile": "cluster-read",
+        "target_types": [
+          "node",
+          "platform_component"
+        ],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {
+          "collectors": [
+            {
+              "name": "control-plane-requests",
+              "kind": "prometheus",
+              "interval_seconds": 15,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "request_rate": "sum by (resource,verb,code) (rate(apiserver_request_total[5m]))",
+                "request_p99": "histogram_quantile(0.99,sum by(le,resource,verb)(rate(apiserver_request_duration_seconds_bucket[5m])))",
+                "inflight": "apiserver_current_inflight_requests",
+                "queue_wait": "histogram_quantile(0.99,sum by(le)(rate(apiserver_flowcontrol_request_wait_duration_seconds_bucket[5m])))"
+              }
+            },
+            {
+              "name": "etcd-storage",
+              "kind": "prometheus",
+              "interval_seconds": 15,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "wal_fsync_p99": "histogram_quantile(0.99,sum by(le)(rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])))",
+                "commit_p99": "histogram_quantile(0.99,sum by(le)(rate(etcd_disk_backend_commit_duration_seconds_bucket[5m])))",
+                "leader": "etcd_server_has_leader",
+                "pending_proposals": "etcd_server_proposals_pending"
+              }
+            },
+            {
+              "name": "node-workload",
+              "kind": "prometheus",
+              "interval_seconds": 15,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "system_cpu": "rate(process_cpu_seconds_total{job=\"fugue-kubernetes-nodes\",node={{node}}}[3m])",
+                "container_cpu": "topk(20,sum by(pod,container)(rate(container_cpu_usage_seconds_total{node={{node}},container!=\"\",container!=\"POD\"}[3m])))",
+                "throttled_time": "sum by(pod,container)(rate(container_cpu_cfs_throttled_seconds_total{node={{node}},container!=\"\"}[3m]))"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "kubernetes-reconcile",
+        "description": "Read-only database controller logs and scheduling/storage object evidence",
+        "image": "$runner",
+        "profile": "cluster-read",
+        "target_types": [
+          "platform_component"
+        ],
+        "max_duration_seconds": 120,
+        "parameters": {
+          "namespace": {
+            "default": "*",
+            "description": "Namespace for database objects, or * for all visible namespaces",
+            "max_length": 63,
+            "pattern": "^(\\*|[a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$"
+          },
+          "container": {
+            "default": "manager",
+            "max_length": 63,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "config": {
+          "collectors": [
+            {
+              "name": "controller-log",
+              "kind": "kubernetes-logs",
+              "interval_seconds": 30,
+              "namespace": "{{namespace}}",
+              "object_name": "{{pod}}",
+              "container": "{{param.container}}",
+              "since_seconds": 180,
+              "match": [
+                "Selected PVC",
+                "waiting for",
+                "error",
+                "Error",
+                "already exists",
+                "reconcile"
+              ]
+            },
+            {
+              "name": "database-clusters",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 30,
+              "resource": "clusters",
+              "fields": [
+                "spec.instances",
+                "spec.affinity",
+                "spec.storage",
+                "spec.primaryUpdateStrategy",
+                "status"
+              ],
+              "group": "postgresql.cnpg.io",
+              "namespace": "{{param.namespace}}"
+            },
+            {
+              "name": "database-pods",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 30,
+              "resource": "pods",
+              "fields": [
+                "spec.nodeName",
+                "spec.affinity",
+                "spec.nodeSelector",
+                "spec.tolerations",
+                "spec.volumes",
+                "status"
+              ],
+              "namespace": "{{param.namespace}}",
+              "selector": "cnpg.io/cluster"
+            },
+            {
+              "name": "database-pvcs",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 30,
+              "resource": "persistentvolumeclaims",
+              "fields": [
+                "spec.volumeName",
+                "spec.storageClassName",
+                "spec.resources",
+                "spec.accessModes",
+                "status"
+              ],
+              "namespace": "{{param.namespace}}",
+              "selector": "cnpg.io/cluster"
+            },
+            {
+              "name": "persistent-volumes",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 30,
+              "resource": "persistentvolumes",
+              "fields": [
+                "spec.nodeAffinity",
+                "spec.claimRef",
+                "spec.storageClassName",
+                "spec.capacity",
+                "spec.accessModes",
+                "status"
+              ]
+            },
+            {
+              "name": "nodes",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 30,
+              "resource": "nodes",
+              "fields": [
+                "spec.taints",
+                "status.conditions",
+                "status.allocatable",
+                "status.capacity"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "pipeline-backpressure",
+        "description": "Queue, ingestion/export throughput, source coverage and recent pipeline warnings",
+        "image": "$runner",
+        "profile": "cluster-read",
+        "target_types": [
+          "platform_component"
+        ],
+        "max_duration_seconds": 120,
+        "parameters": {
+          "container": {
+            "default": "telemetry-agent",
+            "max_length": 63,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "config": {
+          "collectors": [
+            {
+              "name": "pipeline-flow",
+              "kind": "prometheus",
+              "interval_seconds": 15,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "queue": "{__name__=~\"fugue_telemetry_pipeline_queue_depth|fugue_telemetry_pipeline_queued_bytes\",job=\"fugue-telemetry-agent\"}",
+                "events": "rate(fugue_telemetry_pipeline_events_total{job=\"fugue-telemetry-agent\"}[3m])",
+                "source_lines": "rate(fugue_telemetry_pipeline_kubernetes_log_lines_total{job=\"fugue-telemetry-agent\"}[3m])",
+                "coverage": "{__name__=~\"fugue_telemetry_pipeline_kubernetes_log_backlog_max_seconds|fugue_telemetry_pipeline_kubernetes_log_cycle_seconds|fugue_telemetry_pipeline_kubernetes_log_deferred_targets|fugue_telemetry_pipeline_kubernetes_log_cursor_gaps_total\",job=\"fugue-telemetry-agent\"}",
+                "errors": "increase(fugue_telemetry_pipeline_errors_total{job=\"fugue-telemetry-agent\"}[3m])",
+                "cpu": "sum(rate(container_cpu_usage_seconds_total{pod={{pod}},container!=\"\",container!=\"POD\"}[3m]))"
+              }
+            },
+            {
+              "name": "pipeline-log",
+              "kind": "kubernetes-logs",
+              "interval_seconds": 30,
+              "namespace": "{{namespace}}",
+              "object_name": "{{pod}}",
+              "container": "{{param.container}}",
+              "since_seconds": 180,
+              "match": [
+                "warning",
+                "error",
+                "failed",
+                "timeout",
+                "deadline",
+                "connection lost"
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "reader_rules": [
+    {
+      "apiGroups": [
+        ""
+      ],
+      "resources": [
+        "nodes",
+        "pods",
+        "pods/log",
+        "services",
+        "events",
+        "persistentvolumeclaims",
+        "persistentvolumes"
+      ],
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "apps"
+      ],
+      "resources": [
+        "deployments",
+        "statefulsets",
+        "replicasets"
+      ],
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "postgresql.cnpg.io"
+      ],
+      "resources": [
+        "clusters"
+      ],
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "storage.k8s.io"
+      ],
+      "resources": [
+        "storageclasses",
+        "volumeattachments",
+        "csinodes",
+        "csidrivers",
+        "csistoragecapacities"
+      ],
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    }
+  ]
+}

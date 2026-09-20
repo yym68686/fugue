@@ -49,7 +49,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -84,6 +84,16 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	if yamlMappingValue(t, observabilityConfig, "environment").Value != "production" {
 		t.Fatal("configuration lane requires production environment")
+	}
+	diagnosticConfig := yamlMappingValue(t, jobs, "diagnostics_configuration")
+	if yamlMappingValue(t, diagnosticConfig, "environment").Value != "production" {
+		t.Fatal("diagnostic configuration requires the production environment")
+	}
+	if !strings.Contains(yamlMappingValue(t, diagnosticConfig, "if").Value, "always()") || yamlMappingValue(t, diagnosticConfig, "needs").Value != "diagnostic_packages" {
+		t.Fatal("diagnostic configuration recovery must run even when a code build fails")
+	}
+	if !strings.Contains(source, "scripts/publish_diagnostic_catalog.py deploy/environments/production/diagnostics/catalog.json --runner-image") || !strings.Contains(source, "--tag \"$repository:diagnostic-git-$SOURCE_SHA\"") {
+		t.Fatal("diagnostic package publication must use an independent tag and configuration path")
 	}
 	for _, required := range []string{
 		"\"${RELEASE_TOOL}\" plan",

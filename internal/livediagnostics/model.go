@@ -46,6 +46,7 @@ const (
 	TargetApp               TargetType = "app"
 	TargetPlatformComponent TargetType = "platform_component"
 	TargetNodeProcess       TargetType = "node_process"
+	TargetNode              TargetType = "node"
 )
 
 type ProbeKind string
@@ -54,6 +55,7 @@ const (
 	ProbeCPUProfile    ProbeKind = "cpu-profile"
 	ProbeMemoryProfile ProbeKind = "memory-profile"
 	ProbeProcessSample ProbeKind = "process-snapshot"
+	ProbeRegistered    ProbeKind = "probe"
 )
 
 type Target struct {
@@ -109,7 +111,7 @@ func (r *StartRequest) Normalize() error {
 		r.Kind = ProbeCPUProfile
 	}
 	switch r.Kind {
-	case ProbeCPUProfile, ProbeMemoryProfile, ProbeProcessSample:
+	case ProbeCPUProfile, ProbeMemoryProfile, ProbeProcessSample, ProbeRegistered:
 	default:
 		return fmt.Errorf("unsupported diagnostic kind %q", r.Kind)
 	}
@@ -117,7 +119,7 @@ func (r *StartRequest) Normalize() error {
 		r.DurationSeconds = 60
 	}
 	maxDuration := 120
-	if r.Kind == ProbeMemoryProfile || r.Kind == ProbeProcessSample {
+	if r.Kind == ProbeMemoryProfile || r.Kind == ProbeProcessSample || r.Kind == ProbeRegistered {
 		maxDuration = 360
 	}
 	if r.DurationSeconds < 5 || r.DurationSeconds > maxDuration {
@@ -171,6 +173,10 @@ func (t Target) ValidateResolved() error {
 		if _, err := NormalizeNodeProcessName(t.ProcessName); err != nil {
 			return err
 		}
+	case TargetNode:
+		if t.Node == "" {
+			return errors.New("resolved node diagnostic target is incomplete")
+		}
 	default:
 		return fmt.Errorf("unsupported diagnostic target type %q", t.Type)
 	}
@@ -178,6 +184,9 @@ func (t Target) ValidateResolved() error {
 }
 
 func BuildJob(target Target, sessionID, sessionNamespace, runnerImage, controlPath string, probe StartRequest) (batchv1.Job, error) {
+	if target.Type == TargetNode || probe.Kind == ProbeRegistered {
+		return batchv1.Job{}, errors.New("registered probes require catalog authorization")
+	}
 	target.Normalize()
 	if err := target.ValidateResolved(); err != nil {
 		return batchv1.Job{}, err

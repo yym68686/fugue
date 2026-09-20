@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -183,7 +184,7 @@ func TestDecodeDiagnosticReportIsStrictlyBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	value, ok := report.(map[string]any)
-	if !ok || value["samples"] != float64(12) {
+	if !ok || value["samples"] != json.Number("12") {
 		t.Fatalf("unexpected report: %#v", report)
 	}
 	if _, err := decodeDiagnosticReport(strings.Repeat("x", diagnosticMaxReportBytes+1)); err == nil {

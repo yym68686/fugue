@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,6 +25,8 @@ type platformDiagnosticTargetRequest struct {
 }
 
 type platformDiagnosticStartRequest struct {
+	ProbeRef                   string                          `json:"probe_ref,omitempty"`
+	Parameters                 map[string]string               `json:"parameters,omitempty"`
 	Target                     platformDiagnosticTargetRequest `json:"target"`
 	Kind                       livediagnostics.ProbeKind       `json:"kind"`
 	DurationSeconds            int                             `json:"duration_seconds"`
@@ -31,6 +35,10 @@ type platformDiagnosticStartRequest struct {
 }
 
 type platformDiagnosticSession struct {
+	RunnerImage                string                    `json:"runner_image,omitempty"`
+	ProbeRef                   string                    `json:"probe_ref,omitempty"`
+	ProbeDigest                string                    `json:"probe_digest,omitempty"`
+	CatalogDigest              string                    `json:"catalog_digest,omitempty"`
 	ID                         string                    `json:"id"`
 	Kind                       livediagnostics.ProbeKind `json:"kind"`
 	Status                     string                    `json:"status"`
@@ -106,4 +114,18 @@ func (c *Client) CancelPlatformDiagnosticSession(sessionID string) (platformDiag
 
 func platformDiagnosticSessionPath(sessionID string) string {
 	return path.Join(platformDiagnosticsPath, url.PathEscape(strings.TrimSpace(sessionID)))
+}
+
+func (r *platformDiagnosticReportResponse) UnmarshalJSON(raw []byte) error {
+	var wire struct {
+		Session platformDiagnosticSession `json:"session"`
+		Report  json.RawMessage           `json:"report"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return err
+	}
+	r.Session = wire.Session
+	decoder := json.NewDecoder(bytes.NewReader(wire.Report))
+	decoder.UseNumber()
+	return decoder.Decode(&r.Report)
 }

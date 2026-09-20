@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/diagnosticadmission"
 	"fugue/internal/httpx"
 	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
@@ -64,6 +66,7 @@ type kubeDiagnosticSessionBackend struct {
 	cluster          *clusterNodeClient
 	logs             *kubeLogsClient
 	controlNamespace string
+	catalogCache     *livediagnostics.CatalogCache
 }
 
 type diagnosticSession struct {
@@ -462,10 +465,16 @@ func (s *Server) newDiagnosticSessionBackend() (diagnosticSessionBackend, error)
 			return nil, err
 		}
 	}
-	return &kubeDiagnosticSessionBackend{cluster: cluster, logs: logs, controlNamespace: controlNamespace}, nil
+	return &kubeDiagnosticSessionBackend{cluster: cluster, logs: logs, controlNamespace: controlNamespace, catalogCache: &s.diagnosticCatalogCache}, nil
 }
 
 func (b *kubeDiagnosticSessionBackend) RunnerImage(ctx context.Context) (string, error) {
+	if catalog, err := b.DiagnosticCatalog(ctx); err == nil {
+		return catalog.RunnerImage, nil
+	} else if !errors.Is(err, errDiagnosticCatalogAbsent) {
+		return "", err
+	}
+
 	namespace := strings.TrimSpace(b.controlNamespace)
 	if namespace == "" {
 		var err error
@@ -508,9 +517,15 @@ func (b *kubeDiagnosticSessionBackend) SessionNamespace() string {
 }
 
 func (b *kubeDiagnosticSessionBackend) CreateJob(ctx context.Context, namespace string, job batchv1.Job) (batchv1.Job, error) {
-	var created batchv1.Job
-	err := b.cluster.doJSONWithBody(ctx, http.MethodPost, "/apis/batch/v1/namespaces/"+url.PathEscape(namespace)+"/jobs", job, &created)
-	return created, err
+	client, err := b.diagnosticKubernetesClient()
+	if err != nil {
+		return batchv1.Job{}, err
+	}
+	created, err := diagnosticadmission.AdmitJob(ctx, client, namespace, &job)
+	if err != nil {
+		return batchv1.Job{}, err
+	}
+	return *created, nil
 }
 
 func (b *kubeDiagnosticSessionBackend) GetJob(ctx context.Context, namespace, name string) (batchv1.Job, error) {
@@ -549,7 +564,31 @@ func (b *kubeDiagnosticSessionBackend) GetNode(ctx context.Context, name string)
 }
 
 func (b *kubeDiagnosticSessionBackend) ReadPodLogs(ctx context.Context, namespace, pod, container string) (string, error) {
-	return b.logs.readPodLogs(ctx, namespace, pod, kubeLogOptions{Container: container})
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	query := url.Values{"container": {container}, "limitBytes": {strconv.Itoa(diagnosticMaxReportBytes + 1)}}
+	endpoint := b.cluster.baseURL + "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods/" + url.PathEscape(pod) + "/log?" + query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+b.cluster.bearerToken)
+	response, err := b.cluster.client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("read diagnostic report returned HTTP %d", response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, diagnosticMaxReportBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > diagnosticMaxReportBytes {
+		return "", errors.New("diagnostic report exceeds byte budget")
+	}
+	return string(raw), nil
 }
 
 func parseDiagnosticInt(value string) int {
@@ -574,7 +613,7 @@ func decodeDiagnosticReport(logs string) (any, error) {
 		return nil, errors.New("report is empty")
 	}
 	var report any
-	if err := json.Unmarshal([]byte(trimmed), &report); err == nil {
+	if err := decodeDiagnosticJSON(trimmed, &report); err == nil {
 		return report, nil
 	}
 	// Be tolerant of a runtime that prefixes log lines, while still accepting
@@ -585,9 +624,22 @@ func decodeDiagnosticReport(logs string) (any, error) {
 		if candidate == "" {
 			continue
 		}
-		if err := json.Unmarshal([]byte(candidate), &report); err == nil {
+		if err := decodeDiagnosticJSON(candidate, &report); err == nil {
 			return report, nil
 		}
 	}
 	return nil, errors.New("report is not valid JSON")
+}
+
+func decodeDiagnosticJSON(raw string, value any) error {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return errors.New("diagnostic report has trailing JSON")
+	}
+	return nil
 }

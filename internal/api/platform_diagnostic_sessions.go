@@ -29,6 +29,8 @@ type platformDiagnosticTargetRequest struct {
 }
 
 type platformDiagnosticStartRequest struct {
+	ProbeRef                   string                          `json:"probe_ref,omitempty"`
+	Parameters                 map[string]string               `json:"parameters,omitempty"`
 	Target                     platformDiagnosticTargetRequest `json:"target"`
 	Kind                       livediagnostics.ProbeKind       `json:"kind"`
 	DurationSeconds            int                             `json:"duration_seconds"`
@@ -37,6 +39,10 @@ type platformDiagnosticStartRequest struct {
 }
 
 type platformDiagnosticSession struct {
+	RunnerImage                string                    `json:"runner_image,omitempty"`
+	ProbeRef                   string                    `json:"probe_ref,omitempty"`
+	ProbeDigest                string                    `json:"probe_digest,omitempty"`
+	CatalogDigest              string                    `json:"catalog_digest,omitempty"`
 	ID                         string                    `json:"id"`
 	Kind                       livediagnostics.ProbeKind `json:"kind"`
 	Status                     string                    `json:"status"`
@@ -62,6 +68,16 @@ func (s *Server) handleStartPlatformDiagnosticSession(w http.ResponseWriter, r *
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if request.ProbeRef != "" {
+		if request.Kind != "" && request.Kind != livediagnostics.ProbeRegistered {
+			httpx.WriteError(w, http.StatusBadRequest, "probe_ref cannot be combined with a built-in kind")
+			return
+		}
+		request.Kind = livediagnostics.ProbeRegistered
+	} else if request.Kind == livediagnostics.ProbeRegistered || len(request.Parameters) > 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "probe_ref is required for probe parameters")
+		return
+	}
 	probe := livediagnostics.StartRequest{
 		Kind: request.Kind, DurationSeconds: request.DurationSeconds, FrequencyHz: request.FrequencyHz,
 		SampleIntervalMilliseconds: request.SampleIntervalMilliseconds,
@@ -84,7 +100,21 @@ func (s *Server) handleStartPlatformDiagnosticSession(w http.ResponseWriter, r *
 		httpx.WriteError(w, http.StatusConflict, "diagnostic session concurrency limit reached")
 		return
 	}
-	target, err := s.resolvePlatformDiagnosticTarget(r.Context(), backend, request.Target)
+	var target livediagnostics.Target
+	var catalog livediagnostics.VerifiedCatalog
+	var registered livediagnostics.Probe
+	var parameters map[string]string
+	if request.ProbeRef != "" {
+		catalog, err = loadBackendDiagnosticCatalog(r.Context(), backend)
+		if err == nil {
+			registered, parameters, err = catalog.Resolve(request.ProbeRef, request.Parameters)
+		}
+		if err == nil {
+			target, err = s.resolveRegisteredDiagnosticTarget(r.Context(), backend, catalog, request.Target)
+		}
+	} else {
+		target, err = s.resolvePlatformDiagnosticTarget(r.Context(), backend, request.Target)
+	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 		return
@@ -93,13 +123,17 @@ func (s *Server) handleStartPlatformDiagnosticSession(w http.ResponseWriter, r *
 		httpx.WriteError(w, http.StatusConflict, "diagnostic target already has an active session")
 		return
 	}
-	runnerImage, err := backend.RunnerImage(r.Context())
-	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "resolve diagnostic runner image: "+err.Error())
-		return
-	}
 	sessionID := model.DNS1035Label(model.NewID("diagnostic"), "diagnostic")
-	job, err := livediagnostics.BuildJob(target, sessionID, backend.SessionNamespace(), runnerImage, "api", probe)
+	var job batchv1.Job
+	if request.ProbeRef != "" {
+		job, err = livediagnostics.BuildProbeJob(catalog, registered, target, sessionID, backend.SessionNamespace(), "api", probe, parameters)
+	} else {
+		var runnerImage string
+		runnerImage, err = backend.RunnerImage(r.Context())
+		if err == nil {
+			job, err = livediagnostics.BuildJob(target, sessionID, backend.SessionNamespace(), runnerImage, "api", probe)
+		}
+	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "build diagnostic session: "+err.Error())
 		return
@@ -113,6 +147,7 @@ func (s *Server) handleStartPlatformDiagnosticSession(w http.ResponseWriter, r *
 	s.appendAudit(principal, "platform.diagnostics.start", "diagnostic_session", session.ID, principal.TenantID, map[string]string{
 		"kind": string(probe.Kind), "target_type": string(target.Type), "target_node": target.Node,
 		"target_pod": target.Pod, "target_component": target.Component, "target_process": target.ProcessName,
+		"probe_ref": session.ProbeRef, "probe_digest": session.ProbeDigest, "catalog_digest": session.CatalogDigest,
 	})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"session": session})
 }
@@ -196,6 +231,12 @@ func (s *Server) handleGetPlatformDiagnosticSessionValue(w http.ResponseWriter, 
 		if decodeErr != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, "diagnostic report is invalid: "+decodeErr.Error())
 			return
+		}
+		if session.Kind == livediagnostics.ProbeRegistered {
+			if err := livediagnostics.ValidateProbeReport(report, job); err != nil {
+				httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+				return
+			}
 		}
 		response["report"] = report
 	}
@@ -342,7 +383,7 @@ func platformDiagnosticJob(job batchv1.Job) bool {
 		return false
 	}
 	targetType := livediagnostics.TargetType(job.Labels[livediagnostics.TargetTypeLabel])
-	return targetType == livediagnostics.TargetPlatformComponent || targetType == livediagnostics.TargetNodeProcess
+	return targetType == livediagnostics.TargetPlatformComponent || targetType == livediagnostics.TargetNodeProcess || targetType == livediagnostics.TargetNode
 }
 
 func platformDiagnosticSessionFromJob(job batchv1.Job) platformDiagnosticSession {
@@ -356,7 +397,8 @@ func platformDiagnosticSessionFromJob(job batchv1.Job) platformDiagnosticSession
 		ProcessName: job.Annotations[livediagnostics.TargetProcessAnnotation], ImageDigest: job.Annotations[livediagnostics.TargetImageAnnotation],
 	}
 	return platformDiagnosticSession{
-		ID: base.ID, Kind: livediagnostics.ProbeKind(base.Kind), Status: base.Status, Target: target,
+		RunnerImage: livediagnostics.JobRunnerImage(job), ID: base.ID, Kind: livediagnostics.ProbeKind(base.Kind), Status: base.Status, Target: target,
+		ProbeRef: job.Annotations[livediagnostics.ProbeRefAnnotation], ProbeDigest: job.Annotations[livediagnostics.ProbeDigestAnnotation], CatalogDigest: job.Annotations[livediagnostics.CatalogDigestAnnotation],
 		ControlPath: job.Labels[livediagnostics.ControlPathLabel], DurationSeconds: base.DurationSeconds, FrequencyHz: base.FrequencyHz,
 		SampleIntervalMilliseconds: parseDiagnosticInt(job.Annotations[livediagnostics.SampleIntervalAnnotation]),
 		CreatedAt:                  created, StartedAt: base.StartedAt, FinishedAt: base.FinishedAt, ExpiresAt: base.ExpiresAt, FailureReason: base.FailureReason,
@@ -377,6 +419,12 @@ func countActivePlatformDiagnosticTargetJobs(jobs []batchv1.Job, target livediag
 	count := 0
 	for _, job := range jobs {
 		if job.Status.Succeeded > 0 || job.Status.Failed > 0 {
+			continue
+		}
+		if target.Type == livediagnostics.TargetNode {
+			if job.Labels[livediagnostics.TargetTypeLabel] == string(target.Type) && job.Annotations[livediagnostics.TargetNodeAnnotation] == target.Node {
+				count++
+			}
 			continue
 		}
 		if target.Type == livediagnostics.TargetNodeProcess {

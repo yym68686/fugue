@@ -40,3 +40,24 @@ func TestAdminDiagnosticsStartSendsPlatformMemoryProbe(t *testing.T) {
 		t.Fatalf("unexpected output: %s", stdout.String())
 	}
 }
+
+func TestUnifiedRegisteredProbeSendsPinnedReferenceAndParameters(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req platformDiagnosticStartRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Kind != "probe" || req.ProbeRef != "observer-test" || req.Parameters["scope"] != "status" || req.Target.Type != "node" {
+			t.Fatalf("wrong registered probe request: %+v", req)
+		}
+		_, _ = w.Write([]byte(`{"session":{"id":"diagnostic-test","kind":"probe","status":"queued","probe_ref":"observer-test","target":{"type":"node","node":"node-test"}}}`))
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	if err := runWithStreams([]string{"--base-url", server.URL, "--token", "bootstrap", "--json", "diagnostics", "run", "--probe", "observer-test", "--target-type", "node", "--node", "node-test", "--param", "scope=status"}, &stdout, &stderr); err != nil {
+		t.Fatal(err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"probe_ref": "observer-test"`) {
+		t.Fatal("missing probe identity", stdout.String())
+	}
+}

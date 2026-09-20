@@ -22,6 +22,7 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/failover"
 	"fugue/internal/httpx"
+	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
@@ -132,6 +133,7 @@ type Server struct {
 	newFilesystemPodLister                 func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner                   filesystemPodExecRunner
 	diagnosticSessionBackend               diagnosticSessionBackend
+	diagnosticCatalogCache                 livediagnostics.CatalogCache
 	appProxyTransport                      http.RoundTripper
 	edgeDNSAuthorityHTTPClient             *http.Client
 	appRequestHTTPClient                   *http.Client

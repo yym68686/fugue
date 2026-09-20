@@ -30,6 +30,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/backups/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAdminBackupStatus)))
 	mux.Handle("POST /v1/admin/control-plane/store/promote", s.auth.RequireAPI(http.HandlerFunc(s.handlePromoteControlPlaneStore)))
 	mux.Handle("GET /v1/admin/control-plane/store/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetControlPlaneStoreStatus)))
+	mux.Handle("GET /v1/admin/diagnostics/probes", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformDiagnosticProbes)))
 	mux.Handle("GET /v1/admin/diagnostics/sessions", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformDiagnosticSessions)))
 	mux.Handle("POST /v1/admin/diagnostics/sessions", s.auth.RequireAPI(http.HandlerFunc(s.handleStartPlatformDiagnosticSession)))
 	mux.Handle("GET /v1/admin/diagnostics/sessions/{session_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformDiagnosticSession)))

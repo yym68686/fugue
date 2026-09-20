@@ -8028,11 +8028,29 @@ paths:
                 $ref: "#/components/schemas/AppDiagnosticReportResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/diagnostics/probes:
+    get:
+      operationId: listPlatformDiagnosticProbes
+      summary: List Registered Diagnostic Probes
+      description: Lists the verified diagnostic catalog and input contracts. Platform administrator access is required. Probe packages and catalog configuration are published independently of application code.
+      tags: [Admin]
+      x-fugue-handler: handleListPlatformDiagnosticProbes
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Verified diagnostic probe catalog.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosticProbeCatalogResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/diagnostics/sessions:
     post:
       operationId: startPlatformDiagnosticSession
       summary: Start Platform Diagnostic Session
-      description: Starts a bounded, temporary diagnostic probe for a Fugue platform component or an allowlisted node process. Platform administrator access is required.
+      description: Starts a bounded diagnostic session using a built-in kind or a verified catalog probe_ref. Registered probes may select an exact Pod or node within the catalog target policy; legacy kinds retain their original component and process restrictions. Platform administrator access is required.
       tags: [Admin]
       x-fugue-handler: handleStartPlatformDiagnosticSession
       security:
@@ -27497,25 +27515,96 @@ components:
       properties:
         type:
           type: string
-          enum: [platform_component, node_process]
+          enum: [platform_component, node_process, node]
         component:
           type: string
-          description: Fugue component label. Required for platform_component targets.
+          description: Fugue component label for legacy probes. Registered probes may instead specify an exact Pod within the catalog namespace policy.
         namespace:
           type: string
           description: Optional Fugue system namespace; defaults to the control-plane namespace.
         pod:
           type: string
-          description: Optional exact Pod name within the trusted component selector.
+          description: Exact Pod name. Legacy kinds additionally require the trusted component selector; registered probes use the catalog namespace policy.
         container:
           type: string
           description: Required when the selected platform Pod contains multiple containers.
         node:
           type: string
-          description: Required for node_process targets.
+          description: Required for node_process and node targets. Node-only targets require a registered probe.
         process_name:
           type: string
           description: Required allowlisted Fugue or k3s process name for node_process targets.
+    DiagnosticProbeParameter:
+      type: object
+      additionalProperties: false
+      properties:
+        description:
+          type: string
+        required:
+          type: boolean
+        default:
+          type: string
+        enum:
+          type: array
+          items:
+            type: string
+        pattern:
+          type: string
+        max_length:
+          type: integer
+          minimum: 1
+          maximum: 4096
+    DiagnosticProbeDescriptor:
+      type: object
+      additionalProperties: false
+      required: [id, digest, image, profile, target_types, max_duration_seconds, parameters]
+      properties:
+        id:
+          type: string
+        digest:
+          type: string
+          description: Digest of the verified probe manifest; can be appended to the id in probe_ref to pin an exact definition.
+        description:
+          type: string
+        image:
+          type: string
+          description: Digest-addressed independently published probe image.
+        profile:
+          type: string
+          description: Execution capability profile authorized by the catalog policy.
+        target_types:
+          type: array
+          items:
+            type: string
+            enum: [platform_component, node_process, node]
+        max_duration_seconds:
+          type: integer
+          minimum: 5
+          maximum: 360
+        parameters:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/DiagnosticProbeParameter"
+    DiagnosticProbeCatalogResponse:
+      type: object
+      additionalProperties: false
+      required: [catalog_digest, catalog_status, runner_image, probes]
+      properties:
+        catalog_digest:
+          type: string
+        catalog_status:
+          type: string
+          enum: [current, last_known_good]
+        source_revision:
+          type: string
+          description: Git revision that published the signed catalog, when available.
+        runner_image:
+          type: string
+          description: Independent runner image used for compatible built-in probes.
+        probes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiagnosticProbeDescriptor"
     PlatformDiagnosticSessionStartRequest:
       type: object
       additionalProperties: false
@@ -27525,8 +27614,20 @@ components:
           $ref: "#/components/schemas/PlatformDiagnosticTargetRequest"
         kind:
           type: string
-          enum: [cpu-profile, memory-profile, process-snapshot]
+          enum: [cpu-profile, memory-profile, process-snapshot, probe]
           default: cpu-profile
+          description: Built-in probe kind. Use probe (or omit kind) when probe_ref is supplied.
+        probe_ref:
+          type: string
+          maxLength: 160
+          description: Registered probe id, optionally followed by @sha256 manifest digest. Caller-supplied images or executables are not accepted.
+        parameters:
+          type: object
+          maxProperties: 32
+          additionalProperties:
+            type: string
+            maxLength: 4096
+          description: Validated using the selected probe parameter contract. Unsupported keys are rejected.
         duration_seconds:
           type: integer
           format: int32
@@ -27552,7 +27653,7 @@ components:
       properties:
         type:
           type: string
-          enum: [platform_component, node_process]
+          enum: [platform_component, node_process, node]
         app_id:
           type: string
         component:
@@ -27580,7 +27681,16 @@ components:
           type: string
         kind:
           type: string
-          enum: [cpu-profile, memory-profile, process-snapshot]
+          enum: [cpu-profile, memory-profile, process-snapshot, probe]
+        runner_image:
+          type: string
+          description: Immutable image used by this diagnostic Job, independently of the observed target image.
+        probe_ref:
+          type: string
+        probe_digest:
+          type: string
+        catalog_digest:
+          type: string
         status:
           type: string
           enum: [queued, running, succeeded, failed]
