@@ -34,19 +34,21 @@ func TestPostgresStorageRescueDeliveryOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`insert into fugue_node_update_tasks(id,task_type) values ('inventory','report-lvm-localpv-inventory'),('rescue','expand-lvm-localpv'),('prune','prune-image-cache'),('upgrade','upgrade-node-updater')`)
+	_, err = db.Exec(`insert into fugue_node_update_tasks(id,task_type,payload_json) values
+ ('inventory','report-lvm-localpv-inventory','{}'),('rescue','expand-lvm-localpv','{}'),('prune','prune-image-cache','{}'),('upgrade','upgrade-node-updater','{}'),
+ ('capacity','refresh-join-config','{"pod_capacity_mode":"resources","dry_run":"true"}'),('refresh','refresh-join-config','{}')`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := &Store{databaseURL: address, db: db, dbReady: true}
-	tasks, err := s.ListPendingNodeUpdateTasks("test", 4)
+	tasks, err := s.ListPendingNodeUpdateTasks("test", 6)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 4 {
+	if len(tasks) != 6 {
 		t.Fatalf("missing tasks: %+v", tasks)
 	}
-	for i, want := range []string{"upgrade", "rescue", "inventory", "prune"} {
+	for i, want := range []string{"upgrade", "capacity", "rescue", "inventory", "prune", "refresh"} {
 		if tasks[i].ID != want {
 			t.Fatalf("Postgres order %d: got %s want %s", i, tasks[i].ID, want)
 		}
@@ -69,6 +71,7 @@ FROM fugue_node_update_tasks
 WHERE node_updater_id = $1 AND status = $2
 ORDER BY CASE
 	WHEN task_type = 'upgrade-node-updater' THEN 0
+	WHEN task_type = 'refresh-join-config' AND COALESCE(payload_json->>'pod_capacity_mode', '') <> '' THEN 1
 	WHEN task_type = 'expand-lvm-localpv' THEN 1
 	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') AND created_at <= $3 THEN 1
 	WHEN task_type = 'replicate-app-image' AND COALESCE(payload_json->>'priority', '') = 'deploy_blocking' THEN 2

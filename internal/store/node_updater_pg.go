@@ -392,6 +392,7 @@ FROM fugue_node_update_tasks
 WHERE node_updater_id = $1 AND status = $2
 ORDER BY CASE
 	WHEN task_type = 'upgrade-node-updater' THEN 0
+	WHEN task_type = 'refresh-join-config' AND COALESCE(payload_json->>'pod_capacity_mode', '') <> '' THEN 1
 	WHEN task_type = 'expand-lvm-localpv' THEN 1
 	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') AND created_at <= $3 THEN 1
 	WHEN task_type = 'replicate-app-image' AND COALESCE(payload_json->>'priority', '') = 'deploy_blocking' THEN 2
