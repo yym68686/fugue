@@ -170,6 +170,9 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route draft cannot be captured")
 	}
+	if err := s.captureReleaseRuntimeReadiness(ctx, &projection, business); err != nil {
+		return platformIntentProjectionResponse{}, err
+	}
 	projection.BusinessSnapshotRevision = business.Revision
 	projection.BusinessSnapshotAt = business.CapturedAt
 	if err := projectDomainTLSLifecycle(&projection, snapshot.TLSAllowlist, business.Domains); err != nil {

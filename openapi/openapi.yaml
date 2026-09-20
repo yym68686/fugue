@@ -32274,6 +32274,36 @@ components:
           type: object
           additionalProperties: true
           properties:
+            release_readiness:
+              type: object
+              additionalProperties: false
+              required: [schema, cluster_id, observed_at, releases]
+              description: Independent managed-release readiness from one cluster observation window. These facts may authorize compilation but never replace actual consumer serving proof.
+              properties:
+                schema: {type: string, enum: [fugue.release-runtime-readiness/v1]}
+                cluster_id: {type: string, minLength: 1}
+                observed_at: {type: string, format: date-time}
+                releases:
+                  type: array
+                  maxItems: 10000
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [release_id, namespace, deployment_name, deployment_uid, deployment_generation, observed_generation, service_name, service_uid, desired_replicas, ready_replicas, ready_endpoints, ready]
+                    properties:
+                      release_id: {type: string, minLength: 1}
+                      namespace: {type: string}
+                      deployment_name: {type: string}
+                      deployment_uid: {type: string}
+                      deployment_generation: {type: integer, format: int64}
+                      observed_generation: {type: integer, format: int64}
+                      service_name: {type: string}
+                      service_uid: {type: string}
+                      desired_replicas: {type: integer}
+                      ready_replicas: {type: integer}
+                      ready_endpoints: {type: integer}
+                      ready: {type: boolean}
+                      reason: {type: string}
             configuration_producer:
               type: object
               additionalProperties: false
@@ -32397,7 +32427,7 @@ components:
     PlatformReleaseObservation:
       type: object
       additionalProperties: false
-      description: Fixed release evidence. Migration drafts require matching owner, release, runtime, image and healthy serving evidence before reporting active. observed_at is the original runtime evidence time, never a business-row update time; absent evidence has zero observed_at and blocks compilation.
+      description: Fixed release readiness evidence. Managed stable and candidate releases are observed independently from exact Kubernetes deployment, image, owner, service selector and current service-owned EndpointSlices. Active means ready to receive traffic, not already serving. The capture keeps cluster and resource identities in runtime_snapshot.facts.release_readiness. App-level serving status, desired weights and business-row timestamps cannot establish readiness. Transport or cluster-identity failure preserves unknown evidence; authoritative absent or unready resources produce a fresh unavailable observation. Actual serving still requires the separate trusted consumer apply and probe gates.
       required: [id, app_id, tenant_id, observed_at, status, upstream_url]
       properties:
         id: {type: string}

@@ -211,6 +211,8 @@ type managedAppKubeSnapshot struct {
 	namespaces              map[string]struct{}
 	deployments             map[string]kubeDeploymentRuntimeEvidence
 	services                map[string]struct{}
+	serviceDetails          map[string]kubeServiceRuntimeEvidence
+	ownedEndpointSlices     map[string]map[string]kubeEndpointRuntimeEvidence
 	endpoints               map[string]kubeEndpointRuntimeEvidence
 	endpointSlices          map[string]kubeEndpointRuntimeEvidence
 	endpointsAvailable      bool
@@ -225,10 +227,25 @@ type kubeTypedResourceList[T any] struct {
 }
 type kubeMetadataEvidence struct {
 	Metadata struct {
-		Name      string            `json:"name"`
-		Namespace string            `json:"namespace"`
-		Labels    map[string]string `json:"labels"`
+		UID             string            `json:"uid"`
+		Name            string            `json:"name"`
+		Namespace       string            `json:"namespace"`
+		Labels          map[string]string `json:"labels"`
+		OwnerReferences []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+			UID  string `json:"uid"`
+		} `json:"ownerReferences"`
 	} `json:"metadata"`
+}
+type kubeServiceRuntimeEvidence struct {
+	kubeMetadataEvidence
+	Spec struct {
+		Selector map[string]string `json:"selector"`
+		Ports    []struct {
+			Port int `json:"port"`
+		} `json:"ports"`
+	} `json:"spec"`
 }
 type kubeEndpointsEvidence struct {
 	kubeMetadataEvidence
@@ -249,13 +266,18 @@ type kubeEndpointSliceEvidence struct {
 
 type kubeDeploymentRuntimeEvidence struct {
 	Metadata struct {
-		Name       string `json:"name"`
-		Namespace  string `json:"namespace"`
-		Generation int64  `json:"generation"`
+		UID        string            `json:"uid"`
+		Name       string            `json:"name"`
+		Namespace  string            `json:"namespace"`
+		Generation int64             `json:"generation"`
+		Labels     map[string]string `json:"labels"`
 	} `json:"metadata"`
 	Spec struct {
 		Replicas *int `json:"replicas"`
 		Template struct {
+			Metadata struct {
+				Labels map[string]string `json:"labels"`
+			} `json:"metadata"`
 			Spec struct {
 				Containers []struct {
 					Name  string `json:"name"`
@@ -713,7 +735,8 @@ func listTypedKubeResourcesOptional[T any](ctx context.Context, c *managedAppSta
 }
 
 func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (managedAppKubeSnapshot, error) {
-	var namespaceItems, serviceItems []kubeMetadataEvidence
+	var namespaceItems []kubeMetadataEvidence
+	var serviceItems []kubeServiceRuntimeEvidence
 	var deploymentItems []kubeDeploymentRuntimeEvidence
 	var endpointItems []kubeEndpointsEvidence
 	var endpointSliceItems []kubeEndpointSliceEvidence
@@ -739,7 +762,7 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 	})
 	group.Go(func() error {
 		var err error
-		serviceItems, err = listTypedKubeResources[kubeMetadataEvidence](groupCtx, c, "/api/v1/services")
+		serviceItems, err = listTypedKubeResources[kubeServiceRuntimeEvidence](groupCtx, c, "/api/v1/services")
 		if err != nil {
 			return fmt.Errorf("list kubernetes services: %w", err)
 		}
@@ -775,6 +798,8 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 		namespaces:              make(map[string]struct{}, len(namespaceItems)),
 		deployments:             make(map[string]kubeDeploymentRuntimeEvidence, len(deploymentItems)),
 		services:                make(map[string]struct{}, len(serviceItems)),
+		serviceDetails:          make(map[string]kubeServiceRuntimeEvidence, len(serviceItems)),
+		ownedEndpointSlices:     make(map[string]map[string]kubeEndpointRuntimeEvidence),
 		endpoints:               make(map[string]kubeEndpointRuntimeEvidence, len(endpointItems)),
 		endpointSlices:          make(map[string]kubeEndpointRuntimeEvidence, len(endpointSliceItems)),
 		endpointsAvailable:      endpointsAvailable,
@@ -799,6 +824,7 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes service: metadata name/namespace is missing")
 		}
 		snapshot.services[kubeNamespacedKey(item.Metadata.Namespace, item.Metadata.Name)] = struct{}{}
+		snapshot.serviceDetails[kubeNamespacedKey(item.Metadata.Namespace, item.Metadata.Name)] = item
 	}
 	for _, item := range endpointItems {
 		if strings.TrimSpace(item.Metadata.Name) == "" || strings.TrimSpace(item.Metadata.Namespace) == "" {
@@ -820,16 +846,32 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 			continue
 		}
 		key := kubeNamespacedKey(item.Metadata.Namespace, serviceName)
+		owned := kubeEndpointRuntimeEvidence{Present: true}
 		evidence := snapshot.endpointSlices[key]
 		evidence.Present = true
 		for _, endpoint := range item.Endpoints {
 			if endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
 				evidence.ReadyAddresses += len(endpoint.Addresses)
+				owned.ReadyAddresses += len(endpoint.Addresses)
 			} else {
 				evidence.NotReadyAddresses += len(endpoint.Addresses)
+				owned.NotReadyAddresses += len(endpoint.Addresses)
 			}
 		}
 		snapshot.endpointSlices[key] = evidence
+		for _, owner := range item.Metadata.OwnerReferences {
+			if owner.Kind != "Service" || owner.Name != serviceName || owner.UID == "" {
+				continue
+			}
+			if snapshot.ownedEndpointSlices[key] == nil {
+				snapshot.ownedEndpointSlices[key] = map[string]kubeEndpointRuntimeEvidence{}
+			}
+			prior := snapshot.ownedEndpointSlices[key][owner.UID]
+			prior.Present = true
+			prior.ReadyAddresses += owned.ReadyAddresses
+			prior.NotReadyAddresses += owned.NotReadyAddresses
+			snapshot.ownedEndpointSlices[key][owner.UID] = prior
+		}
 	}
 
 	return snapshot, nil
