@@ -3,6 +3,7 @@ package controller
 import (
 	"path"
 	"reflect"
+	"slices"
 	"strings"
 
 	"fugue/internal/model"
@@ -183,6 +184,8 @@ func comparableConfigFileUpdateSpec(spec model.AppSpec) model.AppSpec {
 	normalized, _ := model.StripFugueInjectedAppEnvFromSpec(spec)
 	normalized.RestartToken = ""
 	normalized.RolloutIntent = ""
+	// Comparisons must not clear content in the serving or desired snapshot.
+	normalized.Files = slices.Clone(normalized.Files)
 	for i := range normalized.Files {
 		normalized.Files[i].Content = ""
 	}
@@ -433,6 +436,7 @@ func comparableZeroDowntimeRestartSpec(spec model.AppSpec) model.AppSpec {
 	normalized.TerminationGracePeriodSeconds = 0
 	normalized.RestartToken = ""
 	normalized.RolloutIntent = ""
+	normalized.Files = slices.Clone(normalized.Files)
 	for i := range normalized.Files {
 		normalized.Files[i].Content = ""
 	}
