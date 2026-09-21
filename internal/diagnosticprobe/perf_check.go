@@ -13,8 +13,8 @@ import (
 )
 
 func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (any, error) {
-	if req.DurationSeconds < 30 || (req.ContainerID == "" && req.Target.ProcessName == "") {
-		return nil, errors.New("perf comparison requires an exact process target and at least 30 seconds")
+	if req.DurationSeconds < 45 || (req.ContainerID == "" && req.Target.ProcessName == "") {
+		return nil, errors.New("perf comparison requires an exact process target and at least 45 seconds")
 	}
 	before, err := profileProcessIdentities(ctx, req)
 	if err != nil {
@@ -51,13 +51,16 @@ func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (an
 	defer os.RemoveAll(dir)
 	results := []any{}
 	gaps := []string{}
-	for _, mode := range []string{"cgroup", "pid"} {
+	for _, mode := range []string{"cgroup", "pid", "cgroup-dwarf"} {
 		file := filepath.Join(dir, mode+".data")
 		args := []string{"record", "-e", "cpu-clock", "-F", "19", "--no-buildid-mmap", "-o", file}
-		if mode == "cgroup" {
+		if strings.HasPrefix(mode, "cgroup") {
 			args = append(args, "-a", "-G", path)
 		} else {
 			args = append(args, "-p", strings.Join(pidNames, ","))
+		}
+		if mode == "cgroup-dwarf" {
+			args = append(args, "--call-graph", "dwarf,8192")
 		}
 		args = append(args, "--", "sleep", "5")
 		_, stderr, truncated, err := diagnosticCommandEvidence(ctx, 16<<10, "perf", args...)
@@ -80,6 +83,24 @@ func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (an
 		}
 		if cut {
 			gaps = append(gaps, mode+" report truncated")
+		}
+		if mode == "cgroup-dwarf" {
+			for _, symfs := range []bool{false, true} {
+				args := []string{"report", "--stdio", "--stdio-color", "never", "--no-children", "--call-graph", "none", "--percent-limit", "0", "--field-separator", "|", "--fields", "overhead,sample,overhead_sys,overhead_us,tgid,comm,dso,symbol", "--sort", "tgid,comm,dso,symbol", "-i", file}
+				name := "machine_report"
+				if symfs {
+					args = append(args, "--symfs", filepath.Join(hostProc, strconv.Itoa(pids[0]), "root"))
+					name += "_symfs"
+				}
+				raw, stderr, cut, err := diagnosticCommandEvidence(ctx, 128<<10, "perf", args...)
+				row[name] = map[string]any{"stdout": safeText(string(raw)), "stderr": stderr}
+				if err != nil {
+					gaps = append(gaps, name+": "+boundedError(err))
+				}
+				if cut {
+					gaps = append(gaps, name+" truncated")
+				}
+			}
 		}
 		results = append(results, row)
 	}
