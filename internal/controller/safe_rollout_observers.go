@@ -244,7 +244,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 				reason = "app_traffic_proof_mismatch"
 			case proof.EdgeID != id || proof.GroupID != wait.groups[id]:
 				reason = "app_traffic_identity_mismatch"
-			case proof.Version != node.RouteBundleVersion:
+			case !safeRolloutProofPublicationAtLeast(proof.Version, node.RouteBundleVersion):
 				reason = "app_traffic_bundle_mismatch"
 			case proof.State != "" || proof.CheckedAt.Before(started) || proof.CheckedAt.After(o.now()) || !proof.ValidUntil.After(o.now()):
 				reason = "app_traffic_proof_stale"
@@ -292,7 +292,12 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	observation.RequiredNodes = len(wait.groups)
 	for id, proof := range proofs {
 		node, exists := afterByID[id]
-		if !exists || node.EdgeGroupID != wait.groups[id] || node.Draining || !node.Healthy || node.Status != model.EdgeHealthHealthy || node.RouteBundleVersion != proof.Version || node.CaddyAppliedVersion != proof.Version || node.LastHeartbeatAt == nil || node.LastHeartbeatAt.Before(o.now().Add(-2*time.Minute)) || node.LastHeartbeatAt.After(o.now().Add(5*time.Second)) || node.CaddyLastError != "" || node.LastError != "" {
+		before := current[id]
+		if !exists || node.EdgeGroupID != wait.groups[id] || node.Draining || !node.Healthy || node.Status != model.EdgeHealthHealthy ||
+			!safeRolloutProofPublicationAtLeast(proof.Version, node.RouteBundleVersion) ||
+			!safeRolloutProofPublicationAtLeast(node.RouteBundleVersion, before.RouteBundleVersion) ||
+			node.CaddyAppliedVersion != node.RouteBundleVersion || node.PublicIPv4 != before.PublicIPv4 || node.PublicIPv6 != before.PublicIPv6 ||
+			node.LastHeartbeatAt == nil || node.LastHeartbeatAt.Before(o.now().Add(-2*time.Minute)) || node.LastHeartbeatAt.After(o.now().Add(5*time.Second)) || node.CaddyLastError != "" || node.LastError != "" {
 			delete(proofs, id)
 			observation.WaitingNodes = append(observation.WaitingNodes, id+":edge_changed_during_probes")
 		}
@@ -321,6 +326,44 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	observation.Summary["waiting_nodes"] = observation.WaitingNodes
 	observation.Summary["serving_versions"] = observation.ServingVersions
 	return observation, nil
+}
+
+// The nonce-bound HTTPS app proof attests the exact locally applied index.
+// A healthy inventory heartbeat can lag a newer group publication, even when
+// the application's release/weight/upstream digest is unchanged. Never accept
+// an older proof, a recovery epoch change, or unordered legacy versions.
+func safeRolloutProofPublicationAtLeast(proofVersion, inventoryVersion string) bool {
+	if proofVersion == inventoryVersion {
+		return proofVersion != ""
+	}
+	proofSequence, proofEpoch, proofOK := safeRolloutGroupPublicationOrder(proofVersion)
+	inventorySequence, inventoryEpoch, inventoryOK := safeRolloutGroupPublicationOrder(inventoryVersion)
+	return proofOK && inventoryOK && proofEpoch == inventoryEpoch && proofSequence > inventorySequence
+}
+
+func safeRolloutGroupPublicationOrder(version string) (uint64, uint64, bool) {
+	const prefix = "edgegroupbundle_"
+	if !strings.HasPrefix(version, prefix) || len(version) <= len(prefix)+64 {
+		return 0, 0, false
+	}
+	digest := version[len(prefix) : len(prefix)+64]
+	for _, c := range digest {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return 0, 0, false
+		}
+	}
+	suffix, ok := strings.CutPrefix(version[len(prefix)+64:], ".p")
+	if !ok {
+		return 0, 0, false
+	}
+	publication, recovery, ok := strings.Cut(suffix, ".r")
+	if !ok {
+		return 0, 0, false
+	}
+	sequence, sequenceErr := strconv.ParseUint(publication, 10, 64)
+	epoch, epochErr := strconv.ParseUint(recovery, 10, 64)
+	return sequence, epoch, sequenceErr == nil && epochErr == nil && sequence > 0 &&
+		version == fmt.Sprintf("%s%s.p%d.r%d", prefix, digest, sequence, epoch)
 }
 
 func (o storeSafeRolloutEdgeBundleObserver) expectedAppTrafficDigest(app model.App, release model.AppRelease, targetCandidateWeight int) (string, error) {
