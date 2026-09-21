@@ -44,7 +44,7 @@ func TestPprofTopReadsRuntimeHeapProfile(t *testing.T) {
 }
 
 func TestSampledFunctionsSeparatesLeafAndCumulativeFrames(t *testing.T) {
-	raw := []byte("\n          513920 encoding/json.appendString+0x40 (/app/service)\n          5042a5 service.Proxy+0x35 (/app/service)\n          ffffffff12345678 entry_SYSCALL_64 ([kernel.kallsyms])\n\n          ffffffff87654321 schedule ([kernel.kallsyms])\n          4788b7 runtime.park_m+0x17 (/app/service)\n\n")
+	raw := []byte("\n          513920 encoding/json.appendString+0x40 (/app/service)\n          5042a5 service.Proxy+0x35 (/app/service)\n          5042a5 service.Proxy+0x35 (/app/service)\n          ffffffff12345678 entry_SYSCALL_64 ([kernel.kallsyms])\n\n          ffffffff87654321 schedule ([kernel.kallsyms])\n          4788b7 runtime.park_m+0x17 (/app/service)\n\n")
 	leaves, cumulative, samples, users, kernel := sampledFunctions(raw)
 	if samples != 2 || users != 1 || kernel != 1 {
 		t.Fatalf("unexpected counts samples=%d user=%d kernel=%d", samples, users, kernel)
@@ -52,7 +52,7 @@ func TestSampledFunctionsSeparatesLeafAndCumulativeFrames(t *testing.T) {
 	if leaves[0].Function != "encoding/json.appendString+0x40 (/app/service)" || leaves[0].Samples != 1 {
 		t.Fatalf("unexpected leaf addresses: %+v", leaves)
 	}
-	if len(cumulative) != 5 {
+	if len(cumulative) != 5 || cumulative[1].Samples != 1 {
 		t.Fatalf("unexpected cumulative addresses: %+v", cumulative)
 	}
 }

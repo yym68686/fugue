@@ -80,6 +80,7 @@ type report struct {
 	LostSamples             int              `json:"lost_samples"`
 	LeafFunctions           []functionSample `json:"leaf_functions"`
 	CumulativeFunctions     []functionSample `json:"cumulative_functions"`
+	StackPaths              stackPathSummary `json:"stack_paths"`
 	PerfReport              string           `json:"perf_report,omitempty"`
 	RawScript               string           `json:"raw_script,omitempty"`
 	Warnings                []string         `json:"warnings,omitempty"`
@@ -352,6 +353,10 @@ func run(opts options) error {
 	if cgroupErr != nil {
 		warnings = append(warnings, "target cgroup snapshot after sampling unavailable: "+cgroupErr.Error())
 	}
+	paths := summarizeStackPaths(rawScript)
+	if paths.Truncated || paths.ObservedSamples < stackSamples {
+		warnings = append(warnings, "stack path report is partial; inspect omitted_samples and observed_samples")
+	}
 
 	value := report{
 		Schema:                  "fugue.diagnostic.cpu_profile.v1",
@@ -385,6 +390,7 @@ func run(opts options) error {
 		LostSamples:             parseLostSamples(perfReport),
 		LeafFunctions:           functions,
 		CumulativeFunctions:     cumulativeFunctions,
+		StackPaths:              paths,
 		PerfReport:              string(perfReport),
 		RawScript:               string(rawScript),
 		Warnings:                warnings,
@@ -990,10 +996,12 @@ func sampledFunctions(raw []byte) ([]functionSample, []functionSample, int, int,
 	userSamples := 0
 	kernelSamples := 0
 	needLeaf := true
+	seenInSample := map[string]struct{}{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			needLeaf = true
+			seenInSample = map[string]struct{}{}
 			continue
 		}
 		fields := strings.Fields(line)
@@ -1009,7 +1017,14 @@ func sampledFunctions(raw []byte) ([]functionSample, []functionSample, int, int,
 			frame = "0x" + address + " [unknown]"
 		}
 		kernel := strings.HasPrefix(address, "ffffffff") || strings.Contains(frame, "[kernel.kallsyms]") || strings.Contains(frame, "[kernel.vmlinux]")
-		cumulative[frame]++
+		// A perf call chain can repeat a frame through recursive wrappers or
+		// stitched unwind segments. Count one occurrence per sample so the
+		// cumulative table remains a sample count (never greater than the
+		// number of samples solely because a frame repeats in one stack).
+		if _, seen := seenInSample[frame]; !seen {
+			cumulative[frame]++
+			seenInSample[frame] = struct{}{}
+		}
 		if needLeaf {
 			samples++
 			leaves[frame]++
