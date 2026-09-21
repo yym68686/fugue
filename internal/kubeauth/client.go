@@ -49,6 +49,6 @@ func Load(namespace string, timeout time.Duration, maxIdle, maxIdleHost int, for
 	}
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.TLSHandshakeTimeout = 5 * time.Second
-	client := &http.Client{Transport: transport, Timeout: timeout}
+	client := &http.Client{Transport: HTTPObservations.Wrap(transport, classifyRequest), Timeout: timeout}
 	return Config{BaseURL: "https://" + host + ":" + port, Token: strings.TrimSpace(string(token)), Namespace: namespace}, client, nil
 }

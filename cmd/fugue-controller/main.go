@@ -12,7 +12,9 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/controller"
+	"fugue/internal/kubeauth"
 	"fugue/internal/livediagnostics"
+	"fugue/internal/runtimeobservation"
 	"fugue/internal/store"
 )
 
@@ -47,6 +49,9 @@ func main() {
 	defer stop()
 	if err := livediagnostics.StartRuntimeEndpoint(ctx, "controller"); err != nil {
 		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
+	}
+	if err := runtimeobservation.Start(ctx, "controller", map[string]runtimeobservation.Provider{"http-client": kubeauth.HTTPObservations.Snapshot}); err != nil {
+		logger.Printf("runtime observations unavailable: %v", err)
 	}
 
 	service := controller.New(store, cfg, logger)

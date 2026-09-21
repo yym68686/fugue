@@ -71,6 +71,14 @@ agent registers log-source cursor/timing/outcome metadata and collection-cycle
 budgets; observations never include log bodies or alter collection cursors.
 Source eviction and output limits are explicit in the snapshot.
 
+API and controller also expose an `http-client` provider for their shared
+Kubernetes client. It retains 2,048 recent completed requests with normalized
+resource/cache selection, response-header time, body-consumption time and bytes.
+It excludes URLs, object names, query values, headers and payloads. Ring overwrite
+and in-flight requests are explicit, so a snapshot cannot imply full historical
+coverage. These client facts complement audit logs when the audit policy excludes
+read requests, without changing Kubernetes audit settings.
+
 Kubernetes observation recipes can use `field_selector` and explicit
 `annotation_keys` to inspect event reasons and controller state without dumping
 all annotations. Credential-related and last-applied configuration annotations
