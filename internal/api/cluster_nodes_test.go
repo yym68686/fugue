@@ -700,6 +700,14 @@ func TestListClusterNodesIncludesCNPGBackingServiceWorkloads(t *testing.T) {
 					"items": []map[string]any{
 						{
 							"metadata": map[string]any{
+								"name": "demo-7b95d6b54f-z2f4g", "namespace": namespace,
+								"labels": map[string]string{runtime.FugueLabelName: "demo", runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue, runtime.FugueLabelAppID: app.ID},
+							},
+							"spec":   map[string]any{"nodeName": "worker-1"},
+							"status": map[string]any{"phase": "Running"},
+						},
+						{
+							"metadata": map[string]any{
 								"name":      service.Spec.Postgres.ServiceName + "-1",
 								"namespace": namespace,
 								"labels": map[string]string{

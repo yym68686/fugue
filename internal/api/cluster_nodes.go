@@ -1012,14 +1012,18 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 		return nil, err
 	}
 
-	podsByNode, err := c.listManagedPodsByNode(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	requestPodsByNode, hasRequestPods, err := c.listActivePodsByNode(ctx)
 	if err != nil {
 		return nil, err
+	}
+	podsByNode := managedPodsFromActiveSnapshot(requestPodsByNode)
+	if !hasRequestPods {
+		// A cluster-scoped inventory may be forbidden while label-scoped
+		// reads are available. Preserve that existing degraded mode.
+		podsByNode, err = c.listManagedPodsByNode(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	summariesByNode, err := c.listNodeSummaries(ctx, nodeList.Items)
@@ -1044,6 +1048,36 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 		})
 	}
 	return snapshots, nil
+}
+
+func managedPodsFromActiveSnapshot(active map[string][]clusterNodePod) map[string][]clusterNodePod {
+	result := make(map[string][]clusterNodePod)
+	for node, pods := range active {
+		seen := make(map[string]bool)
+		// Match the same equality/existence selectors and precedence as the
+		// original two list calls, including labels with empty values.
+		for _, owner := range []string{"fugue", "cloudnative-pg"} {
+			for _, pod := range pods {
+				if pod.Metadata.Labels["app.kubernetes.io/managed-by"] != owner {
+					continue
+				}
+				label := "app.kubernetes.io/name"
+				if owner == "cloudnative-pg" {
+					label = clusterNodeCNPGClusterLabel
+				}
+				if _, exists := pod.Metadata.Labels[label]; !exists {
+					continue
+				}
+				key := clusterNamespacedResourceKey(strings.TrimSpace(pod.Metadata.Namespace), strings.TrimSpace(pod.Metadata.Name))
+				if key != "" && seen[key] {
+					continue
+				}
+				seen[key] = true
+				result[node] = append(result[node], pod)
+			}
+		}
+	}
+	return result
 }
 
 func (c *clusterNodeClient) listManagedPodsByNode(ctx context.Context) (map[string][]clusterNodePod, error) {

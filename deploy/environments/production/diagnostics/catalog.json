@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 19,
+    "generation": 20,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,21 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "kubernetes-object-changes",
+        "description": "Short resource-version-bound watch of an exact object's status",
+        "image": "$runner",
+        "profile": "cluster-read",
+        "target_types": ["platform_component"],
+        "max_duration_seconds": 30,
+        "parameters": {
+          "resource": {"default": "clusters", "max_length": 80, "pattern": "^[a-z][a-z0-9.-]*$"},
+          "group": {"default": "postgresql.cnpg.io", "max_length": 100, "pattern": "^[a-z][a-z0-9.-]*$"},
+          "namespace": {"required": true, "max_length": 63, "pattern": "^[a-z0-9][a-z0-9-]*$"},
+          "name": {"required": true, "max_length": 253, "pattern": "^[a-z0-9][a-z0-9.-]*$"}
+        },
+        "config": {"collectors": [{"name": "object-changes", "kind": "kubernetes-object-changes", "group": "{{param.group}}", "resource": "{{param.resource}}", "namespace": "{{param.namespace}}", "object_name": "{{param.name}}", "fields": ["status"], "capture_seconds": 5, "interval_seconds": 120}]}
+      },
       {
         "id": "kubernetes-audit-object-activity",
         "description": "Bounded object-level caller and write activity for an explicit Kubernetes resource",

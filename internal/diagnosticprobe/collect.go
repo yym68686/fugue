@@ -196,6 +196,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return hostKubernetesAudit(ctx, req, c)
 	case "kubernetes-objects":
 		return k.objects(ctx, req, c)
+	case "kubernetes-object-changes":
+		return k.objectChanges(ctx, req, c)
 	case "kubernetes-logs":
 		return k.logs(ctx, req, c)
 	case "prometheus":
