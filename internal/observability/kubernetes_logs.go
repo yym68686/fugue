@@ -149,10 +149,15 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	remaining.Store(budget)
 	workers := min(8, len(targets))
 	type indexedTarget struct {
-		target kubernetesLogTarget
-		offset int
+		target   kubernetesLogTarget
+		offset   int
+		reserved int64
 	}
 	jobs := make(chan indexedTarget)
+	completed := make(chan int, workers)
+	// Reserve before opening a stream so a fast response cannot spend a slower
+	// stream's share. Workers borrow only unreserved slots and refund unused ones.
+	reservation := max(int64(1), min(int64(c.pipeline.cfg.BatchSize), budget/int64(workers)))
 	var firstBlocked atomic.Int64
 	firstBlocked.Store(int64(len(targets)))
 	var wg sync.WaitGroup
@@ -161,13 +166,17 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				if c.collectCursorTarget(ctx, job.target, &remaining) {
+				var local atomic.Int64
+				local.Store(job.reserved)
+				if c.collectReservedCursorTarget(ctx, job.target, &local, &remaining) {
 					for old := firstBlocked.Load(); int64(job.offset) < old; old = firstBlocked.Load() {
 						if firstBlocked.CompareAndSwap(old, int64(job.offset)) {
 							break
 						}
 					}
 				}
+				remaining.Add(local.Load())
+				completed <- job.offset
 			}
 		}()
 	}
@@ -178,18 +187,43 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		}
 	}
 	scheduled := 0
-	for i := range targets {
-		target := targets[(i+c.targetOffset)%len(targets)]
-		if remaining.Load() <= 0 || ctx.Err() != nil {
+	inFlight := 0
+	for scheduled < len(targets) && ctx.Err() == nil {
+		grant := int64(0)
+		if inFlight < workers {
+			for left := remaining.Load(); left > 0; left = remaining.Load() {
+				grant = min(reservation, left)
+				if remaining.CompareAndSwap(left, left-grant) {
+					break
+				}
+				grant = 0
+			}
+		}
+		if grant > 0 {
+			target := targets[(scheduled+c.targetOffset)%len(targets)]
+			select {
+			case jobs <- indexedTarget{target, scheduled, grant}:
+				inFlight++
+				scheduled++
+			case <-ctx.Done():
+				remaining.Add(grant)
+			}
+			continue
+		}
+		if inFlight == 0 {
 			break
 		}
 		select {
-		case jobs <- indexedTarget{target, i}:
-			scheduled++
+		case <-completed:
+			inFlight--
 		case <-ctx.Done():
 		}
 	}
 	close(jobs)
+	for inFlight > 0 {
+		<-completed
+		inFlight--
+	}
 	wg.Wait()
 	// A request may have been scheduled before another worker spent the budget.
 	// Resume at the first source that made no progress, including in-flight reads.

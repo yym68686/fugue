@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-func TestCollectionResumesAtSourceWhoseInFlightRequestLostCycleBudget(t *testing.T) {
+func TestCollectionResumesAtFirstUnscheduledSourceAndReturnsUnusedBudget(t *testing.T) {
 	var p *Pipeline
 	ts := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
 	opened := make(chan struct{}, 3)
@@ -30,17 +30,8 @@ func TestCollectionResumesAtSourceWhoseInFlightRequestLostCycleBudget(t *testing
 			return
 		}
 		opened <- struct{}{}
-		deadline := time.Now().Add(3 * time.Second)
-		for len(opened) < 3 && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
-		}
 		if strings.Contains(r.URL.Path, "/pods/a/") {
 			return
-		}
-		if strings.Contains(r.URL.Path, "/pods/c/") {
-			for p.kubernetesLogLines.Load() == 0 && time.Now().Before(deadline) {
-				time.Sleep(time.Millisecond)
-			}
 		}
 		fmt.Fprintf(w, "%s one\n", ts)
 	}))
@@ -49,8 +40,39 @@ func TestCollectionResumesAtSourceWhoseInFlightRequestLostCycleBudget(t *testing
 	p = NewPipeline(Config{Enabled: true, QueueSize: 32, KubernetesLogMaxLinesPerCycle: 1, KubernetesLogPollInterval: 5 * time.Second}, nil)
 	c := newKubernetesLogCollectorWithClient(p, client)
 	c.collectOnce(t.Context())
-	if len(opened) != 3 || p.kubernetesLogLines.Load() != 1 || c.targetOffset != 2 {
+	if len(opened) != 2 || p.kubernetesLogLines.Load() != 1 || c.targetOffset != 2 {
 		t.Fatalf("in-flight blocked source did not get next turn: requests=%d lines=%d offset=%d", len(opened), p.kubernetesLogLines.Load(), c.targetOffset)
+	}
+}
+
+func TestCollectionReservesBudgetForSlowerInFlightSource(t *testing.T) {
+	var p *Pipeline
+	ts := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/pods" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"name":"slow","namespace":"ns"},"spec":{"containers":[{"name":"app"}]}},{"metadata":{"name":"fast","namespace":"ns"},"spec":{"containers":[{"name":"app"}]}}]}`)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/slow/") {
+			deadline := time.Now().Add(time.Second)
+			for p.kubernetesLogLines.Load() < 2 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+		}
+		for i := 0; i < 10; i++ {
+			fmt.Fprintf(w, "%s line-%d\n", ts, i)
+		}
+	}))
+	defer server.Close()
+	client, _ := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	p = NewPipeline(Config{Enabled: true, QueueSize: 32, KubernetesLogMaxLinesPerCycle: 4, KubernetesLogTailLines: 10}, nil)
+	c := newKubernetesLogCollectorWithClient(p, client)
+	c.collectOnce(t.Context())
+	v, _ := p.DiagnosticSources(t.Context())
+	rows := v.(map[string]any)["sources"].([]logSourceObservation)
+	if len(rows) != 2 || rows[0].Lines != 2 || rows[1].Lines != 2 || p.kubernetesLogLines.Load() != 4 || p.dropped.Load() != 0 {
+		t.Fatalf("fast source consumed slower source budget: %+v", rows)
 	}
 }
 

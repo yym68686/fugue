@@ -68,6 +68,22 @@ func logTargetKey(t kubernetesLogTarget) string {
 // inclusive timestamp plus boundary occurrence counts preserves equal-time
 // duplicate lines without replaying the entire history on every poll.
 func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, target kubernetesLogTarget, budget *atomic.Int64) (budgetBlockedWithoutProgress bool) {
+	return c.collectReservedCursorTarget(parent, target, budget, nil)
+}
+
+func takeLogBudget(budget *atomic.Int64) bool {
+	if budget == nil {
+		return false
+	}
+	for left := budget.Load(); left > 0; left = budget.Load() {
+		if budget.CompareAndSwap(left, left-1) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Context, target kubernetesLogTarget, budget, shared *atomic.Int64) (budgetBlockedWithoutProgress bool) {
 	if parent.Err() != nil {
 		return false
 	}
@@ -168,10 +184,9 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 			cur.PendingAt = ts
 			break
 		}
-		if budget.Add(-1) < 0 {
+		if !takeLogBudget(budget) && !takeLogBudget(shared) {
 			budgetBlockedWithoutProgress = n == 0
 			observation.Outcome = "cycle_budget"
-			budget.Add(1)
 			truncated = true
 			cur.PendingAt = ts
 			break
