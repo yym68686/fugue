@@ -63,6 +63,14 @@ service unit and a lookback of at most 24 hours, with entry and byte limits,
 redacted examples, source timestamps and explicit partial-coverage reporting.
 These recipes can be registered or removed through catalog configuration.
 
+Components can register bounded, read-only snapshot providers with
+`runtimeobservation.Start`. This exposes a root-only Unix socket and a stable
+provider discovery endpoint, without opening a network listener. Independent
+`runtime-json` recipes select provider paths and output fields. The telemetry
+agent registers log-source cursor/timing/outcome metadata and collection-cycle
+budgets; observations never include log bodies or alter collection cursors.
+Source eviction and output limits are explicit in the snapshot.
+
 Kubernetes observation recipes can use `field_selector` and explicit
 `annotation_keys` to inspect event reasons and controller state without dumping
 all annotations. Credential-related and last-applied configuration annotations

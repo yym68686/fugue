@@ -204,6 +204,9 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	c.pipeline.kubernetesPriorityTargets.Store(int64(priorityTargets))
 	c.pipeline.kubernetesLogPods.Store(int64(podCount))
 	c.pipeline.kubernetesLogCycleMillis.Store(time.Since(started).Milliseconds())
+	c.pipeline.sourceObservationMu.Lock()
+	c.pipeline.sourceObservationCycle = logCycleObservation{At: started, Targets: len(targets), Scheduled: scheduled, Visited: c.cycleVisited.Load(), InitialBudget: budget, RemainingBudget: remaining.Load(), PollMillis: c.pipeline.cfg.KubernetesLogPollInterval.Milliseconds(), PerSourceLimit: c.pipeline.cfg.KubernetesLogTailLines, CycleLimit: c.pipeline.cfg.KubernetesLogMaxLinesPerCycle}
+	c.pipeline.sourceObservationMu.Unlock()
 }
 
 func (c *kubernetesLogCollector) kubernetesLogTargets(ctx context.Context, labelSelector string, enforcePodLimit bool) ([]kubernetesLogTarget, int, bool) {

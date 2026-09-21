@@ -270,7 +270,7 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           changed=false
-          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/diagnostics/package.json Dockerfile.diagnostics cmd/fugue-diagnostic-probe cmd/fugue-api/diagnostic_agent internal/diagnosticprobe internal/livediagnostics internal/observability internal/model go.mod go.sum .github/workflows/ci.yml; then
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/diagnostics/package.json Dockerfile.diagnostics cmd/fugue-diagnostic-probe cmd/fugue-api/diagnostic_agent internal/diagnosticprobe internal/livediagnostics internal/runtimeobservation internal/observability internal/model go.mod go.sum .github/workflows/ci.yml; then
             changed=true
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"

@@ -199,6 +199,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return k.prometheus(ctx, req, c)
 	case "service-json":
 		return k.serviceJSON(ctx, req, c)
+	case "runtime-json":
+		return runtimeJSON(ctx, req, c)
 	default:
 		return nil, fmt.Errorf("collector %q is not supported by this package image", c.Kind)
 	}

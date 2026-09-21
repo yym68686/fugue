@@ -38,7 +38,12 @@ type commandObservation struct {
 // lines or environment values are exported. The sampler is killed as a group
 // before its RSS consumes the whole diagnostic container memory allowance.
 func observedCommand(ctx context.Context, limit int, rssLimit uint64, name string, args ...string) ([]byte, bool, commandObservation, error) {
+	return observedCommandEnvironment(ctx, limit, rssLimit, nil, name, args...)
+}
+
+func observedCommandEnvironment(ctx context.Context, limit int, rssLimit uint64, environment []string, name string, args ...string) ([]byte, bool, commandObservation, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), environment...)
 	configureCommandCancellation(cmd)
 	cmd.WaitDelay = time.Second
 	out, stderr := &boundedOutput{limit: limit}, &boundedOutput{limit: 4096}

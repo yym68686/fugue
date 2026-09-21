@@ -33,7 +33,7 @@ func processCPUProfile(ctx context.Context, req livediagnostics.ProbeRequest, c 
 	} else {
 		args = append(args, "--process-name", req.Target.ProcessName)
 	}
-	raw, truncated, observation, err := observedCommand(ctx, 8<<20, 192<<20, "/usr/local/bin/fugue-diagnostic-agent", args...)
+	raw, truncated, observation, err := observedCommandEnvironment(ctx, 8<<20, 192<<20, []string{"GOMEMLIMIT=128MiB"}, "/usr/local/bin/fugue-diagnostic-agent", args...)
 	if err != nil {
 		detail := boundedError(err)
 		var failure struct {

@@ -62,3 +62,11 @@ func TestObservedCommandStopsOnlyOwnedProcessGroupAtMemoryBudget(t *testing.T) {
 		t.Fatalf("memory supervisor did not stop sampler: %+v %v", obs, err)
 	}
 }
+
+func TestObservedCommandMemorySettingIsChildOnly(t *testing.T) {
+	old := os.Getenv("GOMEMLIMIT")
+	raw, _, _, err := observedCommandEnvironment(context.Background(), 128, 192<<20, []string{"GOMEMLIMIT=128MiB"}, "sh", "-c", "printf %s \"$GOMEMLIMIT\"")
+	if err != nil || string(raw) != "128MiB" || os.Getenv("GOMEMLIMIT") != old {
+		t.Fatalf("child environment affected supervisor: %q %v", raw, err)
+	}
+}

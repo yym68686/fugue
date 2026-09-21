@@ -15,6 +15,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/observability"
+	"fugue/internal/runtimeobservation"
 )
 
 const (
@@ -51,6 +52,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := runtimeobservation.Start(ctx, "telemetry-agent", map[string]runtimeobservation.Provider{"log-sources": agent.pipeline.DiagnosticSources}); err != nil {
+		logger.Printf("runtime observations unavailable: %v", err)
+	}
 	if err := agent.pipeline.Start(ctx); err != nil {
 		logger.Printf("telemetry pipeline degraded: %v", err)
 	}

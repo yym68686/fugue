@@ -119,6 +119,10 @@ type telemetryTenantMeterSnapshot struct {
 }
 
 type Pipeline struct {
+	sourceObservationMu          sync.Mutex
+	sourceObservations           map[string]logSourceObservation
+	sourceObservationEvicted     uint64
+	sourceObservationCycle       logCycleObservation
 	kubernetesLogCycleMillis     atomic.Int64
 	kubernetesLogBacklogMillis   atomic.Int64
 	kubernetesLogDeferredTargets atomic.Int64

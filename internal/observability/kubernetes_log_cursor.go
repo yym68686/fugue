@@ -104,13 +104,23 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 		}
 	}
 	original := cur.Time
+	observation := logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, Outcome: "drained"}
+	defer func() {
+		observation.CursorAfter = cur.Time
+		observation.PendingAt = cur.PendingAt
+		observation.DrainedThrough = cur.DrainedThrough
+		observation.TotalMillis = time.Since(now).Milliseconds()
+		c.pipeline.observeLogSource(observation)
+	}()
 	boundary := cur.Boundary
 	seen := map[[32]byte]int{}
 	ctx, cancel := context.WithTimeout(parent, c.pipeline.cfg.KubernetesLogPollInterval)
 	defer cancel()
 	since := metav1.NewTime(cur.Time)
 	stream, err := c.client.CoreV1().Pods(target.pod.Namespace).GetLogs(target.pod.Name, &corev1.PodLogOptions{Container: target.container, Timestamps: true, SinceTime: &since, Previous: target.previous}).Stream(ctx)
+	observation.OpenMillis = time.Since(now).Milliseconds()
 	if err != nil {
+		observation.Outcome = "open_error"
 		if !isBenignKubernetesLogReadError(err) && parent.Err() == nil {
 			c.pipeline.kubernetesLogErrors.Add(1)
 			c.pipeline.recordError(fmt.Errorf("read Kubernetes cursor logs: %w", err))
@@ -128,6 +138,7 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 	for scanner.Scan() {
 		ts, msg := splitKubernetesLogLine(scanner.Text())
 		if ts.IsZero() {
+			observation.Outcome = "source_unavailable"
 			// Kubelet can return HTTP 200 with an untimestamped unavailable-log
 			// message after container GC. Count the loss once and retry with backoff.
 			if !cur.SourceUnavailable {
@@ -149,17 +160,20 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 			}
 		}
 		if n >= int(c.pipeline.cfg.KubernetesLogTailLines) {
+			observation.Outcome = "source_budget"
 			truncated = true
 			cur.PendingAt = ts
 			break
 		}
 		if budget.Add(-1) < 0 {
+			observation.Outcome = "cycle_budget"
 			budget.Add(1)
 			truncated = true
 			cur.PendingAt = ts
 			break
 		}
 		if !c.pipeline.IngestLogLineWithAttributes(ctx, source, msg, attrs, ts) {
+			observation.Outcome = "queue_rejected"
 			budget.Add(1)
 			truncated = true
 			cur.PendingAt = ts
@@ -167,6 +181,7 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 		}
 		cur.PendingAt = time.Time{}
 		n++
+		observation.Lines = n
 		c.pipeline.kubernetesLogLines.Add(1)
 		if kubernetesLogPriorityMessage(msg) {
 			c.pipeline.kubernetesPriorityLines.Add(1)
@@ -178,8 +193,12 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 		cur.Boundary[hash]++
 	}
 	if err = scanner.Err(); err != nil && parent.Err() == nil {
+		observation.Outcome = "scan_error"
 		c.pipeline.kubernetesLogErrors.Add(1)
 		c.pipeline.recordError(fmt.Errorf("scan Kubernetes cursor logs: %w", err))
+	}
+	if parent.Err() != nil {
+		observation.Outcome = "canceled"
 	}
 	if err == nil && !invalid && !truncated {
 		cur.PendingAt = time.Time{}
