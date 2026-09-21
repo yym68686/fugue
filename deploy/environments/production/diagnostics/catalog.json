@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 3,
+    "generation": 4,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -378,6 +378,22 @@
                 "queue",
                 "lines",
                 "errors"
+              ]
+            },
+            {
+              "name": "pipeline-effective-status",
+              "kind": "service-json",
+              "interval_seconds": 15,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-telemetry-agent",
+                "port": "http"
+              },
+              "path": "/readyz",
+              "fields": [
+                "status",
+                "observability",
+                "pipeline"
               ]
             }
           ]

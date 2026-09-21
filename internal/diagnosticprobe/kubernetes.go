@@ -303,15 +303,24 @@ func (k *kubeReader) logs(ctx context.Context, req livediagnostics.ProbeRequest,
 }
 
 func (k *kubeReader) prometheus(ctx context.Context, req livediagnostics.ProbeRequest, c Collector) (any, error) {
-	if err := k.init(); err != nil {
+	serviceURL, err := k.serviceURL(ctx, c)
+	if err != nil {
 		return nil, err
 	}
+	endpoint := serviceURL + "/api/v1/query"
+	return k.queryMetrics(ctx, req, c, endpoint)
+}
+
+func (k *kubeReader) serviceURL(ctx context.Context, c Collector) (string, error) {
+	if err := k.init(); err != nil {
+		return "", err
+	}
 	if c.Service == nil || c.Service.Name == "" || c.Service.Namespace == "" {
-		return nil, errors.New("metrics reader requires an explicit Kubernetes service reference")
+		return "", errors.New("service reader requires an explicit Kubernetes service reference")
 	}
 	raw, err := k.get(ctx, k.base+"/api/v1/namespaces/"+url.PathEscape(c.Service.Namespace)+"/services/"+url.PathEscape(c.Service.Name), true)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	var service struct {
 		Spec struct {
@@ -323,7 +332,7 @@ func (k *kubeReader) prometheus(ctx context.Context, req livediagnostics.ProbeRe
 		} `json:"spec"`
 	}
 	if err := json.Unmarshal(raw, &service); err != nil {
-		return nil, err
+		return "", err
 	}
 	port := 0
 	for _, p := range service.Spec.Ports {
@@ -333,9 +342,47 @@ func (k *kubeReader) prometheus(ctx context.Context, req livediagnostics.ProbeRe
 	}
 	ip := net.ParseIP(service.Spec.ClusterIP)
 	if ip == nil || port < 1 || port > 65535 {
-		return nil, errors.New("metrics service has no matching cluster endpoint")
+		return "", errors.New("service has no matching cluster endpoint")
 	}
-	endpoint := "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(port)) + "/api/v1/query"
+	return "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(port)), nil
+}
+
+func (k *kubeReader) serviceJSON(ctx context.Context, req livediagnostics.ProbeRequest, c Collector) (any, error) {
+	parsed, err := url.Parse(c.Path)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(c.Path, "/") || parsed.RawQuery != "" || parsed.Fragment != "" || len(c.Fields) == 0 {
+		return nil, errors.New("service observation requires a fixed local path and explicit output fields")
+	}
+	endpoint, err := k.serviceURL(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := k.get(ctx, endpoint+c.Path, false)
+	if err != nil {
+		return nil, err
+	}
+	var object map[string]any
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil {
+		return nil, errors.New("service did not return an observation object")
+	}
+	result := map[string]any{}
+	gaps := []string{}
+	for _, field := range c.Fields {
+		value, found := jsonField(object, strings.Split(field, "."))
+		if !found {
+			gaps = append(gaps, "service field unavailable: "+field)
+			continue
+		}
+		result[field] = redactJSON(map[string]any{field: value}).(map[string]any)[field]
+	}
+	if len(gaps) > 0 {
+		return partialValue{Value: result, Gaps: gaps}, nil
+	}
+	return result, nil
+}
+
+func (k *kubeReader) queryMetrics(ctx context.Context, req livediagnostics.ProbeRequest, c Collector, endpoint string) (any, error) {
 	names := make([]string, 0, len(c.Queries))
 	for name := range c.Queries {
 		names = append(names, name)

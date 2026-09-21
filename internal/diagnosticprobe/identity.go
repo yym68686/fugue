@@ -43,6 +43,7 @@ func processIdentities(ctx context.Context, req livediagnostics.ProbeRequest, pr
 		identity, err := executableIdentity(filepath.Join(root, "exe"))
 		if err != nil {
 			gaps = append(gaps, "executable metadata unavailable for PID "+strconv.Itoa(process.PID)+": "+boundedError(err))
+			identities = append(identities, map[string]any{"pid": process.PID, "start_ticks": process.StartTicks, "security": processSecurity(root), "executable_error": boundedError(err)})
 			continue
 		}
 		identity["pid"], identity["start_ticks"], identity["cgroup"] = process.PID, process.StartTicks, process.Cgroup
@@ -60,11 +61,30 @@ func processIdentities(ctx context.Context, req livediagnostics.ProbeRequest, pr
 		}
 		identities = append(identities, identity)
 	}
-	result := map[string]any{"executables": identities, "target_processes": len(inventory)}
+	result := map[string]any{"executables": identities, "target_processes": len(inventory), "observer_security": processSecurity("/proc/self")}
 	if len(gaps) > 0 {
 		return partialValue{Value: result, Gaps: gaps, Truncated: len(inventory) > 16}, nil
 	}
 	return result, nil
+}
+
+func processSecurity(root string) map[string]any {
+	result := map[string]any{}
+	if value, err := readBounded(filepath.Join(root, "status"), 32<<10); err == nil {
+		for _, line := range strings.Split(value, "\n") {
+			key, data, _ := strings.Cut(line, ":")
+			switch key {
+			case "Uid", "Gid", "CapEff", "CapPrm", "CapBnd", "NoNewPrivs", "Seccomp", "TracerPid":
+				result[key] = strings.TrimSpace(data)
+			}
+		}
+	}
+	for _, name := range []string{"attr/current", "uid_map", "gid_map"} {
+		if value, err := readBounded(filepath.Join(root, name), 4096); err == nil {
+			result[name] = strings.TrimSpace(value)
+		}
+	}
+	return result
 }
 
 func executableIdentity(filename string) (map[string]any, error) {

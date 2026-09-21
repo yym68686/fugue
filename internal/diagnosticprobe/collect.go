@@ -40,6 +40,7 @@ type Collector struct {
 	SinceSeconds    int               `json:"since_seconds,omitempty"`
 	Match           []string          `json:"match,omitempty"`
 	Service         *Service          `json:"service,omitempty"`
+	Path            string            `json:"path,omitempty"`
 	Queries         map[string]string `json:"queries,omitempty"`
 	RequiredQueries []string          `json:"required_queries,omitempty"`
 }
@@ -181,6 +182,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return k.logs(ctx, req, c)
 	case "prometheus":
 		return k.prometheus(ctx, req, c)
+	case "service-json":
+		return k.serviceJSON(ctx, req, c)
 	default:
 		return nil, fmt.Errorf("collector %q is not supported by this package image", c.Kind)
 	}
