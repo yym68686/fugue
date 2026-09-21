@@ -51,7 +51,7 @@ func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (an
 	defer os.RemoveAll(dir)
 	results := []any{}
 	gaps := []string{}
-	for _, mode := range []string{"cgroup", "pid", "cgroup-dwarf"} {
+	for _, mode := range []string{"cgroup", "pid", "cgroup-dwarf", "cgroup-fp"} {
 		file := filepath.Join(dir, mode+".data")
 		args := []string{"record", "-e", "cpu-clock", "-F", "19", "--no-buildid-mmap", "-o", file}
 		if strings.HasPrefix(mode, "cgroup") {
@@ -61,6 +61,9 @@ func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (an
 		}
 		if mode == "cgroup-dwarf" {
 			args = append(args, "--call-graph", "dwarf,8192")
+		}
+		if mode == "cgroup-fp" {
+			args = append(args, "--call-graph", "fp")
 		}
 		args = append(args, "--", "sleep", "5")
 		_, stderr, truncated, err := diagnosticCommandEvidence(ctx, 16<<10, "perf", args...)
@@ -84,7 +87,7 @@ func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (an
 		if cut {
 			gaps = append(gaps, mode+" report truncated")
 		}
-		if mode == "cgroup-dwarf" {
+		if mode == "cgroup-dwarf" || mode == "cgroup-fp" {
 			for _, symfs := range []bool{false, true} {
 				args := []string{"report", "--stdio", "--stdio-color", "never", "--no-children", "--call-graph", "none", "--percent-limit", "0", "--field-separator", "|", "--fields", "overhead,sample,overhead_sys,overhead_us,pid,comm,dso,symbol", "--sort", "pid,comm,dso,symbol", "-i", file}
 				name := "machine_report"
