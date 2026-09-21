@@ -33,7 +33,7 @@ func processCPUProfile(ctx context.Context, req livediagnostics.ProbeRequest, c 
 	} else {
 		args = append(args, "--process-name", req.Target.ProcessName)
 	}
-	raw, truncated, err := diagnosticCommand(ctx, 8<<20, "/usr/local/bin/fugue-diagnostic-agent", args...)
+	raw, truncated, observation, err := observedCommand(ctx, 8<<20, 192<<20, "/usr/local/bin/fugue-diagnostic-agent", args...)
 	if err != nil {
 		detail := boundedError(err)
 		var failure struct {
@@ -42,7 +42,7 @@ func processCPUProfile(ctx context.Context, req livediagnostics.ProbeRequest, c 
 		if json.Unmarshal(raw, &failure) == nil && failure.Error != "" {
 			detail = safeText(failure.Error)
 		}
-		return partialValue{Value: map[string]any{"sampler_error": detail, "preflight": perfPreflight()}, Gaps: []string{"CPU sampler failed: " + boundedError(errors.New(detail))}}, nil
+		return partialValue{Value: map[string]any{"sampler_error": detail, "preflight": perfPreflight(), "sampler_resources": observation}, Gaps: []string{"CPU sampler failed: " + boundedError(errors.New(detail))}}, nil
 	}
 	if truncated {
 		return nil, errors.New("CPU sampler output exceeded the transport budget")
@@ -59,7 +59,19 @@ func processCPUProfile(ctx context.Context, req livediagnostics.ProbeRequest, c 
 			return nil, errors.New("target process identity changed during CPU capture")
 		}
 	}
-	return profileEvidence(raw)
+	value, err := profileEvidence(raw)
+	if err != nil {
+		return nil, err
+	}
+	if partial, ok := value.(partialValue); ok {
+		partial.Value.(map[string]any)["sampler_resources"] = observation
+		return partial, nil
+	}
+	value.(map[string]any)["sampler_resources"] = observation
+	if len(observation.Missing) > 0 {
+		return partialValue{Value: value, Gaps: observation.Missing}, nil
+	}
+	return value, nil
 }
 
 func profileProcessIdentities(ctx context.Context, req livediagnostics.ProbeRequest) (map[int]string, error) {
