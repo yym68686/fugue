@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 9,
+    "generation": 10,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,18 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "kubernetes-audit-requests",
+        "description": "Bounded audit request rates, callers, cache options and completed-request durations",
+        "image": "ghcr.io/yym68686/fugue-api@sha256:6fe95477cf3381c2b30092ca85372d4c65668ecf2468213a7260a7c589959ec8",
+        "profile": "process-profile",
+        "target_types": ["node_process"],
+        "max_duration_seconds": 30,
+        "parameters": {},
+        "config": {
+          "collectors": [{"name": "audit-requests", "kind": "kubernetes-audit", "path": "/var/log/fugue/kubernetes/audit*.log", "since_seconds": 300, "interval_seconds": 120}]
+        }
+      },
       {
         "id": "process-cpu-sampling",
         "description": "Bounded process CPU sample counts, cgroup pressure and symbol coverage",
