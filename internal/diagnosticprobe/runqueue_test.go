@@ -44,6 +44,10 @@ func TestSchedulerUnpairedAndConflictingTransitionsAreExplicit(t *testing.T) {
 	if _, exists := out["max_wait_ns"]; exists {
 		t.Fatal("no pairs reported as zero latency")
 	}
+	examples := out["conflict_examples"].([]map[string]any)
+	if len(examples) != 1 || examples[0]["tid"] != 42 || len(examples[0]["preceding_events"].([]schedulerEvent)) != 2 {
+		t.Fatalf("conflict context is missing: %+v", examples)
+	}
 }
 
 func TestSchedulerEventLimitsAndMalformedLossCannotDisappear(t *testing.T) {

@@ -129,6 +129,8 @@ The production recipe uses a one-second event burst plus node snapshots; mapping
 synthesis is disabled because thread identity comes directly from procfs.
 Only the captured burst has thread latency coverage. Failed recordings retain
 bounded decode counts for collector troubleshooting but no latency estimates.
+Up to eight conflicting transitions retain four preceding events from the same
+thread, including numeric thread identities and monotonic timestamps only.
 It reads already mounted host tracefs metadata and opens temporary perf event
 descriptors; it does not mount tracefs, enable schedstats, or modify global
 tracing configuration. Its filters include wakeups issued outside the target

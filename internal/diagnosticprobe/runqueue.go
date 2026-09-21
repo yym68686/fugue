@@ -186,6 +186,11 @@ func processRunqueueLatency(ctx context.Context, req livediagnostics.ProbeReques
 	latencies := schedulerLatencies(events, stable)
 	result["latencies"] = latencies
 	conflicts := latencies["conflicting_transitions"].(int)
+	result["transition_coverage"] = map[string]any{
+		"completed_pairs": latencies["completed_pairs"], "unpaired_switch_ins": latencies["unpaired_switch_ins"],
+		"pending_at_end": latencies["pending_at_end"], "conflicting_transitions": conflicts,
+		"conflict_examples": latencies["conflict_examples"],
+	}
 	if conflicts > 0 {
 		gaps = append(gaps, "conflicting scheduler transitions prevent complete latency attribution")
 	}
@@ -302,10 +307,27 @@ func schedulerLatencies(events []schedulerEvent, threads map[int]schedulerThread
 	pending := map[int]schedulerPair{}
 	pairs := []schedulerPair{}
 	unpaired, conflicts := 0, 0
+	examples := []map[string]any{}
+	recent := map[int][]schedulerEvent{}
+	observe := func(tid int, e schedulerEvent, conflict bool) {
+		if _, ok := threads[tid]; !ok {
+			return
+		}
+		if conflict && len(examples) < 8 {
+			examples = append(examples, map[string]any{"tid": tid, "prior_runnable": pending[tid], "preceding_events": append([]schedulerEvent{}, recent[tid]...), "event": e})
+		}
+		history := append(recent[tid], e)
+		if len(history) > 4 {
+			history = history[len(history)-4:]
+		}
+		recent[tid] = history
+	}
 	for _, e := range events {
 		if e.Kind == "sched_wakeup" {
 			if identity, ok := threads[e.PID]; ok {
-				if _, exists := pending[e.PID]; exists {
+				_, exists := pending[e.PID]
+				observe(e.PID, e, exists)
+				if exists {
 					conflicts++
 					delete(pending, e.PID)
 					continue
@@ -315,6 +337,7 @@ func schedulerLatencies(events []schedulerEvent, threads map[int]schedulerThread
 			continue
 		}
 		if _, ok := threads[e.Next]; ok {
+			observe(e.Next, e, false)
 			if pair, exists := pending[e.Next]; exists && e.At >= pair.Start {
 				pair.End, pair.Wait = e.At, e.At-pair.Start
 				pairs = append(pairs, pair)
@@ -324,7 +347,9 @@ func schedulerLatencies(events []schedulerEvent, threads map[int]schedulerThread
 			delete(pending, e.Next)
 		}
 		if identity, ok := threads[e.Prev]; ok {
-			if _, exists := pending[e.Prev]; exists {
+			_, exists := pending[e.Prev]
+			observe(e.Prev, e, exists)
+			if exists {
 				conflicts++
 			}
 			delete(pending, e.Prev)
@@ -339,6 +364,7 @@ func schedulerLatencies(events []schedulerEvent, threads map[int]schedulerThread
 		total += pair.Wait
 	}
 	out := map[string]any{"completed_pairs": len(pairs), "unpaired_switch_ins": unpaired, "pending_at_end": len(pending), "conflicting_transitions": conflicts, "sum_thread_wait_ns": total, "longest_pairs": pairs[:min(len(pairs), 20)]}
+	out["conflict_examples"] = examples
 	if len(pairs) > 0 {
 		out["max_wait_ns"] = pairs[0].Wait
 		for _, q := range []int{50, 95, 99} {
