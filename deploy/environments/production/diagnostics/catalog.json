@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 11,
+    "generation": 12,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -33,13 +33,13 @@
       {
         "id": "kubernetes-audit-requests",
         "description": "Bounded audit request rates, callers, cache options and completed-request durations",
-        "image": "ghcr.io/yym68686/fugue-api@sha256:6fe95477cf3381c2b30092ca85372d4c65668ecf2468213a7260a7c589959ec8",
+        "image": "$runner",
         "profile": "process-profile",
         "target_types": ["node_process"],
         "max_duration_seconds": 30,
         "parameters": {},
         "config": {
-          "collectors": [{"name": "audit-requests", "kind": "kubernetes-audit", "path": "/var/log/fugue/kubernetes/audit*.log", "since_seconds": 300, "interval_seconds": 120}]
+          "collectors": [{"name": "audit-requests", "kind": "kubernetes-audit", "path": "/var/log/fugue/kubernetes/audit*.log", "policy_path": "/etc/rancher/k3s/audit-policy.yaml", "since_seconds": 300, "interval_seconds": 120}]
         }
       },
       {
