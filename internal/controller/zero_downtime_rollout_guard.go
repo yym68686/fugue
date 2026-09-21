@@ -611,6 +611,13 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	// rollout may require those auxiliary fields to match before replacing a
 	// workload; the reconciler preserves the live template for the no-op case.
 	guardAuxiliaryTemplateChanged := auxiliaryTemplateChanged && managedAppAuxiliaryTemplateChangeRequiresGuard(desired)
+	// A new default helper image is used by future executable releases. Keep a
+	// complete serving release on its existing helper until an actual rollout;
+	// the reconciler preserves that template under the same predicate.
+	if liveKey == desiredKey && managedDeploymentStatusReady(deployment, desired.Spec.Replicas) &&
+		managedDeploymentDrainAgentImageOnlyChanged(deployment, expectedDeployment) {
+		guardAuxiliaryTemplateChanged = false
+	}
 	desiredReplicas := desired.Spec.Replicas
 	workloadChange := liveKey != desiredKey ||
 		!liveDeploymentStrategyMatchesDesired(deployment, desiredDeployment) ||
@@ -1016,6 +1023,17 @@ func managedDeploymentAuxiliaryTemplateChanged(live, desired kubeDeployment) boo
 		managedDeploymentAuxiliaryTemplateFingerprintFor(live),
 		managedDeploymentAuxiliaryTemplateFingerprintFor(desired),
 	)
+}
+
+func managedDeploymentDrainAgentImageOnlyChanged(live, desired kubeDeployment) bool {
+	current := managedDeploymentAuxiliaryTemplateFingerprintFor(live)
+	expected := managedDeploymentAuxiliaryTemplateFingerprintFor(desired)
+	if current.DrainAgent == nil || expected.DrainAgent == nil || current.DrainAgent.Image == "" ||
+		expected.DrainAgent.Image == "" || current.DrainAgent.Image == expected.DrainAgent.Image {
+		return false
+	}
+	current.DrainAgent.Image = expected.DrainAgent.Image
+	return reflect.DeepEqual(current, expected)
 }
 
 func managedDeploymentAuxiliaryTemplateFingerprintFor(deployment kubeDeployment) managedDeploymentAuxiliaryTemplateFingerprint {

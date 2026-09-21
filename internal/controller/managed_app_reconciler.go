@@ -483,7 +483,7 @@ func (s *Service) preserveManagedAppServingDeploymentTemplate(
 	app model.App,
 	objects []map[string]any,
 ) []map[string]any {
-	if client == nil || appHasOnlineRolloutIntent(app) || model.AppZeroDowntimeEnabled(app.Spec) {
+	if client == nil {
 		return objects
 	}
 	desired := firstManagedAppDeploymentObject(objects, runtime.RuntimeAppResourceName(app))
@@ -515,6 +515,10 @@ func (s *Service) preserveManagedAppServingDeploymentTemplate(
 	}
 	if app.Spec.Replicas <= 0 || !managedDeploymentStatusReady(live, app.Spec.Replicas) ||
 		!managedDeploymentAuxiliaryTemplateChanged(live, expected) {
+		return objects
+	}
+	if (appHasOnlineRolloutIntent(app) || model.AppZeroDowntimeEnabled(app.Spec)) &&
+		!managedDeploymentDrainAgentImageOnlyChanged(live, expected) {
 		return objects
 	}
 	spec := objectMapField(desired, "spec")
