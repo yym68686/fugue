@@ -38,6 +38,7 @@ func runtimeJSONForProcesses(ctx context.Context, c Collector, procRoot string, 
 	sort.Ints(pids)
 	rows := []any{}
 	gaps := []string{}
+	truncated := false
 	seen := []os.FileInfo{}
 	skipped := 0
 	for _, pid := range pids {
@@ -81,6 +82,7 @@ func runtimeJSONForProcesses(ctx context.Context, c Collector, procRoot string, 
 		seen = append(seen, info)
 		rows = append(rows, map[string]any{"pid": peerPID, "start_ticks": before[peerPID], "snapshot": value})
 		if value["truncated"] == true {
+			truncated = true
 			gaps = append(gaps, "runtime source rows are truncated")
 		}
 		stat, readErr := readBounded(filepath.Join(procRoot, strconv.Itoa(peerPID), "stat"), 16<<10)
@@ -98,7 +100,7 @@ func runtimeJSONForProcesses(ctx context.Context, c Collector, procRoot string, 
 	}
 	result := map[string]any{"provider_path": c.Path, "processes": rows, "skipped_processes": skipped, "scope": "distinct observation sockets with a verified peer in the frozen process set"}
 	if len(gaps) > 0 {
-		return partialValue{Value: result, Gaps: gaps}, nil
+		return partialValue{Value: result, Gaps: gaps, Truncated: truncated}, nil
 	}
 	return result, nil
 }

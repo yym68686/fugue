@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"fugue/internal/livediagnostics"
@@ -83,10 +84,13 @@ func TestRuntimeJSONDeduplicatesHelpersAndVerifiesActualProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"count":1}`) })}
+	var truncated atomic.Bool
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"count":1,"truncated":%t}`, truncated.Load())
+	})}
 	go server.Serve(ln)
 	defer server.Close()
-	c := Collector{Path: "/v1/snapshots/queue", Fields: []string{"count"}}
+	c := Collector{Path: "/v1/snapshots/queue", Fields: []string{"count", "truncated"}}
 	v, err := runtimeJSONForProcesses(context.Background(), c, proc, before)
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +103,13 @@ func TestRuntimeJSONDeduplicatesHelpersAndVerifiesActualProvider(t *testing.T) {
 	if len(rows) != 1 || result["skipped_processes"] != 2 || rows[0].(map[string]any)["pid"] != pid {
 		t.Fatalf("provider was not deduplicated and attributed to its actual peer: %#v", result)
 	}
+	truncated.Store(true)
+	v, _ = runtimeJSONForProcesses(context.Background(), c, proc, before)
+	partial, ok := v.(partialValue)
+	if !ok || !partial.Truncated {
+		t.Fatal("provider truncation was not propagated to report quality")
+	}
+	truncated.Store(false)
 	writeStat("999")
 	v, _ = runtimeJSONForProcesses(context.Background(), c, proc, before)
 	if _, ok := v.(partialValue); !ok {
@@ -106,7 +117,7 @@ func TestRuntimeJSONDeduplicatesHelpersAndVerifiesActualProvider(t *testing.T) {
 	}
 	writeStat("42")
 	v, _ = runtimeJSONForProcesses(context.Background(), c, proc, map[int]string{pid + 1: "43"})
-	partial, ok := v.(partialValue)
+	partial, ok = v.(partialValue)
 	if !ok || len(partial.Value.(map[string]any)["processes"].([]any)) != 0 {
 		t.Fatal("socket peer outside frozen process set was accepted")
 	}
