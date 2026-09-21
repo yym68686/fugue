@@ -90,6 +90,7 @@ type logCycleObservation struct {
 	Targets         int       `json:"targets"`
 	Scheduled       int       `json:"scheduled"`
 	Visited         int64     `json:"visited"`
+	CatchupReads    int       `json:"catchup_reads"`
 	InitialBudget   int64     `json:"initial_budget"`
 	RemainingBudget int64     `json:"remaining_budget"`
 	PollMillis      int64     `json:"poll_ms"`

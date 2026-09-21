@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +15,48 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCatchupUsesOnlyUnusedCycleBudgetAfterEverySourceGetsATurn(t *testing.T) {
+	ts := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	var quietReads atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/pods" {
+			pods := []corev1.Pod{}
+			for _, name := range []string{"busy", "quiet"} {
+				pods = append(pods, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(corev1.PodList{Items: pods})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/quiet/") {
+			quietReads.Add(1)
+			fmt.Fprintf(w, "%s quiet\n", ts.Format(time.RFC3339Nano))
+			return
+		}
+		for i := 0; i < 6; i++ {
+			fmt.Fprintf(w, "%s line-%d\n", ts.Add(time.Duration(i)*time.Second).Format(time.RFC3339Nano), i)
+		}
+	}))
+	defer server.Close()
+	client, _ := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	p := NewPipeline(Config{Enabled: true, QueueSize: 32, BatchSize: 2, KubernetesLogMaxLinesPerCycle: 6, KubernetesLogTailLines: 2, KubernetesLogPollInterval: time.Second}, nil)
+	c := newKubernetesLogCollectorWithClient(p, client)
+	c.collectOnce(t.Context())
+	if p.kubernetesLogLines.Load() != 6 || quietReads.Load() != 1 || p.dropped.Load() != 0 || p.kubernetesLogDeferredTargets.Load() != 0 {
+		t.Fatalf("catchup broke budgets/fairness: lines=%d quiet=%d dropped=%d deferred=%d", p.kubernetesLogLines.Load(), quietReads.Load(), p.dropped.Load(), p.kubernetesLogDeferredTargets.Load())
+	}
+	if got := p.sourceObservationCycle; got.CatchupReads != 2 || got.RemainingBudget != 0 || got.Visited != 2 {
+		t.Fatalf("incorrect cycle evidence: %+v", got)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var remaining atomic.Int64
+	remaining.Store(10)
+	if c.catchupCursorTargets(ctx, nil, &remaining) != 0 || remaining.Load() != 10 {
+		t.Fatal("catchup ignored cancellation")
+	}
+}
 
 func TestCollectionResumesAtFirstUnscheduledSourceAndReturnsUnusedBudget(t *testing.T) {
 	var p *Pipeline

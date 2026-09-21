@@ -225,6 +225,16 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		inFlight--
 	}
 	wg.Wait()
+	visited := c.cycleVisited.Load()
+	catchupReads := 0
+	if scheduled == len(targets) && remaining.Load() > 0 {
+		// Every source received its first turn. Spend only the original unused
+		// queue/cycle budget on known unread records, with a bounded deadline
+		// and request count. An idle source is never polled twice here.
+		catchupCtx, stop := context.WithDeadline(ctx, started.Add(c.pipeline.cfg.KubernetesLogPollInterval))
+		catchupReads = c.catchupCursorTargets(catchupCtx, targets, &remaining)
+		stop()
+	}
 	// A request may have been scheduled before another worker spent the budget.
 	// Resume at the first source that made no progress, including in-flight reads.
 	if resume := min(scheduled, int(firstBlocked.Load())); resume < len(targets) {
@@ -240,7 +250,7 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		}
 	}
 	c.pipeline.kubernetesLogBacklogMillis.Store(backlog)
-	c.pipeline.kubernetesLogDeferredTargets.Store(max(int64(0), int64(len(targets))-c.cycleVisited.Load()))
+	c.pipeline.kubernetesLogDeferredTargets.Store(max(int64(0), int64(len(targets))-visited))
 	for key, cur := range c.cursors {
 		if time.Since(cur.Visited) > time.Hour {
 			delete(c.cursors, key)
@@ -251,8 +261,36 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	c.pipeline.kubernetesLogPods.Store(int64(podCount))
 	c.pipeline.kubernetesLogCycleMillis.Store(time.Since(started).Milliseconds())
 	c.pipeline.sourceObservationMu.Lock()
-	c.pipeline.sourceObservationCycle = logCycleObservation{At: started, Targets: len(targets), Scheduled: scheduled, Visited: c.cycleVisited.Load(), InitialBudget: budget, RemainingBudget: remaining.Load(), PollMillis: c.pipeline.cfg.KubernetesLogPollInterval.Milliseconds(), PerSourceLimit: c.pipeline.cfg.KubernetesLogTailLines, CycleLimit: c.pipeline.cfg.KubernetesLogMaxLinesPerCycle}
+	c.pipeline.sourceObservationCycle = logCycleObservation{At: started, Targets: len(targets), Scheduled: scheduled, Visited: visited, CatchupReads: catchupReads, InitialBudget: budget, RemainingBudget: remaining.Load(), PollMillis: c.pipeline.cfg.KubernetesLogPollInterval.Milliseconds(), PerSourceLimit: c.pipeline.cfg.KubernetesLogTailLines, CycleLimit: c.pipeline.cfg.KubernetesLogMaxLinesPerCycle}
 	c.pipeline.sourceObservationMu.Unlock()
+}
+
+func (c *kubernetesLogCollector) catchupCursorTargets(ctx context.Context, targets []kubernetesLogTarget, remaining *atomic.Int64) int {
+	reads := 0
+	for reads < 8 && remaining.Load() > 0 && ctx.Err() == nil {
+		progress := false
+		for i := range targets {
+			if reads >= 8 || remaining.Load() <= 0 || ctx.Err() != nil {
+				break
+			}
+			target := targets[(i+c.targetOffset)%len(targets)]
+			key := logTargetKey(target)
+			c.cursorsMu.Lock()
+			cur := c.cursors[key]
+			c.cursorsMu.Unlock()
+			if cur.PendingAt.IsZero() || cur.Complete || time.Now().Before(cur.NextAttempt) {
+				continue
+			}
+			before := remaining.Load()
+			c.collectCursorTarget(ctx, target, remaining)
+			reads++
+			progress = progress || remaining.Load() < before
+		}
+		if !progress {
+			break
+		}
+	}
+	return reads
 }
 
 func (c *kubernetesLogCollector) kubernetesLogTargets(ctx context.Context, labelSelector string, enforcePodLimit bool) ([]kubernetesLogTarget, int, bool) {
