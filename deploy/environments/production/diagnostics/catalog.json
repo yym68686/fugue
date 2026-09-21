@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 7,
+    "generation": 8,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -241,11 +241,12 @@
                 "status"
               ],
               "namespace": "{{param.namespace}}",
-              "selector": "cnpg.io/cluster",
               "annotation_keys": [
                 "cnpg.io/pvcStatus",
                 "volume.kubernetes.io/selected-node",
-                "pv.kubernetes.io/bind-completed"
+                "pv.kubernetes.io/bind-completed",
+                "fugue.pro/recovery-retained-cluster-uid",
+                "fugue.pro/recovery-retained-reason"
               ]
             },
             {
