@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,7 +32,45 @@ func main() {
 		fmt.Fprintln(os.Stderr, "probe failed:", err)
 		os.Exit(1)
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+	if err := writeReport(os.Stdout, report); err != nil {
 		os.Exit(1)
 	}
+}
+
+// JSON reports are also read by line-oriented log collectors. Insert sparse
+// whitespace at JSON token boundaries so arrays do not become multi-MiB lines.
+// String contents and numeric precision remain byte-for-byte unchanged.
+func writeReport(w io.Writer, report livediagnostics.ProbeReport) error {
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	var output bytes.Buffer
+	output.Grow(len(raw) + len(raw)/(32<<10) + 1)
+	quoted, escaped, column := false, false, 0
+	for _, ch := range raw {
+		output.WriteByte(ch)
+		column++
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				quoted = false
+			}
+			continue
+		}
+		if ch == '"' {
+			quoted = true
+			continue
+		}
+		if column >= 32<<10 && (ch == ',' || ch == '}' || ch == ']' || ch == '{' || ch == '[' || ch == ':') {
+			output.WriteByte('\n')
+			column = 0
+		}
+	}
+	output.WriteByte('\n')
+	_, err = w.Write(output.Bytes())
+	return err
 }
