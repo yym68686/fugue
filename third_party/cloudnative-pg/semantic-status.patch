@@ -208,4 +208,3 @@ new file mode 100644
 +		t.Fatalf("real plugin removal was lost: patches=%d patch=%s", c.patches, c.after)
 +	}
 +}
-
