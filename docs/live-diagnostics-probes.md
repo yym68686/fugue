@@ -110,6 +110,13 @@ offset. No mapped contents or command-line values are read. Lost/unparsed events
 unresolved mappings and reached bounds degrade evidence. Fault occurrence alone
 does not measure IO latency, identify a lock owner or prove a request's cause.
 
+The production `process-page-faults` recipe also pairs that capture with a bounded
+host journal collector for the selected service. Its `since_seconds`, `unit`, and
+`match` parameters are independently bounded, and every journal row retains its
+timestamp. This makes compaction, slow-apply, and fault windows directly
+comparable in one report without changing the service or its configuration;
+missing journal coverage remains an explicit evidence gap.
+
 Runtime snapshots deduplicate shared Unix sockets across helper processes and
 bind each row to the socket's kernel-reported peer PID in the frozen target set.
 Only that provider's lifetime and socket identity determine snapshot continuity;

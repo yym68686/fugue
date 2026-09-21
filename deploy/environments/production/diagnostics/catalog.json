@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 30,
+    "generation": 31,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -25,9 +25,14 @@
         "profile": "kernel-profile",
         "target_types": ["node_process"],
         "max_duration_seconds": 60,
-        "parameters": {},
+        "parameters": {
+          "unit": {"default": "k3s.service", "max_length": 120, "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"},
+          "since_seconds": {"default": "900", "max_length": 5, "pattern": "^[0-9]{1,5}$"},
+          "match": {"default": "trace", "max_length": 256, "pattern": "^[^\\r\\n]+$"}
+        },
         "config": {"collectors": [
           {"name": "compaction-window", "kind": "host-loopback-metrics", "port": 2381, "interval_seconds": 15, "fields": ["etcd_server_slow_apply_total", "etcd_debugging_mvcc_index_compaction_pause_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_pause_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_total_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_last", "etcd_debugging_mvcc_db_compaction_keys_total", "go_gc_duration_seconds", "process_cpu_seconds_total"]},
+          {"name": "compaction-journal", "kind": "host-journal", "unit": "{{param.unit}}", "since_seconds": 900, "since_seconds_param": "{{param.since_seconds}}", "match_param": "{{param.match}}", "interval_seconds": 30, "match": ["finished scheduled compaction", "slow apply", "trace"]},
           {"name": "page-faults", "kind": "process-page-faults", "capture_seconds": 20, "interval_seconds": 120}
         ]}
       },
