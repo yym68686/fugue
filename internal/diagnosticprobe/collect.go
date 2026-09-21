@@ -46,6 +46,7 @@ type Collector struct {
 	RequiredQueries []string          `json:"required_queries,omitempty"`
 	Unit            string            `json:"unit,omitempty"`
 	CaptureSeconds  int               `json:"capture_seconds,omitempty"`
+	CallGraph       string            `json:"call_graph,omitempty"`
 	PolicyPath      string            `json:"policy_path,omitempty"`
 }
 type Service struct {

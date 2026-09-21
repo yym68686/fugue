@@ -28,6 +28,12 @@ func processCPUProfile(ctx context.Context, req livediagnostics.ProbeRequest, c 
 	}
 	defer os.RemoveAll(dir)
 	args := []string{"--kind", "cpu-profile", "--duration", strconv.Itoa(c.CaptureSeconds), "--frequency", "19", "--output-dir", dir}
+	if c.CallGraph != "" {
+		if c.CallGraph != "fp" && c.CallGraph != "dwarf,8192" {
+			return nil, errors.New("unsupported CPU call graph mode")
+		}
+		args = append(args, "--call-graph", c.CallGraph)
+	}
 	if req.ContainerID != "" {
 		args = append(args, "--container-id", req.ContainerID)
 	} else {

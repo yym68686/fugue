@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"debug/elf"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,6 +203,15 @@ func TestGoSymbolizerResolvesStrippedExecutableOffset(t *testing.T) {
 	name, file, line, ok := resolver.ResolveDSOOffset(entry - resolver.loadBase)
 	if !ok || name != wantedName || file == "" || line <= 0 {
 		t.Fatalf("unexpected symbolization ok=%t name=%q file=%q line=%d", ok, name, file, line)
+	}
+	stack := []byte(fmt.Sprintf("\t%x [unknown] (/app/sample)\n\t%x [unknown] (/app/other)\n", entry-resolver.loadBase, entry-resolver.loadBase))
+	resolved := string(resolveUnknownGoStackFrames(stack, map[int]processGoSymbolizer{1: {DSO: "sample", Resolver: resolver}}))
+	if !strings.Contains(resolved, wantedName+" (/app/sample)") || !strings.Contains(resolved, "[unknown] (/app/other)") {
+		t.Fatalf("stack resolution ignored executable identity: %s", resolved)
+	}
+	ambiguous := resolveUnknownGoStackFrames(stack, map[int]processGoSymbolizer{1: {DSO: "sample", Resolver: resolver}, 2: {DSO: "sample", Resolver: &goSymbolizer{table: resolver.table, loadBase: resolver.loadBase}}})
+	if !bytes.Equal(ambiguous, stack) {
+		t.Fatal("stack without PID resolved an ambiguous executable name")
 	}
 	// Resolve the actual process executable and share large line tables between
 	// processes backed by the same inode, even without a visible root pathname.

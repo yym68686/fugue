@@ -43,6 +43,7 @@ type options struct {
 	frequency                  int
 	containerID                string
 	processName                string
+	callGraph                  string
 	outputDir                  string
 	sampleIntervalMilliseconds int
 }
@@ -199,6 +200,7 @@ func main() {
 	flag.IntVar(&opts.frequency, "frequency", defaultFrequency, "CPU sampling frequency in Hz")
 	flag.StringVar(&opts.containerID, "container-id", "", "target container ID")
 	flag.StringVar(&opts.processName, "process-name", "", "allowlisted host process name")
+	flag.StringVar(&opts.callGraph, "call-graph", "dwarf,8192", "stack capture mode (dwarf,8192 or fp)")
 	flag.StringVar(&opts.outputDir, "output-dir", "/tmp/fugue-diagnostic", "temporary output directory")
 	flag.IntVar(&opts.sampleIntervalMilliseconds, "sample-interval-ms", 1000, "memory sampling interval in milliseconds")
 	flag.Parse()
@@ -210,6 +212,12 @@ func main() {
 }
 
 func run(opts options) error {
+	if opts.callGraph == "" {
+		opts.callGraph = "dwarf,8192"
+	}
+	if opts.callGraph != "dwarf,8192" && opts.callGraph != "fp" {
+		return errors.New("unsupported stack capture mode")
+	}
 	opts.kind = strings.TrimSpace(opts.kind)
 	if opts.kind != string(livediagnostics.ProbeCPUProfile) && opts.kind != string(livediagnostics.ProbeMemoryProfile) && opts.kind != string(livediagnostics.ProbeProcessSample) {
 		return fmt.Errorf("unsupported diagnostic kind %q", opts.kind)
@@ -268,7 +276,7 @@ func run(opts options) error {
 	dataPath := filepath.Join(opts.outputDir, "perf.data")
 	perfArgs := []string{
 		"record", "-a", "-e", "cpu-clock", "-F", strconv.Itoa(opts.frequency),
-		"--call-graph", "dwarf,8192", "--no-buildid-mmap", "-G", strings.TrimPrefix(cgroupPath, "/"), "-o", dataPath, "--",
+		"--call-graph", opts.callGraph, "--no-buildid-mmap", "-G", strings.TrimPrefix(cgroupPath, "/"), "-o", dataPath, "--",
 		"sleep", strconv.Itoa(opts.duration),
 	}
 	if output, err := runCommand(context.Background(), "perf", perfArgs...); err != nil {
@@ -280,7 +288,7 @@ func run(opts options) error {
 
 	targetRoot := filepath.Join("/host/proc", strconv.Itoa(pids[0]), "root")
 	warnings := make([]string, 0, 6)
-	rawScript, scriptErr := runCommand(context.Background(), "perf", "script", "--symfs", targetRoot, "-i", dataPath, "-F", "ip,sym,dso")
+	rawScript, scriptErr := runCommand(context.Background(), "perf", "script", "--max-stack", "64", "--symfs", targetRoot, "-i", dataPath, "-F", "ip,sym,dso")
 	_, cumulativeFunctions, stackSamples, stackUserSamples, stackKernelSamples := sampledFunctions(rawScript)
 	if scriptErr != nil {
 		warnings = append(warnings, "call-stack export unavailable: "+scriptErr.Error())
@@ -299,7 +307,13 @@ func run(opts options) error {
 	if err != nil {
 		return fmt.Errorf("parse perf machine report: %w", err)
 	}
-	functions, samples, userSamples, kernelSamples, otherSamples, resolvedUserSamples, resolvedKernelSamples := summarizePerfEntries(entries, pids)
+	symbolizers := loadProcessGoSymbolizers(pids)
+	kernelSymbols, _ := newKernelSymbolizer("/host/proc/kallsyms")
+	functions, samples, userSamples, kernelSamples, otherSamples, resolvedUserSamples, resolvedKernelSamples := summarizePerfEntriesWithSymbols(entries, symbolizers, kernelSymbols)
+	if scriptErr == nil {
+		rawScript = resolveUnknownGoStackFrames(rawScript, symbolizers)
+		_, cumulativeFunctions, stackSamples, stackUserSamples, stackKernelSamples = sampledFunctions(rawScript)
+	}
 	if expectedSamples >= 0 && samples != expectedSamples {
 		return fmt.Errorf("perf machine report sample mismatch: header=%d rows=%d", expectedSamples, samples)
 	}
@@ -1180,6 +1194,45 @@ type processGoSymbolizer struct {
 func summarizePerfEntries(entries []perfReportEntry, targetPIDs []int) ([]functionSample, int, int, int, int, int, int) {
 	symbolizers := loadProcessGoSymbolizers(targetPIDs)
 	kernelSymbols, _ := newKernelSymbolizer("/host/proc/kallsyms")
+	return summarizePerfEntriesWithSymbols(entries, symbolizers, kernelSymbols)
+}
+
+func resolveUnknownGoStackFrames(raw []byte, symbolizers map[int]processGoSymbolizer) []byte {
+	byDSO := map[string]*goSymbolizer{}
+	ambiguous := map[string]bool{}
+	for _, candidate := range symbolizers {
+		if previous := byDSO[candidate.DSO]; previous != nil && previous != candidate.Resolver {
+			ambiguous[candidate.DSO] = true
+		}
+		byDSO[candidate.DSO] = candidate.Resolver
+	}
+	lines := strings.Split(string(raw), "\n")
+	for i, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[1] != "[unknown]" || !isHexAddress(fields[0]) {
+			continue
+		}
+		at := strings.LastIndex(line, " (")
+		if at < 0 || !strings.HasSuffix(line, ")") {
+			continue
+		}
+		dso := filepath.Base(line[at+2 : len(line)-1])
+		resolver := byDSO[dso]
+		if resolver == nil || ambiguous[dso] {
+			continue
+		}
+		offset, err := strconv.ParseUint(fields[0], 16, 64)
+		if err != nil {
+			continue
+		}
+		if name, _, _, ok := resolver.ResolveDSOOffset(offset); ok {
+			lines[i] = strings.Replace(line, "[unknown]", name, 1)
+		}
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+func summarizePerfEntriesWithSymbols(entries []perfReportEntry, symbolizers map[int]processGoSymbolizer, kernelSymbols *kernelSymbolizer) ([]functionSample, int, int, int, int, int, int) {
 	counts := make(map[functionSampleKey]*functionSampleAggregate)
 	total := 0
 	user := 0

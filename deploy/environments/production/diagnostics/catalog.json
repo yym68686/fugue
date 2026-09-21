@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 16,
+    "generation": 17,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,16 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "process-cpu-frame-pointer",
+        "description": "Bounded frame-pointer CPU capture with Go stack symbol resolution",
+        "image": "$runner",
+        "profile": "kernel-profile",
+        "target_types": ["node_process", "platform_component"],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {"collectors": [{"name": "cpu-profile", "kind": "process-cpu-profile", "capture_seconds": 20, "call_graph": "fp", "interval_seconds": 120}]}
+      },
       {
         "id": "runtime-stage-cost",
         "description": "Fixed-cardinality operation counts and elapsed work from the runtime operations provider",
