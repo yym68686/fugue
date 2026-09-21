@@ -368,6 +368,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply namespace memory admission policy: %w", err))
 	}
 	if err := client.applyObjects(applyCtx, childObjects); err != nil {
+		if errors.Is(err, errAppServiceWorkloadPreflight) {
+			return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, err)
+		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}
 	if err := reconcileCloudNativePGManagedRoles(ctx, client, namespace, childObjects); err != nil {

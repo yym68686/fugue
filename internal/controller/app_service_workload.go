@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,6 +13,8 @@ import (
 )
 
 const appWorkloadMigrationAnnotation = "fugue.pro/workload-label-migration"
+
+var errAppServiceWorkloadPreflight = errors.New("Service workload migration is pending")
 
 // Services are applied before Deployments. Label existing workloads first so
 // narrowing a Service never waits for a replacement Pod to regain endpoints.
@@ -32,7 +35,7 @@ func (c *kubeClient) prepareAppServiceWorkloads(ctx context.Context, objects []m
 			continue
 		}
 		if err := c.prepareAppServiceWorkload(ctx, namespace, workload, selector); err != nil {
-			return fmt.Errorf("prepare Service workload %s: %w", key, err)
+			return fmt.Errorf("%w: prepare Service workload %s: %w", errAppServiceWorkloadPreflight, key, err)
 		}
 		prepared[key] = true
 	}
@@ -148,6 +151,9 @@ func (c *kubeClient) prepareAppServiceWorkload(ctx context.Context, namespace, n
 		if labels[runtime.FugueLabelAppWorkload] == "" {
 			rsPath := "/apis/apps/v1/namespaces/" + url.PathEscape(namespace) + "/replicasets/" + url.PathEscape(rsName)
 			if err := c.patchAppWorkloadObject(ctx, rsPath, rs, map[string]any{"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"labels": map[string]string{runtime.FugueLabelAppWorkload: name}}}}}); err != nil {
+				if strings.Contains(err.Error(), "status=404") {
+					continue
+				}
 				return err
 			}
 		}
@@ -258,7 +264,31 @@ func (c *kubeClient) patchAppWorkloadObject(ctx context.Context, path string, cu
 		patchMeta = map[string]any{}
 		patch["metadata"] = patchMeta
 	}
-	patchMeta["uid"], patchMeta["resourceVersion"] = uid, version
-	_, err := c.doRequest(ctx, http.MethodPatch, path, "application/merge-patch+json", patch, nil)
-	return err
+	for attempt := 0; attempt < 4; attempt++ {
+		patchMeta["uid"], patchMeta["resourceVersion"] = uid, version
+		status, err := c.doRequest(ctx, http.MethodPatch, path, "application/merge-patch+json", patch, nil)
+		if err == nil || status != http.StatusConflict || attempt == 3 {
+			return err
+		}
+		fresh, found, readErr := c.getRawObject(ctx, path)
+		if readErr != nil || !found {
+			return err
+		}
+		freshMeta := objectMapField(fresh, "metadata")
+		// Kubernetes status writes advance resourceVersion without changing
+		// ownership or intent. Only those conflicts may be retried here.
+		for _, key := range []string{"uid", "labels", "annotations", "ownerReferences", "deletionTimestamp"} {
+			if !normalizedKubeValueEqual(meta[key], freshMeta[key]) {
+				return err
+			}
+		}
+		if !normalizedKubeValueEqual(current["spec"], fresh["spec"]) {
+			return err
+		}
+		version = objectStringField(freshMeta, "resourceVersion")
+		if version == "" {
+			return err
+		}
+	}
+	return nil
 }

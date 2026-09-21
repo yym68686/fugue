@@ -78,7 +78,7 @@ func TestAppServiceWorkloadMigrationOrdersAndRecoversWrites(t *testing.T) {
 						}
 						if failPodPatch && !failed && strings.HasSuffix(req.URL.Path, "/pods/pod") {
 							failed = true
-							http.Error(w, "version conflict", http.StatusConflict)
+							http.Error(w, "interrupted write", http.StatusServiceUnavailable)
 							return
 						}
 						mergeWorkloadTestPatch(object, patch)
@@ -170,6 +170,43 @@ func TestAppServiceWorkloadRejectsUnsafeIdentityBeforeMutation(t *testing.T) {
 			client := &kubeClient{client: server.Client(), baseURL: server.URL}
 			if err := client.prepareAppServiceWorkload(context.Background(), "tenant", "workload", map[string]string{runtime.FugueLabelAppID: "app_test", runtime.FugueLabelTenantID: "tenant_test", runtime.FugueLabelAppWorkload: "workload"}); err == nil {
 				t.Fatal("unsafe identity accepted")
+			}
+		})
+	}
+}
+
+func TestAppWorkloadPatchRetriesOnlyStatusConflicts(t *testing.T) {
+	for _, changedSpec := range []bool{false, true} {
+		t.Run(fmt.Sprint(changedSpec), func(t *testing.T) {
+			original := map[string]any{"metadata": map[string]any{"uid": "uid", "resourceVersion": "1", "labels": map[string]any{"owner": "app"}}, "spec": map[string]any{"paused": true}}
+			fresh := cloneKubeMap(original)
+			objectMapField(fresh, "metadata")["resourceVersion"] = "2"
+			if changedSpec {
+				objectMapField(fresh, "spec")["paused"] = false
+			}
+			patches := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_ = json.NewEncoder(w).Encode(fresh)
+					return
+				}
+				patches++
+				if patches == 1 {
+					http.Error(w, "status changed", http.StatusConflict)
+					return
+				}
+				var patch map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&patch)
+				if objectMapField(patch, "metadata")["resourceVersion"] != "2" {
+					t.Error("retry did not use fresh version")
+				}
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer server.Close()
+			client := &kubeClient{client: server.Client(), baseURL: server.URL}
+			err := client.patchAppWorkloadObject(context.Background(), "/deployment", original, map[string]any{"spec": map[string]any{"paused": false}})
+			if changedSpec && (err == nil || patches != 1) || !changedSpec && (err != nil || patches != 2) {
+				t.Fatalf("retry state patches=%d error=%v", patches, err)
 			}
 		})
 	}
