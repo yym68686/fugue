@@ -7,7 +7,26 @@ It is a prepared candidate, not an instruction to update the live operator.
 and verify that candidate. The job has no production environment or Kubernetes
 access. Its receipt records the immutable image and unchanged instance-manager
 hashes; no live workload references the candidate until a separate release
-intent is enrolled.
+intent is enrolled. `deploy/environments/production/cnpg-controller/release.json`
+currently authorizes preflight only. Its `external_controller_release` job in
+the same `ci.yml` verifies both OCI digests, the original Deployment UID and
+configuration digest, operator ConfigMap data, and database instance-manager
+hashes. It uploads a fresh recovery witness before any mutation can run.
+
+The external controller writer only replaces the selected container image and
+command using UID/resourceVersion tests. The operand image environment, volumes,
+replica policy, RBAC and database specifications are not write targets. Every
+observed database Pod identity and restart count is compared, while primary,
+database configuration and manager hashes must remain stable and readiness
+must not decrease. An activation failure restores the exact original immutable
+image and command only if the current controller still matches the declared
+candidate and preserved configuration. Drift blocks that rollback to avoid
+overwriting another writer. Existing unhealthy databases remain visible and
+must not regress during the operator rollout.
+
+The candidate also passed the upstream `Pod upgrade` suite: 21 selected specs,
+zero failures, with race detection. These tests complement the immutable image
+receipt; they do not establish that the production deployment has succeeded.
 
 Three controller paths compare Go collections with `reflect.DeepEqual` even
 though their JSON fields use `omitempty`. After an API round trip, empty maps

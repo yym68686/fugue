@@ -281,6 +281,68 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  external_controller_release:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-external-controller, cancel-in-progress: false}
+    timeout-minutes: 15
+    permissions: {contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select the current declared external controller release
+        id: selected
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/cnpg-controller/release.json
+          git fetch origin main
+          changed=false
+          if ! git diff --quiet "$BASE_SHA" HEAD -- "$config" scripts/release_external_controller.py scripts/test_release_external_controller.py; then
+            if git diff --quiet HEAD origin/main -- "$config" scripts/release_external_controller.py scripts/test_release_external_controller.py; then
+              changed=true
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          python3 -c 'import json; print("apply=" + str(json.load(open("deploy/environments/production/cnpg-controller/release.json"))["apply"]).lower())' >> "$GITHUB_OUTPUT"
+      - name: Prepare the exact controller and operand witness
+        if: steps.selected.outputs.changed == 'true'
+        env:
+          FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
+          FUGUE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_release_external_controller
+          python3 scripts/release_external_controller.py deploy/environments/production/cnpg-controller/release.json > "$RUNNER_TEMP/external-controller-prepared.json"
+      - name: Persist the controller recovery witness before mutation
+        if: steps.selected.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-external-controller-prepared-${{ github.sha }}
+          path: ${{ runner.temp }}/external-controller-prepared.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Execute the fenced controller release
+        if: steps.selected.outputs.changed == 'true' && steps.selected.outputs.apply == 'true'
+        env:
+          FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
+          FUGUE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/cnpg-controller/release.json scripts/release_external_controller.py
+          python3 scripts/release_external_controller.py deploy/environments/production/cnpg-controller/release.json --prepared "$RUNNER_TEMP/external-controller-prepared.json" > "$RUNNER_TEMP/external-controller-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.selected.outputs.changed == 'true' && steps.selected.outputs.apply == 'true'
+        with:
+          name: fugue-external-controller-result-${{ github.sha }}
+          path: ${{ runner.temp }}/external-controller-result.json
+          if-no-files-found: warn
+          retention-days: 30
+
   cnpg_candidate_artifact:
     # Build and verify only; enrolling the live operator is a separate reviewed intent.
     needs: prepush

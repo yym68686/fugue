@@ -49,11 +49,18 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "drain_observation_access", "drain_observer_artifact", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	externalController := yamlMappingValue(t, jobs, "external_controller_release")
+	if yamlMappingValue(t, externalController, "environment").Value != "production" || yamlMappingValue(t, externalController, "needs").Value != "prepush" {
+		t.Fatal("external controller release must use the production CI gate")
+	}
+	if !strings.Contains(source, "steps.selected.outputs.apply == 'true'") || !strings.Contains(source, "Persist the controller recovery witness before mutation") {
+		t.Fatal("external controller release needs an explicit intent and durable prewrite witness")
+	}
 	cnpgCandidate := yamlMappingValue(t, jobs, "cnpg_candidate_artifact")
 	if yamlMappingValue(t, cnpgCandidate, "runs-on").Value != "ubuntu-latest" || yamlMappingValue(t, cnpgCandidate, "needs").Value != "prepush" {
 		t.Fatal("third-party candidate verification requires prepush and an isolated hosted runner")

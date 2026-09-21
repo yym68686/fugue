@@ -1,0 +1,38 @@
+{
+  "apiVersion": "release.fugue.dev/v1",
+  "kind": "ExternalControllerRelease",
+  "apply": false,
+  "namespace": "fugue-system",
+  "deployment": "fugue-cloudnative-pg",
+  "container": "manager",
+  "uid": "b2ad8bd3-64f9-4609-ac6a-be638e4f88d9",
+  "preservedSpecSHA256": "1a9ddca812aaa239ff86b6788302f86667f98877f8b21adc2bdd2675e67a63f5",
+  "predecessor": {
+    "image": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
+    "specImage": "ghcr.io/cloudnative-pg/cloudnative-pg:1.29.0",
+    "revision": "23eae00cd",
+    "command": ["/manager"]
+  },
+  "candidate": {
+    "image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:4aaaa5900c87730f913aa4a9da39e297b1e7b5ea884d9155aee499c780839d4c",
+    "revision": "b0495ea6c1e57b6a38dae93ed0a30068a9b379ec",
+    "command": ["/fugue-cnpg-controller"]
+  },
+  "candidateReceipt": {
+    "base_image": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e",
+    "candidate_image": "ghcr.io/yym68686/fugue-cnpg-controller@sha256:4aaaa5900c87730f913aa4a9da39e297b1e7b5ea884d9155aee499c780839d4c",
+    "source_revision": "b0495ea6c1e57b6a38dae93ed0a30068a9b379ec",
+    "controller_command_verified": true,
+    "production_deployed": false,
+    "instance_manager_sha256": {
+      "manager_amd64": "b77f8f908fdc909122fe24fa164f8247c0689c4ca8c01ccef07fc50e7be8f6f1",
+      "manager_arm64": "97fa01dc1c6abcd7f64a51d16f2e4ef9c7bb8d4d842e01adc9d07060e6b84157"
+    }
+  },
+  "configurationGuards": [{
+    "name": "cnpg-controller-manager-config",
+    "uid": "3e1b420e-c4dc-4193-a8fb-43edbd949b8a",
+    "dataSHA256": "f11eb61678e9d4645cb617df544ee787e59f4ad9a605b0c6f61a6ca4d7a06dee"
+  }],
+  "operandGuard": "cnpg-instance-identity-v1"
+}
