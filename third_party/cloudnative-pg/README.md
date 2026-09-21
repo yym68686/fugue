@@ -37,6 +37,16 @@ Tests call the upstream reconciler methods with synthetic objects, check zero
 requests for unchanged wire state, and require one request for real resource,
 instance and plugin changes. The other status comparisons remain unchanged.
 
+`role-binding-cache.patch` avoids a CREATE on every reconciliation when the
+binding is already present in the controller client's cache. The production
+audit recorded 288 AlreadyExists responses in five minutes after status writes
+were removed. The existing role path already uses this cache, and the operator
+has list/watch permission for bindings. Missing bindings still use the same
+CREATE with AlreadyExists race handling; other read failures are returned.
+Regression tests cover existing, absent, deleted, stale-cache and read-failure
+cases. This patch does not change ownership, subjects, role references or the
+reconciliation interval for an unschedulable database.
+
 Reproduce in a separate upstream checkout:
 
 ```sh

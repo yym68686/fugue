@@ -1,0 +1,106 @@
+diff --git a/internal/controller/cluster_create.go b/internal/controller/cluster_create.go
+index e685979..01d2df6 100644
+--- a/internal/controller/cluster_create.go
++++ b/internal/controller/cluster_create.go
+@@ -1068,6 +1068,13 @@ func (r *ClusterReconciler) createRoleBinding(ctx context.Context, cluster *apiv
+ 	roleBinding := specs.CreateRoleBinding(cluster.ObjectMeta, cluster.GetServiceAccountName())
+ 	cluster.SetInheritedDataAndOwnership(&roleBinding.ObjectMeta)
+ 
++	// Existing bindings need no write; the client cache follows deletion events.
++	if err := r.Get(ctx, client.ObjectKeyFromObject(&roleBinding), &rbacv1.RoleBinding{}); err == nil {
++		return nil
++	} else if !apierrs.IsNotFound(err) {
++		return err
++	}
++
+ 	err := r.Create(ctx, &roleBinding)
+ 	if err != nil && !apierrs.IsAlreadyExists(err) {
+ 		log.FromContext(ctx).Error(err, "Unable to create the ServiceAccount", "object", roleBinding)
+diff --git a/internal/controller/role_binding_regression_test.go b/internal/controller/role_binding_regression_test.go
+new file mode 100644
+index 0000000..351e422
+--- /dev/null
++++ b/internal/controller/role_binding_regression_test.go
+@@ -0,0 +1,82 @@
++package controller
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
++	"github.com/cloudnative-pg/cloudnative-pg/internal/scheme"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"sigs.k8s.io/controller-runtime/pkg/client"
++	"sigs.k8s.io/controller-runtime/pkg/client/fake"
++)
++
++type diagnosticRoleBindingClient struct {
++	client.Client
++	creates      int
++	getError     error
++	hideExisting bool
++}
++
++func (c *diagnosticRoleBindingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
++	if c.getError != nil {
++		return c.getError
++	}
++	if c.hideExisting {
++		return fake.NewClientBuilder().WithScheme(scheme.BuildWithAllKnownScheme()).Build().Get(ctx, key, obj, opts...)
++	}
++	return c.Client.Get(ctx, key, obj, opts...)
++}
++
++func (c *diagnosticRoleBindingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
++	c.creates++
++	return c.Client.Create(ctx, obj, opts...)
++}
++
++func TestRoleBindingRegression(t *testing.T) {
++	ctx := context.Background()
++	cluster := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "sample", UID: "cluster-id"}}
++	for _, test := range []struct {
++		name                     string
++		exists, stale, readError bool
++		wantCreates              int
++	}{
++		{name: "existing", exists: true},
++		{name: "missing", wantCreates: 1},
++		{name: "create-race", exists: true, stale: true, wantCreates: 1},
++		{name: "read-failure", readError: true},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			binding := specs.CreateRoleBinding(cluster.ObjectMeta, cluster.GetServiceAccountName())
++			builder := fake.NewClientBuilder().WithScheme(scheme.BuildWithAllKnownScheme())
++			if test.exists {
++				builder = builder.WithObjects(&binding)
++			}
++			c := &diagnosticRoleBindingClient{Client: builder.Build(), hideExisting: test.stale}
++			if test.readError {
++				c.getError = errors.New("read unavailable")
++			}
++			r := &ClusterReconciler{Client: c}
++			err := r.createRoleBinding(ctx, cluster)
++			if test.readError && !errors.Is(err, c.getError) || !test.readError && err != nil {
++				t.Fatalf("unexpected result: %v", err)
++			}
++			if c.creates != test.wantCreates {
++				t.Fatalf("creates=%d, want %d", c.creates, test.wantCreates)
++			}
++			if test.name == "existing" {
++				if err := c.Client.Delete(ctx, &binding); err != nil {
++					t.Fatal(err)
++				}
++				if err := r.createRoleBinding(ctx, cluster); err != nil {
++					t.Fatal(err)
++				}
++				if c.creates != 1 {
++					t.Fatalf("deleted binding not recreated: creates=%d", c.creates)
++				}
++			}
++		})
++	}
++}
