@@ -86,6 +86,12 @@ include their deltas. These distinguish the selected process from a shared
 cgroup; they do not identify a fault's backing file or establish causality for
 an individual request.
 
+The `storage-scan-cost` recipe combines host loopback metrics, node counters and
+process facts. Run the separate `kubernetes-storage-read-paths` recipe for cached
+cluster metrics and join by source timestamps. Host capability profiles do not
+mount a Kubernetes service-account credential; composing recipes must respect
+that boundary instead of assuming all collectors are available in every profile.
+
 Runtime snapshots deduplicate shared Unix sockets across helper processes and
 bind each row to the socket's kernel-reported peer PID in the frozen target set.
 Only that provider's lifetime and socket identity determine snapshot continuity;
