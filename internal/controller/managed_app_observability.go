@@ -326,7 +326,7 @@ func (s *Service) latestManagedAppReplicaSetName(ctx context.Context, client *ku
 	if client == nil {
 		return ""
 	}
-	replicaSets, err := client.listReplicaSetsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
+	replicaSets, err := client.listReplicaSetMetadataBySelector(ctx, namespace, managedAppPodLabelSelector(app))
 	if err != nil {
 		if s.Logger != nil {
 			s.Logger.Printf("list managed app replica sets app=%s failed: %v", app.ID, err)

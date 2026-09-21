@@ -315,8 +315,8 @@
               "interval_seconds": 30,
               "resource": "clusters",
               "fields": [
-          "spec.instances",
-          "spec.plugins",
+                "spec.instances",
+                "spec.plugins",
                 "spec.affinity",
                 "spec.storage",
                 "spec.primaryUpdateStrategy",

@@ -84,6 +84,9 @@ func newDrainWorkloadFixture(t *testing.T) (*Service, model.App, model.AppReleas
 		case strings.HasSuffix(r.URL.Path, "/deployments/"+old.DeploymentName):
 			_ = json.NewEncoder(w).Encode(f.deployment)
 		case strings.HasSuffix(r.URL.Path, "/replicasets"):
+			if r.Header.Get("Accept") != metadataListAccept || r.URL.RawQuery != "" {
+				t.Error("drain ownership read must retain the full unfiltered metadata set")
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": f.replicas})
 		case strings.HasSuffix(r.URL.Path, "/pods"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": f.pods})

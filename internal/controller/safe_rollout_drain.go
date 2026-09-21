@@ -172,7 +172,7 @@ func (s *Service) captureReleaseDrainWorkload(ctx context.Context, client *kubeC
 	var replicas, pods kubeObjectList
 	// Follow ownership even when a child's selector labels have changed. A
 	// label-only list could hide an old Pod that still owns active connections.
-	if _, err := client.doJSON(ctx, http.MethodGet, "/apis/apps/v1/namespaces/"+url.PathEscape(ns)+"/replicasets", nil, &replicas); err != nil {
+	if _, err := client.doMetadataList(ctx, "/apis/apps/v1/namespaces/"+url.PathEscape(ns)+"/replicasets", &replicas); err != nil {
 		return out, err
 	}
 	owned := map[string]string{}

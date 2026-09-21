@@ -1040,6 +1040,16 @@ func (c *kubeClient) getDeployment(ctx context.Context, namespace, name string) 
 }
 
 func (c *kubeClient) listReplicaSetsBySelector(ctx context.Context, namespace, labelSelector string) ([]kubeReplicaSet, error) {
+	return c.listReplicaSets(ctx, namespace, labelSelector, false)
+}
+
+// Revision selection uses only metadata; evidence collection still requests
+// full status through listReplicaSetsBySelector.
+func (c *kubeClient) listReplicaSetMetadataBySelector(ctx context.Context, namespace, labelSelector string) ([]kubeReplicaSet, error) {
+	return c.listReplicaSets(ctx, namespace, labelSelector, true)
+}
+
+func (c *kubeClient) listReplicaSets(ctx context.Context, namespace, labelSelector string, metadataOnly bool) ([]kubeReplicaSet, error) {
 	query := url.Values{}
 	if strings.TrimSpace(labelSelector) != "" {
 		query.Set("labelSelector", labelSelector)
@@ -1050,7 +1060,13 @@ func (c *kubeClient) listReplicaSetsBySelector(ctx context.Context, namespace, l
 	}
 
 	var list kubeReplicaSetList
-	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &list)
+	var status int
+	var err error
+	if metadataOnly {
+		status, err = c.doMetadataList(ctx, apiPath, &list)
+	} else {
+		status, err = c.doJSON(ctx, http.MethodGet, apiPath, nil, &list)
+	}
 	if err != nil {
 		if status == http.StatusForbidden || status == http.StatusNotFound {
 			return nil, nil
@@ -1523,12 +1539,7 @@ func (c *kubeClient) listNamespacedResourceNames(ctx context.Context, apiPath, l
 	var list kubeObjectList
 	// Only names are consumed below. Preserve selectors and latest-read
 	// semantics while asking Kubernetes to omit unused spec/status/data.
-	status, err := c.doRequestWithAccept(ctx, http.MethodGet, apiPath, "", metadataListAccept, nil, &list)
-	if status == http.StatusNotAcceptable {
-		// Some API servers reject a transform before considering fallback
-		// media types. Retry the exact read with the original representation.
-		_, err = c.doJSON(ctx, http.MethodGet, apiPath, nil, &list)
-	}
+	_, err := c.doMetadataList(ctx, apiPath, &list)
 	if err != nil {
 		return nil, err
 	}
@@ -1550,6 +1561,16 @@ func (c *kubeClient) doRequest(ctx context.Context, method, apiPath, contentType
 }
 
 const metadataListAccept = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json;q=0.9"
+
+func (c *kubeClient) doMetadataList(ctx context.Context, apiPath string, out any) (int, error) {
+	status, err := c.doRequestWithAccept(ctx, http.MethodGet, apiPath, "", metadataListAccept, nil, out)
+	if status == http.StatusNotAcceptable {
+		// Retry the exact read with the original representation when a server
+		// rejects the transformation before considering Accept fallbacks.
+		return c.doJSON(ctx, http.MethodGet, apiPath, nil, out)
+	}
+	return status, err
+}
 
 func (c *kubeClient) doRequestWithAccept(ctx context.Context, method, apiPath, contentType, accept string, body any, out any) (int, error) {
 	var payload io.Reader

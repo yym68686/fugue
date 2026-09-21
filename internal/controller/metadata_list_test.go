@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,45 @@ func TestNameOnlyListNegotiatesMetadataAndPreservesFallbackAndErrors(t *testing.
 				t.Fatal("metadata request hid API failure")
 			}
 		})
+	}
+}
+
+func TestReplicaSetMetadataSelectionPreservesOrderingAndFullEvidenceStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Query().Get("labelSelector") != "owner=sample" || r.URL.Query().Has("resourceVersion") {
+			t.Errorf("changed read semantics: %s %s", r.Method, r.URL)
+		}
+		var items []map[string]any
+		for _, item := range []struct{ name, revision, created string }{
+			{"old", "8", "2026-01-01T00:00:00Z"},
+			{"later", "9", "2026-01-02T00:00:00Z"},
+			{"z", "9", "2026-01-03T00:00:00Z"},
+			{"a", "9", "2026-01-03T00:00:00Z"},
+		} {
+			v := map[string]any{"metadata": map[string]any{"name": item.name, "creationTimestamp": item.created, "annotations": map[string]string{"deployment.kubernetes.io/revision": item.revision}}}
+			if r.Header.Get("Accept") == "application/json" {
+				v["status"] = map[string]int{"readyReplicas": 2}
+			} else if r.Header.Get("Accept") != metadataListAccept {
+				t.Error("unexpected representation", r.Header.Get("Accept"))
+			}
+			items = append(items, v)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+	}))
+	defer server.Close()
+	c := &kubeClient{client: server.Client(), baseURL: server.URL}
+	metadata, err := c.listReplicaSetMetadataBySelector(t.Context(), "sample", "owner=sample")
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := c.listReplicaSetsBySelector(t.Context(), "sample", "owner=sample")
+	if err != nil || len(full) != len(metadata) || len(full) != 4 {
+		t.Fatalf("incomplete list: metadata=%v full=%v err=%v", metadata, full, err)
+	}
+	for i, want := range []string{"a", "z", "later", "old"} {
+		if metadata[i].Metadata.Name != want || !reflect.DeepEqual(metadata[i].Metadata, full[i].Metadata) || full[i].Status.ReadyReplicas != 2 {
+			t.Fatalf("changed ordering or lost full evidence at %d: metadata=%+v full=%+v", i, metadata[i], full[i])
+		}
 	}
 }
 
