@@ -105,6 +105,20 @@ func executableIdentity(filename string) (map[string]any, error) {
 	for _, section := range metadata.Sections {
 		if strings.Contains(section.Name, "gopclntab") || strings.Contains(section.Name, "gosymtab") || strings.HasPrefix(section.Name, ".note.") || section.Name == ".text" {
 			row := map[string]any{"name": section.Name, "address": section.Addr, "offset": section.Offset, "size": section.Size}
+			if strings.Contains(section.Name, "gopclntab") && section.Size >= 32 {
+				var header [32]byte
+				if _, err := section.ReadAt(header[:], 0); err == nil {
+					row["header_hex"] = hex.EncodeToString(header[:])
+					magic := metadata.ByteOrder.Uint32(header[:4])
+					if magic == 0xfffffff0 || magic == 0xfffffff1 {
+						if header[7] == 8 {
+							row["go_text_start"] = metadata.ByteOrder.Uint64(header[24:32])
+						} else if header[7] == 4 {
+							row["go_text_start"] = metadata.ByteOrder.Uint32(header[16:20])
+						}
+					}
+				}
+			}
 			if strings.HasPrefix(section.Name, ".note.") && section.Size <= 4096 {
 				if data, err := section.Data(); err == nil {
 					row["bytes_hex"] = hex.EncodeToString(data)

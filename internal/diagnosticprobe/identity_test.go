@@ -37,6 +37,9 @@ func TestExecutableIdentityReadsActualGoELFWithoutExecutingIt(t *testing.T) {
 	for _, section := range result["sections"].([]map[string]any) {
 		if section["name"] == ".gopclntab" {
 			lineTable = true
+			if section["go_text_start"] == nil || section["header_hex"] == nil {
+				t.Fatal("missing declared Go text origin")
+			}
 		}
 	}
 	if !lineTable {
