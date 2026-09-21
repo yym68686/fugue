@@ -9,11 +9,15 @@ import (
 )
 
 func (s *Server) platformConvergenceBinding(set model.PlatformExpectedConsumerSet) *platformcontrol.ConsumerReleaseBinding {
+	return s.platformConvergenceBindingWithReader(set, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+}
+
+func (s *Server) platformConvergenceBindingWithReader(set model.PlatformExpectedConsumerSet, readArtifact func(string) (model.PlatformArtifact, error)) *platformcontrol.ConsumerReleaseBinding {
 	if set.ReleaseSetID == "" || set.ArtifactReleaseID == "" {
 		return nil
 	}
-	parent, err := s.store.GetPlatformArtifact(set.ReleaseSetID)
-	if err != nil || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || !s.validateReleaseSetReferences(parent).Pass {
+	parent, err := readArtifact(set.ReleaseSetID)
+	if err != nil || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || !validateReleaseSetReferences(parent, readArtifact).Pass {
 		return nil
 	}
 	release, err := s.store.GetPlatformArtifactRelease(set.ArtifactReleaseID)
@@ -28,7 +32,7 @@ func (s *Server) platformConvergenceBinding(set model.PlatformExpectedConsumerSe
 	if err != nil || newest.ID != release.ID {
 		return nil
 	}
-	child, err := s.consumerAssignmentChild(parent, set.ArtifactKind)
+	child, err := consumerAssignmentChild(parent, set.ArtifactKind, readArtifact)
 	if err != nil || child.Status != model.PlatformArtifactStatusValidated || child.ScopeKey != set.ScopeKey || child.Generation != set.ExpectedGeneration || child.GenerationSequence <= 0 || s.store.VerifyPlatformArtifactIntegrity(child) != nil {
 		return nil
 	}

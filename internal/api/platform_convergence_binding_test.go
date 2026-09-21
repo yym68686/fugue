@@ -113,6 +113,22 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 		t.Fatal("unverified legacy receipt passed", status)
 	}
 	sets := prepare(shadow)
+	for _, set := range sets {
+		reads := map[string]int{}
+		reader := newConsumerArtifactReader(func(id string) (model.PlatformArtifact, error) {
+			reads[id]++
+			return state.GetPlatformArtifact(id)
+		})
+		binding := server.platformConvergenceBindingWithReader(set, reader)
+		if binding == nil || !reflect.DeepEqual(binding, server.platformConvergenceBinding(set)) {
+			t.Fatal("read reuse changed convergence binding", binding)
+		}
+		for _, artifact := range []model.PlatformArtifact{compiled.ReleaseArtifact, compiled.RouteArtifact, compiled.DNSArtifact, compiled.TLSArtifact} {
+			if reads[artifact.ID] != 1 {
+				t.Fatalf("convergence reread artifact %s: %v", artifact.ArtifactKind, reads)
+			}
+		}
+	}
 	again := prepare(shadow)
 	if len(sets) != 3 || !reflect.DeepEqual(sets, again) {
 		t.Fatal("same-release preparation was not idempotent")

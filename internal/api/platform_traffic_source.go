@@ -19,6 +19,10 @@ var trafficSourceGroup = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)
 // reinterpreting a broken or unprepared release as permission to read business
 // tables. The bootstrap fallback is consulted only when no release selects us.
 func (s *Server) edgeRouteIntentSnapshotFromTrafficRelease(group string) (model.EdgeRouteIntentSnapshot, bool, error) {
+	return s.edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+}
+
+func (s *Server) edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
 	parent, release, found, err := s.selectTrafficRouteRelease(group)
 	if err != nil || !found {
 		return model.EdgeRouteIntentSnapshot{}, found, err
@@ -26,7 +30,7 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficRelease(group string) (model.
 	fail := func() (model.EdgeRouteIntentSnapshot, bool, error) {
 		return model.EdgeRouteIntentSnapshot{}, true, errors.New("traffic release route source is unavailable")
 	}
-	if !s.validateReleaseSetReferences(parent).Pass {
+	if !validateReleaseSetReferences(parent, readArtifact).Pass {
 		return fail()
 	}
 	var child model.PlatformArtifact
@@ -34,7 +38,7 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficRelease(group string) (model.
 	// Read all three prepared topologies; a partially completed preparation
 	// cannot activate only the route member of a traffic release.
 	for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig} {
-		artifact, err := s.consumerAssignmentChild(parent, kind)
+		artifact, err := consumerAssignmentChild(parent, kind, readArtifact)
 		if err != nil || artifact.ScopeKey != parent.ScopeKey || s.store.VerifyPlatformArtifactIntegrity(artifact) != nil {
 			return fail()
 		}

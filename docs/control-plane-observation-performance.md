@@ -62,3 +62,13 @@ references, revision ordering and lifecycle checks. A 406 retries the identical
 read using full JSON. Operation evidence that consumes ReplicaSet status still
 uses the full representation. This reduces serialization and response bytes
 without weakening the set of Pods checked before draining a release.
+
+Route source and convergence binding reads reuse the existing invocation-local
+artifact reader. Reference validation and child selection share each immutable
+artifact load; lane selection, fences, topology, signatures and the final route
+publication recheck still execute. There is no cross-request cache. Regression
+tests count one child load and compare the resulting projection/binding, while
+the existing revoked-key, removed-topology and superseded-publication tests
+remain mandatory. The three-read synthetic 1 MiB benchmark measured 22.2 ms /
+3.15 MB without reuse and 7.88 ms / 1.05 MB with reuse on arm64; this is not an
+end-to-end production latency measurement.

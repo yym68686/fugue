@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -103,12 +104,29 @@ func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *tes
 	prepare(gray, "edge-group-test-a", true)
 	assertSource := func(release model.PlatformArtifactRelease) {
 		t.Helper()
+		reads := map[string]int{}
+		reader := newConsumerArtifactReader(func(id string) (model.PlatformArtifact, error) {
+			reads[id]++
+			return state.GetPlatformArtifact(id)
+		})
+		observed, found, err := server.edgeRouteIntentSnapshotFromTrafficReleaseWithReader("edge-group-test-a", reader)
+		if err != nil || !found {
+			t.Fatal("route observation unavailable", err)
+		}
+		for _, child := range []model.PlatformArtifact{compiled.RouteArtifact, compiled.DNSArtifact, compiled.TLSArtifact} {
+			if reads[child.ID] != 1 {
+				t.Fatalf("route observation reread child %s: %v", child.ArtifactKind, reads)
+			}
+		}
 		r := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents?edge_group_id=edge-group-test-a", token, nil)
 		if r.Code != 200 {
 			t.Fatal(r.Code, r.Body.String())
 		}
 		var snapshot model.EdgeRouteIntentSnapshot
 		mustDecodeJSON(t, r, &snapshot)
+		if !reflect.DeepEqual(observed, snapshot) {
+			t.Fatal("request-scoped artifact reads changed route projection")
+		}
 		if r.Header().Get("X-Fugue-Route-Intent-Source") != "traffic-release" || snapshot.TrafficRelease == nil || snapshot.TrafficRelease.ReleaseID != release.ID || snapshot.Generation != compiled.RouteArtifact.Generation {
 			t.Fatal("wrong release selected")
 		}
