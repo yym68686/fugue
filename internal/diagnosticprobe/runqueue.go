@@ -120,8 +120,8 @@ func schedulerRecordingQuality(result map[string]any, file string, cut bool, rec
 }
 
 func processRunqueueLatency(ctx context.Context, req livediagnostics.ProbeRequest, c Collector) (any, error) {
-	if (req.ContainerID == "") == (req.Target.ProcessName == "") || c.CaptureSeconds < 5 || c.CaptureSeconds > 20 || c.CaptureSeconds+15 > req.DurationSeconds || c.IntervalSeconds < req.DurationSeconds {
-		return nil, errors.New("scheduler capture requires one process or container target, 5-20 seconds and 15 seconds analysis headroom")
+	if (req.ContainerID == "") == (req.Target.ProcessName == "") || c.CaptureSeconds < 1 || c.CaptureSeconds > 20 || c.CaptureSeconds+15 > req.DurationSeconds || c.IntervalSeconds < req.DurationSeconds {
+		return nil, errors.New("scheduler capture requires one process or container target, 1-20 seconds and 15 seconds analysis headroom")
 	}
 	processes, err := profileProcessIdentities(ctx, req)
 	if err != nil {
@@ -148,7 +148,8 @@ func processRunqueueLatency(ctx context.Context, req livediagnostics.ProbeReques
 		"scope": "completed wakeup-to-switch-in and runnable-switch-out-to-switch-in pairs for frozen thread lifetimes; blocked time is excluded; unpaired boundary events and new threads are not assigned zero latency"}
 	cut, gaps := schedulerRecordingQuality(result, file, cut, err)
 	gaps = append(gaps, recording.Missing...)
-	if err != nil || cut {
+	recordingFailed := err != nil
+	if _, available := result["capture_bytes"]; !available {
 		return partialValue{Value: result, Gaps: gaps, Truncated: cut}, nil
 	}
 	if finished.Sub(started) < time.Duration(c.CaptureSeconds)*time.Second {
@@ -199,7 +200,7 @@ func processRunqueueLatency(ctx context.Context, req livediagnostics.ProbeReques
 	}
 	// A missing transition can fabricate a long pair. Retain the capture facts,
 	// but withhold durations altogether when event-stream continuity is lost.
-	if lost > 0 || invalid > 0 || cut || err != nil || conflicts > 0 {
+	if lost > 0 || invalid > 0 || cut || err != nil || conflicts > 0 || recordingFailed {
 		delete(result, "latencies")
 	}
 	if len(gaps) > 0 {
