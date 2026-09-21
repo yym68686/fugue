@@ -186,6 +186,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return processCPUProfile(ctx, req, c)
 	case "host-journal":
 		return hostJournal(ctx, req, c)
+	case "kubernetes-audit":
+		return hostKubernetesAudit(ctx, req, c)
 	case "kubernetes-objects":
 		return k.objects(ctx, req, c)
 	case "kubernetes-logs":
