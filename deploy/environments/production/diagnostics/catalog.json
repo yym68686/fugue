@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 23,
+    "generation": 24,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -153,7 +153,7 @@
           "since_seconds": {"default": "900", "max_length": 5, "pattern": "^[0-9]{1,5}$"},
           "since": {"max_length": 40, "pattern": "^[0-9T:.Z+-]+$"},
           "until": {"max_length": 40, "pattern": "^[0-9T:.Z+-]+$"},
-          "match": {"max_length": 256, "pattern": "^[^\\r\\n]+$"}
+          "match": {"max_length": 256, "pattern": "^[^\r\n]+$"}
         },
         "config": {
           "collectors": [{"name": "service-log", "kind": "host-journal", "unit": "{{param.unit}}", "since_seconds": 900, "since_seconds_param": "{{param.since_seconds}}", "since_time": "{{param.since}}", "until_time": "{{param.until}}", "match_param": "{{param.match}}", "interval_seconds": 120, "match": ["took too long", "slow", "timeout", "deadline", "error", "warn", "trace"]}]
