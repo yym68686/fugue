@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"debug/elf"
+	"encoding/binary"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"strings"
 	"testing"
@@ -216,6 +218,73 @@ func TestGoSymbolizerResolvesStrippedExecutableOffset(t *testing.T) {
 	if len(loaded) != 2 || loaded[10].Resolver != loaded[11].Resolver {
 		t.Fatal("shared executable line tables were parsed twice")
 	}
+}
+
+func TestGoTextStartValidatesExplicitOrigin(t *testing.T) {
+	section := &elf.Section{SectionHeader: elf.SectionHeader{Addr: 0x1000, Size: 0x10000}}
+	for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		for _, width := range []int{4, 8} {
+			header := make([]byte, 8+3*width)
+			order.PutUint32(header, 0xfffffff1)
+			header[7] = byte(width)
+			if width == 4 {
+				order.PutUint32(header[8+2*width:], 0x1200)
+			} else {
+				order.PutUint64(header[8+2*width:], 0x1200)
+			}
+			if got, err := goTextStart(header, section); err != nil || got != 0x1200 {
+				t.Fatalf("explicit text origin: got=%#x err=%v", got, err)
+			}
+			if _, err := goTextStart(header[:len(header)-1], section); err == nil {
+				t.Fatal("accepted truncated header")
+			}
+			if _, err := goTextStart(header, &elf.Section{SectionHeader: elf.SectionHeader{Addr: 0x2000, Size: 0x10000}}); err == nil {
+				t.Fatal("accepted unrelocated or invalid origin")
+			}
+		}
+	}
+}
+
+func TestGoSymbolizerMatchesExternalLinkerSymbol(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("external ELF fixture requires a native Linux C linker")
+	}
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "fixture.go")
+	source := "package main\nimport \"C\"\n//go:noinline\nfunc diagnosticFixture() int { return 42 }\nfunc main() { println(diagnosticFixture()) }\n"
+	if err := os.WriteFile(sourcePath, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(dir, "fixture")
+	command := exec.Command("go", "build", "-ldflags=-linkmode=external", "-o", executable, sourcePath)
+	command.Env = append(os.Environ(), "CGO_ENABLED=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("external fixture: %v: %s", err, output)
+	}
+	metadata, err := elf.Open(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	symbols, err := metadata.Symbols()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := newGoSymbolizer(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, symbol := range symbols {
+		if symbol.Name != "main.diagnosticFixture" {
+			continue
+		}
+		name, _, _, ok := resolver.ResolveDSOOffset(symbol.Value - resolver.loadBase)
+		if !ok || name != symbol.Name {
+			t.Fatalf("ELF symbol at %#x resolved to %q (ok=%t)", symbol.Value, name, ok)
+		}
+		return
+	}
+	t.Fatal("independent ELF symbol was not found")
 }
 
 func TestKernelSymbolizerResolvesNearestVisibleSymbol(t *testing.T) {

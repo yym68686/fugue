@@ -6,6 +6,7 @@ import (
 	"context"
 	"debug/elf"
 	"debug/gosym"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -1361,7 +1362,11 @@ func newGoSymbolizer(path string) (*goSymbolizer, error) {
 			return nil, err
 		}
 	}
-	table, err := gosym.NewTable(symtabData, gosym.NewLineTable(pclnData, text.Addr))
+	textStart, err := goTextStart(pclnData, text)
+	if err != nil {
+		return nil, err
+	}
+	table, err := gosym.NewTable(symtabData, gosym.NewLineTable(pclnData, textStart))
 	if err != nil {
 		return nil, err
 	}
@@ -1372,6 +1377,40 @@ func newGoSymbolizer(path string) (*goSymbolizer, error) {
 		}
 	}
 	return &goSymbolizer{table: table, loadBase: loadBase}, nil
+}
+
+// External linkers can put native startup code before runtime.text. Go 1.18+
+// tables record the Go origin explicitly; .text.Addr would shift every symbol.
+func goTextStart(pcln []byte, text *elf.Section) (uint64, error) {
+	if len(pcln) < 8 {
+		return 0, errors.New("truncated Go line table header")
+	}
+	var order binary.ByteOrder
+	for _, candidate := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		magic := candidate.Uint32(pcln)
+		if magic == 0xfffffff0 || magic == 0xfffffff1 {
+			order = candidate
+			break
+		}
+	}
+	if order == nil {
+		return text.Addr, nil // Older Go tables contain absolute function PCs.
+	}
+	width := int(pcln[7])
+	if (width != 4 && width != 8) || len(pcln) < 8+3*width {
+		return 0, errors.New("invalid Go line table pointer header")
+	}
+	field := pcln[8+2*width : 8+3*width]
+	var start uint64
+	if width == 4 {
+		start = uint64(order.Uint32(field))
+	} else {
+		start = order.Uint64(field)
+	}
+	if start < text.Addr || start-text.Addr >= text.Size {
+		return 0, errors.New("Go text origin is outside executable text section")
+	}
+	return start, nil
 }
 
 // Section.Data grows a slice in chunks for large tables, retaining several
