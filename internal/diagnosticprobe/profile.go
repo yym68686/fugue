@@ -36,6 +36,12 @@ func processCPUProfile(ctx context.Context, req livediagnostics.ProbeRequest, c 
 	}
 	raw, truncated, err := diagnosticCommand(ctx, 8<<20, "/usr/local/bin/fugue-diagnostic-agent", args...)
 	if err != nil {
+		var failure struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(raw, &failure) == nil && failure.Error != "" {
+			return nil, fmt.Errorf("CPU sampler failed: %s", safeText(failure.Error))
+		}
 		return nil, fmt.Errorf("CPU sampler failed: %w", err)
 	}
 	if truncated {
