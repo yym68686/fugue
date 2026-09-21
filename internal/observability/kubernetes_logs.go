@@ -148,14 +148,26 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	var remaining atomic.Int64
 	remaining.Store(budget)
 	workers := min(8, len(targets))
-	jobs := make(chan kubernetesLogTarget)
+	type indexedTarget struct {
+		target kubernetesLogTarget
+		offset int
+	}
+	jobs := make(chan indexedTarget)
+	var firstBlocked atomic.Int64
+	firstBlocked.Store(int64(len(targets)))
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for target := range jobs {
-				c.collectCursorTarget(ctx, target, &remaining)
+			for job := range jobs {
+				if c.collectCursorTarget(ctx, job.target, &remaining) {
+					for old := firstBlocked.Load(); int64(job.offset) < old; old = firstBlocked.Load() {
+						if firstBlocked.CompareAndSwap(old, int64(job.offset)) {
+							break
+						}
+					}
+				}
 			}
 		}()
 	}
@@ -172,17 +184,17 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 			break
 		}
 		select {
-		case jobs <- target:
+		case jobs <- indexedTarget{target, i}:
 			scheduled++
 		case <-ctx.Done():
 		}
 	}
 	close(jobs)
 	wg.Wait()
-	// Resume after the last scheduled target when the global budget runs out.
-	// Rotating by only one would starve the far end of a large target list.
-	if scheduled < len(targets) {
-		c.targetOffset = (c.targetOffset + scheduled) % len(targets)
+	// A request may have been scheduled before another worker spent the budget.
+	// Resume at the first source that made no progress, including in-flight reads.
+	if resume := min(scheduled, int(firstBlocked.Load())); resume < len(targets) {
+		c.targetOffset = (c.targetOffset + resume) % len(targets)
 	} else {
 		c.targetOffset = (c.targetOffset + 1) % len(targets)
 	}

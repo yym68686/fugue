@@ -67,9 +67,12 @@ func logTargetKey(t kubernetesLogTarget) string {
 // of a busy stream). The cursor advances only after queue admission, and an
 // inclusive timestamp plus boundary occurrence counts preserves equal-time
 // duplicate lines without replaying the entire history on every poll.
-func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, target kubernetesLogTarget, budget *atomic.Int64) {
-	if budget.Load() <= 0 || parent.Err() != nil {
-		return
+func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, target kubernetesLogTarget, budget *atomic.Int64) (budgetBlockedWithoutProgress bool) {
+	if parent.Err() != nil {
+		return false
+	}
+	if budget.Load() <= 0 {
+		return true
 	}
 	c.cycleVisited.Add(1)
 	key := logTargetKey(target)
@@ -166,6 +169,7 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 			break
 		}
 		if budget.Add(-1) < 0 {
+			budgetBlockedWithoutProgress = n == 0
 			observation.Outcome = "cycle_budget"
 			budget.Add(1)
 			truncated = true
@@ -216,4 +220,5 @@ func (c *kubernetesLogCollector) collectCursorTarget(parent context.Context, tar
 	c.cursorsMu.Lock()
 	c.cursors[key] = cur
 	c.cursorsMu.Unlock()
+	return
 }

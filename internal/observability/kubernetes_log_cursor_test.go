@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"encoding/json"
 	"fmt"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +14,45 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCollectionResumesAtSourceWhoseInFlightRequestLostCycleBudget(t *testing.T) {
+	var p *Pipeline
+	ts := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	opened := make(chan struct{}, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/pods" {
+			pods := []corev1.Pod{}
+			for _, name := range []string{"a", "b", "c"} {
+				pods = append(pods, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(corev1.PodList{Items: pods})
+			return
+		}
+		opened <- struct{}{}
+		deadline := time.Now().Add(3 * time.Second)
+		for len(opened) < 3 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if strings.Contains(r.URL.Path, "/pods/a/") {
+			return
+		}
+		if strings.Contains(r.URL.Path, "/pods/c/") {
+			for p.kubernetesLogLines.Load() == 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+		}
+		fmt.Fprintf(w, "%s one\n", ts)
+	}))
+	defer server.Close()
+	client, _ := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	p = NewPipeline(Config{Enabled: true, QueueSize: 32, KubernetesLogMaxLinesPerCycle: 1, KubernetesLogPollInterval: 5 * time.Second}, nil)
+	c := newKubernetesLogCollectorWithClient(p, client)
+	c.collectOnce(t.Context())
+	if len(opened) != 3 || p.kubernetesLogLines.Load() != 1 || c.targetOffset != 2 {
+		t.Fatalf("in-flight blocked source did not get next turn: requests=%d lines=%d offset=%d", len(opened), p.kubernetesLogLines.Load(), c.targetOffset)
+	}
+}
 
 func TestCursorReadsFrontOfBacklogAndEqualTimestampOccurrences(t *testing.T) {
 	ts := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
