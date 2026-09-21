@@ -80,6 +80,13 @@ agent registers log-source cursor/timing/outcome metadata and collection-cycle
 budgets; observations never include log bodies or alter collection cursors.
 Source eviction and output limits are explicit in the snapshot.
 
+Runtime snapshots deduplicate shared Unix sockets across helper processes and
+bind each row to the socket's kernel-reported peer PID in the frozen target set.
+Only that provider's lifetime and socket identity determine snapshot continuity;
+short-lived helpers do not create false gaps. Missing providers, changed peers
+and incomplete source data still degrade the report. The reported scope and
+skipped process count make this provider-level coverage explicit.
+
 Source snapshots retain the last read error's timestamp, stage, normalized
 class and elapsed time after recovery. They retain no error payload. A failed
 stream open saves the existing cursor and unresolved coverage boundary, and
