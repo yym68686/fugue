@@ -3,6 +3,9 @@ package diagnosticprobe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +52,59 @@ func TestHostJournalSupportsBoundedParameterLookback(t *testing.T) {
 	}
 	if _, err := configuredSinceSeconds(Collector{SinceSecondsParam: "{{param.since_seconds}}"}, livediagnostics.ProbeRequest{Parameters: map[string]string{"since_seconds": "nope"}}); err == nil {
 		t.Fatal("accepted non-numeric lookback")
+	}
+}
+
+func TestJournalFiltersAreLiteralAndWindowIsBounded(t *testing.T) {
+	args, err := journalFilterArguments([]string{"timeout", "error|unsafe"})
+	if err != nil || len(args) != 2 || args[0] != `--grep=timeout|error\|unsafe` || args[1] != "--case-sensitive=yes" {
+		t.Fatalf("literal filter: %#v %v", args, err)
+	}
+	if _, err := journalFilterArguments([]string{"bad\nvalue"}); err == nil {
+		t.Fatal("accepted newline in journal filter")
+	}
+	matcher := regexp.MustCompile(strings.TrimPrefix(args[0], "--grep="))
+	for _, input := range []string{"Timeout", "unsafe", "error", "error|unsafe", "read timeout"} {
+		want := strings.Contains(input, "timeout") || strings.Contains(input, "error|unsafe")
+		if matcher.MatchString(input) != want {
+			t.Fatalf("filter changed literal/case semantics for %q", input)
+		}
+	}
+	now := time.Date(2026, 9, 21, 12, 0, 0, 123456789, time.UTC)
+	c := Collector{SinceSeconds: 86400}
+	since, until, err := journalWindow(c, livediagnostics.ProbeRequest{}, now)
+	if err != nil || !until.Equal(now.Truncate(time.Microsecond)) || !since.Equal(time.Date(2026, 9, 20, 12, 0, 0, 123457000, time.UTC)) {
+		t.Fatalf("window rounding: since=%s until=%s err=%v", since, until, err)
+	}
+	if _, _, err := journalWindow(Collector{SinceSeconds: 86401}, livediagnostics.ProbeRequest{}, now); err == nil {
+		t.Fatal("accepted lookback beyond 24 hours")
+	}
+	for _, bounds := range [][2]string{
+		{"2026-09-20T11:59:59Z", "2026-09-21T11:00:00Z"},
+		{"2026-09-21T11:00:00Z", "2026-09-21T13:00:00Z"},
+		{"2026-09-21T11:00:00Z", "2026-09-21T10:00:00Z"},
+		{"invalid", "2026-09-21T11:00:00Z"},
+	} {
+		if _, _, err := journalWindow(Collector{SinceSeconds: 900, SinceTime: bounds[0], UntilTime: bounds[1]}, livediagnostics.ProbeRequest{}, now); err == nil {
+			t.Fatalf("accepted invalid window %v", bounds)
+		}
+	}
+	since, until, err = journalWindow(Collector{SinceSeconds: 900, SinceTime: "{{param.since}}", UntilTime: "{{param.until}}"}, livediagnostics.ProbeRequest{Parameters: map[string]string{"since": "2026-09-21T10:59:00Z", "until": "2026-09-21T11:01:00Z"}}, now)
+	if err != nil || until.Sub(since) != 2*time.Minute || journalTimestamp(since) != "@1789988340.000000" {
+		t.Fatalf("explicit incident window: %s %s %v", since, until, err)
+	}
+}
+
+func TestJournalNoMatchesOnlyAcceptsCleanFilteredExit(t *testing.T) {
+	err := exec.Command("sh", "-c", "exit 1").Run()
+	if !journalNoMatches(fmt.Errorf("wrapped: %w", err), nil, "", true) {
+		t.Fatal("did not recognize clean filtered no-match exit")
+	}
+	if journalNoMatches(err, nil, "journal failure", true) || journalNoMatches(err, []byte("partial"), "", true) || journalNoMatches(err, nil, "", false) || journalNoMatches(context.Canceled, nil, "", true) {
+		t.Fatal("treated journal failure as no matches")
+	}
+	if journalNoMatches(exec.Command("sh", "-c", "exit 2").Run(), nil, "", true) {
+		t.Fatal("treated unrelated failure as no matches")
 	}
 }
 

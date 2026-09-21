@@ -14,9 +14,17 @@ for executable in ["perf", "journalctl"]:
 # journal mounted. Invalid time syntax is a hard error, unlike an empty source.
 subprocess.run([
     "docker", "run", "--rm", "--network=none", "--read-only", "--cap-drop=ALL",
-    "--entrypoint", "journalctl", sys.argv[1], "--since=@1789960000", "--until=@1789960001",
+    "--entrypoint", "journalctl", sys.argv[1], "--since=@1789960000.123457", "--until=@1789960001.123456",
     "--unit=fixture.service", "--no-pager", "--quiet",
 ], capture_output=True, check=True, timeout=30)
+
+filtered = subprocess.run([
+    "docker", "run", "--rm", "--network=none", "--read-only", "--cap-drop=ALL",
+    "--entrypoint", "journalctl", sys.argv[1], "--since=@1789960000.123457", "--until=@1789960001.123456",
+    "--unit=fixture.service", "--grep=error\\|unsafe", "--case-sensitive=yes", "--no-pager", "--quiet",
+], capture_output=True, timeout=30)
+if filtered.returncode != 1 or filtered.stdout or filtered.stderr:
+    raise RuntimeError("journal literal no-match exit contract differs")
 
 request = {
     "probe_image":sys.argv[1], "protocol": "fugue.diagnostics/v1", "session_id": "diagnostic-smoke", "probe_id": "package-smoke",

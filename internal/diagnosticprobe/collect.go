@@ -41,7 +41,9 @@ type Collector struct {
 	SinceSeconds      int               `json:"since_seconds,omitempty"`
 	SinceSecondsParam string            `json:"since_seconds_param,omitempty"`
 	SinceTime         string            `json:"since_time,omitempty"`
+	UntilTime         string            `json:"until_time,omitempty"`
 	Match             []string          `json:"match,omitempty"`
+	MatchParam        string            `json:"match_param,omitempty"`
 	Service           *Service          `json:"service,omitempty"`
 	Path              string            `json:"path,omitempty"`
 	Queries           map[string]string `json:"queries,omitempty"`
@@ -83,7 +85,7 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 	}
 	seen := map[string]bool{}
 	for _, c := range cfg.Collectors {
-		if c.Name == "" || len(c.Name) > 80 || seen[c.Name] || c.IntervalSeconds < 0 || c.IntervalSeconds > 360 || len(c.Queries) > 12 || len(c.Fields) > 32 || len(c.Match) > 16 || len(c.AnnotationKeys) > 16 {
+		if c.Name == "" || len(c.Name) > 80 || seen[c.Name] || c.IntervalSeconds < 0 || c.IntervalSeconds > 360 || len(c.Queries) > 12 || len(c.Fields) > 32 || len(c.Match) > 16 || len(c.AnnotationKeys) > 16 || len(c.SinceSecondsParam) > 4096 || len(c.MatchParam) > 4096 || len(c.SinceTime) > 64 || len(c.UntilTime) > 64 {
 			return livediagnostics.ProbeReport{}, errors.New("invalid collector configuration or budget")
 		}
 		for _, name := range c.RequiredQueries {

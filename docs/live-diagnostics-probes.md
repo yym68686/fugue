@@ -63,6 +63,15 @@ service unit and a lookback of at most 24 hours, with entry and byte limits,
 redacted examples, source timestamps and explicit partial-coverage reporting.
 These recipes can be registered or removed through catalog configuration.
 
+The journal collector filters literal, case-sensitive `match` strings at the
+source before applying its entry limit. `match_param` optionally selects one
+literal from a recipe parameter. Reports record the selected literals and
+coverage scope; no-match is distinct from a journal read failure. Results cover
+retained journal records only, not logs already rotated away. `since_time` and
+`until_time` accept optional RFC3339 parameters for an exact incident window;
+the entire window must remain inside the past 24 hours. Entry and byte limits
+remain fixed even when a longer window is selected.
+
 Components can register bounded, read-only snapshot providers with
 `runtimeobservation.Start`. This exposes a root-only Unix socket and a stable
 provider discovery endpoint, without opening a network listener. Independent
