@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 8,
+    "generation": 9,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -12,7 +12,8 @@
       "profiles": [
         "host-read",
         "cluster-read",
-        "process-profile"
+        "process-profile",
+        "kernel-profile"
       ],
       "service_account": "fugue-diagnostic-reader"
     },
@@ -21,7 +22,7 @@
         "id": "process-cpu-sampling",
         "description": "Bounded process CPU sample counts, cgroup pressure and symbol coverage",
         "image": "$runner",
-        "profile": "process-profile",
+        "profile": "kernel-profile",
         "target_types": ["node_process", "platform_component"],
         "max_duration_seconds": 120,
         "parameters": {},

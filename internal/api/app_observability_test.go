@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -239,8 +240,14 @@ func TestAppObservabilityMetricsTimeseriesReturnsTimestampedSamples(t *testing.T
 		if r.URL.Query().Get("step") != "10" {
 			t.Fatalf("step = %q", r.URL.Query().Get("step"))
 		}
+		end, err := strconv.ParseInt(r.URL.Query().Get("end"), 10, 64)
+		if err != nil {
+			t.Errorf("invalid requested end: %v", err)
+			http.Error(w, "invalid end", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "matrix", "result": []any{map[string]any{"metric": map[string]string{"app_id": app.ID}, "values": [][2]any{{float64(time.Now().Unix() - 10), "2"}, {float64(time.Now().Unix()), "3"}}}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "matrix", "result": []any{map[string]any{"metric": map[string]string{"app_id": app.ID}, "values": [][2]any{{float64(end - 10), "2"}, {float64(end), "3"}}}}}})
 	}))
 	t.Cleanup(prometheus.Close)
 	server.observabilityConfig = observability.Config{Enabled: true, MetricsQueryURL: prometheus.URL + "/api/v1/query"}.Normalize()
