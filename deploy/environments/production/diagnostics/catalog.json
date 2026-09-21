@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 34,
+    "generation": 35,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [

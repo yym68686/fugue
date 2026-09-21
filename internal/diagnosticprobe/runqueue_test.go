@@ -50,6 +50,19 @@ func TestSchedulerUnpairedAndConflictingTransitionsAreExplicit(t *testing.T) {
 	}
 }
 
+func TestSchedulerStaleWakeupDoesNotHideCompletedLatencyPairs(t *testing.T) {
+	events := []schedulerEvent{
+		{At: 1, Kind: "sched_wakeup", PID: 42},
+		{At: 5, Kind: "sched_switch", Next: 42},
+		{At: 6, Kind: "sched_wakeup", PID: 42},
+		{At: 7, Kind: "sched_switch", Prev: 42, Runnable: false},
+	}
+	out := schedulerLatencies(events, map[int]schedulerThread{42: {PID: 42, Start: "1"}})
+	if out["completed_pairs"] != 1 || out["max_wait_ns"] != int64(4) || out["conflicting_transitions"] != 0 || out["stale_wakeup_transitions"] != 1 {
+		t.Fatalf("stale wakeup hid a valid wait pair: %+v", out)
+	}
+}
+
 func TestSchedulerEventLimitsAndMalformedLossCannotDisappear(t *testing.T) {
 	valid := "1.123456789: sched:sched_wakeup: comm=worker pid=42 prio=120 target_cpu=000\n"
 	events, lost, invalid, cut := parseSchedulerEvents([]byte(valid + "PERF_RECORD_LOST lost 4\nmalformed\n999999999999999.123456789: sched:sched_wakeup: pid=42 prio=120\n"))

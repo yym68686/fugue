@@ -189,7 +189,8 @@ func processRunqueueLatency(ctx context.Context, req livediagnostics.ProbeReques
 	result["transition_coverage"] = map[string]any{
 		"completed_pairs": latencies["completed_pairs"], "unpaired_switch_ins": latencies["unpaired_switch_ins"],
 		"pending_at_end": latencies["pending_at_end"], "conflicting_transitions": conflicts,
-		"conflict_examples": latencies["conflict_examples"],
+		"stale_wakeup_transitions": latencies["stale_wakeup_transitions"],
+		"conflict_examples":        latencies["conflict_examples"],
 	}
 	if conflicts > 0 {
 		gaps = append(gaps, "conflicting scheduler transitions prevent complete latency attribution")
@@ -306,7 +307,7 @@ type schedulerPair struct {
 func schedulerLatencies(events []schedulerEvent, threads map[int]schedulerThread) map[string]any {
 	pending := map[int]schedulerPair{}
 	pairs := []schedulerPair{}
-	unpaired, conflicts := 0, 0
+	unpaired, conflicts, staleWakeups := 0, 0, 0
 	examples := []map[string]any{}
 	recent := map[int][]schedulerEvent{}
 	observe := func(tid int, e schedulerEvent, conflict bool) {
@@ -347,9 +348,14 @@ func schedulerLatencies(events []schedulerEvent, threads map[int]schedulerThread
 			delete(pending, e.Next)
 		}
 		if identity, ok := threads[e.Prev]; ok {
-			_, exists := pending[e.Prev]
-			observe(e.Prev, e, exists)
-			if exists {
+			pendingPair, exists := pending[e.Prev]
+			observe(e.Prev, e, exists && pendingPair.Reason != "wakeup")
+			if exists && pendingPair.Reason == "wakeup" {
+				// A wakeup observed while the thread is still running can be
+				// followed by its switch-out without an intervening switch-in.
+				// It is a stale runnable marker, not a broken event stream.
+				staleWakeups++
+			} else if exists {
 				conflicts++
 			}
 			delete(pending, e.Prev)
@@ -363,7 +369,7 @@ func schedulerLatencies(events []schedulerEvent, threads map[int]schedulerThread
 	for _, pair := range pairs {
 		total += pair.Wait
 	}
-	out := map[string]any{"completed_pairs": len(pairs), "unpaired_switch_ins": unpaired, "pending_at_end": len(pending), "conflicting_transitions": conflicts, "sum_thread_wait_ns": total, "longest_pairs": pairs[:min(len(pairs), 20)]}
+	out := map[string]any{"completed_pairs": len(pairs), "unpaired_switch_ins": unpaired, "pending_at_end": len(pending), "conflicting_transitions": conflicts, "stale_wakeup_transitions": staleWakeups, "sum_thread_wait_ns": total, "longest_pairs": pairs[:min(len(pairs), 20)]}
 	out["conflict_examples"] = examples
 	if len(pairs) > 0 {
 		out["max_wait_ns"] = pairs[0].Wait

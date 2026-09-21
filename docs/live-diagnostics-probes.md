@@ -131,6 +131,8 @@ Only the captured burst has thread latency coverage. Failed recordings retain
 bounded decode counts for collector troubleshooting but no latency estimates.
 Up to eight conflicting transitions retain four preceding events from the same
 thread, including numeric thread identities and monotonic timestamps only.
+Wakeups that arrive while a thread is still running are counted separately as
+stale runnable markers; they do not invalidate otherwise complete wait pairs.
 It reads already mounted host tracefs metadata and opens temporary perf event
 descriptors; it does not mount tracefs, enable schedstats, or modify global
 tracing configuration. Its filters include wakeups issued outside the target
