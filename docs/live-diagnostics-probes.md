@@ -117,6 +117,19 @@ timestamp. This makes compaction, slow-apply, and fault windows directly
 comparable in one report without changing the service or its configuration;
 missing journal coverage remains an explicit evidence gap.
 
+`process-runqueue-latency` observes existing scheduler tracepoints for at most
+20 seconds, with kernel filters limited to 128 frozen target threads. It pairs
+successful wakeups or runnable switch-outs with the next switch-in using the
+shared monotonic clock, excluding blocked time. The report includes quantiles,
+the 20 longest completed waits, and unpaired boundary counts. Changed thread
+lifetimes, new threads, loss, malformed events, and capture bounds are explicit;
+an interrupted event stream has no derived latency table. The 8 MiB capture,
+4 MiB decoder output and 192 MiB sampler RSS limits bound observation cost.
+It reads already mounted host tracefs metadata and opens temporary perf event
+descriptors; it does not mount tracefs, enable schedstats, or modify global
+tracing configuration. Its filters include wakeups issued outside the target
+cgroup. A wait measures runnable scheduling delay, not its workload-level cause.
+
 Runtime snapshots deduplicate shared Unix sockets across helper processes and
 bind each row to the socket's kernel-reported peer PID in the frozen target set.
 Only that provider's lifetime and socket identity determine snapshot continuity;

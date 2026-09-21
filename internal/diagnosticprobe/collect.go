@@ -121,7 +121,7 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 			observed := time.Now().UTC()
 			e := livediagnostics.Evidence{Name: c.Name, Source: c.Kind, ObservedAt: observed, Status: "complete"}
 			budget := 8 * time.Second
-			if c.Kind == "process-cpu-profile" || c.Kind == "perf-capture-check" || c.Kind == "process-page-faults" {
+			if c.Kind == "process-cpu-profile" || c.Kind == "perf-capture-check" || c.Kind == "process-page-faults" || c.Kind == "process-runqueue-latency" {
 				budget = time.Duration(req.DurationSeconds-1) * time.Second
 			}
 			budgetCtx, stop := context.WithTimeout(ctx, budget)
@@ -210,6 +210,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return processCPUProfile(ctx, req, c)
 	case "process-page-faults":
 		return processPageFaults(ctx, req, c)
+	case "process-runqueue-latency":
+		return processRunqueueLatency(ctx, req, c)
 	case "perf-capture-check":
 		return perfCaptureCheck(ctx, req)
 	case "host-journal":

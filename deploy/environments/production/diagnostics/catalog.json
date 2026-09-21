@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 31,
+    "generation": 32,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -19,6 +19,16 @@
     },
     "probes": [
       {
+        "id": "process-runqueue-latency",
+        "description": "Bounded per-thread runnable wait from filtered scheduler events without changing schedstats",
+        "image": "$runner",
+        "profile": "kernel-profile",
+        "target_types": ["node_process", "platform_component"],
+        "max_duration_seconds": 60,
+        "parameters": {},
+        "config": {"collectors": [{"name": "runqueue", "kind": "process-runqueue-latency", "capture_seconds": 20, "interval_seconds": 120}]}
+      },
+      {
         "id": "process-page-faults",
         "description": "Bounded major-fault addresses attributed to stable process file mappings",
         "image": "$runner",
@@ -28,7 +38,7 @@
         "parameters": {
           "unit": {"default": "k3s.service", "max_length": 120, "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"},
           "since_seconds": {"default": "900", "max_length": 5, "pattern": "^[0-9]{1,5}$"},
-          "match": {"default": "trace", "max_length": 256, "pattern": "^[^\\r\\n]+$"}
+          "match": {"max_length": 256, "pattern": "^[^\\r\\n]+$"}
         },
         "config": {"collectors": [
           {"name": "compaction-window", "kind": "host-loopback-metrics", "port": 2381, "interval_seconds": 15, "fields": ["etcd_server_slow_apply_total", "etcd_debugging_mvcc_index_compaction_pause_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_pause_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_total_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_last", "etcd_debugging_mvcc_db_compaction_keys_total", "go_gc_duration_seconds", "process_cpu_seconds_total"]},
