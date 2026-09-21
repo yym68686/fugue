@@ -97,7 +97,7 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 			observed := time.Now().UTC()
 			e := livediagnostics.Evidence{Name: c.Name, Source: c.Kind, ObservedAt: observed, Status: "complete"}
 			budget := 8 * time.Second
-			if c.Kind == "process-cpu-profile" {
+			if c.Kind == "process-cpu-profile" || c.Kind == "perf-capture-check" {
 				budget = time.Duration(req.DurationSeconds-1) * time.Second
 			}
 			budgetCtx, stop := context.WithTimeout(ctx, budget)
@@ -184,6 +184,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return processIdentities(ctx, req, hostProc)
 	case "process-cpu-profile":
 		return processCPUProfile(ctx, req, c)
+	case "perf-capture-check":
+		return perfCaptureCheck(ctx, req)
 	case "host-journal":
 		return hostJournal(ctx, req, c)
 	case "kubernetes-audit":

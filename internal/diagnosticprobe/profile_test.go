@@ -53,6 +53,10 @@ func TestDiagnosticCommandBoundsOutputAndCancelsChildProcessGroup(t *testing.T) 
 	if err == nil || time.Since(start) > 3*time.Second {
 		t.Fatal("descendant outlived capture cancellation")
 	}
+	_, stderr, _, err := diagnosticCommandEvidence(context.Background(), 100, "sh", "-c", "printf 'token=fixture-secret' >&2; exit 2")
+	if err == nil || strings.Contains(stderr, "fixture-secret") || strings.Contains(err.Error(), "fixture-secret") {
+		t.Fatal("command failure lost its exit status or leaked credentials")
+	}
 }
 
 func TestJournalEvidenceHasTimestampRedactionAndPartialCoverage(t *testing.T) {

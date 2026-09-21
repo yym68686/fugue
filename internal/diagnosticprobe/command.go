@@ -25,6 +25,11 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 }
 
 func diagnosticCommand(ctx context.Context, limit int, name string, args ...string) ([]byte, bool, error) {
+	out, _, truncated, err := diagnosticCommandEvidence(ctx, limit, name, args...)
+	return out, truncated, err
+}
+
+func diagnosticCommandEvidence(ctx context.Context, limit int, name string, args ...string) ([]byte, string, bool, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	configureCommandCancellation(cmd)
 	cmd.WaitDelay = time.Second
@@ -37,5 +42,5 @@ func diagnosticCommand(ctx context.Context, limit int, name string, args ...stri
 			err = fmt.Errorf("%w: %s", err, detail)
 		}
 	}
-	return out.data, out.truncated, err
+	return out.data, safeText(string(errout.data)), out.truncated, err
 }
