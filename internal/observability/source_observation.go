@@ -21,6 +21,9 @@ type logSourceObservation struct {
 	Outcome        string    `json:"outcome"`
 	Attempts       uint64    `json:"attempts"`
 	Errors         uint64    `json:"errors"`
+	ErrorClass     string    `json:"error_class,omitempty"`
+	LineLimitBytes int       `json:"line_limit_bytes"`
+	MaxLineBytes   int       `json:"max_line_bytes"`
 	TotalLines     uint64    `json:"total_lines"`
 }
 

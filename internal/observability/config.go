@@ -23,6 +23,7 @@ const (
 	DefaultKubernetesLogQPS               = 40.0
 	DefaultKubernetesLogBurst             = 80
 	DefaultKubernetesLogTailLines         = 2000
+	DefaultKubernetesLogMaxLineBytes      = 4 << 20
 	DefaultKubernetesLogMaxPods           = 500
 	DefaultKubernetesLogMaxLinesPerCycle  = 20000
 )
@@ -49,6 +50,7 @@ type Config struct {
 	KubernetesLogQPS               float64
 	KubernetesLogBurst             int
 	KubernetesLogTailLines         int64
+	KubernetesLogMaxLineBytes      int
 	KubernetesLogMaxPods           int
 	KubernetesLogMaxLinesPerCycle  int
 	BatchSize                      int
@@ -136,6 +138,10 @@ func (c Config) Normalize() Config {
 	if c.KubernetesLogTailLines <= 0 {
 		c.KubernetesLogTailLines = DefaultKubernetesLogTailLines
 	}
+	if c.KubernetesLogMaxLineBytes <= 0 {
+		c.KubernetesLogMaxLineBytes = DefaultKubernetesLogMaxLineBytes
+	}
+	c.KubernetesLogMaxLineBytes = min(c.KubernetesLogMaxLineBytes, 8<<20)
 	if c.KubernetesLogMaxPods <= 0 {
 		c.KubernetesLogMaxPods = DefaultKubernetesLogMaxPods
 	}

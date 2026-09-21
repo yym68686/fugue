@@ -419,7 +419,7 @@ func (c *kubernetesLogCollector) ingestLogStream(ctx context.Context, stream io.
 
 func (c *kubernetesLogCollector) ingestLogStreamResult(ctx context.Context, stream io.Reader, pod corev1.Pod, container string, maxLines int) kubernetesLogIngestResult {
 	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), int(c.pipeline.cfg.MaxPayloadBytes))
+	scanner.Buffer(make([]byte, 0, min(64<<10, c.pipeline.cfg.KubernetesLogMaxLineBytes+64)), c.pipeline.cfg.KubernetesLogMaxLineBytes+64)
 	attrs := kubernetesLogAttributes(pod, container)
 	source := "kubernetes://" + pod.Namespace + "/" + pod.Name + "/" + container
 	ingested := 0

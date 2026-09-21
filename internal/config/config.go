@@ -455,6 +455,7 @@ func ObservabilityFromEnv() observability.Config {
 		KubernetesLogQPS:               getenvFloat("FUGUE_OBSERVABILITY_KUBERNETES_LOG_QPS", observability.DefaultKubernetesLogQPS),
 		KubernetesLogBurst:             getenvInt("FUGUE_OBSERVABILITY_KUBERNETES_LOG_BURST", observability.DefaultKubernetesLogBurst),
 		KubernetesLogTailLines:         int64(getenvInt("FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES", observability.DefaultKubernetesLogTailLines)),
+		KubernetesLogMaxLineBytes:      getenvInt("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINE_BYTES", observability.DefaultKubernetesLogMaxLineBytes),
 		KubernetesLogMaxPods:           getenvInt("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS", observability.DefaultKubernetesLogMaxPods),
 		KubernetesLogMaxLinesPerCycle:  getenvInt("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE", observability.DefaultKubernetesLogMaxLinesPerCycle),
 		BatchSize:                      getenvInt("FUGUE_OBSERVABILITY_BATCH_SIZE", observability.DefaultBatchSize),

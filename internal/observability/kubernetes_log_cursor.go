@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -123,7 +124,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		}
 	}
 	original := cur.Time
-	observation := logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, Outcome: "drained"}
+	observation := logSourceObservation{Identity: key, Node: target.pod.Spec.NodeName, Previous: target.previous, ObservedAt: now, CursorBefore: cur.Time, Outcome: "drained", LineLimitBytes: c.pipeline.cfg.KubernetesLogMaxLineBytes}
 	defer func() {
 		observation.CursorAfter = cur.Time
 		observation.PendingAt = cur.PendingAt
@@ -140,6 +141,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	observation.OpenMillis = time.Since(now).Milliseconds()
 	if err != nil {
 		observation.Outcome = "open_error"
+		observation.ErrorClass = logReadErrorClass(err)
 		if !isBenignKubernetesLogReadError(err) && parent.Err() == nil {
 			c.pipeline.kubernetesLogErrors.Add(1)
 			c.pipeline.recordError(fmt.Errorf("read Kubernetes cursor logs: %w", err))
@@ -150,11 +152,14 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	attrs := kubernetesLogAttributes(target.pod, target.container)
 	source := "kubernetes://" + target.pod.Namespace + "/" + target.pod.Name + "/" + target.container
 	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64<<10), int(c.pipeline.cfg.MaxPayloadBytes))
+	// Incoming OTLP request limits are unrelated to a container log record.
+	// Keep source reads independently bounded, including its CRI timestamp.
+	scanner.Buffer(make([]byte, 0, min(64<<10, c.pipeline.cfg.KubernetesLogMaxLineBytes+64)), c.pipeline.cfg.KubernetesLogMaxLineBytes+64)
 	n := 0
 	truncated := false
 	invalid := false
 	for scanner.Scan() {
+		observation.MaxLineBytes = max(observation.MaxLineBytes, len(scanner.Bytes()))
 		ts, msg := splitKubernetesLogLine(scanner.Text())
 		if ts.IsZero() {
 			observation.Outcome = "source_unavailable"
@@ -213,6 +218,10 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	}
 	if err = scanner.Err(); err != nil && parent.Err() == nil {
 		observation.Outcome = "scan_error"
+		observation.ErrorClass = logReadErrorClass(err)
+		if cur.PendingAt.IsZero() {
+			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
+		}
 		c.pipeline.kubernetesLogErrors.Add(1)
 		c.pipeline.recordError(fmt.Errorf("scan Kubernetes cursor logs: %w", err))
 	}
@@ -236,4 +245,24 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	c.cursors[key] = cur
 	c.cursorsMu.Unlock()
 	return
+}
+
+func logReadErrorClass(err error) string {
+	switch {
+	case errors.Is(err, bufio.ErrTooLong):
+		return "line_too_long"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "source_read"
+	}
+}
+
+func maxLogTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return b
+	}
+	return a
 }

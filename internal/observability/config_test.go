@@ -24,6 +24,20 @@ func TestConfigNormalizeKeepsObservabilityDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestLogLineLimitIsIndependentAndBounded(t *testing.T) {
+	for _, n := range []int{0, 2 << 20, 100 << 20} {
+		cfg := (Config{MaxPayloadBytes: 1024, KubernetesLogMaxLineBytes: n}).Normalize()
+		want := n
+		if want == 0 {
+			want = 4 << 20
+		}
+		want = min(want, 8<<20)
+		if cfg.MaxPayloadBytes != 1024 || cfg.KubernetesLogMaxLineBytes != want {
+			t.Fatalf("unbounded/coupled limits: %+v", cfg)
+		}
+	}
+}
+
 func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
 	cfg := Config{
 		Enabled:                        true,
