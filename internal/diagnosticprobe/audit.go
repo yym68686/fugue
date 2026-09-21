@@ -67,7 +67,11 @@ func hostKubernetesAuditAt(ctx context.Context, req livediagnostics.ProbeRequest
 			byObject = true
 		}
 	}
-	if req.Target.Type != livediagnostics.TargetNodeProcess || !strings.HasPrefix(c.Path, "/var/log/") || filepath.Clean(c.Path) != c.Path || c.SinceSeconds < 1 || c.SinceSeconds > 86400 {
+	sinceSeconds, err := configuredSinceSeconds(c, req)
+	if err != nil {
+		return nil, err
+	}
+	if req.Target.Type != livediagnostics.TargetNodeProcess || !strings.HasPrefix(c.Path, "/var/log/") || filepath.Clean(c.Path) != c.Path || sinceSeconds < 1 || sinceSeconds > 86400 {
 		return nil, errors.New("audit reader requires a process target, log path pattern and a lookback within 24 hours")
 	}
 	paths, err := filepath.Glob(filepath.Join(root, c.Path))
@@ -89,7 +93,7 @@ func hostKubernetesAuditAt(ctx context.Context, req livediagnostics.ProbeRequest
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].info.ModTime().After(files[j].info.ModTime()) })
 	until := time.Now().UTC()
-	since := until.Add(-time.Duration(c.SinceSeconds) * time.Second)
+	since := until.Add(-time.Duration(sinceSeconds) * time.Second)
 	groups := map[string]*auditGroup{}
 	sources := []any{}
 	gaps := []string{}

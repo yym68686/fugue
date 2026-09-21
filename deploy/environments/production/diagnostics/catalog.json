@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 21,
+    "generation": 22,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -149,10 +149,11 @@
         "target_types": ["node_process"],
         "max_duration_seconds": 30,
         "parameters": {
-          "unit": {"default": "k3s.service", "max_length": 120, "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"}
+          "unit": {"default": "k3s.service", "max_length": 120, "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"},
+          "since_seconds": {"default": "900", "max_length": 5, "pattern": "^[0-9]{1,5}$"}
         },
         "config": {
-          "collectors": [{"name": "service-log", "kind": "host-journal", "unit": "{{param.unit}}", "since_seconds": 900, "interval_seconds": 120, "match": ["took too long", "slow", "timeout", "deadline", "error", "warn", "trace"]}]
+          "collectors": [{"name": "service-log", "kind": "host-journal", "unit": "{{param.unit}}", "since_seconds": 900, "since_seconds_param": "{{param.since_seconds}}", "interval_seconds": 120, "match": ["took too long", "slow", "timeout", "deadline", "error", "warn", "trace"]}]
         }
       },
       {

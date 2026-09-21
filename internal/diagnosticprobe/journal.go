@@ -21,11 +21,15 @@ var journalUnitPattern = regexp.MustCompile(`^[a-zA-Z0-9_@.:-]{1,120}\.service$`
 
 func hostJournal(ctx context.Context, req livediagnostics.ProbeRequest, c Collector) (any, error) {
 	c.Unit = parameter(c.Unit, req)
-	if req.Target.Type != livediagnostics.TargetNodeProcess || !journalUnitPattern.MatchString(c.Unit) || c.SinceSeconds < 1 || c.SinceSeconds > 86400 {
+	sinceSeconds, err := configuredSinceSeconds(c, req)
+	if err != nil {
+		return nil, err
+	}
+	if req.Target.Type != livediagnostics.TargetNodeProcess || !journalUnitPattern.MatchString(c.Unit) || sinceSeconds < 1 || sinceSeconds > 86400 {
 		return nil, errors.New("journal observation requires a process target, explicit service unit and a lookback within 24 hours")
 	}
 	until := time.Now().UTC()
-	since := until.Add(-time.Duration(c.SinceSeconds) * time.Second)
+	since := until.Add(-time.Duration(sinceSeconds) * time.Second)
 	results := []any{}
 	gaps := []string{}
 	for _, path := range []string{"var/log/journal", "run/log/journal"} {

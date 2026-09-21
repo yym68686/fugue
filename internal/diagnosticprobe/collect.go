@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,36 +25,49 @@ type Config struct {
 	Collectors []Collector `json:"collectors"`
 }
 type Collector struct {
-	Name            string            `json:"name"`
-	Kind            string            `json:"kind"`
-	IntervalSeconds int               `json:"interval_seconds,omitempty"`
-	Group           string            `json:"group,omitempty"`
-	Version         string            `json:"version,omitempty"`
-	Resource        string            `json:"resource,omitempty"`
-	Namespace       string            `json:"namespace,omitempty"`
-	ObjectName      string            `json:"object_name,omitempty"`
-	Selector        string            `json:"selector,omitempty"`
-	FieldSelector   string            `json:"field_selector,omitempty"`
-	AnnotationKeys  []string          `json:"annotation_keys,omitempty"`
-	Fields          []string          `json:"fields,omitempty"`
-	Container       string            `json:"container,omitempty"`
-	SinceSeconds    int               `json:"since_seconds,omitempty"`
-	SinceTime       string            `json:"since_time,omitempty"`
-	Match           []string          `json:"match,omitempty"`
-	Service         *Service          `json:"service,omitempty"`
-	Path            string            `json:"path,omitempty"`
-	Queries         map[string]string `json:"queries,omitempty"`
-	RequiredQueries []string          `json:"required_queries,omitempty"`
-	Unit            string            `json:"unit,omitempty"`
-	CaptureSeconds  int               `json:"capture_seconds,omitempty"`
-	CallGraph       string            `json:"call_graph,omitempty"`
-	Port            int               `json:"port,omitempty"`
-	PolicyPath      string            `json:"policy_path,omitempty"`
+	Name              string            `json:"name"`
+	Kind              string            `json:"kind"`
+	IntervalSeconds   int               `json:"interval_seconds,omitempty"`
+	Group             string            `json:"group,omitempty"`
+	Version           string            `json:"version,omitempty"`
+	Resource          string            `json:"resource,omitempty"`
+	Namespace         string            `json:"namespace,omitempty"`
+	ObjectName        string            `json:"object_name,omitempty"`
+	Selector          string            `json:"selector,omitempty"`
+	FieldSelector     string            `json:"field_selector,omitempty"`
+	AnnotationKeys    []string          `json:"annotation_keys,omitempty"`
+	Fields            []string          `json:"fields,omitempty"`
+	Container         string            `json:"container,omitempty"`
+	SinceSeconds      int               `json:"since_seconds,omitempty"`
+	SinceSecondsParam string            `json:"since_seconds_param,omitempty"`
+	SinceTime         string            `json:"since_time,omitempty"`
+	Match             []string          `json:"match,omitempty"`
+	Service           *Service          `json:"service,omitempty"`
+	Path              string            `json:"path,omitempty"`
+	Queries           map[string]string `json:"queries,omitempty"`
+	RequiredQueries   []string          `json:"required_queries,omitempty"`
+	Unit              string            `json:"unit,omitempty"`
+	CaptureSeconds    int               `json:"capture_seconds,omitempty"`
+	CallGraph         string            `json:"call_graph,omitempty"`
+	Port              int               `json:"port,omitempty"`
+	PolicyPath        string            `json:"policy_path,omitempty"`
 }
 type Service struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	Port      string `json:"port"`
+}
+
+func configuredSinceSeconds(c Collector, req livediagnostics.ProbeRequest) (int, error) {
+	if strings.TrimSpace(c.SinceSecondsParam) == "" {
+		return c.SinceSeconds, nil
+	}
+	raw := parameter(c.SinceSecondsParam, req)
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, errors.New("since_seconds_param must resolve to an integer")
+	}
+	return n, nil
 }
 
 func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediagnostics.ProbeReport, error) {

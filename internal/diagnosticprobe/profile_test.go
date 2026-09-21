@@ -41,6 +41,17 @@ func TestCPUProfileRequiresBoundedSingleCaptureAndExactTarget(t *testing.T) {
 	}
 }
 
+func TestHostJournalSupportsBoundedParameterLookback(t *testing.T) {
+	req := livediagnostics.ProbeRequest{Parameters: map[string]string{"since_seconds": "86400"}}
+	got, err := configuredSinceSeconds(Collector{SinceSeconds: 900, SinceSecondsParam: "{{param.since_seconds}}"}, req)
+	if err != nil || got != 86400 {
+		t.Fatalf("lookback parameter: got=%d err=%v", got, err)
+	}
+	if _, err := configuredSinceSeconds(Collector{SinceSecondsParam: "{{param.since_seconds}}"}, livediagnostics.ProbeRequest{Parameters: map[string]string{"since_seconds": "nope"}}); err == nil {
+		t.Fatal("accepted non-numeric lookback")
+	}
+}
+
 func TestCPUProfileReportsStructuredStackCoverageIndependently(t *testing.T) {
 	for _, paths := range []string{
 		`{"observed_samples":29,"truncated":false}`,
