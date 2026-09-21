@@ -163,6 +163,91 @@ func TestCursorDoesNotAdvanceOverQueueRejection(t *testing.T) {
 	}
 }
 
+func TestCursorOpenFailurePreservesStartAndRecoveryEvidence(t *testing.T) {
+	var unavailable atomic.Bool
+	unavailable.Store(true)
+	var requestedSince []string
+	ts := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedSince = append(requestedSince, r.URL.Query().Get("sinceTime"))
+		if unavailable.Load() {
+			http.Error(w, "source unavailable", http.StatusBadGateway)
+			return
+		}
+		fmt.Fprintf(w, "%s recovered\n", ts.Format(time.RFC3339Nano))
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewPipeline(Config{Enabled: true, QueueSize: 32, KubernetesLogPollInterval: time.Second}, nil)
+	c := newKubernetesLogCollectorWithClient(p, client)
+	target := kubernetesLogTarget{pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "sample", Name: "pod"}}, container: "app"}
+	key := logTargetKey(target)
+	var budget atomic.Int64
+	budget.Store(10)
+	c.collectCursorTarget(t.Context(), target, &budget)
+	cur, exists := c.cursors[key]
+	if !exists || cur.Time.IsZero() || !cur.PendingAt.Equal(cur.Time) || cur.NextAttempt.IsZero() || budget.Load() != 10 {
+		t.Fatalf("failed first read lost its coverage boundary: exists=%v cursor=%+v budget=%d", exists, cur, budget.Load())
+	}
+	if c.catchupCursorTargets(t.Context(), []kubernetesLogTarget{target}, &budget) != 0 {
+		t.Fatal("failed source consumed catch-up requests")
+	}
+	cur.NextAttempt = time.Time{}
+	c.cursors[key] = cur
+	unavailable.Store(false)
+	c.collectCursorTarget(t.Context(), target, &budget)
+	if len(requestedSince) != 2 || requestedSince[0] != requestedSince[1] || !c.cursors[key].PendingAt.IsZero() || p.kubernetesLogLines.Load() != 1 || p.kubernetesLogErrors.Load() != 1 {
+		t.Fatalf("recovery skipped/replayed data or hid failure: since=%v cursor=%+v lines=%d errors=%d", requestedSince, c.cursors[key], p.kubernetesLogLines.Load(), p.kubernetesLogErrors.Load())
+	}
+}
+
+func TestCursorOpenFailurePreservesExistingProgressAndPendingBoundary(t *testing.T) {
+	for _, code := range []int{http.StatusBadGateway, http.StatusNotFound} {
+		for _, pending := range []bool{false, true} {
+			t.Run(fmt.Sprintf("status-%d-pending-%t", code, pending), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if code == http.StatusNotFound {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(code)
+						json.NewEncoder(w).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: "Failure", Code: 404, Reason: metav1.StatusReasonNotFound, Message: `pods "pod" not found`})
+						return
+					}
+					http.Error(w, http.StatusText(code), code)
+				}))
+				defer server.Close()
+				client, err := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
+				if err != nil {
+					t.Fatal(err)
+				}
+				p := NewPipeline(Config{Enabled: true}, nil)
+				c := newKubernetesLogCollectorWithClient(p, client)
+				target := kubernetesLogTarget{pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "sample", Name: "pod"}}, container: "app"}
+				key := logTargetKey(target)
+				start := time.Now().UTC().Add(-time.Hour)
+				cur := kubernetesLogCursor{Time: start, DrainedThrough: start.Add(59 * time.Minute)}
+				if pending {
+					cur.PendingAt = start.Add(58 * time.Minute)
+				}
+				c.cursors = map[string]kubernetesLogCursor{key: cur}
+				var budget atomic.Int64
+				budget.Store(10)
+				c.collectCursorTarget(t.Context(), target, &budget)
+				got := c.cursors[key]
+				wantPending := cur.PendingAt
+				if !pending && code == http.StatusBadGateway {
+					wantPending = cur.DrainedThrough
+				}
+				if !got.Time.Equal(cur.Time) || !got.DrainedThrough.Equal(cur.DrainedThrough) || !got.PendingAt.Equal(wantPending) || budget.Load() != 10 {
+					t.Fatalf("failure changed read boundary: before=%+v after=%+v", cur, got)
+				}
+			})
+		}
+	}
+}
+
 func TestCursorDoesNotRepollFinishedContainersOrCountOldUnavailableLogs(t *testing.T) {
 	var calls atomic.Int32
 	ts := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)

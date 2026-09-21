@@ -142,10 +142,24 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	if err != nil {
 		observation.Outcome = "open_error"
 		observation.ErrorClass = logReadErrorClass(err)
-		if !isBenignKubernetesLogReadError(err) && parent.Err() == nil {
+		benign := isBenignKubernetesLogReadError(err)
+		if !benign && parent.Err() == nil {
 			c.pipeline.kubernetesLogErrors.Add(1)
 			c.pipeline.recordError(fmt.Errorf("read Kubernetes cursor logs: %w", err))
 		}
+		// Persist the newly initialized cursor even when the stream cannot be
+		// opened. Without this write, the next poll recreates a fresh five-minute
+		// cursor and can silently skip the interval covered by this failure.
+		if !benign && parent.Err() == nil && cur.PendingAt.IsZero() {
+			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
+		}
+		// Retry at the next normal poll, not again in the catch-up pass intended
+		// for streams with successfully observed unread records.
+		cur.NextAttempt = time.Now().UTC().Add(c.pipeline.cfg.KubernetesLogPollInterval)
+		cur.Visited = now
+		c.cursorsMu.Lock()
+		c.cursors[key] = cur
+		c.cursorsMu.Unlock()
 		return
 	}
 	defer stream.Close()

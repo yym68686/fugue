@@ -80,6 +80,14 @@ agent registers log-source cursor/timing/outcome metadata and collection-cycle
 budgets; observations never include log bodies or alter collection cursors.
 Source eviction and output limits are explicit in the snapshot.
 
+Source snapshots retain the last read error's timestamp, stage, normalized
+class and elapsed time after recovery. They retain no error payload. A failed
+stream open saves the existing cursor and unresolved coverage boundary, and
+waits a normal polling interval before retrying. It cannot consume catch-up
+requests intended for known unread records. This preserves the first attempt's
+lower bound through an outage; it does not persist cursors across process restarts
+or recover records already rotated away by the source.
+
 API and controller also expose an `http-client` provider for their shared
 Kubernetes client. It retains 2,048 recent completed requests with normalized
 resource/cache selection, response-header time, body-consumption time and bytes.

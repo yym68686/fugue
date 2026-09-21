@@ -7,24 +7,28 @@ import (
 )
 
 type logSourceObservation struct {
-	Identity       string    `json:"identity"`
-	Node           string    `json:"node"`
-	Previous       bool      `json:"previous"`
-	ObservedAt     time.Time `json:"observed_at"`
-	CursorBefore   time.Time `json:"cursor_before"`
-	CursorAfter    time.Time `json:"cursor_after"`
-	PendingAt      time.Time `json:"pending_at,omitempty"`
-	DrainedThrough time.Time `json:"drained_through,omitempty"`
-	OpenMillis     int64     `json:"open_ms"`
-	TotalMillis    int64     `json:"total_ms"`
-	Lines          int       `json:"lines"`
-	Outcome        string    `json:"outcome"`
-	Attempts       uint64    `json:"attempts"`
-	Errors         uint64    `json:"errors"`
-	ErrorClass     string    `json:"error_class,omitempty"`
-	LineLimitBytes int       `json:"line_limit_bytes"`
-	MaxLineBytes   int       `json:"max_line_bytes"`
-	TotalLines     uint64    `json:"total_lines"`
+	Identity        string    `json:"identity"`
+	Node            string    `json:"node"`
+	Previous        bool      `json:"previous"`
+	ObservedAt      time.Time `json:"observed_at"`
+	CursorBefore    time.Time `json:"cursor_before"`
+	CursorAfter     time.Time `json:"cursor_after"`
+	PendingAt       time.Time `json:"pending_at,omitempty"`
+	DrainedThrough  time.Time `json:"drained_through,omitempty"`
+	OpenMillis      int64     `json:"open_ms"`
+	TotalMillis     int64     `json:"total_ms"`
+	Lines           int       `json:"lines"`
+	Outcome         string    `json:"outcome"`
+	Attempts        uint64    `json:"attempts"`
+	Errors          uint64    `json:"errors"`
+	ErrorClass      string    `json:"error_class,omitempty"`
+	LastErrorAt     time.Time `json:"last_error_at,omitempty"`
+	LastErrorClass  string    `json:"last_error_class,omitempty"`
+	LastErrorStage  string    `json:"last_error_stage,omitempty"`
+	LastErrorMillis int64     `json:"last_error_ms,omitempty"`
+	LineLimitBytes  int       `json:"line_limit_bytes"`
+	MaxLineBytes    int       `json:"max_line_bytes"`
+	TotalLines      uint64    `json:"total_lines"`
 }
 
 func (p *Pipeline) observeLogSource(v logSourceObservation) {
@@ -48,8 +52,12 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	v.Attempts = prior.Attempts + 1
 	v.Errors = prior.Errors
 	v.TotalLines = prior.TotalLines + uint64(v.Lines)
+	v.LastErrorAt, v.LastErrorClass = prior.LastErrorAt, prior.LastErrorClass
+	v.LastErrorStage, v.LastErrorMillis = prior.LastErrorStage, prior.LastErrorMillis
 	if v.Outcome == "open_error" || v.Outcome == "scan_error" {
 		v.Errors++
+		v.LastErrorAt, v.LastErrorClass = v.ObservedAt, v.ErrorClass
+		v.LastErrorStage, v.LastErrorMillis = v.Outcome, v.TotalMillis
 	}
 	p.sourceObservations[v.Identity] = v
 }

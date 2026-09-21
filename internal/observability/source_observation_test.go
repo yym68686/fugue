@@ -87,3 +87,18 @@ func TestCursorObservationCapturesBudgetReasonWithoutLogPayload(t *testing.T) {
 		t.Fatalf("missing collection reason: %+v", rows)
 	}
 }
+
+func TestSourceRecoveryRetainsLastErrorEvidence(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	failedAt := time.Now().UTC().Add(-time.Minute)
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: failedAt, Outcome: "open_error", ErrorClass: "deadline", TotalMillis: 15000})
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: time.Now().UTC(), Outcome: "drained", Lines: 1})
+	v, err := p.DiagnosticSources(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := v.(map[string]any)["sources"].([]logSourceObservation)[0]
+	if row.Outcome != "drained" || row.ErrorClass != "" || row.Errors != 1 || !row.LastErrorAt.Equal(failedAt) || row.LastErrorStage != "open_error" || row.LastErrorClass != "deadline" || row.LastErrorMillis != 15000 {
+		t.Fatalf("recovery erased or misrepresented previous failure: %+v", row)
+	}
+}
