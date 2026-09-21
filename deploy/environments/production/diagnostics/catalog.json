@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 1,
+    "generation": 2,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -87,7 +87,13 @@
                 "commit_p99": "histogram_quantile(0.99,sum by(le)(rate(etcd_disk_backend_commit_duration_seconds_bucket[5m])))",
                 "leader": "etcd_server_has_leader",
                 "pending_proposals": "etcd_server_proposals_pending"
-              }
+              },
+              "required_queries": [
+                "wal_fsync_p99",
+                "commit_p99",
+                "leader",
+                "pending_proposals"
+              ]
             },
             {
               "name": "node-workload",
@@ -103,6 +109,23 @@
                 "container_cpu": "topk(20,sum by(pod,container)(rate(container_cpu_usage_seconds_total{node={{node}},container!=\"\",container!=\"POD\"}[3m])))",
                 "throttled_time": "sum by(pod,container)(rate(container_cpu_cfs_throttled_seconds_total{node={{node}},container!=\"\"}[3m]))"
               }
+            },
+            {
+              "name": "available-control-metrics",
+              "kind": "prometheus",
+              "interval_seconds": 60,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "families": "count by(__name__,job)({__name__=~\"etcd_.+|cnpg_.+|workqueue_.+|controller_runtime_.+\"})",
+                "targets": "up{job=~\".*kubernetes.*|.*cnpg.*\"}"
+              },
+              "required_queries": [
+                "targets"
+              ]
             }
           ]
         }
@@ -192,7 +215,12 @@
                 "status"
               ],
               "namespace": "{{param.namespace}}",
-              "selector": "cnpg.io/cluster"
+              "selector": "cnpg.io/cluster",
+              "annotation_keys": [
+                "cnpg.io/pvcStatus",
+                "volume.kubernetes.io/selected-node",
+                "pv.kubernetes.io/bind-completed"
+              ]
             },
             {
               "name": "persistent-volumes",
@@ -218,6 +246,53 @@
                 "status.conditions",
                 "status.allocatable",
                 "status.capacity"
+              ]
+            },
+            {
+              "name": "database-jobs",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 60,
+              "resource": "jobs",
+              "group": "batch",
+              "namespace": "{{param.namespace}}",
+              "selector": "cnpg.io/cluster",
+              "fields": [
+                "status",
+                "spec.suspend",
+                "spec.backoffLimit"
+              ]
+            },
+            {
+              "name": "database-events",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 60,
+              "resource": "events",
+              "namespace": "{{param.namespace}}",
+              "field_selector": "type=Warning",
+              "fields": [
+                "involvedObject",
+                "reason",
+                "message",
+                "firstTimestamp",
+                "lastTimestamp",
+                "eventTime",
+                "series",
+                "count",
+                "type",
+                "reportingComponent"
+              ]
+            },
+            {
+              "name": "storage-classes",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 60,
+              "resource": "storageclasses",
+              "group": "storage.k8s.io",
+              "fields": [
+                "provisioner",
+                "volumeBindingMode",
+                "allowedTopologies",
+                "reclaimPolicy"
               ]
             }
           ]
@@ -257,7 +332,13 @@
                 "coverage": "{__name__=~\"fugue_telemetry_pipeline_kubernetes_log_backlog_max_seconds|fugue_telemetry_pipeline_kubernetes_log_cycle_seconds|fugue_telemetry_pipeline_kubernetes_log_deferred_targets|fugue_telemetry_pipeline_kubernetes_log_cursor_gaps_total\",job=\"fugue-telemetry-agent\"}",
                 "errors": "increase(fugue_telemetry_pipeline_errors_total{job=\"fugue-telemetry-agent\"}[3m])",
                 "cpu": "sum(rate(container_cpu_usage_seconds_total{pod={{pod}},container!=\"\",container!=\"POD\"}[3m]))"
-              }
+              },
+              "required_queries": [
+                "coverage",
+                "queue",
+                "events",
+                "source_lines"
+              ]
             },
             {
               "name": "pipeline-log",
@@ -274,6 +355,65 @@
                 "timeout",
                 "deadline",
                 "connection lost"
+              ]
+            },
+            {
+              "name": "recent-pipeline-window",
+              "kind": "prometheus",
+              "interval_seconds": 120,
+              "service": {
+                "namespace": "fugue-system",
+                "name": "fugue-fugue-observability-prometheus",
+                "port": "http"
+              },
+              "queries": {
+                "backlog": "fugue_telemetry_pipeline_kubernetes_log_backlog_max_seconds{job=\"fugue-telemetry-agent\"}[30m]",
+                "deferred": "fugue_telemetry_pipeline_kubernetes_log_deferred_targets{job=\"fugue-telemetry-agent\"}[30m]",
+                "queue": "fugue_telemetry_pipeline_queue_depth{job=\"fugue-telemetry-agent\"}[30m]",
+                "lines": "fugue_telemetry_pipeline_kubernetes_log_lines_total{job=\"fugue-telemetry-agent\"}[30m]",
+                "errors": "fugue_telemetry_pipeline_errors_total{job=\"fugue-telemetry-agent\"}[30m]"
+              },
+              "required_queries": [
+                "backlog",
+                "deferred",
+                "queue",
+                "lines",
+                "errors"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "cluster-target-inventory",
+        "description": "Discover system workload runtime identities through bounded read-only observation",
+        "image": "$runner",
+        "profile": "cluster-read",
+        "target_types": [
+          "platform_component",
+          "node"
+        ],
+        "max_duration_seconds": 60,
+        "parameters": {
+          "namespace": {
+            "default": "fugue-system",
+            "max_length": 63,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "config": {
+          "collectors": [
+            {
+              "name": "workload-identities",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 60,
+              "resource": "pods",
+              "namespace": "{{param.namespace}}",
+              "fields": [
+                "spec.nodeName",
+                "status.phase",
+                "status.conditions",
+                "status.containerStatuses"
               ]
             }
           ]
