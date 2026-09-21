@@ -10,6 +10,14 @@ for executable in ["perf", "journalctl"]:
         "--entrypoint", executable, sys.argv[1], "--version",
     ], capture_output=True, check=True, timeout=30)
 
+# Validate the actual journal parser shipped in this image, even with no host
+# journal mounted. Invalid time syntax is a hard error, unlike an empty source.
+subprocess.run([
+    "docker", "run", "--rm", "--network=none", "--read-only", "--cap-drop=ALL",
+    "--entrypoint", "journalctl", sys.argv[1], "--since=@1789960000", "--until=@1789960001",
+    "--unit=fixture.service", "--no-pager", "--quiet",
+], capture_output=True, check=True, timeout=30)
+
 request = {
     "probe_image":sys.argv[1], "protocol": "fugue.diagnostics/v1", "session_id": "diagnostic-smoke", "probe_id": "package-smoke",
     "probe_digest": "sha256:" + "a" * 64, "catalog_digest": "sha256:" + "b" * 64,

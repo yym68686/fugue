@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -36,13 +35,14 @@ func processCPUProfile(ctx context.Context, req livediagnostics.ProbeRequest, c 
 	}
 	raw, truncated, err := diagnosticCommand(ctx, 8<<20, "/usr/local/bin/fugue-diagnostic-agent", args...)
 	if err != nil {
+		detail := boundedError(err)
 		var failure struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(raw, &failure) == nil && failure.Error != "" {
-			return nil, fmt.Errorf("CPU sampler failed: %s", safeText(failure.Error))
+			detail = safeText(failure.Error)
 		}
-		return nil, fmt.Errorf("CPU sampler failed: %w", err)
+		return partialValue{Value: map[string]any{"sampler_error": detail, "preflight": perfPreflight()}, Gaps: []string{"CPU sampler failed: " + boundedError(errors.New(detail))}}, nil
 	}
 	if truncated {
 		return nil, errors.New("CPU sampler output exceeded the transport budget")

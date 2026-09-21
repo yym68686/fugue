@@ -41,7 +41,7 @@ func hostJournal(ctx context.Context, req livediagnostics.ProbeRequest, c Collec
 		if len(entries) == 0 {
 			continue
 		}
-		raw, truncated, err := diagnosticCommand(ctx, 2<<20, "journalctl", "--directory="+dir, "--unit="+c.Unit, "--since="+since.Format(time.RFC3339), "--until="+until.Format(time.RFC3339), "--lines=2000", "--reverse", "--output=json", "--no-pager", "--quiet")
+		raw, truncated, err := diagnosticCommand(ctx, 2<<20, "journalctl", "--directory="+dir, "--unit="+c.Unit, "--since=@"+strconv.FormatInt(since.Unix(), 10), "--until=@"+strconv.FormatInt(until.Unix(), 10), "--lines=2000", "--reverse", "--output=json", "--no-pager", "--quiet")
 		if err != nil {
 			gaps = append(gaps, fmt.Sprintf("journal reader for %s failed: %v", path, err))
 			continue
