@@ -3,6 +3,11 @@
 This patch applies only to upstream commit
 `23eae00cd7aad82978397798dd27b600eb25ae3d` (CloudNativePG 1.29.0).
 It is a prepared candidate, not an instruction to update the live operator.
+`Dockerfile.cnpg-candidate` and the isolated `cnpg_candidate_artifact` job build
+and verify that candidate. The job has no production environment or Kubernetes
+access. Its receipt records the immutable image and unchanged instance-manager
+hashes; no live workload references the candidate until a separate release
+intent is enrolled.
 
 Three controller paths compare Go collections with `reflect.DeepEqual` even
 though their JSON fields use `omitempty`. After an API round trip, empty maps

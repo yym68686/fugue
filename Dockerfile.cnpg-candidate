@@ -1,0 +1,24 @@
+# Candidate artifact only. Publishing this image does not update the operator.
+FROM golang:1.26.1-bookworm AS build
+WORKDIR /src
+RUN git init . \
+    && git remote add origin https://github.com/cloudnative-pg/cloudnative-pg.git \
+    && git fetch --depth=1 origin 23eae00cd7aad82978397798dd27b600eb25ae3d \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = 23eae00cd7aad82978397798dd27b600eb25ae3d
+COPY third_party/cloudnative-pg/semantic-status.patch /tmp/semantic-status.patch
+RUN git apply --check /tmp/semantic-status.patch && git apply /tmp/semantic-status.patch
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go test -race ./internal/controller -run '^TestNoopStatusRegression' -count=1 \
+    && CGO_ENABLED=0 go build -trimpath \
+       -ldflags '-X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildVersion=1.29.0-fugue-noop1 -X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildCommit=23eae00cd+fugue-noop1' \
+       -o /out/fugue-cnpg-controller ./cmd/manager
+
+# Retain the original instance-manager executables byte-for-byte. The candidate
+# controller is a separate path; /manager keeps its original upstream behavior.
+FROM ghcr.io/cloudnative-pg/cloudnative-pg@sha256:68074486205a33ed41928761e22ad48278c690feebe8316727a1c6b3380f9e5e
+COPY --from=build --chown=65532:65532 --chmod=0755 /out/fugue-cnpg-controller /fugue-cnpg-controller
+COPY third_party/cloudnative-pg/semantic-status.patch /licenses/fugue-cnpg-semantic-status.patch
+USER 65532:65532
+ENTRYPOINT ["/fugue-cnpg-controller"]

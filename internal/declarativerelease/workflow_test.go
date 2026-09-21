@@ -48,12 +48,19 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "drain_observation_access", "drain_observer_artifact", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	cnpgCandidate := yamlMappingValue(t, jobs, "cnpg_candidate_artifact")
+	if yamlMappingValue(t, cnpgCandidate, "runs-on").Value != "ubuntu-latest" || yamlMappingValue(t, cnpgCandidate, "needs").Value != "prepush" {
+		t.Fatal("third-party candidate verification requires prepush and an isolated hosted runner")
+	}
+	if !strings.Contains(source, "scripts/verify_cnpg_candidate.py \"$IMAGE_REPOSITORY@$digest\" \"$SOURCE_SHA\"") {
+		t.Fatal("CNPG candidate must verify retained manager binaries by immutable image identity")
+	}
 	drainAccess := yamlMappingValue(t, jobs, "drain_observation_access")
 	for _, key := range yamlMappingKeys(t, drainAccess) {
 		if key == "needs" {
