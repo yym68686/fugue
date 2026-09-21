@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 14,
+    "generation": 15,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -25,8 +25,8 @@
         "profile": "cluster-read",
         "target_types": ["platform_component"],
         "max_duration_seconds": 30,
-        "parameters": {"container": {"required": true, "max_length": 63, "pattern": "^[a-z0-9][a-z0-9-]*$"}},
-        "config": {"collectors": [{"name": "workload-log", "kind": "kubernetes-logs", "namespace": "{{namespace}}", "object_name": "{{pod}}", "container": "{{param.container}}", "since_seconds": 900, "interval_seconds": 120}]}
+        "parameters": {"container": {"required": true, "max_length": 63, "pattern": "^[a-z0-9][a-z0-9-]*$"}, "since": {"max_length": 40, "pattern": "^[0-9T:.Z+-]+$"}},
+        "config": {"collectors": [{"name": "workload-log", "kind": "kubernetes-logs", "namespace": "{{namespace}}", "object_name": "{{pod}}", "container": "{{param.container}}", "since_seconds": 900, "since_time": "{{param.since}}", "interval_seconds": 120}]}
       },
       {
         "id": "runtime-http-requests",

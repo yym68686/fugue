@@ -38,6 +38,7 @@ type Collector struct {
 	Fields          []string          `json:"fields,omitempty"`
 	Container       string            `json:"container,omitempty"`
 	SinceSeconds    int               `json:"since_seconds,omitempty"`
+	SinceTime       string            `json:"since_time,omitempty"`
 	Match           []string          `json:"match,omitempty"`
 	Service         *Service          `json:"service,omitempty"`
 	Path            string            `json:"path,omitempty"`

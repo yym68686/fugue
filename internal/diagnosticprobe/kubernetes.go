@@ -269,6 +269,18 @@ func (k *kubeReader) logs(ctx context.Context, req livediagnostics.ProbeRequest,
 		return nil, errors.New("log lookback exceeds 900-second bound")
 	}
 	query := url.Values{"sinceSeconds": {strconv.Itoa(since)}, "timestamps": {"true"}, "limitBytes": {strconv.Itoa(512 << 10)}}
+	start := parameter(c.SinceTime, req)
+	if strings.HasPrefix(start, "{{param.") && strings.HasSuffix(start, "}}") {
+		start = "" // An omitted optional recipe parameter keeps recent lookback.
+	}
+	if start != "" {
+		at, err := time.Parse(time.RFC3339Nano, start)
+		if err != nil || at.After(time.Now()) || time.Since(at) > 24*time.Hour {
+			return nil, errors.New("log start must be a timestamp within the past 24 hours")
+		}
+		query.Del("sinceSeconds")
+		query.Set("sinceTime", at.UTC().Format(time.RFC3339Nano))
+	}
 	if container := parameter(c.Container, req); container != "" {
 		query.Set("container", container)
 	}
@@ -277,9 +289,30 @@ func (k *kubeReader) logs(ctx context.Context, req livediagnostics.ProbeRequest,
 		return nil, err
 	}
 	counts := map[string]int{}
+	seconds := map[string]int{}
 	examples := []string{}
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(raw) == 0 {
+		lines = nil
+	}
+	first, last := "", ""
+	unknownTime := 0
 	for _, line := range lines {
+		stamp, _, _ := strings.Cut(line, " ")
+		if at, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+			if first == "" {
+				first = stamp
+			}
+			last = stamp
+			bucket := at.UTC().Format(time.RFC3339)
+			if _, exists := seconds[bucket]; exists || len(seconds) < 256 {
+				seconds[bucket]++
+			} else {
+				unknownTime++
+			}
+		} else {
+			unknownTime++
+		}
 		matched := len(c.Match) == 0
 		for _, pattern := range c.Match {
 			if strings.Contains(line, pattern) {
@@ -296,6 +329,12 @@ func (k *kubeReader) logs(ctx context.Context, req livediagnostics.ProbeRequest,
 		}
 	}
 	result := map[string]any{"pod": pod, "namespace": namespace, "lookback_seconds": since, "lines_returned": len(lines), "pattern_counts": counts, "examples": examples, "byte_limit": 512 << 10, "note": "bounded recent source log sample; overlapping windows must not be summed"}
+	result["first_timestamp"], result["last_timestamp"] = first, last
+	result["lines_by_second"], result["unbucketed_lines"] = seconds, unknownTime
+	if start != "" {
+		delete(result, "lookback_seconds")
+		result["since_time"] = start
+	}
 	if len(raw) >= 512<<10 {
 		return partialValue{Value: result, Gaps: []string{"log byte limit reached; source coverage is partial"}, Truncated: true}, nil
 	}
