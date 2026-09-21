@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 12,
+    "generation": 13,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,18 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "runtime-source-progress",
+        "description": "Read bounded runtime provider snapshots of source cursors, stages and collection budgets",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": ["platform_component"],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {
+          "collectors": [{"name": "source-progress", "kind": "runtime-json", "path": "/v1/snapshots/log-sources", "interval_seconds": 15, "fields": ["schema", "observed_at", "sources", "source_count", "truncated", "evicted_sources", "cycle", "queue_depth", "queued_bytes"]}]
+        }
+      },
       {
         "id": "perf-capture-comparison",
         "description": "Compare frozen PID and cgroup CPU capture with raw bounded perf summaries",
