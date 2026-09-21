@@ -104,6 +104,24 @@ func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (an
 					gaps = append(gaps, name+" did not produce a valid report")
 				}
 			}
+			for _, noPager := range []bool{false, true} {
+				args := []string{"script", "--symfs", filepath.Join(hostProc, strconv.Itoa(pids[0]), "root"), "-i", file, "-F", "ip,sym,dso"}
+				name := "script_default"
+				if noPager {
+					args = append([]string{"--no-pager"}, args...)
+					name = "script_no_pager"
+				}
+				raw, stderr, cut, err := diagnosticCommandEvidence(ctx, 128<<10, "perf", args...)
+				detail := map[string]any{"stdout": safeText(string(raw)), "stderr": stderr, "truncated": cut}
+				if err != nil {
+					detail["error"] = boundedError(err)
+					gaps = append(gaps, name+": "+boundedError(err))
+				}
+				if cut {
+					gaps = append(gaps, name+" truncated")
+				}
+				row[name] = detail
+			}
 		}
 		results = append(results, row)
 	}

@@ -1262,9 +1262,6 @@ func summarizePerfEntries(entries []perfReportEntry, targetPIDs []int) ([]functi
 		}
 		return functions[i].DSO < functions[j].DSO
 	})
-	if len(functions) > 100 {
-		functions = functions[:100]
-	}
 	return functions, total, user, kernel, other, resolvedUser, resolvedKernel
 }
 

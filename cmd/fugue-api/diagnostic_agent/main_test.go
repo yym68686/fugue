@@ -131,6 +131,21 @@ func TestParsePerfMachineReportRejectsMissingRows(t *testing.T) {
 	}
 }
 
+func TestLeafSummaryKeepsEverySampleAcrossManyThreads(t *testing.T) {
+	entries := make([]perfReportEntry, 250)
+	for i := range entries {
+		entries[i] = perfReportEntry{Samples: 1, PID: i + 100, Mode: "user", DSO: "worker", Symbol: "work"}
+	}
+	functions, total, _, _, _, _, _ := summarizePerfEntries(entries, nil)
+	sum := 0
+	for _, row := range functions {
+		sum += row.Samples
+	}
+	if total != 250 || sum != total || len(functions) != 250 {
+		t.Fatalf("lost leaf evidence: total=%d represented=%d rows=%d", total, sum, len(functions))
+	}
+}
+
 func TestGoSymbolizerResolvesStrippedExecutableOffset(t *testing.T) {
 	executable := os.Getenv("FUGUE_DIAGNOSTIC_SYMBOL_FIXTURE")
 	wantedSuffix := ""
