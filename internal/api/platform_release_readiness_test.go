@@ -216,7 +216,7 @@ func TestCaptureReleaseRuntimeReadinessAllowsCanaryBeforeServing(t *testing.T) {
 			server := &Server{newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
 				return &managedAppStatusClient{client: kube.Client(), baseURL: kube.URL}, nil
 			}}
-			traffic := model.AppTrafficPolicy{ID: "traffic", AppID: app.ID, TenantID: app.TenantID, Mode: model.AppTrafficModeCanary, StableReleaseID: stable.ID, CandidateReleaseID: candidate.ID, StableWeight: 80, CandidateWeight: 20}
+			traffic := model.AppTrafficPolicy{ID: "traffic", AppID: app.ID, TenantID: app.TenantID, Mode: model.AppTrafficModeCanary, StableReleaseID: stable.ID, CandidateReleaseID: candidate.ID, StableWeight: 80, CandidateWeight: 20, StickyCookie: "Fugue-Release-Stickiness"}
 			projection := platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: app.ID, TenantID: app.TenantID, Enabled: true, UpstreamURL: stable.UpstreamURL}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{Releases: []platformconfig.ReleaseObservation{{ID: stable.ID}, {ID: candidate.ID}}}}
 			policy, err := platformconfig.ProjectPolicySnapshot(platformconfig.PolicySnapshot{Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 120}, nil, []model.AppTrafficPolicy{traffic}, "policy")
 			if err != nil {

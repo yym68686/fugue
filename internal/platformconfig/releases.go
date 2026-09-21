@@ -66,7 +66,9 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 		if rule.Mode == model.AppTrafficModeSingle || rule.Mode == model.AppTrafficModePaused {
 			stableWeight, candidateWeight = 100, 0
 		}
-		if candidateWeight > 0 && (rule.StickyHeader != "" || rule.StickyCookie != "") {
+		// The built-in cookie is already executed by every weighted Edge route.
+		// Custom names need explicit executor fields and must not be ignored.
+		if candidateWeight > 0 && (rule.StickyHeader != "" || (rule.StickyCookie != "" && rule.StickyCookie != "Fugue-Release-Stickiness")) {
 			return nil, fmt.Errorf("sticky release routing requires consumer support; compilation refused")
 		}
 		resolve := func(id string) (ReleaseObservation, error) {

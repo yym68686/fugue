@@ -122,6 +122,8 @@ func TestReleaseCompilerRejectsUntrustedOrAmbiguousInputs(t *testing.T) {
 			r.Intent.Routes[0].Upstreams = []UpstreamIntent{{UpstreamURL: "http://other", Weight: 100}}
 		},
 		"unsupported sticky":        func(r *CompileRequest) { r.Policy.TrafficConstraints[0].StickyHeader = "X-Release" },
+		"unsupported cookie":        func(r *CompileRequest) { r.Policy.TrafficConstraints[0].StickyCookie = "custom-session" },
+		"cookie name case differs":  func(r *CompileRequest) { r.Policy.TrafficConstraints[0].StickyCookie = "fugue-release-stickiness" },
 		"same stable and candidate": func(r *CompileRequest) { r.Policy.TrafficConstraints[0].CandidateReleaseID = "stable" },
 	}
 	for name, mutate := range tests {

@@ -32067,7 +32067,7 @@ components:
         traffic_constraints:
           type: array
           maxItems: 4096
-          description: Desired release references and weights. Compilation requires matching fresh release observations. Unsupported sticky routing is rejected, never silently ignored.
+          description: Desired release references and weights. Compilation requires matching fresh release observations. Candidate traffic supports the existing Edge Fugue-Release-Stickiness cookie (or omission); custom cookie names and sticky_header overrides are rejected, never silently ignored. Existing Edge identity precedence remains the built-in cookie, X-Fugue-Release-Stickiness, X-API-Key, Authorization, then per-request trace identity. Sticky declarations remain in signed policy and its digest; no business lookup is required by Edge.
           items:
             $ref: "#/components/schemas/PlatformTrafficPolicyConstraint"
     PlatformRoutePolicyConstraint:
@@ -32115,7 +32115,9 @@ components:
         stable_weight: {type: integer, minimum: 0, maximum: 100}
         candidate_weight: {type: integer, minimum: 0, maximum: 100}
         sticky_header: {type: string}
-        sticky_cookie: {type: string}
+        sticky_cookie:
+          type: string
+          description: Fugue-Release-Stickiness selects the existing Edge cookie behavior. A different nonempty name is unsupported when candidate traffic is requested. Single/paused stable-only routing does not use the declaration.
     PlatformConstraintGraph:
       type: object
       additionalProperties: false
