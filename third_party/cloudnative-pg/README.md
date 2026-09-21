@@ -8,7 +8,7 @@ and verify that candidate. The job has no production environment or Kubernetes
 access. Its receipt records the immutable image and unchanged instance-manager
 hashes; no live workload references the candidate until a separate release
 intent is enrolled. `deploy/environments/production/cnpg-controller/release.json`
-currently authorizes preflight only. Its `external_controller_release` job in
+authorizes the fenced release after successful production preflight. Its `external_controller_release` job in
 the same `ci.yml` verifies both OCI digests, the original Deployment UID and
 configuration digest, operator ConfigMap data, and database instance-manager
 hashes. It uploads a fresh recovery witness before any mutation can run.
