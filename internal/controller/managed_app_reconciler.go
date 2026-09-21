@@ -558,6 +558,11 @@ func (s *Service) syncManagedAppObservedStatus(
 				if podsErr != nil {
 					return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("list backing service cluster %s pods: %w", serviceDeployment.ResourceName, podsErr))
 				}
+				if !serviceDeployment.Suspended && serviceDeployment.DesiredInstances == clusterStatus.Spec.Instances {
+					if err := retainSurplusUnboundClaims(ctx, client, namespace, managed, clusterStatus, pods); err != nil {
+						return fmt.Errorf("retain surplus uninitialized database claims: %w", err)
+					}
+				}
 				if failure := managedPostgresPodFailureMessage(pods); failure != "" &&
 					!strings.EqualFold(strings.TrimSpace(backingStatus.Phase), model.ManagedPostgresRuntimePhaseActive) {
 					backingStatus.Phase = model.ManagedPostgresRuntimePhaseError

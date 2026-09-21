@@ -129,6 +129,7 @@ type kubeCloudNativePGCluster struct {
 		Annotations       map[string]string `json:"annotations,omitempty"`
 		Labels            map[string]string `json:"labels,omitempty"`
 		CreationTimestamp string            `json:"creationTimestamp,omitempty"`
+		DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
 		OwnerReferences   []struct {
 			APIVersion string `json:"apiVersion,omitempty"`
 			Kind       string `json:"kind,omitempty"`
@@ -149,6 +150,7 @@ type kubeCloudNativePGCluster struct {
 		PhaseReason            string                        `json:"phaseReason,omitempty"`
 		Instances              int                           `json:"instances,omitempty"`
 		ReadyInstances         int                           `json:"readyInstances,omitempty"`
+		DanglingPVC            []string                      `json:"danglingPVC,omitempty"`
 		CurrentPrimary         string                        `json:"currentPrimary,omitempty"`
 		TargetPrimary          string                        `json:"targetPrimary,omitempty"`
 		TargetPrimaryTimestamp string                        `json:"targetPrimaryTimestamp,omitempty"`

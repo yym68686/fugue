@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 
@@ -61,11 +62,59 @@ func recoveryStorageTargetNode(ctx context.Context, client *kubeClient, targetRu
 // CNPG can bootstrap a new replica from the still-ready primary. Never mark an
 // uninitialized volume ready, delete it, or detach a claim used by any Pod/Job.
 func retainAbandonedRecoveryClaims(ctx context.Context, client *kubeClient, namespace, name string, target managedPostgresStorageTarget) error {
+	return retainInitializingReplicaClaims(ctx, client, namespace, name, target, false, "")
+}
+
+// CNPG attempts to reattach dangling claims before it evaluates scale-down.
+// An unbound initializing claim without a bootstrap Job can therefore block
+// reconciliation even when every desired instance is already healthy.
+func retainSurplusUnboundClaims(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, cluster kubeCloudNativePGCluster, pods []kubePod) error {
+	if !cloudNativePGClusterOwnedByManagedApp(cluster, managed) || !surplusClaimClusterReady(cluster) {
+		return nil
+	}
+	ready := 0
+	primaryReady := false
+	for _, pod := range pods {
+		if pod.Metadata.DeletionTimestamp != "" || pod.Status.Phase != "Running" {
+			continue
+		}
+		owned := false
+		for _, ref := range pod.ObservedOwnerReferences {
+			owned = owned || (ref.UID == cluster.Metadata.UID && ref.Kind == runtime.CloudNativePGClusterKind && ref.APIVersion == runtime.CloudNativePGAPIVersion)
+		}
+		if !owned {
+			continue
+		}
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == "True" {
+				ready++
+				primaryReady = primaryReady || pod.Metadata.Name == cluster.Status.CurrentPrimary
+				break
+			}
+		}
+	}
+	if !primaryReady || ready != cluster.Spec.Instances {
+		return nil
+	}
+	return retainInitializingReplicaClaims(ctx, client, namespace, cluster.Metadata.Name, managedPostgresStorageTarget{StorageClassName: cluster.Spec.Storage.StorageClass}, true, cluster.Metadata.UID)
+}
+
+func surplusClaimClusterReady(cluster kubeCloudNativePGCluster) bool {
+	return cluster.Metadata.DeletionTimestamp == "" && cluster.Spec.Instances > 0 &&
+		cluster.Status.ReadyInstances == cluster.Spec.Instances && cluster.Status.Instances > cluster.Spec.Instances &&
+		len(cluster.Status.DanglingPVC) > 0 && cluster.Status.CurrentPrimary != "" &&
+		cluster.Status.CurrentPrimary == cluster.Status.TargetPrimary
+}
+
+func retainInitializingReplicaClaims(ctx context.Context, client *kubeClient, namespace, name string, target managedPostgresStorageTarget, surplusOnly bool, expectedUID string) error {
 	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, name)
 	if err != nil {
 		return err
 	}
 	if !found || cluster.Metadata.UID == "" || cluster.Status.CurrentPrimary == "" || cluster.Status.ReadyInstances < 1 || cluster.Spec.Storage.StorageClass != target.StorageClassName {
+		return nil
+	}
+	if surplusOnly && (cluster.Metadata.UID != expectedUID || !surplusClaimClusterReady(cluster)) {
 		return nil
 	}
 	pods, err := client.listPodsBySelector(ctx, namespace, "")
@@ -106,6 +155,9 @@ func retainAbandonedRecoveryClaims(ctx context.Context, client *kubeClient, name
 		return err
 	}
 	for _, claim := range claims {
+		if surplusOnly && !slices.Contains(cluster.Status.DanglingPVC, claim) {
+			continue
+		}
 		if claim == cluster.Status.CurrentPrimary || claim == cluster.Status.TargetPrimary || inUse[claim] {
 			continue
 		}
@@ -129,6 +181,34 @@ func retainAbandonedRecoveryClaims(ctx context.Context, client *kubeClient, name
 			continue
 		}
 		refs, _ := meta["ownerReferences"].([]any)
+		if surplusOnly {
+			spec, _ := current["spec"].(map[string]any)
+			status, _ := current["status"].(map[string]any)
+			if spec["volumeName"] != nil && spec["volumeName"] != "" {
+				continue
+			}
+			if status["phase"] != "Pending" || (meta["deletionTimestamp"] != nil && meta["deletionTimestamp"] != "") {
+				continue
+			}
+			if pvc.Metadata.Labels["cnpg.io/cluster"] != name || pvc.Metadata.Labels["cnpg.io/pvcRole"] != "PG_DATA" {
+				continue
+			}
+			owned := false
+			for _, raw := range refs {
+				ref, _ := raw.(map[string]any)
+				owned = owned || (ref["uid"] == expectedUID && ref["kind"] == "Cluster" && ref["apiVersion"] == runtime.CloudNativePGAPIVersion)
+			}
+			if !owned {
+				continue
+			}
+			fresh, exists, err := client.getCloudNativePGCluster(ctx, namespace, name)
+			if err != nil {
+				return err
+			}
+			if !exists || fresh.Metadata.UID != expectedUID || fresh.Metadata.Generation != cluster.Metadata.Generation || !surplusClaimClusterReady(fresh) || fresh.Status.CurrentPrimary != cluster.Status.CurrentPrimary {
+				return nil
+			}
+		}
 		kept := []any{}
 		for _, raw := range refs {
 			ref, _ := raw.(map[string]any)
