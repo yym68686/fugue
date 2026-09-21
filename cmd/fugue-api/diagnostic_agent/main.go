@@ -1353,13 +1353,16 @@ func newGoSymbolizer(path string) (*goSymbolizer, error) {
 	if text == nil || pcln == nil {
 		return nil, errors.New("ELF does not contain Go line tables")
 	}
-	pclnData, err := pcln.Data()
+	pclnData, err := readSymbolSection(pcln, 80<<20)
 	if err != nil {
 		return nil, err
 	}
 	var symtabData []byte
 	if symtab := file.Section(".gosymtab"); symtab != nil {
-		symtabData, _ = symtab.Data()
+		symtabData, err = readSymbolSection(symtab, 16<<20)
+		if err != nil {
+			return nil, err
+		}
 	}
 	table, err := gosym.NewTable(symtabData, gosym.NewLineTable(pclnData, text.Addr))
 	if err != nil {
@@ -1372,6 +1375,19 @@ func newGoSymbolizer(path string) (*goSymbolizer, error) {
 		}
 	}
 	return &goSymbolizer{table: table, loadBase: loadBase}, nil
+}
+
+// Section.Data grows a slice in chunks for large tables, retaining several
+// copies until GC. Bound the declared size before one exact allocation instead.
+func readSymbolSection(section *elf.Section, limit uint64) ([]byte, error) {
+	if section.Size > limit {
+		return nil, fmt.Errorf("symbol section %s exceeds %d byte budget", section.Name, limit)
+	}
+	data := make([]byte, int(section.Size))
+	if _, err := io.ReadFull(section.Open(), data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (s *goSymbolizer) ResolveDSOOffset(offset uint64) (string, string, int, bool) {

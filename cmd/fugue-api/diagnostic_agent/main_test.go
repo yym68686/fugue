@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"debug/elf"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,6 +152,23 @@ func TestGoSymbolizerResolvesStrippedExecutableOffset(t *testing.T) {
 	resolver, err := newGoSymbolizer(executable)
 	if err != nil {
 		t.Fatal(err)
+	}
+	metadata, err := elf.Open(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	section := metadata.Section(".gopclntab")
+	bounded, err := readSymbolSection(section, section.Size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := section.Data()
+	if err != nil || !bytes.Equal(bounded, reference) {
+		t.Fatal("bounded symbol read changed section data")
+	}
+	if _, err := readSymbolSection(section, section.Size-1); err == nil {
+		t.Fatal("symbol section exceeded memory budget")
 	}
 	var entry uint64
 	wantedName := ""
