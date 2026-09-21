@@ -92,6 +92,14 @@ cluster metrics and join by source timestamps. Host capability profiles do not
 mount a Kubernetes service-account credential; composing recipes must respect
 that boundary instead of assuming all collectors are available in every profile.
 
+Executable identity recipes may select up to 32 exact `go_modules` names from
+the running binary's embedded Go build metadata. Reports retain declared and
+replacement module versions/checksums and a small VCS/architecture settings
+allowlist. Local replacement paths, build flags and environment values are not
+exported. Missing requested modules degrade evidence; a local replacement is
+explicitly marked and does not establish its source contents. Module metadata
+identifies what the binary records, not an independent source or binary audit.
+
 Runtime snapshots deduplicate shared Unix sockets across helper processes and
 bind each row to the socket's kernel-reported peer PID in the frozen target set.
 Only that provider's lifetime and socket identity determine snapshot continuity;

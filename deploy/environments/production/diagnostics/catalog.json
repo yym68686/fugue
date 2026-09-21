@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 28,
+    "generation": 29,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,16 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "kubernetes-build-provenance",
+        "description": "Selected embedded storage, API server and HTTP transport dependency versions from the running executable",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": ["node_process"],
+        "max_duration_seconds": 30,
+        "parameters": {},
+        "config": {"collectors": [{"name": "build-provenance", "kind": "process-identity", "interval_seconds": 120, "go_modules": ["go.etcd.io/etcd/server/v3", "go.etcd.io/etcd/api/v3", "go.etcd.io/etcd/client/v3", "go.etcd.io/bbolt", "k8s.io/apiserver", "golang.org/x/net"]}]}
+      },
       {
         "id": "storage-scan-cost",
         "description": "Correlated storage reads, Go heap/GC, process faults and node reclaim in one bounded window",

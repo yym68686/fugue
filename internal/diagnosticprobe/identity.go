@@ -17,7 +17,10 @@ import (
 // Inspect the actual executable of a frozen target, rather than guessing why
 // a previous profiler did not resolve symbols. No command line or environment
 // values are exported. The collector is independently versioned with its pack.
-func processIdentities(ctx context.Context, req livediagnostics.ProbeRequest, procRoot string) (any, error) {
+func processIdentities(ctx context.Context, req livediagnostics.ProbeRequest, procRoot string, modules ...string) (any, error) {
+	if err := validateGoModules(modules); err != nil {
+		return nil, err
+	}
 	if req.ContainerID == "" && req.Target.ProcessName == "" {
 		return nil, errors.New("executable identity requires an exact process or container target")
 	}
@@ -40,13 +43,16 @@ func processIdentities(ctx context.Context, req livediagnostics.ProbeRequest, pr
 			return nil, err
 		}
 		root := filepath.Join(procRoot, strconv.Itoa(process.PID))
-		identity, err := executableIdentity(filepath.Join(root, "exe"))
+		identity, err := executableIdentity(filepath.Join(root, "exe"), modules...)
 		if err != nil {
 			gaps = append(gaps, "executable metadata unavailable for PID "+strconv.Itoa(process.PID)+": "+boundedError(err))
 			identities = append(identities, map[string]any{"pid": process.PID, "start_ticks": process.StartTicks, "security": processSecurity(root), "executable_error": boundedError(err)})
 			continue
 		}
 		identity["pid"], identity["start_ticks"], identity["cgroup"] = process.PID, process.StartTicks, process.Cgroup
+		if missing, ok := identity["go_modules_missing"].([]string); ok && len(missing) > 0 {
+			gaps = append(gaps, "requested Go dependency unavailable for PID "+strconv.Itoa(process.PID)+": "+strings.Join(missing, ", "))
+		}
 		maps, err := readBounded(filepath.Join(root, "maps"), 128<<10)
 		if err != nil {
 			gaps = append(gaps, "process address maps unavailable: "+boundedError(err))
@@ -87,7 +93,7 @@ func processSecurity(root string) map[string]any {
 	return result
 }
 
-func executableIdentity(filename string) (map[string]any, error) {
+func executableIdentity(filename string, modules ...string) (map[string]any, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -134,8 +140,14 @@ func executableIdentity(filename string) (map[string]any, error) {
 	if build, err := buildinfo.Read(file); err == nil {
 		result["go_version"] = build.GoVersion
 		result["module_path"] = build.Path
+		if len(modules) > 0 {
+			result["go_build"], result["go_modules_missing"] = selectedGoBuild(build, modules)
+		}
 	} else {
 		result["go_build_info_error"] = boundedError(err)
+		if len(modules) > 0 {
+			result["go_modules_missing"] = modules
+		}
 	}
 	return result, nil
 }

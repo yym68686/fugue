@@ -37,6 +37,7 @@ type Collector struct {
 	FieldSelector     string            `json:"field_selector,omitempty"`
 	AnnotationKeys    []string          `json:"annotation_keys,omitempty"`
 	Fields            []string          `json:"fields,omitempty"`
+	GoModules         []string          `json:"go_modules,omitempty"`
 	Container         string            `json:"container,omitempty"`
 	SinceSeconds      int               `json:"since_seconds,omitempty"`
 	SinceSecondsParam string            `json:"since_seconds_param,omitempty"`
@@ -87,6 +88,9 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 	for _, c := range cfg.Collectors {
 		if c.Name == "" || len(c.Name) > 80 || seen[c.Name] || c.IntervalSeconds < 0 || c.IntervalSeconds > 360 || len(c.Queries) > 12 || len(c.Fields) > 32 || len(c.Match) > 16 || len(c.AnnotationKeys) > 16 || len(c.SinceSecondsParam) > 4096 || len(c.MatchParam) > 4096 || len(c.SinceTime) > 64 || len(c.UntilTime) > 64 {
 			return livediagnostics.ProbeReport{}, errors.New("invalid collector configuration or budget")
+		}
+		if err := validateGoModules(c.GoModules); err != nil {
+			return livediagnostics.ProbeReport{}, err
 		}
 		for _, name := range c.RequiredQueries {
 			if _, ok := c.Queries[name]; !ok {
@@ -201,7 +205,7 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 	case "process-scheduling":
 		return processSchedulingAt(ctx, req, hostProc)
 	case "process-identity":
-		return processIdentities(ctx, req, hostProc)
+		return processIdentities(ctx, req, hostProc, c.GoModules...)
 	case "process-cpu-profile":
 		return processCPUProfile(ctx, req, c)
 	case "perf-capture-check":
