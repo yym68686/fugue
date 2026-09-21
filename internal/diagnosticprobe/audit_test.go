@@ -38,6 +38,32 @@ func TestAuditAggregationKeepsCallerTimingAndCacheOptionsWithoutPayloads(t *test
 	}
 }
 
+func TestAuditObjectGroupingIsExplicitAndPreservesNamespaceIdentity(t *testing.T) {
+	var event auditEvent
+	event.Object.Resource = "clusters"
+	event.Object.Name = "sample"
+	aggregated := map[string]*auditGroup{}
+	exact := map[string]*auditGroup{}
+	for _, ns := range []string{"one", "two"} {
+		event.Object.Namespace = ns
+		aggregateAuditEvent(aggregated, event)
+		aggregateAuditEvent(exact, event, true)
+	}
+	if len(aggregated) != 1 || len(exact) != 2 {
+		t.Fatal("incorrect object grouping")
+	}
+	for _, g := range aggregated {
+		if g.Namespace != "" || g.ObjectName != "" {
+			t.Fatal("default unexpectedly exposed objects")
+		}
+	}
+	for _, g := range exact {
+		if g.Namespace == "" || g.ObjectName != "sample" {
+			t.Fatal("object identity omitted")
+		}
+	}
+}
+
 func TestAuditReaderWindowDuplicateStagesAndMissingCoverage(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "var/log/audit")

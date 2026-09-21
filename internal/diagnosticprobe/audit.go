@@ -31,6 +31,7 @@ type auditEvent struct {
 		Resource    string `json:"resource"`
 		Subresource string `json:"subresource"`
 		Namespace   string `json:"namespace"`
+		Name        string `json:"name"`
 	} `json:"objectRef"`
 	Response struct {
 		Code int `json:"code"`
@@ -45,6 +46,8 @@ type auditGroup struct {
 	Verb           string         `json:"verb"`
 	Resource       string         `json:"resource"`
 	Subresource    string         `json:"subresource"`
+	Namespace      string         `json:"namespace,omitempty"`
+	ObjectName     string         `json:"object_name,omitempty"`
 	Code           int            `json:"code"`
 	Count          int            `json:"count"`
 	DurationMillis float64        `json:"duration_total_ms"`
@@ -57,6 +60,13 @@ func hostKubernetesAudit(ctx context.Context, req livediagnostics.ProbeRequest, 
 }
 
 func hostKubernetesAuditAt(ctx context.Context, req livediagnostics.ProbeRequest, c Collector, root string) (any, error) {
+	resource := parameter(c.Resource, req)
+	byObject := false
+	for _, field := range c.Fields {
+		if field == "object_name" {
+			byObject = true
+		}
+	}
 	if req.Target.Type != livediagnostics.TargetNodeProcess || !strings.HasPrefix(c.Path, "/var/log/") || filepath.Clean(c.Path) != c.Path || c.SinceSeconds < 1 || c.SinceSeconds > 86400 {
 		return nil, errors.New("audit reader requires a process target, log path pattern and a lookback within 24 hours")
 	}
@@ -139,6 +149,9 @@ func hostKubernetesAuditAt(ctx context.Context, req livediagnostics.ProbeRequest
 			if event.Stage != "ResponseComplete" || event.Finished.Before(since) || event.Finished.After(until) {
 				continue
 			}
+			if resource != "" && event.Object.Resource != resource {
+				continue
+			}
 			if event.ID == "" || seen[event.ID] {
 				continue
 			}
@@ -147,7 +160,7 @@ func hostKubernetesAuditAt(ctx context.Context, req livediagnostics.ProbeRequest
 				break
 			}
 			seen[event.ID] = true
-			if !aggregateAuditEvent(groups, event) {
+			if !aggregateAuditEvent(groups, event, byObject) {
 				gaps = append(gaps, "audit group budget exhausted")
 				continue
 			}
@@ -225,7 +238,7 @@ func auditPolicyEvidence(root, path string) (any, string) {
 	return redactJSON(safe), "audit request coverage is constrained by the reported policy; excluded requests cannot be attributed"
 }
 
-func aggregateAuditEvent(groups map[string]*auditGroup, e auditEvent) bool {
+func aggregateAuditEvent(groups map[string]*auditGroup, e auditEvent, objectGrouping ...bool) bool {
 	bound := func(s string) string {
 		s = safeText(s)
 		if len(s) > 240 {
@@ -235,12 +248,17 @@ func aggregateAuditEvent(groups map[string]*auditGroup, e auditEvent) bool {
 	}
 	user, agent := bound(e.User.Name), bound(e.Agent)
 	key := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%d", user, agent, e.Verb, e.Object.Resource, e.Object.Subresource, e.Response.Code)
+	namespace, name := "", ""
+	if len(objectGrouping) > 0 && objectGrouping[0] {
+		namespace, name = bound(e.Object.Namespace), bound(e.Object.Name)
+		key += "\x00" + namespace + "\x00" + name
+	}
 	g := groups[key]
 	if g == nil {
 		if len(groups) >= 256 {
 			return false
 		}
-		g = &auditGroup{User: user, Agent: agent, Verb: e.Verb, Resource: e.Object.Resource, Subresource: e.Object.Subresource, Code: e.Response.Code, Options: map[string]int{}}
+		g = &auditGroup{User: user, Agent: agent, Verb: e.Verb, Resource: e.Object.Resource, Subresource: e.Object.Subresource, Namespace: namespace, ObjectName: name, Code: e.Response.Code, Options: map[string]int{}}
 		groups[key] = g
 	}
 	g.Count++

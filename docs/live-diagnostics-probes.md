@@ -54,8 +54,8 @@ observations also degrade when IO permissions or scheduler accounting are
 unavailable. Node-window summaries compare cumulative counters only across the
 same boot identity; process deltas require the same PID and start time.
 
-The independently released pack also supports `process-cpu-profile` and
-`host-journal` collectors under the existing `process-profile` capability.
+The independently released pack supports `process-cpu-profile` under
+`kernel-profile` and `host-journal` under `process-profile`.
 CPU collection captures at 19 Hz for 5-30 seconds with bounded output and
 process-group cancellation; changed process identities, lost samples and
 unresolved symbols cannot produce complete evidence. Journal recipes specify a
@@ -87,3 +87,22 @@ jobs. A successful package build activates its new digest in a separate lane;
 both writers serialize through the same production concurrency group. The
 versioned `diagnostics/package.json` permits an explicit package rebuild without
 changing a serving component.
+
+The `host-loopback-metrics` collector uses a fixed helper in the host network
+namespace, under `kernel-profile`. It only issues GET `/metrics` to IPv4 loopback
+at a configured port, without credentials or redirects. Responses are bounded at
+2 MiB and projected to explicit metric families; missing families degrade the
+report. This can observe services whose metrics are not scraped by Prometheus
+without reconfiguring or restarting them.
+
+`runtime-stage-cost` reads fixed operation counters exposed by the reusable
+`runtimeobservation.Operations` provider. Its stage set cannot grow from request
+values. Image-cache registers local/network registry operation counts and work
+durations, including inventory phases. Add/remove recipes in the signed catalog
+to inspect these counters without redeploying the serving component.
+
+Audit recipes can specify a resource filter and `fields: ["object_name"]` to
+group by namespace/name as well as caller, verb and response. The 256-group,
+30,000-event and 32 MiB source limits still apply. Audit policy exclusions remain
+explicit. For runtime client snapshots, `subresource` separates node proxy/log
+requests and `metadata_only` identifies metadata content negotiation.

@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 18,
+    "generation": 19,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,16 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "kubernetes-audit-object-activity",
+        "description": "Bounded object-level caller and write activity for an explicit Kubernetes resource",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": ["node_process"],
+        "max_duration_seconds": 60,
+        "parameters": {"resource": {"default": "clusters", "max_length": 80, "pattern": "^[a-z][a-z0-9.-]*$"}},
+        "config": {"collectors": [{"name": "object-activity", "kind": "kubernetes-audit", "path": "/var/log/fugue/kubernetes/audit*.log", "policy_path": "/etc/rancher/k3s/audit-policy.yaml", "resource": "{{param.resource}}", "fields": ["object_name"], "since_seconds": 300, "interval_seconds": 120}]}
+      },
       {
         "id": "host-storage-metrics",
         "description": "Bounded loopback storage metrics in the host network namespace",
