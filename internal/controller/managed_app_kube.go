@@ -1367,6 +1367,13 @@ func (c *kubeClient) deleteDeployment(ctx context.Context, namespace, name strin
 	return normalizeDeleteNotFound(err)
 }
 
+// deleteDeploymentWithUID makes stale-name cleanup fail closed. A release
+// target can be replaced while a controller is waiting for drain; Kubernetes
+// must reject deletion when the observed UID no longer exists at that name.
+func (c *kubeClient) deleteDeploymentWithUID(ctx context.Context, namespace, name, uid string) error {
+	return c.deleteObjectWithUID(ctx, deploymentAPIPath(c.effectiveNamespace(namespace), name), uid)
+}
+
 func (c *kubeClient) scaleDeployment(ctx context.Context, namespace, name string, replicas int) error {
 	body := map[string]any{
 		"spec": map[string]any{
@@ -1444,6 +1451,28 @@ func (c *kubeClient) deleteCloudNativePGCluster(ctx context.Context, namespace, 
 
 func (c *kubeClient) deleteService(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/services/"+url.PathEscape(name), "", nil, nil)
+	return normalizeDeleteNotFound(err)
+}
+
+func (c *kubeClient) deleteServiceWithUID(ctx context.Context, namespace, name, uid string) error {
+	return c.deleteObjectWithUID(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/services/"+url.PathEscape(name), uid)
+}
+
+func (c *kubeClient) deleteObjectWithUID(ctx context.Context, apiPath, uid string) error {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return fmt.Errorf("UID precondition is required for release cleanup")
+	}
+	body := map[string]any{
+		"apiVersion":        "v1",
+		"kind":              "DeleteOptions",
+		"propagationPolicy": "Background",
+		"preconditions":     map[string]any{"uid": uid},
+	}
+	status, err := c.doRequest(ctx, http.MethodDelete, apiPath, "application/json", body, nil)
+	if status == http.StatusConflict {
+		return errKubeConflict
+	}
 	return normalizeDeleteNotFound(err)
 }
 

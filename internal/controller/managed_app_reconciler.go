@@ -398,10 +398,85 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := s.pruneManagedAppStaleObjects(ctx, client, namespace, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("prune stale managed app child objects: %w", err))
 	}
+	if err := s.retryDrainingAppReleaseRetirement(ctx, app); err != nil {
+		// Retirement is deliberately independent from serving reconciliation.
+		// Keep the workload and retry on the next fallback/event pass when the
+		// drain observer or edge proof is temporarily unavailable.
+		if s.Logger != nil {
+			s.Logger.Printf("background release retirement deferred for app %s: %v", app.ID, err)
+		}
+	}
 	if err := s.reconcileWorkspaceReplicationSource(ctx, client, app, ownerRef); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile workspace replication source: %w", err))
 	}
 	return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, app, postgresPlacements, releaseKey, recoverStoredBaseline)
+}
+
+// retryDrainingAppReleaseRetirement re-enters the same guarded retirement
+// path used by the foreground rollout. The persisted revision binding is the
+// only identity accepted for cleanup; legacy unbound releases remain retained
+// until the explicit migration path binds them.
+func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app model.App) error {
+	if s == nil || s.Store == nil {
+		return nil
+	}
+	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true})
+	if err != nil {
+		return fmt.Errorf("list draining releases: %w", err)
+	}
+	policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
+	if err != nil || policy.StableReleaseID == "" || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		return nil
+	}
+	stable, err := s.Store.GetAppRelease(app.TenantID, true, policy.StableReleaseID)
+	if err != nil || stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
+		return nil
+	}
+	for _, previous := range releases {
+		if previous.Status == model.AppReleaseStatusRetired && previous.RevisionWorkload != nil {
+			if err := s.retryRetiredAppReleaseCleanup(ctx, app, previous, stable); err != nil {
+				return fmt.Errorf("cleanup retired release %s: %w", previous.ID, err)
+			}
+			continue
+		}
+		if previous.Role != model.AppReleaseRolePrevious || previous.Status != model.AppReleaseStatusDraining {
+			continue
+		}
+		if previous.RevisionWorkload == nil || previous.RevisionWorkload.OperationID == "" {
+			continue
+		}
+		op, err := s.Store.GetOperation(previous.RevisionWorkload.OperationID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return fmt.Errorf("load retirement operation %s: %w", previous.RevisionWorkload.OperationID, err)
+		}
+		previousApp := app
+		if previous.SpecSnapshot != nil {
+			previousApp.Spec = *cloneControllerAppSpec(previous.SpecSnapshot)
+		}
+		state := &safeRolloutState{
+			Enabled:                true,
+			PreviousApp:            previousApp,
+			CandidateApp:           app,
+			StableRelease:          previous,
+			Candidate:              stable,
+			StableAlignmentAllowed: true,
+		}
+		s.finalizeSafeZeroDowntimePreviousRetire(ctx, op, state)
+	}
+	return nil
+}
+
+func (s *Service) retryRetiredAppReleaseCleanup(ctx context.Context, app model.App, retired, stable model.AppRelease) error {
+	if retired.RevisionWorkload == nil || retired.RevisionWorkload.DeploymentUID == "" || retired.RevisionWorkload.ServiceUID == "" {
+		return fmt.Errorf("retired release %s has incomplete immutable cleanup identity", retired.ID)
+	}
+	if stable.ID == retired.ID || stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
+		return nil
+	}
+	return s.cleanupSafeRolloutRetiredResources(ctx, app, retired)
 }
 
 // Preserve irreversible storage allocation and validate immutable class
@@ -2963,6 +3038,12 @@ func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind
 	for _, release := range releases {
 		switch strings.TrimSpace(release.Status) {
 		case model.AppReleaseStatusCreating, model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining, model.AppReleaseStatusFailed:
+		case model.AppReleaseStatusRetired:
+			// Retired is a logical state; a failed UID-guarded cleanup must
+			// retain the immutable names until the background retry succeeds.
+			if release.RevisionWorkload == nil {
+				continue
+			}
 		default:
 			continue
 		}

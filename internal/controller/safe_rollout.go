@@ -867,8 +867,11 @@ func (s *Service) cleanupSafeRolloutRetiredResources(ctx context.Context, app mo
 	prepared := s.Renderer.PrepareApp(app)
 	canonicalDeployment := runtime.RuntimeAppResourceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
 	canonicalService := runtime.RuntimeAppServiceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
-	deploymentName := strings.TrimSpace(retired.DeploymentName)
-	serviceName := strings.TrimSpace(retired.ServiceName)
+	if retired.RevisionWorkload == nil {
+		return fmt.Errorf("retired release has no immutable workload binding; retain resources until migration")
+	}
+	deploymentName := strings.TrimSpace(retired.RevisionWorkload.DeploymentName)
+	serviceName := strings.TrimSpace(retired.RevisionWorkload.ServiceName)
 	if deploymentName == "" || strings.EqualFold(deploymentName, canonicalDeployment) {
 		deploymentName = ""
 	}
@@ -884,12 +887,12 @@ func (s *Service) cleanupSafeRolloutRetiredResources(ctx context.Context, app mo
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	if deploymentName != "" {
-		if err := client.deleteDeployment(ctx, namespace, deploymentName); err != nil {
+		if err := client.deleteDeploymentWithUID(ctx, namespace, deploymentName, retired.RevisionWorkload.DeploymentUID); err != nil {
 			return fmt.Errorf("delete retired release deployment %s/%s: %w", namespace, deploymentName, err)
 		}
 	}
 	if serviceName != "" {
-		if err := client.deleteService(ctx, namespace, serviceName); err != nil {
+		if err := client.deleteServiceWithUID(ctx, namespace, serviceName, retired.RevisionWorkload.ServiceUID); err != nil {
 			return fmt.Errorf("delete retired release service %s/%s: %w", namespace, serviceName, err)
 		}
 	}

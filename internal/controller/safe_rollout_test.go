@@ -222,6 +222,7 @@ func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	var mu sync.Mutex
 	deleted := []string{}
+	preconditions := map[string]string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			http.NotFound(w, r)
@@ -229,6 +230,13 @@ func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing
 		}
 		mu.Lock()
 		deleted = append(deleted, r.URL.Path)
+		var body struct {
+			Preconditions struct {
+				UID string `json:"uid"`
+			} `json:"preconditions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		preconditions[r.URL.Path] = body.Preconditions.UID
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -242,8 +250,12 @@ func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing
 	}
 	revision := safeRolloutCandidateRevision("apprel_retired")
 	retired := model.AppRelease{
-		DeploymentName: runtime.RuntimeAppResourceNameWithOptions(app, runtime.RenderOptions{Revision: revision}),
-		ServiceName:    runtime.RuntimeAppServiceNameWithOptions(app, runtime.RenderOptions{Revision: revision}),
+		RevisionWorkload: &model.AppReleaseWorkload{
+			DeploymentName: runtime.RuntimeAppResourceNameWithOptions(app, runtime.RenderOptions{Revision: revision}),
+			DeploymentUID:  "deployment-uid",
+			ServiceName:    runtime.RuntimeAppServiceNameWithOptions(app, runtime.RenderOptions{Revision: revision}),
+			ServiceUID:     "service-uid",
+		},
 	}
 	if err := svc.cleanupSafeRolloutRetiredResources(context.Background(), app, retired); err != nil {
 		t.Fatalf("cleanup retired revision: %v", err)
@@ -252,17 +264,22 @@ func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing
 	got := append([]string(nil), deleted...)
 	mu.Unlock()
 	if len(got) != 2 ||
-		got[0] != "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+retired.DeploymentName ||
-		got[1] != "/api/v1/namespaces/"+namespace+"/services/"+retired.ServiceName {
+		got[0] != "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+retired.RevisionWorkload.DeploymentName ||
+		got[1] != "/api/v1/namespaces/"+namespace+"/services/"+retired.RevisionWorkload.ServiceName {
 		t.Fatalf("unexpected retired revision deletes: %v", got)
 	}
+	mu.Lock()
+	if preconditions[got[0]] != "deployment-uid" || preconditions[got[1]] != "service-uid" {
+		t.Fatalf("retired revision deletes must carry UID preconditions: %+v", preconditions)
+	}
+	mu.Unlock()
 
 	canonical := model.AppRelease{
 		DeploymentName: runtime.RuntimeAppResourceName(app),
 		ServiceName:    runtime.RuntimeAppServiceName(app),
 	}
-	if err := svc.cleanupSafeRolloutRetiredResources(context.Background(), app, canonical); err != nil {
-		t.Fatalf("preserve canonical resources: %v", err)
+	if err := svc.cleanupSafeRolloutRetiredResources(context.Background(), app, canonical); err == nil {
+		t.Fatal("unbound canonical resource must remain retained and report migration required")
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -1543,6 +1560,101 @@ func newSafeRolloutTestState(t *testing.T) (*store.Store, model.App, model.App, 
 		t.Fatalf("create release attempt: %v", err)
 	}
 	return stateStore, previous, candidate, op
+}
+
+func TestRetryDrainingAppReleaseRetirementUsesPersistedBinding(t *testing.T) {
+	t.Parallel()
+	st, app, _, op := newSafeRolloutTestState(t)
+	now := time.Now().UTC()
+	claimed, ok, err := st.TryClaimPendingOperation(op.ID)
+	if err != nil || !ok {
+		t.Fatalf("claim operation: %v", err)
+	}
+	previous, err := st.CreateAppRelease(model.AppRelease{ID: "previous-bound", TenantID: app.TenantID, AppID: app.ID,
+		Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating, RuntimeID: "runtime-v1",
+		ResolvedImageRef: app.Spec.Image, DeploymentName: "old-deployment", ServiceName: "old-service", SpecSnapshot: &app.Spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := st.BindAppReleaseWorkload(context.Background(), previous, model.AppReleaseWorkload{OperationID: claimed.ID, Namespace: runtime.NamespaceForTenant(app.TenantID),
+		DeploymentName: "old-deployment", DeploymentUID: "old-deployment-uid", DeploymentGeneration: 1, ServiceName: "old-service", ServiceUID: "old-service-uid",
+		ReleaseKey: "old-release-key", RuntimeID: "runtime-v1", ImageRef: app.Spec.Image})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound.Role, bound.Status, bound.PromotedAt = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining, &now
+	previous, err = st.UpdateAppRelease(bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, err := st.CreateAppRelease(model.AppRelease{ID: "current-stable", TenantID: app.TenantID, AppID: app.ID,
+		Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing, RuntimeID: "runtime-v2", ResolvedImageRef: "ghcr.io/example/api:v2",
+		DeploymentName: "current-deployment", ServiceName: "current-service", PromotedAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertAppTrafficPolicy(model.AppTrafficPolicy{AppID: app.ID, TenantID: app.TenantID, Mode: model.AppTrafficModeSingle,
+		StableReleaseID: stable.ID, StableWeight: 100, CandidateWeight: 0}); err != nil {
+		t.Fatal(err)
+	}
+	svc := newSafeRolloutIntegrationService(st, "http://current-service", safeRolloutDrainMetrics{Ready: true, FinalCount: 1, Summary: map[string]any{"active_connections": 0}})
+	if err := svc.retryDrainingAppReleaseRetirement(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := st.GetAppRelease(app.TenantID, true, previous.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.Role != model.AppReleaseRoleRetired || retired.Status != model.AppReleaseStatusRetired {
+		t.Fatalf("background retry did not retire drained bound release: %+v", retired)
+	}
+}
+
+func TestRetryRetiredAppReleaseCleanupUsesUIDPreconditions(t *testing.T) {
+	t.Parallel()
+	st, app, _, op := newSafeRolloutTestState(t)
+	now := time.Now().UTC()
+	claimed, ok, err := st.TryClaimPendingOperation(op.ID)
+	if err != nil || !ok {
+		t.Fatalf("claim operation: %v", err)
+	}
+	retired, err := st.CreateAppRelease(model.AppRelease{ID: "retired-bound", TenantID: app.TenantID, AppID: app.ID,
+		Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating, RuntimeID: "runtime-v1", ResolvedImageRef: app.Spec.Image, DeploymentName: "old-deployment", ServiceName: "old-service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired, err = st.BindAppReleaseWorkload(context.Background(), retired, model.AppReleaseWorkload{OperationID: claimed.ID, Namespace: runtime.NamespaceForTenant(app.TenantID), DeploymentName: "old-deployment", DeploymentUID: "old-uid", DeploymentGeneration: 1, ServiceName: "old-service", ServiceUID: "old-service-uid", ReleaseKey: "old-key", RuntimeID: "runtime-v1", ImageRef: app.Spec.Image})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired.Role, retired.Status, retired.PromotedAt = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired, &now
+	retired, err = st.UpdateAppRelease(retired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, err := st.CreateAppRelease(model.AppRelease{ID: "stable-bound", TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing, RuntimeID: "runtime-v2", ResolvedImageRef: "ghcr.io/example/api:v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	svc := &Service{Store: st, Config: config.ControllerConfig{KubectlApply: true}, Renderer: runtime.Renderer{}, newKubeClient: func(string) (*kubeClient, error) {
+		calls++
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(server.Close)
+		return &kubeClient{client: server.Client(), baseURL: server.URL}, nil
+	}}
+	if err := svc.retryRetiredAppReleaseCleanup(context.Background(), app, retired, stable); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one cleanup attempt, got %d", calls)
+	}
 }
 
 func releaseStepsContainPhase(steps []model.ReleaseStep, phase, status string) bool {
