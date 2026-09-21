@@ -1670,7 +1670,7 @@ func TestPrepareLocalPVLoopServiceChecksAssociationOutput(t *testing.T) {
 		t.Fatalf("read LocalPV preparation script: %v", err)
 	}
 	script := string(raw)
-	want := "losetup -j ${IMAGE_PATH} | grep -q . || losetup --find --show ${IMAGE_PATH}"
+	want := `python3 "${LOCALPV_UNIT_RENDERER}" render "${IMAGE_PATH}" "${VG_NAME}"`
 	if !strings.Contains(script, want) {
 		t.Fatalf("LocalPV loop service must attach when losetup -j returns success with empty output; missing %q", want)
 	}
@@ -1851,6 +1851,7 @@ printf '%s\n' "$(basename "$0") $*" >>"${TEST_ACTIONS}"
 				"TEST_PV_PRESENT="+fmt.Sprintf("%t", tt.pvPresent),
 				"TEST_PV_VG="+tt.pvVG,
 				"FUGUE_NODE_ROLES=",
+				"FUGUE_LOCALPV_UNIT_RENDERER="+mustLocalPVUnitProgramPath(t),
 			)
 			output, runErr := cmd.CombinedOutput()
 			if tt.wantOK && runErr != nil {
@@ -1884,7 +1885,7 @@ printf '%s\n' "$(basename "$0") $*" >>"${TEST_ACTIONS}"
 				if err != nil {
 					t.Fatalf("read generated LocalPV service: %v", err)
 				}
-				if !strings.Contains(string(serviceRaw), "losetup -j "+imagePath+" | grep -q . || losetup --find --show "+imagePath) {
+				if !strings.Contains(string(serviceRaw), `association=$$(losetup -j "$$image"); if [ -z "$$association" ]`) {
 					t.Fatalf("generated LocalPV service does not test association output:\n%s", serviceRaw)
 				}
 			}

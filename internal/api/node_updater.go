@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion        = "v41"
+	nodeUpdaterScriptVersion        = model.NodeUpdaterCurrentVersion
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 	nodeRepairTaskMaxAge            = 45 * time.Minute
@@ -1333,6 +1333,8 @@ FUGUE_LOCALPV_LOOP_SERVICE="${FUGUE_LOCALPV_LOOP_SERVICE:-fugue-lvm-localpv-loop
 __FUGUE_HOST_MEMORY_SAFETY_LIBRARY__
 
 __FUGUE_HOST_JOURNALD_POLICY_LIBRARY__
+
+__FUGUE_LOCALPV_UNIT_LIBRARY__
 
 log() {
   printf '[fugue-node-updater] %s\n' "$*" >&2
@@ -3046,6 +3048,7 @@ reconcile_node_state() {
   local k3s_runtime_config_changed=0
   local cluster_rejoin_changed=0
   mkdir -p "${FUGUE_NODE_UPDATER_STATE_DIR}"
+  reconcile_localpv_boot_unit
   if reconcile_time_sync; then
     log "reconciled host time synchronization"
   fi
@@ -3358,6 +3361,8 @@ node_deep_health_heartbeat_json() {
   FUGUE_HEARTBEAT_LAST_ERROR="$(last_error)" \
   FUGUE_HEARTBEAT_CLUSTER_NODE_NAME="$(node_deep_health_cluster_node_name)" \
   FUGUE_HEARTBEAT_EDGE_ROLE="$(node_deep_health_edge_role)" \
+  FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT="$(localpv_boot_unit_observation observe)" \
+  FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT_APPLY="${FUGUE_LOCALPV_UNIT_LAST_APPLY:-}" \
   FUGUE_HEARTBEAT_DESIRED_STATE_FILE="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" \
   FUGUE_HEARTBEAT_REJOIN_CREDENTIAL_CLASS="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_CREDENTIAL_CLASS || true)" \
   FUGUE_HEARTBEAT_REJOIN_TOKEN_ID="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_TOKEN_ID || true)" \
@@ -3410,6 +3415,24 @@ def check(name, category, status, observed="", expected="", hard=False, message=
     }
 
 checks = []
+
+try:
+    localpv = json.loads(os.environ.get("FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT", ""))
+    state = localpv.get("state", "unknown")
+    status = "pass" if state in ("converged", "not_applicable") else "warning"
+    last_apply = json.loads(os.environ.get("FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT_APPLY", "") or "{}")
+    for key in ("state", "reason", "changed", "observed_at"):
+        if key in last_apply:
+            localpv["last_apply_" + key] = last_apply[key]
+    checks.append(check(
+        "localpv_boot_unit", "storage", status, state,
+        "recognized boot implementation installed and loaded; existing storage intent retained",
+        False, localpv.get("reason", ""),
+        evidence={key: str(value) for key, value in localpv.items()},
+    ))
+except (ValueError, TypeError, AttributeError):
+    checks.append(check("localpv_boot_unit", "storage", "warning", "observation unavailable",
+                        "fresh LocalPV boot unit evidence", False))
 
 def tcp_connect_check(name, category, host, port, expected, hard=False, timeout=3):
     try:
@@ -5807,5 +5830,6 @@ esac
 		"__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary(),
 		"__FUGUE_POD_CAPACITY_LIBRARY__", podCapacityShellLibrary(),
 		"__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__", hostJournaldPolicyShellLibrary(),
+		"__FUGUE_LOCALPV_UNIT_LIBRARY__", localPVUnitShellLibrary(),
 	).Replace(script)
 }

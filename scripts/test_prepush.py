@@ -11,6 +11,32 @@ from unittest import mock
 from scripts import prepush
 
 
+class LocalPVGenerationTest(unittest.TestCase):
+    def test_changed_boot_implementation_requires_new_updater_generation(self):
+        for version, expected in [("v7", 1), ("v6", 1), ("v8", 0)]:
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "internal/api").mkdir(parents=True)
+                (root / "internal/model").mkdir(parents=True)
+                (root / "internal/api/localpv_unit.py").write_text("new implementation")
+                (root / "internal/model/model.go").write_text(f'const NodeUpdaterCurrentVersion = "{version}"')
+                def previous(command, timeout):
+                    if command[-1].endswith("model.go"):
+                        return 0, 'const NodeUpdaterCurrentVersion = "v7"'
+                    return 0, "old implementation"
+                with mock.patch.object(prepush, "ROOT", root), mock.patch.object(prepush, "run", side_effect=previous):
+                    status, _ = prepush.localpv_updater_generation_check("base", ["internal/api/localpv_unit.py"], 5)
+                self.assertEqual(status, expected)
+
+    def test_unchanged_implementation_does_not_require_a_bump(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "internal/api").mkdir(parents=True)
+            (root / "internal/api/localpv_unit.py").write_text("same implementation")
+            with mock.patch.object(prepush, "ROOT", root), mock.patch.object(prepush, "run", return_value=(0, "same implementation")):
+                self.assertEqual(prepush.localpv_updater_generation_check("base", ["internal/api/localpv_unit.py"], 5), (0, ""))
+
+
 class CanonicalReceiptTest(unittest.TestCase):
     def test_ci_always_runs_the_single_repository_prepush_entrypoint(self) -> None:
         source = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")

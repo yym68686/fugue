@@ -23,6 +23,10 @@ MAX_CONFIGURED_TIMEOUT_SECONDS = 240.0
 MAX_CONFIGURED_ELAPSED_SECONDS = 240.0
 GO_TASK_CONCURRENCY = 2
 SERIAL_WARM_TEST_PACKAGES = {"./internal/api"}
+LOCALPV_BOOT_SOURCES = {
+    "internal/api/localpv_unit.py",
+    "internal/api/localpv_unit.go",
+}
 DECLARATIVE_TEST_PACKAGES = {
     "./cmd/fugue-declarative-release",
     "./internal/declarativerelease",
@@ -319,6 +323,27 @@ def shell_syntax_check(paths: list[str], timeout: float) -> tuple[int, str]:
     return 0, ""
 
 
+def localpv_updater_generation_check(base: str, paths: list[str], timeout: float) -> tuple[int, str]:
+    relevant = LOCALPV_BOOT_SOURCES.intersection(paths)
+    changed = False
+    for name in sorted(relevant):
+        status, before = run(["git", "show", f"{base}:{name}"], timeout)
+        after = (ROOT / name).read_text() if (ROOT / name).exists() else ""
+        if status != 0 or before != after:
+            changed = True
+    if not changed:
+        return 0, ""
+    status, before = run(["git", "show", f"{base}:internal/model/model.go"], timeout)
+    if status != 0:
+        return 1, "cannot verify the previous node-updater version"
+    after = (ROOT / "internal/model/model.go").read_text()
+    pattern = r'NodeUpdaterCurrentVersion\s*=\s*"v(\d+)"'
+    old_version, new_version = re.search(pattern, before), re.search(pattern, after)
+    if not old_version or not new_version or int(new_version[1]) <= int(old_version[1]):
+        return 1, "LocalPV boot implementation changed: increment NodeUpdaterCurrentVersion so existing nodes receive it"
+    return 0, ""
+
+
 def helm_check(timeout: float) -> tuple[int, str]:
     deadline = time.monotonic() + max(0.0, timeout)
     commands = [
@@ -463,6 +488,8 @@ def main() -> int:
         "gofmt": lambda remaining: gofmt_check([name for name in paths if name.endswith(".go") and (ROOT / name).is_file()], remaining),
         "shell-syntax": lambda remaining: shell_syntax_check(paths, remaining),
     }
+    if LOCALPV_BOOT_SOURCES.intersection(paths):
+        local_checks["localpv-updater-generation"] = lambda remaining: localpv_updater_generation_check(base, paths, remaining)
     if any(name.startswith("deploy/helm/fugue/") for name in paths):
         go_dependent_tasks["helm-lint-render"] = None
 

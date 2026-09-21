@@ -121,6 +121,13 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
+LOCALPV_UNIT_RENDERER="${FUGUE_LOCALPV_UNIT_RENDERER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../internal/api" && pwd)/localpv_unit.py}"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required to validate and render the LocalPV boot unit" >&2
+  exit 1
+fi
+LOCALPV_UNIT_CONTENT="$(python3 "${LOCALPV_UNIT_RENDERER}" render "${IMAGE_PATH}" "${VG_NAME}")"
+
 if ! command -v pvcreate >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
@@ -176,22 +183,7 @@ if ! vgs "${VG_NAME}" >/dev/null 2>&1; then
 fi
 
 SERVICE_PATH="/etc/systemd/system/fugue-lvm-localpv-loop.service"
-cat > "${SERVICE_PATH}" <<EOF
-[Unit]
-Description=Attach Fugue LVM LocalPV loopback volume group
-DefaultDependencies=no
-After=local-fs.target
-Before=k3s.service k3s-agent.service kubelet.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh -ec 'losetup -j ${IMAGE_PATH} | grep -q . || losetup --find --show ${IMAGE_PATH} >/dev/null; vgchange -ay ${VG_NAME}'
-ExecStop=/bin/sh -ec 'vgchange -an ${VG_NAME} || true'
-
-[Install]
-WantedBy=multi-user.target
-EOF
+printf '%s\n' "${LOCALPV_UNIT_CONTENT}" > "${SERVICE_PATH}"
 
 systemctl daemon-reload
 systemctl enable --now fugue-lvm-localpv-loop.service
