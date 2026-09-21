@@ -14,7 +14,7 @@ import (
 )
 
 func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testing.T) {
-	for _, scenario := range []string{"valid", "defaults", "wrong_owner", "wrong_release", "wrong_uid", "wrong_selector", "extra_selector", "wrong_image", "wrong_key", "wrong_service_port", "missing_resource", "deleting", "replaced_between_reads", "generation_changed", "wrong_operation", "operation_finished"} {
+	for _, scenario := range []string{"valid", "defaults", "omitted_zero_delay", "omitted_nonzero_delay", "wrong_owner", "wrong_release", "wrong_uid", "wrong_selector", "extra_selector", "wrong_image", "wrong_key", "wrong_service_port", "missing_resource", "deleting", "replaced_between_reads", "generation_changed", "wrong_operation", "operation_finished"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			st, _, app, op := newSafeRolloutTestState(t)
@@ -50,6 +50,17 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 			}
 			dep, service := live["Deployment"], live["Service"]
 			switch scenario {
+			case "omitted_zero_delay", "omitted_nonzero_delay":
+				for _, obj := range objects {
+					if obj["kind"] == "Deployment" {
+						probe := objectMapField(mapSlice(nestedObjectValue(obj, "spec", "template", "spec", "containers"))[0], "readinessProbe")
+						probe["initialDelaySeconds"] = 0
+						if scenario == "omitted_nonzero_delay" {
+							probe["initialDelaySeconds"] = 5
+						}
+					}
+				}
+				delete(objectMapField(mapSlice(nestedObjectValue(dep, "spec", "template", "spec", "containers"))[0], "readinessProbe"), "initialDelaySeconds")
 			case "defaults":
 				c := mapSlice(nestedObjectValue(dep, "spec", "template", "spec", "containers"))[0]
 				c["terminationMessagePath"] = "/dev/termination-log"
@@ -112,7 +123,7 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 			client := &kubeClient{baseURL: server.URL, client: server.Client()}
 			state := &safeRolloutState{Enabled: true, CandidateApp: app, Candidate: release}
 			err = svc.bindSafeRolloutWorkload(context.Background(), client, op, state, objects)
-			valid := scenario == "valid" || scenario == "defaults"
+			valid := scenario == "valid" || scenario == "defaults" || scenario == "omitted_zero_delay"
 			if !valid {
 				if err == nil {
 					t.Fatal("invalid binding accepted")

@@ -122,6 +122,12 @@ func revisionAppliedFieldsMatch(path string, actual, desired any) bool {
 		}
 		return true
 	default:
+		// The API omits the default zero delay when serializing probes even
+		// when the submitted manifest explicitly contains zero.
+		if actual == nil && desired == float64(0) &&
+			(strings.HasSuffix(path, ".readinessProbe.initialDelaySeconds") || strings.HasSuffix(path, ".livenessProbe.initialDelaySeconds") || strings.HasSuffix(path, ".startupProbe.initialDelaySeconds")) {
+			return true
+		}
 		for _, suffix := range []string{"resources.requests.cpu", "resources.requests.memory", "resources.limits.cpu", "resources.limits.memory"} {
 			if strings.HasSuffix(path, suffix) && kubeQuantityValueEqual(actual, desired) {
 				return true
