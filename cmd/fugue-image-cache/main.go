@@ -193,7 +193,7 @@ func main() {
 		pinStorePath:         env("FUGUE_IMAGE_CACHE_PIN_STORE", filepath.Join(filepath.Dir(storeDir), "pins.json")),
 		managementToken:      strings.TrimSpace(env("FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN", apiToken)),
 		httpClient:           &http.Client{Timeout: 15 * time.Second},
-		registry:             registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		registry:             registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir)), registry.Logger(registryRequestLogger(log.Default()))),
 		hydrateTimeout:       envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
 		hydrateSlots:         newSemaphore(envInt("FUGUE_IMAGE_CACHE_HYDRATE_CONCURRENCY", 1)),
 		proxySlots:           newSemaphore(envInt("FUGUE_IMAGE_CACHE_PROXY_CONCURRENCY", 4)),

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -38,4 +39,27 @@ func (c *imageCache) serveObservedRegistry(w http.ResponseWriter, r *http.Reques
 	started := time.Now()
 	c.registry.ServeHTTP(w, r)
 	registryOperations.Observe("registry-"+source+"-"+method, time.Since(started))
+	if source == "network" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		// The embedded registry also serves in-process graph checks. Emit
+		// access facts only for real network reads; library errors stay logged.
+		log.Printf("registry request method=%s path=%s source=network", r.Method, r.URL)
+	}
+}
+
+func registryRequestLogger(destination *log.Logger) *log.Logger {
+	return log.New(registryLogWriter{destination}, "", 0)
+}
+
+type registryLogWriter struct{ destination *log.Logger }
+
+func (w registryLogWriter) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	fields := strings.Fields(line)
+	// Upstream's successful read record has exactly METHOD URL; failures
+	// include status/code/message. Never filter warnings, errors or writes.
+	if len(fields) == 2 && (fields[0] == http.MethodGet || fields[0] == http.MethodHead) && strings.HasPrefix(fields[1], "/v2/") {
+		return len(p), nil
+	}
+	w.destination.Print(line)
+	return len(p), nil
 }
