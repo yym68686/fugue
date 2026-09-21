@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 4,
+    "generation": 5,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -293,6 +293,36 @@
                 "allowedTopologies",
                 "reclaimPolicy"
               ]
+            },
+            {
+              "name": "managed-database-intent",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 120,
+              "resource": "managedapps",
+              "group": "fugue.pro",
+              "namespace": "{{param.namespace}}",
+              "fields": [
+                "spec.appID",
+                "spec.name",
+                "spec.appSpec.runtime_id",
+                "spec.appSpec.postgres",
+                "spec.backingServices",
+                "spec.scheduling",
+                "status"
+              ]
+            },
+            {
+              "name": "database-service-selectors",
+              "kind": "kubernetes-objects",
+              "interval_seconds": 120,
+              "resource": "services",
+              "namespace": "{{param.namespace}}",
+              "selector": "cnpg.io/cluster",
+              "fields": [
+                "spec.selector",
+                "spec.clusterIP",
+                "spec.ports"
+              ]
             }
           ]
         }
@@ -528,6 +558,19 @@
       ],
       "resources": [
         "jobs"
+      ],
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "fugue.pro"
+      ],
+      "resources": [
+        "managedapps"
       ],
       "verbs": [
         "get",
