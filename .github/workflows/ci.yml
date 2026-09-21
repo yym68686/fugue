@@ -125,6 +125,38 @@ jobs:
             done
           fi
 
+  drain_observation_access:
+    # Observation access can be repaired without rebuilding or restarting code.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-drain-observation-access, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Reconcile drain observation proxy access
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/drain-observation/rbac.json
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config"; then
+            git fetch origin main
+            if ! git diff --quiet HEAD origin/main -- "$config"; then
+              echo "A newer observation access policy supersedes this run."
+              exit 0
+            fi
+            kubectl apply --server-side --dry-run=server --field-manager=fugue-drain-observation-access -f "$config"
+            kubectl apply --server-side --field-manager=fugue-drain-observation-access -f "$config"
+            kubectl auth can-i get pods --subresource=proxy --all-namespaces --as=system:serviceaccount:fugue-system:fugue-fugue-control-plane-sa
+          fi
+
   observability_configuration:
     # Configuration recovery is independent of component builds and releases.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

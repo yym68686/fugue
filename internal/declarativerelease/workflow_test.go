@@ -49,11 +49,20 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "drain_observer_artifact", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "drain_observation_access", "drain_observer_artifact", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	drainAccess := yamlMappingValue(t, jobs, "drain_observation_access")
+	for _, key := range yamlMappingKeys(t, drainAccess) {
+		if key == "needs" {
+			t.Fatal("drain observation access recovery must not wait for code builds")
+		}
+	}
+	if yamlMappingValue(t, drainAccess, "environment").Value != "production" || !strings.Contains(source, "get pods --subresource=proxy") {
+		t.Fatal("drain access requires the production environment and exact subresource validation")
+	}
 	drainArtifact := yamlMappingValue(t, jobs, "drain_observer_artifact")
 	if yamlMappingValue(t, drainArtifact, "runs-on").Value != "ubuntu-latest" || yamlMappingValue(t, drainArtifact, "needs").Value != "prepush" {
 		t.Fatal("drain artifact verification requires prepush and an isolated hosted runner")
