@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -73,7 +72,7 @@ func TestCollectorProtocolRejectsUnboundedRequestsAndReportsCancellation(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Quality.Status != "degraded" || !reflect.DeepEqual(result.Quality.Gaps, []string{"session canceled"}) {
+	if result.Quality.Status != "degraded" || !strings.Contains(strings.Join(result.Quality.Gaps, ";"), "session canceled") || !strings.Contains(strings.Join(result.Quality.Gaps, ";"), "not sampled") {
 		t.Fatalf("cancellation was presented as complete: %+v", result.Quality)
 	}
 	request.DurationSeconds = 361

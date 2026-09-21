@@ -33,12 +33,15 @@ type Collector struct {
 	Namespace       string            `json:"namespace,omitempty"`
 	ObjectName      string            `json:"object_name,omitempty"`
 	Selector        string            `json:"selector,omitempty"`
+	FieldSelector   string            `json:"field_selector,omitempty"`
+	AnnotationKeys  []string          `json:"annotation_keys,omitempty"`
 	Fields          []string          `json:"fields,omitempty"`
 	Container       string            `json:"container,omitempty"`
 	SinceSeconds    int               `json:"since_seconds,omitempty"`
 	Match           []string          `json:"match,omitempty"`
 	Service         *Service          `json:"service,omitempty"`
 	Queries         map[string]string `json:"queries,omitempty"`
+	RequiredQueries []string          `json:"required_queries,omitempty"`
 }
 type Service struct {
 	Namespace string `json:"namespace"`
@@ -59,8 +62,13 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 	}
 	seen := map[string]bool{}
 	for _, c := range cfg.Collectors {
-		if c.Name == "" || len(c.Name) > 80 || seen[c.Name] || c.IntervalSeconds < 0 || c.IntervalSeconds > 360 || len(c.Queries) > 12 || len(c.Fields) > 32 || len(c.Match) > 16 {
+		if c.Name == "" || len(c.Name) > 80 || seen[c.Name] || c.IntervalSeconds < 0 || c.IntervalSeconds > 360 || len(c.Queries) > 12 || len(c.Fields) > 32 || len(c.Match) > 16 || len(c.AnnotationKeys) > 16 {
 			return livediagnostics.ProbeReport{}, errors.New("invalid collector configuration or budget")
+		}
+		for _, name := range c.RequiredQueries {
+			if _, ok := c.Queries[name]; !ok {
+				return livediagnostics.ProbeReport{}, fmt.Errorf("required query %q is not configured", name)
+			}
 		}
 		seen[c.Name] = true
 	}
@@ -69,6 +77,7 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 	defer cancel()
 	report := livediagnostics.ProbeReport{ProbeImage: req.ProbeImage, Schema: "fugue.diagnostic.probe_report.v1", SessionID: req.SessionID, ProbeID: req.ProbeID, ProbeDigest: req.ProbeDigest, CatalogDigest: req.CatalogDigest, Target: req.Target, StartedAt: started, Quality: livediagnostics.EvidenceQuality{Status: "complete", Gaps: []string{}}, Evidence: []livediagnostics.Evidence{}}
 	next := make([]time.Time, len(cfg.Collectors))
+	visited := make([]bool, len(cfg.Collectors))
 	remaining := req.MaxOutputBytes - (32 << 10)
 	attempts := 0
 	client := &kubeReader{}
@@ -81,6 +90,7 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 				continue
 			}
 			attempts++
+			visited[i] = true
 			observed := time.Now().UTC()
 			e := livediagnostics.Evidence{Name: c.Name, Source: c.Kind, ObservedAt: observed, Status: "complete"}
 			budgetCtx, stop := context.WithTimeout(ctx, 8*time.Second)
@@ -147,7 +157,14 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 		report.Quality.Status = "degraded"
 		appendGap(&report, "session canceled")
 	}
+	for i, observed := range visited {
+		if !observed {
+			report.Quality.Status = "degraded"
+			appendGap(&report, cfg.Collectors[i].Name+": not sampled before the session deadline")
+		}
+	}
 	report.FinishedAt = time.Now().UTC()
+	appendWindowSummary(&report)
 	return report, nil
 }
 func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collector, k *kubeReader) (any, error) {
@@ -155,7 +172,7 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 	case "node-snapshot":
 		return nodeSnapshot(req)
 	case "process-scheduling":
-		return processScheduling(req)
+		return processSchedulingAt(ctx, req, hostProc)
 	case "kubernetes-objects":
 		return k.objects(ctx, req, c)
 	case "kubernetes-logs":

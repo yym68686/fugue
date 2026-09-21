@@ -1,6 +1,7 @@
 package diagnosticprobe
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -71,13 +72,21 @@ type processFact struct {
 }
 
 func processScheduling(req livediagnostics.ProbeRequest) (any, error) {
-	entries, err := os.ReadDir(hostProc)
+	return processSchedulingAt(context.Background(), req, hostProc)
+}
+
+func processSchedulingAt(ctx context.Context, req livediagnostics.ProbeRequest, procRoot string) (any, error) {
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return nil, err
 	}
 	facts := []processFact{}
+	missing := map[string]int{}
 	scanned := 0
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil || !e.IsDir() {
 			continue
@@ -86,7 +95,7 @@ func processScheduling(req livediagnostics.ProbeRequest) (any, error) {
 		if scanned > 4096 {
 			break
 		}
-		path := filepath.Join(hostProc, e.Name())
+		path := filepath.Join(procRoot, e.Name())
 		stat, err := readBounded(filepath.Join(path, "stat"), 16<<10)
 		if err != nil {
 			continue
@@ -142,13 +151,31 @@ func processScheduling(req livediagnostics.ProbeRequest) (any, error) {
 		} else {
 			f.Missing = append(f.Missing, "io")
 		}
+		for _, source := range f.Missing {
+			missing[source]++
+		}
 		facts = append(facts, f)
 	}
 	if len(facts) == 0 && (req.ContainerID != "" || req.Target.ProcessName != "") {
 		return nil, errors.New("frozen target process was not found in the current process observation")
 	}
 	sort.Slice(facts, func(i, j int) bool { return facts[i].PID < facts[j].PID })
-	return map[string]any{"processes": facts, "scanned_processes": scanned, "scan_truncated": scanned > 4096, "scheduler_scope": "main thread; counters are cumulative, compare only identical pid and start_ticks", "note": "zero wait counters do not prove no contention when kernel scheduler statistics are disabled"}, nil
+	result := map[string]any{"processes": facts, "scanned_processes": scanned, "scan_truncated": scanned > 4096, "scheduler_scope": "main thread; counters are cumulative, compare only identical pid and start_ticks", "missing_source_counts": missing}
+	gaps := []string{}
+	for source, count := range missing {
+		gaps = append(gaps, fmt.Sprintf("%s unavailable for %d processes; missing counters are not zero", source, count))
+	}
+	if enabled, err := readBounded(filepath.Join(procRoot, "sys/kernel/sched_schedstats"), 64); err != nil || strings.TrimSpace(enabled) != "1" {
+		gaps = append(gaps, "kernel scheduler wait accounting is disabled or unavailable; wait counters cannot establish current runqueue latency")
+	}
+	if scanned > 4096 {
+		gaps = append(gaps, "process inventory limit reached")
+	}
+	if len(gaps) > 0 {
+		sort.Strings(gaps)
+		return partialValue{Value: result, Gaps: gaps, Truncated: scanned > 4096}, nil
+	}
+	return result, nil
 }
 func parseProcessStat(pid int, s string) (processFact, error) {
 	end := strings.LastIndex(s, ")")

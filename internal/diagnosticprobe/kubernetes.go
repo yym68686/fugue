@@ -133,6 +133,9 @@ func (k *kubeReader) objects(ctx context.Context, req livediagnostics.ProbeReque
 	if selector := parameter(c.Selector, req); selector != "" {
 		query.Set("labelSelector", selector)
 	}
+	if selector := parameter(c.FieldSelector, req); selector != "" {
+		query.Set("fieldSelector", selector)
+	}
 	if name == "" {
 		query.Set("limit", "100")
 	}
@@ -148,12 +151,12 @@ func (k *kubeReader) objects(ctx context.Context, req livediagnostics.ProbeReque
 			return nil, errors.New("invalid Kubernetes JSON")
 		}
 		if name != "" {
-			return projectObject(doc, c.Fields), nil
+			return projectConfiguredObject(doc, c), nil
 		}
 		list, _ := doc["items"].([]any)
 		for _, item := range list {
 			if object, ok := item.(map[string]any); ok {
-				items = append(items, projectObject(object, c.Fields))
+				items = append(items, projectConfiguredObject(object, c))
 			}
 		}
 		metadata, _ := doc["metadata"].(map[string]any)
@@ -165,6 +168,25 @@ func (k *kubeReader) objects(ctx context.Context, req livediagnostics.ProbeReque
 		query.Set("continue", cursor)
 	}
 	return partialValue{Value: map[string]any{"resource_version": rv, "items": items, "truncated": true}, Gaps: []string{"Kubernetes pagination budget exhausted"}, Truncated: true}, nil
+}
+func projectConfiguredObject(object map[string]any, collector Collector) map[string]any {
+	projected := projectObject(object, collector.Fields)
+	metadata, _ := object["metadata"].(map[string]any)
+	annotations, _ := metadata["annotations"].(map[string]any)
+	selected := map[string]any{}
+	for _, key := range collector.AnnotationKeys {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "last-applied") {
+			continue
+		}
+		if value, ok := annotations[key]; ok {
+			selected[key] = redactJSON(value)
+		}
+	}
+	if len(selected) > 0 {
+		projected["metadata"].(map[string]any)["annotations"] = selected
+	}
+	return projected
 }
 func projectObject(object map[string]any, fields []string) map[string]any {
 	out := map[string]any{"apiVersion": object["apiVersion"], "kind": object["kind"]}
@@ -279,6 +301,7 @@ func (k *kubeReader) logs(ctx context.Context, req livediagnostics.ProbeRequest,
 	}
 	return result, nil
 }
+
 func (k *kubeReader) prometheus(ctx context.Context, req livediagnostics.ProbeRequest, c Collector) (any, error) {
 	if err := k.init(); err != nil {
 		return nil, err
@@ -345,11 +368,54 @@ func (k *kubeReader) prometheus(ctx context.Context, req livediagnostics.ProbeRe
 			continue
 		}
 		results[name] = response["data"]
+		for _, required := range c.RequiredQueries {
+			if required == name {
+				if reason := missingMetricResult(response["data"]); reason != "" {
+					gaps = append(gaps, name+": "+reason)
+				}
+			}
+		}
 	}
 	if len(gaps) > 0 {
 		return partialValue{Value: results, Gaps: gaps}, nil
 	}
 	return results, nil
+}
+
+func missingMetricResult(value any) string {
+	data, ok := value.(map[string]any)
+	if !ok {
+		return "required metrics data is malformed"
+	}
+	result, ok := data["result"].([]any)
+	if !ok || len(result) == 0 {
+		return "required metrics series are unavailable"
+	}
+	for _, entry := range result {
+		if row, ok := entry.(map[string]any); ok {
+			if sample, ok := row["value"].([]any); ok && len(sample) == 2 {
+				if v, ok := sample[1].(string); ok && (v == "NaN" || v == "+Inf" || v == "-Inf") {
+					return "required metrics include non-finite samples"
+				}
+			}
+			if data["resultType"] == "matrix" {
+				values, _ := row["values"].([]any)
+				if len(values) == 0 {
+					return "required metrics series have no samples"
+				}
+				for _, raw := range values {
+					sample, ok := raw.([]any)
+					if !ok || len(sample) != 2 {
+						return "required metrics samples are malformed"
+					}
+					if v, ok := sample[1].(string); ok && (v == "NaN" || v == "+Inf" || v == "-Inf") {
+						return "required metrics include non-finite samples"
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func safeText(value string) string { result, _ := observability.RedactText(value); return result }

@@ -21,6 +21,30 @@ def config():
 
 
 class DiagnosticPublicationTest(unittest.TestCase):
+    def test_initial_recovery_waits_without_creating_partial_configuration(self):
+        with mock.patch.object(publisher, "get", return_value=None), mock.patch.object(publisher, "put") as put:
+            publisher.publish(config(), "", True)
+            put.assert_not_called()
+
+    def test_invalid_api_identity_and_unknown_fields_fail_before_any_mutation(self):
+        for update in [{"api_service_account": "invalid/account"}, {"undeclared": True}]:
+            value = config()
+            value.update(update)
+            with mock.patch.object(publisher, "get") as get, mock.patch.object(publisher, "put") as put:
+                with self.assertRaises(ValueError):
+                    publisher.publish(value, "registry.example/diagnostics@sha256:" + "a" * 64, True)
+                get.assert_not_called()
+                put.assert_not_called()
+
+    def test_api_read_role_cannot_read_other_configmaps_or_signing_key(self):
+        value = config()
+        value["api_service_account"] = "api-test"
+        observed = []
+        with mock.patch.dict(os.environ, {"GITHUB_SHA": "a" * 40}), mock.patch.object(publisher, "get", return_value=None), mock.patch.object(publisher, "put", side_effect=lambda doc, old: observed.append(doc) or doc):
+            publisher.publish(value, "registry.example/diagnostics@sha256:" + "b" * 64, True)
+        role = next(x for x in observed if x["kind"] == "Role")
+        self.assertEqual(role["rules"], [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": [publisher.CATALOG, publisher.TRUST], "verbs": ["get"]}])
+
     def test_signature_rejects_changed_payload_and_key(self):
         seed = os.urandom(32)
         public = publisher.public_key(seed)

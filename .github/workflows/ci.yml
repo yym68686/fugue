@@ -270,7 +270,7 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           changed=false
-          if ! git diff --quiet "$base" HEAD -- Dockerfile.diagnostics cmd/fugue-diagnostic-probe cmd/fugue-api/diagnostic_agent internal/diagnosticprobe internal/livediagnostics internal/observability internal/model go.mod go.sum .github/workflows/ci.yml; then
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/diagnostics/package.json Dockerfile.diagnostics cmd/fugue-diagnostic-probe cmd/fugue-api/diagnostic_agent internal/diagnosticprobe internal/livediagnostics internal/observability internal/model go.mod go.sum .github/workflows/ci.yml; then
             changed=true
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
@@ -307,8 +307,7 @@ jobs:
   diagnostics_configuration:
     # Configuration recovery can reuse the last verified runner even when a
     # component or probe code build fails. No API/controller rollout is needed.
-    needs: [prepush, diagnostic_packages]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.diagnostic_packages.result == 'success' || needs.diagnostic_packages.result == 'skipped') }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-diagnostics-configuration, cancel-in-progress: false}
@@ -321,19 +320,37 @@ jobs:
         id: changed
         env:
           BASE_SHA: ${{ github.event.before }}
-          RUNNER_IMAGE: ${{ needs.diagnostic_packages.outputs.runner_image }}
         run: |
           base="$BASE_SHA"
           if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
           changed=false
-          if [[ -n "$RUNNER_IMAGE" ]] || ! git diff --quiet "$base" HEAD -- deploy/environments/production/diagnostics scripts/publish_diagnostic_catalog.py scripts/test_publish_diagnostic_catalog.py; then
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/diagnostics/catalog.json scripts/publish_diagnostic_catalog.py scripts/test_publish_diagnostic_catalog.py; then
             changed=true
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
       - name: Verify and publish the signed diagnostic catalog
         if: steps.changed.outputs.changed == 'true'
+        env:
+          RUNNER_IMAGE: ""
+        run: |
+          python3 -m unittest scripts.test_publish_diagnostic_catalog
+          python3 scripts/publish_diagnostic_catalog.py deploy/environments/production/diagnostics/catalog.json --runner-image "$RUNNER_IMAGE"
+          python3 scripts/publish_diagnostic_catalog.py deploy/environments/production/diagnostics/catalog.json --runner-image "$RUNNER_IMAGE" --apply
+
+  diagnostics_package_activation:
+    needs: diagnostic_packages
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.diagnostic_packages.outputs.runner_image != '' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-diagnostics-configuration, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Activate the verified independent diagnostic package
         env:
           RUNNER_IMAGE: ${{ needs.diagnostic_packages.outputs.runner_image }}
         run: |

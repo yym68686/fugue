@@ -38,3 +38,19 @@ objects, exports Secret or environment values, or treats unavailable data as
 zero. A future collector can be published as another digest-pinned package
 without changing API/controller business code; only a new capability class or
 protocol version requires a core change.
+
+The independent package distinguishes missing metric series from a valid zero
+sample. A collector can name `required_queries`; empty or non-finite required
+results degrade evidence quality while preserving the source response. Process
+observations also degrade when IO permissions or scheduler accounting are
+unavailable. Node-window summaries compare cumulative counters only across the
+same boot identity; process deltas require the same PID and start time.
+
+Kubernetes observation recipes can use `field_selector` and explicit
+`annotation_keys` to inspect event reasons and controller state without dumping
+all annotations. Credential-related and last-applied configuration annotations
+are excluded. Catalog configuration recovery runs independently of all code
+jobs. A successful package build activates its new digest in a separate lane;
+both writers serialize through the same production concurrency group. The
+versioned `diagnostics/package.json` permits an explicit package rebuild without
+changing a serving component.

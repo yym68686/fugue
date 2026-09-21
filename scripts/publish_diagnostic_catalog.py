@@ -103,14 +103,19 @@ def verify(envelope, keys):
 
 
 def validate(config, runner):
+    allowed_keys(config, {"namespace", "repository", "catalog", "reader_rules", "api_service_account"}, "publication")
     if not NAME.fullmatch(config["namespace"]) or not config.get("reader_rules"):
         raise ValueError("namespace and reader rules must be explicit")
+    if config.get("api_service_account") and not NAME.fullmatch(config["api_service_account"]):
+        raise ValueError("invalid API service account")
     if not IMAGE.fullmatch(runner) or not runner.startswith(config["repository"] + "@sha256:"):
         raise ValueError("runner is not a digest in the configured repository")
     catalog = config["catalog"]
+    allowed_keys(catalog, {"protocol", "generation", "runner_image", "policy", "probes", "source_revision"}, "catalog")
     if catalog["runner_image"] == "$runner":
         catalog["runner_image"] = runner
     policy = catalog["policy"]
+    allowed_keys(policy, {"namespaces", "profiles", "service_account"}, "policy")
     if catalog["protocol"] != "fugue.diagnostics/v1" or catalog["generation"] < 1 or not IMAGE.fullmatch(catalog["runner_image"]):
         raise ValueError("invalid catalog protocol or runner")
     if not NAME.fullmatch(policy["service_account"]) or not policy["namespaces"] or not policy["profiles"]:
@@ -123,6 +128,7 @@ def validate(config, runner):
     if len(catalog["probes"]) > 64:
         raise ValueError("too many probes")
     for probe in catalog["probes"]:
+        allowed_keys(probe, {"id", "description", "image", "profile", "target_types", "max_duration_seconds", "parameters", "config"}, "probe")
         if probe["image"] == "$runner":
             probe["image"] = runner
         if not NAME.fullmatch(probe["id"]) or probe["id"] in seen:
@@ -135,8 +141,11 @@ def validate(config, runner):
         if not 5 <= probe["max_duration_seconds"] <= 360 or len(canonical(probe.get("config", {}))) > 32768 or len(probe["parameters"]) > 32:
             raise ValueError("probe exceeds protocol budgets")
         for name, param in probe["parameters"].items():
+            allowed_keys(param, {"description", "required", "default", "enum", "pattern", "max_length"}, "parameter")
             if not NAME.fullmatch(name.replace("_", "-")) or not 0 <= param.get("max_length", 0) <= 4096:
                 raise ValueError("invalid parameter contract")
+            if param.get("pattern"):
+                re.compile(param["pattern"])
     for rule in config["reader_rules"]:
         if not set(rule["verbs"]) <= {"get", "list", "watch"} or rule.get("nonResourceURLs"):
             raise ValueError("observer policy must remain read-only")
@@ -146,6 +155,11 @@ def validate(config, runner):
     if len(canonical(catalog)) > 190 * 1024:
         raise ValueError("catalog is too large")
     return catalog
+
+
+def allowed_keys(value, allowed, description):
+    if not isinstance(value, dict) or set(value) - allowed:
+        raise ValueError("unsupported fields in diagnostic " + description)
 
 
 def recover_catalog(data, keys):
@@ -174,6 +188,9 @@ def check_revision(previous, incoming):
 
 
 def publish(config, runner, apply):
+    # Validate without side effects before any key or RBAC publication. Resolving
+    # the prior runner must not change the validation path for configuration-only recovery.
+    validate(copy.deepcopy(config), runner or config["repository"] + "@sha256:" + "a" * 64)
     namespace = config["namespace"]
     current = get("configmap", CATALOG, namespace) if apply else None
     if current and current["metadata"].get("labels", {}).get(OWNER) != "true":
@@ -184,6 +201,9 @@ def publish(config, runner, apply):
         previous = recover_catalog(current["data"], json.loads(trust["data"]["keys.json"]))
         if not runner:
             runner = previous["runner_image"]
+    if apply and not runner and not current:
+        print("diagnostic catalog not published: waiting for the first verified independent package")
+        return
     if apply:
         revision = os.environ.get("GITHUB_SHA", "")
         check_revision(previous.get("source_revision", "") if previous else "", revision)
@@ -211,8 +231,6 @@ def publish(config, runner, apply):
     account = catalog["policy"]["service_account"]
     api_account = config.get("api_service_account", "")
     if api_account:
-        if not NAME.fullmatch(api_account):
-            raise ValueError("invalid API service account")
         role_name = "fugue-diagnostic-catalog-read"
         role = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": metadata(role_name, namespace), "rules": [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": [CATALOG, TRUST], "verbs": ["get"]}]}
         binding = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": metadata(role_name, namespace), "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": role_name}, "subjects": [{"kind": "ServiceAccount", "name": api_account, "namespace": namespace}]}
