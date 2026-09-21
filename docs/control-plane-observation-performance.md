@@ -54,3 +54,11 @@ replicas, scrape success/latency, fresh metric snapshot timestamps, API allocati
 profiles and request rate trends. Traffic and concurrent releases affect those
 rates. Observe retention logs for protected/deleted/deferred counts; do not force
 cleanup during a failed or unfinished release to meet a size target.
+
+ReplicaSet revision-name observations and drain ownership enumeration request
+`PartialObjectMetadataList`. They preserve the original selector (including an
+unfiltered namespace list for drain ownership), latest-read semantics, owner
+references, revision ordering and lifecycle checks. A 406 retries the identical
+read using full JSON. Operation evidence that consumes ReplicaSet status still
+uses the full representation. This reduces serialization and response bytes
+without weakening the set of Pods checked before draining a release.

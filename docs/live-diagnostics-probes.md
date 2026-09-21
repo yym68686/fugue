@@ -106,3 +106,23 @@ group by namespace/name as well as caller, verb and response. The 256-group,
 30,000-event and 32 MiB source limits still apply. Audit policy exclusions remain
 explicit. For runtime client snapshots, `subresource` separates node proxy/log
 requests and `metadata_only` identifies metadata content negotiation.
+
+Frame-pointer CPU reports include a bounded dictionary of ordered call paths
+in `stack_paths`. Frame IDs run from leaf to root; repeated frames remain in
+their original positions. Cumulative function counts count a function once
+per sampled stack. The path table is summarized before raw-text export limits
+are applied, and has its own 512-path, 4,096-frame and 256-KiB frame-text limits.
+`observed_samples`, `omitted_samples` and `truncated` distinguish coverage from
+the complete leaf table. Missing symbols still degrade report quality.
+
+`kubernetes-object-changes` performs an exact namespaced GET followed by a
+resource-version-bound five-second watch. It emits only configured fields and
+at most 64 events / 2 MiB. An unchanged version establishes no persisted changes
+in that window; use the separate audit recipe to establish attempted writes.
+
+Example registered CPU capture (the session includes analysis headroom):
+
+```sh
+fugue diagnostics node-process start --node NODE --process k3s \
+  --probe process-cpu-frame-pointer --duration 50 --wait
+```

@@ -1,0 +1,211 @@
+diff --git a/internal/controller/cluster_plugins.go b/internal/controller/cluster_plugins.go
+index 56e9b43..4f79f08 100644
+--- a/internal/controller/cluster_plugins.go
++++ b/internal/controller/cluster_plugins.go
+@@ -22,7 +22,7 @@ package controller
+ 
+ import (
+ 	"context"
+-	"reflect"
++	"k8s.io/apimachinery/pkg/api/equality"
+ 
+ 	"sigs.k8s.io/controller-runtime/pkg/client"
+ 
+@@ -51,7 +51,7 @@ func (r *ClusterReconciler) updatePluginsStatus(ctx context.Context, cluster *ap
+ 	}
+ 
+ 	// If nothing changes, there's no need to hit the API server
+-	if reflect.DeepEqual(oldCluster.Status.PluginStatus, cluster.Status.PluginStatus) {
++	if equality.Semantic.DeepEqual(oldCluster.Status.PluginStatus, cluster.Status.PluginStatus) {
+ 		return nil
+ 	}
+ 
+diff --git a/internal/controller/cluster_status.go b/internal/controller/cluster_status.go
+index 7711295..985c7d2 100644
+--- a/internal/controller/cluster_status.go
++++ b/internal/controller/cluster_status.go
+@@ -32,6 +32,7 @@ import (
+ 	"github.com/cloudnative-pg/machinery/pkg/stringset"
+ 	batchv1 "k8s.io/api/batch/v1"
+ 	corev1 "k8s.io/api/core/v1"
++	"k8s.io/apimachinery/pkg/api/equality"
+ 	apierrs "k8s.io/apimachinery/pkg/api/errors"
+ 	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+@@ -334,7 +335,7 @@ func (r *ClusterReconciler) updateResourceStatus(
+ 		cluster.Status.DemotionToken = ""
+ 	}
+ 
+-	if !reflect.DeepEqual(existingClusterStatus, cluster.Status) {
++	if !equality.Semantic.DeepEqual(existingClusterStatus, cluster.Status) {
+ 		return r.Status().Update(ctx, cluster)
+ 	}
+ 	return nil
+@@ -780,7 +781,7 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
+ 		})
+ 	}
+ 
+-	if !reflect.DeepEqual(existingClusterStatus, cluster.Status) {
++	if !equality.Semantic.DeepEqual(existingClusterStatus, cluster.Status) {
+ 		return r.Status().Update(ctx, cluster)
+ 	}
+ 	return nil
+
+diff --git a/internal/controller/noop_status_regression_test.go b/internal/controller/noop_status_regression_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/controller/noop_status_regression_test.go
+@@ -0,0 +1,152 @@
++package controller
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"reflect"
++	goRuntime "runtime"
++	"testing"
++
++	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
++	cnpgiclient "github.com/cloudnative-pg/cloudnative-pg/internal/cnpi/plugin/client"
++	"github.com/cloudnative-pg/cloudnative-pg/internal/scheme"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
++	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
++	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/runtime"
++	"sigs.k8s.io/controller-runtime/pkg/client"
++	"sigs.k8s.io/controller-runtime/pkg/client/fake"
++)
++
++type diagnosticStatusClient struct {
++	client.Client
++	updates       int
++	patches       int
++	before, after []byte
++}
++
++func (c *diagnosticStatusClient) Status() client.SubResourceWriter {
++	return &diagnosticStatusWriter{owner: c}
++}
++
++type diagnosticStatusWriter struct {
++	client.SubResourceWriter
++	owner *diagnosticStatusClient
++}
++
++func (w *diagnosticStatusWriter) Create(context.Context, client.Object, client.Object, ...client.SubResourceCreateOption) error {
++	return nil
++}
++func (w *diagnosticStatusWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
++	w.owner.patches++
++	w.owner.after, _ = patch.Data(obj)
++	return nil
++}
++
++func TestNoopStatusRegressionResourceStatus(t *testing.T) {
++	t.Chdir(t.TempDir())
++	if err := os.Mkdir("operator", 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join("operator", "manager_"+goRuntime.GOARCH), []byte("synthetic executable hash fixture"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := utils.DetectAvailableArchitectures(); err != nil {
++		t.Fatal(err)
++	}
++	fakeClient := fake.NewClientBuilder().WithScheme(scheme.BuildWithAllKnownScheme()).WithIndex(&apiv1.Pooler{}, poolerClusterKey, func(client.Object) []string { return nil }).Build()
++	c := &diagnosticStatusClient{Client: fakeClient}
++	r := ClusterReconciler{Client: c}
++	cluster := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "sample"}, Spec: apiv1.ClusterSpec{Instances: 1, Monitoring: &apiv1.MonitoringConfiguration{}}}
++	resources := &managedResources{instances: corev1.PodList{Items: []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "pending-2"}}}}}
++	if err := r.updateResourceStatus(context.Background(), cluster, resources); err != nil {
++		t.Fatal(err)
++	}
++	// A successful API roundtrip omits empty collections, as on the live object.
++	c.before, _ = json.Marshal(cluster.Status)
++	var persisted apiv1.ClusterStatus
++	if err := json.Unmarshal(c.before, &persisted); err != nil {
++		t.Fatal(err)
++	}
++	cluster.Status = persisted
++	c.updates = 0
++	if err := r.updateResourceStatus(context.Background(), cluster, resources); err != nil {
++		t.Fatal(err)
++	}
++	after, _ := json.Marshal(cluster.Status)
++	if c.updates != 0 || !bytes.Equal(c.before, after) {
++		t.Fatalf("resource status differs: updates=%d before=%s after=%s", c.updates, c.before, c.after)
++	}
++	x, y := reflect.ValueOf(persisted), reflect.ValueOf(cluster.Status)
++	for i := 0; i < x.NumField(); i++ {
++		if !reflect.DeepEqual(x.Field(i).Interface(), y.Field(i).Interface()) {
++			t.Log("Go-only field difference:", x.Type().Field(i).Name)
++		}
++	}
++	cluster.Status.ReadService = "changed"
++	c.updates = 0
++	if err := r.updateResourceStatus(context.Background(), cluster, resources); err != nil {
++		t.Fatal(err)
++	}
++	if c.updates != 1 || cluster.Status.ReadService != cluster.GetServiceReadName() {
++		t.Fatalf("real resource change was lost: updates=%d service=%s", c.updates, cluster.Status.ReadService)
++	}
++}
++func (w *diagnosticStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
++	w.owner.updates++
++	w.owner.after, _ = json.Marshal(obj.(*apiv1.Cluster).Status)
++	return nil
++}
++
++func TestNoopStatusRegressionInstanceStatus(t *testing.T) {
++	scheme := runtime.NewScheme()
++	if err := apiv1.AddToScheme(scheme); err != nil {
++		t.Fatal(err)
++	}
++	cluster := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "sample", ResourceVersion: "42"}, Status: apiv1.ClusterStatus{Conditions: []metav1.Condition{{Type: string(apiv1.ConditionConsistentSystemID), Status: metav1.ConditionFalse, Reason: "NotFound", Message: "No instances are present in the cluster to report a system ID."}}}}
++	c := &diagnosticStatusClient{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
++	c.before, _ = json.Marshal(cluster.Status)
++	r := ClusterReconciler{Client: c}
++	if err := r.updateClusterStatusThatRequiresInstancesState(context.Background(), cluster, postgres.PostgresqlStatusList{}); err != nil {
++		t.Fatal(err)
++	}
++	after, _ := json.Marshal(cluster.Status)
++	if c.updates != 0 || !bytes.Equal(c.before, after) {
++		t.Fatalf("expected no wire-identical status write; updates=%d before=%s after=%s", c.updates, c.before, after)
++	}
++	cluster.Status.SystemID = "previous-system-id"
++	if err := r.updateClusterStatusThatRequiresInstancesState(context.Background(), cluster, postgres.PostgresqlStatusList{}); err != nil {
++		t.Fatal(err)
++	}
++	if c.updates != 1 || cluster.Status.SystemID != "" {
++		t.Fatalf("real instance change was lost: updates=%d systemID=%s", c.updates, cluster.Status.SystemID)
++	}
++}
++
++func TestNoopStatusRegressionPluginStatus(t *testing.T) {
++	pluginClient, err := cnpgiclient.WithPlugins(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := cnpgiclient.SetPluginClientInContext(context.Background(), pluginClient)
++	cluster := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "sample"}}
++	c := &diagnosticStatusClient{}
++	r := ClusterReconciler{Client: c}
++	if err := r.updatePluginsStatus(ctx, cluster); err != nil {
++		t.Fatal(err)
++	}
++	if c.patches != 0 {
++		t.Fatalf("expected no empty plugin patch; patches=%d patch=%s", c.patches, c.after)
++	}
++	cluster.Status.PluginStatus = []apiv1.PluginStatus{{Name: "removed-plugin", Version: "1"}}
++	if err := r.updatePluginsStatus(ctx, cluster); err != nil {
++		t.Fatal(err)
++	}
++	if c.patches != 1 || string(c.after) != `{"status":{"pluginStatus":null}}` {
++		t.Fatalf("real plugin removal was lost: patches=%d patch=%s", c.patches, c.after)
++	}
++}
+
