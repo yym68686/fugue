@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 36,
+    "generation": 37,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -196,7 +196,7 @@
         "max_duration_seconds": 120,
         "parameters": {},
         "config": {
-          "collectors": [{"name": "source-progress", "kind": "runtime-json", "path": "/v1/snapshots/log-sources", "interval_seconds": 15, "fields": ["schema", "observed_at", "sources", "source_count", "truncated", "evicted_sources", "cycle", "queue_depth", "queued_bytes"]}]
+          "collectors": [{"name": "source-progress", "kind": "runtime-json", "path": "/v1/snapshots/log-sources", "interval_seconds": 15, "fields": ["schema", "observed_at", "sources", "source_count", "truncated", "evicted_sources", "error_summary", "cycle", "queue_depth", "queued_bytes"]}]
         }
       },
       {
