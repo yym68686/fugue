@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -315,6 +316,9 @@ func run(opts options) error {
 	if resolvedKernelSamples < kernelSamples {
 		warnings = append(warnings, fmt.Sprintf("symbols resolved for %d of %d kernel-space samples", resolvedKernelSamples, kernelSamples))
 	}
+	// Go line tables are large but no longer needed after the summary. Return
+	// their pages before the next perf subprocess shares this memory cgroup.
+	debug.FreeOSMemory()
 	perfReport, reportErr := runCommand(context.Background(), "perf", "report", "--stdio", "--no-children", "--symfs", targetRoot, "--sort", "comm,dso,symbol", "-i", dataPath)
 	if reportErr != nil {
 		warnings = append(warnings, "perf report unavailable: "+reportErr.Error())
