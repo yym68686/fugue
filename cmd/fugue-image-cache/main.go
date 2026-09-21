@@ -28,6 +28,7 @@ import (
 
 	"fugue/internal/imagecacheevidence"
 	"fugue/internal/imagecacheusage"
+	"fugue/internal/runtimeobservation"
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -150,6 +151,9 @@ type imageCacheBlobUploadState struct {
 }
 
 func main() {
+	if err := runtimeobservation.Start(context.Background(), "image-cache", map[string]runtimeobservation.Provider{"operations": registryOperations.Snapshot}); err != nil {
+		log.Printf("runtime observations unavailable: %v", err)
+	}
 	listenAddr := env("FUGUE_IMAGE_CACHE_LISTEN_ADDR", ":5000")
 	storeDir := env("FUGUE_IMAGE_CACHE_STORE_DIR", "/var/lib/fugue/image-cache/registry")
 	if err := os.MkdirAll(storeDir, 0o755); err != nil {
@@ -256,7 +260,7 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec := newDeferredNotFoundWriter(w)
-	c.registry.ServeHTTP(rec, r)
+	c.serveObservedRegistry(rec, r)
 	if !rec.notFound() {
 		rec.flush()
 		return
@@ -292,7 +296,7 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.flush()
 		return
 	}
-	c.registry.ServeHTTP(w, r)
+	c.serveObservedRegistry(w, r)
 }
 
 type cachePin struct {
@@ -1081,7 +1085,7 @@ func (c *imageCache) deleteLocalManifest(repo, target string) error {
 	if c != nil && c.registry != nil {
 		req := httptestRequest(http.MethodDelete, "/v2/"+strings.Trim(strings.TrimSpace(repo), "/")+"/manifests/"+strings.TrimSpace(target), "", nil)
 		rec := &memoryResponseWriter{header: http.Header{}}
-		c.registry.ServeHTTP(rec, req)
+		c.serveObservedRegistry(rec, req)
 		status := rec.statusCode()
 		if status < 200 || status >= 300 {
 			body := strings.TrimSpace(rec.body.String())
@@ -1104,7 +1108,7 @@ func (c *imageCache) localManifestReferencedBlobDigests(repo, target string) []s
 	path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + target
 	req := httptestRequest(http.MethodGet, path, "", nil)
 	rec := &memoryResponseWriter{header: http.Header{}}
-	c.registry.ServeHTTP(rec, req)
+	c.serveObservedRegistry(rec, req)
 	if rec.statusCode() < 200 || rec.statusCode() >= 300 || rec.body.Len() == 0 {
 		return nil
 	}
@@ -1409,6 +1413,8 @@ func blobEntry(record imageCacheBlobRecord) imageCacheBlobEntry {
 }
 
 func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
+	started := time.Now()
+	defer func() { registryOperations.Observe("inventory-graph", time.Since(started)) }()
 	records, err := c.managementManifestRecords()
 	if err != nil {
 		return nil, err
@@ -1464,6 +1470,8 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 }
 
 func (c *imageCache) managementUnreferencedBlobInventory() ([]imageCacheBlobEntry, error) {
+	started := time.Now()
+	defer func() { registryOperations.Observe("inventory-blob-index", time.Since(started)) }()
 	records, err := c.managementManifestRecords()
 	if err != nil {
 		return nil, err
@@ -1956,7 +1964,7 @@ func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) 
 	}
 
 	rec := &statusRecordingWriter{ResponseWriter: w}
-	c.registry.ServeHTTP(rec, r)
+	c.serveObservedRegistry(rec, r)
 	status := rec.statusCode()
 	if status >= 200 && status < 300 && len(manifestBody) > 0 {
 		for _, target := range manifestPersistTargets(manifestTarget, manifestBody) {
@@ -2656,7 +2664,7 @@ func (c *imageCache) replayManifest(manifest persistedManifest) error {
 	path := "/v2/" + strings.Trim(strings.TrimSpace(manifest.Repo), "/") + "/manifests/" + strings.TrimSpace(manifest.Target)
 	req := httptestRequest(http.MethodPut, path, manifest.ContentType, manifest.Body)
 	rec := &memoryResponseWriter{header: http.Header{}}
-	c.registry.ServeHTTP(rec, req)
+	c.serveObservedRegistry(rec, req)
 	if rec.statusCode() < 200 || rec.statusCode() >= 300 {
 		return fmt.Errorf("status=%d body=%s", rec.statusCode(), strings.TrimSpace(rec.body.String()))
 	}
@@ -3653,7 +3661,7 @@ func (c *imageCache) localManifestBody(ctx context.Context, repo, target string)
 	path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + strings.TrimSpace(target)
 	req := httptestRequest(http.MethodGet, path, "", nil).WithContext(ctx)
 	rec := &memoryResponseWriter{header: http.Header{}}
-	c.registry.ServeHTTP(rec, req)
+	c.serveObservedRegistry(rec, req)
 	if rec.statusCode() < 200 || rec.statusCode() >= 300 {
 		err := fmt.Errorf("local manifest %s status=%d body=%s", target, rec.statusCode(), strings.TrimSpace(rec.body.String()))
 		if rec.statusCode() == http.StatusNotFound {
@@ -3672,7 +3680,7 @@ func (c *imageCache) checkLocalImageBlob(ctx context.Context, repo, digest strin
 	if !verifyDigest {
 		req := httptestRequest(http.MethodHead, path, "", nil).WithContext(ctx)
 		rec := &memoryResponseWriter{header: http.Header{}}
-		c.registry.ServeHTTP(rec, req)
+		c.serveObservedRegistry(rec, req)
 		if rec.statusCode() < 200 || rec.statusCode() >= 300 {
 			err := fmt.Errorf("local status=%d", rec.statusCode())
 			if rec.statusCode() == http.StatusNotFound {
@@ -3707,7 +3715,7 @@ func (c *imageCache) checkLocalImageBlob(ctx context.Context, repo, digest strin
 
 	req := httptestRequest(http.MethodGet, path, "", nil).WithContext(ctx)
 	rec := &digestResponseWriter{header: http.Header{}, hasher: sha256.New()}
-	c.registry.ServeHTTP(rec, req)
+	c.serveObservedRegistry(rec, req)
 	if rec.statusCode() < 200 || rec.statusCode() >= 300 {
 		err := fmt.Errorf("local status=%d", rec.statusCode())
 		if rec.statusCode() == http.StatusNotFound {
@@ -3763,7 +3771,7 @@ func (c *imageCache) localManifestAvailable(repo, target string) bool {
 	path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + strings.TrimSpace(target)
 	req := httptestRequest(http.MethodHead, path, "", nil)
 	rec := &memoryResponseWriter{header: http.Header{}}
-	c.registry.ServeHTTP(rec, req)
+	c.serveObservedRegistry(rec, req)
 	return rec.statusCode() >= 200 && rec.statusCode() < 300
 }
 
