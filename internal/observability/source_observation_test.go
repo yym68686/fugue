@@ -102,3 +102,23 @@ func TestSourceRecoveryRetainsLastErrorEvidence(t *testing.T) {
 		t.Fatalf("recovery erased or misrepresented previous failure: %+v", row)
 	}
 }
+
+func TestSourceErrorSummarySurvivesDetailTruncation(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	for i := 0; i < 700; i++ {
+		p.observeLogSource(logSourceObservation{Identity: fmt.Sprintf("source-%d", i), Node: "node-a", ObservedAt: time.Now(), Outcome: "open_error", ErrorClass: "deadline", TotalMillis: int64(i)})
+	}
+	p.observeLogSource(logSourceObservation{Identity: "other", Node: "node-b", ObservedAt: time.Now(), Outcome: "scan_error", ErrorClass: "connection", TotalMillis: 9})
+	v, err := p.DiagnosticSources(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := v.(map[string]any)
+	if result["truncated"] != true {
+		t.Fatal("detail truncation was not reported")
+	}
+	summaries := result["error_summary"].([]sourceErrorSummary)
+	if len(summaries) != 2 || summaries[0].Node != "node-a" || summaries[0].Sources != 700 || summaries[0].Errors != 700 || summaries[1].Node != "node-b" {
+		t.Fatalf("error summary lost sources outside detail window: %+v", summaries)
+	}
+}

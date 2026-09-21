@@ -135,6 +135,11 @@ Wakeups that arrive while a thread is still running are counted separately as
 stale runnable markers; they do not invalidate otherwise complete wait pairs.
 Duplicate wakeups while one runnable wait is pending are handled the same way,
 with the earliest timestamp retained.
+
+The telemetry source snapshot includes an `error_summary` grouped by node,
+error class, and stage across every retained source, independent of the 512-row
+detail projection. This keeps source error attribution complete when the detail
+list is marked truncated.
 It reads already mounted host tracefs metadata and opens temporary perf event
 descriptors; it does not mount tracefs, enable schedstats, or modify global
 tracing configuration. Its filters include wakeups issued outside the target

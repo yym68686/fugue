@@ -31,6 +31,16 @@ type logSourceObservation struct {
 	TotalLines      uint64    `json:"total_lines"`
 }
 
+type sourceErrorSummary struct {
+	Node           string    `json:"node"`
+	ErrorClass     string    `json:"error_class"`
+	Stage          string    `json:"stage"`
+	Sources        uint64    `json:"sources"`
+	Errors         uint64    `json:"errors"`
+	LastErrorAt    time.Time `json:"last_error_at,omitempty"`
+	MaxErrorMillis int64     `json:"max_error_ms,omitempty"`
+}
+
 func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	p.sourceObservationMu.Lock()
 	defer p.sourceObservationMu.Unlock()
@@ -75,6 +85,45 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	}
 	evicted, cycle := p.sourceObservationEvicted, p.sourceObservationCycle
 	p.sourceObservationMu.Unlock()
+	byError := map[string]sourceErrorSummary{}
+	for _, row := range rows {
+		if row.Errors == 0 {
+			continue
+		}
+		class := row.LastErrorClass
+		if class == "" {
+			class = "unknown"
+		}
+		stage := row.LastErrorStage
+		if stage == "" {
+			stage = "unknown"
+		}
+		key := row.Node + "\x00" + class + "\x00" + stage
+		summary := byError[key]
+		summary.Node, summary.ErrorClass, summary.Stage = row.Node, class, stage
+		summary.Sources++
+		summary.Errors += row.Errors
+		if row.LastErrorAt.After(summary.LastErrorAt) {
+			summary.LastErrorAt = row.LastErrorAt
+		}
+		if row.LastErrorMillis > summary.MaxErrorMillis {
+			summary.MaxErrorMillis = row.LastErrorMillis
+		}
+		byError[key] = summary
+	}
+	errorSummary := make([]sourceErrorSummary, 0, len(byError))
+	for _, summary := range byError {
+		errorSummary = append(errorSummary, summary)
+	}
+	sort.Slice(errorSummary, func(i, j int) bool {
+		if errorSummary[i].Errors != errorSummary[j].Errors {
+			return errorSummary[i].Errors > errorSummary[j].Errors
+		}
+		if errorSummary[i].Node != errorSummary[j].Node {
+			return errorSummary[i].Node < errorSummary[j].Node
+		}
+		return errorSummary[i].ErrorClass+"/"+errorSummary[i].Stage < errorSummary[j].ErrorClass+"/"+errorSummary[j].Stage
+	})
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		if a.PendingAt.IsZero() != b.PendingAt.IsZero() {
@@ -93,7 +142,7 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	if truncated {
 		rows = rows[:512]
 	}
-	return map[string]any{"schema": "fugue.pipeline.sources.v1", "observed_at": time.Now().UTC(), "sources": rows, "source_count": total, "truncated": truncated, "evicted_sources": evicted, "cycle": cycle, "queue_depth": p.queueDepth.Load(), "queued_bytes": p.queuedBytes.Load()}, nil
+	return map[string]any{"schema": "fugue.pipeline.sources.v1", "observed_at": time.Now().UTC(), "sources": rows, "source_count": total, "truncated": truncated, "evicted_sources": evicted, "error_summary": errorSummary, "cycle": cycle, "queue_depth": p.queueDepth.Load(), "queued_bytes": p.queuedBytes.Load()}, nil
 }
 
 type logCycleObservation struct {
