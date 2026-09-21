@@ -10,7 +10,74 @@ import (
 	"testing"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 )
+
+func TestCanonicalAlignmentPreservesIndependentRevisionUntilRetirement(t *testing.T) {
+	for _, status := range []string{model.AppReleaseStatusServing, model.AppReleaseStatusDraining, model.AppReleaseStatusFailed} {
+		t.Run(status, func(t *testing.T) {
+			stateStore, app, _, _ := newSafeRolloutTestState(t)
+			release, err := stateStore.CreateAppRelease(model.AppRelease{
+				TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: status,
+				DeploymentName: runtime.RuntimeAppResourceName(app), ServiceName: runtime.RuntimeAppServiceName(app),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Canonical alignment changes the stored target. The original revision
+			// still belongs to this release and can have old traffic or connections.
+			options := runtime.RenderOptions{Revision: safeRolloutCandidateRevision(release.ID)}
+			names := map[string]string{
+				"deployments": runtime.RuntimeAppResourceNameWithOptions(app, options),
+				"services":    runtime.RuntimeAppServiceNameWithOptions(app, options),
+			}
+			var mu sync.Mutex
+			var deleted []string
+			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodDelete {
+					mu.Lock()
+					deleted = append(deleted, r.URL.Path)
+					mu.Unlock()
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
+				items := []any{}
+				for kind, name := range names {
+					if strings.HasSuffix(r.URL.Path, "/"+kind) {
+						items = append(items, map[string]any{"metadata": map[string]any{"name": name}})
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+			}))
+			defer kube.Close()
+			client := &kubeClient{client: kube.Client(), baseURL: kube.URL}
+			// A fresh service instance exercises recovery after a controller restart.
+			svc := &Service{Store: stateStore}
+			if err := svc.pruneManagedAppStaleObjects(context.Background(), client, "tenant-test", app, nil); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			count := len(deleted)
+			mu.Unlock()
+			if count != 0 {
+				t.Fatal("canonical alignment released an unretired revision to pruning", deleted)
+			}
+			release.Role, release.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
+			if _, err := stateStore.UpdateAppRelease(release); err != nil {
+				t.Fatal(err)
+			}
+			if err := svc.pruneManagedAppStaleObjects(context.Background(), client, "tenant-test", app, nil); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(deleted) != 2 {
+				t.Fatalf("explicit retirement did not release the revision: %v", deleted)
+			}
+		})
+	}
+}
 
 func TestFailedAndStartingReleaseResourcesSurviveOrdinaryPruning(t *testing.T) {
 	for _, status := range []string{model.AppReleaseStatusCreating, model.AppReleaseStatusFailed} {

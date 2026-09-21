@@ -2954,17 +2954,21 @@ func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind
 		// A failed code attempt can still be referenced by an Edge's current
 		// artifact or have in-flight requests. Only explicit retirement after
 		// traffic/drain confirmation authorizes deleting its workload identity.
-		for kind, name := range map[string]string{
-			"Deployment": strings.TrimSpace(release.DeploymentName),
-			"Service":    strings.TrimSpace(release.ServiceName),
+		// Canonical alignment replaces the current target fields, but cannot
+		// release the independently named revision before this release retires.
+		revision := runtime.RenderOptions{Revision: safeRolloutCandidateRevision(release.ID)}
+		for kind, names := range map[string][]string{
+			"Deployment": {release.DeploymentName, runtime.RuntimeAppResourceNameWithOptions(app, revision)},
+			"Service":    {release.ServiceName, runtime.RuntimeAppServiceNameWithOptions(app, revision)},
 		} {
-			if name == "" {
-				continue
-			}
 			if desiredByKind[kind] == nil {
 				desiredByKind[kind] = make(map[string]struct{})
 			}
-			desiredByKind[kind][name] = struct{}{}
+			for _, name := range names {
+				if name = strings.TrimSpace(name); name != "" {
+					desiredByKind[kind][name] = struct{}{}
+				}
+			}
 		}
 	}
 	return nil
