@@ -38,15 +38,16 @@ func TestSchedulerPairsExcludeBlockedTimeAndSortCrossCPUCaptures(t *testing.T) {
 
 func TestSchedulerUnpairedAndConflictingTransitionsAreExplicit(t *testing.T) {
 	out := schedulerLatencies([]schedulerEvent{{At: 1, Kind: "sched_switch", Next: 42}, {At: 2, Kind: "sched_wakeup", PID: 42}, {At: 3, Kind: "sched_wakeup", PID: 42}, {At: 4, Kind: "sched_switch", Next: 42}, {At: 5, Kind: "sched_wakeup", PID: 42}}, map[int]schedulerThread{42: {PID: 42, Start: "1"}})
-	if out["completed_pairs"] != 0 || out["unpaired_switch_ins"] != 2 || out["conflicting_transitions"] != 1 || out["pending_at_end"] != 1 {
-		t.Fatalf("fabricated latency from an incomplete pair: %+v", out)
-	}
-	if _, exists := out["max_wait_ns"]; exists {
-		t.Fatal("no pairs reported as zero latency")
+	if out["completed_pairs"] != 1 || out["max_wait_ns"] != int64(2) || out["unpaired_switch_ins"] != 1 || out["conflicting_transitions"] != 0 || out["stale_wakeup_transitions"] != 1 || out["pending_at_end"] != 1 {
+		t.Fatalf("duplicate wakeup did not retain the conservative pair: %+v", out)
 	}
 	examples := out["conflict_examples"].([]map[string]any)
-	if len(examples) != 1 || examples[0]["tid"] != 42 || len(examples[0]["preceding_events"].([]schedulerEvent)) != 2 {
-		t.Fatalf("conflict context is missing: %+v", examples)
+	if len(examples) != 0 {
+		t.Fatalf("stale duplicate was reported as a conflict: %+v", examples)
+	}
+	conflict := schedulerLatencies([]schedulerEvent{{At: 1, Kind: "sched_switch", Prev: 42, Runnable: true}, {At: 2, Kind: "sched_wakeup", PID: 42}}, map[int]schedulerThread{42: {PID: 42, Start: "1"}})
+	if conflict["conflicting_transitions"] != 1 || len(conflict["conflict_examples"].([]map[string]any)) != 1 {
+		t.Fatalf("true preemption/wakeup conflict was not retained: %+v", conflict)
 	}
 }
 

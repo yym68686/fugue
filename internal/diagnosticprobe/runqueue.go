@@ -326,8 +326,15 @@ func schedulerLatencies(events []schedulerEvent, threads map[int]schedulerThread
 	for _, e := range events {
 		if e.Kind == "sched_wakeup" {
 			if identity, ok := threads[e.PID]; ok {
-				_, exists := pending[e.PID]
-				observe(e.PID, e, exists)
+				pendingPair, exists := pending[e.PID]
+				observe(e.PID, e, exists && pendingPair.Reason != "wakeup")
+				if exists && pendingPair.Reason == "wakeup" {
+					// Duplicate wakeups can be emitted while a runnable task is
+					// still waiting. Keep the earliest timestamp for a conservative
+					// wait and count the duplicate separately.
+					staleWakeups++
+					continue
+				}
 				if exists {
 					conflicts++
 					delete(pending, e.PID)
