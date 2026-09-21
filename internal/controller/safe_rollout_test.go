@@ -1008,7 +1008,7 @@ func TestSafeZeroDowntimeRolloutRetiresPreviousAfterDrainMetricsReachZero(t *tes
 	}
 }
 
-func TestSafeZeroDowntimeRolloutRetiresPreviousWhenRevisionDeploymentGone(t *testing.T) {
+func TestSafeZeroDowntimeRolloutRetainsPreviousWhenRevisionDeploymentGone(t *testing.T) {
 	t.Parallel()
 
 	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
@@ -1053,8 +1053,8 @@ func TestSafeZeroDowntimeRolloutRetiresPreviousWhenRevisionDeploymentGone(t *tes
 	if err != nil {
 		t.Fatalf("get previous release: %v", err)
 	}
-	if retiredPrevious.Role != model.AppReleaseRoleRetired || retiredPrevious.Status != model.AppReleaseStatusRetired {
-		t.Fatalf("expected missing previous revision deployment to retire previous release, got %+v", retiredPrevious)
+	if retiredPrevious.Role != model.AppReleaseRolePrevious || retiredPrevious.Status != model.AppReleaseStatusDraining {
+		t.Fatalf("missing Deployment cannot prove its Pods have drained, got %+v", retiredPrevious)
 	}
 }
 
@@ -1388,33 +1388,6 @@ func TestSafeRolloutEdgeObserverRejectsServingLKGAndStaleHeartbeat(t *testing.T)
 	}
 	if len(observation.WaitingNodes) != 1 || !strings.Contains(observation.WaitingNodes[0], "serving_lkg") {
 		t.Fatalf("expected serving_lkg waiting reason, got %+v", observation.WaitingNodes)
-	}
-}
-
-func TestSafeRolloutDrainMetricsParserRequiresFinalZeroActive(t *testing.T) {
-	t.Parallel()
-
-	metrics := safeRolloutDrainMetrics{Summary: map[string]any{}}
-	safeRolloutApplyDrainLogLine(&metrics, "fugue_drain_sample active_connections=3 states=ESTABLISHED:3 waited_ms=1000")
-	safeRolloutApplyDrainLogLine(&metrics, "fugue_drain_complete reason=idle waited_ms=3200 active_connections=0 max_active_connections=3 observer_errors=0")
-	metrics.Ready = metrics.FinalCount > 0 && metrics.ActiveConnections == 0
-	if !metrics.Ready || metrics.SampleCount != 1 || metrics.FinalCount != 1 || metrics.MaxActiveConnections != 3 {
-		t.Fatalf("expected zero-active final drain metrics to be ready, got %+v", metrics)
-	}
-
-	active := safeRolloutDrainMetrics{Summary: map[string]any{}}
-	safeRolloutApplyDrainLogLine(&active, "fugue_drain_complete reason=timeout waited_ms=600000 active_connections=2 max_active_connections=5 observer_errors=0")
-	active.Ready = active.FinalCount > 0 && active.ActiveConnections == 0
-	if active.Ready {
-		t.Fatalf("expected non-zero active drain metrics to block retire, got %+v", active)
-	}
-
-	timedOut := safeRolloutDrainMetrics{Summary: map[string]any{}}
-	safeRolloutApplyDrainLogLine(&timedOut, "fugue_drain_complete reason=timeout waited_ms=600000 active_connections=0 max_active_connections=5 observer_errors=0")
-	unsafeFinalReason, _ := timedOut.Summary["unsafe_final_reason"].(bool)
-	timedOut.Ready = timedOut.FinalCount > 0 && timedOut.ActiveConnections == 0 && !unsafeFinalReason
-	if timedOut.Ready {
-		t.Fatalf("expected timeout final reason to block retire even with zero active connections, got %+v", timedOut)
 	}
 }
 

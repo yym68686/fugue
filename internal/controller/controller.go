@@ -98,7 +98,7 @@ const (
 )
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
-	return &Service{
+	s := &Service{
 		Store:  store,
 		Config: cfg,
 		Renderer: runtime.Renderer{
@@ -125,22 +125,23 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 				NativeSidecarEnabled:          cfg.StrictDrainNativeSidecarEnabled,
 			}.Normalize(),
 		},
-		Logger:                         logger,
-		importer:                       sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
-		registryPushBase:               strings.TrimSpace(cfg.RegistryPushBase),
-		registryPullBase:               strings.TrimSpace(cfg.RegistryPullBase),
-		builderRegistryPushBase:        strings.TrimSpace(cfg.BuilderRegistryPushBase),
-		resolveManagedImageDigestRef:   sourceimport.ResolveRemoteImageDigestRef,
-		resolveRemoteImageDigest:       sourceimport.ResolveRemoteImageDigest,
-		verifyDestinationImageCache:    newDestinationImageCacheVerifier(imageCacheManagementTokenFromEnv()),
-		releaseGateMetricsQuerier:      controllerReleaseGateMetricsQuerier(cfg),
-		safeRolloutDrainMetricsQuerier: controllerSafeRolloutDrainMetricsQuerier(cfg),
-		latestGitHubCommit:             sourceimport.LatestGitHubCommit,
-		newKubeClient:                  newKubeClient,
-		now:                            time.Now,
-		metricsStartedAt:               time.Now().UTC(),
-		imageTrackingDecisionCounts:    map[string]int64{},
+		Logger:                       logger,
+		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
+		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
+		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
+		builderRegistryPushBase:      strings.TrimSpace(cfg.BuilderRegistryPushBase),
+		resolveManagedImageDigestRef: sourceimport.ResolveRemoteImageDigestRef,
+		resolveRemoteImageDigest:     sourceimport.ResolveRemoteImageDigest,
+		verifyDestinationImageCache:  newDestinationImageCacheVerifier(imageCacheManagementTokenFromEnv()),
+		releaseGateMetricsQuerier:    controllerReleaseGateMetricsQuerier(cfg),
+		latestGitHubCommit:           sourceimport.LatestGitHubCommit,
+		newKubeClient:                newKubeClient,
+		now:                          time.Now,
+		metricsStartedAt:             time.Now().UTC(),
+		imageTrackingDecisionCounts:  map[string]int64{},
 	}
+	s.safeRolloutDrainMetricsQuerier = kubeSafeRolloutDrainObserver{service: s}
+	return s
 }
 
 func runtimeAPIBaseURL(publicDomain string) string {

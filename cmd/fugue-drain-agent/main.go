@@ -21,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"fugue/internal/drainprotocol"
 )
 
 const (
@@ -231,6 +233,7 @@ func newServer(cfg config, logger *log.Logger) *server {
 func (s *server) register(mux *http.ServeMux) {
 	mux.HandleFunc("/readyz", s.handleReadyz)
 	mux.HandleFunc("/drain/prestop", s.handlePreStop)
+	mux.HandleFunc("/drain/observe", s.handleObserve)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 }
 
@@ -325,6 +328,34 @@ func parsePorts(value string) (map[int]struct{}, error) {
 
 func (s *server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "component": componentName})
+}
+
+func (s *server) handleObserve(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nonce := r.URL.Query().Get("nonce")
+	if len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" {
+		http.Error(w, "invalid observation nonce", http.StatusBadRequest)
+		return
+	}
+	observed, err := s.observe()
+	if err != nil {
+		http.Error(w, "socket observation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	ports := make([]int, 0, len(s.cfg.AppPorts))
+	for port := range s.cfg.AppPorts {
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+	writeJSON(w, http.StatusOK, drainprotocol.Snapshot{
+		APIVersion: drainprotocol.Version, Nonce: nonce, Pod: s.cfg.PodName,
+		Namespace: s.cfg.Namespace, AppPorts: ports, ActiveConnections: &observed.Active,
+	})
 }
 
 func (s *server) handlePreStop(w http.ResponseWriter, r *http.Request) {
@@ -709,13 +740,21 @@ func parseTCPEntries(r io.Reader) ([]tcpEntry, error) {
 	scanner := bufio.NewScanner(r)
 	var entries []tcpEntry
 	lineNo := 0
+	headerSeen := false
 	for scanner.Scan() {
 		lineNo++
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "sl") {
+		if line == "" {
 			continue
 		}
 		fields := strings.Fields(line)
+		if len(fields) >= 4 && fields[0] == "sl" && fields[1] == "local_address" && fields[3] == "st" {
+			headerSeen = true
+			continue
+		}
+		if !headerSeen {
+			return nil, fmt.Errorf("TCP observation has no valid header")
+		}
 		if len(fields) < 4 {
 			return nil, fmt.Errorf("line %d has %d fields", lineNo, len(fields))
 		}
@@ -731,6 +770,9 @@ func parseTCPEntries(r io.Reader) ([]tcpEntry, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
+	}
+	if !headerSeen {
+		return nil, fmt.Errorf("TCP observation is empty or incomplete")
 	}
 	return entries, nil
 }

@@ -249,6 +249,61 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  drain_observer_artifact:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {contents: read, packages: write}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Detect drain observer source changes
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          changed=false
+          if ! git diff --quiet "$base" HEAD -- Dockerfile.drain-agent cmd/fugue-drain-agent internal/drainprotocol scripts/smoke_drain_agent.py go.mod go.sum; then
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+        if: steps.changed.outputs.changed == 'true'
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and verify the immutable drain observer
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/fugue-drain-agent
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --file Dockerfile.drain-agent \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --tag "$IMAGE_REPOSITORY:$SOURCE_SHA" --metadata-file "$RUNNER_TEMP/drain-build.json" --push .
+          digest="$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/drain-build.json"))["containerimage.digest"])')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          python3 scripts/smoke_drain_agent.py "$IMAGE_REPOSITORY@$digest" "$SOURCE_SHA" > "$RUNNER_TEMP/drain-smoke.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          name: fugue-drain-observer-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/drain-build.json
+            ${{ runner.temp }}/drain-smoke.json
+          if-no-files-found: error
+          retention-days: 30
+
   diagnostic_packages:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' }}

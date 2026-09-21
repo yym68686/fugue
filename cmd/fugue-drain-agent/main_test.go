@@ -13,7 +13,71 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/drainprotocol"
 )
+
+func TestReadOnlyObservationPreservesPreStopLifecycle(t *testing.T) {
+	path := writeTempFile(t, tcpFixture)
+	srv := newTestServer(t, config{AppPorts: map[int]struct{}{8080: {}}, ProcTCPPath: path, ProcTCP6Path: path,
+		PodName: "pod", Namespace: "tenant", FailClosed: true})
+	mux := http.NewServeMux()
+	srv.register(mux)
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/drain/observe?nonce="+strings.Repeat("a", 32), nil))
+		var result drainprotocol.Snapshot
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil || rec.Code != http.StatusOK || result.APIVersion != drainprotocol.Version || result.ActiveConnections == nil || *result.ActiveConnections != 2 || result.Pod != "pod" || len(result.AppPorts) != 1 || result.AppPorts[0] != 8080 {
+			t.Fatalf("invalid fresh observation: %s %v", rec.Body.String(), err)
+		}
+		if rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("observation may be cached")
+		}
+	}
+	select {
+	case <-srv.drainStarted:
+		t.Fatal("observation started termination")
+	default:
+	}
+	select {
+	case <-srv.drainCompleted:
+		t.Fatal("observation completed termination")
+	default:
+	}
+	if srv.metrics.PreStopRequests != 0 || srv.metrics.EarlyExitTotal != 0 || srv.metrics.ObserverErrors != 0 {
+		t.Fatal("observation changed prestop metrics")
+	}
+	if outcome := srv.waitForDrainAfterSignal(context.Background(), time.Millisecond); outcome != "no_prestop_request" {
+		t.Fatalf("termination was bypassed: %s", outcome)
+	}
+}
+
+func TestReadOnlyObservationFailsClosed(t *testing.T) {
+	srv := newTestServer(t, config{AppPorts: map[int]struct{}{8080: {}}, ProcTCPPath: "/missing/tcp", ProcTCP6Path: "/missing/tcp6", FailClosed: false})
+	for _, tc := range []struct {
+		method, nonce string
+		want          int
+	}{
+		{http.MethodGet, strings.Repeat("b", 32), http.StatusServiceUnavailable},
+		{http.MethodGet, "", http.StatusBadRequest},
+		{http.MethodGet, strings.Repeat("z", 32), http.StatusBadRequest},
+		{http.MethodPost, strings.Repeat("b", 32), http.StatusMethodNotAllowed},
+	} {
+		rec := httptest.NewRecorder()
+		srv.handleObserve(rec, httptest.NewRequest(tc.method, "/drain/observe?nonce="+tc.nonce, nil))
+		if rec.Code != tc.want {
+			t.Fatalf("got %d, want %d", rec.Code, tc.want)
+		}
+	}
+}
+
+func TestTCPObservationRejectsIncompleteInput(t *testing.T) {
+	for _, input := range []string{"", "\n", "sl invalid header st\n", "0: 0100007F:1F90 0100007F:C001 01\n"} {
+		if _, err := parseTCPEntries(strings.NewReader(input)); err == nil {
+			t.Fatalf("incomplete observation accepted: %q", input)
+		}
+	}
+}
 
 const tcpFixture = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 0100007F:1F90 0100007F:C001 01 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 20 4 30 10 -1

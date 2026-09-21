@@ -49,11 +49,18 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "drain_observer_artifact", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	drainArtifact := yamlMappingValue(t, jobs, "drain_observer_artifact")
+	if yamlMappingValue(t, drainArtifact, "runs-on").Value != "ubuntu-latest" || yamlMappingValue(t, drainArtifact, "needs").Value != "prepush" {
+		t.Fatal("drain artifact verification requires prepush and an isolated hosted runner")
+	}
+	if !strings.Contains(source, "scripts/smoke_drain_agent.py \"$IMAGE_REPOSITORY@$digest\" \"$SOURCE_SHA\"") {
+		t.Fatal("drain observer artifact must exercise the exact immutable image")
+	}
 	memoryPolicy := yamlMappingValue(t, jobs, "workload_memory_policy")
 	for _, key := range yamlMappingKeys(t, memoryPolicy) {
 		if key == "needs" {
