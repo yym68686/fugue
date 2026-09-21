@@ -137,6 +137,10 @@ RETURNING `+appReleaseSelectColumns,
 }
 
 func (s *Store) pgUpdateAppReleaseTx(ctx context.Context, tx *sql.Tx, release model.AppRelease) (model.AppRelease, error) {
+	bindingJSON, err := marshalReleaseWorkload(release.RevisionWorkload)
+	if err != nil {
+		return model.AppRelease{}, err
+	}
 	specJSON, err := marshalNullableAppSpec(release.SpecSnapshot)
 	if err != nil {
 		return model.AppRelease{}, err
@@ -162,11 +166,11 @@ SET tenant_id = $2,
 	retired_at = $18,
 	retention_until = $19,
 	updated_at = $20
-WHERE id = $1
+WHERE id = $1 AND ($21::jsonb IS NULL OR revision_workload_json = $21::jsonb)
 RETURNING `+appReleaseSelectColumns,
 		release.ID, release.TenantID, release.AppID, release.Role, release.SourceRef, release.ResolvedImageRef, release.UpstreamURL, release.RuntimeID,
 		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, release.RollbackTargetID, release.ReleaseMessage, specJSON,
-		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.RetentionUntil, release.UpdatedAt))
+		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.RetentionUntil, release.UpdatedAt, bindingJSON))
 	return out, mapDBErr(err)
 }
 

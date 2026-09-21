@@ -1062,6 +1062,9 @@ func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op
 	if err := client.replaceObjectSpecsByKind(ctx, objects, "apps/v1", "Deployment"); err != nil {
 		return fmt.Errorf("replace candidate revision deployment spec: %w", err)
 	}
+	if err := s.bindSafeRolloutWorkload(ctx, client, op, state, objects); err != nil {
+		return fmt.Errorf("bind candidate revision workload: %w", err)
+	}
 	s.recordSafeRolloutReleaseStep(op, app, "candidate_apply", model.ReleaseStepStatusCompleted, "candidate revision desired state applied", state.Candidate.ID, map[string]any{
 		"deployment_name": runtime.RuntimeAppResourceNameWithOptions(app, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision}),
 		"service_name":    runtime.RuntimeAppServiceNameWithOptions(app, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision}),

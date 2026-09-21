@@ -2401,27 +2401,44 @@ type App struct {
 }
 
 type AppRelease struct {
-	ID               string     `json:"id"`
-	TenantID         string     `json:"tenant_id"`
-	AppID            string     `json:"app_id"`
-	Role             string     `json:"role"`
-	SourceRef        string     `json:"source_ref,omitempty"`
-	ResolvedImageRef string     `json:"resolved_image_ref,omitempty"`
-	UpstreamURL      string     `json:"upstream_url,omitempty"`
-	RuntimeID        string     `json:"runtime_id,omitempty"`
-	DeploymentName   string     `json:"deployment_name,omitempty"`
-	ServiceName      string     `json:"service_name,omitempty"`
-	Status           string     `json:"status"`
-	StatusReason     string     `json:"status_reason,omitempty"`
-	RollbackTargetID string     `json:"rollback_target_release_id,omitempty"`
-	ReleaseMessage   string     `json:"release_message,omitempty"`
-	SpecSnapshot     *AppSpec   `json:"spec_snapshot,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	ReadyAt          *time.Time `json:"ready_at,omitempty"`
-	PromotedAt       *time.Time `json:"promoted_at,omitempty"`
-	RetiredAt        *time.Time `json:"retired_at,omitempty"`
-	RetentionUntil   *time.Time `json:"retention_until,omitempty"`
+	ID               string              `json:"id"`
+	TenantID         string              `json:"tenant_id"`
+	AppID            string              `json:"app_id"`
+	Role             string              `json:"role"`
+	SourceRef        string              `json:"source_ref,omitempty"`
+	ResolvedImageRef string              `json:"resolved_image_ref,omitempty"`
+	UpstreamURL      string              `json:"upstream_url,omitempty"`
+	RuntimeID        string              `json:"runtime_id,omitempty"`
+	DeploymentName   string              `json:"deployment_name,omitempty"`
+	ServiceName      string              `json:"service_name,omitempty"`
+	Status           string              `json:"status"`
+	StatusReason     string              `json:"status_reason,omitempty"`
+	RollbackTargetID string              `json:"rollback_target_release_id,omitempty"`
+	ReleaseMessage   string              `json:"release_message,omitempty"`
+	SpecSnapshot     *AppSpec            `json:"spec_snapshot,omitempty"`
+	RevisionWorkload *AppReleaseWorkload `json:"revision_workload,omitempty"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
+	ReadyAt          *time.Time          `json:"ready_at,omitempty"`
+	PromotedAt       *time.Time          `json:"promoted_at,omitempty"`
+	RetiredAt        *time.Time          `json:"retired_at,omitempty"`
+	RetentionUntil   *time.Time          `json:"retention_until,omitempty"`
+}
+
+// AppReleaseWorkload records the original revision independently of the
+// mutable serving target. Only the controller's first verified bind writes it.
+type AppReleaseWorkload struct {
+	OperationID          string    `json:"operation_id"`
+	Namespace            string    `json:"namespace"`
+	DeploymentName       string    `json:"deployment_name"`
+	DeploymentUID        string    `json:"deployment_uid"`
+	DeploymentGeneration int64     `json:"deployment_generation"`
+	ServiceName          string    `json:"service_name"`
+	ServiceUID           string    `json:"service_uid"`
+	ReleaseKey           string    `json:"release_key"`
+	RuntimeID            string    `json:"runtime_id"`
+	ImageRef             string    `json:"image_ref"`
+	BoundAt              time.Time `json:"bound_at"`
 }
 
 type AppReleaseFilter struct {

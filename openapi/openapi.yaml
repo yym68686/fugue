@@ -22824,6 +22824,10 @@ components:
           type: string
         spec_snapshot:
           $ref: "#/components/schemas/AppSpec"
+        revision_workload:
+          readOnly: true
+          description: Immutable original revision identity captured by the controller; current serving targets may later point to the canonical workload.
+          $ref: "#/components/schemas/AppReleaseWorkload"
         ready_at:
           type: string
           format: date-time
@@ -22840,6 +22844,45 @@ components:
           type: string
           format: date-time
         updated_at:
+          type: string
+          format: date-time
+    AppReleaseWorkload:
+      type: object
+      additionalProperties: false
+      required: [operation_id, namespace, deployment_name, deployment_uid, deployment_generation, service_name, service_uid, release_key, runtime_id, image_ref, bound_at]
+      properties:
+        operation_id:
+          type: string
+          minLength: 1
+        namespace:
+          type: string
+          minLength: 1
+        deployment_name:
+          type: string
+          minLength: 1
+        deployment_uid:
+          type: string
+          minLength: 1
+        deployment_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        service_name:
+          type: string
+          minLength: 1
+        service_uid:
+          type: string
+          minLength: 1
+        release_key:
+          type: string
+          minLength: 1
+        runtime_id:
+          type: string
+          minLength: 1
+        image_ref:
+          type: string
+          minLength: 1
+        bound_at:
           type: string
           format: date-time
     AppTrafficPolicy:

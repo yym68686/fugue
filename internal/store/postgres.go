@@ -403,6 +403,7 @@ var postgresSchemaStatements = []string{
 	`ALTER TABLE fugue_app_releases ADD COLUMN IF NOT EXISTS rollback_target_release_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_app_releases ADD COLUMN IF NOT EXISTS release_message TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_app_releases ADD COLUMN IF NOT EXISTS retention_until TIMESTAMPTZ NULL`,
+	`ALTER TABLE fugue_app_releases ADD COLUMN IF NOT EXISTS revision_workload_json JSONB NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_app_releases_tenant_app_role ON fugue_app_releases (tenant_id, app_id, role, updated_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_app_releases_app_status ON fugue_app_releases (app_id, status, updated_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_app_releases_active ON fugue_app_releases (tenant_id, app_id, role, status, updated_at DESC) WHERE role IN ('stable', 'candidate', 'previous') AND status IN ('ready', 'serving', 'draining')`,

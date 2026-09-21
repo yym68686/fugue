@@ -10,6 +10,9 @@ import (
 )
 
 func (s *Store) CreateAppRelease(release model.AppRelease) (model.AppRelease, error) {
+	if release.RevisionWorkload != nil {
+		return model.AppRelease{}, ErrInvalidInput
+	}
 	release, err := normalizeAppReleaseForStore(release)
 	if err != nil {
 		return model.AppRelease{}, err
@@ -44,6 +47,10 @@ func (s *Store) UpdateAppRelease(release model.AppRelease) (model.AppRelease, er
 		index := findAppReleaseByID(state.AppReleases, release.ID)
 		if index < 0 {
 			return ErrNotFound
+		}
+		current := state.AppReleases[index]
+		if err := preserveReleaseWorkload(current, &release); err != nil {
+			return err
 		}
 		state.AppReleases[index] = release
 		out = release
