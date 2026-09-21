@@ -1,0 +1,114 @@
+package diagnosticprobe
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	"fugue/internal/livediagnostics"
+)
+
+func processCPUProfile(ctx context.Context, req livediagnostics.ProbeRequest, c Collector) (any, error) {
+	if c.CaptureSeconds < 5 || c.CaptureSeconds > 30 || c.CaptureSeconds+15 > req.DurationSeconds || c.IntervalSeconds < req.DurationSeconds {
+		return nil, errors.New("CPU capture requires 5-30 seconds, 15 seconds analysis headroom and a single capture per session")
+	}
+	if (req.ContainerID == "") == (req.Target.ProcessName == "") {
+		return nil, errors.New("CPU capture requires one frozen process or container target")
+	}
+	before, err := profileProcessIdentities(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp("", "fugue-profile-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	args := []string{"--kind", "cpu-profile", "--duration", strconv.Itoa(c.CaptureSeconds), "--frequency", "19", "--output-dir", dir}
+	if req.ContainerID != "" {
+		args = append(args, "--container-id", req.ContainerID)
+	} else {
+		args = append(args, "--process-name", req.Target.ProcessName)
+	}
+	raw, truncated, err := diagnosticCommand(ctx, 8<<20, "/usr/local/bin/fugue-diagnostic-agent", args...)
+	if err != nil {
+		return nil, fmt.Errorf("CPU sampler failed: %w", err)
+	}
+	if truncated {
+		return nil, errors.New("CPU sampler output exceeded the transport budget")
+	}
+	after, err := profileProcessIdentities(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if len(before) != len(after) {
+		return nil, errors.New("target process set changed during CPU capture")
+	}
+	for pid, start := range before {
+		if after[pid] != start {
+			return nil, errors.New("target process identity changed during CPU capture")
+		}
+	}
+	return profileEvidence(raw)
+}
+
+func profileProcessIdentities(ctx context.Context, req livediagnostics.ProbeRequest) (map[int]string, error) {
+	v, err := processSchedulingAt(ctx, req, hostProc)
+	if err != nil {
+		return nil, err
+	}
+	if p, ok := v.(partialValue); ok {
+		v = p.Value
+	}
+	facts := v.(map[string]any)["processes"].([]processFact)
+	if len(facts) == 0 || len(facts) > 16 {
+		return nil, errors.New("CPU capture requires 1-16 matching target processes")
+	}
+	result := map[int]string{}
+	for _, f := range facts {
+		result[f.PID] = f.StartTicks
+	}
+	return result, nil
+}
+
+func profileEvidence(raw []byte) (any, error) {
+	var result map[string]any
+	d := json.NewDecoder(strings.NewReader(string(raw)))
+	d.UseNumber()
+	if err := d.Decode(&result); err != nil {
+		return nil, errors.New("CPU sampler did not return a valid report")
+	}
+	if result["schema"] != "fugue.diagnostic.cpu_profile.v1" {
+		return nil, errors.New("CPU sampler returned an unexpected schema")
+	}
+	// The bounded structured sample table preserves every leaf count. Raw
+	// duplicate text can be megabytes and is not needed to establish coverage.
+	delete(result, "raw_script")
+	delete(result, "perf_report")
+	gaps := []string{}
+	if warnings, ok := result["warnings"].([]any); ok {
+		for _, warning := range warnings {
+			if s, ok := warning.(string); ok {
+				gaps = append(gaps, safeText(s))
+			}
+		}
+	}
+	count := func(key string) int64 { n, _ := result[key].(json.Number); v, _ := n.Int64(); return v }
+	if count("samples") <= 0 {
+		gaps = append(gaps, "no CPU samples were captured")
+	}
+	if count("lost_samples") > 0 {
+		gaps = append(gaps, "CPU samples were lost")
+	}
+	if count("unresolved_user_samples") > 0 || count("unresolved_kernel_samples") > 0 {
+		gaps = append(gaps, "some sampled symbols could not be resolved")
+	}
+	if len(gaps) > 0 {
+		return partialValue{Value: result, Gaps: gaps}, nil
+	}
+	return result, nil
+}

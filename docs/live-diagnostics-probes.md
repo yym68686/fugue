@@ -50,6 +50,15 @@ observations also degrade when IO permissions or scheduler accounting are
 unavailable. Node-window summaries compare cumulative counters only across the
 same boot identity; process deltas require the same PID and start time.
 
+The independently released pack also supports `process-cpu-profile` and
+`host-journal` collectors under the existing `process-profile` capability.
+CPU collection captures at 19 Hz for 5-30 seconds with bounded output and
+process-group cancellation; changed process identities, lost samples and
+unresolved symbols cannot produce complete evidence. Journal recipes specify a
+service unit and a lookback of at most 24 hours, with entry and byte limits,
+redacted examples, source timestamps and explicit partial-coverage reporting.
+These recipes can be registered or removed through catalog configuration.
+
 Kubernetes observation recipes can use `field_selector` and explicit
 `annotation_keys` to inspect event reasons and controller state without dumping
 all annotations. Credential-related and last-applied configuration annotations

@@ -4,6 +4,12 @@ import json
 import subprocess
 import sys
 
+for executable in ["perf", "journalctl"]:
+    subprocess.run([
+        "docker", "run", "--rm", "--network=none", "--read-only", "--cap-drop=ALL",
+        "--entrypoint", executable, sys.argv[1], "--version",
+    ], capture_output=True, check=True, timeout=30)
+
 request = {
     "probe_image":sys.argv[1], "protocol": "fugue.diagnostics/v1", "session_id": "diagnostic-smoke", "probe_id": "package-smoke",
     "probe_digest": "sha256:" + "a" * 64, "catalog_digest": "sha256:" + "b" * 64,

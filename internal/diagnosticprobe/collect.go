@@ -43,6 +43,8 @@ type Collector struct {
 	Path            string            `json:"path,omitempty"`
 	Queries         map[string]string `json:"queries,omitempty"`
 	RequiredQueries []string          `json:"required_queries,omitempty"`
+	Unit            string            `json:"unit,omitempty"`
+	CaptureSeconds  int               `json:"capture_seconds,omitempty"`
 }
 type Service struct {
 	Namespace string `json:"namespace"`
@@ -94,7 +96,11 @@ func Collect(parent context.Context, req livediagnostics.ProbeRequest) (livediag
 			visited[i] = true
 			observed := time.Now().UTC()
 			e := livediagnostics.Evidence{Name: c.Name, Source: c.Kind, ObservedAt: observed, Status: "complete"}
-			budgetCtx, stop := context.WithTimeout(ctx, 8*time.Second)
+			budget := 8 * time.Second
+			if c.Kind == "process-cpu-profile" {
+				budget = time.Duration(req.DurationSeconds-1) * time.Second
+			}
+			budgetCtx, stop := context.WithTimeout(ctx, budget)
 			value, err := collectOne(budgetCtx, req, c, client)
 			stop()
 			if partial, ok := value.(partialValue); ok {
@@ -176,6 +182,10 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return processSchedulingAt(ctx, req, hostProc)
 	case "process-identity":
 		return processIdentities(ctx, req, hostProc)
+	case "process-cpu-profile":
+		return processCPUProfile(ctx, req, c)
+	case "host-journal":
+		return hostJournal(ctx, req, c)
 	case "kubernetes-objects":
 		return k.objects(ctx, req, c)
 	case "kubernetes-logs":

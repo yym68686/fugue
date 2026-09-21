@@ -11,7 +11,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o /out/fugue-diagnostic-probe ./cmd/fugue-diagnostic-probe \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o /out/fugue-diagnostic-agent ./cmd/fugue-api/diagnostic_agent \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o /out/fugue-pprof cmd/pprof
-FROM --platform=$TARGETPLATFORM alpine:3.23
-RUN apk add --no-cache ca-certificates perf
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates linux-perf systemd \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/ /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/fugue-diagnostic-probe"]
