@@ -122,7 +122,7 @@ def validate(config, runner):
         raise ValueError("invalid observer policy")
     if any(n != "*" and not NAME.fullmatch(n) for n in policy["namespaces"]):
         raise ValueError("invalid target namespace policy")
-    if not set(policy["profiles"]) <= {"host-read", "cluster-read", "process-profile"}:
+    if not set(policy["profiles"]) <= {"host-read", "cluster-read", "process-profile", "kernel-profile"}:
         raise ValueError("unsupported capability profile")
     seen = set()
     if len(catalog["probes"]) > 64:

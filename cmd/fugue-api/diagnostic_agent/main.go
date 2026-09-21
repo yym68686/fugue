@@ -1279,17 +1279,42 @@ func isUnknownSymbol(value string) bool {
 }
 
 func loadProcessGoSymbolizers(pids []int) map[int]processGoSymbolizer {
+	return loadProcessGoSymbolizersAt("/host/proc", pids)
+}
+
+func loadProcessGoSymbolizersAt(procRoot string, pids []int) map[int]processGoSymbolizer {
 	result := make(map[int]processGoSymbolizer)
+	var cached []struct {
+		info     os.FileInfo
+		resolver *goSymbolizer
+	}
 	for _, pid := range pids {
-		executableLink, err := os.Readlink(filepath.Join("/host/proc", strconv.Itoa(pid), "exe"))
+		executable := filepath.Join(procRoot, strconv.Itoa(pid), "exe")
+		executableLink, err := os.Readlink(executable)
 		if err != nil || !filepath.IsAbs(executableLink) {
 			continue
 		}
 		executableLink = strings.TrimSuffix(executableLink, " (deleted)")
-		executable := filepath.Join("/host/proc", strconv.Itoa(pid), "root", strings.TrimPrefix(filepath.Clean(executableLink), "/"))
-		resolver, err := newGoSymbolizer(executable)
+		info, err := os.Stat(executable)
 		if err != nil {
 			continue
+		}
+		var resolver *goSymbolizer
+		for _, entry := range cached {
+			if os.SameFile(entry.info, info) {
+				resolver = entry.resolver
+				break
+			}
+		}
+		if resolver == nil {
+			resolver, err = newGoSymbolizer(executable)
+			if err != nil {
+				continue
+			}
+			cached = append(cached, struct {
+				info     os.FileInfo
+				resolver *goSymbolizer
+			}{info, resolver})
 		}
 		result[pid] = processGoSymbolizer{DSO: filepath.Base(executableLink), Resolver: resolver}
 	}

@@ -34,6 +34,10 @@ Capability profiles are separate from target selection:
   administrator-only probe: the runtime default peer policy can deny reading a
   host process executable even when SYS_PTRACE is present. This does not change
   the target's policy and does not grant privileged mode or SYS_ADMIN.
+- `kernel-profile` separately authorizes SYS_ADMIN for kernels such as Debian
+  with `perf_event_paranoid=3`, whose downstream admission check requires it
+  even with PERFMON. It remains a bounded, non-privileged, read-only-root
+  diagnostic Job. Proc, journal and cluster recipes do not need this profile.
 
 The first production catalog combines bounded node pressure and scheduling
 facts, control-plane request/storage metrics, Kubernetes reconcile objects and

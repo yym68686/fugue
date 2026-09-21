@@ -17,7 +17,7 @@ func testProbeCatalog() Catalog {
 }
 
 func TestOnlyAuthorizedProcessProfileCanReadAcrossAppArmorPeers(t *testing.T) {
-	for _, profile := range []string{"cluster-read", "host-read", "process-profile"} {
+	for _, profile := range []string{"cluster-read", "host-read", "process-profile", "kernel-profile"} {
 		catalog := VerifiedCatalog{Catalog: testProbeCatalog(), Digest: "catalog"}
 		catalog.Policy.Profiles = []string{profile}
 		catalog.Probes[0].Profile = profile
@@ -29,18 +29,28 @@ func TestOnlyAuthorizedProcessProfileCanReadAcrossAppArmorPeers(t *testing.T) {
 		if security.Privileged == nil || *security.Privileged || security.ReadOnlyRootFilesystem == nil || !*security.ReadOnlyRootFilesystem || *security.AllowPrivilegeEscalation {
 			t.Fatalf("probe lost workload isolation bounds: %+v", security)
 		}
-		if profile == "process-profile" {
+		if profile == "process-profile" || profile == "kernel-profile" {
 			if security.AppArmorProfile == nil || security.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
 				t.Fatal("process profile cannot observe a differently confined target")
 			}
 		} else if security.AppArmorProfile != nil {
 			t.Fatalf("ordinary profile %s gained a cross-profile override", profile)
 		}
+		hasAdmin := false
 		for _, capability := range security.Capabilities.Add {
-			if capability == "SYS_ADMIN" {
-				t.Fatal("process observation does not require SYS_ADMIN")
-			}
+			hasAdmin = hasAdmin || capability == "SYS_ADMIN"
 		}
+		if hasAdmin != (profile == "kernel-profile") {
+			t.Fatal("SYS_ADMIN must be exclusive to the explicitly authorized kernel profile")
+		}
+	}
+}
+
+func TestKernelProfileCannotBeGrantedByProbeWithoutPolicy(t *testing.T) {
+	catalog := testProbeCatalog()
+	catalog.Probes[0].Profile = "kernel-profile"
+	if err := catalog.Validate(); err == nil {
+		t.Fatal("probe self-granted kernel observation capability")
 	}
 }
 func TestCatalogRejectsTamperingAndRevokedKeys(t *testing.T) {

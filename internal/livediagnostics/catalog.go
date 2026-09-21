@@ -158,7 +158,7 @@ func (c Catalog) Validate() error {
 		return errors.New("diagnostic catalog requires explicit namespaces, profiles and service account")
 	}
 	for _, p := range c.Policy.Profiles {
-		if p != "host-read" && p != "cluster-read" && p != "process-profile" {
+		if p != "host-read" && p != "cluster-read" && p != "process-profile" && p != "kernel-profile" {
 			return fmt.Errorf("unsupported capability profile %q", p)
 		}
 	}

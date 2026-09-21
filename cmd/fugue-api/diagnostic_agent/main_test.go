@@ -162,6 +162,21 @@ func TestGoSymbolizerResolvesStrippedExecutableOffset(t *testing.T) {
 	if !ok || name != wantedName || file == "" || line <= 0 {
 		t.Fatalf("unexpected symbolization ok=%t name=%q file=%q line=%d", ok, name, file, line)
 	}
+	// Resolve the actual process executable and share large line tables between
+	// processes backed by the same inode, even without a visible root pathname.
+	proc := t.TempDir()
+	for _, pid := range []string{"10", "11"} {
+		if err := os.MkdirAll(filepath.Join(proc, pid), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(executable, filepath.Join(proc, pid, "exe")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded := loadProcessGoSymbolizersAt(proc, []int{10, 11})
+	if len(loaded) != 2 || loaded[10].Resolver != loaded[11].Resolver {
+		t.Fatal("shared executable line tables were parsed twice")
+	}
 }
 
 func TestKernelSymbolizerResolvesNearestVisibleSymbol(t *testing.T) {

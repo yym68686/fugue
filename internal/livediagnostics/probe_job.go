@@ -130,17 +130,22 @@ func BuildProbeJob(c VerifiedCatalog, p Probe, target Target, sessionID, namespa
 			}},
 		})
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: "kube-access", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true})
-	case "host-read", "process-profile":
+	case "host-read", "process-profile", "kernel-profile":
 		pod.HostPID = true
 		root := int64(0)
 		container.SecurityContext.RunAsUser = &root
-		if p.Profile == "process-profile" {
+		if p.Profile == "process-profile" || p.Profile == "kernel-profile" {
 			container.SecurityContext.Capabilities.Add = []corev1.Capability{"SYS_PTRACE", "PERFMON", "SYSLOG"}
 			// The runtime's default AppArmor policy restricts cross-profile proc
 			// reads even with SYS_PTRACE. This administrator-only capability class
 			// explicitly opts the temporary, signed probe out of that peer policy.
 			// It remains non-privileged, read-only, bounded, and without SYS_ADMIN.
 			container.SecurityContext.AppArmorProfile = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined}
+		}
+		if p.Profile == "kernel-profile" {
+			// Debian's additional paranoid>2 check requires SYS_ADMIN even when
+			// PERFMON is present. Keep this opt-in separate from proc/journal reads.
+			container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, "SYS_ADMIN")
 		}
 		for _, m := range []struct{ name, path, mount string }{{"host-proc", "/proc", "/host/proc"}, {"host-cgroup", "/sys/fs/cgroup", "/sys/fs/cgroup"}} {
 			pod.Volumes = append(pod.Volumes, corev1.Volume{Name: m.name, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: m.path, Type: &dir}}})
