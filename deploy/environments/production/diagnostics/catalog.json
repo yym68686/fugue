@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 6,
+    "generation": 7,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -17,6 +17,32 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "process-cpu-sampling",
+        "description": "Bounded process CPU sample counts, cgroup pressure and symbol coverage",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": ["node_process", "platform_component"],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {
+          "collectors": [{"name": "cpu-profile", "kind": "process-cpu-profile", "capture_seconds": 20, "interval_seconds": 120}]
+        }
+      },
+      {
+        "id": "host-service-journal",
+        "description": "Read-only bounded host service logs with explicit coverage and timestamps",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": ["node_process"],
+        "max_duration_seconds": 30,
+        "parameters": {
+          "unit": {"default": "k3s.service", "max_length": 120, "pattern": "^[a-zA-Z0-9_@.:-]+\\.service$"}
+        },
+        "config": {
+          "collectors": [{"name": "service-log", "kind": "host-journal", "unit": "{{param.unit}}", "since_seconds": 900, "interval_seconds": 120, "match": ["took too long", "slow", "timeout", "deadline", "error", "warn", "trace"]}]
+        }
+      },
       {
         "id": "scheduler-pressure",
         "description": "Node CPU/IO pressure and process scheduling counters; no workload restart",
