@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"fugue/internal/observability"
@@ -22,6 +23,33 @@ func TestBoundTelemetryAgentMemoryCapsRetainedQueueAndBatchRisk(t *testing.T) {
 	}
 	if cfg.KubernetesLogMaxPods != observability.DefaultKubernetesLogMaxPods {
 		t.Fatalf("telemetry pod coverage drifted below the configured default: %+v", cfg)
+	}
+}
+
+func TestConfiguredTelemetryBurstFitsWithoutIncreasingPayloadBudget(t *testing.T) {
+	cfg := boundTelemetryAgentMemory(observability.Config{Enabled: true, QueueSize: 8192, KubernetesLogMaxLinesPerCycle: 8000, MemoryLimitBytes: 128 << 20})
+	if cfg.QueueSize != 8192 || cfg.KubernetesLogMaxLinesPerCycle != 8000 {
+		t.Fatalf("configured bounded throughput was silently reduced: queue=%d cycle=%d", cfg.QueueSize, cfg.KubernetesLogMaxLinesPerCycle)
+	}
+	p := observability.NewPipeline(cfg, nil)
+	for i := 0; i < 6000; i++ {
+		if !p.IngestLogLine(t.Context(), "synthetic-burst", "bounded request completed") {
+			t.Fatalf("small-event burst blocked at %d: %+v", i, p.Snapshot())
+		}
+	}
+	if s := p.Snapshot(); s.Received != 6000 || s.Dropped != 0 || s.QueuedBytes > 16<<20 {
+		t.Fatalf("burst violated memory/admission bounds: %+v", s)
+	}
+	large := strings.Repeat("x", 1<<20)
+	rejected := false
+	for i := 0; i < 32; i++ {
+		if !p.IngestLogLine(t.Context(), "synthetic-burst", large) {
+			rejected = true
+			break
+		}
+	}
+	if !rejected || p.Snapshot().QueuedBytes > 16<<20 || cfg.MemoryLimitBytes != 16<<20 || cfg.BatchSize != 128 {
+		t.Fatalf("larger count capacity bypassed payload/batch protection: %+v", p.Snapshot())
 	}
 }
 

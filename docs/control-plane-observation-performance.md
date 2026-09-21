@@ -72,3 +72,18 @@ the existing revoked-key, removed-topology and superseded-publication tests
 remain mandatory. The three-read synthetic 1 MiB benchmark measured 22.2 ms /
 3.15 MB without reuse and 7.88 ms / 1.05 MB with reuse on arm64; this is not an
 end-to-end production latency measurement.
+
+Telemetry keeps its 16 MiB retained-payload admission limit, 128-event export
+batch, eight source workers and 1,000-line per-source chunk. Its bounded queue
+and cycle ceilings now permit the declared defaults of 32,768 slots and 20,000
+lines, rather than silently reducing them to 4,096 and 4,000. The queue slot
+array adds at most 1 MiB; payload bytes and critical-event reserves remain
+independently enforced. A six-thousand-event regression checks a configured
+burst fits while larger payloads still hit the unchanged byte limit. Cursor
+rejection, catch-up deadline, fairness and source coverage tests remain required.
+
+The production source snapshot established a cycle-budget stop at four edge
+sources with no read errors and about 0.8 MiB / 1,207 events queued. This identifies
+the count ceiling as a throughput constraint; it does not attribute every delay
+to that ceiling. Verify backlog, read errors, cursor gaps, export drops, CPU and
+memory after deployment, including log bursts and source rotations.

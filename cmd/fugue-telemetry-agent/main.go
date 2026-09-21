@@ -21,11 +21,11 @@ import (
 const (
 	telemetryAgentGoMemoryLimitBytes     int64 = 160 << 20
 	telemetryAgentMemoryLimitBytes       int64 = 16 << 20
-	telemetryAgentQueueSize                    = 4096
+	telemetryAgentQueueSize                    = observability.DefaultQueueSize
 	telemetryAgentBatchSize                    = 128
 	telemetryAgentKubernetesLogTailLines int64 = 1000
 	telemetryAgentKubernetesLogMaxPods         = observability.DefaultKubernetesLogMaxPods
-	telemetryAgentKubernetesLogMaxLines        = 4000
+	telemetryAgentKubernetesLogMaxLines        = observability.DefaultKubernetesLogMaxLinesPerCycle
 )
 
 func main() {
@@ -84,6 +84,8 @@ func main() {
 
 func boundTelemetryAgentMemory(cfg observability.Config) observability.Config {
 	cfg = cfg.Normalize()
+	// Queue payload bytes are independently bounded by admission. Count limits
+	// must allow the declared default throughput; the slot array is at most 1 MiB.
 	if cfg.MemoryLimitBytes > telemetryAgentMemoryLimitBytes {
 		cfg.MemoryLimitBytes = telemetryAgentMemoryLimitBytes
 	}
