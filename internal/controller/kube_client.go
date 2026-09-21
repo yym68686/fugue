@@ -442,7 +442,9 @@ func (c *kubeClient) deleteJob(ctx context.Context, namespace, name string) erro
 
 func (c *kubeClient) listNodeNames(ctx context.Context) ([]string, error) {
 	var nodeList kubeNodeList
-	if _, err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes", nil, &nodeList); err != nil {
+	// Callers re-read each selected Node before evaluating capacity/readiness.
+	// Enumeration consumes only names; avoid transferring spec/status twice.
+	if _, err := c.doMetadataList(ctx, "/api/v1/nodes", &nodeList); err != nil {
 		return nil, err
 	}
 

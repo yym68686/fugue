@@ -63,6 +63,15 @@ read using full JSON. Operation evidence that consumes ReplicaSet status still
 uses the full representation. This reduces serialization and response bytes
 without weakening the set of Pods checked before draining a release.
 
+Node-name enumeration also requests `PartialObjectMetadataList`, with the same
+406 fallback. Readiness lists and subsequent per-node capacity, storage and
+scheduling checks continue to fetch full current Node objects; no state cache
+is introduced. Runtime HTTP evidence showed full ~130 KiB Node lists followed
+by individual Node reads, while enumeration used only the names. Verify the
+`metadata_only` request class and response-byte reduction after rollout. This
+reduces transferred/serialized fields, not the number of safety checks or the
+O(nodes) enumeration complexity.
+
 Route source and convergence binding reads reuse the existing invocation-local
 artifact reader. Reference validation and child selection share each immutable
 artifact load; lane selection, fences, topology, signatures and the final route

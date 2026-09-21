@@ -100,3 +100,79 @@ func TestNameOnlyListRetriesRejectedRepresentationWithoutChangingRead(t *testing
 		t.Fatalf("fallback: %v %v calls=%d", names, err, calls.Load())
 	}
 }
+
+func TestNodeNameEnumerationRequestsMetadataButStateReadsRemainFresh(t *testing.T) {
+	var metadataReads, fullReads, singleReads atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.RawQuery != "" {
+			t.Errorf("changed Node read: %s %s", r.Method, r.URL)
+		}
+		if r.URL.Path == "/api/v1/nodes/worker" {
+			singleReads.Add(1)
+			if r.Header.Get("Accept") != "application/json" {
+				t.Error("individual Node read lost spec/status")
+			}
+			fmt.Fprint(w, `{"metadata":{"name":"worker"},"spec":{"unschedulable":true},"status":{"conditions":[{"type":"Ready","status":"False"}]}}`)
+			return
+		}
+		if r.URL.Path != "/api/v1/nodes" {
+			t.Errorf("wrong Node path %s", r.URL.Path)
+		}
+		if r.Header.Get("Accept") == metadataListAccept {
+			metadataReads.Add(1)
+			fmt.Fprint(w, `{"kind":"PartialObjectMetadataList","items":[{"metadata":{"name":"worker"}},{"metadata":{"name":" "}},{"metadata":{"name":"second"}}]}`)
+		} else {
+			fullReads.Add(1)
+			fmt.Fprint(w, `{"items":[{"metadata":{"name":"worker"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}`)
+		}
+	}))
+	defer server.Close()
+	c := &kubeClient{client: server.Client(), baseURL: server.URL}
+	names, err := c.listNodeNames(t.Context())
+	if err != nil || !reflect.DeepEqual(names, []string{"worker", "second"}) {
+		t.Fatalf("name enumeration changed: %v %v", names, err)
+	}
+	ready, err := c.listNodeReadyStates(t.Context())
+	if err != nil || !ready["worker"] {
+		t.Fatalf("readiness list changed: %v %v", ready, err)
+	}
+	node, found, err := c.getNode(t.Context(), "worker")
+	if err != nil || !found || !node.Spec.Unschedulable || kubeNodeReady(node) {
+		t.Fatalf("fresh individual Node state lost: %+v %v", node, err)
+	}
+	if metadataReads.Load() != 1 || fullReads.Load() != 1 || singleReads.Load() != 1 {
+		t.Fatal("Node read paths unexpectedly reused or changed representation")
+	}
+}
+
+func TestNodeNameEnumerationFallbackAndFailure(t *testing.T) {
+	for _, status := range []int{http.StatusNotAcceptable, http.StatusForbidden, http.StatusInternalServerError} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.String() != "/api/v1/nodes" {
+					t.Error("changed fallback URL", r.URL)
+				}
+				if r.Header.Get("Accept") == metadataListAccept {
+					http.Error(w, "unavailable", status)
+					return
+				}
+				if r.Header.Get("Accept") != "application/json" {
+					t.Error("invalid fallback representation")
+				}
+				fmt.Fprint(w, `{"items":[{"metadata":{"name":"worker"}}]}`)
+			}))
+			defer server.Close()
+			c := &kubeClient{client: server.Client(), baseURL: server.URL}
+			names, err := c.listNodeNames(t.Context())
+			if status == http.StatusNotAcceptable {
+				if err != nil || !reflect.DeepEqual(names, []string{"worker"}) || calls != 2 {
+					t.Fatalf("fallback failed: %v %v %d", names, err, calls)
+				}
+			} else if err == nil || calls != 1 {
+				t.Fatalf("API failure hidden or retried: %v %d", err, calls)
+			}
+		})
+	}
+}
