@@ -86,7 +86,7 @@ func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (an
 		}
 		if mode == "cgroup-dwarf" {
 			for _, symfs := range []bool{false, true} {
-				args := []string{"report", "--stdio", "--stdio-color", "never", "--no-children", "--call-graph", "none", "--percent-limit", "0", "--field-separator", "|", "--fields", "overhead,sample,overhead_sys,overhead_us,tgid,comm,dso,symbol", "--sort", "tgid,comm,dso,symbol", "-i", file}
+				args := []string{"report", "--stdio", "--stdio-color", "never", "--no-children", "--call-graph", "none", "--percent-limit", "0", "--field-separator", "|", "--fields", "overhead,sample,overhead_sys,overhead_us,pid,comm,dso,symbol", "--sort", "pid,comm,dso,symbol", "-i", file}
 				name := "machine_report"
 				if symfs {
 					args = append(args, "--symfs", filepath.Join(hostProc, strconv.Itoa(pids[0]), "root"))
@@ -99,6 +99,9 @@ func perfCaptureCheck(ctx context.Context, req livediagnostics.ProbeRequest) (an
 				}
 				if cut {
 					gaps = append(gaps, name+" truncated")
+				}
+				if strings.Contains(stderr, "Error:") || len(raw) == 0 {
+					gaps = append(gaps, name+" did not produce a valid report")
 				}
 			}
 		}

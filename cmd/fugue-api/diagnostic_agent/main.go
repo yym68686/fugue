@@ -1030,8 +1030,8 @@ func runPerfMachineReport(dataPath, targetRoot string) ([]byte, error) {
 		"perf", "report",
 		"--stdio", "--stdio-color", "never", "--no-children", "--call-graph", "none",
 		"--percent-limit", "0", "--field-separator", perfFieldSeparator,
-		"--fields", "overhead,sample,overhead_sys,overhead_us,tgid,comm,dso,symbol",
-		"--sort", "tgid,comm,dso,symbol", "--symfs", targetRoot, "-i", dataPath,
+		"--fields", "overhead,sample,overhead_sys,overhead_us,pid,comm,dso,symbol",
+		"--sort", "pid,comm,dso,symbol", "--symfs", targetRoot, "-i", dataPath,
 	)
 }
 
@@ -1042,6 +1042,9 @@ func isEmptyPerfData(output []byte) bool {
 func parsePerfMachineReport(raw []byte) ([]perfReportEntry, int, error) {
 	entries := make([]perfReportEntry, 0, 64)
 	expectedSamples := parsePerfSampleTotal(raw)
+	if expectedSamples < 0 && !isEmptyPerfData(raw) {
+		return nil, expectedSamples, errors.New("perf report has no valid sample header; tool errors cannot be treated as zero samples")
+	}
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	scanner.Buffer(make([]byte, 4096), 4<<20)
 	for scanner.Scan() {

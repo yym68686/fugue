@@ -122,6 +122,11 @@ func TestParsePerfMachineReportRejectsMissingRows(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a non-empty report without histogram rows to fail")
 	}
+	for _, invalid := range []string{"", "Error: unknown sort key", "Usage: perf report"} {
+		if _, _, err := parsePerfMachineReport([]byte(invalid)); err == nil {
+			t.Fatalf("tool failure became zero samples: %q", invalid)
+		}
+	}
 }
 
 func TestGoSymbolizerResolvesStrippedExecutableOffset(t *testing.T) {
