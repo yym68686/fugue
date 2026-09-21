@@ -276,6 +276,7 @@ func TestSafeRolloutLiveAppTrafficProof(t *testing.T) {
 		Releases []model.AppRelease     `json:"releases"`
 		Nodes    []model.EdgeNode       `json:"nodes"`
 		Weight   int                    `json:"candidate_weight"`
+		Machines []model.Machine        `json:"machines,omitempty"`
 	}
 	if err = json.Unmarshal(raw, &input); err != nil {
 		t.Fatal(err)
@@ -291,6 +292,9 @@ func TestSafeRolloutLiveAppTrafficProof(t *testing.T) {
 		}
 	}
 	observer := storeSafeRolloutEdgeBundleObserver{Store: staticEdgeNodeLister{nodes: input.Nodes}, Traffic: safeRolloutTrafficStoreFixture{policy: input.Policy, releases: input.Releases}}
+	if input.Machines != nil {
+		observer.Membership = &rolloutMembershipFixture{machines: input.Machines}
+	}
 	got, err := observer.observe(context.Background(), input.App, target, input.Weight, time.Time{})
 	if err != nil {
 		t.Fatal(err)
@@ -299,5 +303,56 @@ func TestSafeRolloutLiveAppTrafficProof(t *testing.T) {
 	t.Log(string(result))
 	if !got.Ready || got.RequiredNodes == 0 || got.ReadyNodes != got.RequiredNodes {
 		t.Fatal("live Edge app traffic proof did not match release metadata")
+	}
+}
+
+type rolloutMembershipFixture struct {
+	machines []model.Machine
+	err      error
+}
+
+func (f *rolloutMembershipFixture) ListMachines(string, bool) ([]model.Machine, error) {
+	return f.machines, f.err
+}
+
+func TestSafeRolloutMembershipUsesExplicitPolicyNotHeartbeatHistory(t *testing.T) {
+	now := time.Now().UTC()
+	for _, scenario := range []string{"disabled history", "missing declared", "unhealthy declared", "unknown policy", "ambiguous policy", "policy read failed", "disabled during wait"} {
+		t.Run(scenario, func(t *testing.T) {
+			o, a, r, node, proof := appTrafficObserverFixture(t, now)
+			old := node
+			old.ID = "edge-old"
+			old.Healthy = false
+			old.LastHeartbeatAt = nil
+			inventory := &changingEdgeNodeLister{nodes: []model.EdgeNode{node, old}}
+			o.Store = inventory
+			policy := &rolloutMembershipFixture{machines: []model.Machine{{ClusterNodeName: node.ID, Policy: model.MachinePolicy{AllowEdge: true}}, {ClusterNodeName: old.ID, Policy: model.MachinePolicy{AllowEdge: false}}}}
+			o.Membership = policy
+			switch scenario {
+			case "missing declared":
+				inventory.nodes = inventory.nodes[1:]
+			case "unhealthy declared":
+				inventory.nodes[0].Healthy = false
+			case "unknown policy":
+				policy.machines = policy.machines[:1]
+			case "ambiguous policy":
+				policy.machines = append(policy.machines, policy.machines[0])
+			case "policy read failed":
+				policy.err = fmt.Errorf("offline")
+			case "disabled during wait":
+				o.Probe = func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+					policy.machines[0].Policy.AllowEdge = false
+					return proof, nil
+				}
+			}
+			got, err := o.observe(context.Background(), a, r, 20, now.Add(-time.Minute))
+			if scenario == "disabled history" {
+				if err != nil || !got.Ready || got.RequiredNodes != 1 {
+					t.Fatalf("revoked Edge history blocked current membership: %+v %v", got, err)
+				}
+			} else if got.Ready {
+				t.Fatalf("missing/invalid membership proved serving: %+v %v", got, err)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,13 +66,57 @@ type safeRolloutDrainMetrics struct {
 }
 
 type storeSafeRolloutEdgeBundleObserver struct {
-	Store    edgeNodeLister
-	Timeout  time.Duration
-	Interval time.Duration
-	Sleep    func(context.Context, time.Duration) error
-	Now      func() time.Time
-	Traffic  safeRolloutTrafficStore
-	Probe    safeRolloutRouteProbe
+	Store      edgeNodeLister
+	Timeout    time.Duration
+	Interval   time.Duration
+	Sleep      func(context.Context, time.Duration) error
+	Now        func() time.Time
+	Traffic    safeRolloutTrafficStore
+	Probe      safeRolloutRouteProbe
+	Membership safeRolloutEdgeMembership
+}
+
+type safeRolloutEdgeMembership interface {
+	ListMachines(tenantID string, platformAdmin bool) ([]model.Machine, error)
+}
+
+// Historical heartbeats do not declare membership. Explicit machine policy can
+// remove an Edge role; an unhealthy or absent declared Edge remains required.
+func (o storeSafeRolloutEdgeBundleObserver) requiredNodes() ([]model.EdgeNode, error) {
+	nodes, _, err := o.Store.ListActiveEdgeNodes("")
+	if err != nil || o.Membership == nil {
+		return nodes, err
+	}
+	machines, err := o.Membership.ListMachines("", true)
+	if err != nil {
+		return nil, fmt.Errorf("read desired Edge membership: %w", err)
+	}
+	policies := make(map[string]bool, len(machines))
+	for _, machine := range machines {
+		id := strings.TrimSpace(machine.ClusterNodeName)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := policies[id]; duplicate {
+			return nil, fmt.Errorf("ambiguous desired Edge membership")
+		}
+		policies[id] = machine.Policy.AllowEdge
+	}
+	present := make(map[string]bool, len(nodes))
+	out := make([]model.EdgeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if enabled, explicit := policies[node.ID]; explicit && !enabled {
+			continue
+		}
+		present[node.ID] = true
+		out = append(out, node)
+	}
+	for id, enabled := range policies {
+		if enabled && !present[id] {
+			return nil, fmt.Errorf("declared Edge %s is missing from inventory", id)
+		}
+	}
+	return out, nil
 }
 
 type edgeNodeLister interface {
@@ -98,6 +143,9 @@ func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ct
 	for {
 		observation, err := o.observeWait(ctx, app, release, targetCandidateWeight, since, &wait)
 		if err != nil {
+			if (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) && last.Summary != nil {
+				return last, err
+			}
 			return observation, err
 		}
 		last = observation
@@ -135,7 +183,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 		return observation, fmt.Errorf("app traffic target changed during edge confirmation")
 	}
 	observation.Summary["expected_app_traffic_digest"] = digest
-	nodes, _, err := o.Store.ListActiveEdgeNodes("")
+	nodes, err := o.requiredNodes()
 	if err != nil {
 		return observation, err
 	}
@@ -223,7 +271,7 @@ func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app
 	}
 	// Confirm that the inventory used for this batch still describes serving
 	// nodes. A topology change requires another complete observation batch.
-	after, _, err := o.Store.ListActiveEdgeNodes("")
+	after, err := o.requiredNodes()
 	if err != nil {
 		return observation, err
 	}

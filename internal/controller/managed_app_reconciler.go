@@ -2940,7 +2940,6 @@ func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind
 	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{
 		TenantID:      app.TenantID,
 		AppID:         app.ID,
-		ActiveOnly:    true,
 		PlatformAdmin: true,
 	})
 	if err != nil {
@@ -2948,10 +2947,13 @@ func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind
 	}
 	for _, release := range releases {
 		switch strings.TrimSpace(release.Status) {
-		case model.AppReleaseStatusCreating, model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining:
+		case model.AppReleaseStatusCreating, model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining, model.AppReleaseStatusFailed:
 		default:
 			continue
 		}
+		// A failed code attempt can still be referenced by an Edge's current
+		// artifact or have in-flight requests. Only explicit retirement after
+		// traffic/drain confirmation authorizes deleting its workload identity.
 		for kind, name := range map[string]string{
 			"Deployment": strings.TrimSpace(release.DeploymentName),
 			"Service":    strings.TrimSpace(release.ServiceName),

@@ -485,6 +485,7 @@ func (s *Service) waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx context.Contex
 			"phase":            "canary_edge_bundle_wait",
 			"candidate_weight": fmt.Sprintf("%d", weight),
 			"reason":           err.Error(),
+			"waiting_nodes":    strings.Join(observation.WaitingNodes, ","),
 		})
 		return false
 	}
@@ -593,7 +594,7 @@ func (s *Service) edgeBundleObserverForSafeRollout() safeRolloutEdgeBundleObserv
 	if s != nil {
 		sleep = s.safeRolloutSleep
 	}
-	return storeSafeRolloutEdgeBundleObserver{Store: s.Store, Traffic: s.Store, Sleep: sleep}
+	return storeSafeRolloutEdgeBundleObserver{Store: s.Store, Traffic: s.Store, Membership: s.Store, Sleep: sleep}
 }
 
 func (s *Service) recheckSafeRolloutCandidateBeforeRetire(ctx context.Context, op model.Operation, state *safeRolloutState, phase string) bool {
@@ -1141,6 +1142,18 @@ func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op
 	app = s.Renderer.PrepareApp(app)
 	state.CandidateApp = app
 	revision := safeRolloutCandidateRevision(state.Candidate.ID)
+	// Persist the independent identity before creating Kubernetes objects so a
+	// concurrent ordinary reconciliation cannot mistake a starting revision for
+	// stale state. This does not claim that the release is ready or serving.
+	candidate := state.Candidate
+	candidate.DeploymentName = runtime.RuntimeAppResourceNameWithOptions(app, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision})
+	candidate.ServiceName = runtime.RuntimeAppServiceNameWithOptions(app, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision})
+	candidate.UpstreamURL = s.controllerRevisionServiceURLForApp(ctx, app, revision)
+	stored, err := s.Store.UpdateAppRelease(candidate)
+	if err != nil {
+		return fmt.Errorf("persist candidate resource identity before apply: %w", err)
+	}
+	state.Candidate = stored
 	objects := s.Renderer.BuildManagedAppRevisionChildObjects(app, scheduling, postgresPlacements, nil, revision)
 	objects = filterSafeRolloutCandidateRevisionObjects(objects, revision)
 	if err := s.validateAppStoragePlacement(ctx, client, app, scheduling, objects); err != nil {
