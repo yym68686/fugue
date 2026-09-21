@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 29,
+    "generation": 30,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,19 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "process-page-faults",
+        "description": "Bounded major-fault addresses attributed to stable process file mappings",
+        "image": "$runner",
+        "profile": "kernel-profile",
+        "target_types": ["node_process"],
+        "max_duration_seconds": 60,
+        "parameters": {},
+        "config": {"collectors": [
+          {"name": "compaction-window", "kind": "host-loopback-metrics", "port": 2381, "interval_seconds": 15, "fields": ["etcd_server_slow_apply_total", "etcd_debugging_mvcc_index_compaction_pause_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_pause_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_total_duration_milliseconds", "etcd_debugging_mvcc_db_compaction_last", "etcd_debugging_mvcc_db_compaction_keys_total", "go_gc_duration_seconds", "process_cpu_seconds_total"]},
+          {"name": "page-faults", "kind": "process-page-faults", "capture_seconds": 20, "interval_seconds": 120}
+        ]}
+      },
       {
         "id": "kubernetes-build-provenance",
         "description": "Selected embedded storage, API server and HTTP transport dependency versions from the running executable",

@@ -100,6 +100,16 @@ exported. Missing requested modules degrade evidence; a local replacement is
 explicitly marked and does not establish its source contents. Module metadata
 identifies what the binary records, not an independent source or binary audit.
 
+The independent `process-page-faults` collector uses perf software major-fault
+events for one frozen host process selection. A single capture lasts 5-30 seconds
+with a 4 MiB data bound and a 192 MiB sampler RSS guard. Reports keep realtime
+timestamps, fault/instruction addresses and at most 8,192 events. File attribution
+requires identical process lifetime, cgroup membership and address mappings
+before and after capture; mappings are identified by range, device, inode and
+offset. No mapped contents or command-line values are read. Lost/unparsed events,
+unresolved mappings and reached bounds degrade evidence. Fault occurrence alone
+does not measure IO latency, identify a lock owner or prove a request's cause.
+
 Runtime snapshots deduplicate shared Unix sockets across helper processes and
 bind each row to the socket's kernel-reported peer PID in the frozen target set.
 Only that provider's lifetime and socket identity determine snapshot continuity;
