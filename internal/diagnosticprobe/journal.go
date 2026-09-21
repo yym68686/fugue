@@ -41,7 +41,7 @@ func hostJournal(ctx context.Context, req livediagnostics.ProbeRequest, c Collec
 		if len(entries) == 0 {
 			continue
 		}
-		raw, truncated, err := diagnosticCommand(ctx, 2<<20, "journalctl", "--directory="+dir, "--unit="+c.Unit, "--since=@"+strconv.FormatInt(since.Unix(), 10), "--until=@"+strconv.FormatInt(until.Unix(), 10), "--lines=2000", "--reverse", "--output=json", "--no-pager", "--quiet")
+		raw, truncated, err := diagnosticCommand(ctx, 2<<20, "journalctl", "--directory="+dir, "--unit="+c.Unit, "--since=@"+strconv.FormatInt(since.Unix(), 10), "--until=@"+strconv.FormatInt(until.Unix(), 10), "--lines=2000", "--reverse", "--output=json", "--output-fields=MESSAGE,__REALTIME_TIMESTAMP,_BOOT_ID", "--no-pager", "--quiet")
 		if err != nil {
 			gaps = append(gaps, fmt.Sprintf("journal reader for %s failed: %v", path, err))
 			continue
@@ -69,6 +69,7 @@ func hostJournal(ctx context.Context, req livediagnostics.ProbeRequest, c Collec
 func journalEvidence(raw []byte, patterns []string) (map[string]any, error) {
 	counts := map[string]int{}
 	examples := []any{}
+	byPattern := map[string][]any{}
 	rows := 0
 	var oldest, newest time.Time
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
@@ -100,22 +101,26 @@ func journalEvidence(raw []byte, patterns []string) (map[string]any, error) {
 			newest = ts
 		}
 		matched := len(patterns) == 0
+		safe := safeText(message)
+		if len(safe) > 2000 {
+			safe = safe[:2000]
+		}
+		example := map[string]any{"at": ts, "boot_id": boot, "message": safe}
 		for _, pattern := range patterns {
 			if strings.Contains(message, pattern) {
 				counts[pattern]++
 				matched = true
+				if len(byPattern[pattern]) < 8 {
+					byPattern[pattern] = append(byPattern[pattern], example)
+				}
 			}
 		}
 		if matched && len(examples) < 40 {
-			safe := safeText(message)
-			if len(safe) > 2000 {
-				safe = safe[:2000]
-			}
-			examples = append(examples, map[string]any{"at": ts, "boot_id": boot, "message": safe})
+			examples = append(examples, example)
 		}
 	}
 	if scanner.Err() != nil {
 		parseErr = errors.New("journal entry exceeds the parser byte budget")
 	}
-	return map[string]any{"entries": rows, "oldest_observed": oldest, "newest_observed": newest, "pattern_counts": counts, "examples": examples}, parseErr
+	return map[string]any{"entries": rows, "oldest_observed": oldest, "newest_observed": newest, "pattern_counts": counts, "examples": examples, "examples_by_pattern": byPattern}, parseErr
 }

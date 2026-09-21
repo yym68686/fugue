@@ -72,3 +72,20 @@ func TestJournalEvidenceHasTimestampRedactionAndPartialCoverage(t *testing.T) {
 		t.Fatal("accepted unbounded host source")
 	}
 }
+
+func TestJournalRetainsRarePatternsBehindFrequentMessages(t *testing.T) {
+	line := `{"__REALTIME_TIMESTAMP":"1789960000000000","MESSAGE":"frequent warning"}` + "\n"
+	rare := `{"__REALTIME_TIMESTAMP":"1789960000000001","MESSAGE":"slow storage token=fixture-secret"}` + "\n"
+	v, err := journalEvidence([]byte(strings.Repeat(line, 80)+rare), []string{"warning", "slow storage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := v["examples_by_pattern"].(map[string][]any)
+	if len(groups["warning"]) != 8 || len(groups["slow storage"]) != 1 {
+		t.Fatalf("rare evidence starved: %v", groups)
+	}
+	raw, _ := json.Marshal(v)
+	if strings.Contains(string(raw), "fixture-secret") {
+		t.Fatal("pattern-specific evidence bypassed redaction")
+	}
+}
