@@ -32,6 +32,22 @@ func TestFaultEventsRetainRealtimeAddressesAndReportLoss(t *testing.T) {
 	}
 }
 
+func TestFaultPerfArgsDeclareEventBeforeCgroup(t *testing.T) {
+	args := faultPerfArgs("system.slice/service.scope", 20, "/tmp/faults.data")
+	event, group := -1, -1
+	for i, arg := range args {
+		if arg == "-e" {
+			event = i
+		}
+		if arg == "-G" {
+			group = i
+		}
+	}
+	if event < 0 || group < 0 || event > group || args[event+1] != "major-faults" || args[group+1] != "system.slice/service.scope" {
+		t.Fatalf("perf selectors are not ordered safely: %v", args)
+	}
+}
+
 func TestFaultMappingRequiresStableRangesOffsetsAndFileIdentity(t *testing.T) {
 	raw := "00400000-00410000 r-xp 00000000 08:01 123 /usr/bin/server\n7f000000-7f100000 rw-s 00001000 08:01 456 /var/lib/store/db\n7f200000-7f300000 rw-p 00000000 00:00 0\n"
 	maps, err := parseProcessMappings(raw)

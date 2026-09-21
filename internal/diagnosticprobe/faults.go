@@ -17,6 +17,10 @@ import (
 
 const faultCaptureLimit = 4 << 20
 
+func faultPerfArgs(cgroup string, seconds int, output string) []string {
+	return []string{"record", "-a", "-e", "major-faults", "-c", "1", "-G", cgroup, "-d", "-T", "--clockid", "CLOCK_REALTIME", "--max-size", "4M", "--mmap-pages", "64", "--no-buildid", "--no-buildid-cache", "--no-buildid-mmap", "-o", output, "--", "sleep", strconv.Itoa(seconds)}
+}
+
 type processMapping struct {
 	start, end, offset               uint64
 	permissions, device, inode, path string
@@ -61,7 +65,9 @@ func processPageFaults(ctx context.Context, req livediagnostics.ProbeRequest, c 
 	defer os.RemoveAll(dir)
 	dataFile := filepath.Join(dir, "perf.data")
 	started := time.Now().UTC()
-	args := []string{"record", "-a", "-G", cgroup, "-e", "major-faults", "-c", "1", "-d", "-T", "--clockid", "CLOCK_REALTIME", "--max-size", "4M", "--mmap-pages", "64", "--no-buildid", "--no-buildid-cache", "--no-buildid-mmap", "-o", dataFile, "--", "sleep", strconv.Itoa(c.CaptureSeconds)}
+	// perf requires event selectors before cgroup filters; otherwise it exits
+	// before opening the capture and the report would contain no fault evidence.
+	args := faultPerfArgs(cgroup, c.CaptureSeconds, dataFile)
 	_, cut, recordResources, recordErr := observedCommand(ctx, 16<<10, 192<<20, "perf", args...)
 	finished := time.Now().UTC()
 	result := map[string]any{"schema": "fugue.process-page-faults.v1", "event": "major-faults", "sample_period": 1, "clock": "CLOCK_REALTIME", "started_at": started, "finished_at": finished, "requested_seconds": c.CaptureSeconds, "capture_cgroup": cgroup, "target_identities": identities, "capture_limit_bytes": faultCaptureLimit, "record_resources": recordResources,
