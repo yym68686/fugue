@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sigs.k8s.io/yaml"
 	"sort"
 	"strings"
 	"time"
@@ -82,6 +83,10 @@ func hostKubernetesAuditAt(ctx context.Context, req livediagnostics.ProbeRequest
 	groups := map[string]*auditGroup{}
 	sources := []any{}
 	gaps := []string{}
+	policy, policyGap := auditPolicyEvidence(root, c.PolicyPath)
+	if policyGap != "" {
+		gaps = append(gaps, policyGap)
+	}
 	seen := map[string]bool{}
 	var oldest time.Time
 	remaining := int64(32 << 20)
@@ -174,11 +179,50 @@ func hostKubernetesAuditAt(ctx context.Context, req livediagnostics.ProbeRequest
 		}
 		return rows[i].Count > rows[j].Count
 	})
-	result := map[string]any{"since": since, "until": until, "oldest_observed": oldest, "completed_requests": matched, "groups": rows, "sources": sources, "note": "ResponseComplete only; watch durations include stream lifetime; overlapping windows must not be summed"}
+	result := map[string]any{"since": since, "until": until, "oldest_observed": oldest, "completed_requests": matched, "groups": rows, "sources": sources, "audit_policy": policy, "note": "ResponseComplete only; watch durations include stream lifetime; overlapping windows must not be summed; policy-excluded events are not observable"}
 	if len(gaps) > 0 {
-		return partialValue{Value: result, Gaps: gaps, Truncated: true}, nil
+		truncated := false
+		for _, gap := range gaps {
+			truncated = truncated || strings.Contains(gap, "budget exhausted") || strings.Contains(gap, "byte limit") || strings.Contains(gap, "deadline")
+		}
+		return partialValue{Value: result, Gaps: gaps, Truncated: truncated}, nil
 	}
 	return result, nil
+}
+
+func auditPolicyEvidence(root, path string) (any, string) {
+	if !strings.HasPrefix(path, "/etc/") || filepath.Clean(path) != path {
+		return nil, "audit policy coverage is unavailable; file coverage does not imply complete request coverage"
+	}
+	raw, err := readBounded(filepath.Join(root, path), 64<<10)
+	if err != nil {
+		return nil, "audit policy cannot be read: " + boundedError(err)
+	}
+	var policy struct {
+		Kind       string   `json:"kind"`
+		OmitStages []string `json:"omitStages"`
+		Rules      []struct {
+			Level           string   `json:"level"`
+			Verbs           []string `json:"verbs,omitempty"`
+			Users           []string `json:"users,omitempty"`
+			UserGroups      []string `json:"userGroups,omitempty"`
+			Namespaces      []string `json:"namespaces,omitempty"`
+			NonResourceURLs []string `json:"nonResourceURLs,omitempty"`
+			Resources       []struct {
+				Group         string   `json:"group"`
+				Resources     []string `json:"resources"`
+				ResourceNames []string `json:"resourceNames,omitempty"`
+			} `json:"resources,omitempty"`
+			OmitStages []string `json:"omitStages,omitempty"`
+		} `json:"rules"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &policy); err != nil || policy.Kind != "Policy" || len(policy.Rules) == 0 {
+		return nil, "audit policy is invalid or empty"
+	}
+	encoded, _ := json.Marshal(policy)
+	var safe any
+	json.Unmarshal(encoded, &safe)
+	return redactJSON(safe), "audit request coverage is constrained by the reported policy; excluded requests cannot be attributed"
 }
 
 func aggregateAuditEvent(groups map[string]*auditGroup, e auditEvent) bool {

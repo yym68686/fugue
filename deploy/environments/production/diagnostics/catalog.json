@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 10,
+    "generation": 11,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,18 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "perf-capture-comparison",
+        "description": "Compare frozen PID and cgroup CPU capture with raw bounded perf summaries",
+        "image": "$runner",
+        "profile": "kernel-profile",
+        "target_types": ["node_process", "platform_component"],
+        "max_duration_seconds": 60,
+        "parameters": {},
+        "config": {
+          "collectors": [{"name": "capture-comparison", "kind": "perf-capture-check", "interval_seconds": 120}]
+        }
+      },
       {
         "id": "kubernetes-audit-requests",
         "description": "Bounded audit request rates, callers, cache options and completed-request durations",

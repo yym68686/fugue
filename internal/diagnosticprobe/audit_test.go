@@ -61,8 +61,8 @@ func TestAuditReaderWindowDuplicateStagesAndMissingCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, ok := v.(map[string]any)
-	if !ok || result["completed_requests"] != 1 {
+	partial, ok := v.(partialValue)
+	if !ok || partial.Value.(map[string]any)["completed_requests"] != 1 {
 		t.Fatalf("window or dedup incorrect: %+v", v)
 	}
 	if err := os.WriteFile(path, []byte(line("recent", "ResponseComplete", now.Add(-time.Second))), 0600); err != nil {
@@ -71,5 +71,21 @@ func TestAuditReaderWindowDuplicateStagesAndMissingCoverage(t *testing.T) {
 	v, err = hostKubernetesAuditAt(context.Background(), req, c, root)
 	if _, ok := v.(partialValue); err != nil || !ok {
 		t.Fatalf("partial history not marked: %v %v", v, err)
+	}
+}
+
+func TestAuditPolicyExclusionsRemainVisibleWithoutExposingOtherYAML(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	policy := "kind: Policy\nomitStages: [RequestReceived]\nrules:\n  - level: Metadata\n    verbs: [create, update, patch, delete]\n  - level: None\nsecret: fixture-private\n"
+	if err := os.WriteFile(filepath.Join(root, "etc/policy.yaml"), []byte(policy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	v, gap := auditPolicyEvidence(root, "/etc/policy.yaml")
+	raw, _ := json.Marshal(v)
+	if gap == "" || !strings.Contains(string(raw), "None") || strings.Contains(string(raw), "fixture-private") {
+		t.Fatalf("incorrect policy evidence: %s %s", raw, gap)
 	}
 }
