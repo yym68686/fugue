@@ -16,6 +16,22 @@ const appWorkloadMigrationAnnotation = "fugue.pro/workload-label-migration"
 
 var errAppServiceWorkloadPreflight = errors.New("Service workload migration is pending")
 
+// A started metadata migration must remain recoverable when a later image or
+// storage preflight rejects the desired code release.
+func (c *kubeClient) resumeAppWorkloadMigration(ctx context.Context, namespace, name, appID, tenantID string) error {
+	deployment, found, err := c.getRawObject(ctx, deploymentAPIPath(namespace, name))
+	if err != nil || !found {
+		return err
+	}
+	annotations := objectStringMapValue(objectMapField(deployment, "metadata")["annotations"])
+	if annotations[appWorkloadMigrationAnnotation] == "" {
+		return nil
+	}
+	return c.prepareAppServiceWorkload(ctx, namespace, name, map[string]string{
+		runtime.FugueLabelAppID: appID, runtime.FugueLabelTenantID: tenantID, runtime.FugueLabelAppWorkload: name,
+	})
+}
+
 // Services are applied before Deployments. Label existing workloads first so
 // narrowing a Service never waits for a replacement Pod to regain endpoints.
 func (c *kubeClient) prepareAppServiceWorkloads(ctx context.Context, objects []map[string]any) error {

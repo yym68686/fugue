@@ -249,6 +249,9 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 }
 
 func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, recoverStoredBaseline bool, syncStoredManagedAppSnapshot bool, rolloutPrepared bool) error {
+	if err := client.resumeAppWorkloadMigration(ctx, namespace, runtime.RuntimeAppResourceName(app), app.ID, app.TenantID); err != nil {
+		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, err)
+	}
 	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
 		app = normalizedApp
 	}

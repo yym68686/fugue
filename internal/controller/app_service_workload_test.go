@@ -100,7 +100,10 @@ func TestAppServiceWorkloadMigrationOrdersAndRecoversWrites(t *testing.T) {
 						t.Fatal("failed migration did not retain resumable state", err)
 					}
 					client = &kubeClient{client: server.Client(), baseURL: server.URL}
-					err = client.applyObjects(context.Background(), []map[string]any{service})
+					err = client.resumeAppWorkloadMigration(context.Background(), "tenant", "workload", "app_test", "tenant_test")
+					if err == nil {
+						err = client.applyObjects(context.Background(), []map[string]any{service})
+					}
 				}
 				if err != nil || !serviceApplied {
 					t.Fatal("migration did not complete", err)
