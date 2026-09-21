@@ -114,6 +114,7 @@ func profileEvidence(raw []byte) (any, error) {
 	delete(result, "raw_script")
 	delete(result, "perf_report")
 	gaps := []string{}
+	truncated := false
 	if warnings, ok := result["warnings"].([]any); ok {
 		for _, warning := range warnings {
 			if s, ok := warning.(string); ok {
@@ -131,8 +132,17 @@ func profileEvidence(raw []byte) (any, error) {
 	if count("unresolved_user_samples") > 0 || count("unresolved_kernel_samples") > 0 {
 		gaps = append(gaps, "some sampled symbols could not be resolved")
 	}
+	if paths, ok := result["stack_paths"].(map[string]any); ok {
+		observed, _ := paths["observed_samples"].(json.Number)
+		n, _ := observed.Int64()
+		truncated, _ = paths["truncated"].(bool)
+		if truncated || n < count("stack_samples") {
+			truncated = true
+			gaps = append(gaps, "structured stack path coverage is incomplete")
+		}
+	}
 	if len(gaps) > 0 {
-		return partialValue{Value: result, Gaps: gaps}, nil
+		return partialValue{Value: result, Gaps: gaps, Truncated: truncated}, nil
 	}
 	return result, nil
 }

@@ -41,6 +41,22 @@ func TestCPUProfileRequiresBoundedSingleCaptureAndExactTarget(t *testing.T) {
 	}
 }
 
+func TestCPUProfileReportsStructuredStackCoverageIndependently(t *testing.T) {
+	for _, paths := range []string{
+		`{"observed_samples":29,"truncated":false}`,
+		`{"observed_samples":30,"omitted_samples":1,"truncated":true}`,
+	} {
+		v, err := profileEvidence([]byte(`{"schema":"fugue.diagnostic.cpu_profile.v1","samples":30,"stack_samples":30,"stack_paths":` + paths + `}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, ok := v.(partialValue)
+		if !ok || !p.Truncated || len(p.Gaps) == 0 {
+			t.Fatalf("incomplete path table reported complete: %+v", v)
+		}
+	}
+}
+
 func TestDiagnosticCommandBoundsOutputAndCancelsChildProcessGroup(t *testing.T) {
 	raw, truncated, err := diagnosticCommand(context.Background(), 3, "sh", "-c", "printf abcdef")
 	if string(raw) != "abc" || !truncated || err != nil {

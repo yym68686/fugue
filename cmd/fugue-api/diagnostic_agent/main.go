@@ -332,6 +332,12 @@ func run(opts options) error {
 	if resolvedKernelSamples < kernelSamples {
 		warnings = append(warnings, fmt.Sprintf("symbols resolved for %d of %d kernel-space samples", resolvedKernelSamples, kernelSamples))
 	}
+	// Summarize the full capture before bounding the optional raw text export.
+	// The frame dictionary and path table apply their own independent budgets.
+	paths := summarizeStackPaths(rawScript)
+	if paths.Truncated || paths.ObservedSamples < stackSamples {
+		warnings = append(warnings, "stack path report is partial; inspect omitted_samples and observed_samples")
+	}
 	// Go line tables are large but no longer needed after the summary. Return
 	// their pages before the next perf subprocess shares this memory cgroup.
 	debug.FreeOSMemory()
@@ -353,11 +359,6 @@ func run(opts options) error {
 	if cgroupErr != nil {
 		warnings = append(warnings, "target cgroup snapshot after sampling unavailable: "+cgroupErr.Error())
 	}
-	paths := summarizeStackPaths(rawScript)
-	if paths.Truncated || paths.ObservedSamples < stackSamples {
-		warnings = append(warnings, "stack path report is partial; inspect omitted_samples and observed_samples")
-	}
-
 	value := report{
 		Schema:                  "fugue.diagnostic.cpu_profile.v1",
 		Kind:                    opts.kind,

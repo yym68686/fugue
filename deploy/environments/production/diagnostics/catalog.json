@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 20,
+    "generation": 21,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -315,7 +315,8 @@
               "interval_seconds": 30,
               "resource": "clusters",
               "fields": [
-                "spec.instances",
+          "spec.instances",
+          "spec.plugins",
                 "spec.affinity",
                 "spec.storage",
                 "spec.primaryUpdateStrategy",
