@@ -708,6 +708,9 @@ func (c *kubeClient) applyObjects(ctx context.Context, objects []map[string]any)
 	if len(objects) == 0 {
 		return nil
 	}
+	if err := c.prepareAppServiceWorkloads(ctx, objects); err != nil {
+		return err
+	}
 
 	objectsByPhase := make(map[int][]map[string]any)
 	phases := make([]int, 0)

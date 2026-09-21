@@ -695,7 +695,7 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 	applyScheduling(&podSpec, scheduling)
 
 	templateMetadata := map[string]any{
-		"labels": labels,
+		"labels": mergeStringMaps(labels, map[string]string{FugueLabelAppWorkload: resourceName}),
 	}
 	templateRolloutAnnotations := appRolloutAnnotations(app, options.StrictDrain)
 	if annotations := mergeStringMaps(templateRolloutAnnotations, buildAppTemplateAnnotations(app.Spec)); len(annotations) > 0 {
@@ -1300,6 +1300,22 @@ func deploymentTemplateForRuntimeKey(template any) any {
 	for key, value := range metadata {
 		metadataCopy[key] = value
 	}
+	// Workload isolation is derived from the Deployment identity and does not
+	// change the application's executable configuration or release identity.
+	switch labels := metadata["labels"].(type) {
+	case map[string]string:
+		copy := mergeStringMaps(labels)
+		delete(copy, FugueLabelAppWorkload)
+		metadataCopy["labels"] = copy
+	case map[string]any:
+		copy := make(map[string]any, len(labels))
+		for key, value := range labels {
+			if key != FugueLabelAppWorkload {
+				copy[key] = value
+			}
+		}
+		metadataCopy["labels"] = copy
+	}
 	switch annotations := metadata["annotations"].(type) {
 	case map[string]string:
 		annotationsCopy := make(map[string]string, len(annotations))
@@ -1572,7 +1588,7 @@ func buildAppServiceObjectWithOptions(namespace string, app model.App, labels ma
 			"labels":    labels,
 		},
 		"spec": map[string]any{
-			"selector": labels,
+			"selector": mergeStringMaps(labels, map[string]string{FugueLabelAppWorkload: RuntimeAppResourceNameWithOptions(app, options)}),
 			"ports":    servicePorts,
 		},
 	}
@@ -2088,7 +2104,7 @@ func buildComposeServiceAliasObject(namespace string, app model.App) map[string]
 			"labels":    composeServiceAliasLabels(app, composeService),
 		},
 		"spec": map[string]any{
-			"selector": appLabels(app),
+			"selector": mergeStringMaps(appLabels(app), map[string]string{FugueLabelAppWorkload: RuntimeAppResourceName(app)}),
 			"ports":    servicePorts,
 		},
 	}
@@ -2123,7 +2139,7 @@ func buildLegacyComposeAppNameAliasObject(namespace string, app model.App) map[s
 			"labels":    legacyComposeAppNameAliasLabels(app),
 		},
 		"spec": map[string]any{
-			"selector": appLabels(app),
+			"selector": mergeStringMaps(appLabels(app), map[string]string{FugueLabelAppWorkload: RuntimeAppResourceName(app)}),
 			"ports":    servicePorts,
 		},
 	}

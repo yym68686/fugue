@@ -11,6 +11,7 @@ const (
 	FugueLabelManagedApp         = "fugue.pro/managed-app"
 	FugueLabelAppReleaseID       = "fugue.pro/app-release-id"
 	FugueLabelAppReleaseRole     = "fugue.pro/app-release-role"
+	FugueLabelAppWorkload        = "fugue.pro/app-workload"
 	FugueLabelBackingServiceID   = "fugue.pro/backing-service-id"
 	FugueLabelBackingServiceType = "fugue.pro/backing-service-type"
 	FugueLabelOwnerAppID         = "fugue.pro/owner-app-id"

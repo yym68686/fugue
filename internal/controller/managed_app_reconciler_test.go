@@ -3041,6 +3041,14 @@ func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyMa
 			if err != nil {
 				t.Fatalf("marshal deployment: %v", err)
 			}
+			var raw map[string]any
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatal(err)
+			}
+			meta := objectMapField(raw, "metadata")
+			meta["uid"] = "deployment-current"
+			meta["labels"] = map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID, runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue}
+			data, _ = json.Marshal(raw)
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader(string(data))),
