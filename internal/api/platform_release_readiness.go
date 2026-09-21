@@ -18,19 +18,20 @@ import (
 // This is compiler input evidence, not an assertion that the release is serving.
 // Store only resource identities and readiness, never a workload's environment.
 type releaseRuntimeReadiness struct {
-	ReleaseID            string `json:"release_id"`
-	Namespace            string `json:"namespace"`
-	DeploymentName       string `json:"deployment_name"`
-	DeploymentUID        string `json:"deployment_uid"`
-	DeploymentGeneration int64  `json:"deployment_generation"`
-	ObservedGeneration   int64  `json:"observed_generation"`
-	ServiceName          string `json:"service_name"`
-	ServiceUID           string `json:"service_uid"`
-	DesiredReplicas      int    `json:"desired_replicas"`
-	ReadyReplicas        int    `json:"ready_replicas"`
-	ReadyEndpoints       int    `json:"ready_endpoints"`
-	Ready                bool   `json:"ready"`
-	Reason               string `json:"reason,omitempty"`
+	ReleaseID            string                       `json:"release_id"`
+	Namespace            string                       `json:"namespace"`
+	DeploymentName       string                       `json:"deployment_name"`
+	DeploymentUID        string                       `json:"deployment_uid"`
+	DeploymentGeneration int64                        `json:"deployment_generation"`
+	ObservedGeneration   int64                        `json:"observed_generation"`
+	ServiceName          string                       `json:"service_name"`
+	ServiceUID           string                       `json:"service_uid"`
+	DesiredReplicas      int                          `json:"desired_replicas"`
+	ReadyReplicas        int                          `json:"ready_replicas"`
+	ReadyEndpoints       int                          `json:"ready_endpoints"`
+	EndpointPods         []releaseEndpointPodIdentity `json:"endpoint_pods,omitempty"`
+	Ready                bool                         `json:"ready"`
+	Reason               string                       `json:"reason,omitempty"`
 }
 
 func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection *platformIntentProjectionResponse, business store.RouteBusinessSnapshot) error {
@@ -83,6 +84,9 @@ func (s *Server) captureReleaseRuntimeReadiness(ctx context.Context, projection 
 	snapshot, err := client.readRuntimeSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("release readiness snapshot unavailable: %w", err)
+	}
+	if err := client.captureReleaseEndpointOwners(ctx, &snapshot); err != nil {
+		return fmt.Errorf("release endpoint ownership unavailable: %w", err)
 	}
 	confirmed, err := client.getClusterID(ctx)
 	if err != nil || cluster == "" || confirmed != cluster {
@@ -171,7 +175,7 @@ func (s *Server) observeReleaseRuntimeReadiness(app model.App, release model.App
 		proof.DesiredReplicas = *deployment.Spec.Replicas
 	}
 	proof.ReadyReplicas = minObservedReplicaCount(deployment.Status.UpdatedReplicas, deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
-	if proof.DeploymentUID == "" || !owner(deployment.Metadata.Labels) || !owner(deployment.Spec.Template.Metadata.Labels) {
+	if proof.DeploymentUID == "" || deployment.Metadata.DeletionTimestamp != "" || !owner(deployment.Metadata.Labels) || !owner(deployment.Spec.Template.Metadata.Labels) {
 		return fail("release deployment ownership differs")
 	}
 	if !deploymentCurrentCohortComplete(deployment) || deployment.Spec.Replicas == nil || !s.observedRuntimeImageRefsEquivalent(app, release.ResolvedImageRef, firstDeploymentContainerImage(deployment)) {
@@ -183,7 +187,7 @@ func (s *Server) observeReleaseRuntimeReadiness(app model.App, release model.App
 		return fail("release service absent")
 	}
 	proof.ServiceUID = service.Metadata.UID
-	if proof.ServiceUID == "" || !owner(service.Metadata.Labels) || !owner(service.Spec.Selector) {
+	if proof.ServiceUID == "" || service.Metadata.DeletionTimestamp != "" || !owner(service.Metadata.Labels) || !owner(service.Spec.Selector) || service.Spec.Selector[runtime.FugueLabelAppWorkload] != release.DeploymentName {
 		return fail("release service ownership differs")
 	}
 	for k, v := range service.Spec.Selector {
@@ -209,10 +213,19 @@ func (s *Server) observeReleaseRuntimeReadiness(app model.App, release model.App
 	if !portMatches {
 		return fail("release upstream port differs from service")
 	}
-	endpoints := snapshot.ownedEndpointSlices[serviceKey][service.Metadata.UID]
-	proof.ReadyEndpoints = endpoints.ReadyAddresses
-	if !snapshot.endpointSlicesAvailable || !endpoints.Present || endpoints.ReadyAddresses < proof.DesiredReplicas {
-		return fail("release service-owned endpoints are not ready")
+	if binding := release.RevisionWorkload; binding != nil && release.DeploymentName == binding.DeploymentName {
+		if binding.Namespace != proof.Namespace || binding.DeploymentUID != proof.DeploymentUID || binding.DeploymentGeneration > proof.DeploymentGeneration || binding.ServiceName != proof.ServiceName || binding.ServiceUID != proof.ServiceUID || binding.ReleaseKey != deployment.Spec.Template.Metadata.Annotations.ReleaseKey || binding.RuntimeID != release.RuntimeID || !s.observedRuntimeImageRefsEquivalent(app, binding.ImageRef, release.ResolvedImageRef) {
+			return fail("release revision workload differs from immutable binding")
+		}
+	}
+	endpointPods, err := s.observeReleaseEndpointPods(app, release, deployment, service, snapshot, owner)
+	if err != nil {
+		return fail(err.Error())
+	}
+	proof.ReadyEndpoints = len(endpointPods)
+	proof.EndpointPods = endpointPods
+	if proof.ReadyEndpoints < proof.DesiredReplicas {
+		return fail("release service-owned endpoint Pods are not ready")
 	}
 	fact.Status = model.EdgeRouteStatusActive
 	fact.StatusReason = ""

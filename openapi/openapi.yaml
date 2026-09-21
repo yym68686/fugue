@@ -32453,7 +32453,7 @@ components:
               type: object
               additionalProperties: false
               required: [schema, cluster_id, observed_at, releases]
-              description: Independent managed-release readiness from one cluster observation window. These facts may authorize compilation but never replace actual consumer serving proof.
+              description: Independent managed-release readiness from one cluster observation window. EndpointSlice membership is checked through Pod and ReplicaSet controller UIDs to the exact Deployment, including addresses, workload labels, executable release key and Pod readiness. These facts may authorize compilation but never replace actual consumer serving proof.
               properties:
                 schema: {type: string, enum: [fugue.release-runtime-readiness/v1]}
                 cluster_id: {type: string, minLength: 1}
@@ -32477,6 +32477,24 @@ components:
                       desired_replicas: {type: integer}
                       ready_replicas: {type: integer}
                       ready_endpoints: {type: integer}
+                      endpoint_pods:
+                        type: array
+                        description: Unique ready Pod identities, sorted by UID. Dual-stack addresses and duplicate slices do not count a Pod more than once. Older retained snapshots may omit this field.
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required: [pod_name, pod_uid, replica_set_name, replica_set_uid, release_key, addresses]
+                          properties:
+                            pod_name: {type: string, minLength: 1}
+                            pod_uid: {type: string, minLength: 1}
+                            replica_set_name: {type: string, minLength: 1}
+                            replica_set_uid: {type: string, minLength: 1}
+                            release_key: {type: string, minLength: 1}
+                            addresses:
+                              type: array
+                              minItems: 1
+                              uniqueItems: true
+                              items: {type: string, minLength: 1}
                       ready: {type: boolean}
                       reason: {type: string}
             configuration_producer:
@@ -32602,7 +32620,7 @@ components:
     PlatformReleaseObservation:
       type: object
       additionalProperties: false
-      description: Fixed release readiness evidence. Managed stable and candidate releases are observed independently from exact Kubernetes deployment, image, owner, service selector and current service-owned EndpointSlices. Active means ready to receive traffic, not already serving. The capture keeps cluster and resource identities in runtime_snapshot.facts.release_readiness. App-level serving status, desired weights and business-row timestamps cannot establish readiness. Transport or cluster-identity failure preserves unknown evidence; authoritative absent or unready resources produce a fresh unavailable observation. Actual serving still requires the separate trusted consumer apply and probe gates.
+      description: Fixed release readiness evidence. Managed stable and candidate releases are observed independently from exact Kubernetes deployment, image, owner, service selector and current service-owned EndpointSlices. Endpoint target UIDs, addresses, Pod readiness and Pod-to-ReplicaSet-to-Deployment ownership must match the workload and executable release key; distinct ready Pods, not address count, establish replica coverage. Active means ready to receive traffic, not already serving. The capture keeps cluster and resource identities in runtime_snapshot.facts.release_readiness. App-level serving status, desired weights and business-row timestamps cannot establish readiness. Transport or cluster-identity failure preserves unknown evidence; authoritative absent or unready resources produce a fresh unavailable observation. Actual serving still requires the separate trusted consumer apply and probe gates.
       required: [id, app_id, tenant_id, observed_at, status, upstream_url]
       properties:
         id: {type: string}

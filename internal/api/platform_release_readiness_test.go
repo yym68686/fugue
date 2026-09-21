@@ -3,7 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fugue/internal/auth"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
@@ -36,7 +38,7 @@ func releaseReadinessFixture(t *testing.T, candidate bool) (model.App, model.App
 	options := runtime.RenderOptions{Revision: revision}
 	release := model.AppRelease{ID: id, AppID: app.ID, TenantID: app.TenantID, Role: role, Status: model.AppReleaseStatusReady, RuntimeID: app.Spec.RuntimeID, ResolvedImageRef: target.Spec.Image, SpecSnapshot: &target.Spec, DeploymentName: runtime.RuntimeAppResourceNameWithOptions(target, options), ServiceName: runtime.RuntimeAppServiceNameWithOptions(target, options), UpstreamURL: runtime.AppRevisionServiceURL(target, options)}
 	ns := runtime.NamespaceForTenant(app.TenantID)
-	snapshot := managedAppKubeSnapshot{namespaces: map[string]struct{}{ns: {}}, deployments: map[string]kubeDeploymentRuntimeEvidence{}, services: map[string]struct{}{}, serviceDetails: map[string]kubeServiceRuntimeEvidence{}, ownedEndpointSlices: map[string]map[string]kubeEndpointRuntimeEvidence{}, endpointSlicesAvailable: true}
+	snapshot := managedAppKubeSnapshot{namespaces: map[string]struct{}{ns: {}}, deployments: map[string]kubeDeploymentRuntimeEvidence{}, services: map[string]struct{}{}, serviceDetails: map[string]kubeServiceRuntimeEvidence{}, endpointSlicesAvailable: true}
 	renderer := runtime.Renderer{}
 	for _, object := range renderer.BuildManagedAppRevisionChildObjects(target, runtime.SchedulingConstraints{}, nil, nil, revision) {
 		metadata := object["metadata"].(map[string]any)
@@ -60,10 +62,50 @@ func releaseReadinessFixture(t *testing.T, candidate bool) (model.App, model.App
 			key := kubeNamespacedKey(ns, service.Metadata.Name)
 			snapshot.serviceDetails[key] = service
 			snapshot.services[key] = struct{}{}
-			snapshot.ownedEndpointSlices[key] = map[string]kubeEndpointRuntimeEvidence{service.Metadata.UID: {Present: true, ReadyAddresses: 2}}
 		}
 	}
+	populateReleaseEndpointFixture(t, &snapshot, release, 2)
 	return app, release, snapshot
+}
+
+func populateReleaseEndpointFixture(t *testing.T, snapshot *managedAppKubeSnapshot, release model.AppRelease, replicas int) {
+	t.Helper()
+	ns := runtime.NamespaceForTenant(release.TenantID)
+	d := snapshot.deployments[kubeNamespacedKey(ns, release.DeploymentName)]
+	svc := snapshot.serviceDetails[kubeNamespacedKey(ns, release.ServiceName)]
+	controller := true
+	rs := kubeReleaseReplicaSetEvidence{}
+	rs.Metadata.Namespace, rs.Metadata.Name, rs.Metadata.UID = ns, d.Metadata.Name+"-rs", d.Metadata.UID+"-rs"
+	rs.Metadata.Labels = maps.Clone(d.Spec.Template.Metadata.Labels)
+	rs.Metadata.OwnerReferences = []kubeOwnerReferenceEvidence{{APIVersion: "apps/v1", Kind: "Deployment", Name: d.Metadata.Name, UID: d.Metadata.UID, Controller: &controller}}
+	rs.Spec.Template.Metadata.Labels = maps.Clone(d.Spec.Template.Metadata.Labels)
+	rs.Spec.Template.Metadata.Annotations = d.Spec.Template.Metadata.Annotations
+	snapshot.releaseReplicaSets = map[string]kubeReleaseReplicaSetEvidence{kubeNamespacedKey(ns, rs.Metadata.Name): rs}
+	snapshot.releasePods = map[string]kubeReleasePodEvidence{}
+	slice := kubeEndpointSliceEvidence{}
+	slice.Metadata.Name, slice.Metadata.Namespace, slice.Metadata.UID = svc.Metadata.Name+"-slice", ns, svc.Metadata.UID+"-slice"
+	slice.Metadata.Labels = map[string]string{"kubernetes.io/service-name": svc.Metadata.Name}
+	slice.Metadata.OwnerReferences = []kubeOwnerReferenceEvidence{{APIVersion: "v1", Kind: "Service", Name: svc.Metadata.Name, UID: svc.Metadata.UID, Controller: &controller}}
+	for i := 0; i < replicas; i++ {
+		pod := kubeReleasePodEvidence{}
+		pod.Metadata.Name, pod.Metadata.Namespace, pod.Metadata.UID = fmt.Sprintf("%s-pod-%d", release.ID, i), ns, fmt.Sprintf("%s-pod-uid-%d", release.ID, i)
+		pod.Metadata.Labels = maps.Clone(d.Spec.Template.Metadata.Labels)
+		pod.Metadata.Annotations = d.Spec.Template.Metadata.Annotations
+		pod.Metadata.OwnerReferences = []kubeOwnerReferenceEvidence{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: rs.Metadata.Name, UID: rs.Metadata.UID, Controller: &controller}}
+		pod.Spec.Containers = d.Spec.Template.Spec.Containers
+		pod.Status.Phase = "Running"
+		pod.Status.PodIP = fmt.Sprintf("192.0.2.%d", i+10)
+		pod.Status.Conditions = []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		}{{Type: "Ready", Status: "True"}}
+		snapshot.releasePods[kubeNamespacedKey(ns, pod.Metadata.Name)] = pod
+		ep := kubeReleaseEndpointEvidence{Addresses: []string{pod.Status.PodIP}}
+		ep.TargetRef.Kind, ep.TargetRef.Name, ep.TargetRef.Namespace, ep.TargetRef.UID = "Pod", pod.Metadata.Name, ns, pod.Metadata.UID
+		ep.Conditions.Ready = &controller
+		slice.Endpoints = append(slice.Endpoints, ep)
+	}
+	snapshot.releaseEndpointSlices = map[string][]kubeEndpointSliceEvidence{kubeNamespacedKey(ns, svc.Metadata.Name): {slice}}
 }
 
 func TestReleaseRuntimeReadinessUsesExactIndependentWorkload(t *testing.T) {
@@ -87,7 +129,8 @@ func TestReleaseRuntimeReadinessUsesExactIndependentWorkload(t *testing.T) {
 					d.Status.UpdatedReplicas = n
 					d.Status.ReadyReplicas = n
 					d.Status.AvailableReplicas = n
-					snap.ownedEndpointSlices[sk][svc.Metadata.UID] = kubeEndpointRuntimeEvidence{Present: true, ReadyAddresses: n}
+					snap.deployments[dk] = d
+					populateReleaseEndpointFixture(t, &snap, r, n)
 				case "other app":
 					app.ID = "app-b"
 				case "other tenant":
@@ -121,9 +164,9 @@ func TestReleaseRuntimeReadinessUsesExactIndependentWorkload(t *testing.T) {
 				case "foreign upstream":
 					r.UpstreamURL = "http://other.example:8080"
 				case "stale endpoint owner":
-					snap.ownedEndpointSlices[sk] = map[string]kubeEndpointRuntimeEvidence{"obsolete-service-uid": {Present: true, ReadyAddresses: 2}}
+					snap.releaseEndpointSlices[sk][0].Metadata.OwnerReferences[0].UID = "obsolete-service-uid"
 				case "no endpoints":
-					snap.ownedEndpointSlices[sk] = nil
+					snap.releaseEndpointSlices[sk] = nil
 				case "missing endpoint API":
 					snap.endpointSlicesAvailable = false
 				case "no replicas":
@@ -165,16 +208,28 @@ func TestCaptureReleaseRuntimeReadinessAllowsCanaryBeforeServing(t *testing.T) {
 	deployments := []any{}
 	services := []any{}
 	slices := []any{}
+	pods := []any{}
+	replicas := []any{}
 	for _, snapshot := range []managedAppKubeSnapshot{stableSnap, candidateSnap} {
 		for _, d := range snapshot.deployments {
 			deployments = append(deployments, d)
 		}
 		for _, s := range snapshot.serviceDetails {
 			services = append(services, s)
-			slices = append(slices, map[string]any{"metadata": map[string]any{"name": s.Metadata.Name + "-slice", "namespace": s.Metadata.Namespace, "labels": map[string]string{"kubernetes.io/service-name": s.Metadata.Name}, "ownerReferences": []any{map[string]string{"kind": "Service", "name": s.Metadata.Name, "uid": s.Metadata.UID}}}, "endpoints": []any{map[string]any{"addresses": []string{"192.0.2.10", "192.0.2.11"}, "conditions": map[string]bool{"ready": true}}}})
+		}
+		for _, items := range snapshot.releaseEndpointSlices {
+			for _, slice := range items {
+				slices = append(slices, slice)
+			}
+		}
+		for _, pod := range snapshot.releasePods {
+			pods = append(pods, pod)
+		}
+		for _, rs := range snapshot.releaseReplicaSets {
+			replicas = append(replicas, rs)
 		}
 	}
-	for _, scenario := range []string{"ready", "cluster changed", "snapshot denied"} {
+	for _, scenario := range []string{"ready", "cluster changed", "snapshot denied", "pods denied", "replicas denied"} {
 		t.Run(scenario, func(t *testing.T) {
 			clusterReads := 0
 			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +257,18 @@ func TestCaptureReleaseRuntimeReadinessAllowsCanaryBeforeServing(t *testing.T) {
 					data = map[string]any{"items": deployments}
 				case "/api/v1/services":
 					data = map[string]any{"items": services}
+				case "/api/v1/pods":
+					if scenario == "pods denied" {
+						http.Error(w, "denied", http.StatusForbidden)
+						return
+					}
+					data = map[string]any{"items": pods}
+				case "/apis/apps/v1/replicasets":
+					if scenario == "replicas denied" {
+						http.Error(w, "denied", http.StatusForbidden)
+						return
+					}
+					data = map[string]any{"items": replicas}
 				case "/api/v1/endpoints":
 					data = map[string]any{"items": []any{}}
 				case "/apis/discovery.k8s.io/v1/endpointslices":
