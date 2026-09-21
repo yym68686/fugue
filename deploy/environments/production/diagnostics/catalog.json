@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 24,
+    "generation": 25,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,34 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "kubernetes-storage-read-paths",
+        "description": "Storage range reads, watch cache lifecycle and consistency checks",
+        "image": "$runner",
+        "profile": "cluster-read",
+        "target_types": ["node", "platform_component"],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {
+          "collectors": [{
+            "name": "storage-read-paths",
+            "kind": "prometheus",
+            "interval_seconds": 15,
+            "service": {"namespace": "fugue-system", "name": "fugue-fugue-observability-prometheus", "port": "http"},
+            "queries": {
+              "families": "count by(__name__)({__name__=~\"apiserver_(storage_(consistency_checks_total|list_.*)|watch_cache_(initializations_total|consistent_read_total)|cache_list_.*)\"})",
+              "consistency_checks": "sum by(group,resource,status)(apiserver_storage_consistency_checks_total)",
+              "cache_initializations": "sum by(group,resource)(apiserver_watch_cache_initializations_total)",
+              "consistent_cache_reads": "sum by(group,resource,success,fallback)(apiserver_watch_cache_consistent_read_total)",
+              "storage_lists": "sum by(resource)(apiserver_storage_list_total)",
+              "storage_fetched": "sum by(resource)(apiserver_storage_list_fetched_objects_total)",
+              "cache_lists": "sum by(resource)(apiserver_cache_list_total)",
+              "list_requests": "sum by(group,resource,code)(apiserver_request_total{verb=\"LIST\"})"
+            },
+            "required_queries": ["families", "list_requests", "consistency_checks", "cache_initializations", "storage_lists", "storage_fetched"]
+          }]
+        }
+      },
       {
         "id": "kubernetes-object-changes",
         "description": "Short resource-version-bound watch of an exact object's status",
