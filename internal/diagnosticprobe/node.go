@@ -36,7 +36,7 @@ func nodeSnapshot(req livediagnostics.ProbeRequest) (any, error) {
 		return nil, errors.New("host process observation is not available for this capability profile")
 	}
 	values := map[string]any{"node": req.Target.Node, "sources": map[string]any{}, "missing_sources": map[string]string{}}
-	for _, name := range []string{"pressure/cpu", "pressure/io", "pressure/memory", "stat", "loadavg", "diskstats", "uptime", "meminfo", "sys/kernel/random/boot_id", "sys/kernel/sched_schedstats"} {
+	for _, name := range []string{"pressure/cpu", "pressure/io", "pressure/memory", "stat", "loadavg", "diskstats", "uptime", "meminfo", "vmstat", "sys/kernel/random/boot_id", "sys/kernel/sched_schedstats"} {
 		s, err := readBounded(filepath.Join(hostProc, name), 128<<10)
 		if err != nil {
 			values["missing_sources"].(map[string]string)[name] = boundedError(err)
@@ -61,6 +61,8 @@ type processFact struct {
 	StartTicks      string   `json:"start_ticks"`
 	UserTicks       uint64   `json:"user_ticks"`
 	SystemTicks     uint64   `json:"system_ticks"`
+	MinorFaults     uint64   `json:"minor_faults"`
+	MajorFaults     uint64   `json:"major_faults"`
 	Threads         string   `json:"threads"`
 	Cgroup          string   `json:"cgroup"`
 	RunNanoseconds  uint64   `json:"run_nanoseconds"`
@@ -189,8 +191,10 @@ func parseProcessStat(pid int, s string) (processFact, error) {
 	}
 	user, e1 := strconv.ParseUint(v[11], 10, 64)
 	system, e2 := strconv.ParseUint(v[12], 10, 64)
-	if e1 != nil || e2 != nil {
-		return processFact{}, fmt.Errorf("invalid process CPU counters")
+	minor, e3 := strconv.ParseUint(v[7], 10, 64)
+	major, e4 := strconv.ParseUint(v[9], 10, 64)
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil {
+		return processFact{}, fmt.Errorf("invalid process CPU or fault counters")
 	}
-	return processFact{PID: pid, Command: s[start+1 : end], StartTicks: v[19], UserTicks: user, SystemTicks: system, Threads: v[17], Missing: []string{}}, nil
+	return processFact{PID: pid, Command: s[start+1 : end], StartTicks: v[19], UserTicks: user, SystemTicks: system, MinorFaults: minor, MajorFaults: major, Threads: v[17], Missing: []string{}}, nil
 }

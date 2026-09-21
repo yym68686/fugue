@@ -20,12 +20,14 @@ type processWindow struct {
 }
 
 type processDelta struct {
-	PID        int     `json:"pid"`
-	StartTicks string  `json:"start_ticks"`
-	Command    string  `json:"command"`
-	CPUTicks   uint64  `json:"cpu_ticks"`
-	CPUCores   float64 `json:"average_cpu_cores"`
-	Cgroup     string  `json:"cgroup"`
+	PID         int     `json:"pid"`
+	StartTicks  string  `json:"start_ticks"`
+	Command     string  `json:"command"`
+	CPUTicks    uint64  `json:"cpu_ticks"`
+	CPUCores    float64 `json:"average_cpu_cores"`
+	Cgroup      string  `json:"cgroup"`
+	MinorFaults uint64  `json:"minor_faults"`
+	MajorFaults uint64  `json:"major_faults"`
 }
 
 func cpuCounters(stat string) ([]uint64, int, error) {
@@ -134,11 +136,11 @@ func appendWindowSummary(report *livediagnostics.ProbeReport) {
 				deltas := []processDelta{}
 				for _, fact := range b.Processes {
 					old, ok := before[fact.PID]
-					if !ok || old.StartTicks != fact.StartTicks || old.UserTicks > fact.UserTicks || old.SystemTicks > fact.SystemTicks {
+					if !ok || old.StartTicks != fact.StartTicks || old.UserTicks > fact.UserTicks || old.SystemTicks > fact.SystemTicks || old.MinorFaults > fact.MinorFaults || old.MajorFaults > fact.MajorFaults {
 						continue
 					}
 					ticks := fact.UserTicks - old.UserTicks + fact.SystemTicks - old.SystemTicks
-					deltas = append(deltas, processDelta{fact.PID, fact.StartTicks, fact.Command, ticks, float64(ticks) * float64(value["logical_cpus"].(int)) / float64(value["cpu_tick_delta"].(uint64)), fact.Cgroup})
+					deltas = append(deltas, processDelta{PID: fact.PID, StartTicks: fact.StartTicks, Command: fact.Command, CPUTicks: ticks, CPUCores: float64(ticks) * float64(value["logical_cpus"].(int)) / float64(value["cpu_tick_delta"].(uint64)), Cgroup: fact.Cgroup, MinorFaults: fact.MinorFaults - old.MinorFaults, MajorFaults: fact.MajorFaults - old.MajorFaults})
 				}
 				sort.Slice(deltas, func(i, j int) bool { return deltas[i].CPUTicks > deltas[j].CPUTicks })
 				if len(deltas) > 30 {
@@ -146,6 +148,7 @@ func appendWindowSummary(report *livediagnostics.ProbeReport) {
 				}
 				value["top_process_cpu"] = deltas
 				value["process_scope"] = "processes present with identical PID/start time in both snapshots; CPU cores normalized against node ticks; newly started or exited processes are excluded"
+				value["fault_scope"] = "per-process fault deltas excluding child processes; top-process ordering is by CPU, not fault count; a major fault alone does not identify the backing file or prove a request's cause"
 			}
 		}
 	}

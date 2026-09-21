@@ -108,6 +108,44 @@ func TestCPUWindowRejectsRebootsAndCountsStealWithoutGuestDuplication(t *testing
 	}
 }
 
+func TestProcessFaultWindowExcludesReusedAndRegressedCounters(t *testing.T) {
+	start := time.Unix(100, 0)
+	encode := func(source string, at time.Time, value any) livediagnostics.Evidence {
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return livediagnostics.Evidence{Source: source, ObservedAt: at, Data: data}
+	}
+	before := []processFact{
+		{PID: 1, StartTicks: "10", UserTicks: 10, MinorFaults: 100, MajorFaults: 20},
+		{PID: 2, StartTicks: "20", UserTicks: 10, MinorFaults: 100, MajorFaults: 20},
+		{PID: 3, StartTicks: "30", UserTicks: 10, MinorFaults: 100, MajorFaults: 20},
+	}
+	after := []processFact{
+		{PID: 1, StartTicks: "10", UserTicks: 20, MinorFaults: 150, MajorFaults: 23},
+		{PID: 2, StartTicks: "21", UserTicks: 30, MinorFaults: 150, MajorFaults: 23},
+		{PID: 3, StartTicks: "30", UserTicks: 30, MinorFaults: 150, MajorFaults: 19},
+		{PID: 4, StartTicks: "40", UserTicks: 30, MinorFaults: 150, MajorFaults: 23},
+	}
+	report := livediagnostics.ProbeReport{Evidence: []livediagnostics.Evidence{
+		encode("node-snapshot", start, nodeWindow{Sources: map[string]string{"sys/kernel/random/boot_id": "same", "stat": "cpu 100 0 0 100 0 0 0 0\ncpu0 0\n"}}),
+		encode("process-scheduling", start, processWindow{Processes: before}),
+		encode("node-snapshot", start.Add(time.Second), nodeWindow{Sources: map[string]string{"sys/kernel/random/boot_id": "same", "stat": "cpu 120 0 0 180 0 0 0 0\ncpu0 0\n"}}),
+		encode("process-scheduling", start.Add(time.Second), processWindow{Processes: after}),
+	}}
+	appendWindowSummary(&report)
+	var result struct {
+		Processes []processDelta `json:"top_process_cpu"`
+	}
+	if err := json.Unmarshal(report.Evidence[len(report.Evidence)-1].Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Processes) != 1 || result.Processes[0].PID != 1 || result.Processes[0].MinorFaults != 50 || result.Processes[0].MajorFaults != 3 {
+		t.Fatalf("invalid process fault deltas: %+v", result.Processes)
+	}
+}
+
 func TestAnnotationProjectionIsExplicitAndExcludesCredentials(t *testing.T) {
 	object := map[string]any{"metadata": map[string]any{"annotations": map[string]any{"observation.example/state": "initializing", "api-token": "private", "kubectl.kubernetes.io/last-applied-configuration": "private-env"}}}
 	result := projectConfiguredObject(object, Collector{AnnotationKeys: []string{"observation.example/state", "api-token", "kubectl.kubernetes.io/last-applied-configuration"}})

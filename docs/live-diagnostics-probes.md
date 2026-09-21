@@ -80,6 +80,12 @@ agent registers log-source cursor/timing/outcome metadata and collection-cycle
 budgets; observations never include log bodies or alter collection cursors.
 Source eviction and output limits are explicit in the snapshot.
 
+Node recipes include bounded `/proc/vmstat` counters. Process observations retain
+minor/major fault counts excluding children, and matching PID/start-time windows
+include their deltas. These distinguish the selected process from a shared
+cgroup; they do not identify a fault's backing file or establish causality for
+an individual request.
+
 Runtime snapshots deduplicate shared Unix sockets across helper processes and
 bind each row to the socket's kernel-reported peer PID in the frozen target set.
 Only that provider's lifetime and socket identity determine snapshot continuity;

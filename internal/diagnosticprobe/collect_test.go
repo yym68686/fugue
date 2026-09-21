@@ -19,7 +19,7 @@ func TestProcessStatRetainsIdentityWithSpacesAndParentheses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Command != "worker (child)" || got.StartTicks != "9000" || got.UserTicks != 111 || got.SystemTicks != 222 || got.Threads != "7" {
+	if got.Command != "worker (child)" || got.StartTicks != "9000" || got.UserTicks != 111 || got.SystemTicks != 222 || got.Threads != "7" || got.MinorFaults != 7 || got.MajorFaults != 9 {
 		t.Fatalf("bad identity/counters: %+v", got)
 	}
 }
