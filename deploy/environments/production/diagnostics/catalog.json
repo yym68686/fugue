@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 32,
+    "generation": 33,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -26,7 +26,7 @@
         "target_types": ["node_process", "platform_component"],
         "max_duration_seconds": 60,
         "parameters": {},
-        "config": {"collectors": [{"name": "runqueue", "kind": "process-runqueue-latency", "capture_seconds": 20, "interval_seconds": 120}]}
+        "config": {"collectors": [{"name": "node-resources", "kind": "node-snapshot", "interval_seconds": 10}, {"name": "runqueue", "kind": "process-runqueue-latency", "capture_seconds": 5, "interval_seconds": 120}]}
       },
       {
         "id": "process-page-faults",

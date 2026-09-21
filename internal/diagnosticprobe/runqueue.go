@@ -97,7 +97,26 @@ func schedulerPerfArgs(threads map[int]schedulerThread, seconds int, output stri
 	}
 	// A wakeup runs in the waker's context, so cgroup filtering would lose
 	// precisely the cross-cgroup wakeups needed to establish runnable latency.
-	return []string{"record", "-a", "-e", "sched:sched_switch", "--filter", strings.Join(switches, " || "), "-e", "sched:sched_wakeup", "--filter", strings.Join(wakes, " || "), "--clockid", "CLOCK_MONOTONIC", "--max-size", "8M", "--mmap-pages", "64", "--no-buildid", "--no-buildid-cache", "--no-buildid-mmap", "-o", output, "--", "sleep", strconv.Itoa(seconds)}
+	// Thread identity is read directly from procfs. Symbol/mapping synthesis
+	// adds unrelated system-wide metadata to this event-only capture.
+	return []string{"record", "-a", "-e", "sched:sched_switch", "--filter", strings.Join(switches, " || "), "-e", "sched:sched_wakeup", "--filter", strings.Join(wakes, " || "), "--synth=no", "--clockid", "CLOCK_MONOTONIC", "--max-size", "8M", "--mmap-pages", "64", "--no-buildid", "--no-buildid-cache", "--no-buildid-mmap", "-o", output, "--", "sleep", strconv.Itoa(seconds)}
+}
+
+func schedulerRecordingQuality(result map[string]any, file string, cut bool, recordErr error) (bool, []string) {
+	gaps := []string{}
+	if info, err := os.Stat(file); err == nil {
+		result["capture_bytes"] = info.Size()
+		cut = cut || info.Size() >= schedulerCaptureLimit
+	} else {
+		gaps = append(gaps, "scheduler capture file unavailable")
+	}
+	if recordErr != nil {
+		gaps = append(gaps, "scheduler recording failed: "+boundedError(recordErr))
+	}
+	if cut {
+		gaps = append(gaps, "scheduler recording reached a capture or output bound")
+	}
+	return cut, gaps
 }
 
 func processRunqueueLatency(ctx context.Context, req livediagnostics.ProbeRequest, c Collector) (any, error) {
@@ -127,16 +146,11 @@ func processRunqueueLatency(ctx context.Context, req livediagnostics.ProbeReques
 	finished := time.Now().UTC()
 	result := map[string]any{"schema": "fugue.process-runqueue-latency.v1", "started_at": started, "finished_at": finished, "clock": "CLOCK_MONOTONIC", "requested_seconds": c.CaptureSeconds, "target_threads": before, "capture_limit_bytes": schedulerCaptureLimit, "record_resources": recording,
 		"scope": "completed wakeup-to-switch-in and runnable-switch-out-to-switch-in pairs for frozen thread lifetimes; blocked time is excluded; unpaired boundary events and new threads are not assigned zero latency"}
-	if err != nil {
-		return partialValue{Value: result, Gaps: []string{"scheduler recording failed: " + boundedError(err)}}, nil
+	cut, gaps := schedulerRecordingQuality(result, file, cut, err)
+	gaps = append(gaps, recording.Missing...)
+	if err != nil || cut {
+		return partialValue{Value: result, Gaps: gaps, Truncated: cut}, nil
 	}
-	gaps := append([]string{}, recording.Missing...)
-	info, err := os.Stat(file)
-	if err != nil {
-		return nil, err
-	}
-	result["capture_bytes"] = info.Size()
-	cut = cut || info.Size() >= schedulerCaptureLimit
 	if finished.Sub(started) < time.Duration(c.CaptureSeconds)*time.Second {
 		gaps = append(gaps, "scheduler capture ended before requested duration")
 	}

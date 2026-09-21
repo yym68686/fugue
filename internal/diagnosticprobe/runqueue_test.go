@@ -2,6 +2,7 @@ package diagnosticprobe
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -93,5 +94,35 @@ func TestSchedulerThreadsRejectReusedProcessAndBoundThreadSet(t *testing.T) {
 	}
 	if _, err = schedulerThreads(root, map[int]string{42: "99"}); err == nil {
 		t.Fatal("reused PID accepted")
+	}
+}
+
+func TestSchedulerFailedRecordingStillReportsTruncation(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "perf.data")
+	f, err := os.Create(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(schedulerCaptureLimit + 1024); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]any{}
+	cut, gaps := schedulerRecordingQuality(result, file, false, errors.New("signal: terminated"))
+	if !cut || result["capture_bytes"] != int64(schedulerCaptureLimit+1024) || len(gaps) != 2 {
+		t.Fatalf("failed capture hid its bound: %+v %v %v", result, cut, gaps)
+	}
+	if err := os.Truncate(file, 100); err != nil {
+		t.Fatal(err)
+	}
+	cut, gaps = schedulerRecordingQuality(result, file, false, nil)
+	if cut || len(gaps) != 0 {
+		t.Fatalf("complete capture degraded: %v %v", cut, gaps)
+	}
+	cut, gaps = schedulerRecordingQuality(result, file, true, nil)
+	if !cut || len(gaps) != 1 {
+		t.Fatal("output truncation ignored")
 	}
 }

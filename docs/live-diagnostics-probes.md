@@ -125,6 +125,8 @@ the 20 longest completed waits, and unpaired boundary counts. Changed thread
 lifetimes, new threads, loss, malformed events, and capture bounds are explicit;
 an interrupted event stream has no derived latency table. The 8 MiB capture,
 4 MiB decoder output and 192 MiB sampler RSS limits bound observation cost.
+The production recipe uses a five-second capture plus node snapshots; mapping
+synthesis is disabled because thread identity comes directly from procfs.
 It reads already mounted host tracefs metadata and opens temporary perf event
 descriptors; it does not mount tracefs, enable schedstats, or modify global
 tracing configuration. Its filters include wakeups issued outside the target
