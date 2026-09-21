@@ -47,6 +47,7 @@ type Collector struct {
 	Unit            string            `json:"unit,omitempty"`
 	CaptureSeconds  int               `json:"capture_seconds,omitempty"`
 	CallGraph       string            `json:"call_graph,omitempty"`
+	Port            int               `json:"port,omitempty"`
 	PolicyPath      string            `json:"policy_path,omitempty"`
 }
 type Service struct {
@@ -203,6 +204,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return k.serviceJSON(ctx, req, c)
 	case "runtime-json":
 		return runtimeJSON(ctx, req, c)
+	case "host-loopback-metrics":
+		return hostLoopbackMetrics(ctx, req, c)
 	default:
 		return nil, fmt.Errorf("collector %q is not supported by this package image", c.Kind)
 	}

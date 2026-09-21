@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"fugue/internal/diagnosticprobe"
@@ -17,6 +18,21 @@ import (
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	if len(os.Args) == 3 && os.Args[1] == "--loopback-metrics" {
+		port, err := strconv.Atoi(os.Args[2])
+		if err != nil {
+			os.Exit(1)
+		}
+		raw, err := diagnosticprobe.LoopbackMetrics(ctx, port)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if _, err := os.Stdout.Write(raw); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	raw := []byte(os.Getenv(livediagnostics.ProbeRequestEnv))
 	if len(raw) > 64<<10 {
 		fmt.Fprintln(os.Stderr, "probe request exceeds 64 KiB")

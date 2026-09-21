@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 17,
+    "generation": 18,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,16 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "host-storage-metrics",
+        "description": "Bounded loopback storage metrics in the host network namespace",
+        "image": "$runner",
+        "profile": "kernel-profile",
+        "target_types": ["node_process"],
+        "max_duration_seconds": 120,
+        "parameters": {},
+        "config": {"collectors": [{"name": "storage-metrics", "kind": "host-loopback-metrics", "port": 2381, "interval_seconds": 15, "fields": ["etcd_disk_wal_fsync_duration_seconds", "etcd_disk_backend_commit_duration_seconds", "etcd_server_has_leader", "etcd_server_proposals_pending", "etcd_server_slow_apply_total", "etcd_server_slow_read_indexes_total", "etcd_server_read_indexes_failed_total", "etcd_mvcc_db_total_size_in_bytes", "etcd_mvcc_db_total_size_in_use_in_bytes", "process_cpu_seconds_total", "process_resident_memory_bytes", "go_gc_duration_seconds", "grpc_server_handled_total"]}]}
+      },
       {
         "id": "process-cpu-frame-pointer",
         "description": "Bounded frame-pointer CPU capture with Go stack symbol resolution",
