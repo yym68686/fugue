@@ -173,6 +173,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return nodeSnapshot(req)
 	case "process-scheduling":
 		return processSchedulingAt(ctx, req, hostProc)
+	case "process-identity":
+		return processIdentities(ctx, req, hostProc)
 	case "kubernetes-objects":
 		return k.objects(ctx, req, c)
 	case "kubernetes-logs":

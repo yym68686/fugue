@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 2,
+    "generation": 3,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -268,7 +268,6 @@
               "interval_seconds": 60,
               "resource": "events",
               "namespace": "{{param.namespace}}",
-              "field_selector": "type=Warning",
               "fields": [
                 "involvedObject",
                 "reason",
@@ -347,7 +346,7 @@
               "namespace": "{{namespace}}",
               "object_name": "{{pod}}",
               "container": "{{param.container}}",
-              "since_seconds": 180,
+              "since_seconds": 900,
               "match": [
                 "warning",
                 "error",
@@ -418,6 +417,27 @@
             }
           ]
         }
+      },
+      {
+        "id": "process-runtime-identity",
+        "description": "Inspect exact process executable and Go line-table layout without restarting the target",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": [
+          "node_process",
+          "platform_component"
+        ],
+        "max_duration_seconds": 30,
+        "parameters": {},
+        "config": {
+          "collectors": [
+            {
+              "name": "executable-identity",
+              "kind": "process-identity",
+              "interval_seconds": 120
+            }
+          ]
+        }
       }
     ]
   },
@@ -479,6 +499,19 @@
         "csinodes",
         "csidrivers",
         "csistoragecapacities"
+      ],
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "apiGroups": [
+        "batch"
+      ],
+      "resources": [
+        "jobs"
       ],
       "verbs": [
         "get",
