@@ -24,6 +24,11 @@ candidate and preserved configuration. Drift blocks that rollback to avoid
 overwriting another writer. Existing unhealthy databases remain visible and
 must not regress during the operator rollout.
 
+Later controller releases bind both candidate and predecessor verification
+receipts to the same upstream base and instance-manager hashes. The predecessor
+is the currently deployed immutable controller, so rollback retains earlier
+fixes instead of reverting to the original upstream controller.
+
 The candidate also passed the upstream `Pod upgrade` suite: 21 selected specs,
 zero failures, with race detection. These tests complement the immutable image
 receipt; they do not establish that the production deployment has succeeded.

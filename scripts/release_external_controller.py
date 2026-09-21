@@ -35,7 +35,7 @@ def load_config(path):
     config = json.loads(Path(path).read_text())
     required = {"apiVersion", "kind", "namespace", "deployment", "container", "uid",
                 "preservedSpecSHA256", "predecessor", "candidate", "operandGuard", "configurationGuards", "candidateReceipt", "apply"}
-    if set(config) != required or config["apiVersion"] != "release.fugue.dev/v1" or config["kind"] != "ExternalControllerRelease":
+    if not required <= set(config) or set(config) - required - {"predecessorReceipt"} or config["apiVersion"] != "release.fugue.dev/v1" or config["kind"] != "ExternalControllerRelease":
         raise ValueError("invalid external controller release contract")
     for field in ("namespace", "deployment", "container"):
         if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", config[field]):
@@ -56,11 +56,15 @@ def load_config(path):
     if type(config["apply"]) is not bool:
         raise ValueError("apply must be an explicit boolean")
     receipt = config["candidateReceipt"]
-    if receipt.get("candidate_image") != config["candidate"]["image"] or receipt.get("source_revision") != config["candidate"]["revision"] or receipt.get("base_image") != config["predecessor"]["image"] or receipt.get("controller_command_verified") is not True or receipt.get("production_deployed") is not False:
-        raise ValueError("candidate receipt does not bind both artifacts")
+    if receipt.get("candidate_image") != config["candidate"]["image"] or receipt.get("source_revision") != config["candidate"]["revision"] or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", receipt.get("base_image", "")) or receipt.get("controller_command_verified") is not True or receipt.get("production_deployed") is not False:
+        raise ValueError("candidate receipt does not bind the artifact")
     hashes = receipt.get("instance_manager_sha256", {})
     if set(hashes) != {"manager_amd64", "manager_arm64"} or any(not re.fullmatch(r"[0-9a-f]{64}", v) for v in hashes.values()):
         raise ValueError("candidate instance-manager verification missing")
+    if receipt["base_image"] != config["predecessor"]["image"] or "predecessorReceipt" in config:
+        previous = config.get("predecessorReceipt", {})
+        if previous.get("candidate_image") != config["predecessor"]["image"] or previous.get("source_revision") != config["predecessor"]["revision"] or previous.get("base_image") != receipt["base_image"] or previous.get("instance_manager_sha256") != hashes or previous.get("controller_command_verified") is not True or previous.get("production_deployed") is not False:
+            raise ValueError("predecessor receipt does not bind the same operand binaries")
     for guard in config["configurationGuards"]:
         if set(guard) != {"name", "uid", "dataSHA256"} or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", guard["name"]) or not re.fullmatch(r"[0-9a-f]{64}", guard["dataSHA256"]):
             raise ValueError("invalid ConfigMap guard")

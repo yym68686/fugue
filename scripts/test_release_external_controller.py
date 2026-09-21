@@ -51,7 +51,28 @@ class ExternalControllerReleaseTests(unittest.TestCase):
             altered = copy.deepcopy(deployment)
             altered["spec"]["template"]["spec"]["containers"][0][field] = value
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, "configuration drifted"):
-                release.validate_workload(config, altered, config["predecessor"])
+                    release.validate_workload(config, altered, config["predecessor"])
+
+    def test_subsequent_release_requires_verified_predecessor_and_same_operands(self):
+        config, _ = fixture()
+        previous = copy.deepcopy(config["candidateReceipt"])
+        config["predecessor"] = dict(config["candidate"], specImage=config["candidate"]["image"])
+        config["candidate"].update(image="registry.example/controller@sha256:" + "e" * 64, revision="e" * 40)
+        config["candidateReceipt"].update(candidate_image=config["candidate"]["image"], source_revision=config["candidate"]["revision"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "intent.json"
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, "predecessor receipt"):
+                release.load_config(path)
+            config["predecessorReceipt"] = previous
+            path.write_text(json.dumps(config))
+            self.assertEqual(release.load_config(path), config)
+            for key, value in [("candidate_image", config["candidate"]["image"]), ("source_revision", "f" * 40), ("base_image", config["candidate"]["image"]), ("instance_manager_sha256", {"manager_amd64": "f" * 64, "manager_arm64": "d" * 64}), ("controller_command_verified", False)]:
+                altered = copy.deepcopy(config)
+                altered["predecessorReceipt"][key] = value
+                path.write_text(json.dumps(altered))
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, "predecessor receipt"):
+                    release.load_config(path)
 
     def test_database_guard_detects_replacement_primary_and_health(self):
         clusters = {"items": [{"metadata": {"name": "db", "namespace": "sample", "uid": "cluster-id", "generation": 2}, "spec": {"instances": 1}, "status": {"currentPrimary": "db-1", "targetPrimary": "db-1", "readyInstances": 1}}]}
