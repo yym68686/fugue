@@ -1,7 +1,7 @@
 {
   "apiVersion": "release.fugue.dev/v1",
   "kind": "ExternalControllerRelease",
-  "apply": false,
+  "apply": true,
   "namespace": "fugue-system",
   "deployment": "fugue-cloudnative-pg",
   "container": "manager",
