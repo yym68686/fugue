@@ -1523,7 +1523,13 @@ func (c *kubeClient) listNamespacedResourceNames(ctx context.Context, apiPath, l
 	var list kubeObjectList
 	// Only names are consumed below. Preserve selectors and latest-read
 	// semantics while asking Kubernetes to omit unused spec/status/data.
-	if _, err := c.doRequestWithAccept(ctx, http.MethodGet, apiPath, "", metadataListAccept, nil, &list); err != nil {
+	status, err := c.doRequestWithAccept(ctx, http.MethodGet, apiPath, "", metadataListAccept, nil, &list)
+	if status == http.StatusNotAcceptable {
+		// Some API servers reject a transform before considering fallback
+		// media types. Retry the exact read with the original representation.
+		_, err = c.doJSON(ctx, http.MethodGet, apiPath, nil, &list)
+	}
+	if err != nil {
 		return nil, err
 	}
 	names := make([]string, 0, len(list.Items))
@@ -1543,7 +1549,7 @@ func (c *kubeClient) doRequest(ctx context.Context, method, apiPath, contentType
 	return c.doRequestWithAccept(ctx, method, apiPath, contentType, "application/json", body, out)
 }
 
-const metadataListAccept = "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1,application/json;q=0.9"
+const metadataListAccept = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json;q=0.9"
 
 func (c *kubeClient) doRequestWithAccept(ctx context.Context, method, apiPath, contentType, accept string, body any, out any) (int, error) {
 	var payload io.Reader

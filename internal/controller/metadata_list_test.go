@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -33,5 +34,29 @@ func TestNameOnlyListNegotiatesMetadataAndPreservesFallbackAndErrors(t *testing.
 				t.Fatal("metadata request hid API failure")
 			}
 		})
+	}
+}
+
+func TestNameOnlyListRetriesRejectedRepresentationWithoutChangingRead(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.String() != "/api/v1/namespaces/sample/secrets?labelSelector=owner%3Dsample" {
+			t.Errorf("fallback changed read: %s", r.URL)
+		}
+		switch r.Header.Get("Accept") {
+		case "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json;q=0.9":
+			http.Error(w, "unsupported representation", http.StatusNotAcceptable)
+		case "application/json":
+			fmt.Fprint(w, `{"items":[{"metadata":{"name":"kept"}}]}`)
+		default:
+			t.Error("unexpected representation", r.Header.Get("Accept"))
+		}
+	}))
+	defer server.Close()
+	c := &kubeClient{client: server.Client(), baseURL: server.URL}
+	names, err := c.listNamespacedResourceNames(t.Context(), "/api/v1/namespaces/sample/secrets", "owner=sample")
+	if err != nil || !reflect.DeepEqual(names, []string{"kept"}) || calls.Load() != 2 {
+		t.Fatalf("fallback: %v %v calls=%d", names, err, calls.Load())
 	}
 }
