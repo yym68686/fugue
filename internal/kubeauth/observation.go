@@ -33,7 +33,18 @@ func classifyRequest(req *http.Request) runtimeobservation.HTTPRequestClass {
 			c.Resource = resource
 		}
 		c.SingleObject = len(parts) > 1
+		if len(parts) > 2 {
+			// Only Kubernetes subresource names; proxy suffixes can contain
+			// arbitrary paths and must never enter diagnostic records.
+			switch parts[2] {
+			case "status", "scale", "log", "proxy", "exec", "attach", "portforward", "eviction", "binding", "finalize":
+				c.Subresource = parts[2]
+			default:
+				c.Subresource = "other"
+			}
+		}
 	}
+	c.MetadataOnly = strings.Contains(req.Header.Get("Accept"), "as=PartialObjectMetadata")
 	q := req.URL.Query()
 	c.Watch = q.Get("watch") == "true"
 	c.LabelSelector = q.Get("labelSelector") != ""

@@ -29,3 +29,15 @@ func TestKubernetesObservationClassifiesWithoutObjectOrQueryValues(t *testing.T)
 		}
 	}
 }
+
+func TestKubernetesObservationDistinguishesProxyAndMetadataRequests(t *testing.T) {
+	req, _ := http.NewRequest("GET", "https://control.invalid/api/v1/nodes/private-node/proxy/private-path?token=private-token", nil)
+	if got := classifyRequest(req); got.Resource != "nodes" || got.Subresource != "proxy" || got.MetadataOnly {
+		t.Fatalf("proxy classification: %+v", got)
+	}
+	req, _ = http.NewRequest("GET", "https://control.invalid/api/v1/namespaces/private-ns/secrets", nil)
+	req.Header.Set("Accept", "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1,application/json;q=0.9")
+	if got := classifyRequest(req); !got.MetadataOnly || got.Subresource != "" || got.SingleObject {
+		t.Fatalf("metadata classification: %+v", got)
+	}
+}

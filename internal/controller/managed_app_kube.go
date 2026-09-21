@@ -1521,7 +1521,9 @@ func (c *kubeClient) listNamespacedResourceNames(ctx context.Context, apiPath, l
 	}
 
 	var list kubeObjectList
-	if _, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &list); err != nil {
+	// Only names are consumed below. Preserve selectors and latest-read
+	// semantics while asking Kubernetes to omit unused spec/status/data.
+	if _, err := c.doRequestWithAccept(ctx, http.MethodGet, apiPath, "", metadataListAccept, nil, &list); err != nil {
 		return nil, err
 	}
 	names := make([]string, 0, len(list.Items))
@@ -1538,6 +1540,12 @@ func (c *kubeClient) listNamespacedResourceNames(ctx context.Context, apiPath, l
 }
 
 func (c *kubeClient) doRequest(ctx context.Context, method, apiPath, contentType string, body any, out any) (int, error) {
+	return c.doRequestWithAccept(ctx, method, apiPath, contentType, "application/json", body, out)
+}
+
+const metadataListAccept = "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1,application/json;q=0.9"
+
+func (c *kubeClient) doRequestWithAccept(ctx context.Context, method, apiPath, contentType, accept string, body any, out any) (int, error) {
 	var payload io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -1552,7 +1560,7 @@ func (c *kubeClient) doRequest(ctx context.Context, method, apiPath, contentType
 		return 0, fmt.Errorf("create kubernetes request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	if body != nil {
 		if strings.TrimSpace(contentType) == "" {
 			contentType = "application/json"

@@ -13,6 +13,8 @@ type HTTPRequestClass struct {
 	Client        string `json:"client"`
 	Method        string `json:"method"`
 	Resource      string `json:"resource"`
+	Subresource   string `json:"subresource,omitempty"`
+	MetadataOnly  bool   `json:"metadata_only,omitempty"`
 	Namespaced    bool   `json:"namespaced"`
 	SingleObject  bool   `json:"single_object"`
 	Watch         bool   `json:"watch"`
