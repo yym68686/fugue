@@ -24,6 +24,10 @@ type safeRolloutState struct {
 	StableRelease          model.AppRelease
 	Candidate              model.AppRelease
 	StableAlignmentAllowed bool
+	Resumed                bool
+	ResumeWeight           int
+	AlreadyPromoted        bool
+	PromotionPending       bool
 }
 
 type safeRolloutPlan struct {
@@ -47,12 +51,19 @@ func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.O
 	if candidate.Spec.Workspace != nil {
 		return nil, fmt.Errorf("safe zero downtime rollout does not support workspace storage yet")
 	}
+	if resumed, err := s.resumeSafeRollout(ctx, op, previous, candidate); err != nil || resumed != nil {
+		if err == nil {
+			s.recordSafeRolloutReleaseStep(op, candidate, "resume", model.ReleaseStepStatusCompleted, "resumed existing operation release without resetting traffic", resumed.Candidate.ID, map[string]any{
+				"stable_release_id": resumed.StableRelease.ID, "candidate_release_id": resumed.Candidate.ID, "candidate_weight": resumed.ResumeWeight, "already_promoted": resumed.AlreadyPromoted, "promotion_pending": resumed.PromotionPending,
+			})
+		}
+		return resumed, err
+	}
 	principal := model.Principal{
 		TenantID:  candidate.TenantID,
 		ActorType: model.ActorTypeSystem,
 		ActorID:   "safe-rollout-controller",
 	}
-	service := s.appReleaseService()
 	stable, err := s.ensureSafeRolloutCanonicalStableBaseline(ctx, op, previous, principal)
 	if err != nil {
 		return nil, fmt.Errorf("ensure canonical stable release before safe rollout: %w", err)
@@ -69,15 +80,7 @@ func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.O
 		})
 		return nil, nil
 	}
-	specSnapshot := candidate.Spec
-	candidateRelease, err := service.CreateRelease(ctx, candidate, releaseflow.CreateReleaseRequest{
-		Role:             model.AppReleaseRoleCandidate,
-		SourceRef:        releaseflow.AppReleaseSourceRef(candidate),
-		ResolvedImageRef: candidate.Spec.Image,
-		RuntimeID:        candidate.Spec.RuntimeID,
-		Status:           model.AppReleaseStatusCreating,
-		SpecSnapshot:     &specSnapshot,
-	})
+	candidateRelease, err := s.createSafeRolloutCandidate(op, candidate, stable)
 	if err != nil {
 		return nil, fmt.Errorf("create candidate release before safe rollout: %w", err)
 	}
@@ -100,6 +103,32 @@ func (s *Service) safeRolloutCandidateChangesPodTemplate(previous, candidate mod
 func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.Operation, state *safeRolloutState) error {
 	if state == nil || !state.Enabled {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if state.AlreadyPromoted || state.PromotionPending {
+		if !s.recheckSafeRolloutCandidateBeforeRetire(ctx, op, state, "resume_promoted_gate") {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("resumed promoted release is not ready")
+		}
+		if state.PromotionPending {
+			principal := model.Principal{TenantID: state.CandidateApp.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-controller"}
+			if _, err := s.appReleaseService().PromoteRelease(ctx, principal, state.CandidateApp, state.Candidate, 100); err != nil {
+				return err
+			}
+			updated, err := s.Store.GetAppRelease(state.CandidateApp.TenantID, true, state.Candidate.ID)
+			if err != nil {
+				return err
+			}
+			state.Candidate = updated
+		}
+		if s.waitSafeRolloutEdgeRouteBundleApplied(ctx, op, state) {
+			state.StableAlignmentAllowed = true
+		}
+		return ctx.Err()
 	}
 	service := s.appReleaseService()
 	now := time.Now().UTC()
@@ -125,6 +154,9 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	initialPolicy := plan.Gate
 	initialPolicy.MinCandidateRequests = 0
 	gate := s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, initialPolicy)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if gate.Status == model.AppReleaseGateStatusFail {
 		evidenceID := s.recordSafeRolloutGateFailureEvidence(op, state.CandidateApp, state.Candidate, gate, "candidate active gate failed")
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "gate_check", model.ReleaseStepStatusFailed, "candidate gate failed", state.Candidate.ID, map[string]any{
@@ -154,7 +186,13 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			if weight <= 0 || weight >= 100 {
 				continue
 			}
-			traffic, err := service.PromoteRelease(ctx, principal, state.CandidateApp, state.Candidate, weight)
+			if weight < state.ResumeWeight {
+				continue
+			}
+			traffic, err := s.Store.GetAppTrafficPolicy(state.CandidateApp.TenantID, true, state.CandidateApp.ID)
+			if err == nil && !(state.Resumed && weight == state.ResumeWeight) {
+				traffic, err = service.PromoteRelease(ctx, principal, state.CandidateApp, state.Candidate, weight)
+			}
 			if err != nil {
 				return fmt.Errorf("shift safe rollout canary to %d%%: %w", weight, err)
 			}
@@ -169,6 +207,9 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			})
 			routePolicyUpdatedAt := time.Now().UTC()
 			if !s.waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx, op, state, weight, routePolicyUpdatedAt) {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				reason := fmt.Sprintf("candidate canary edge route bundle not applied at %d%%", weight)
 				_ = s.abortSafeZeroDowntimeRollout(ctx, op, state, reason)
 				return fmt.Errorf("safe zero downtime rollout canary edge route bundle wait failed at %d%%", weight)
@@ -178,6 +219,9 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 				return err
 			}
 			gate = s.evaluateSafeRolloutCandidateCanaryGate(ctx, state, plan.Gate)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if gate.Status == model.AppReleaseGateStatusFail {
 				if safeRolloutCanaryGateOnlySampleDeficit(gate, plan.Gate) && safeRolloutHasLaterCanaryStep(plan.CanarySteps, index) {
 					s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_gate", model.ReleaseStepStatusSkipped, fmt.Sprintf("candidate canary gate inconclusive at %d%%; continuing to next canary weight", weight), state.Candidate.ID, map[string]any{
@@ -231,6 +275,9 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	} else {
 		gate = s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, finalPolicy)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if gate.Status == model.AppReleaseGateStatusFail {
 		evidenceID := s.recordSafeRolloutGateFailureEvidence(op, state.CandidateApp, state.Candidate, gate, "candidate final gate failed")
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "final_gate", model.ReleaseStepStatusFailed, "candidate final gate failed", state.Candidate.ID, map[string]any{
@@ -263,7 +310,7 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 		"mode":         "safe_zero_downtime",
 	})
 	if !s.waitSafeRolloutEdgeRouteBundleApplied(ctx, op, state) {
-		return nil
+		return ctx.Err()
 	}
 	if !s.recheckSafeRolloutCandidateBeforeRetire(ctx, op, state, "pre_alignment_retire_gate") {
 		return nil
@@ -950,6 +997,9 @@ func (s *Service) querySafeRolloutDrainMetrics(ctx context.Context, op model.Ope
 }
 
 func (s *Service) abortSafeZeroDowntimeRollout(ctx context.Context, op model.Operation, state *safeRolloutState, reason string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if state == nil || !state.Enabled {
 		return nil
 	}
@@ -1039,6 +1089,11 @@ func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op
 	app = s.Renderer.PrepareApp(app)
 	state.CandidateApp = app
 	revision := safeRolloutCandidateRevision(state.Candidate.ID)
+	objects := s.Renderer.BuildManagedAppRevisionChildObjects(app, scheduling, postgresPlacements, nil, revision)
+	objects = filterSafeRolloutCandidateRevisionObjects(objects, revision)
+	if state.Resumed && state.Candidate.RevisionWorkload != nil {
+		return s.verifyResumedSafeRolloutWorkload(ctx, client, op, state, objects)
+	}
 	// Persist the independent identity before creating Kubernetes objects so a
 	// concurrent ordinary reconciliation cannot mistake a starting revision for
 	// stale state. This does not claim that the release is ready or serving.
@@ -1051,8 +1106,6 @@ func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op
 		return fmt.Errorf("persist candidate resource identity before apply: %w", err)
 	}
 	state.Candidate = stored
-	objects := s.Renderer.BuildManagedAppRevisionChildObjects(app, scheduling, postgresPlacements, nil, revision)
-	objects = filterSafeRolloutCandidateRevisionObjects(objects, revision)
 	if err := s.validateAppStoragePlacement(ctx, client, app, scheduling, objects); err != nil {
 		return fmt.Errorf("candidate storage placement: %w", err)
 	}

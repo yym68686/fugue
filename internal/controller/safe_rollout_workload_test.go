@@ -152,6 +152,17 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 			if err := svc.bindSafeRolloutWorkload(context.Background(), client, op, state, objects); err != nil {
 				t.Fatal("idempotent retry", err)
 			}
+			state.Candidate = aligned
+			if err := svc.verifyResumedSafeRolloutWorkload(context.Background(), client, op, state, objects); err != nil {
+				t.Fatal("resumed canonical verification", err)
+			}
+			if state.Candidate.DeploymentName != aligned.DeploymentName {
+				t.Fatal("resumed verification rewrote serving target")
+			}
+			objectMapField(dep, "metadata")["uid"] = "replacement"
+			if err := svc.verifyResumedSafeRolloutWorkload(context.Background(), client, op, state, objects); err == nil {
+				t.Fatal("resumed verification accepted replacement UID")
+			}
 		})
 	}
 }

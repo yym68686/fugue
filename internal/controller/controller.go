@@ -1140,6 +1140,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
 			if safeRollout != nil {
 				if err := s.applySafeZeroDowntimeCandidateRevision(applyCtx, op, safeRollout, scheduling, postgresPlacements); err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					if safeRollout.Resumed {
+						return fmt.Errorf("verify resumed revision without changing traffic: %w", err)
+					}
 					if rollbackErr := s.abortSafeZeroDowntimeRollout(ctx, op, safeRollout, err.Error()); rollbackErr != nil {
 						return fmt.Errorf("apply safe rollout candidate revision %s: %w; safe rollout restore failed: %v", app.ID, err, rollbackErr)
 					}
@@ -1164,6 +1170,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			}
 			s.recordRolloutReadinessResultStep(op, app, rolloutResult)
 			if err := rolloutResult.Error(); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				if safeRollout != nil {
 					if rollbackErr := s.abortSafeZeroDowntimeRollout(ctx, op, safeRollout, err.Error()); rollbackErr != nil {
 						return fmt.Errorf("wait for managed app rollout %s: %w; safe rollout restore failed: %v", app.ID, err, rollbackErr)
@@ -1232,6 +1241,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
 	}
