@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 25,
+    "generation": 26,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -43,6 +43,18 @@
               "list_requests": "sum by(group,resource,code)(apiserver_request_total{verb=\"LIST\"})"
             },
             "required_queries": ["families", "list_requests", "consistency_checks", "cache_initializations", "storage_lists", "storage_fetched"]
+          }, {
+            "name": "recent-storage-read-window",
+            "kind": "prometheus",
+            "interval_seconds": 120,
+            "service": {"namespace": "fugue-system", "name": "fugue-fugue-observability-prometheus", "port": "http"},
+            "queries": {
+              "consistency_checks": "apiserver_storage_consistency_checks_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
+              "storage_fetched": "apiserver_storage_list_fetched_objects_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
+              "cache_initializations": "apiserver_watch_cache_initializations_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\"}[1h]",
+              "cache_fallback": "apiserver_watch_cache_consistent_read_total{resource=~\"replicasets|endpoints|endpointslices|services|secrets\",fallback=\"true\"}[1h]"
+            },
+            "required_queries": ["consistency_checks", "storage_fetched", "cache_initializations"]
           }]
         }
       },
