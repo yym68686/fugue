@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 26,
+    "generation": 27,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -18,6 +18,30 @@
       "service_account": "fugue-diagnostic-reader"
     },
     "probes": [
+      {
+        "id": "storage-scan-cost",
+        "description": "Correlated storage reads, Go heap/GC, process faults and node reclaim in one bounded window",
+        "image": "$runner",
+        "profile": "kernel-profile",
+        "target_types": ["node_process"],
+        "max_duration_seconds": 360,
+        "parameters": {},
+        "config": {
+          "collectors": [
+            {"name": "node-resources", "kind": "node-snapshot", "interval_seconds": 10},
+            {"name": "process-scheduling", "kind": "process-scheduling", "interval_seconds": 10},
+            {"name": "storage-runtime", "kind": "host-loopback-metrics", "port": 2381, "interval_seconds": 15, "fields": ["etcd_disk_wal_fsync_duration_seconds", "etcd_disk_backend_commit_duration_seconds", "etcd_server_has_leader", "etcd_server_proposals_pending", "etcd_server_slow_apply_total", "etcd_server_slow_read_indexes_total", "etcd_server_read_indexes_failed_total", "etcd_mvcc_db_total_size_in_bytes", "etcd_mvcc_db_total_size_in_use_in_bytes", "process_cpu_seconds_total", "process_resident_memory_bytes", "go_gc_duration_seconds", "go_memstats_alloc_bytes", "go_memstats_alloc_bytes_total", "go_memstats_heap_inuse_bytes", "go_memstats_heap_alloc_bytes", "go_memstats_next_gc_bytes", "go_memstats_heap_sys_bytes", "go_memstats_mallocs_total", "go_memstats_frees_total"]},
+            {"name": "storage-read-paths", "kind": "prometheus", "interval_seconds": 30,
+              "service": {"namespace": "fugue-system", "name": "fugue-fugue-observability-prometheus", "port": "http"},
+              "queries": {
+                "consistency_checks": "sum by(group,resource,status)(apiserver_storage_consistency_checks_total)",
+                "storage_fetched": "sum by(resource)(apiserver_storage_list_fetched_objects_total)"
+              },
+              "required_queries": ["consistency_checks", "storage_fetched"]
+            }
+          ]
+        }
+      },
       {
         "id": "kubernetes-storage-read-paths",
         "description": "Storage range reads, watch cache lifecycle and consistency checks",
