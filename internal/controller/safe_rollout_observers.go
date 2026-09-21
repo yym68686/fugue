@@ -90,10 +90,13 @@ func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ct
 	if interval <= 0 {
 		interval = safeRolloutEdgeBundlePollInterval
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	deadline := o.now().Add(timeout)
+	wait := safeRolloutEdgeWait{groups: map[string]string{}}
 	var last safeRolloutEdgeBundleObservation
 	for {
-		observation, err := o.observe(ctx, app, release, targetCandidateWeight, since)
+		observation, err := o.observeWait(ctx, app, release, targetCandidateWeight, since, &wait)
 		if err != nil {
 			return observation, err
 		}
@@ -107,65 +110,162 @@ func (o storeSafeRolloutEdgeBundleObserver) WaitForSafeRolloutEdgeRouteBundle(ct
 	}
 }
 
-func (o storeSafeRolloutEdgeBundleObserver) observe(ctx context.Context, app model.App, release model.AppRelease, targetCandidateWeight int, since time.Time) (safeRolloutEdgeBundleObservation, error) {
+// A wait can add newly serving nodes but cannot forget a node merely because
+// it became unhealthy, stopped heartbeating, drained or vanished from inventory.
+// These expectations live only for this bounded observation, not in a new ledger.
+type safeRolloutEdgeWait struct {
+	groups        map[string]string
+	trafficDigest string
+}
+
+func (o storeSafeRolloutEdgeBundleObserver) observe(ctx context.Context, app model.App, release model.AppRelease, weight int, since time.Time) (safeRolloutEdgeBundleObservation, error) {
+	return o.observeWait(ctx, app, release, weight, since, &safeRolloutEdgeWait{groups: map[string]string{}})
+}
+
+func (o storeSafeRolloutEdgeBundleObserver) observeWait(ctx context.Context, app model.App, release model.AppRelease, weight int, since time.Time, wait *safeRolloutEdgeWait) (safeRolloutEdgeBundleObservation, error) {
+	observation := safeRolloutEdgeBundleObservation{WaitingNodes: []string{}, Summary: map[string]any{"release_id": release.ID, "app_id": app.ID, "target_candidate_weight": weight}}
+	digest, err := o.expectedAppTrafficDigest(app, release, weight)
+	if err != nil {
+		return observation, err
+	}
+	if wait.trafficDigest == "" {
+		wait.trafficDigest = digest
+	}
+	if digest != wait.trafficDigest {
+		return observation, fmt.Errorf("app traffic target changed during edge confirmation")
+	}
+	observation.Summary["expected_app_traffic_digest"] = digest
 	nodes, _, err := o.Store.ListActiveEdgeNodes("")
 	if err != nil {
-		return safeRolloutEdgeBundleObservation{}, err
+		return observation, err
 	}
-	now := o.now()
-	relevant := make([]model.EdgeNode, 0, len(nodes))
+	observation.ObservedNodes = len(nodes)
+	current := make(map[string]model.EdgeNode, len(nodes))
 	for _, node := range nodes {
-		if safeRolloutEdgeNodeRelevant(node, now) {
-			relevant = append(relevant, node)
+		if node.ID == "" || node.EdgeGroupID == "" {
+			return observation, fmt.Errorf("edge inventory identity is missing")
+		}
+		if _, duplicate := current[node.ID]; duplicate {
+			return observation, fmt.Errorf("edge inventory identity is ambiguous")
+		}
+		current[node.ID] = node
+		if _, expected := wait.groups[node.ID]; !expected && !node.Draining {
+			wait.groups[node.ID] = node.EdgeGroupID
 		}
 	}
-	if len(relevant) == 0 {
-		return safeRolloutEdgeBundleObservation{Ready: true, ObservedNodes: len(nodes), WaitingNodes: []string{}, Summary: map[string]any{"release_id": release.ID, "app_id": app.ID, "reason": "no active edge route nodes require bundle confirmation"}}, nil
+	ids := make([]string, 0, len(wait.groups))
+	for id := range wait.groups {
+		ids = append(ids, id)
 	}
-	trafficDigest := ""
-	if o.Traffic != nil {
-		var err error
-		trafficDigest, err = o.expectedAppTrafficDigest(app, release, targetCandidateWeight)
-		if err != nil {
-			return safeRolloutEdgeBundleObservation{}, err
-		}
-	}
-	observation := safeRolloutEdgeBundleObservation{
-		Ready:         true,
-		WaitingNodes:  []string{},
-		Summary:       map[string]any{"release_id": release.ID, "app_id": app.ID, "target_candidate_weight": targetCandidateWeight, "expected_app_traffic_digest": trafficDigest},
-		ObservedNodes: len(nodes),
-		RequiredNodes: len(relevant),
-	}
+	sort.Strings(ids)
+	observation.RequiredNodes = len(ids)
 	versions := map[string]struct{}{}
-	for _, node := range relevant {
-		ready, reason := safeRolloutEdgeNodeBundleApplied(node, since)
-		version := firstNonEmptyString(strings.TrimSpace(node.RouteBundleVersion), strings.TrimSpace(node.ServingGeneration), strings.TrimSpace(node.CaddyAppliedVersion))
-		if version != "" {
-			versions[version] = struct{}{}
+	proofs := make(map[string]routeprobe.Proof, len(ids))
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return observation, err
 		}
-		if ready && trafficDigest != "" {
-			proof, probeErr := o.probeNode(ctx, app, node)
-			if probeErr != nil {
-				ready, reason = false, "app_traffic_probe_failed"
-			} else if proof.AppTrafficDigest != trafficDigest {
-				ready, reason = false, "app_traffic_proof_mismatch"
-			} else if proof.EdgeID != node.ID || proof.GroupID != node.EdgeGroupID {
-				ready, reason = false, "app_traffic_identity_mismatch"
-			} else if strings.TrimSpace(node.RouteBundleVersion) != "" && proof.Version != strings.TrimSpace(node.RouteBundleVersion) {
-				ready, reason = false, "app_traffic_bundle_mismatch"
+		node, exists := current[id]
+		reason := ""
+		switch {
+		case !exists:
+			reason = "edge_missing"
+		case node.EdgeGroupID != wait.groups[id]:
+			reason = "edge_group_changed"
+		case node.Draining:
+			reason = "edge_draining"
+		case !node.Healthy || node.Status != model.EdgeHealthHealthy:
+			reason = "edge_unhealthy"
+		case node.LastHeartbeatAt == nil || o.now().Sub(*node.LastHeartbeatAt) > 2*time.Minute:
+			reason = "edge_heartbeat_stale"
+		case node.LastHeartbeatAt.After(o.now().Add(5 * time.Second)):
+			reason = "edge_heartbeat_future"
+		default:
+			_, reason = safeRolloutEdgeNodeBundleApplied(node, since)
+			if reason == "" && (node.RouteBundleVersion == "" || node.CaddyAppliedVersion != node.RouteBundleVersion) {
+				reason = "caddy_bundle_not_applied"
 			}
 		}
-		if ready {
-			observation.ReadyNodes++
-			continue
+		if reason == "" {
+			started := o.now()
+			proof, probeErr := o.probeNode(ctx, app, node)
+			switch {
+			case probeErr != nil:
+				reason = "app_traffic_probe_failed"
+			case proof.AppTrafficDigest != digest:
+				reason = "app_traffic_proof_mismatch"
+			case proof.EdgeID != id || proof.GroupID != wait.groups[id]:
+				reason = "app_traffic_identity_mismatch"
+			case proof.Version != node.RouteBundleVersion:
+				reason = "app_traffic_bundle_mismatch"
+			case proof.State != "" || proof.CheckedAt.Before(started) || proof.CheckedAt.After(o.now()) || !proof.ValidUntil.After(o.now()):
+				reason = "app_traffic_proof_stale"
+			default:
+				proofs[id] = proof
+				versions[proof.Version] = struct{}{}
+			}
 		}
-		observation.Ready = false
-		observation.WaitingNodes = append(observation.WaitingNodes, node.ID+":"+reason)
+		if reason != "" {
+			observation.WaitingNodes = append(observation.WaitingNodes, id+":"+reason)
+		}
 	}
+	if err := ctx.Err(); err != nil {
+		return observation, err
+	}
+	// Recheck desired traffic after the network calls; no ACK may be reused after
+	// the policy or target upstream changed while evidence was being collected.
+	currentDigest, err := o.expectedAppTrafficDigest(app, release, weight)
+	if err != nil {
+		return observation, err
+	}
+	if currentDigest != digest {
+		return observation, fmt.Errorf("app traffic target changed during edge probes")
+	}
+	// Confirm that the inventory used for this batch still describes serving
+	// nodes. A topology change requires another complete observation batch.
+	after, _, err := o.Store.ListActiveEdgeNodes("")
+	if err != nil {
+		return observation, err
+	}
+	afterByID := make(map[string]model.EdgeNode, len(after))
+	for _, node := range after {
+		if node.ID == "" || node.EdgeGroupID == "" {
+			return observation, fmt.Errorf("edge inventory identity is missing")
+		}
+		if _, duplicate := afterByID[node.ID]; duplicate {
+			return observation, fmt.Errorf("edge inventory identity is ambiguous")
+		}
+		afterByID[node.ID] = node
+		if _, expected := wait.groups[node.ID]; !expected && !node.Draining {
+			wait.groups[node.ID] = node.EdgeGroupID
+			observation.WaitingNodes = append(observation.WaitingNodes, node.ID+":edge_joined_during_probes")
+		}
+	}
+	observation.RequiredNodes = len(wait.groups)
+	for id, proof := range proofs {
+		node, exists := afterByID[id]
+		if !exists || node.EdgeGroupID != wait.groups[id] || node.Draining || !node.Healthy || node.Status != model.EdgeHealthHealthy || node.RouteBundleVersion != proof.Version || node.CaddyAppliedVersion != proof.Version || node.LastHeartbeatAt == nil || node.LastHeartbeatAt.Before(o.now().Add(-2*time.Minute)) || node.LastHeartbeatAt.After(o.now().Add(5*time.Second)) || node.CaddyLastError != "" || node.LastError != "" {
+			delete(proofs, id)
+			observation.WaitingNodes = append(observation.WaitingNodes, id+":edge_changed_during_probes")
+		}
+	}
+	// A slow later probe must not make an earlier expired proof count as success.
+	for _, id := range ids {
+		if proof, ok := proofs[id]; ok {
+			if proof.ValidUntil.After(o.now()) {
+				observation.ReadyNodes++
+			} else {
+				observation.WaitingNodes = append(observation.WaitingNodes, id+":app_traffic_proof_expired")
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return observation, err
+	}
+	sort.Strings(observation.WaitingNodes)
+	observation.Ready = observation.RequiredNodes > 0 && observation.ReadyNodes == observation.RequiredNodes
 	if observation.RequiredNodes == 0 {
-		observation.Ready = true
-		observation.Summary["reason"] = "no active edge route nodes require bundle confirmation"
+		observation.Summary["reason"] = "no edge serving evidence available"
 	}
 	observation.ServingVersions = sortedStringSet(versions)
 	observation.Summary["required_nodes"] = observation.RequiredNodes
@@ -186,6 +286,15 @@ func (o storeSafeRolloutEdgeBundleObserver) expectedAppTrafficDigest(app model.A
 	if err != nil {
 		return "", fmt.Errorf("read app traffic policy for edge proof: %w", err)
 	}
+	if policy.AppID != app.ID || policy.TenantID != app.TenantID || release.AppID != app.ID || release.TenantID != app.TenantID {
+		return "", fmt.Errorf("app traffic policy or target release owner differs")
+	}
+	if targetCandidateWeight > 0 && policy.Mode != model.AppTrafficModeCanary && policy.Mode != model.AppTrafficModeWeighted {
+		return "", fmt.Errorf("app traffic policy mode does not allow candidate traffic")
+	}
+	if targetCandidateWeight == 0 && policy.Mode != model.AppTrafficModeSingle {
+		return "", fmt.Errorf("app traffic policy mode does not identify a promoted stable")
+	}
 	if targetCandidateWeight < 0 || targetCandidateWeight > 100 || policy.CandidateWeight != targetCandidateWeight {
 		return "", fmt.Errorf("app traffic policy candidate weight does not match rollout target")
 	}
@@ -205,6 +314,10 @@ func (o storeSafeRolloutEdgeBundleObserver) expectedAppTrafficDigest(app model.A
 	byID := make(map[string]model.AppRelease, len(releases))
 	for _, item := range releases {
 		byID[item.ID] = item
+	}
+	target, ok := byID[release.ID]
+	if !ok || target.UpstreamURL != release.UpstreamURL || target.RuntimeID != release.RuntimeID || firstNonEmptyString(target.ResolvedImageRef, target.SourceRef) != firstNonEmptyString(release.ResolvedImageRef, release.SourceRef) {
+		return "", fmt.Errorf("app release target changed from rollout state")
 	}
 	upstreams := make([]model.EdgeRouteUpstream, 0, 2)
 	for _, target := range []struct {
@@ -244,25 +357,6 @@ func (o storeSafeRolloutEdgeBundleObserver) probeNode(ctx context.Context, app m
 		probe = routeprobe.Probe
 	}
 	return probe(ctx, app.Route.Hostname, model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix), address, "", 5*time.Second)
-}
-
-func safeRolloutEdgeNodeRelevant(node model.EdgeNode, now time.Time) bool {
-	if strings.TrimSpace(node.ID) == "" || node.Draining {
-		return false
-	}
-	if !node.Healthy || strings.TrimSpace(node.Status) != model.EdgeHealthHealthy {
-		return false
-	}
-	if node.CaddyRouteCount <= 0 &&
-		strings.TrimSpace(node.RouteBundleVersion) == "" &&
-		strings.TrimSpace(node.ServingGeneration) == "" &&
-		strings.TrimSpace(node.CaddyAppliedVersion) == "" {
-		return false
-	}
-	if node.LastHeartbeatAt == nil {
-		return false
-	}
-	return now.Sub(node.LastHeartbeatAt.UTC()) <= 2*time.Minute
 }
 
 func safeRolloutEdgeNodeBundleApplied(node model.EdgeNode, since time.Time) (bool, string) {

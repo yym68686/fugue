@@ -15,6 +15,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/routeprobe"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
@@ -102,10 +103,11 @@ func TestSafeZeroDowntimeRolloutCanaryMetricsFailureAutoAborts(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		serviceURLForApp: func(context.Context, model.App) string { return upstream.URL },
-		safeRolloutSleep: func(context.Context, time.Duration) error { return nil },
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true}},
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		serviceURLForApp:              func(context.Context, model.App) string { return upstream.URL },
+		safeRolloutSleep:              func(context.Context, time.Duration) error { return nil },
 		releaseGateMetricsQuerier: &sequencedReleaseGateMetricsQuerier{metrics: []map[string]any{
 			{"request_count": 1, "error_5xx_rate": 0, "edge_upstream_error_rate": 0, "p95_ttfb_ms": 10, "p99_duration_ms": 20},
 			{"request_count": 10, "error_5xx_rate": 0.50, "edge_upstream_error_rate": 0, "p95_ttfb_ms": 10, "p99_duration_ms": 20},
@@ -359,10 +361,11 @@ func TestSafeZeroDowntimeRolloutCanaryComparisonFailureAutoAborts(t *testing.T) 
 		Max5xxRate:           0.10,
 	}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		serviceURLForApp: func(context.Context, model.App) string { return "http://candidate.test" },
-		safeRolloutSleep: func(context.Context, time.Duration) error { return nil },
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true}},
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		serviceURLForApp:              func(context.Context, model.App) string { return "http://candidate.test" },
+		safeRolloutSleep:              func(context.Context, time.Duration) error { return nil },
 	}
 	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
 	if err != nil {
@@ -1343,33 +1346,40 @@ func TestSafeRolloutEdgeObserverRejectsServingLKGAndStaleHeartbeat(t *testing.T)
 
 	now := time.Unix(1700000000, 0).UTC()
 	readyHeartbeat := now.Add(time.Second)
-	observer := storeSafeRolloutEdgeBundleObserver{
-		Store: staticEdgeNodeLister{nodes: []model.EdgeNode{
-			{
-				ID:                 "edge-live",
-				EdgeGroupID:        "edge-group-country-us",
-				Status:             model.EdgeHealthHealthy,
-				Healthy:            true,
-				CaddyRouteCount:    10,
-				RouteBundleVersion: "routegen_live",
-				ServingGeneration:  "routegen_live",
-				LastHeartbeatAt:    &readyHeartbeat,
-			},
-			{
-				ID:                 "edge-lkg",
-				EdgeGroupID:        "edge-group-country-de",
-				Status:             model.EdgeHealthHealthy,
-				Healthy:            true,
-				CaddyRouteCount:    10,
-				RouteBundleVersion: "routegen_new",
-				ServingGeneration:  "routegen_old",
-				LKGGeneration:      "routegen_old",
-				LastHeartbeatAt:    &readyHeartbeat,
-			},
-		}},
-		Now: func() time.Time { return now },
+	observer, app, release, _, proof := appTrafficObserverFixture(t, now)
+	observer.Store = staticEdgeNodeLister{nodes: []model.EdgeNode{
+		{
+			ID:                  "edge-live",
+			EdgeGroupID:         "edge-group-country-us",
+			Status:              model.EdgeHealthHealthy,
+			Healthy:             true,
+			CaddyRouteCount:     10,
+			RouteBundleVersion:  "routegen_live",
+			CaddyAppliedVersion: "routegen_live",
+			PublicIPv4:          "203.0.113.9",
+			ServingGeneration:   "routegen_live",
+			LastHeartbeatAt:     &readyHeartbeat,
+		},
+		{
+			ID:                 "edge-lkg",
+			EdgeGroupID:        "edge-group-country-de",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			CaddyRouteCount:    10,
+			RouteBundleVersion: "routegen_new",
+			ServingGeneration:  "routegen_old",
+			LKGGeneration:      "routegen_old",
+			LastHeartbeatAt:    &readyHeartbeat,
+		},
+	}}
+
+	proof.EdgeID = "edge-live"
+	proof.GroupID = "edge-group-country-us"
+	proof.Version = "routegen_live"
+	observer.Probe = func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+		return proof, nil
 	}
-	observation, err := observer.observe(context.Background(), model.App{ID: "app"}, model.AppRelease{ID: "rel"}, 0, now)
+	observation, err := observer.observe(context.Background(), app, release, 20, now)
 	if err != nil {
 		t.Fatalf("wait edge bundle: %v", err)
 	}
@@ -1599,4 +1609,37 @@ func auditEventsContainAction(items []model.AuditEvent, action string) bool {
 		}
 	}
 	return false
+}
+
+func TestSafeZeroDowntimeRolloutKeepsPreviousWhenProofLostAfterDrain(t *testing.T) {
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer upstream.Close()
+	svc := newSafeRolloutIntegrationService(stateStore, upstream.URL, safeRolloutDrainMetrics{Ready: true, FinalCount: 1, Summary: map[string]any{"active_connections": 0}})
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.StableAlignmentAllowed {
+		t.Fatal("initial alignment proof was not accepted")
+	}
+	svc.safeRolloutEdgeBundleObserver = staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: false, RequiredNodes: 1, Summary: map[string]any{"reason": "edge_missing"}}}
+	svc.finalizeSafeZeroDowntimePreviousRetire(context.Background(), op, state)
+	retained, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.Role != model.AppReleaseRolePrevious || retained.Status != model.AppReleaseStatusDraining {
+		t.Fatalf("previous release retired with lost serving proof: %+v", retained)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if releaseStepsContainPhase(steps, "previous_retire", model.ReleaseStepStatusCompleted) || releaseStepsContainPhase(steps, "previous_resource_cleanup", model.ReleaseStepStatusCompleted) {
+		t.Fatal("retired or cleaned up without current proof")
+	}
 }

@@ -786,6 +786,11 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 	if !ok {
 		return
 	}
+	// Drain observation can outlive the proof used for stable alignment. Confirm
+	// the current target again before retiring any previous release resources.
+	if !s.waitSafeRolloutEdgeRouteBundleApplied(ctx, op, state) {
+		return
+	}
 	retired, err := s.appReleaseService().RetireRelease(ctx, state.CandidateApp, previous, "safe rollout previous stable drained")
 	if err != nil {
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: release record update failed", state.Candidate.ID, map[string]any{"error": err.Error(), "drain_metrics": metrics.Summary})

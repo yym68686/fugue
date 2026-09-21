@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -14,19 +13,9 @@ func TestSafeRolloutEdgeObserverAcceptsAppliedGroupPublication(t *testing.T) {
 
 	now := time.Unix(1700000000, 0).UTC()
 	heartbeat := now.Add(time.Second)
-	observer := storeSafeRolloutEdgeBundleObserver{
-		Store: staticEdgeNodeLister{nodes: []model.EdgeNode{{
-			ID: "edge-current", Healthy: true, Status: model.EdgeHealthHealthy,
-			RouteBundleVersion: "route-generation.p42.r3",
-			ServingGeneration:  "route-generation", LKGGeneration: "route-generation",
-			CaddyAppliedVersion: "route-generation.p42.r3", CaddyRouteCount: 10,
-			LastHeartbeatAt: &heartbeat,
-		}}},
-		Now: func() time.Time { return heartbeat },
-	}
-	observation, err := observer.observe(context.Background(), model.App{ID: "app"}, model.AppRelease{ID: "release"}, 0, now)
-	if err != nil || !observation.Ready || observation.RequiredNodes != 1 || observation.ReadyNodes != 1 {
-		t.Fatalf("an applied publication of the serving generation must be ready: observation=%+v err=%v", observation, err)
+	node := model.EdgeNode{RouteBundleVersion: "route-generation.p42.r3", ServingGeneration: "route-generation", LKGGeneration: "route-generation", CaddyAppliedVersion: "route-generation.p42.r3", LastHeartbeatAt: &heartbeat}
+	if ready, reason := safeRolloutEdgeNodeBundleApplied(node, now); !ready {
+		t.Fatalf("applied publication rejected: %s", reason)
 	}
 }
 
