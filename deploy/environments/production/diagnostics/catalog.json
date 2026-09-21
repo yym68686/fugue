@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 5,
+    "generation": 6,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -309,7 +309,8 @@
                 "spec.backingServices",
                 "spec.scheduling",
                 "status"
-              ]
+              ],
+              "version": "v1alpha1"
             },
             {
               "name": "database-service-selectors",

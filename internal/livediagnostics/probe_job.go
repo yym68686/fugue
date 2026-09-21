@@ -136,6 +136,11 @@ func BuildProbeJob(c VerifiedCatalog, p Probe, target Target, sessionID, namespa
 		container.SecurityContext.RunAsUser = &root
 		if p.Profile == "process-profile" {
 			container.SecurityContext.Capabilities.Add = []corev1.Capability{"SYS_PTRACE", "PERFMON", "SYSLOG"}
+			// The runtime's default AppArmor policy restricts cross-profile proc
+			// reads even with SYS_PTRACE. This administrator-only capability class
+			// explicitly opts the temporary, signed probe out of that peer policy.
+			// It remains non-privileged, read-only, bounded, and without SYS_ADMIN.
+			container.SecurityContext.AppArmorProfile = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined}
 		}
 		for _, m := range []struct{ name, path, mount string }{{"host-proc", "/proc", "/host/proc"}, {"host-cgroup", "/sys/fs/cgroup", "/sys/fs/cgroup"}} {
 			pod.Volumes = append(pod.Volumes, corev1.Volume{Name: m.name, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: m.path, Type: &dir}}})

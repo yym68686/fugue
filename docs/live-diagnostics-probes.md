@@ -30,6 +30,10 @@ Capability profiles are separate from target selection:
 - `host-read` reads bounded `/proc` and cgroup facts with host PID and read-only
   mounts.
 - `process-profile` adds only the capabilities required by the process profile.
+  It explicitly uses an unconfined AppArmor profile for the temporary signed
+  administrator-only probe: the runtime default peer policy can deny reading a
+  host process executable even when SYS_PTRACE is present. This does not change
+  the target's policy and does not grant privileged mode or SYS_ADMIN.
 
 The first production catalog combines bounded node pressure and scheduling
 facts, control-plane request/storage metrics, Kubernetes reconcile objects and

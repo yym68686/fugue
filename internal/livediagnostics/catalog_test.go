@@ -7,11 +7,41 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 func testProbeCatalog() Catalog {
 	image := "registry.example/diagnostic-probes@sha256:" + strings.Repeat("a", 64)
 	return Catalog{Protocol: CatalogProtocol, Generation: 1, RunnerImage: image, Policy: CatalogPolicy{Namespaces: []string{"system-test"}, Profiles: []string{"cluster-read", "host-read"}, ServiceAccount: "diagnostic-reader"}, Probes: []Probe{{ID: "resource-observer", Image: image, Profile: "cluster-read", TargetTypes: []TargetType{TargetNode, TargetPlatformComponent}, MaxDurationSeconds: 60, Parameters: map[string]Parameter{"resource": {Required: true, Enum: []string{"pods", "events"}}}, Config: json.RawMessage(`{"collectors":[]}`)}}}
+}
+
+func TestOnlyAuthorizedProcessProfileCanReadAcrossAppArmorPeers(t *testing.T) {
+	for _, profile := range []string{"cluster-read", "host-read", "process-profile"} {
+		catalog := VerifiedCatalog{Catalog: testProbeCatalog(), Digest: "catalog"}
+		catalog.Policy.Profiles = []string{profile}
+		catalog.Probes[0].Profile = profile
+		job, err := BuildProbeJob(catalog, catalog.Probes[0], Target{Type: TargetNode, Node: "node-test"}, "diagnostic-test", "system-test", "api", StartRequest{DurationSeconds: 10}, map[string]string{"resource": "pods"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		security := job.Spec.Template.Spec.Containers[0].SecurityContext
+		if security.Privileged == nil || *security.Privileged || security.ReadOnlyRootFilesystem == nil || !*security.ReadOnlyRootFilesystem || *security.AllowPrivilegeEscalation {
+			t.Fatalf("probe lost workload isolation bounds: %+v", security)
+		}
+		if profile == "process-profile" {
+			if security.AppArmorProfile == nil || security.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+				t.Fatal("process profile cannot observe a differently confined target")
+			}
+		} else if security.AppArmorProfile != nil {
+			t.Fatalf("ordinary profile %s gained a cross-profile override", profile)
+		}
+		for _, capability := range security.Capabilities.Add {
+			if capability == "SYS_ADMIN" {
+				t.Fatal("process observation does not require SYS_ADMIN")
+			}
+		}
+	}
 }
 func TestCatalogRejectsTamperingAndRevokedKeys(t *testing.T) {
 	pub, key, _ := ed25519.GenerateKey(rand.Reader)
