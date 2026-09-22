@@ -184,7 +184,7 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	if err := projectPlatformDomainDNSWithDomains(&projection, business.Domains, static.DNS, domainsConfig); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("platform domain DNS ownership projection invalid")
 	}
-	if err := projectDefaultAppDNSWithTTL(&projection, domainsConfig.AppBaseDomain, domainsConfig.DefaultDNSTTL); err != nil {
+	if err := projectDefaultAppDNSWithTTL(&projection, source.apps, domainsConfig.AppBaseDomain, domainsConfig.DefaultDNSTTL); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("application DNS route migration configuration invalid")
 	}
 	if err := projectCustomDomainDNSWithDomains(&projection, business.Domains, source.apps, domainsConfig); err != nil {
