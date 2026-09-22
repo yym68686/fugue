@@ -871,7 +871,7 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 		target := previous
 		target.DeploymentName = previous.RevisionWorkload.DeploymentName
 		target.ServiceName = previous.RevisionWorkload.ServiceName
-		fresh, err := s.captureReleaseDrainWorkload(ctx, client, state.CandidateApp, target)
+		fresh, err := s.captureReleaseDrainWorkloadMode(ctx, client, state.CandidateApp, target, metrics.Workload.RuntimeStopped)
 		if err != nil || !reflect.DeepEqual(metrics.Workload, &fresh) {
 			return
 		}

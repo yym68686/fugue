@@ -24,18 +24,24 @@ import (
 type kubeSafeRolloutDrainObserver struct{ service *Service }
 
 type releaseDrainPod struct {
-	Name       string   `json:"name"`
-	UID        string   `json:"uid"`
-	ReplicaUID string   `json:"replica_set_uid"`
-	AgentImage string   `json:"agent_image"`
-	Restarts   int      `json:"agent_restarts"`
-	Port       int      `json:"agent_port"`
-	QuietMS    int64    `json:"quiet_period_ms"`
-	AppPorts   []int    `json:"app_ports"`
-	Containers []string `json:"container_identities"`
+	Name              string            `json:"name"`
+	UID               string            `json:"uid"`
+	ReplicaUID        string            `json:"replica_set_uid"`
+	AgentImage        string            `json:"agent_image"`
+	Restarts          int               `json:"agent_restarts"`
+	Port              int               `json:"agent_port"`
+	QuietMS           int64             `json:"quiet_period_ms"`
+	AppPorts          []int             `json:"app_ports"`
+	Containers        []string          `json:"container_identities"`
+	Version           string            `json:"resource_version,omitempty"`
+	Node              string            `json:"node,omitempty"`
+	NodeUID           string            `json:"node_uid,omitempty"`
+	BootID            string            `json:"boot_id,omitempty"`
+	StoppedContainers map[string]string `json:"stopped_containers,omitempty"`
 }
 
 type releaseDrainWorkload struct {
+	RuntimeStopped    bool              `json:"runtime_stopped,omitempty"`
 	DeploymentUID     string            `json:"deployment_uid"`
 	DeploymentVersion string            `json:"deployment_version"`
 	ServiceVersion    string            `json:"service_version"`
@@ -87,55 +93,73 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	}
 	before, err := s.captureReleaseDrainWorkload(ctx, client, app, previous)
 	if err != nil {
-		return out, err
+		before, err = s.captureReleaseDrainWorkloadMode(ctx, client, app, previous, true)
+		if err != nil {
+			return out, err
+		}
 	}
 	out.Summary["workload"] = before
-	// Observation is bounded independently of the agent's configured drain
-	// timeout. A busy Pod stays retained and a later reconcile can retry.
-	drainCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	quietPeriod := time.Duration(0)
-	for _, pod := range before.Pods {
-		if period := time.Duration(pod.QuietMS) * time.Millisecond; period > quietPeriod {
-			quietPeriod = period
+	if before.RuntimeStopped {
+		receipts, err := s.observeStoppedReleaseRuntime(ctx, client, app, previous, before)
+		if err != nil {
+			return out, err
 		}
-	}
-	var idleSince time.Time
-	for {
-		out.ActiveConnections = 0
-		receipts := make([]map[string]any, 0, len(before.Pods))
+		out.Source = "verified_cri_runtime"
+		out.Summary["source"] = out.Source
+		out.Summary["runtime_receipts"] = receipts
+		out.FinalCount, out.SampleCount = len(before.Pods), len(receipts)
+		out.Summary["runtime_stopped"] = true
+	} else {
+		// Observation is bounded independently of the agent's configured drain
+		// timeout. A busy Pod stays retained and a later reconcile can retry.
+		drainCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		quietPeriod := time.Duration(0)
 		for _, pod := range before.Pods {
-			started := time.Now().UTC()
-			receipt, err := client.observeReleasePodDrain(drainCtx, runtime.NamespaceForTenant(app.TenantID), pod)
-			if err != nil {
-				out.ObserverErrors++
-				return out, fmt.Errorf("observe Pod %s: %w", pod.Name, err)
+			if period := time.Duration(pod.QuietMS) * time.Millisecond; period > quietPeriod {
+				quietPeriod = period
 			}
-			out.SampleCount++
-			out.ActiveConnections += *receipt.ActiveConnections
-			receipts = append(receipts, map[string]any{"pod_uid": pod.UID, "started_at": started, "completed_at": time.Now().UTC(), "receipt": receipt})
 		}
-		out.Summary["receipts"] = receipts
-		out.MaxActiveConnections = max(out.MaxActiveConnections, out.ActiveConnections)
-		if out.ActiveConnections == 0 {
-			if idleSince.IsZero() {
-				idleSince = time.Now()
+		var idleSince time.Time
+		for {
+			out.ActiveConnections = 0
+			receipts := make([]map[string]any, 0, len(before.Pods))
+			for _, pod := range before.Pods {
+				started := time.Now().UTC()
+				receipt, err := client.observeReleasePodDrain(drainCtx, runtime.NamespaceForTenant(app.TenantID), pod)
+				if err != nil {
+					out.ObserverErrors++
+					return out, fmt.Errorf("observe Pod %s: %w", pod.Name, err)
+				}
+				out.SampleCount++
+				out.ActiveConnections += *receipt.ActiveConnections
+				receipts = append(receipts, map[string]any{"pod_uid": pod.UID, "started_at": started, "completed_at": time.Now().UTC(), "receipt": receipt})
 			}
-			if time.Since(idleSince) >= quietPeriod {
-				out.FinalCount = len(before.Pods)
-				out.Summary["quiet_since"] = idleSince.UTC()
-				break
+			out.Summary["receipts"] = receipts
+			out.MaxActiveConnections = max(out.MaxActiveConnections, out.ActiveConnections)
+			if out.ActiveConnections == 0 {
+				if idleSince.IsZero() {
+					idleSince = time.Now()
+				}
+				if time.Since(idleSince) >= quietPeriod {
+					out.FinalCount = len(before.Pods)
+					out.Summary["quiet_since"] = idleSince.UTC()
+					break
+				}
+			} else {
+				idleSince = time.Time{}
 			}
-		} else {
-			idleSince = time.Time{}
+			select {
+			case <-drainCtx.Done():
+				return out, fmt.Errorf("release did not become idle within observation budget")
+			case <-time.After(200 * time.Millisecond):
+			}
 		}
-		select {
-		case <-drainCtx.Done():
-			return out, fmt.Errorf("release did not become idle within observation budget")
-		case <-time.After(200 * time.Millisecond):
+		if drainCtx.Err() != nil {
+			return out, drainCtx.Err()
 		}
 	}
-	after, err := s.captureReleaseDrainWorkload(ctx, client, app, previous)
+	after, err := s.captureReleaseDrainWorkloadMode(ctx, client, app, previous, before.RuntimeStopped)
 	if err != nil || !reflect.DeepEqual(before, after) {
 		return out, fmt.Errorf("release workload changed during drain observation")
 	}
@@ -144,7 +168,7 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 		return out, fmt.Errorf("traffic policy changed during drain observation")
 	}
 	currentRelease, err := s.Store.GetAppRelease(app.TenantID, true, previous.ID)
-	if err != nil || !sameReleaseDrainTarget(expected, currentRelease) || drainCtx.Err() != nil {
+	if err != nil || !sameReleaseDrainTarget(expected, currentRelease) || ctx.Err() != nil {
 		return out, fmt.Errorf("release target changed during drain observation")
 	}
 	out.Ready = true
@@ -162,7 +186,11 @@ func sameReleaseDrainTarget(a, b model.AppRelease) bool {
 }
 
 func (s *Service) captureReleaseDrainWorkload(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease) (releaseDrainWorkload, error) {
-	var out releaseDrainWorkload
+	return s.captureReleaseDrainWorkloadMode(ctx, client, app, release, false)
+}
+
+func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease, stopped bool) (releaseDrainWorkload, error) {
+	out := releaseDrainWorkload{RuntimeStopped: stopped}
 	ns := runtime.NamespaceForTenant(app.TenantID)
 	deployment, found, err := client.getRawObject(ctx, deploymentAPIPath(ns, release.DeploymentName))
 	if err != nil || !found {
@@ -191,7 +219,7 @@ func (s *Service) captureReleaseDrainWorkload(ctx context.Context, client *kubeC
 	}
 	var dep kubeDeployment
 	data, _ := json.Marshal(deployment)
-	if err := json.Unmarshal(data, &dep); err != nil || dep.Metadata.UID == "" || dep.Spec.Replicas == nil || *dep.Spec.Replicas < 1 || *dep.Spec.Replicas > 32 || !managedDeploymentStatusReady(dep, *dep.Spec.Replicas) || !s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(dep), release.ResolvedImageRef) {
+	if err := json.Unmarshal(data, &dep); err != nil || dep.Metadata.UID == "" || dep.Spec.Replicas == nil || *dep.Spec.Replicas < 1 || *dep.Spec.Replicas > 32 || (!stopped && !managedDeploymentStatusReady(dep, *dep.Spec.Replicas)) || !s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(dep), release.ResolvedImageRef) {
 		return out, fmt.Errorf("release Deployment is not a complete current workload")
 	}
 	if dep.Metadata.Generation < binding.DeploymentGeneration {
@@ -258,6 +286,18 @@ func (s *Service) captureReleaseDrainWorkload(ctx context.Context, client *kubeC
 		}
 		if p.ReplicaUID == "" {
 			return out, fmt.Errorf("release Pod has no verified Deployment owner chain")
+		}
+		if stopped {
+			p.Version = objectStringField(pm, "resourceVersion")
+			p.Node = objectStringField(objectMapField(pod, "spec"), "nodeName")
+			if err := captureStoppedPodIdentity(pod, &p); err != nil {
+				return out, err
+			}
+			if err := captureDrainNodeIdentity(ctx, client, &p); err != nil {
+				return out, err
+			}
+			out.Pods = append(out.Pods, p)
+			continue
 		}
 		for _, field := range []string{"initContainers", "containers"} {
 			for _, c := range mapSlice(nestedObjectValue(pod, "spec", field)) {

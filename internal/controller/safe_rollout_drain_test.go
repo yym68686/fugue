@@ -30,6 +30,7 @@ type drainWorkloadFixture struct {
 	deleteCalls    int
 	failDelete     bool
 	conflictDelete bool
+	extra          func(http.ResponseWriter, *http.Request) bool
 }
 
 func newDrainWorkloadFixture(t *testing.T) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
@@ -105,6 +106,9 @@ func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool) (*Service, mo
 			"spec": spec, "status": map[string]any{"containerStatuses": []map[string]any{status("application")}, "initContainerStatuses": []map[string]any{status("fugue-drain-agent")}}})
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f.extra != nil && f.extra(w, r) {
+			return
+		}
 		if r.Method == http.MethodDelete {
 			f.deleteCalls++
 			var body struct {
