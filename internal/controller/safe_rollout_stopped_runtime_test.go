@@ -88,10 +88,24 @@ func TestStoppedRuntimeReportRequiresFreshCompleteIdentity(t *testing.T) {
 }
 
 func TestStoppedWorkloadUsesSignedProbeBeforeRetirement(t *testing.T) {
+	testStoppedWorkloadUsesSignedProbeBeforeRetirement(t, false)
+}
+
+func TestUnboundHistoricalRuntimeRetiresAtomicallyWithoutRepairingSnapshot(t *testing.T) {
+	testStoppedWorkloadUsesSignedProbeBeforeRetirement(t, true)
+}
+
+func testStoppedWorkloadUsesSignedProbeBeforeRetirement(t *testing.T, historical bool) {
 	for _, scenario := range []string{"valid", "old_status_fresh_lease", "stale_lease", "wrong_lease_owner", "wrong_lease_holder", "lease_missing", "revoked", "wrong_job_image", "wrong_job_owner", "stale_report", "wrong_report_container", "wrong_report_boot", "pod_restart", "node_reboot", "policy_changed", "unready_node", "running_container", "missing_container"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
-			s, app, old, f := newDrainWorkloadFixture(t)
+			s, app, old, f := newDrainWorkloadFixtureWithOutcome(t, false, historical)
+			if historical {
+				delete(objectMapValue(nestedObjectValue(f.service, "spec", "selector")), runtime.FugueLabelAppWorkload)
+				for _, p := range f.pods {
+					delete(objectMapValue(nestedObjectValue(p, "metadata", "labels")), runtime.FugueLabelAppWorkload)
+				}
+			}
 			s.Config.KubectlNamespace = "system-test"
 			f.pods = f.pods[:1]
 			objectMapField(f.deployment, "spec")["replicas"] = float64(1)
@@ -255,13 +269,18 @@ func TestStoppedWorkloadUsesSignedProbeBeforeRetirement(t *testing.T) {
 				t.Fatal(err)
 			}
 			if scenario == "valid" || scenario == "old_status_fresh_lease" {
-				if got.Status != model.AppReleaseStatusRetired || f.deleteCalls != 2 || logReads != 1 || nodeReads < 3 {
+				if got.Status != model.AppReleaseStatusRetired || f.deleteCalls != 2 || logReads != 1 || nodeReads < 2 || !historical && nodeReads < 3 {
+
 					t.Fatalf("not retired: status=%s deletes=%d logs=%d nodes=%d", got.Status, f.deleteCalls, logReads, nodeReads)
 				}
 			} else if got.Status == model.AppReleaseStatusRetired || f.deleteCalls != 0 {
 				t.Fatal("unverified stopped runtime retired", scenario)
 			}
-			if !reflect.DeepEqual(got.RevisionWorkload, old.RevisionWorkload) {
+			if historical && (scenario == "valid" || scenario == "old_status_fresh_lease") {
+				if got.RevisionWorkload == nil || got.RevisionWorkload.BoundAt.IsZero() || !reflect.DeepEqual(got.SpecSnapshot, old.SpecSnapshot) {
+					t.Fatal("atomic historical retirement rewrote intent or lost binding")
+				}
+			} else if !reflect.DeepEqual(got.RevisionWorkload, old.RevisionWorkload) {
 				t.Fatal("runtime observation changed binding")
 			}
 		})

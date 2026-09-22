@@ -38,7 +38,7 @@ func newDrainWorkloadFixture(t *testing.T) (*Service, model.App, model.AppReleas
 	return newDrainWorkloadFixtureWithOutcome(t, false)
 }
 
-func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
+func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool, historical ...bool) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
 	t.Helper()
 	st, app, _, op := newSafeRolloutTestState(t)
 	if _, ok, err := st.TryClaimPendingOperation(op.ID); err != nil || !ok {
@@ -50,11 +50,24 @@ func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool) (*Service, mo
 	if err != nil {
 		t.Fatal(err)
 	}
-	old, err = st.BindAppReleaseWorkload(context.Background(), old, model.AppReleaseWorkload{OperationID: op.ID, Namespace: runtime.NamespaceForTenant(app.TenantID), DeploymentName: old.DeploymentName, DeploymentUID: "deployment-uid", DeploymentGeneration: 1, ServiceName: old.ServiceName, ServiceUID: "service-uid", ReleaseKey: "release-key", RuntimeID: old.RuntimeID, ImageRef: old.ResolvedImageRef})
+	unbound := len(historical) > 0 && historical[0]
+	if !unbound {
+		old, err = st.BindAppReleaseWorkload(context.Background(), old, model.AppReleaseWorkload{OperationID: op.ID, Namespace: runtime.NamespaceForTenant(app.TenantID), DeploymentName: old.DeploymentName, DeploymentUID: "deployment-uid", DeploymentGeneration: 1, ServiceName: old.ServiceName, ServiceUID: "service-uid", ReleaseKey: "release-key", RuntimeID: old.RuntimeID, ImageRef: old.ResolvedImageRef})
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	old.Role, old.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
+	if unbound {
+		options := runtime.RenderOptions{Revision: safeRolloutCandidateRevision(old.ID)}
+		old.DeploymentName = runtime.RuntimeAppResourceNameWithOptions(app, options)
+		old.ServiceName = runtime.RuntimeAppServiceNameWithOptions(app, options)
+		spec := *cloneControllerAppSpec(&app.Spec)
+		spec.Env = map[string]string{"HISTORICAL": "lost-snapshot"}
+		old.SpecSnapshot = &spec
+		now := time.Now().UTC()
+		old.PromotedAt = &now
+	}
 	if failed {
 		old.Role, old.Status = model.AppReleaseRoleCandidate, model.AppReleaseStatusFailed
 		old.StatusReason = "canary latency gate failed"
@@ -63,11 +76,20 @@ func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool) (*Service, mo
 	if err != nil {
 		t.Fatal(err)
 	}
+	if unbound {
+		if err := st.AppendAuditEvent(model.AuditEvent{TenantID: app.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-controller", Action: "app.release.promote", TargetType: "app_release", TargetID: old.ID, Metadata: map[string]string{"app_id": app.ID, "app_release_id": old.ID, "operation_id": op.ID, "mode": "safe_zero_downtime"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if failed {
 		_, err = st.FailOperation(op.ID, old.StatusReason)
 	} else {
 		_, err = st.CompleteManagedOperation(op.ID, "", "done")
 	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err = st.GetAppRelease(app.TenantID, false, old.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +106,7 @@ func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool) (*Service, mo
 	labels := map[string]any{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID,
 		runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue, runtime.FugueLabelAppReleaseID: old.ID, runtime.FugueLabelAppWorkload: old.DeploymentName}
 	metadata := func(name, uid, ownerKind, ownerName, ownerUID string) map[string]any {
-		return map[string]any{"name": name, "uid": uid, "resourceVersion": "1", "labels": labels, "generation": 1, "annotations": map[string]any{runtime.FugueAnnotationReleaseKey: "release-key"},
+		return map[string]any{"name": name, "namespace": runtime.NamespaceForTenant(app.TenantID), "creationTimestamp": op.CreatedAt.Truncate(time.Second).Format(time.RFC3339), "uid": uid, "resourceVersion": "1", "labels": labels, "generation": 1, "annotations": map[string]any{runtime.FugueAnnotationReleaseKey: "release-key"},
 			"ownerReferences": []map[string]any{{"kind": ownerKind, "name": ownerName, "uid": ownerUID, "controller": true}}}
 	}
 	application := map[string]any{"name": "application", "image": app.Spec.Image, "ports": []map[string]any{{"containerPort": 8080}}}

@@ -214,7 +214,9 @@ func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *k
 	}
 	sm := objectMapField(service, "metadata")
 	selector := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
-	if objectStringField(sm, "uid") != binding.ServiceUID || objectStringField(sm, "deletionTimestamp") != "" || !owner(sm) || selector[runtime.FugueLabelAppWorkload] != binding.DeploymentName || selector[runtime.FugueLabelAppReleaseID] != release.ID {
+	legacyStopped := stopped && binding.BoundAt.IsZero()
+	workloadLabelMatches := func(value string) bool { return value == binding.DeploymentName || legacyStopped && value == "" }
+	if objectStringField(sm, "uid") != binding.ServiceUID || objectStringField(sm, "deletionTimestamp") != "" || !owner(sm) || !workloadLabelMatches(selector[runtime.FugueLabelAppWorkload]) || selector[runtime.FugueLabelAppReleaseID] != release.ID {
 		return out, fmt.Errorf("drain Service differs from immutable binding")
 	}
 	var dep kubeDeployment
@@ -263,7 +265,7 @@ func (s *Service) captureReleaseDrainWorkloadMode(ctx context.Context, client *k
 		if !owner(pm) || objectStringField(pm, "uid") == "" || objectStringField(pm, "deletionTimestamp") != "" {
 			return out, fmt.Errorf("release Pod ownership or lifecycle differs")
 		}
-		if objectStringMapValue(pm["annotations"])[runtime.FugueAnnotationReleaseKey] != binding.ReleaseKey || objectStringMapValue(pm["labels"])[runtime.FugueLabelAppWorkload] != binding.DeploymentName {
+		if objectStringMapValue(pm["annotations"])[runtime.FugueAnnotationReleaseKey] != binding.ReleaseKey || !workloadLabelMatches(objectStringMapValue(pm["labels"])[runtime.FugueLabelAppWorkload]) {
 			return out, fmt.Errorf("drain Pod belongs to another executable revision")
 		}
 		p := releaseDrainPod{Name: objectStringField(pm, "name"), UID: objectStringField(pm, "uid")}

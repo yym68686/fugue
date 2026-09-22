@@ -15,6 +15,7 @@ import (
 func TestHistoricalReleaseWorkloadMigration(t *testing.T) {
 	s, _, _, app := newAppImageTrackingTestStore(t)
 	testHistoricalReleaseWorkloadMigration(t, s, app)
+	testStoppedHistoricalRetirement(t, s, app)
 }
 
 func TestHistoricalReleaseWorkloadMigrationPostgres(t *testing.T) {
@@ -23,6 +24,9 @@ func TestHistoricalReleaseWorkloadMigrationPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := schemamigrate.MigrateAppReleaseWorkload(context.Background(), os.Getenv("FUGUE_TEST_DATABASE_URL")); err != nil {
+		t.Fatal(err)
+	}
+	if err := schemamigrate.MigrateAppReleaseRetirement(context.Background(), os.Getenv("FUGUE_TEST_DATABASE_URL")); err != nil {
 		t.Fatal(err)
 	}
 	tenant := billingBatchPGTenant(t, s)
@@ -35,6 +39,136 @@ func TestHistoricalReleaseWorkloadMigrationPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	testHistoricalReleaseWorkloadMigration(t, s, app)
+	testStoppedHistoricalRetirement(t, s, app)
+}
+
+func testStoppedHistoricalRetirement(t *testing.T, s *Store, app model.App) {
+	for _, scenario := range []string{"valid", "missing_source", "policy_changed", "retention", "operation_changed", "release_changed", "canceled", "concurrent_reactivate"} {
+		t.Run("atomic_stopped_"+scenario, func(t *testing.T) {
+			op, err := s.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: &app.Spec, ExecutionMode: model.ExecutionModeManaged})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := s.TryClaimPendingOperation(op.ID); err != nil || !ok {
+				t.Fatal(err)
+			}
+			r, err := s.CreateAppRelease(model.AppRelease{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining, RuntimeID: "runtime", ResolvedImageRef: app.Spec.Image, SpecSnapshot: &app.Spec})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			r.PromotedAt = &now
+			r, err = s.UpdateAppRelease(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "missing_source" {
+				if err := s.AppendAuditEvent(model.AuditEvent{TenantID: app.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-controller", Action: "app.release.promote", TargetType: "app_release", TargetID: r.ID, Metadata: map[string]string{"app_id": app.ID, "app_release_id": r.ID, "operation_id": op.ID, "mode": "safe_zero_downtime"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err = s.CompleteManagedOperation(op.ID, "", "done"); err != nil {
+				t.Fatal(err)
+			}
+			op, err = s.GetOperation(op.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stable, err := s.CreateAppRelease(model.AppRelease{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing})
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, err := s.UpsertAppTrafficPolicy(model.AppTrafficPolicy{TenantID: app.TenantID, AppID: app.ID, Mode: model.AppTrafficModeSingle, StableReleaseID: stable.ID, StableWeight: 100})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := model.AppReleaseWorkload{OperationID: op.ID, Namespace: "tenant", DeploymentName: "revision", DeploymentUID: "dep-uid", DeploymentGeneration: 1, ServiceName: "revision", ServiceUID: "svc-uid", ReleaseKey: "observed-key", RuntimeID: r.RuntimeID, ImageRef: r.ResolvedImageRef}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			switch scenario {
+			case "policy_changed":
+				copy := policy
+				copy.StableReleaseID = r.ID
+				if _, err = s.UpsertAppTrafficPolicy(copy); err != nil {
+					t.Fatal(err)
+				}
+			case "retention":
+				future := time.Now().Add(time.Hour)
+				r.RetentionUntil = &future
+				r, err = s.UpdateAppRelease(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "operation_changed":
+				op.UpdatedAt = op.UpdatedAt.Add(-time.Second)
+			case "release_changed":
+				copy := r
+				copy.UpstreamURL = "http://changed"
+				if _, err = s.UpdateAppRelease(copy); err != nil {
+					t.Fatal(err)
+				}
+			case "canceled":
+				cancel()
+			}
+			if scenario == "concurrent_reactivate" {
+				start := make(chan struct{})
+				results := make(chan error, 2)
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					<-start
+					_, err := s.RetireStoppedHistoricalAppRelease(ctx, r, stable, policy, op, w)
+					results <- err
+				}()
+				go func() {
+					defer wg.Done()
+					<-start
+					p := policy
+					p.StableReleaseID = r.ID
+					_, err := s.UpsertAppTrafficPolicy(p)
+					results <- err
+				}()
+				close(start)
+				wg.Wait()
+				close(results)
+				wins := 0
+				for err := range results {
+					if err == nil {
+						wins++
+					}
+				}
+				if wins != 1 {
+					t.Fatalf("concurrent commits=%d", wins)
+				}
+				stored, err := s.GetAppRelease(app.TenantID, false, r.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (stored.RevisionWorkload != nil) != AppReleaseIsRetired(stored) {
+					t.Fatal("binding visible outside tombstone")
+				}
+				return
+			}
+			retired, err := s.RetireStoppedHistoricalAppRelease(ctx, r, stable, policy, op, w)
+			if scenario != "valid" {
+				if err == nil {
+					t.Fatal("unsafe atomic retirement accepted")
+				}
+				stored, _ := s.GetAppRelease(app.TenantID, false, r.ID)
+				if stored.RevisionWorkload != nil || AppReleaseIsRetired(stored) {
+					t.Fatal("failed transaction left binding or retired state")
+				}
+				return
+			}
+			if err != nil || !AppReleaseIsRetired(retired) || retired.RevisionWorkload == nil || !reflect.DeepEqual(retired.SpecSnapshot, r.SpecSnapshot) {
+				t.Fatal("atomic stopped retirement failed", err)
+			}
+			if _, err = s.UpdateAppRelease(r); err == nil {
+				t.Fatal("old writer resurrected tombstone")
+			}
+		})
+	}
 }
 
 func testHistoricalReleaseWorkloadMigration(t *testing.T, s *Store, app model.App) {

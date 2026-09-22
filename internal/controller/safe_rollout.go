@@ -953,7 +953,8 @@ func (s *Service) cleanupSafeRolloutRetiredResources(ctx context.Context, app mo
 		}
 		if target.kind == "Service" {
 			selector := objectStringMapValue(nestedObjectValue(object, "spec", "selector"))
-			if selector[runtime.FugueLabelAppReleaseID] != retired.ID || selector[runtime.FugueLabelAppWorkload] != deploymentName {
+			legacyStopped := retired.StatusReason == "historical runtime verified stopped; original intent retained for audit" && selector[runtime.FugueLabelAppWorkload] == ""
+			if selector[runtime.FugueLabelAppReleaseID] != retired.ID || (!legacyStopped && selector[runtime.FugueLabelAppWorkload] != deploymentName) {
 				return fmt.Errorf("retired Service selects another revision")
 			}
 		}

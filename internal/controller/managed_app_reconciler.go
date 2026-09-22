@@ -466,6 +466,11 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 				if !errors.Is(migrationErr, store.ErrNotFound) && s.Logger != nil {
 					s.Logger.Printf("retain unbound release %s: %v", previous.ID, migrationErr)
 				}
+				if !errors.Is(migrationErr, store.ErrNotFound) {
+					if err := s.retireUnboundStoppedRevision(ctx, app, previous, stable, policy); err != nil && s.Logger != nil {
+						s.Logger.Printf("retain unbound stopped revision %s: %v", previous.ID, err)
+					}
+				}
 				continue
 			}
 			previous = bound
