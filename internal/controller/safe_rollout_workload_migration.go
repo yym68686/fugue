@@ -68,7 +68,15 @@ func (s *Service) migrateSafeRolloutWorkload(ctx context.Context, app model.App,
 		release.Status == model.AppReleaseStatusFailed && op.Status != model.OperationStatusFailed {
 		return release, fmt.Errorf("historical revision has no matching terminal deploy")
 	}
-	if !s.safeRolloutResumeSpecMatches(historical, *op.DesiredSpec) {
+	// Completion saves an operation's final spec. A previously promoted
+	// revision has its own executable snapshot and may predate that final spec.
+	// Its exact promote receipt and lifetime establish source ownership; the
+	// live template and release key below still have to match its own snapshot.
+	if release.Status == model.AppReleaseStatusDraining {
+		if release.CreatedAt.Before(op.CreatedAt) || release.PromotedAt == nil || release.PromotedAt.Before(release.CreatedAt) || release.PromotedAt.After(*op.CompletedAt) {
+			return release, fmt.Errorf("historical promotion is outside its source operation")
+		}
+	} else if !s.safeRolloutResumeSpecMatches(historical, *op.DesiredSpec) {
 		return release, fmt.Errorf("historical executable spec differs from its source operation")
 	}
 	if err := s.prepareHistoricalRevisionLabels(ctx, client, op, historical, target, objects); err != nil {

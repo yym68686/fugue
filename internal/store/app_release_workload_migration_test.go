@@ -38,7 +38,7 @@ func TestHistoricalReleaseWorkloadMigrationPostgres(t *testing.T) {
 }
 
 func testHistoricalReleaseWorkloadMigration(t *testing.T, s *Store, app model.App) {
-	for _, scenario := range []string{"previous", "failed", "missing_source", "wrong_actor", "wrong_app", "ambiguous_source", "stale_release", "stale_operation", "running_operation", "canceled", "concurrent"} {
+	for _, scenario := range []string{"previous", "failed", "final_spec_changed", "missing_promotion", "promotion_after_receipt", "wrong_mode", "missing_source", "wrong_actor", "wrong_app", "ambiguous_source", "stale_release", "stale_operation", "running_operation", "canceled", "concurrent"} {
 		t.Run(scenario, func(t *testing.T) {
 			op, err := s.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: &app.Spec, ExecutionMode: model.ExecutionModeManaged})
 			if err != nil {
@@ -56,13 +56,24 @@ func testHistoricalReleaseWorkloadMigration(t *testing.T, s *Store, app model.Ap
 			if err != nil {
 				t.Fatal(err)
 			}
+			if status == model.AppReleaseStatusDraining {
+				now := time.Now().UTC()
+				r.PromotedAt = &now
+				r, err = s.UpdateAppRelease(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			event := model.AuditEvent{TenantID: app.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-controller", Action: action, TargetType: "app_release", TargetID: r.ID,
-				Metadata: map[string]string{"app_id": app.ID, "app_release_id": r.ID, "operation_id": op.ID}}
+				Metadata: map[string]string{"app_id": app.ID, "app_release_id": r.ID, "operation_id": op.ID, "mode": "safe_zero_downtime"}}
 			if scenario == "wrong_actor" {
 				event.ActorID = "unrelated-controller"
 			}
 			if scenario == "wrong_app" {
 				event.Metadata["app_id"] = "other-app"
+			}
+			if scenario == "wrong_mode" {
+				event.Metadata["mode"] = "other"
 			}
 			if scenario != "missing_source" {
 				if err := s.AppendAuditEvent(event); err != nil {
@@ -77,6 +88,10 @@ func testHistoricalReleaseWorkloadMigration(t *testing.T, s *Store, app model.Ap
 			}
 			if scenario == "failed" {
 				_, err = s.FailOperation(op.ID, "canary gate failed")
+			} else if scenario == "final_spec_changed" {
+				final := app.Spec
+				final.Env = map[string]string{"REVISION": "later"}
+				_, err = s.CompleteManagedOperationWithResult(op.ID, "", "done", &final, nil)
 			} else if scenario != "running_operation" {
 				_, err = s.CompleteManagedOperation(op.ID, "", "done")
 			}
@@ -94,9 +109,20 @@ func testHistoricalReleaseWorkloadMigration(t *testing.T, s *Store, app model.Ap
 			if err != nil || len(op.ControllerTimingSegments) != 1 {
 				t.Fatal("missing timing facts", err)
 			}
+			if scenario == "missing_promotion" || scenario == "promotion_after_receipt" {
+				r.PromotedAt = nil
+				if scenario == "promotion_after_receipt" {
+					future := time.Now().Add(time.Hour)
+					r.PromotedAt = &future
+				}
+				r, err = s.UpdateAppRelease(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			w := model.AppReleaseWorkload{OperationID: op.ID, Namespace: "tenant", DeploymentName: "revision", DeploymentUID: "dep-uid", DeploymentGeneration: 1, ServiceName: "revision", ServiceUID: "svc-uid", ReleaseKey: "key", RuntimeID: r.RuntimeID, ImageRef: r.ResolvedImageRef}
 			id, sourceErr := s.FindAppReleaseWorkloadSource(context.Background(), r)
-			invalidSource := scenario == "missing_source" || scenario == "wrong_actor" || scenario == "wrong_app" || scenario == "ambiguous_source"
+			invalidSource := scenario == "missing_source" || scenario == "wrong_actor" || scenario == "wrong_app" || scenario == "ambiguous_source" || scenario == "wrong_mode" || scenario == "missing_promotion" || scenario == "promotion_after_receipt"
 			if invalidSource == (sourceErr == nil) || !invalidSource && id != op.ID {
 				t.Fatal("unexpected source resolution", id, sourceErr)
 			}
@@ -142,7 +168,7 @@ func testHistoricalReleaseWorkloadMigration(t *testing.T, s *Store, app model.Ap
 				return
 			}
 			bound, err := s.MigrateAppReleaseWorkload(ctx, r, op, w)
-			if scenario != "previous" && scenario != "failed" {
+			if scenario != "previous" && scenario != "failed" && scenario != "final_spec_changed" {
 				if err == nil {
 					t.Fatal("invalid migration accepted")
 				}

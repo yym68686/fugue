@@ -40,12 +40,17 @@ func releaseWorkloadSource(release model.AppRelease, events []model.AuditEvent) 
 	action := "app.release.promote"
 	if release.Status == model.AppReleaseStatusFailed {
 		action = "app.release.abort.auto"
+	} else if release.PromotedAt == nil || release.PromotedAt.Before(release.CreatedAt) {
+		return "", ErrConflict
 	}
 	var source string
 	for _, event := range events {
 		if event.TenantID != release.TenantID || event.ActorType != model.ActorTypeSystem || event.ActorID != "safe-rollout-controller" ||
 			event.TargetType != "app_release" || event.TargetID != release.ID || event.Action != action || event.Metadata["app_id"] != release.AppID ||
 			event.Metadata["app_release_id"] != release.ID || event.CreatedAt.Before(release.CreatedAt) {
+			continue
+		}
+		if action == "app.release.promote" && (event.Metadata["mode"] != "safe_zero_downtime" || event.CreatedAt.Before(*release.PromotedAt)) {
 			continue
 		}
 		id := event.Metadata["operation_id"]
@@ -101,6 +106,9 @@ func migrateReleaseWorkload(current, expected model.AppRelease, op, source model
 	}
 	id, err := releaseWorkloadSource(current, events)
 	if err != nil || id != op.ID {
+		return model.AppRelease{}, ErrConflict
+	}
+	if current.Status == model.AppReleaseStatusDraining && (current.CreatedAt.Before(op.CreatedAt) || current.PromotedAt == nil || current.PromotedAt.After(*op.CompletedAt)) {
 		return model.AppRelease{}, ErrConflict
 	}
 	workload.BoundAt = time.Now().UTC().Truncate(time.Microsecond)

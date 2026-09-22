@@ -17,7 +17,7 @@ import (
 )
 
 func TestHistoricalWorkloadMigrationRequiresSourceAndExactExistingResources(t *testing.T) {
-	for _, scenario := range []string{"previous", "failed", "missing_source", "wrong_spec", "new_uid", "new_generation", "recreated_after_operation", "old_resource", "wrong_owner", "wrong_selector", "wrong_image", "old_agent", "agent_changed", "agent_config_changed", "missing_deployment", "canceled", "missing_labels", "label_retry", "label_wrong_owner", "label_wrong_image", "label_replaced_after_preflight"} {
+	for _, scenario := range []string{"previous", "failed", "final_spec_changed", "missing_promotion", "promotion_after_operation", "missing_source", "wrong_spec", "new_uid", "new_generation", "recreated_after_operation", "old_resource", "wrong_owner", "wrong_selector", "wrong_image", "old_agent", "agent_changed", "agent_config_changed", "missing_deployment", "canceled", "missing_labels", "label_retry", "label_wrong_owner", "label_wrong_image", "label_replaced_after_preflight"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			st, _, app, _ := newSafeRolloutTestState(t)
@@ -42,11 +42,23 @@ func TestHistoricalWorkloadMigrationRequiresSourceAndExactExistingResources(t *t
 			if err != nil {
 				t.Fatal(err)
 			}
+			if status == model.AppReleaseStatusDraining {
+				now := time.Now().UTC()
+				r.PromotedAt = &now
+				r, err = st.UpdateAppRelease(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			if scenario != "missing_source" {
-				s.appendSafeRolloutAuditEvent(app, action, r.ID, map[string]string{"operation_id": op.ID})
+				s.appendSafeRolloutAuditEvent(app, action, r.ID, map[string]string{"operation_id": op.ID, "mode": "safe_zero_downtime"})
 			}
 			if scenario == "failed" {
 				_, err = st.FailOperation(op.ID, "gate failed")
+			} else if scenario == "final_spec_changed" {
+				final := *cloneControllerAppSpec(&app.Spec)
+				final.Env = map[string]string{"REVISION": "later"}
+				_, err = st.CompleteManagedOperationWithResult(op.ID, "", "done", &final, nil)
 			} else {
 				_, err = st.CompleteManagedOperation(op.ID, "", "done")
 			}
@@ -60,6 +72,17 @@ func TestHistoricalWorkloadMigrationRequiresSourceAndExactExistingResources(t *t
 			r, err = st.GetAppRelease(app.TenantID, false, r.ID)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if scenario == "missing_promotion" || scenario == "promotion_after_operation" {
+				r.PromotedAt = nil
+				if scenario == "promotion_after_operation" {
+					future := op.CompletedAt.Add(time.Hour)
+					r.PromotedAt = &future
+				}
+				r, err = st.UpdateAppRelease(r)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			prepared := s.Renderer.PrepareApp(app)
 			objects := s.Renderer.BuildManagedAppRevisionChildObjects(prepared, runtime.SchedulingForRuntime(rt), nil, nil, safeRolloutCandidateRevision(r.ID))
@@ -220,7 +243,7 @@ func TestHistoricalWorkloadMigrationRequiresSourceAndExactExistingResources(t *t
 				}
 				bound, err = s.migrateSafeRolloutWorkload(ctx, app, r)
 			}
-			if scenario != "previous" && scenario != "failed" && scenario != "old_agent" && scenario != "missing_labels" && scenario != "label_retry" {
+			if scenario != "previous" && scenario != "failed" && scenario != "final_spec_changed" && scenario != "old_agent" && scenario != "missing_labels" && scenario != "label_retry" {
 				if err == nil {
 					t.Fatal("unsafe migration accepted")
 				}
