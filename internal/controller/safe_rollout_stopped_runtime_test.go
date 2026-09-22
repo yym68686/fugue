@@ -88,7 +88,7 @@ func TestStoppedRuntimeReportRequiresFreshCompleteIdentity(t *testing.T) {
 }
 
 func TestStoppedWorkloadUsesSignedProbeBeforeRetirement(t *testing.T) {
-	for _, scenario := range []string{"valid", "revoked", "wrong_job_image", "wrong_job_owner", "stale_report", "wrong_report_container", "wrong_report_boot", "pod_restart", "node_reboot", "policy_changed", "unready_node", "running_container", "missing_container"} {
+	for _, scenario := range []string{"valid", "old_status_fresh_lease", "stale_lease", "wrong_lease_owner", "wrong_lease_holder", "lease_missing", "revoked", "wrong_job_image", "wrong_job_owner", "stale_report", "wrong_report_container", "wrong_report_boot", "pod_restart", "node_reboot", "policy_changed", "unready_node", "running_container", "missing_container"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			s, app, old, f := newDrainWorkloadFixture(t)
@@ -140,7 +140,27 @@ func TestStoppedWorkloadUsesSignedProbeBeforeRetirement(t *testing.T) {
 					if scenario == "node_reboot" && logReads > 0 {
 						boot = "changed"
 					}
-					encode(map[string]any{"metadata": map[string]any{"uid": "node-uid"}, "status": map[string]any{"nodeInfo": map[string]any{"bootID": boot}, "conditions": []any{map[string]any{"type": "Ready", "status": ready, "lastHeartbeatTime": time.Now().UTC().Format(time.RFC3339)}}}})
+					at := time.Now().UTC()
+					if scenario == "old_status_fresh_lease" {
+						at = at.Add(-time.Hour)
+					}
+					encode(map[string]any{"metadata": map[string]any{"uid": "node-uid"}, "status": map[string]any{"nodeInfo": map[string]any{"bootID": boot}, "conditions": []any{map[string]any{"type": "Ready", "status": ready, "lastHeartbeatTime": at.Format(time.RFC3339)}}}})
+				case strings.Contains(r.URL.Path, "/namespaces/kube-node-lease/"):
+					if scenario == "lease_missing" {
+						http.NotFound(w, r)
+						break
+					}
+					at, uid, holder := time.Now().UTC(), "node-uid", "node-test"
+					if scenario == "stale_lease" {
+						at = at.Add(-time.Minute)
+					}
+					if scenario == "wrong_lease_owner" {
+						uid = "foreign"
+					}
+					if scenario == "wrong_lease_holder" {
+						holder = "foreign"
+					}
+					encode(map[string]any{"metadata": map[string]any{"ownerReferences": []any{map[string]any{"kind": "Node", "name": "node-test", "uid": uid}}}, "spec": map[string]any{"holderIdentity": holder, "renewTime": at.Format(time.RFC3339Nano), "leaseDurationSeconds": 40}})
 				case strings.Contains(r.URL.Path, "/configmaps/"):
 					data := map[string]string{"catalog.json": string(signed)}
 					if strings.HasSuffix(r.URL.Path, "/"+livediagnostics.TrustConfigMap) {
@@ -234,7 +254,7 @@ func TestStoppedWorkloadUsesSignedProbeBeforeRetirement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if scenario == "valid" {
+			if scenario == "valid" || scenario == "old_status_fresh_lease" {
 				if got.Status != model.AppReleaseStatusRetired || f.deleteCalls != 2 || logReads != 1 || nodeReads < 3 {
 					t.Fatalf("not retired: status=%s deletes=%d logs=%d nodes=%d", got.Status, f.deleteCalls, logReads, nodeReads)
 				}

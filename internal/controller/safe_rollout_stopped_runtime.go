@@ -75,16 +75,35 @@ func captureDrainNodeIdentity(ctx context.Context, c *kubeClient, p *releaseDrai
 	if p.NodeUID == "" || p.BootID == "" || objectStringField(m, "deletionTimestamp") != "" {
 		return errors.New("stopped Pod node identity incomplete")
 	}
+	ready := false
 	for _, condition := range mapSlice(nestedObjectValue(obj, "status", "conditions")) {
-		if condition["type"] != "Ready" {
-			continue
-		}
-		at, err := time.Parse(time.RFC3339Nano, objectStringField(condition, "lastHeartbeatTime"))
-		if err == nil && condition["status"] == "True" && time.Since(at) >= -5*time.Second && time.Since(at) < 2*time.Minute {
-			return nil
+		if condition["type"] == "Ready" {
+			ready = condition["status"] == "True"
 		}
 	}
-	return errors.New("stopped Pod node has no fresh Ready heartbeat")
+	if !ready {
+		return errors.New("stopped Pod node is not Ready")
+	}
+	lease, found, err := c.getRawObject(ctx, "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/"+url.PathEscape(p.Node))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("stopped Pod node Lease unavailable")
+	}
+	lm, ls := objectMapField(lease, "metadata"), objectMapField(lease, "spec")
+	owner := false
+	for _, ref := range mapSlice(lm["ownerReferences"]) {
+		if ref["kind"] == "Node" && ref["name"] == p.Node && ref["uid"] == p.NodeUID {
+			owner = true
+		}
+	}
+	at, err := time.Parse(time.RFC3339Nano, objectStringField(ls, "renewTime"))
+	duration, ok := ls["leaseDurationSeconds"].(float64)
+	if !owner || objectStringField(lm, "deletionTimestamp") != "" || ls["holderIdentity"] != p.Node || err != nil || !ok || duration < 1 || duration > 120 || duration != float64(int(duration)) || time.Since(at) < -5*time.Second || time.Since(at) >= time.Duration(duration)*time.Second {
+		return errors.New("stopped Pod node has no fresh owned Lease")
+	}
+	return nil
 }
 
 func validCRIHex(id string) bool {

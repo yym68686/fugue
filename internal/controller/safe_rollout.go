@@ -1047,9 +1047,10 @@ func (s *Service) querySafeRolloutDrainMetrics(ctx context.Context, op model.Ope
 	if err != nil {
 		s.recordSafeRolloutReleaseStep(op, app, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: drain metrics unavailable", previous.ID, map[string]any{"error": err.Error()})
 		s.appendSafeRolloutAuditEvent(app, "app.release.previous_retire.paused", previous.ID, map[string]string{
-			"operation_id": op.ID,
-			"phase":        "previous_retire",
-			"reason":       "drain metrics unavailable",
+			"operation_id":   op.ID,
+			"phase":          "previous_retire",
+			"reason":         "drain metrics unavailable",
+			"observer_error": err.Error(),
 		})
 		return safeRolloutDrainMetrics{}, false
 	}
