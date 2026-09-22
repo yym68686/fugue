@@ -330,6 +330,9 @@ func (s *Service) alignSafeRolloutPromotedStableRelease(ctx context.Context, op 
 	if err != nil {
 		return false, fmt.Errorf("read promoted safe rollout release: %w", err)
 	}
+	if !s.safeRolloutBoundReleaseMatchesApp(state.CandidateApp, latest) {
+		return false, fmt.Errorf("canonical target differs from bound release executable intent")
+	}
 	since := time.Now().UTC()
 	aligned := s.safeRolloutApplyCanonicalStableFields(ctx, state.CandidateApp, latest, "safe rollout promoted stable aligned to canonical service")
 	aligned.Role = model.AppReleaseRoleStable
@@ -378,14 +381,19 @@ func (s *Service) ensureSafeRolloutCanonicalStableBaseline(ctx context.Context, 
 			return model.AppRelease{}, err
 		}
 		stable = created
-	} else {
+	} else if stable.RevisionWorkload == nil {
 		aligned := s.safeRolloutApplyCanonicalStableFields(ctx, app, stable, "safe rollout canonical stable baseline")
 		updated, err := s.Store.UpdateAppRelease(aligned)
 		if err != nil {
 			return model.AppRelease{}, err
 		}
 		stable = updated
+	} else if stable.Role != model.AppReleaseRoleStable ||
+		(stable.Status != model.AppReleaseStatusReady && stable.Status != model.AppReleaseStatusServing) {
+		return model.AppRelease{}, fmt.Errorf("bound baseline is not an active stable release")
 	}
+	// An already bound stable keeps its verified target and executable intent.
+	// A later AppSpec is not evidence that the canonical workload serves it.
 
 	for _, release := range releases {
 		if release.ID == stable.ID || release.Role != model.AppReleaseRoleStable {
@@ -492,8 +500,14 @@ func (s *Service) safeRolloutApplyCanonicalStableFields(ctx context.Context, app
 	now := time.Now().UTC()
 	prepared := s.Renderer.PrepareApp(app)
 	originalRole := release.Role
-	release.TenantID = app.TenantID
-	release.AppID = app.ID
+	if release.RevisionWorkload == nil {
+		release.TenantID = app.TenantID
+		release.AppID = app.ID
+		release.SourceRef = releaseflow.AppReleaseSourceRef(app)
+		release.ResolvedImageRef = strings.TrimSpace(app.Spec.Image)
+		release.RuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+		release.SpecSnapshot = cloneControllerAppSpec(&app.Spec)
+	}
 	release.Role = model.AppReleaseRoleStable
 	if release.Status == "" ||
 		release.Status == model.AppReleaseStatusFailed ||
@@ -502,19 +516,28 @@ func (s *Service) safeRolloutApplyCanonicalStableFields(ctx context.Context, app
 		originalRole != model.AppReleaseRoleStable {
 		release.Status = model.AppReleaseStatusReady
 	}
-	release.SourceRef = releaseflow.AppReleaseSourceRef(app)
-	release.ResolvedImageRef = strings.TrimSpace(app.Spec.Image)
-	release.RuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 	release.UpstreamURL = s.controllerServiceURLForApp(ctx, app)
 	release.DeploymentName = runtime.RuntimeAppResourceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
 	release.ServiceName = runtime.RuntimeAppServiceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
-	release.SpecSnapshot = cloneControllerAppSpec(&app.Spec)
 	release.StatusReason = ""
 	if strings.TrimSpace(message) != "" {
 		release.ReleaseMessage = strings.TrimSpace(message)
 	}
 	release.ReadyAt = releaseflow.FirstNonNilTime(release.ReadyAt, &now)
 	return release
+}
+
+func (s *Service) safeRolloutBoundReleaseMatchesApp(app model.App, release model.AppRelease) bool {
+	if release.RevisionWorkload == nil {
+		return true
+	}
+	if release.SpecSnapshot == nil || release.AppID != app.ID || release.TenantID != app.TenantID ||
+		release.RuntimeID != strings.TrimSpace(app.Spec.RuntimeID) {
+		return false
+	}
+	original := app
+	original.Spec = *cloneControllerAppSpec(release.SpecSnapshot)
+	return !s.safeRolloutCandidateChangesPodTemplate(original, app, runtime.SchedulingConstraints{})
 }
 
 func (s *Service) waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx context.Context, op model.Operation, state *safeRolloutState, weight int, since time.Time) bool {
@@ -990,7 +1013,8 @@ func (s *Service) reconcileServingReleaseCanonicalTargetIfReady(ctx context.Cont
 	}
 	if !strings.EqualFold(strings.TrimSpace(release.Role), model.AppReleaseRoleStable) ||
 		!strings.EqualFold(strings.TrimSpace(release.Status), model.AppReleaseStatusServing) ||
-		!s.migrationImageRefsEquivalent(app, release.ResolvedImageRef, app.Spec.Image) {
+		!s.migrationImageRefsEquivalent(app, release.ResolvedImageRef, app.Spec.Image) ||
+		!s.safeRolloutBoundReleaseMatchesApp(app, release) {
 		return nil
 	}
 	prepared := s.Renderer.PrepareApp(app)

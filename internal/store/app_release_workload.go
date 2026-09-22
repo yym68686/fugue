@@ -21,7 +21,9 @@ func preserveReleaseWorkload(current model.AppRelease, desired *model.AppRelease
 	if desired.RevisionWorkload != nil && !reflect.DeepEqual(current.RevisionWorkload, desired.RevisionWorkload) {
 		return ErrConflict
 	}
-	if current.RevisionWorkload != nil && (desired.AppID != current.AppID || desired.TenantID != current.TenantID) {
+	if current.RevisionWorkload != nil && (desired.AppID != current.AppID || desired.TenantID != current.TenantID ||
+		desired.SourceRef != current.SourceRef || desired.ResolvedImageRef != current.ResolvedImageRef ||
+		desired.RuntimeID != current.RuntimeID || !reflect.DeepEqual(desired.SpecSnapshot, current.SpecSnapshot)) {
 		return ErrConflict
 	}
 	desired.RevisionWorkload = current.RevisionWorkload

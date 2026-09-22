@@ -9,6 +9,8 @@ import (
 // This additive migration leaves old code and existing release rows valid.
 // Once a controller binds a workload, ordinary release updates cannot replace
 // or erase its identity, including updates from a rolled-back controller.
+// The executable intent is frozen with the binding; routing and runtime facts
+// can still change without destroying the original revision's provenance.
 const appReleaseWorkloadSQL = `
 ALTER TABLE fugue_app_releases ADD COLUMN IF NOT EXISTS revision_workload_json JSONB NULL;
 CREATE OR REPLACE FUNCTION fugue_preserve_app_release_workload() RETURNS trigger
@@ -28,6 +30,25 @@ $$;
 CREATE OR REPLACE TRIGGER fugue_app_release_workload_immutable
 BEFORE INSERT OR UPDATE ON fugue_app_releases
 FOR EACH ROW EXECUTE FUNCTION fugue_preserve_app_release_workload();
+
+-- A separate additive guard survives rollback to the earlier schema writer,
+-- which replaces only the workload identity function above.
+CREATE OR REPLACE FUNCTION fugue_preserve_bound_release_intent() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+ IF OLD.revision_workload_json IS NOT NULL AND
+    (NEW.source_ref IS DISTINCT FROM OLD.source_ref OR
+     NEW.resolved_image_ref IS DISTINCT FROM OLD.resolved_image_ref OR
+     NEW.runtime_id IS DISTINCT FROM OLD.runtime_id OR
+     NEW.spec_snapshot_json IS DISTINCT FROM OLD.spec_snapshot_json) THEN
+  RAISE EXCEPTION 'bound revision executable intent is immutable' USING ERRCODE = '40001';
+ END IF;
+ RETURN NEW;
+END
+$$;
+CREATE OR REPLACE TRIGGER fugue_app_release_intent_immutable
+BEFORE UPDATE ON fugue_app_releases
+FOR EACH ROW EXECUTE FUNCTION fugue_preserve_bound_release_intent();
 `
 
 func MigrateAppReleaseWorkload(ctx context.Context, databaseURL string) error {
@@ -67,6 +88,9 @@ func applyAppReleaseWorkload(ctx context.Context, db *sql.DB) error {
 ) AND EXISTS (
  SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('fugue_app_releases')
  AND tgname='fugue_app_release_workload_immutable' AND tgenabled='O' AND NOT tgisinternal
+) AND EXISTS (
+ SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('fugue_app_releases')
+ AND tgname='fugue_app_release_intent_immutable' AND tgenabled='O' AND NOT tgisinternal
 )`).Scan(&complete); err != nil {
 		return fmt.Errorf("verify app release workload binding schema: %w", err)
 	}

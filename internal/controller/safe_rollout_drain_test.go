@@ -463,8 +463,12 @@ func TestReleaseDrainRequiresCompleteStablePodSet(t *testing.T) {
 			f.change = func(f *drainWorkloadFixture) {
 				f.change = nil
 				changed := *r
-				changed.RuntimeID = "replacement"
-				_, _ = s.Store.UpdateAppRelease(changed)
+				// Executable intent is immutable after binding. Change a
+				// mutable target to exercise the observation's version fence.
+				changed.ServiceName = "replacement"
+				if _, err := s.Store.UpdateAppRelease(changed); err != nil {
+					t.Error(err)
+				}
 			}
 		}},
 	} {

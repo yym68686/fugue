@@ -39,8 +39,9 @@ func TestAppReleaseWorkloadMigrationPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer isolated.Close()
-	if _, err = isolated.Exec(`CREATE TABLE fugue_app_releases(id text PRIMARY KEY,app_id text NOT NULL,tenant_id text NOT NULL,deployment_name text NOT NULL,status text NOT NULL);
-INSERT INTO fugue_app_releases VALUES ('release','app','tenant','candidate','ready')`); err != nil {
+	if _, err = isolated.Exec(`CREATE TABLE fugue_app_releases(id text PRIMARY KEY,app_id text NOT NULL,tenant_id text NOT NULL,deployment_name text NOT NULL,status text NOT NULL,
+source_ref text NOT NULL DEFAULT '',resolved_image_ref text NOT NULL DEFAULT '',runtime_id text NOT NULL DEFAULT '',spec_snapshot_json jsonb);
+INSERT INTO fugue_app_releases(id,app_id,tenant_id,deployment_name,status,spec_snapshot_json) VALUES ('release','app','tenant','candidate','ready','{"env":{"CONFIG_VERSION":"original"}}')`); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -57,6 +58,12 @@ INSERT INTO fugue_app_releases VALUES ('release','app','tenant','candidate','rea
 	if err := MigrateAppReleaseWorkload(ctx, u.String()); err != nil {
 		t.Fatal(err)
 	}
+	// Reapplying the older migration replaces the identity function but
+	// cannot remove the independently added executable-intent guard.
+	legacy := strings.Split(appReleaseWorkloadSQL, "-- A separate additive guard")[0]
+	if _, err := isolated.Exec(legacy); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = isolated.Exec(`UPDATE fugue_app_releases SET deployment_name='canonical',status='serving'`); err != nil {
 		t.Fatal(err)
 	}
@@ -69,12 +76,20 @@ INSERT INTO fugue_app_releases VALUES ('release','app','tenant','candidate','rea
 		`UPDATE fugue_app_releases SET revision_workload_json='{"deployment_uid":"replacement"}'`,
 		`UPDATE fugue_app_releases SET app_id='another-app'`,
 		`UPDATE fugue_app_releases SET tenant_id='another-tenant'`,
-		`INSERT INTO fugue_app_releases VALUES ('bad','app','tenant','candidate','ready','null')`,
-		`INSERT INTO fugue_app_releases VALUES ('bad','app','tenant','candidate','ready','[]')`,
+		`UPDATE fugue_app_releases SET source_ref='other-source'`,
+		`UPDATE fugue_app_releases SET resolved_image_ref='other-image'`,
+		`UPDATE fugue_app_releases SET runtime_id='other-runtime'`,
+		`UPDATE fugue_app_releases SET spec_snapshot_json='{"env":{"CONFIG_VERSION":"replacement"}}'`,
+		`UPDATE fugue_app_releases SET spec_snapshot_json=NULL`,
+		`INSERT INTO fugue_app_releases(id,app_id,tenant_id,deployment_name,status,revision_workload_json) VALUES ('bad','app','tenant','candidate','ready','null')`,
+		`INSERT INTO fugue_app_releases(id,app_id,tenant_id,deployment_name,status,revision_workload_json) VALUES ('bad','app','tenant','candidate','ready','[]')`,
 	} {
 		if _, err := isolated.Exec(query); err == nil {
 			t.Fatalf("immutable identity guard accepted %s", query)
 		}
+	}
+	if err = isolated.QueryRow(`SELECT spec_snapshot_json->'env'->>'CONFIG_VERSION' FROM fugue_app_releases WHERE id='release'`).Scan(&value); err != nil || value != "original" {
+		t.Fatalf("original intent lost: %q %v", value, err)
 	}
 	if _, err = isolated.Exec(`INSERT INTO fugue_app_releases(id,app_id,tenant_id,deployment_name,status) VALUES ('concurrent','app','tenant','candidate','ready')`); err != nil {
 		t.Fatal(err)

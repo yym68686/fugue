@@ -25,7 +25,7 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 			app.Spec.RuntimeID = "runtime"
 			svc := &Service{Store: st, Renderer: runtime.Renderer{StrictDrain: runtime.DefaultStrictDrainConfig()}}
 			app = svc.Renderer.PrepareApp(app)
-			release, err := st.CreateAppRelease(model.AppRelease{ID: "candidate", TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating, RuntimeID: app.Spec.RuntimeID, ResolvedImageRef: app.Spec.Image})
+			release, err := st.CreateAppRelease(model.AppRelease{ID: "candidate", TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusCreating, RuntimeID: app.Spec.RuntimeID, ResolvedImageRef: app.Spec.Image, SpecSnapshot: cloneControllerAppSpec(&app.Spec)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -148,6 +148,41 @@ func TestSafeRolloutBindsVerifiedRevisionAndPreservesCanonicalIdentity(t *testin
 			}
 			if aligned.DeploymentName == binding.DeploymentName || !reflect.DeepEqual(aligned.RevisionWorkload, binding) {
 				t.Fatal("canonical alignment rewrote immutable revision")
+			}
+			changed := app
+			changed.Spec = *cloneControllerAppSpec(&app.Spec)
+			changed.Spec.Env = map[string]string{"CONFIG_VERSION": "new"}
+			if !svc.safeRolloutBoundReleaseMatchesApp(app, aligned) || svc.safeRolloutBoundReleaseMatchesApp(changed, aligned) {
+				t.Fatal("bound execution comparison did not distinguish configuration with the same image")
+			}
+			// Starting a later operation must retain the previously verified
+			// stable revision even if the business AppSpec has since changed.
+			principal := model.Principal{TenantID: app.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-controller"}
+			baseline, err := svc.ensureSafeRolloutCanonicalStableBaseline(context.Background(), op, changed, principal)
+			if err != nil || !reflect.DeepEqual(baseline, aligned) {
+				t.Fatal("next baseline rewrote bound stable", err)
+			}
+			mismatch := &safeRolloutState{Enabled: true, StableAlignmentAllowed: true, CandidateApp: changed, Candidate: aligned}
+			if ok, err := svc.alignSafeRolloutPromotedStableRelease(context.Background(), op, mismatch); err == nil || ok {
+				t.Fatal("promoted alignment accepted different intent")
+			}
+			aligned.Status = model.AppReleaseStatusServing
+			aligned, err = st.UpdateAppRelease(aligned)
+			if err != nil {
+				t.Fatal(err)
+			}
+			priorReads := reads
+			if err := svc.reconcileServingReleaseCanonicalTargetIfReady(context.Background(), client, runtime.NamespaceForTenant(app.TenantID), changed); err != nil || reads != priorReads {
+				t.Fatal("mismatched reconciler should retain target without probing canonical", err)
+			}
+			retained, err := st.GetAppRelease(app.TenantID, true, aligned.ID)
+			if err != nil || !reflect.DeepEqual(retained, aligned) {
+				t.Fatal("mismatched reconciliation changed release", err)
+			}
+			changed.Spec.RuntimeID, changed.Spec.Image = "new-runtime", "registry.example/app:v3"
+			preserved := svc.safeRolloutApplyCanonicalStableFields(context.Background(), changed, aligned, "reconcile")
+			if preserved.SourceRef != aligned.SourceRef || preserved.ResolvedImageRef != aligned.ResolvedImageRef || preserved.RuntimeID != aligned.RuntimeID || !reflect.DeepEqual(preserved.SpecSnapshot, aligned.SpecSnapshot) {
+				t.Fatal("canonical alignment overwrote bound executable intent")
 			}
 			if err := svc.bindSafeRolloutWorkload(context.Background(), client, op, state, objects); err != nil {
 				t.Fatal("idempotent retry", err)

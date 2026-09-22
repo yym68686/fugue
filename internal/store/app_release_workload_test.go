@@ -136,6 +136,32 @@ func testAppReleaseWorkloadBinding(t *testing.T, s *Store, app model.App) {
 	if _, err := s.UpdateAppRelease(bad); err == nil {
 		t.Fatal("binding moved to another tenant")
 	}
+	for _, field := range []string{"source", "image", "runtime", "snapshot", "missing_snapshot"} {
+		bad = updated
+		// Also exercise an old writer that does not know the binding column.
+		bad.RevisionWorkload = nil
+		switch field {
+		case "source":
+			bad.SourceRef = "new-source"
+		case "image":
+			bad.ResolvedImageRef = "registry.example/app:replacement"
+		case "runtime":
+			bad.RuntimeID = "new-runtime"
+		case "snapshot":
+			spec := *bad.SpecSnapshot
+			spec.Env = map[string]string{"CONFIG_VERSION": "new"}
+			bad.SpecSnapshot = &spec
+		case "missing_snapshot":
+			bad.SpecSnapshot = nil
+		}
+		if _, err := s.UpdateAppRelease(bad); !errors.Is(err, ErrConflict) {
+			t.Fatalf("bound %s mutation must conflict: %v", field, err)
+		}
+		got, err := s.GetAppRelease(app.TenantID, true, updated.ID)
+		if err != nil || !reflect.DeepEqual(got, updated) {
+			t.Fatalf("rejected %s update changed the release: %v", field, err)
+		}
+	}
 	metadata, err := s.ListAppReleaseMetadata(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID})
 	if err != nil || len(metadata) != 1 || metadata[0].SpecSnapshot != nil || !reflect.DeepEqual(metadata[0].RevisionWorkload, &identity) {
 		t.Fatal("metadata projection lost binding", err)
