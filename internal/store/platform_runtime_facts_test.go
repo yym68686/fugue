@@ -13,6 +13,7 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformsafety"
+	"fugue/internal/schemamigrate"
 )
 
 func TestPlatformRuntimeFactsFiltering(t *testing.T) { testPlatformRuntimeFactsFiltering(t, "") }
@@ -112,9 +113,27 @@ func testPlatformRuntimeFactsFiltering(t *testing.T, dsn string) {
 		{"literal query string", PlatformRuntimeFactFilter{ReleaseSetID: parent + "' OR true --", Limit: 20}, nil},
 		{"unknown", PlatformRuntimeFactFilter{ReleaseSetID: prefix + "-missing", Limit: 20}, nil},
 	}
+	if s.db != nil {
+		if err := schemamigrate.MigratePlatformRuntimeFactIndexes(ctx, dsn); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_audit_events (id,actor_type,actor_id,action,target_type,target_id,metadata_json,created_at) SELECT $1||n::text,'bootstrap','synthetic','platform_consumer.heartbeat_accepted','platform_consumer','unrelated',jsonb_build_object('release_set_id','unrelated-'||(n/3)),NOW()+n*interval '1 second' FROM generate_series(1,100000)n`, prefix+"-bulk-"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = s.db.Exec(`DELETE FROM fugue_audit_events WHERE left(id,length($1))=$1`, prefix+"-bulk-")
+		})
+		if _, err := s.db.Exec(`ANALYZE fugue_audit_events`); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := s.ListPlatformRuntimeFacts(ctx, tt.filter)
+			queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			started := time.Now()
+			got, err := s.ListPlatformRuntimeFacts(queryCtx, tt.filter)
+			t.Logf("filtered query behind 100,000 newer heartbeats: %s", time.Since(started))
 			if err != nil {
 				t.Fatal(err)
 			}

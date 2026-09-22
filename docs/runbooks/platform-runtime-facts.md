@@ -24,3 +24,9 @@ they cannot substitute for authenticated consumer evidence.
 For current readiness, also inspect the exact publication's expected consumer
 sets and `/v1/admin/platform-state/convergence`. Historical success does not
 replace fresh evidence for the current release and fence.
+
+The schema release builds the existing audit table's target-history B-tree and
+metadata JSONB indexes online. Filtered history selects by identity and then
+sorts the matching rows, avoiding a small-limit chronological scan over unrelated
+recent heartbeats. Index creation is bounded, serialized, safe to retry after
+interruption, and refuses to replace an index with an unexpected definition.

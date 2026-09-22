@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -125,20 +126,54 @@ func (s *Store) pgListPlatformRuntimeFacts(ctx context.Context, filter PlatformR
         e.metadata_json,e.chain_id,e.chain_sequence,e.previous_hash,e.event_hash,e.provenance_json,e.created_at
         FROM fugue_audit_events e WHERE (e.action='platform_consumer.heartbeat_accepted'
         OR left(e.action,length('platform_artifact.'))='platform_artifact.' OR ` + producer + `)`
+	metadataEquals := func(key, value string) string {
+		raw, _ := json.Marshal(map[string]string{key: value})
+		return "e.metadata_json @> " + bind(string(raw)) + "::jsonb"
+	}
 	if filter.ConsumerID != "" {
-		p := bind(filter.ConsumerID)
-		query += ` AND (e.metadata_json->>'consumer_id'=` + p + ` OR (e.target_type='platform_consumer' AND (e.target_id=` + p + ` OR EXISTS (SELECT 1 FROM fugue_platform_consumer_instances c WHERE c.id=e.target_id AND c.consumer_id=` + p + `))))`
+		// Resolve the stable legacy instance identities before selecting audit
+		// rows. An EXISTS subquery inside the OR prevents bitmap index scans.
+		ids := []string{filter.ConsumerID}
+		rows, err := s.db.QueryContext(ctx, `SELECT id FROM fugue_platform_consumer_instances WHERE consumer_id=$1`, filter.ConsumerID)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		query += " AND (" + metadataEquals("consumer_id", filter.ConsumerID) + " OR (e.target_type='platform_consumer' AND e.target_id=ANY(" + bind(ids) + ")))"
 	}
 	if filter.ArtifactKind != "" {
-		query += " AND " + kind + "=" + bind(filter.ArtifactKind)
+		if filter.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+			query += " AND (" + producer + " OR " + metadataEquals("artifact_kind", filter.ArtifactKind) + ")"
+		} else {
+			query += " AND (NOT " + producer + " AND " + metadataEquals("artifact_kind", filter.ArtifactKind) + ")"
+		}
 	}
 	if filter.ReleaseSetID != "" {
 		p := bind(filter.ReleaseSetID)
-		query += ` AND (e.metadata_json->>'release_set_id'=` + p + ` OR (` + kind + `='release_set' AND (
-            (e.target_type IN ('platform_release_set','platform_artifact') AND e.target_id=` + p + `)
-            OR e.metadata_json->>'artifact_id'=` + p + ` OR (` + producer + ` AND e.action='platform_config.serving_rolled_back' AND e.metadata_json->>'lkg_artifact_id'=` + p + `))))`
+		query += " AND (" + metadataEquals("release_set_id", filter.ReleaseSetID) + " OR (" + kind + "='release_set' AND (" +
+			"(e.target_type IN ('platform_release_set','platform_artifact') AND e.target_id=" + p + ") OR " + metadataEquals("artifact_id", filter.ReleaseSetID) +
+			" OR (" + producer + " AND e.action='platform_config.serving_rolled_back' AND " + metadataEquals("lkg_artifact_id", filter.ReleaseSetID) + "))))"
 	}
-	query += ` ORDER BY e.created_at DESC,e.id DESC LIMIT ` + bind(filter.Limit)
+	// Filtered history may be far behind the newest heartbeat. Avoid the
+	// chronological index's small-LIMIT plan that scans unrelated recent rows;
+	// select via identity indexes, then perform the bounded top-N sort.
+	order := "e.created_at"
+	if filter.ConsumerID != "" || filter.ReleaseSetID != "" || filter.ArtifactKind != "" {
+		order = "(e.created_at + interval '0 seconds')"
+	}
+	query += " ORDER BY " + order + " DESC,e.id DESC LIMIT " + bind(filter.Limit)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list platform runtime facts: %w", err)
