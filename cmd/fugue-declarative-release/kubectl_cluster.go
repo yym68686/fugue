@@ -59,9 +59,9 @@ var emergencyOwnershipManagers = map[string]bool{
 	"kubectl-set":   true,
 }
 
-// Helm may still own declared environment values and CPU/memory quantities on
+// Helm may still own declared environment values, HTTP probe paths and CPU/memory quantities on
 // workloads created before declarative ownership. Transfer only those leaves
-// through the UID/RV-bound scalar bridge. Images, annotations, probes, other
+// through the UID/RV-bound scalar bridge. Images, annotations, probe timing, other
 // resources and structural fields remain outside this legacy boundary.
 var legacyScalarOwnershipManagers = map[string]bool{
 	"helm": true,
@@ -1831,7 +1831,7 @@ func emergencyEnvValuePointer(pointer string) bool {
 // Extending legacy Helm convergence to those same leaves allows a configuration
 // correction without taking ownership of a whole container or resource map.
 func legacyScalarOwnershipPointer(pointer string) bool {
-	if emergencyEnvValuePointer(pointer) {
+	if emergencyEnvValuePointer(pointer) || emergencyProbePathPointer(pointer) {
 		return true
 	}
 	_, _, tail, ok := emergencyContainerPointerParts(pointer)
