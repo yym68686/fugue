@@ -863,34 +863,23 @@ func (s *Server) handleListPlatformRuntimeFacts(w http.ResponseWriter, r *http.R
 		httpx.WriteError(w, http.StatusForbidden, "platform admin with artifact.read scope required")
 		return
 	}
-	limit := queryIntDefault(r, "limit", 200)
-	if limit > 1000 {
-		httpx.WriteError(w, http.StatusBadRequest, "limit cannot exceed 1000")
-		return
+	limit := 200
+	if values, present := r.URL.Query()["limit"]; present {
+		var err error
+		if len(values) != 1 {
+			httpx.WriteError(w, http.StatusBadRequest, "one limit from 1 to 1000 is required")
+			return
+		}
+		limit, err = strconv.Atoi(values[0])
+		if err != nil || limit < 1 || limit > 1000 {
+			httpx.WriteError(w, http.StatusBadRequest, "limit must be from 1 to 1000")
+			return
+		}
 	}
-	events, err := s.store.ListAuditEvents("", true, limit)
+	facts, err := s.store.ListPlatformRuntimeFacts(r.Context(), store.PlatformRuntimeFactFilter{ConsumerID: r.URL.Query().Get("consumer_id"), ReleaseSetID: r.URL.Query().Get("release_set_id"), ArtifactKind: r.URL.Query().Get("artifact_kind"), Limit: limit})
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
-	}
-	consumerID := strings.TrimSpace(r.URL.Query().Get("consumer_id"))
-	releaseSetID := strings.TrimSpace(r.URL.Query().Get("release_set_id"))
-	artifactKind := strings.TrimSpace(r.URL.Query().Get("artifact_kind"))
-	facts := make([]model.AuditEvent, 0, len(events))
-	for _, event := range events {
-		if event.Action != "platform_consumer.heartbeat_accepted" && !strings.HasPrefix(event.Action, "platform_artifact.") {
-			continue
-		}
-		if consumerID != "" && event.TargetID != consumerID && event.Metadata["consumer_id"] != consumerID {
-			continue
-		}
-		if releaseSetID != "" && event.Metadata["release_set_id"] != releaseSetID {
-			continue
-		}
-		if artifactKind != "" && event.Metadata["artifact_kind"] != artifactKind {
-			continue
-		}
-		facts = append(facts, event)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"runtime_facts": facts, "generated_at": time.Now().UTC()})
 }

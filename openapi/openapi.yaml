@@ -3294,6 +3294,16 @@ paths:
     get:
       operationId: listPlatformRuntimeFacts
       summary: List Platform Runtime Facts
+      description: >-
+        Read-only projection of persisted heartbeat, artifact, and producer
+        publication audit events. Filters are applied before the bounded limit,
+        ordered by created_at and id descending. Producer shadow, gray, full,
+        verified-LKG, and rollback events are included. ReleaseSet filters also
+        match their typed audit target or artifact reference. consumer_id accepts
+        canonical consumer identity or the historical stored instance ID;
+        historical heartbeat identities are resolved without rewriting signed
+        audit records. Original event hashes, provenance and metadata are retained.
+        An invalid or repeated limit returns 400.
       tags: [Admin]
       x-fugue-handler: handleListPlatformRuntimeFacts
       security:
@@ -3317,8 +3327,12 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/PlatformRuntimeFactsResponse"
+        '400':
+          description: Invalid bounded query limit.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-config/policy-lkg:
@@ -21884,6 +21898,28 @@ components:
           $ref: "#/components/schemas/AppContinuityDatabaseFailoverRequest"
         zero_downtime:
           $ref: "#/components/schemas/AppZeroDowntimePolicy"
+    PlatformRuntimeFactsResponse:
+      type: object
+      additionalProperties: false
+      required: [runtime_facts, generated_at]
+      properties:
+        runtime_facts:
+          type: array
+          items: {$ref: "#/components/schemas/AuditEvent"}
+        generated_at:
+          type: string
+          format: date-time
+    AuditEventProvenance:
+      type: object
+      additionalProperties: false
+      description: Original audit provenance. Unsigned operational events contain empty identity, algorithm and signature fields; these do not prove consumer identity.
+      required: [issuer, key_id, algorithm, signature, signed_at]
+      properties:
+        issuer: {type: string}
+        key_id: {type: string}
+        algorithm: {type: string, enum: ["", hmac-sha256]}
+        signature: {type: string}
+        signed_at: {type: string, format: date-time}
     AuditEvent:
       type: object
       additionalProperties: false
@@ -21905,6 +21941,17 @@ components:
           type: string
         metadata:
           $ref: "#/components/schemas/StringMap"
+        chain_id:
+          type: string
+        chain_sequence:
+          type: integer
+          format: int64
+        previous_hash:
+          type: string
+        event_hash:
+          type: string
+        provenance:
+          $ref: "#/components/schemas/AuditEventProvenance"
         created_at:
           type: string
           format: date-time

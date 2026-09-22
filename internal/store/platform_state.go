@@ -1972,6 +1972,7 @@ func buildPlatformConsumerHeartbeatAuditEvent(
 		return model.AuditEvent{}, ErrInvalidInput
 	}
 	metadata := map[string]string{
+		"consumer_id":              strings.TrimSpace(consumer.ConsumerID),
 		"credential_id":            strings.TrimSpace(consumer.CredentialID),
 		"token_id":                 strings.TrimSpace(consumer.TokenID),
 		"component":                strings.TrimSpace(consumer.Component),
