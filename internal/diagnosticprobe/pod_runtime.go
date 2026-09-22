@@ -66,9 +66,7 @@ func podRuntimeState(ctx context.Context, req livediagnostics.ProbeRequest, c Co
 	// endpoint URL or command. All invocations are fixed read-only CRI methods.
 	var args []string
 	switch c.RuntimeBinary {
-	case "/usr/local/bin/k3s":
-		args = []string{"crictl"}
-	case "/usr/local/bin/crictl", "/usr/bin/crictl":
+	case "/var/lib/rancher/k3s/data/current/bin/crictl", "/usr/local/bin/crictl", "/usr/bin/crictl":
 	default:
 		return nil, errors.New("unsupported CRI reader binary")
 	}

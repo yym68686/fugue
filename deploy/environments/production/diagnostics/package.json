@@ -1,1 +1,1 @@
-{"generation":5,"description":"Independent diagnostic package: exact Pod CRI state with runtime and boot identity"}
+{"generation":6,"description":"Independent diagnostic package: read installed CRI executable without bootstrap writes"}

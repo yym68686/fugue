@@ -148,7 +148,7 @@ func TestPodRuntimeCollectorRejectsArbitraryRuntimeAndTarget(t *testing.T) {
 	for _, c := range []Collector{
 		{Namespace: "tenant", ObjectName: "pod", PodUID: "missing"},
 		{Namespace: "tenant", ObjectName: "pod", PodUID: "01234567-89ab-cdef-0123-456789abcdef", RuntimeBinary: "/bin/sh", Path: "/run/containerd/containerd.sock"},
-		{Namespace: "tenant", ObjectName: "pod", PodUID: "01234567-89ab-cdef-0123-456789abcdef", RuntimeBinary: "/usr/local/bin/k3s", Path: "/run/other.sock"},
+		{Namespace: "tenant", ObjectName: "pod", PodUID: "01234567-89ab-cdef-0123-456789abcdef", RuntimeBinary: "/var/lib/rancher/k3s/data/current/bin/crictl", Path: "/run/other.sock"},
 	} {
 		if _, err := podRuntimeState(context.Background(), livediagnostics.ProbeRequest{Target: livediagnostics.Target{Type: livediagnostics.TargetNode, Node: "node"}}, c); err == nil {
 			t.Fatal("invalid runtime invocation accepted")

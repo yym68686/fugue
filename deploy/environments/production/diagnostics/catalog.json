@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 38,
+    "generation": 39,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -758,7 +758,7 @@
               "namespace": "{{param.namespace}}",
               "object_name": "{{param.pod}}",
               "pod_uid": "{{param.pod_uid}}",
-              "runtime_binary": "/usr/local/bin/k3s",
+              "runtime_binary": "/var/lib/rancher/k3s/data/current/bin/crictl",
               "path": "/run/k3s/containerd/containerd.sock",
               "interval_seconds": 15
             }
