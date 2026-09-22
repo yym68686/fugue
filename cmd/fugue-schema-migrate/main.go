@@ -140,6 +140,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigrateAppReleaseWorkload(ctx, databaseURL); err != nil {
 		return err
 	}
+	if err := schemamigrate.MigrateAppReleaseRetirement(ctx, databaseURL); err != nil {
+		return err
+	}
 	if err := schemamigrate.MigrateObjectStorage(ctx, databaseURL); err != nil {
 		return err
 	}

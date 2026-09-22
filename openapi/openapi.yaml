@@ -7103,6 +7103,7 @@ paths:
     patch:
       operationId: patchAppTrafficPolicy
       summary: Patch App Traffic Policy
+      description: Retired releases cannot be referenced by a traffic policy, including at zero weight. A conflicting retirement returns 409 and leaves the policy unchanged.
       tags: [Apps]
       x-fugue-handler: handlePatchAppTrafficPolicy
       security:
@@ -7188,6 +7189,7 @@ paths:
     post:
       operationId: promoteAppRelease
       summary: Promote App Release
+      description: A retired release is terminal and cannot be promoted again. Create a new release for a subsequent deployment. A conflicting retirement returns 409 and preserves the current traffic policy.
       tags: [Apps]
       x-fugue-handler: handlePromoteAppRelease
       security:
@@ -22837,6 +22839,7 @@ components:
         retired_at:
           type: string
           format: date-time
+          description: Retirement is terminal. Retired rows cannot be reactivated or changed by stale writers, and traffic policies cannot reference them.
         retention_until:
           type: string
           format: date-time

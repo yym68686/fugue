@@ -3,12 +3,49 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/observability"
 )
+
+func TestRetiredAppReleaseCannotChangeServingTraffic(t *testing.T) {
+	_, s, key, _, _, app, _, _, _, _ := setupAppImagesTestServer(t)
+	get := performJSONRequest(t, s, http.MethodGet, "/v1/apps/"+app.ID+"/traffic", key, nil)
+	if get.Code != http.StatusOK {
+		t.Fatal(get.Body.String())
+	}
+	var before appTrafficResponse
+	mustDecodeJSON(t, get, &before)
+	stable, err := s.store.GetAppRelease(app.TenantID, false, before.Traffic.StableReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.store.CreateAppRelease(model.AppRelease{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleRetired, Status: model.AppReleaseStatusRetired, UpstreamURL: "http://retired.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, weight := range []int{50, 100} {
+		resp := performJSONRequest(t, s, http.MethodPost, "/v1/apps/"+app.ID+"/releases/"+r.ID+"/promote", key, appReleasePromoteRequest{CandidateWeight: &weight})
+		if resp.Code != http.StatusConflict {
+			t.Fatalf("retired promote status %d: %s", resp.Code, resp.Body.String())
+		}
+	}
+	resp := performJSONRequest(t, s, http.MethodPatch, "/v1/apps/"+app.ID+"/traffic", key, appTrafficPatchRequest{StableReleaseID: r.ID})
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("retired traffic status %d: %s", resp.Code, resp.Body.String())
+	}
+	after, err := s.store.GetAppTrafficPolicy(app.TenantID, false, app.ID)
+	if err != nil || !reflect.DeepEqual(before.Traffic, after) {
+		t.Fatal("rejected retirement changed policy", err)
+	}
+	afterStable, err := s.store.GetAppRelease(app.TenantID, false, stable.ID)
+	if err != nil || !reflect.DeepEqual(stable, afterStable) {
+		t.Fatal("rejected promotion changed current stable", err)
+	}
+}
 
 func TestAppReleaseTrafficAPI(t *testing.T) {
 	t.Parallel()

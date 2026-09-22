@@ -203,6 +203,13 @@ func (s AppReleaseService) PromoteRelease(ctx context.Context, principal model.P
 	if candidateWeight < 0 || candidateWeight > 100 {
 		return model.AppTrafficPolicy{}, fmt.Errorf("candidate_weight must be between 0 and 100")
 	}
+	current, err := s.Store.GetAppRelease(app.TenantID, false, release.ID)
+	if err != nil {
+		return model.AppTrafficPolicy{}, err
+	}
+	if current.AppID != app.ID || store.AppReleaseIsRetired(current) {
+		return model.AppTrafficPolicy{}, store.ErrConflict
+	}
 	policy, err := s.EnsureStableTrafficPolicy(ctx, principal, app)
 	if err != nil {
 		return model.AppTrafficPolicy{}, err
@@ -218,16 +225,7 @@ func (s AppReleaseService) PromoteRelease(ctx context.Context, principal model.P
 	}
 	now := s.now()
 	oldStableID := policy.StableReleaseID
-	if oldStableID != "" && oldStableID != release.ID {
-		if oldStable, err := s.Store.GetAppRelease(app.TenantID, true, oldStableID); err == nil {
-			oldStable.Role = model.AppReleaseRolePrevious
-			oldStable.Status = model.AppReleaseStatusDraining
-			oldStable.StatusReason = "superseded by release " + release.ID
-			oldStable.ReleaseMessage = "previous stable kept draining as rollback target"
-			oldStable.RetentionUntil = releaseRetentionUntil(app, now)
-			_, _ = s.Store.UpdateAppRelease(oldStable)
-		}
-	}
+
 	release.Role = model.AppReleaseRoleStable
 	release.Status = model.AppReleaseStatusServing
 	release.StatusReason = ""
@@ -237,6 +235,16 @@ func (s AppReleaseService) PromoteRelease(ctx context.Context, principal model.P
 	release.ReadyAt = FirstNonNilTime(release.ReadyAt, &now)
 	if _, err := s.Store.UpdateAppRelease(release); err != nil {
 		return model.AppTrafficPolicy{}, err
+	}
+	if oldStableID != "" && oldStableID != release.ID {
+		if oldStable, err := s.Store.GetAppRelease(app.TenantID, true, oldStableID); err == nil {
+			oldStable.Role = model.AppReleaseRolePrevious
+			oldStable.Status = model.AppReleaseStatusDraining
+			oldStable.StatusReason = "superseded by release " + release.ID
+			oldStable.ReleaseMessage = "previous stable kept draining as rollback target"
+			oldStable.RetentionUntil = releaseRetentionUntil(app, now)
+			_, _ = s.Store.UpdateAppRelease(oldStable)
+		}
 	}
 	policy.Mode = model.AppTrafficModeSingle
 	policy.StableReleaseID = release.ID

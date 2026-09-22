@@ -131,7 +131,7 @@ func findReusableCurrentStableRelease(releases []model.AppRelease, desired model
 }
 
 func appReleaseMatchesCurrentStable(release, desired model.AppRelease) bool {
-	return strings.TrimSpace(release.TenantID) == strings.TrimSpace(desired.TenantID) &&
+	return !AppReleaseIsRetired(release) && strings.TrimSpace(release.TenantID) == strings.TrimSpace(desired.TenantID) &&
 		strings.TrimSpace(release.AppID) == strings.TrimSpace(desired.AppID) &&
 		strings.TrimSpace(release.SourceRef) == strings.TrimSpace(desired.SourceRef) &&
 		strings.TrimSpace(release.ResolvedImageRef) == strings.TrimSpace(desired.ResolvedImageRef) &&

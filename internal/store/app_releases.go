@@ -27,6 +27,9 @@ func (s *Store) CreateAppRelease(release model.AppRelease) (model.AppRelease, er
 				return ErrConflict
 			}
 		}
+		if err := guardReleaseRetirement(state, model.AppRelease{}, release); err != nil {
+			return err
+		}
 		state.AppReleases = append(state.AppReleases, release)
 		out = release
 		return nil
@@ -49,6 +52,9 @@ func (s *Store) UpdateAppRelease(release model.AppRelease) (model.AppRelease, er
 			return ErrNotFound
 		}
 		current := state.AppReleases[index]
+		if err := guardReleaseRetirement(state, current, release); err != nil {
+			return err
+		}
 		if err := preserveReleaseWorkload(current, &release); err != nil {
 			return err
 		}
@@ -177,6 +183,11 @@ func (s *Store) UpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.App
 	}
 	var out model.AppTrafficPolicy
 	err = s.withLockedState(true, func(state *model.State) error {
+		for _, release := range state.AppReleases {
+			if (release.ID == policy.StableReleaseID || release.ID == policy.CandidateReleaseID) && AppReleaseIsRetired(release) {
+				return ErrConflict
+			}
+		}
 		index := findAppTrafficPolicyByApp(state.AppTrafficPolicies, policy.AppID)
 		if index >= 0 {
 			current := state.AppTrafficPolicies[index]
@@ -194,6 +205,28 @@ func (s *Store) UpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.App
 		return nil
 	})
 	return out, err
+}
+
+func AppReleaseIsRetired(release model.AppRelease) bool {
+	return release.Status == model.AppReleaseStatusRetired || release.Role == model.AppReleaseRoleRetired
+}
+
+func guardReleaseRetirement(state *model.State, current, desired model.AppRelease) error {
+	if AppReleaseIsRetired(current) {
+		return ErrConflict
+	}
+	if !AppReleaseIsRetired(desired) {
+		return nil
+	}
+	if desired.Status != model.AppReleaseStatusRetired || desired.Role != model.AppReleaseRoleRetired {
+		return ErrConflict
+	}
+	for _, policy := range state.AppTrafficPolicies {
+		if policy.StableReleaseID == desired.ID || policy.CandidateReleaseID == desired.ID {
+			return ErrConflict
+		}
+	}
+	return nil
 }
 
 func normalizeAppReleaseForStore(release model.AppRelease) (model.AppRelease, error) {
