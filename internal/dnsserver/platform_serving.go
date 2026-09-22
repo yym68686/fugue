@@ -94,6 +94,9 @@ func (s *Service) loadDNSServingCache() (bool, error) {
 	if s.PlatformTokenFile == "" {
 		return false, nil
 	}
+	// Enrollment selects artifact authority even on a fresh disk. Losing all
+	// checkpoints cannot silently re-enable business/ambient configuration.
+	s.platformServingBound.Store(true)
 	if strings.TrimSpace(s.Config.CachePath) == "" {
 		return true, errors.New("DNS serving cache path unavailable")
 	}
@@ -103,7 +106,7 @@ func (s *Service) loadDNSServingCache() (bool, error) {
 	candidates := []lkgcache.Candidate{{Path: path, Data: raw}}
 	candidates = append(candidates, lkgcache.FallbackCandidates(path)...)
 	if missing && len(candidates) == 1 {
-		return false, nil
+		return true, errors.New("DNS positive serving checkpoint missing")
 	}
 	for _, item := range candidates {
 		c, e := s.decodeDNSCheckpoint(item.Data)

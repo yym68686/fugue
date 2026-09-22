@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,6 +182,9 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	os.WriteFile(token, []byte("pod-token"), 0600)
 	s := NewService(cfg, nil)
 	s.PlatformTokenFile = token
+	if err := s.LoadCache(); err == nil || !s.platformServingBound.Load() {
+		t.Fatal("enrolled fresh disk must wait for an artifact")
+	}
 	p, routeID, err := s.verifyDNSServingRelease(parent, candidate)
 	if err != nil {
 		t.Fatal(err)
@@ -216,12 +220,12 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 			p.TrafficRelease.FencingToken++
 		}
 		return p, e
-	}, s.probeDNSServingListener); err == nil || s.platformServingBound.Load() || reports != 0 {
+	}, s.probeDNSServingListener); err == nil || s.platformServing.Load() != nil || reports != 0 {
 		t.Fatal("foreign release proof activated DNS", err)
 	}
 	signature := parent.Provenance.Signature
 	parent.Provenance.Signature = "invalid"
-	if err = s.syncPlatformDNSServingOnce(ctx, probe, s.probeDNSServingListener); err == nil || s.platformServingBound.Load() {
+	if err = s.syncPlatformDNSServingOnce(ctx, probe, s.probeDNSServingListener); err == nil || s.platformServing.Load() != nil {
 		t.Fatal("invalid parent signature activated DNS", err)
 	}
 	parent.Provenance.Signature = signature
@@ -237,6 +241,10 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	s.Config.UDPAddr, s.Config.TCPAddr = udpAddress, tcpAddress
 	if reports != 1 || !s.Status().Healthy || s.Status().PlatformServing.State != "serving" {
 		t.Fatal("serving not verified", s.Status())
+	}
+	metrics := s.metricSnapshot()
+	if !metrics.Status.Healthy || metrics.Status.ServingGeneration != candidate.Artifact.Generation || metrics.Status.LastGoodGeneration != candidate.Artifact.Generation || metrics.Status.RecordCount == 0 {
+		t.Fatal("inventory heartbeat retained dormant legacy state", metrics.Status)
 	}
 	query := new(dns.Msg)
 	query.SetQuestion("app.example.test.", dns.TypeA)
@@ -359,6 +367,43 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	recovery.ServeDNS(writer, query)
 	if writer.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatal("corrupt recovery served ambient data")
+	}
+}
+
+func TestEnrolledDNSMissingAllCheckpointsCannotServeLegacyOrFetchBusiness(t *testing.T) {
+	var legacyRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		legacyRequests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "group-a", Zone: "example.test", CachePath: filepath.Join(t.TempDir(), "dns-cache.json"), BundleSigningKey: "legacy-key", BundleSigningKeyID: "legacy", AnswerIPs: []string{"192.0.2.9"}}
+	s := NewService(cfg, nil)
+	legacy := bundleauth.SignEdgeDNSBundle(model.EdgeDNSBundle{Version: "legacy", Generation: "legacy", Zone: cfg.Zone, GeneratedAt: time.Now(), Records: []model.EdgeDNSRecord{{Name: "app.example.test", Type: "A", Values: []string{"192.0.2.9"}, TTL: 60}}}, cfg.BundleSigningKey, cfg.BundleSigningKeyID, time.Hour)
+	if err := s.writeCache(cacheFile{Version: cacheFileVersion, Bundle: legacy, CachedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	s.setBundle(legacy, "", false, "")
+	s.PlatformTokenFile = filepath.Join(t.TempDir(), "identity")
+	for _, beforeLoad := range []bool{true, false} {
+		if !beforeLoad {
+			if err := s.LoadCache(); err == nil || !s.platformServingBound.Load() {
+				t.Fatal("missing traffic checkpoint loaded legacy cache")
+			}
+		}
+		if err := s.SyncOnce(context.Background()); err != nil || legacyRequests.Load() != 0 {
+			t.Fatal("enrolled consumer queried legacy serving API", err)
+		}
+		if err := s.LoadPreviousCache(); err == nil {
+			t.Fatal("enrolled consumer accepted previous legacy cache")
+		}
+		answer := dnsQuery(t, s, "app.example.test", dns.TypeA)
+		if answer.Rcode != dns.RcodeServerFailure || len(answer.Answer) != 0 || s.Status().Healthy {
+			t.Fatal("ambient configuration served after enrollment", answer)
+		}
+		if s.metricSnapshot().Status.Healthy {
+			t.Fatal("legacy heartbeat claimed readiness without artifact")
+		}
 	}
 }
 func mustDNSJSON(t *testing.T, v any) []byte {

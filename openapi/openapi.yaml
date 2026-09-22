@@ -173,8 +173,12 @@ x-fugue-dns-artifact-serving:
     proofs carry the exact traffic parent, route digest, release and fence.
     Failed download, validation, probe or persistence preserves the previous
     snapshot. Local authenticated positive checkpoints retain signed inputs;
-    restart discards transient readiness and refreshes it independently. Legacy
-    sync and ambient overrides cannot replace a bound artifact snapshot.
+    restart discards transient readiness and refreshes it independently. Enrolled
+    DNS consumers with a platform identity require a verified traffic artifact
+    from startup, even when all positive checkpoint files are missing. Missing or
+    corrupt recovery state serves SERVFAIL until a valid published release and
+    fresh proofs are available. Legacy bundle sync, legacy cache fallback and
+    ambient overrides cannot supply serving data to an enrolled consumer.
 x-fugue-edge-candidate-execution:
   schema: fugue.edge.candidate-execution/v1
   semantics: >-

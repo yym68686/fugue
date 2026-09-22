@@ -140,14 +140,20 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 		s.PlatformTokenFile = tokenPath
 		return s
 	}
+	loadLegacyBeforeEnrollment := func(s *Service) {
+		t.Helper()
+		s.PlatformTokenFile = ""
+		if err := s.LoadCache(); err != nil {
+			t.Fatal(err)
+		}
+		s.PlatformTokenFile = tokenPath
+	}
 	service := create()
 	legacy := bundleauth.SignEdgeDNSBundle(model.EdgeDNSBundle{Version: "legacy-generation", Generation: "legacy-generation", GeneratedAt: time.Now(), Zone: cfg.Zone, Records: []model.EdgeDNSRecord{{Name: "app.example.test", Type: "A", Values: []string{"192.0.2.1"}, TTL: 60, Status: "active"}}}, key, "signer", time.Hour)
 	if err := service.writeCache(cacheFile{Version: cacheFileVersion, Bundle: legacy, CachedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.LoadCache(); err != nil {
-		t.Fatal(err)
-	}
+	loadLegacyBeforeEnrollment(service)
 	before, _ := os.ReadFile(cfg.CachePath)
 	if err := service.SyncPlatformShadowOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -156,8 +162,8 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 		t.Helper()
 		after, _ := os.ReadFile(cfg.CachePath)
 		answer := dnsQuery(t, s, "app.example.test", dns.TypeA)
-		if !bytes.Equal(before, after) || s.Status().ServingGeneration != "legacy-generation" || len(answer.Answer) != 1 || answer.Answer[0].(*dns.A).A.String() != "192.0.2.1" {
-			t.Fatal("shadow mutated serving/LKG")
+		if !bytes.Equal(before, after) || len(answer.Answer) != 0 || answer.Rcode != dns.RcodeServerFailure || s.Status().Healthy {
+			t.Fatal("shadow mutated legacy cache or enrollment served without a published traffic artifact")
 		}
 	}
 	checkServing(service)
@@ -210,9 +216,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 		checkServing(service)
 	}
 	restarted := create()
-	if err := restarted.LoadCache(); err != nil {
-		t.Fatal(err)
-	}
+	loadLegacyBeforeEnrollment(restarted)
 	first := lastSequence
 	loseReceipt = true
 	if err := restarted.SyncPlatformShadowOnce(context.Background()); err == nil {
@@ -220,9 +224,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	}
 	loseReceipt = false
 	again := create()
-	if err := again.LoadCache(); err != nil {
-		t.Fatal(err)
-	}
+	loadLegacyBeforeEnrollment(again)
 	if err := again.SyncPlatformShadowOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}

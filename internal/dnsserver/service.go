@@ -579,16 +579,18 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.LoadCache(); err != nil {
 		s.Logger.Printf("dns bundle cache unavailable: %v", err)
 	}
-	s.reconcileHostedZoneServices(ctx, false)
-	for _, child := range s.childZoneServices() {
-		if err := child.LoadCache(); err != nil {
-			child.Logger.Printf("dns bundle cache unavailable; zone=%s error=%v", normalizeName(child.Config.Zone), err)
-		}
-	}
-	if s.Config.EdgeHealthProbeEnabled {
-		s.refreshEdgeHealth(ctx)
+	if !s.platformServingRequired() {
+		s.reconcileHostedZoneServices(ctx, false)
 		for _, child := range s.childZoneServices() {
-			child.refreshEdgeHealth(ctx)
+			if err := child.LoadCache(); err != nil {
+				child.Logger.Printf("dns bundle cache unavailable; zone=%s error=%v", normalizeName(child.Config.Zone), err)
+			}
+		}
+		if s.Config.EdgeHealthProbeEnabled {
+			s.refreshEdgeHealth(ctx)
+			for _, child := range s.childZoneServices() {
+				child.refreshEdgeHealth(ctx)
+			}
 		}
 	}
 
@@ -612,6 +614,13 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if dnsShutdown != nil {
 		defer dnsShutdown()
+	}
+	if s.platformServingRequired() {
+		s.Logger.Printf("fugue-dns artifact consumer started; dns_node_id=%s edge_group_id=%s", s.Config.DNSNodeID, s.Config.EdgeGroupID)
+		s.startHeartbeatLoop(ctx)
+		go s.runPlatformShadowConsumer(ctx)
+		<-ctx.Done()
+		return ctx.Err()
 	}
 
 	s.Logger.Printf("fugue-dns shadow started; api=%s dns_node_id=%s edge_group_id=%s zones=%s answer_ips=%s cache=%s listen=%s udp=%s tcp=%s interval=%s", safeBaseURL(s.Config.APIURL), s.Config.DNSNodeID, s.Config.EdgeGroupID, strings.Join(s.configuredZones(), ","), strings.Join(s.Config.AnswerIPs, ","), s.Config.CachePath, s.Config.ListenAddr, s.Config.UDPAddr, s.Config.TCPAddr, s.syncInterval())
@@ -646,7 +655,7 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) SyncOnce(ctx context.Context) (err error) {
-	if s.platformServingBound.Load() || (s.platformParent != nil && s.platformParent.platformServingBound.Load()) {
+	if s.platformServingRequired() {
 		return nil
 	}
 	started := time.Now()
@@ -822,7 +831,7 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
-	if s.platformServingBound.Load() {
+	if s.platformServingRequired() {
 		st := s.platformServing.Load()
 		if st == nil {
 			reply := new(miekgdns.Msg)
@@ -1026,14 +1035,25 @@ func (s *Service) LoadCache() error {
 	return nil
 }
 
+func (s *Service) platformServingRequired() bool {
+	return s.PlatformTokenFile != "" || s.platformServingBound.Load() ||
+		(s.platformParent != nil && (s.platformParent.PlatformTokenFile != "" || s.platformParent.platformServingBound.Load()))
+}
+
 func (s *Service) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.statusLocked()
+}
+
+func (s *Service) statusLocked() Status {
 	status := s.snapshot
 	if s.PlatformTokenFile != "" {
 		status.PlatformServing = &DNSServingStatus{State: "awaiting_release", LastError: s.platformServingError}
+		candidate := s.platformCandidate
+		status.PlatformCandidate = &candidate
 	}
-	if s.platformServingBound.Load() {
+	if s.platformServingRequired() {
 		st := s.platformServing.Load()
 		status.Healthy = false
 		status.Status = "degraded"
@@ -1053,6 +1073,10 @@ func (s *Service) Status() Status {
 			status.Status = "ok"
 		}
 		status.BundleVersion, status.ServingGeneration, status.LKGGeneration = c.Artifact.Generation, c.Artifact.Generation, c.Artifact.Generation
+		status.LastGoodGeneration = c.Artifact.Generation
+		until := st.record.AppliedAt.Add(time.Duration(st.payload.Policy.MaxStaleSeconds) * time.Second)
+		status.BundleValidUntil = &until
+		status.MaxStaleExceeded = !until.After(time.Now())
 		status.RecordCount = 0
 		for _, z := range st.zones {
 			for _, rows := range z.records {
@@ -1064,10 +1088,6 @@ func (s *Service) Status() Status {
 		status.DegradedReason = st.fallback
 		status.PlatformServing = &DNSServingStatus{State: "serving", ReleaseSetID: c.Assignment.ReleaseSetID, ArtifactID: c.Artifact.ID, Digest: c.Artifact.ContentHash, ReleaseChannel: c.Release.ReleaseChannel, FencingToken: c.Release.FencingToken, Zones: len(st.zones), Readiness: &readiness, FallbackReason: st.fallback, LastError: s.platformServingError, ReportedAt: s.platformServingReported}
 		return status
-	}
-	if s.PlatformTokenFile != "" {
-		candidate := s.platformCandidate
-		status.PlatformCandidate = &candidate
 	}
 	for _, child := range s.childZoneServices() {
 		childStatus := child.Status()
@@ -1088,6 +1108,11 @@ func (s *Service) metricSnapshot() metricSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.snapshot
+	if s.platformServingRequired() {
+		// Inventory heartbeats must describe the artifact actually served,
+		// not the dormant legacy snapshot after an enrolled restart.
+		status = s.statusLocked()
+	}
 	metrics := s.metrics
 	metrics.QueryTotal = cloneQueryMetrics(s.metrics.QueryTotal)
 	metrics.ScopeResolutionTotal = cloneStringCounterMap(s.metrics.ScopeResolutionTotal)
@@ -1839,6 +1864,9 @@ func (s *Service) writeCache(cached cacheFile) error {
 }
 
 func (s *Service) LoadPreviousCache() error {
+	if s.platformServingRequired() {
+		return errors.New("enrolled DNS consumer cannot load legacy serving cache")
+	}
 	cachePath := strings.TrimSpace(s.Config.CachePath)
 	if cachePath == "" {
 		return fmt.Errorf("previous dns cache path is not configured")
