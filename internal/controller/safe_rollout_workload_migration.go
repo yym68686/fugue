@@ -51,6 +51,9 @@ func (s *Service) migrateSafeRolloutWorkload(ctx context.Context, app model.App,
 		return release, fmt.Errorf("historical placement differs from its runtime")
 	}
 	objects := s.Renderer.BuildManagedAppRevisionChildObjects(historical, scheduling, nil, nil, revision)
+	if err := retainHistoricalDrainImage(objects, live); err != nil {
+		return release, err
+	}
 	id, err := s.Store.FindAppReleaseWorkloadSource(ctx, release)
 	if err != nil {
 		return release, err
@@ -80,6 +83,49 @@ func (s *Service) migrateSafeRolloutWorkload(ctx context.Context, app model.App,
 		"operation_id": op.ID, "revision_workload": string(evidence),
 	})
 	return bound, nil
+}
+
+// A helper code rollout is independent of an existing application's executable
+// identity. Freeze only the image actually observed on the historical revision;
+// the normal two-read template validation still checks every other field.
+func retainHistoricalDrainImage(objects []map[string]any, live kubeDeployment) error {
+	images := map[string]string{}
+	for _, pair := range []struct {
+		field      string
+		containers []kubeContainerSpec
+	}{{"containers", live.Spec.Template.Spec.Containers}, {"initContainers", live.Spec.Template.Spec.InitContainers}} {
+		for _, c := range pair.containers {
+			if c.Name == "fugue-drain-agent" {
+				if c.Image == "" || len(images) > 0 {
+					return fmt.Errorf("historical drain helper identity is ambiguous")
+				}
+				images[pair.field] = c.Image
+			}
+		}
+	}
+	for _, obj := range objects {
+		if obj["kind"] != "Deployment" || objectStringField(objectMapField(obj, "metadata"), "name") != live.Metadata.Name {
+			continue
+		}
+		count := 0
+		for _, field := range []string{"containers", "initContainers"} {
+			for _, c := range mapSlice(nestedObjectValue(obj, "spec", "template", "spec", field)) {
+				if c["name"] == "fugue-drain-agent" {
+					image := images[field]
+					if image == "" {
+						return fmt.Errorf("historical drain helper layout differs")
+					}
+					c["image"] = image
+					count++
+				}
+			}
+		}
+		if count != len(images) {
+			return fmt.Errorf("historical drain helper membership differs")
+		}
+		return nil
+	}
+	return fmt.Errorf("historical revision template unavailable")
 }
 
 func historicalWorkloadCreatedDuringOperation(metadata map[string]any, op model.Operation) bool {

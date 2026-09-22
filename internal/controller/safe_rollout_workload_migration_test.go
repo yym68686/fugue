@@ -16,7 +16,7 @@ import (
 )
 
 func TestHistoricalWorkloadMigrationRequiresSourceAndExactExistingResources(t *testing.T) {
-	for _, scenario := range []string{"previous", "failed", "missing_source", "wrong_spec", "new_uid", "new_generation", "recreated_after_operation", "old_resource", "wrong_owner", "wrong_selector", "wrong_image", "old_agent", "missing_deployment", "canceled"} {
+	for _, scenario := range []string{"previous", "failed", "missing_source", "wrong_spec", "new_uid", "new_generation", "recreated_after_operation", "old_resource", "wrong_owner", "wrong_selector", "wrong_image", "old_agent", "agent_changed", "agent_config_changed", "missing_deployment", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			st, _, app, _ := newSafeRolloutTestState(t)
@@ -93,8 +93,11 @@ func TestHistoricalWorkloadMigrationRequiresSourceAndExactExistingResources(t *t
 				objectMapField(objectMapField(service, "spec"), "selector")[runtime.FugueLabelAppReleaseID] = "other"
 			case "wrong_image":
 				mapSlice(nestedObjectValue(dep, "spec", "template", "spec", "containers"))[0]["image"] = "registry.example/other:v2"
-			case "old_agent":
+			case "old_agent", "agent_changed", "agent_config_changed":
 				mapSlice(nestedObjectValue(dep, "spec", "template", "spec", "initContainers"))[0]["image"] = "registry.example/legacy-agent:v1"
+				if scenario == "agent_config_changed" {
+					mapSlice(nestedObjectValue(dep, "spec", "template", "spec", "initContainers"))[0]["args"] = []string{"unexpected"}
+				}
 			}
 			reads := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -105,6 +108,9 @@ func TestHistoricalWorkloadMigrationRequiresSourceAndExactExistingResources(t *t
 				}
 				reads++
 				if reads == 4 {
+					if scenario == "agent_changed" {
+						mapSlice(nestedObjectValue(dep, "spec", "template", "spec", "initContainers"))[0]["image"] = "registry.example/legacy-agent:v2"
+					}
 					if scenario == "new_uid" {
 						objectMapField(dep, "metadata")["uid"] = "replacement"
 					}
@@ -130,7 +136,7 @@ func TestHistoricalWorkloadMigrationRequiresSourceAndExactExistingResources(t *t
 				cancel()
 			}
 			bound, err := s.migrateSafeRolloutWorkload(ctx, app, r)
-			if scenario != "previous" && scenario != "failed" {
+			if scenario != "previous" && scenario != "failed" && scenario != "old_agent" {
 				if err == nil {
 					t.Fatal("unsafe migration accepted")
 				}

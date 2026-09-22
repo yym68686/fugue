@@ -95,6 +95,27 @@ func (s *Service) safeRolloutWorkloadIdentity(op model.Operation, app model.App,
 		!revisionAppliedFieldsMatch("spec.template", normalizeKubeValue(nestedObjectValue(dep, "spec", "template")), normalizeKubeValue(nestedObjectValue(expectedDeployment, "spec", "template"))) {
 		return out, fmt.Errorf("revision Deployment does not match applied executable identity")
 	}
+	if op.Status == model.OperationStatusCompleted || op.Status == model.OperationStatusFailed {
+		for _, field := range []string{"containers", "initContainers"} {
+			for _, actual := range mapSlice(nestedObjectValue(dep, "spec", "template", "spec", field)) {
+				if actual["name"] != "fugue-drain-agent" {
+					continue
+				}
+				for _, desired := range mapSlice(nestedObjectValue(expectedDeployment, "spec", "template", "spec", field)) {
+					if desired["name"] != actual["name"] {
+						continue
+					}
+					// These execution fields have no Kubernetes default. Extra
+					// arguments or environment sources cannot hide in a subset match.
+					for _, key := range []string{"command", "args", "envFrom", "workingDir"} {
+						if !reflect.DeepEqual(normalizeKubeValue(actual[key]), normalizeKubeValue(desired[key])) {
+							return out, fmt.Errorf("historical drain helper execution differs")
+						}
+					}
+				}
+			}
+		}
+	}
 	selector := objectStringMapValue(nestedObjectValue(svc, "spec", "selector"))
 	if !reflect.DeepEqual(selector, objectStringMapValue(nestedObjectValue(expectedService, "spec", "selector"))) ||
 		selector[runtime.FugueLabelAppReleaseID] != release.ID || selector[runtime.FugueLabelAppWorkload] != release.DeploymentName ||
