@@ -283,13 +283,13 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	}, s.probeDNSServingListener); err == nil {
 		t.Fatal("bad candidate applied")
 	}
-	if s.platformServing.Load() != old {
+	if !reflect.DeepEqual(s.platformServing.Load().record, old.record) {
 		t.Fatal("failed candidate replaced serving")
 	}
 	if err = s.syncPlatformDNSServingOnce(ctx, probe, func(*dnsServingState) error { return errors.New("wire failure") }); err == nil {
 		t.Fatal("bad listener applied")
 	}
-	if s.platformServing.Load() != old {
+	if !reflect.DeepEqual(s.platformServing.Load().record, old.record) {
 		t.Fatal("wire failure replaced serving")
 	}
 	after, _ := os.ReadFile(cfg.CachePath + ".platform-serving.json")

@@ -137,18 +137,24 @@ func (s *Service) SyncPlatformDNSServingOnce(ctx context.Context) error {
 	return s.syncPlatformDNSServingOnce(ctx, routeprobe.Probe, s.probeDNSServingListener)
 }
 
-func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadinessProbeFunc, wireProbe func(*dnsServingState) error) error {
+func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadinessProbeFunc, wireProbe func(*dnsServingState) error) (syncErr error) {
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
+	old := s.platformServing.Load()
+	fallbackReason := "candidate_rejected"
+	defer func() {
+		// Rejection must not starve the retained artifact's independent probes.
+		// An applied candidate or an explicit negative readiness observation
+		// already replaced the runtime view and must not be overwritten here.
+		if syncErr != nil && ctx.Err() == nil && old != nil && s.platformServing.Load() == old {
+			s.refreshDNSServingFacts(ctx, old, probe, fallbackReason)
+		}
+	}()
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
 	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, "global", model.PlatformArtifactKindDNSAnswerBundle)
-	old := s.platformServing.Load()
 	wasBound := s.platformServingBound.Load()
 	if err != nil {
-		if old != nil {
-			s.refreshDNSServingFacts(ctx, old, probe, "control_plane_unavailable")
-			return err
-		}
+		fallbackReason = "control_plane_unavailable"
 		if errors.Is(err, platformconsumer.ErrNoServingAssignment) && !s.platformServingBound.Load() {
 			s.mu.Lock()
 			s.platformServingError = ""

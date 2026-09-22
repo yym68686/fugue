@@ -185,6 +185,11 @@ x-fugue-dns-artifact-serving:
     This check does not require an artifact, control-plane access or serving
     proofs and never grants DNS serving eligibility. GET /healthz retains
     the full serving-readiness status and remains the readiness probe.
+    A rejected candidate also refreshes independent readiness for the retained
+    positive artifact. Download, parent/schema/signature, replay, apply and
+    persistence failures cannot starve its proof refresh. Refresh preserves
+    original artifact, release, applied-at and static-value expiry, uses only
+    proofs bound to that retained release, and never reports candidate success.
 x-fugue-dns-observation-authority:
   semantics: >-
     The API background DNS loop only refreshes flatten observations and ranking
