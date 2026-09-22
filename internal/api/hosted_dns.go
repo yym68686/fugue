@@ -105,6 +105,11 @@ func (s *Server) handleCreateHostedDNSZone(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	hint, err := s.verifiedDNSDelegationHints(zoneName)
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 	now := time.Now().UTC()
 	zone := model.HostedZone{
 		TenantID:            tenantID,
@@ -112,12 +117,12 @@ func (s *Server) handleCreateHostedDNSZone(w http.ResponseWriter, r *http.Reques
 		ZoneName:            zoneName,
 		Status:              model.HostedZoneStatusPendingDelegation,
 		DelegationStatus:    model.HostedZoneDelegationStatusPending,
-		ExpectedNameservers: append([]string(nil), s.dnsNameservers...),
+		ExpectedNameservers: append([]string(nil), hint.Nameservers...),
 		CreatedBy:           strings.TrimSpace(principal.ActorID),
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}
-	zone, err := s.store.PutHostedZone(zone)
+	zone, err = s.store.PutHostedZone(zone)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -372,9 +377,13 @@ func (s *Server) hostedDNSZonePreflightOptionsFromRequest(r *http.Request, zoneN
 func (s *Server) applyHostedDNSZonePreflight(zone model.HostedZone, response model.DNSDelegationPreflightResponse) model.HostedZone {
 	now := time.Now().UTC()
 	zone.ParentNameservers = append([]string(nil), response.DelegationPlan.CurrentParentNS...)
-	if len(zone.ExpectedNameservers) == 0 {
-		zone.ExpectedNameservers = append([]string(nil), s.dnsNameservers...)
+	hint, err := s.verifiedDNSDelegationHints(zone.ZoneName)
+	if err != nil {
+		zone.LastCheckedAt, zone.LastMessage = &now, err.Error()
+		zone.Status, zone.DelegationStatus = model.HostedZoneStatusDegraded, model.HostedZoneDelegationStatusPending
+		return zone
 	}
+	zone.ExpectedNameservers = append([]string(nil), hint.Nameservers...)
 	zone.LastCheckedAt = &now
 	zone.LastMessage = hostedDNSZonePreflightMessage(response)
 	parentReady := hostedDNSNameserversCover(zone.ParentNameservers, zone.ExpectedNameservers)

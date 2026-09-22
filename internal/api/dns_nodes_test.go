@@ -199,6 +199,7 @@ func TestDNSDelegationPreflightPassesWithTwoHealthyNodes(t *testing.T) {
 		return []string{"current-parent.example"}, nil
 	}
 
+	seedVerifiedDNSDelegationFixture(t, server, "fugue.pro")
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/dns/delegation/preflight", platformAdminKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
@@ -284,6 +285,7 @@ func TestDNSDelegationPreflightUsesPhysicalNodeIDForExtraZoneNodes(t *testing.T)
 		return []string{"current-parent.example"}, nil
 	}
 
+	seedVerifiedDNSDelegationFixture(t, server, "oaix.cc")
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/dns/delegation/preflight?zone=oaix.cc", platformAdminKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
@@ -366,6 +368,7 @@ func TestDNSDelegationPreflightAllowsServingDegradedStaleCache(t *testing.T) {
 		return []string{"current-parent.example"}, nil
 	}
 
+	seedVerifiedDNSDelegationFixture(t, server, "fugue.pro")
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/dns/delegation/preflight", platformAdminKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
@@ -545,6 +548,7 @@ func TestDNSDelegationPreflightFailsWhenSameEdgeGroupReportsDifferentBundleVersi
 		return []string{"current-parent.example"}, nil
 	}
 
+	seedVerifiedDNSDelegationFixture(t, server, "fugue.pro")
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/dns/delegation/preflight", platformAdminKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())

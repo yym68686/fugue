@@ -254,8 +254,14 @@ func (s *Server) dnsDelegationPreflightOptionsFromRequest(r *http.Request) dnsDe
 }
 
 func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal model.Principal, opts dnsDelegationPreflightOptions) model.DNSDelegationPreflightResponse {
+	hint, configErr := s.verifiedDNSDelegationHints(opts.Zone)
+	if configErr != nil {
+		return model.DNSDelegationPreflightResponse{Zone: opts.Zone, ProbeName: opts.ProbeName, MinHealthyNodes: opts.MinHealthyNodes, GeneratedAt: time.Now().UTC(),
+			Checks:         []model.DNSDelegationPreflightCheck{{Name: "dns_delegation_configuration", Pass: false, Message: configErr.Error()}},
+			DelegationPlan: model.DNSDelegationPlan{CurrentParentNS: []string{}, PlannedARecords: []model.DNSDelegationRecord{}, PlannedNSRecords: []model.DNSDelegationRecord{}, RollbackDeleteRecords: []model.DNSDelegationRecord{}}}
+	}
 	nodes, err := s.store.ListDNSNodes(opts.EdgeGroupID)
-	checks := []model.DNSDelegationPreflightCheck{}
+	checks := []model.DNSDelegationPreflightCheck{{Name: "dns_delegation_configuration", Pass: true, Message: "delegation declared by verified traffic intent and policy"}}
 	if err != nil {
 		return model.DNSDelegationPreflightResponse{
 			Pass:            false,
@@ -270,7 +276,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 			}},
 		}
 	}
-	nodes = dnsNodesForZone(nodes, opts.Zone)
+	nodes = dnsNodesForVerifiedDelegation(freshDNSNodes(nodes, time.Now().UTC()), opts.Zone, hint.ConsumerGroups)
 
 	nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal)
 	policyByNode := map[string]model.ClusterNodePolicyStatus{}
@@ -353,7 +359,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 		GeneratedAt:      time.Now().UTC(),
 		Checks:           checks,
 		Nodes:            nodeChecks,
-		DelegationPlan:   buildDNSDelegationPlan(opts.Zone, nodeChecks, currentParentNS, dnsDelegationPlanHints(opts.Zone, s.dnsStaticRecords, s.dnsNameservers)),
+		DelegationPlan:   buildDNSDelegationPlan(opts.Zone, nodeChecks, currentParentNS, hint),
 	}
 }
 
@@ -783,8 +789,9 @@ func dnsNodeReachabilityOK(checks []model.DNSDelegationNodeCheck) bool {
 }
 
 type dnsDelegationPlanHint struct {
-	Nameservers []string
-	ARecords    map[string][]string
+	ConsumerGroups map[string]string
+	Nameservers    []string
+	ARecords       map[string][]string
 }
 
 func normalizeDNSNameservers(values []string) []string {
@@ -895,12 +902,16 @@ func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, c
 			nsHost = hint.Nameservers[index]
 		}
 		ip := strings.TrimSpace(node.PublicIP)
+		glue := []string{ip}
+		if declared := hint.ARecords[nsHost]; len(declared) > 0 {
+			glue = uniqueSortedStrings(declared)
+		}
 		needsGlue := dnsDelegationNSNeedsGlue(zone, nsHost)
 		if needsGlue {
 			plannedA = append(plannedA, model.DNSDelegationRecord{
 				Name:    nsHost,
 				Type:    "A",
-				Values:  []string{ip},
+				Values:  glue,
 				TTL:     defaultDNSDelegationPlanTTL,
 				Comment: "authoritative DNS node " + node.DNSNodeID,
 			})
@@ -913,7 +924,7 @@ func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, c
 			Comment: "delegate child zone to fugue-dns",
 		})
 		if needsGlue {
-			rollback = append(rollback, model.DNSDelegationRecord{Name: nsHost, Type: "A", Values: []string{ip}, Comment: "delete if delegation is rolled back"})
+			rollback = append(rollback, model.DNSDelegationRecord{Name: nsHost, Type: "A", Values: glue, Comment: "delete if delegation is rolled back"})
 		}
 		rollback = append(rollback, model.DNSDelegationRecord{Name: zone, Type: "NS", Values: []string{nsHost}, Comment: "delete if delegation is rolled back"})
 	}
