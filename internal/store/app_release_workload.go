@@ -31,6 +31,17 @@ func preserveReleaseWorkload(current model.AppRelease, desired *model.AppRelease
 // BindAppReleaseWorkload compares the observed release under the same lock as
 // the write. General status/target writers cannot bind or erase this record.
 func (s *Store) BindAppReleaseWorkload(ctx context.Context, expected model.AppRelease, workload model.AppReleaseWorkload) (model.AppRelease, error) {
+	return s.bindAppReleaseWorkload(ctx, expected, workload, nil)
+}
+
+// MigrateAppReleaseWorkload binds a withdrawn historical revision only when
+// its persisted rollout audit identifies the same terminal source operation.
+// The controller must first verify the live executable resources read-only.
+func (s *Store) MigrateAppReleaseWorkload(ctx context.Context, expected model.AppRelease, source model.Operation, workload model.AppReleaseWorkload) (model.AppRelease, error) {
+	return s.bindAppReleaseWorkload(ctx, expected, workload, &source)
+}
+
+func (s *Store) bindAppReleaseWorkload(ctx context.Context, expected model.AppRelease, workload model.AppReleaseWorkload, source *model.Operation) (model.AppRelease, error) {
 	if expected.ID == "" || workload.DeploymentGeneration < 1 || !workload.BoundAt.IsZero() {
 		return model.AppRelease{}, ErrInvalidInput
 	}
@@ -44,7 +55,7 @@ func (s *Store) BindAppReleaseWorkload(ctx context.Context, expected model.AppRe
 		return model.AppRelease{}, err
 	}
 	if s.usingDatabase() {
-		return s.pgBindAppReleaseWorkload(ctx, expected, workload)
+		return s.pgBindAppReleaseWorkload(ctx, expected, workload, source)
 	}
 	var out model.AppRelease
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -63,6 +74,9 @@ func (s *Store) BindAppReleaseWorkload(ctx context.Context, expected model.AppRe
 			}
 		}
 		bound, err := bindReleaseWorkload(state.AppReleases[index], expected, op, workload)
+		if source != nil {
+			bound, err = migrateReleaseWorkload(state.AppReleases[index], expected, op, *source, workload, state.AuditEvents)
+		}
 		if err != nil {
 			return err
 		}
@@ -97,7 +111,7 @@ func bindReleaseWorkload(current, expected model.AppRelease, op model.Operation,
 	return current, nil
 }
 
-func (s *Store) pgBindAppReleaseWorkload(ctx context.Context, expected model.AppRelease, workload model.AppReleaseWorkload) (model.AppRelease, error) {
+func (s *Store) pgBindAppReleaseWorkload(ctx context.Context, expected model.AppRelease, workload model.AppReleaseWorkload, source *model.Operation) (model.AppRelease, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -115,6 +129,13 @@ func (s *Store) pgBindAppReleaseWorkload(ctx context.Context, expected model.App
 		return model.AppRelease{}, mapDBErr(err)
 	}
 	bound, err := bindReleaseWorkload(current, expected, op, workload)
+	if source != nil {
+		events, readErr := pgReleaseWorkloadSourceEvents(ctx, tx, expected)
+		if readErr != nil {
+			return model.AppRelease{}, readErr
+		}
+		bound, err = migrateReleaseWorkload(current, expected, op, *source, workload, events)
+	}
 	if err != nil {
 		return model.AppRelease{}, err
 	}

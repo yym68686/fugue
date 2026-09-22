@@ -12,9 +12,21 @@ import (
 )
 
 func (s *Service) bindSafeRolloutWorkload(ctx context.Context, client *kubeClient, op model.Operation, state *safeRolloutState, objects []map[string]any) error {
-	app, release := state.CandidateApp, state.Candidate
+	first, err := s.captureSafeRolloutWorkload(ctx, client, op, state.CandidateApp, state.Candidate, objects)
+	if err != nil {
+		return err
+	}
+	bound, err := s.Store.BindAppReleaseWorkload(ctx, state.Candidate, first)
+	if err != nil {
+		return fmt.Errorf("persist immutable revision identity: %w", err)
+	}
+	state.Candidate = bound
+	return nil
+}
+
+func (s *Service) captureSafeRolloutWorkload(ctx context.Context, client *kubeClient, op model.Operation, app model.App, release model.AppRelease, objects []map[string]any) (model.AppReleaseWorkload, error) {
 	if op.ID == "" || op.AppID != app.ID || op.TenantID != app.TenantID || release.AppID != app.ID || release.TenantID != app.TenantID {
-		return fmt.Errorf("revision operation ownership differs")
+		return model.AppReleaseWorkload{}, fmt.Errorf("revision operation ownership differs")
 	}
 	var expectedDeployment, expectedService map[string]any
 	for _, obj := range objects {
@@ -27,7 +39,7 @@ func (s *Service) bindSafeRolloutWorkload(ctx context.Context, client *kubeClien
 		}
 	}
 	if expectedDeployment == nil || expectedService == nil {
-		return fmt.Errorf("revision has no complete desired resource pair")
+		return model.AppReleaseWorkload{}, fmt.Errorf("revision has no complete desired resource pair")
 	}
 	ns := runtime.NamespaceForTenant(app.TenantID)
 	depPath := deploymentAPIPath(ns, release.DeploymentName)
@@ -45,21 +57,16 @@ func (s *Service) bindSafeRolloutWorkload(ctx context.Context, client *kubeClien
 	}
 	first, err := read()
 	if err != nil {
-		return err
+		return model.AppReleaseWorkload{}, err
 	}
 	second, err := read()
 	if err != nil {
-		return err
+		return model.AppReleaseWorkload{}, err
 	}
 	if first != second {
-		return fmt.Errorf("revision resources changed during identity capture")
+		return model.AppReleaseWorkload{}, fmt.Errorf("revision resources changed during identity capture")
 	}
-	bound, err := s.Store.BindAppReleaseWorkload(ctx, release, first)
-	if err != nil {
-		return fmt.Errorf("persist immutable revision identity: %w", err)
-	}
-	state.Candidate = bound
-	return nil
+	return first, nil
 }
 
 func (s *Service) safeRolloutWorkloadIdentity(op model.Operation, app model.App, release model.AppRelease, dep, svc, expectedDeployment, expectedService map[string]any) (model.AppReleaseWorkload, error) {
@@ -74,6 +81,9 @@ func (s *Service) safeRolloutWorkloadIdentity(op model.Operation, app model.App,
 		if objectStringField(m, "name") != pair.name || objectStringField(m, "namespace") != ns || objectStringField(m, "uid") == "" || objectStringField(m, "deletionTimestamp") != "" ||
 			!appWorkloadOwnerMatches(m, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) || labels[runtime.FugueLabelAppReleaseID] != release.ID {
 			return out, fmt.Errorf("revision resource ownership or lifecycle differs")
+		}
+		if !historicalWorkloadCreatedDuringOperation(m, op) {
+			return out, fmt.Errorf("historical resource was not created during its source operation")
 		}
 	}
 	dm, sm := objectMapField(dep, "metadata"), objectMapField(svc, "metadata")

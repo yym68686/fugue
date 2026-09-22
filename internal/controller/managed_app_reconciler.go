@@ -460,6 +460,16 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 		if !store.AppReleaseAwaitingDrain(previous) {
 			continue
 		}
+		if previous.RevisionWorkload == nil {
+			bound, migrationErr := s.migrateSafeRolloutWorkload(ctx, app, previous)
+			if migrationErr != nil {
+				if !errors.Is(migrationErr, store.ErrNotFound) && s.Logger != nil {
+					s.Logger.Printf("retain unbound release %s: %v", previous.ID, migrationErr)
+				}
+				continue
+			}
+			previous = bound
+		}
 		if previous.RevisionWorkload == nil || previous.RevisionWorkload.OperationID == "" {
 			continue
 		}
