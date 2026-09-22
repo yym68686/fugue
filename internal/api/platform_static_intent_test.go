@@ -60,7 +60,8 @@ func TestStaticIntentCaptureIgnoresAmbientRoutesAndDNS(t *testing.T) {
 			t.Fatal("static value or expiration lost")
 		}
 	}
-	path := "/v1/admin/platform-config/routes/project?static_intent_artifact_id=" + base.ID
+	policy := createTestProjectionPolicy(t, s, base, "preview-static", "shadow")
+	path := "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + policy.ID
 	r := performJSONRequest(t, s, http.MethodGet, path, admin, nil)
 	if r.Code != 200 {
 		t.Fatal(r.Body.String())
@@ -73,8 +74,8 @@ func TestStaticIntentCaptureIgnoresAmbientRoutesAndDNS(t *testing.T) {
 	if r = performJSONRequest(t, s, http.MethodGet, path, tenant, nil); r.Code != 403 {
 		t.Fatal("tenant read platform input")
 	}
-	for _, ref := range []string{"missing", base.Generation, base.ID + "&static_intent_artifact_id=" + base.ID} {
-		r = performJSONRequest(t, s, http.MethodGet, "/v1/admin/platform-config/routes/project?static_intent_artifact_id="+ref, admin, nil)
+	for _, ref := range []string{"missing", policy.Generation, policy.ID + "&producer_policy_artifact_id=" + policy.ID} {
+		r = performJSONRequest(t, s, http.MethodGet, "/v1/admin/platform-config/routes/project?producer_policy_artifact_id="+ref, admin, nil)
 		if r.Code == 200 {
 			t.Fatal("invalid exact ref fell back to environment", ref)
 		}

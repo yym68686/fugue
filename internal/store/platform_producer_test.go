@@ -51,8 +51,7 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			principal := model.Principal{ActorType: model.ActorTypeBootstrap, ActorID: platformproducer.Actor, Scopes: map[string]struct{}{"platform.admin": {}}}
 			var static, dnsInput model.PlatformArtifact
 			dnsCase := strings.Contains(scenario, "dns")
-			staticCase := strings.Contains(scenario, "static") || dnsCase
-			if staticCase {
+			{
 				gen := model.NewID("static")
 				i := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: gen, Routes: []platformconfig.RouteIntent{{Hostname: "static.example.test", UpstreamURL: "http://static:8080", Enabled: true}}}
 				if scenario == "static domains complete" || scenario == "static domains invalid" {
@@ -117,15 +116,9 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			}
 			makePolicy := func(mode string) model.PlatformArtifactRelease {
 				gen := model.NewID("producer-policy")
-				policy := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: gen, Mode: mode, InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 120}
-				if staticCase {
-					policy.InputSource = "business-static-intent"
-					policy.RequireApplicationDomains = strings.HasPrefix(scenario, "static domains")
-					policy.StaticIntentArtifactID = static.ID
-					policy.StaticIntentDigest = static.ContentHash
-					if scenario == "static digest" {
-						policy.StaticIntentDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-					}
+				policy := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: gen, Mode: mode, InputSource: "business-static-intent", StaticIntentArtifactID: static.ID, StaticIntentDigest: static.ContentHash, RequireApplicationDomains: strings.HasPrefix(scenario, "static domains"), TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 120}
+				if scenario == "static digest" {
+					policy.StaticIntentDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 				}
 				if dnsCase {
 					policy.RequireDNSQueryPolicy = strings.HasPrefix(scenario, "dns query")
@@ -198,12 +191,10 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, ids, time.Now().UTC())
 			parent.Metadata[platformproducer.PolicyReleaseMetadata] = authority.ID
 			parent.Metadata[platformproducer.SourceDigestMetadata] = "sha256:source"
-			if staticCase {
-				parent.Metadata[platformproducer.StaticIntentIDMetadata] = static.ID
-				parent.Metadata[platformproducer.StaticIntentDigestMetadata] = static.ContentHash
-				if scenario == "static binding" {
-					delete(parent.Metadata, platformproducer.StaticIntentIDMetadata)
-				}
+			parent.Metadata[platformproducer.StaticIntentIDMetadata] = static.ID
+			parent.Metadata[platformproducer.StaticIntentDigestMetadata] = static.ContentHash
+			if scenario == "static binding" {
+				delete(parent.Metadata, platformproducer.StaticIntentIDMetadata)
 			}
 			if dnsCase {
 				parent.Metadata[platformproducer.DNSPolicyIDMetadata] = dnsInput.ID

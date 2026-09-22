@@ -14,8 +14,8 @@ import (
 )
 
 func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal model.Principal, policy platformproducer.Policy) (platformIntentProjectionResponse, error) {
-	if policy.InputSource == "business-migration" {
-		return s.capturePlatformIntent(ctx, principal)
+	if policy.InputSource != "business-static-intent" {
+		return platformIntentProjectionResponse{}, fmt.Errorf("producer requires pinned static intent")
 	}
 	static, err := s.loadStaticPlatformIntent(policy.StaticIntentArtifactID, policy.StaticIntentDigest)
 	if err != nil {

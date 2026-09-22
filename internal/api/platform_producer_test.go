@@ -19,7 +19,25 @@ import (
 
 func activateTestProducer(t *testing.T, s *Server, generation, mode string) model.PlatformArtifactRelease {
 	t.Helper()
-	raw, _ := json.Marshal(platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: generation, Mode: mode, InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 300})
+	base, err := s.store.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPlatformIntent, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: "global"}, Generation: generation + "-base", Content: mustPlatformIntentContent(platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: generation + "-base"})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err = s.store.ValidatePlatformArtifact(base.ID, []model.PlatformArtifactValidationResult{{Name: "pinned", Pass: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := createTestProjectionPolicy(t, s, base, generation, mode)
+	_, r, _, _, err := s.store.ReleasePlatformArtifact(a.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, platformProducerPrincipal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func createTestProjectionPolicy(t *testing.T, s *Server, base model.PlatformArtifact, generation, mode string) model.PlatformArtifact {
+	t.Helper()
+	raw, _ := json.Marshal(platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: generation, Mode: mode, InputSource: "business-static-intent", StaticIntentArtifactID: base.ID, StaticIntentDigest: base.ContentHash, TargetScope: "global", IntervalSeconds: 30, RefreshSeconds: 300})
 	var content map[string]any
 	json.Unmarshal(raw, &content)
 	a, err := s.store.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: platformproducer.Scope}, Generation: generation, Content: content})
@@ -33,11 +51,7 @@ func activateTestProducer(t *testing.T, s *Server, generation, mode string) mode
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, r, _, _, err := s.store.ReleasePlatformArtifact(a.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, platformProducerPrincipal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return r
+	return a
 }
 
 func TestPlatformProducerPublishesAndReusesShadow(t *testing.T) {
@@ -238,7 +252,7 @@ func TestPlatformProducerRechecksPolicyAfterCapture(t *testing.T) {
 func TestProducerPolicyAPIRejectsInvalidModes(t *testing.T) {
 	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	for _, mode := range []string{"full", "shadow"} {
-		r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: platformproducer.Scope}, Generation: "policy-" + mode, Content: map[string]any{"schema_version": platformproducer.Schema, "generation": "policy-" + mode, "mode": mode, "input_source": "business-migration", "target_scope": "global", "interval_seconds": 30, "refresh_seconds": 300}})
+		r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: platformproducer.Scope}, Generation: "policy-" + mode, Content: map[string]any{"schema_version": platformproducer.Schema, "generation": "policy-" + mode, "mode": mode, "input_source": "business-static-intent", "static_intent_artifact_id": "synthetic-base", "static_intent_digest": "sha256:" + strings.Repeat("a", 64), "target_scope": "global", "interval_seconds": 30, "refresh_seconds": 300}})
 		if r.Code != 201 {
 			t.Fatal(r.Body.String())
 		}

@@ -75,7 +75,7 @@ func waitPlatformProducer(ctx context.Context, interval time.Duration) bool {
 }
 
 func (s *Server) reconcilePlatformConfiguration(ctx context.Context) (time.Duration, error) {
-	return s.reconcilePlatformConfigurationWithCapture(ctx, s.capturePlatformIntent)
+	return s.reconcilePlatformConfigurationWithCapture(ctx, nil)
 }
 
 func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, capture func(context.Context, model.Principal) (platformIntentProjectionResponse, error)) (time.Duration, error) {
@@ -115,10 +115,10 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	var projection platformIntentProjectionResponse
-	if policy.InputSource == "business-static-intent" {
-		projection, err = s.capturePlatformIntentForProducer(runCtx, principal, policy)
-	} else {
+	if capture != nil {
 		projection, err = capture(runCtx, principal)
+	} else {
+		projection, err = s.capturePlatformIntentForProducer(runCtx, principal, policy)
 	}
 	if err != nil {
 		return interval, err

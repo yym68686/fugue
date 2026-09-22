@@ -1,9 +1,11 @@
-# Platform configuration shadow producer
+# Platform configuration producer
 
 The API replicas elect one producer with the existing store advisory lock. It
 uses the shared business capture and deterministic compiler, then publishes the
 global shadow TrafficReleaseSet and prepares its immutable consumer topology.
-It never publishes gray/full traffic, verifies LKG, or changes serving pointers.
+Shadow mode never publishes gray/full traffic or verifies LKG. Serving mode uses
+the same producer with complete pinned configuration and bounded promotion gates.
+The retired business-migration source is rejected in every mode.
 
 Create a `policy_snapshot` artifact with scope
 `{"scope_type":"global","key":"platform-config-producer"}` and this content:
@@ -13,7 +15,9 @@ Create a `policy_snapshot` artifact with scope
   "schema_version": "fugue.platform.producer/v1",
   "generation": "producer-policy-1",
   "mode": "shadow",
-  "input_source": "business-migration",
+  "input_source": "business-static-intent",
+  "static_intent_artifact_id": "<exact-validated-intent-id>",
+  "static_intent_digest": "sha256:<content-hash>",
   "target_scope": "global",
   "interval_seconds": 60,
   "refresh_seconds": 600
@@ -58,11 +62,10 @@ Watch the `platform configuration producer published`, `unchanged`, and failure
 logs, plus the normal release/expected-consumer/convergence APIs. Shadow consumer
 reports remain non-serving; observed consumers alone do not authorize promotion.
 
-`business-migration` deliberately uses the current migration capture, including
-legacy serving inputs. This stage maintains the business-to-artifact path while
-serving migration is unfinished. Durable intent/policy ownership, output
-equivalence, real gray/full/rollback and removal of legacy sources must still be
-completed before declaring the architecture migration finished.
+Every producer starts from an exact validated signed PlatformIntent. Missing,
+invalid or revoked references reject capture without falling back to the process
+environment. Historical policies and compiler inputs remain readable; retired
+policy sources cannot be validated or reactivated.
 
 ## Pin static platform input
 
@@ -86,8 +89,9 @@ Create a new producer policy generation using:
 ```
 
 Retain the other required policy fields from the preceding example. Preview
-the explicit source with `GET /v1/admin/platform-config/routes/project?static_intent_artifact_id=<id>`
-and compare desired output before activating its shadow policy release. This
+the explicit source with `GET /v1/admin/platform-config/routes/project?producer_policy_artifact_id=<policy-id>`
+and compare desired output before activating its shadow policy release. A missing
+policy reference returns 400; the retired static-only selector returns 410. This
 mode never reads the API's ambient platform-route or static-DNS arrays. It
 continues projecting App/Domain changes from one consistent business snapshot.
 An invalid, missing, wrong-scope, altered or revoked explicit source rejects the
@@ -132,8 +136,7 @@ authority configuration. Missing or conflicting endpoint facts reject capture.
 
 Preview the complete configuration through
 `routes/project?producer_policy_artifact_id=<exact-validated-policy-id>` before
-publishing the producer policy. Do not combine this selector with the static-only
-selector. Pinned DNS capture never queries DNS DaemonSet environment. The signed
+publishing the producer policy. The policy reference is required; static-only previews are retired. Pinned DNS capture never queries DNS DaemonSet environment. The signed
 parent and retained runtime input also record the DNS policy reference so an
 operator replay preserves it. Address collection does not overwrite the pinned
 readiness intervals, freshness, concurrency or rollout cohorts.

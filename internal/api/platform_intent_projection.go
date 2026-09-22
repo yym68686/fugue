@@ -74,43 +74,26 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
 		return
 	}
-	var projection platformIntentProjectionResponse
-	var err error
-	refs, present := r.URL.Query()["static_intent_artifact_id"]
-	policies, policyPresent := r.URL.Query()["producer_policy_artifact_id"]
-	if present && policyPresent {
-		httpx.WriteError(w, http.StatusBadRequest, "choose one configuration reference")
+	if _, retired := r.URL.Query()["static_intent_artifact_id"]; retired {
+		httpx.WriteError(w, http.StatusGone, "static-only preview is retired; select a signed producer policy")
 		return
 	}
-	if policyPresent {
-		if len(policies) != 1 || strings.TrimSpace(policies[0]) == "" {
-			httpx.WriteError(w, http.StatusBadRequest, "one producer_policy_artifact_id required")
-			return
-		}
-		var a model.PlatformArtifact
-		a, err = s.store.GetPlatformArtifact(policies[0])
-		if err == nil && (a.ID != policies[0] || a.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(a) != nil || !platformsafety.EvaluateArtifactIntegrity(a, s.bundleKeyring()).Pass) {
-			err = errors.New("producer policy reference not trusted")
-		}
+	refs := r.URL.Query()["producer_policy_artifact_id"]
+	if len(refs) != 1 || strings.TrimSpace(refs[0]) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "one producer_policy_artifact_id required")
+		return
+	}
+	var projection platformIntentProjectionResponse
+	a, err := s.store.GetPlatformArtifact(refs[0])
+	if err == nil && (a.ID != refs[0] || a.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(a) != nil || !platformsafety.EvaluateArtifactIntegrity(a, s.bundleKeyring()).Pass) {
+		err = errors.New("producer policy reference not trusted")
+	}
+	if err == nil {
+		var policy platformproducer.Policy
+		policy, err = platformproducer.Decode(a)
 		if err == nil {
-			var p platformproducer.Policy
-			p, err = platformproducer.Decode(a)
-			if err == nil {
-				projection, err = s.capturePlatformIntentForProducer(r.Context(), mustPrincipal(r), p)
-			}
+			projection, err = s.capturePlatformIntentForProducer(r.Context(), mustPrincipal(r), policy)
 		}
-	} else if present {
-		if len(refs) != 1 || strings.TrimSpace(refs[0]) == "" {
-			httpx.WriteError(w, http.StatusBadRequest, "one static_intent_artifact_id required")
-			return
-		}
-		var input platformproducer.StaticIntentInput
-		input, err = s.loadStaticPlatformIntent(refs[0], "")
-		if err == nil {
-			projection, err = s.capturePlatformIntentWithStatic(r.Context(), mustPrincipal(r), input)
-		}
-	} else {
-		projection, err = s.capturePlatformIntent(r.Context(), mustPrincipal(r))
 	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
@@ -118,17 +101,6 @@ func (s *Server) handleProjectPlatformIntent(w http.ResponseWriter, r *http.Requ
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, projection)
-}
-
-// capturePlatformIntent freezes business input and captures runtime observations
-// independently. This entry point can be called without an HTTP request; it
-// neither publishes artifacts nor changes serving or recovery state.
-func (s *Server) capturePlatformIntent(ctx context.Context, principal model.Principal) (platformIntentProjectionResponse, error) {
-	return s.capturePlatformIntentWithStatic(ctx, principal, platformproducer.StaticIntentInput{Routes: s.platformRoutes, DNS: s.dnsStaticRecords})
-}
-
-func (s *Server) capturePlatformIntentWithStatic(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput) (platformIntentProjectionResponse, error) {
-	return s.capturePlatformIntentWithInputs(ctx, principal, static, nil, nil)
 }
 
 func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal model.Principal, static platformproducer.StaticIntentInput, dnsPolicy *platformproducer.ProjectionPolicyInput, templates []platformproducer.HostedZoneTemplate) (platformIntentProjectionResponse, error) {

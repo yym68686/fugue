@@ -82,10 +82,6 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 		}
 	}
 	switch p.InputSource {
-	case "business-migration":
-		if p.StaticIntentArtifactID != "" || p.StaticIntentDigest != "" {
-			return p, fmt.Errorf("migration source cannot bind a static intent")
-		}
 	case "business-static-intent":
 		if p.StaticIntentArtifactID == "" || strings.TrimSpace(p.StaticIntentArtifactID) != p.StaticIntentArtifactID || !ValidDigest(p.StaticIntentDigest) {
 			return p, fmt.Errorf("static intent source requires exact identity and digest")

@@ -9,9 +9,9 @@ import (
 )
 
 func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
-	for _, scenario := range []string{"valid", "query", "query missing policy", "route defaults", "route defaults without policy", "domains", "domains without static", "paused", "static", "static missing id", "static bad digest", "migration with ref", "scope", "generation", "schema", "source", "target", "mode", "interval", "refresh", "short refresh", "unknown action", "dns", "dns missing digest", "dns without static", "template without policy", "duplicate template"} {
+	for _, scenario := range []string{"valid", "query", "query missing policy", "route defaults", "route defaults without policy", "domains", "domains without static", "paused", "static", "static missing id", "static bad digest", "migration with ref", "retired migration", "scope", "generation", "schema", "source", "target", "mode", "interval", "refresh", "short refresh", "unknown action", "dns", "dns missing digest", "dns without static", "template without policy", "duplicate template"} {
 		t.Run(scenario, func(t *testing.T) {
-			p := Policy{SchemaVersion: Schema, Generation: "policy", Mode: "shadow", InputSource: "business-migration", TargetScope: "global", IntervalSeconds: 60, RefreshSeconds: 300}
+			p := Policy{SchemaVersion: Schema, Generation: "policy", Mode: "shadow", InputSource: "business-static-intent", StaticIntentArtifactID: "artifact-static", StaticIntentDigest: "sha256:" + strings.Repeat("a", 64), TargetScope: "global", IntervalSeconds: 60, RefreshSeconds: 300}
 			a := model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, ScopeKey: Scope, Generation: p.Generation}
 			switch scenario {
 			case "static", "domains", "static missing id", "static bad digest":
@@ -31,8 +31,12 @@ func TestPolicyRequiresBoundedTypedShadowControl(t *testing.T) {
 				p.RequireRouteDefaults = true
 			case "domains without static":
 				p.RequireApplicationDomains = true
-			case "migration with ref":
-				p.StaticIntentArtifactID = "ignored-ref"
+				p.StaticIntentArtifactID = ""
+			case "migration with ref", "retired migration":
+				p.InputSource = "business-migration"
+				if scenario == "retired migration" {
+					p.StaticIntentArtifactID, p.StaticIntentDigest = "", ""
+				}
 			case "paused":
 				p.Mode = "paused"
 			case "scope":

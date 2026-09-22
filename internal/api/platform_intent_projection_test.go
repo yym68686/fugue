@@ -24,11 +24,12 @@ func TestPlatformIntentProjectionRequiresPlatformAdmin(t *testing.T) {
 			}
 		})
 	}
+	authority := activateTestProducer(t, server, "preview-authority", "paused")
 	before, err := state.ListPlatformArtifacts(model.PlatformArtifactFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/routes/project", admin, nil)
+	response := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/routes/project?producer_policy_artifact_id="+authority.ArtifactID, admin, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("unexpected admin result %d %s", response.Code, response.Body.String())
 	}
