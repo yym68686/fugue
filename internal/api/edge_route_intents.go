@@ -15,7 +15,6 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/platformsafety"
 	"fugue/internal/routeartifact"
 	"fugue/internal/store"
 )
@@ -42,14 +41,11 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	groups, present := r.URL.Query()["edge_group_id"]
-	group := ""
-	if present {
-		if len(groups) != 1 || len(groups[0]) > 128 || !trafficSourceGroup.MatchString(groups[0]) {
-			httpx.WriteError(w, http.StatusBadRequest, "one canonical edge_group_id is required")
-			return
-		}
-		group = groups[0]
+	if !present || len(groups) != 1 || len(groups[0]) > 128 || !trafficSourceGroup.MatchString(groups[0]) {
+		httpx.WriteError(w, http.StatusBadRequest, "one canonical edge_group_id is required")
+		return
 	}
+	group := groups[0]
 	if snapshot, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease(group); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "traffic release recovery state is unavailable; retain the current serving bundle")
 		return
@@ -61,47 +57,7 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteJSON(w, http.StatusOK, snapshot)
 		return
 	}
-	if snapshot, found, err := s.edgeRouteIntentSnapshotFromVerifiedArtifact(); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "route artifact recovery state is unavailable; retain the current serving bundle")
-		return
-	} else if found {
-		w.Header().Set("ETag", edgeRouteBundleETag(snapshot.Generation))
-		w.Header().Set("Cache-Control", "private, no-cache")
-		w.Header().Set("X-Fugue-Route-Intent-Source", "verified-artifact")
-		w.Header().Set("X-Fugue-Route-Intent-Generation", snapshot.Generation)
-		httpx.WriteJSON(w, http.StatusOK, snapshot)
-		return
-	}
-	snapshot, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	w.Header().Set("ETag", edgeRouteBundleETag(snapshot.Generation))
-	w.Header().Set("Cache-Control", "private, no-cache")
-	w.Header().Set("X-Fugue-Route-Intent-Generation", snapshot.Generation)
-	httpx.WriteJSON(w, http.StatusOK, snapshot)
-}
-
-// edgeRouteIntentSnapshotFromVerifiedArtifact projects the serving route
-// artifact into the component-specific RouteIntent wire shape. The legacy
-// business-table projection remains a fallback until a verified artifact is
-// available, but it is never consulted once the artifact path is active.
-func (s *Server) edgeRouteIntentSnapshotFromVerifiedArtifact() (model.EdgeRouteIntentSnapshot, bool, error) {
-	lkg, err := s.store.GetStandalonePlatformLKG(model.PlatformArtifactKindEdgeRouteBundle, "global")
-	if err != nil || lkg == nil {
-		return model.EdgeRouteIntentSnapshot{}, false, err
-	}
-	artifact, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
-	if err != nil {
-		return model.EdgeRouteIntentSnapshot{}, true, err
-	}
-	if artifact.Status != model.PlatformArtifactStatusValidated ||
-		!platformsafety.EvaluatePlatformLKGSnapshot(*lkg, artifact, s.bundleKeyring(), time.Now().UTC()).Pass {
-		return model.EdgeRouteIntentSnapshot{}, true, fmt.Errorf("global route LKG is not usable")
-	}
-	snapshot, err := projectPlatformRouteArtifact(artifact)
-	return snapshot, true, err
+	httpx.WriteError(w, http.StatusServiceUnavailable, "no published traffic release for this group; retain the current serving artifact")
 }
 
 func projectPlatformRouteArtifact(artifact model.PlatformArtifact) (model.EdgeRouteIntentSnapshot, error) {

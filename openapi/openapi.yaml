@@ -633,22 +633,18 @@ paths:
         Returns Core's inventory-independent desired-route projection. Only the
         edge-control component identity with global edge_route_intent capability
         is accepted; tenant and platform-admin API keys are not accepted.
-        A verified global route artifact takes precedence over the legacy source.
-        An unusable artifact or LKG returns 503 so Edge Control retains its last
-        serving bundle rather than recompiling from mutable business tables.
-        Artifact-backed serving and candidate validation share one route
-        projection. Cache references resolve case-insensitively to the declared
-        policy ID; disabled cache policies are not materialized as active bindings.
-        With edge_group_id, the newest applicable gray/full TrafficReleaseSet
-        selects serving routes; gray applies only to its signed cohort. A newer
-        full supersedes an older gray lane. Without an applicable release the
-        verified route LKG remains the migration fallback. A selected
-        release must have immutable expected topology for that group and verified
-        parent/child integrity and lineage. Invalid or unprepared selected releases
-        return 503 without falling back to business data. Shadow releases never
-        select serving configuration. A legacy request without a group is rejected
-        while a gray or full TrafficReleaseSet is active. Group projections retain
-        traffic_release provenance; their signatures include cache policies.
+        Returns only the newest applicable published gray/full TrafficReleaseSet
+        projection for the required edge_group_id. Gray applies only to its
+        signed cohort; a newer full supersedes an older gray lane. The selected
+        release must have immutable expected topology for the group and verified
+        parent/child integrity and lineage. Missing, invalid or unprepared
+        releases return 503 so Edge Control retains its current serving artifact.
+        This serving endpoint never reads mutable business tables or standalone
+        route LKGs to synthesize configuration. Shadow releases never select
+        serving content. Group projections retain traffic_release provenance;
+        signatures include cache policies. Cache references resolve
+        case-insensitively to the declared policy ID; disabled cache policies
+        are not materialized as active bindings.
       tags: [Edge]
       x-fugue-handler: handleEdgeRouteIntents
       security:
@@ -656,7 +652,7 @@ paths:
       parameters:
         - in: query
           name: edge_group_id
-          required: false
+          required: true
           schema:
             type: string
             maxLength: 128
@@ -672,7 +668,7 @@ paths:
               schema:
                 type: string
             X-Fugue-Route-Intent-Source:
-              description: Serving source for the route projection. Present when the verified route artifact path is active.
+              description: Serving source for the route projection; always traffic-release.
               schema:
                 type: string
           content:

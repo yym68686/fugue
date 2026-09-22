@@ -33,7 +33,7 @@ func TestEdgeRouteIntentsRequireExactEdgeControlIdentity(t *testing.T) {
 		{name: "wrong scope", claims: edgeRouteIntentTestClaims(model.PlatformConsumerComponentEdgeControl, "edge-group-country-us", []string{model.PlatformArtifactKindEdgeRouteIntent}), wantStatus: http.StatusForbidden},
 		{name: "wrong capability", claims: edgeRouteIntentTestClaims(model.PlatformConsumerComponentEdgeControl, "global", []string{model.PlatformArtifactKindEdgeRouteBundle}), wantStatus: http.StatusForbidden},
 		{name: "multiple capabilities", claims: edgeRouteIntentTestClaims(model.PlatformConsumerComponentEdgeControl, "global", []string{model.PlatformArtifactKindEdgeRouteIntent, model.PlatformArtifactKindEdgeRouteBundle}), wantStatus: http.StatusForbidden},
-		{name: "exact identity", claims: edgeRouteIntentTestClaims(model.PlatformConsumerComponentEdgeControl, "global", []string{model.PlatformArtifactKindEdgeRouteIntent}), wantStatus: http.StatusOK},
+		{name: "exact identity without published release", claims: edgeRouteIntentTestClaims(model.PlatformConsumerComponentEdgeControl, "global", []string{model.PlatformArtifactKindEdgeRouteIntent}), wantStatus: http.StatusServiceUnavailable},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -45,7 +45,7 @@ func TestEdgeRouteIntentsRequireExactEdgeControlIdentity(t *testing.T) {
 					t.Fatalf("issue platform component identity: %v", err)
 				}
 			}
-			recorder := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents", token, nil)
+			recorder := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents?edge_group_id=edge-group-test", token, nil)
 			if recorder.Code != test.wantStatus {
 				t.Fatalf("expected status %d, got %d body=%s", test.wantStatus, recorder.Code, recorder.Body.String())
 			}

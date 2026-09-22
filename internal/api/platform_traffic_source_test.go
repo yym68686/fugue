@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,38 @@ import (
 	"fugue/internal/platformcontrol"
 	"fugue/internal/trafficbinding"
 )
+
+func TestTrafficRouteEndpointNeverBootstrapsFromBusinessOrStandaloneLKG(t *testing.T) {
+	_, server, _, admin, app, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	if app.Route == nil || app.Route.Hostname == "" {
+		t.Fatal("fixture must contain a routable business application")
+	}
+	server.platformRoutes = []model.PlatformRoute{{Hostname: "ambient.example.test", UpstreamURL: "http://ambient:8080"}}
+	server.auth.EdgeRouteIntentIdentityKeyring = edgeRouteIntentTestKeyring()
+	token, err := platformcontrol.IssuePlatformComponentIdentity(edgeRouteIntentTestKeyring(), *edgeRouteIntentTestClaims(model.PlatformConsumerComponentEdgeControl, "global", []string{model.PlatformArtifactKindEdgeRouteIntent}), time.Now().UTC(), 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func() {
+		t.Helper()
+		r := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents?edge_group_id=edge-group-test", token, nil)
+		if r.Code != http.StatusServiceUnavailable || strings.Contains(r.Body.String(), app.Route.Hostname) || strings.Contains(r.Body.String(), "ambient.example.test") || r.Header().Get("X-Fugue-Route-Intent-Generation") != "" {
+			t.Fatal("serving endpoint synthesized fallback routes", r.Code, r.Body.String())
+		}
+	}
+	check()
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
+		Intent: platformconfig.PlatformIntent{Generation: "standalone", Routes: []platformconfig.RouteIntent{{Hostname: "standalone.example.test", Enabled: true, UpstreamURL: "http://standalone"}}},
+		Policy: platformconfig.PolicySnapshot{Generation: "policy"},
+	})
+	if response.Code != 201 {
+		t.Fatal(response.Body.String())
+	}
+	var compiled platformConfigCompileResponse
+	mustDecodeJSON(t, response, &compiled)
+	seedVerifiedPlatformArtifactAPI(t, server, admin, compiled.RouteArtifact.ID)
+	check()
+}
 
 func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *testing.T) {
 	state, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
@@ -47,19 +80,12 @@ func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *tes
 		query  string
 		status int
 	}{
-		{"", 503}, {"?edge_group_id=edge-group-test-a", 503}, {"?edge_group_id=INVALID", 400}, {"?edge_group_id=edge-group-test-a&edge_group_id=edge-group-test-b", 400},
-		{"?edge_group_id=edge-group-test-b", 200},
+		{"", 400}, {"?edge_group_id=edge-group-test-a", 503}, {"?edge_group_id=INVALID", 400}, {"?edge_group_id=edge-group-test-a&edge_group_id=edge-group-test-b", 400},
+		{"?edge_group_id=edge-group-test-b", 503},
 	} {
 		r := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents"+tc.query, token, nil)
 		if r.Code != tc.status {
 			t.Fatal(tc.query, r.Code, r.Body.String())
-		}
-		if r.Code == 200 {
-			var snap model.EdgeRouteIntentSnapshot
-			mustDecodeJSON(t, r, &snap)
-			if snap.Generation != baseline.RouteArtifact.Generation || snap.TrafficRelease != nil {
-				t.Fatal("unselected group changed source")
-			}
 		}
 	}
 	var revision int64
@@ -169,11 +195,10 @@ func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Member LKGs must not leak the gray artifact into the unselected group.
+	// Without an applicable full release, unselected groups retain their
+	// existing executor cache; neither member nor standalone LKG is republished.
 	unselected := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents?edge_group_id=edge-group-test-b", token, nil)
-	var unchanged model.EdgeRouteIntentSnapshot
-	mustDecodeJSON(t, unselected, &unchanged)
-	if unselected.Code != 200 || unchanged.Generation != baseline.RouteArtifact.Generation || unchanged.TrafficRelease != nil {
+	if unselected.Code != 503 || unselected.Header().Get("X-Fugue-Route-Intent-Generation") != "" {
 		t.Fatal("gray verification changed unselected serving", unselected.Body.String())
 	}
 	_, full, _, _, err := state.ReleasePlatformArtifact(compiled.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full", IdempotencyKey: "full"}, principal)

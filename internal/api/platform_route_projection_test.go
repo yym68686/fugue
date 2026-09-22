@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"reflect"
 	"testing"
@@ -11,10 +12,11 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformsafety"
 )
 
-// Exercise the producer API, signed persistence/LKG, component response and
-// the actual Edge Control compiler, not just fields in the API projection.
+// Exercise the producer API, signed persistence/LKG migration projection and
+// actual Edge Control compiler. Published serving is covered by traffic tests.
 func TestCompiledPlatformArtifactFeedsEdgeControl(t *testing.T) {
 	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
@@ -98,22 +100,9 @@ func (p projectionInventory) ReadGroupInventory(_ context.Context, group string)
 
 func readArtifactRouteProjection(t *testing.T, server *Server) model.EdgeRouteIntentSnapshot {
 	t.Helper()
-	server.auth.EdgeRouteIntentIdentityKeyring = edgeRouteIntentTestKeyring()
-	token, err := platformcontrol.IssuePlatformComponentIdentity(edgeRouteIntentTestKeyring(), *edgeRouteIntentTestClaims(model.PlatformConsumerComponentEdgeControl, "global", []string{model.PlatformArtifactKindEdgeRouteIntent}), time.Now().UTC(), 5*time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents", token, nil)
-	if response.Code != http.StatusOK {
-		t.Fatalf("route projection: %d %s", response.Code, response.Body.String())
-	}
-	var snapshot model.EdgeRouteIntentSnapshot
-	mustDecodeJSON(t, response, &snapshot)
-	if response.Header().Get("X-Fugue-Route-Intent-Generation") != snapshot.Generation {
-		t.Fatal("transport identity mismatch")
-	}
-	if response.Header().Get("X-Fugue-Route-Intent-Source") != "verified-artifact" {
-		t.Fatalf("route intent source is not explicit: %q", response.Header().Get("X-Fugue-Route-Intent-Source"))
+	snapshot, found, err := server.edgeRouteIntentSnapshotFromVerifiedArtifact()
+	if err != nil || !found {
+		t.Fatalf("migration projection unavailable: %v", err)
 	}
 	return snapshot
 }
@@ -158,7 +147,7 @@ func TestInvalidRouteLKGDoesNotFallBackToBusinessProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents", token, nil)
+	failed := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents?edge_group_id=edge-group-test", token, nil)
 	if failed.Code != http.StatusServiceUnavailable {
 		t.Fatalf("invalid LKG fell back to mutable sources: %d %s", failed.Code, failed.Body.String())
 	}
@@ -280,4 +269,24 @@ func TestCompiledOriginObservationPreservesDisabledTrafficAndIdentity(t *testing
 			}
 		})
 	}
+}
+
+// edgeRouteIntentSnapshotFromVerifiedArtifact projects the serving route
+// artifact into the component-specific RouteIntent wire shape for migration
+// diagnostics. It is not a fallback for the serving endpoint.
+func (s *Server) edgeRouteIntentSnapshotFromVerifiedArtifact() (model.EdgeRouteIntentSnapshot, bool, error) {
+	lkg, err := s.store.GetStandalonePlatformLKG(model.PlatformArtifactKindEdgeRouteBundle, "global")
+	if err != nil || lkg == nil {
+		return model.EdgeRouteIntentSnapshot{}, false, err
+	}
+	artifact, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
+	if err != nil {
+		return model.EdgeRouteIntentSnapshot{}, true, err
+	}
+	if artifact.Status != model.PlatformArtifactStatusValidated ||
+		!platformsafety.EvaluatePlatformLKGSnapshot(*lkg, artifact, s.bundleKeyring(), time.Now().UTC()).Pass {
+		return model.EdgeRouteIntentSnapshot{}, true, fmt.Errorf("global route LKG is not usable")
+	}
+	snapshot, err := projectPlatformRouteArtifact(artifact)
+	return snapshot, true, err
 }
