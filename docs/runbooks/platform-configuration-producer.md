@@ -143,3 +143,17 @@ readiness intervals, freshness, concurrency or rollout cohorts.
 
 Base-domain/default application policy and query selection capture still need
 their remaining migration. This step does not activate serving or grant LKG.
+
+## Retired migration comparisons
+
+`GET /v1/admin/platform-config/routes/compare` and
+`GET /v1/admin/platform-config/dns/compare` return 410 to authorized platform
+administrators. Their legacy business/standalone-bundle comparators and the old
+DNS compiler are retained only as test references. They are no longer production
+configuration or verification paths.
+
+Use `/v1/dns/delegation/preflight` and `/v1/admin/robustness/status` for current
+signed TrafficReleaseSet diagnostics. Their evidence binds the selected parent,
+all three member digests and the actual publication's authenticated consumers.
+Use artifact/hostname lineage and Runtime Facts for provenance and history.
+An old migration-equivalence result cannot prove current serving health.

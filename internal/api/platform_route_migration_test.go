@@ -194,7 +194,7 @@ func TestRouteMigrationEmptyExclusionLifecycleEquivalence(t *testing.T) {
 
 func TestPlatformRouteMigrationAPIIsReadOnlyAndRequiresTrustedArtifact(t *testing.T) {
 	state, server, tenant, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
-	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
+	response := performLegacyComparisonRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
 		Intent: platformconfig.PlatformIntent{Generation: "migration-compare-test", Routes: []platformconfig.RouteIntent{
 			{Hostname: "candidate.example.test", UpstreamURL: "http://candidate:8080", Enabled: true},
 		}},
@@ -229,7 +229,7 @@ func TestPlatformRouteMigrationAPIIsReadOnlyAndRequiresTrustedArtifact(t *testin
 		{"valid", admin, compiled.RouteArtifact.ID, http.StatusOK},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			r := performJSONRequest(t, server, http.MethodGet, path+test.id, test.token, nil)
+			r := performLegacyComparisonRequest(t, server, http.MethodGet, path+test.id, test.token, nil)
 			if r.Code != test.status {
 				t.Fatalf("%d: %s", r.Code, r.Body.String())
 			}
@@ -243,7 +243,7 @@ func TestPlatformRouteMigrationAPIIsReadOnlyAndRequiresTrustedArtifact(t *testin
 		})
 	}
 	server.bundleRevokedKeyIDs = append(server.bundleRevokedKeyIDs, compiled.RouteArtifact.Provenance.KeyID)
-	rejected := performJSONRequest(t, server, http.MethodGet, path+compiled.RouteArtifact.ID, admin, nil)
+	rejected := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.RouteArtifact.ID, admin, nil)
 	if rejected.Code != http.StatusConflict {
 		t.Fatalf("revoked artifact accepted: %d %s", rejected.Code, rejected.Body.String())
 	}

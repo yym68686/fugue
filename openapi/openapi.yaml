@@ -2745,99 +2745,45 @@ paths:
   /v1/admin/platform-config/dns/compare:
     get:
       operationId: comparePlatformDNSMigration
-      summary: Compare a Signed DNS Consumer View with its Current Published DNS Bundle
-      description: Read-only platform administrator diagnostic for one exact physical DNS node and zone. Validates the candidate artifact signature, schema, policy lineage and consumer ownership, then compares its materialized records with the current trusted full DNS bundle or verified LKG used by the legacy bundle endpoint. Both sides use one server observation time and absolute value expirations; expired values are not renewed. Compares RRset values, effective TTL, policy, candidates, scoped candidates and ownership metadata; ignores record_generation and record ordering, but preserves nested selection order and TXT bytes. A missing, ambiguous or untrusted source is unavailable, never equivalent. Does not regenerate legacy records from business tables, write artifacts or releases, attest actual serving, or authorize promotion. Equivalence covers only the requested node/zone.
+      summary: Retired Legacy Configuration Comparison
+      deprecated: true
+      description: >-
+        Legacy business/standalone-bundle comparison is retired. Authorized
+        platform administrators receive 410 without reading legacy serving
+        inputs or writing configuration. Use published traffic diagnostics,
+        hostname/artifact lineage, and runtime facts for current serving state.
       tags: [Admin]
       x-fugue-handler: handleComparePlatformDNSMigration
       security:
         - BearerAuth: []
-      parameters:
-        - in: query
-          name: artifact_id
-          required: true
-          schema: {type: string, minLength: 1, maxLength: 256}
-        - in: query
-          name: node_id
-          required: true
-          description: Physical DNS process identity, not a zone alias.
-          schema: {type: string, minLength: 1, maxLength: 256}
-        - in: query
-          name: zone
-          required: true
-          schema: {type: string, minLength: 1, maxLength: 253}
       responses:
-        '200':
-          description: Comparison for the requested node and zone at captured_at.
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/PlatformDNSMigrationComparison"}
-        '400':
-          description: Required comparison identity is missing or invalid.
+        '410':
+          description: Legacy migration comparison is retired.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorResponse"}
-        '404':
-          description: Artifact not found.
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/ErrorResponse"}
-        '409':
-          description: Candidate is untrusted, incompatible, or lacks the exact consumer view.
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/ErrorResponse"}
-        '503':
-          description: Current DNS inventory or trusted published reference is unavailable or ambiguous.
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-config/routes/compare:
     get:
       operationId: comparePlatformRouteMigration
-      summary: Compare Business Route Projection with a Signed Artifact
-      description: Read-only migration diagnostic for platform administrators. Captures the current legacy business projection and compares its route semantics, TLS allowlist and cache policies with one exact validated global route artifact. Omitted exclusion_lifecycle and clear are equivalent only when the route has no excluded edge IDs or group IDs; exclusion lists, other lifecycle states, expiry and reason remain significant. Cache policies are compared by identity; every policy field, nested rule order and relative order among implicit HTML fallback policies remains significant. Other top-level policy ordering is immaterial. Empty or duplicate cache policy identities make comparison unavailable. This is not a serving verification, an atomic business database snapshot, or authorization to promote. No artifacts, releases, LKG or business records are written.
+      summary: Retired Legacy Configuration Comparison
+      deprecated: true
+      description: >-
+        Legacy business/standalone-bundle comparison is retired. Authorized
+        platform administrators receive 410 without reading legacy serving
+        inputs or writing configuration. Use published traffic diagnostics,
+        hostname/artifact lineage, and runtime facts for current serving state.
       tags: [Admin]
       x-fugue-handler: handleComparePlatformRouteMigration
       security:
         - BearerAuth: []
-      parameters:
-        - in: query
-          name: artifact_id
-          required: true
-          schema:
-            type: string
-            minLength: 1
       responses:
-        '200':
-          description: Semantic comparison of the captured business projection and verified artifact projection.
+        '410':
+          description: Legacy migration comparison is retired.
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/PlatformRouteMigrationComparison"
-        '400':
-          description: An exact artifact ID is required.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        '404':
-          description: Artifact not found.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        '409':
-          description: Artifact is untrusted, incompatible, or not a validated global route artifact.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        '503':
-          description: Storage or the business projection is unavailable or invalid.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-config/routes/project:

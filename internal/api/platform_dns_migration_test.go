@@ -108,7 +108,7 @@ func TestDNSMigrationComparisonAPIRequiresExactTrustedPublicationAndIsReadOnly(t
 		Policy:          platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global"},
 		RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: "dns-a", EdgeGroupID: "group-a", ObservedAt: now, A: []string{"8.8.8.8"}}}},
 	}
-	response := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, request)
+	response := performLegacyComparisonRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, request)
 	if response.Code != http.StatusCreated {
 		t.Fatal(response.Body.String())
 	}
@@ -122,7 +122,7 @@ func TestDNSMigrationComparisonAPIRequiresExactTrustedPublicationAndIsReadOnly(t
 		{"anonymous", "", compiled.DNSArtifact.ID, 401}, {"tenant", tenant, compiled.DNSArtifact.ID, 403}, {"missing", admin, "", 400}, {"unknown", admin, "unknown", 404}, {"generation alias", admin, compiled.DNSArtifact.Generation, 409}, {"wrong kind", admin, compiled.RouteArtifact.ID, 409}, {"missing reference", admin, compiled.DNSArtifact.ID, 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := performJSONRequest(t, server, http.MethodGet, path+tc.id, tc.token, nil)
+			r := performLegacyComparisonRequest(t, server, http.MethodGet, path+tc.id, tc.token, nil)
 			if r.Code != tc.status {
 				t.Fatalf("%d: %s", r.Code, r.Body.String())
 			}
@@ -145,7 +145,7 @@ func TestDNSMigrationComparisonAPIRequiresExactTrustedPublicationAndIsReadOnly(t
 	if err != nil || !found {
 		t.Fatal("missing published fixture", err)
 	}
-	good := performJSONRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
+	good := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
 	if good.Code != 200 {
 		t.Fatal(good.Body.String())
 	}
@@ -155,7 +155,7 @@ func TestDNSMigrationComparisonAPIRequiresExactTrustedPublicationAndIsReadOnly(t
 		t.Fatalf("incorrect scoped comparison: %+v", comparison)
 	}
 	for _, query := range []string{"?artifact_id=" + compiled.DNSArtifact.ID + "&node_id=foreign&zone=example.test", "?artifact_id=" + compiled.DNSArtifact.ID + "&node_id=dns-a&zone=other.test"} {
-		r := performJSONRequest(t, server, http.MethodGet, "/v1/admin/platform-config/dns/compare"+query, admin, nil)
+		r := performLegacyComparisonRequest(t, server, http.MethodGet, "/v1/admin/platform-config/dns/compare"+query, admin, nil)
 		if r.Code != 409 {
 			t.Fatal("unsigned consumer view accepted", r.Code)
 		}
@@ -179,7 +179,7 @@ func TestDNSMigrationComparisonAPIRequiresExactTrustedPublicationAndIsReadOnly(t
 	bad.Records = append([]model.EdgeDNSRecord(nil), bad.Records...)
 	bad.Records[0].Values = []string{"192.0.2.99"}
 	publishFullEdgeDNSArtifactForTest(t, state, server, newEdgeDNSBundleArtifact(options, bad, now))
-	badSource := performJSONRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
+	badSource := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
 	if badSource.Code != 503 {
 		t.Fatal("untrusted reference reported a comparison", badSource.Code)
 	}
@@ -188,12 +188,12 @@ func TestDNSMigrationComparisonAPIRequiresExactTrustedPublicationAndIsReadOnly(t
 	if _, err := state.UpdateDNSHeartbeat(alias); err != nil {
 		t.Fatal(err)
 	}
-	ambiguous := performJSONRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
+	ambiguous := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
 	if ambiguous.Code != 503 {
 		t.Fatal("ambiguous physical zone reference accepted", ambiguous.Code)
 	}
 	server.bundleRevokedKeyIDs = append(server.bundleRevokedKeyIDs, compiled.DNSArtifact.Provenance.KeyID)
-	rejected := performJSONRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
+	rejected := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
 	if rejected.Code != 409 {
 		t.Fatal("revoked candidate accepted", rejected.Code)
 	}
