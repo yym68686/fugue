@@ -122,13 +122,21 @@ fugue_hosted_dns_record_publish_lag_seconds
 fugue_app_domain_managed_dns_pending
 ```
 
-Use these with the existing edge DNS artifact metrics:
+Use these with the DNS observation metrics:
 
 ```text
-fugue_edge_dns_artifact_runs_total
-fugue_edge_dns_artifact_errors_total
-fugue_edge_dns_artifact_last_success_timestamp_seconds
+fugue_dns_observation_runs_total
+fugue_dns_observation_errors_total
+fugue_dns_observation_skipped_total
+fugue_dns_observation_policy_mode
+fugue_dns_observation_last_success_timestamp_seconds
 ```
+
+The observation loop refreshes flatten and ranking facts using the verified
+PolicySnapshot's ranking mode and cooldown. It does not publish DNS artifacts.
+TrafficReleaseSet convergence and consumer serving facts determine whether
+the compiled configuration is serving. The old standalone DNS publisher and
+its HTTP serving endpoint are retired.
 
 ## Troubleshooting
 

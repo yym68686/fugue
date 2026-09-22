@@ -156,6 +156,7 @@ type Server struct {
 	edgeQualityRollupRunCount              int64
 	edgeQualityRollupErrorCount            int64
 	edgeQualityRollupLastError             string
+	dnsObservation                         dnsObservationState
 	edgeDNSArtifactMu                      sync.Mutex
 	edgeDNSArtifactLastRun                 time.Time
 	edgeDNSArtifactLastSuccess             time.Time
@@ -404,7 +405,7 @@ func (s *Server) collectMetrics(ctx context.Context, w io.Writer) error {
 	s.writeRobustnessMetrics(w)
 	s.writeAutomationShadowLoopMetrics(w)
 	s.writeEdgeQualityRollupMetrics(w)
-	s.writeEdgeDNSArtifactMetrics(w)
+	s.writeDNSObservationMetrics(w)
 	s.writeHostedDNSMetrics(w)
 	s.writeEdgeExclusionMetrics(w)
 	s.writeEdgeRouteSourceMetrics(w)

@@ -185,6 +185,16 @@ x-fugue-dns-artifact-serving:
     This check does not require an artifact, control-plane access or serving
     proofs and never grants DNS serving eligibility. GET /healthz retains
     the full serving-readiness status and remains the readiness probe.
+x-fugue-dns-observation-authority:
+  semantics: >-
+    The API background DNS loop only refreshes flatten observations and ranking
+    cooldown facts. Ranking mode and switch cooldown come from the signed,
+    validated global verified PolicySnapshot LKG. Missing or invalid policy
+    preserves existing ranking facts; ambient ranking settings cannot authorize
+    updates. Observations never publish standalone DNS bundles, release lanes
+    or LKG pointers. The platform configuration producer alone compiles and
+    publishes traffic configuration; ranking observations are fixed input facts
+    and do not assert serving readiness.
 x-fugue-edge-candidate-execution:
   schema: fugue.edge.candidate-execution/v1
   semantics: >-
