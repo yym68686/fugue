@@ -76,13 +76,25 @@ func (c *kubeClient) prepareAppServiceWorkloads(ctx context.Context, objects []m
 	return nil
 }
 
-func (c *kubeClient) prepareAppServiceWorkload(ctx context.Context, namespace, name string, selector map[string]string) error {
+func (c *kubeClient) prepareAppServiceWorkload(ctx context.Context, namespace, name string, selector map[string]string, expected ...map[string]any) error {
 	path := deploymentAPIPath(namespace, name)
 	deployment, found, err := c.getRawObject(ctx, path)
 	if err != nil || !found {
 		return err
 	}
 	metadata := objectMapField(deployment, "metadata")
+	if len(expected) > 0 {
+		prior := expected[0]
+		pm := objectMapField(prior, "metadata")
+		if !normalizedKubeValueEqual(prior["spec"], deployment["spec"]) {
+			return fmt.Errorf("verified historical Deployment spec changed")
+		}
+		for _, key := range []string{"uid", "labels", "annotations", "deletionTimestamp", "creationTimestamp"} {
+			if !normalizedKubeValueEqual(pm[key], metadata[key]) {
+				return fmt.Errorf("verified historical Deployment identity changed")
+			}
+		}
+	}
 	uid := objectStringField(metadata, "uid")
 	if uid == "" || !appWorkloadOwnerMatches(metadata, selector) {
 		return fmt.Errorf("Deployment owner or UID differs")

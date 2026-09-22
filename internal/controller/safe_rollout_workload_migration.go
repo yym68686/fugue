@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"time"
 
 	"fugue/internal/model"
@@ -70,6 +71,9 @@ func (s *Service) migrateSafeRolloutWorkload(ctx context.Context, app model.App,
 	if !s.safeRolloutResumeSpecMatches(historical, *op.DesiredSpec) {
 		return release, fmt.Errorf("historical executable spec differs from its source operation")
 	}
+	if err := s.prepareHistoricalRevisionLabels(ctx, client, op, historical, target, objects); err != nil {
+		return release, err
+	}
 	identity, err := s.captureSafeRolloutWorkload(ctx, client, op, historical, target, objects)
 	if err != nil {
 		return release, err
@@ -83,6 +87,79 @@ func (s *Service) migrateSafeRolloutWorkload(ctx context.Context, app model.App,
 		"operation_id": op.ID, "revision_workload": string(evidence),
 	})
 	return bound, nil
+}
+
+func (s *Service) prepareHistoricalRevisionLabels(ctx context.Context, client *kubeClient, op model.Operation, app model.App, release model.AppRelease, objects []map[string]any) error {
+	ns := runtime.NamespaceForTenant(app.TenantID)
+	dep, found, err := client.getRawObject(ctx, deploymentAPIPath(ns, release.DeploymentName))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return store.ErrNotFound
+	}
+	path := "/api/v1/namespaces/" + url.PathEscape(ns) + "/services/" + url.PathEscape(release.ServiceName)
+	svc, found, err := client.getRawObject(ctx, path)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return store.ErrNotFound
+	}
+	label := objectStringMapValue(nestedObjectValue(dep, "spec", "template", "metadata", "labels"))[runtime.FugueLabelAppWorkload]
+	selector := objectStringMapValue(nestedObjectValue(svc, "spec", "selector"))
+	marker := objectStringMapValue(objectMapField(dep, "metadata")["annotations"])[appWorkloadMigrationAnnotation]
+	if label == release.DeploymentName && selector[runtime.FugueLabelAppWorkload] == release.DeploymentName && marker == "" {
+		return nil
+	}
+	if label != "" && label != release.DeploymentName || selector[runtime.FugueLabelAppWorkload] != "" && selector[runtime.FugueLabelAppWorkload] != release.DeploymentName {
+		return fmt.Errorf("historical resource declares a different workload")
+	}
+	// Validate all executable and ownership fields before the derived-label
+	// migration. Only the absent workload label is supplied on verification copies.
+	var expectedDep, expectedSvc map[string]any
+	for _, o := range objects {
+		if o["kind"] == "Deployment" && objectStringField(objectMapField(o, "metadata"), "name") == release.DeploymentName {
+			expectedDep = o
+		}
+		if o["kind"] == "Service" && objectStringField(objectMapField(o, "metadata"), "name") == release.ServiceName {
+			expectedSvc = o
+		}
+	}
+	if expectedDep == nil || expectedSvc == nil {
+		return fmt.Errorf("historical expected resource pair unavailable")
+	}
+	depCopy, svcCopy := normalizeKubeMap(dep), normalizeKubeMap(svc)
+	labels := objectStringMapValue(nestedObjectValue(depCopy, "spec", "template", "metadata", "labels"))
+	labels[runtime.FugueLabelAppWorkload] = release.DeploymentName
+	objectMapValue(nestedObjectValue(depCopy, "spec", "template", "metadata"))["labels"] = labels
+	wantSelector := objectStringMapValue(nestedObjectValue(expectedSvc, "spec", "selector"))
+	copySelector := objectStringMapValue(nestedObjectValue(svcCopy, "spec", "selector"))
+	copySelector[runtime.FugueLabelAppWorkload] = release.DeploymentName
+	objectMapField(svcCopy, "spec")["selector"] = copySelector
+	identity, err := s.safeRolloutWorkloadIdentity(op, app, release, depCopy, svcCopy, expectedDep, expectedSvc)
+	if err != nil {
+		return err
+	}
+	if err := client.prepareAppServiceWorkload(ctx, ns, release.DeploymentName, wantSelector, dep); err != nil {
+		return err
+	}
+	current, found, err := client.getRawObject(ctx, path)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return store.ErrNotFound
+	}
+	if objectStringField(objectMapField(current, "metadata"), "uid") != identity.ServiceUID || !normalizedKubeValueEqual(svc["spec"], current["spec"]) {
+		return fmt.Errorf("historical Service changed during label migration")
+	}
+	if selector[runtime.FugueLabelAppWorkload] == "" {
+		if err := client.patchAppWorkloadObject(ctx, path, current, map[string]any{"spec": map[string]any{"selector": wantSelector}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // A helper code rollout is independent of an existing application's executable
