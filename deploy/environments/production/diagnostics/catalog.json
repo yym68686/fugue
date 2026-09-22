@@ -3,7 +3,7 @@
   "repository": "ghcr.io/yym68686/fugue-api",
   "catalog": {
     "protocol": "fugue.diagnostics/v1",
-    "generation": 37,
+    "generation": 38,
     "runner_image": "$runner",
     "policy": {
       "namespaces": [
@@ -720,6 +720,47 @@
               "name": "executable-identity",
               "kind": "process-identity",
               "interval_seconds": 120
+            }
+          ]
+        }
+      },
+      {
+        "id": "pod-runtime-state",
+        "description": "Read-only CRI sandbox and container state for an exact Pod UID, with stable runtime peer and boot identity",
+        "image": "$runner",
+        "profile": "process-profile",
+        "target_types": [
+          "node"
+        ],
+        "max_duration_seconds": 60,
+        "parameters": {
+          "namespace": {
+            "required": true,
+            "max_length": 63,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "pod": {
+            "required": true,
+            "max_length": 253,
+            "pattern": "^[a-z0-9][a-z0-9.-]*$"
+          },
+          "pod_uid": {
+            "required": true,
+            "max_length": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "config": {
+          "collectors": [
+            {
+              "name": "pod-runtime",
+              "kind": "pod-runtime-state",
+              "namespace": "{{param.namespace}}",
+              "object_name": "{{param.pod}}",
+              "pod_uid": "{{param.pod_uid}}",
+              "runtime_binary": "/usr/local/bin/k3s",
+              "path": "/run/k3s/containerd/containerd.sock",
+              "interval_seconds": 15
             }
           ]
         }

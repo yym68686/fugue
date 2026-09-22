@@ -215,3 +215,15 @@ Example registered CPU capture (the session includes analysis headroom):
 fugue diagnostics node-process start --node NODE --process k3s \
   --probe process-cpu-frame-pointer --duration 50 --wait
 ```
+
+
+`pod-runtime-state` observes the explicitly named namespace/Pod/UID on a node
+through fixed read-only CRI list/inspect operations. It records sandbox identity,
+process status, network namespace closure, container state and host PID presence,
+with the same node boot and CRI peer process identity before and after two reads.
+Missing fields, empty inventories, truncation and identity changes are unavailable,
+never proof of quiescence. An exited container can retain an old PID in CRI; the
+collector also checks that PID's current presence in host proc. Raw CRI runtime
+specs, environment variables, labels and annotations are not exported. The signed
+recipe selects an allowlisted local runtime binary and socket. This diagnostic
+report describes current state only and does not authorize deletion.

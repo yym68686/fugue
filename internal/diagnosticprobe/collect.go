@@ -54,6 +54,8 @@ type Collector struct {
 	CallGraph         string            `json:"call_graph,omitempty"`
 	Port              int               `json:"port,omitempty"`
 	PolicyPath        string            `json:"policy_path,omitempty"`
+	RuntimeBinary     string            `json:"runtime_binary,omitempty"`
+	PodUID            string            `json:"pod_uid,omitempty"`
 }
 type Service struct {
 	Namespace string `json:"namespace"`
@@ -230,6 +232,8 @@ func collectOne(ctx context.Context, req livediagnostics.ProbeRequest, c Collect
 		return k.serviceJSON(ctx, req, c)
 	case "runtime-json":
 		return runtimeJSON(ctx, req, c)
+	case "pod-runtime-state":
+		return podRuntimeState(ctx, req, c)
 	case "host-loopback-metrics":
 		return hostLoopbackMetrics(ctx, req, c)
 	default:
