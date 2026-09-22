@@ -1751,16 +1751,30 @@ func (s *Service) validateConfig() error {
 	if normalizeName(s.Config.Zone) == "" {
 		return fmt.Errorf("FUGUE_DNS_ZONE is required")
 	}
-	if len(s.Config.AnswerIPs) == 0 {
-		return fmt.Errorf("FUGUE_DNS_ANSWER_IPS is required")
-	}
-	for _, value := range s.Config.AnswerIPs {
-		if net.ParseIP(strings.TrimSpace(value)) == nil {
-			return fmt.Errorf("FUGUE_DNS_ANSWER_IPS contains invalid IP %q", value)
+	if s.platformServingRequired() {
+		if strings.TrimSpace(s.Config.DNSNodeID) == "" || strings.TrimSpace(s.Config.EdgeGroupID) == "" || strings.TrimSpace(s.Config.CachePath) == "" {
+			return fmt.Errorf("artifact DNS requires node/group identity and durable cache path")
 		}
-	}
-	if s.Config.TTL <= 0 || s.Config.TTL > 3600 {
-		return fmt.Errorf("FUGUE_DNS_TTL must be between 1 and 3600")
+		if s.Config.PublicIPv4 == "" && s.Config.PublicIPv6 == "" {
+			return fmt.Errorf("artifact DNS requires an explicit public inventory address")
+		}
+		for _, value := range []string{s.Config.PublicIPv4, s.Config.PublicIPv6} {
+			if value != "" && net.ParseIP(value) == nil {
+				return fmt.Errorf("artifact DNS public inventory address is invalid")
+			}
+		}
+	} else {
+		if len(s.Config.AnswerIPs) == 0 {
+			return fmt.Errorf("FUGUE_DNS_ANSWER_IPS is required")
+		}
+		for _, value := range s.Config.AnswerIPs {
+			if net.ParseIP(strings.TrimSpace(value)) == nil {
+				return fmt.Errorf("FUGUE_DNS_ANSWER_IPS contains invalid IP %q", value)
+			}
+		}
+		if s.Config.TTL <= 0 || s.Config.TTL > 3600 {
+			return fmt.Errorf("FUGUE_DNS_TTL must be between 1 and 3600")
+		}
 	}
 	if strings.TrimSpace(s.Config.ListenAddr) == "" {
 		return fmt.Errorf("FUGUE_DNS_LISTEN_ADDR is required")

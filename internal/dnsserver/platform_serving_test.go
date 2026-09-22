@@ -406,6 +406,39 @@ func TestEnrolledDNSMissingAllCheckpointsCannotServeLegacyOrFetchBusiness(t *tes
 		}
 	}
 }
+
+func TestEnrolledDNSStartupDoesNotRequireAmbientServingConfiguration(t *testing.T) {
+	cfg := config.DNSConfig{APIURL: "https://control.example.test", EdgeToken: "inventory-token", DNSNodeID: "dns-a", EdgeGroupID: "group-a", Zone: "example.test", CachePath: filepath.Join(t.TempDir(), "cache"), PublicIPv4: "192.0.2.8", ListenAddr: ":7834", UDPAddr: ":5353", TCPAddr: ":5353"}
+	s := NewService(cfg, nil)
+	s.PlatformTokenFile = "/var/run/identity/token"
+	if err := s.validateConfig(); err != nil {
+		t.Fatal("artifact-only bootstrap required answer, TTL or nameserver configuration", err)
+	}
+	for _, field := range []string{"node", "group", "cache", "public", "invalid_public"} {
+		broken := cfg
+		switch field {
+		case "node":
+			broken.DNSNodeID = ""
+		case "group":
+			broken.EdgeGroupID = ""
+		case "cache":
+			broken.CachePath = ""
+		case "public":
+			broken.PublicIPv4 = ""
+		case "invalid_public":
+			broken.PublicIPv4 = "invalid"
+		}
+		other := NewService(broken, nil)
+		other.PlatformTokenFile = s.PlatformTokenFile
+		if err := other.validateConfig(); err == nil {
+			t.Fatal("missing execution identity accepted", field)
+		}
+	}
+	s.PlatformTokenFile = ""
+	if err := s.validateConfig(); err == nil {
+		t.Fatal("legacy bootstrap accepted missing answer configuration")
+	}
+}
 func mustDNSJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
