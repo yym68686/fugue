@@ -244,29 +244,29 @@ func literalEnvironmentDigest(entry map[string]any) string {
 
 func mapFieldValue(raw any, key string) any { m, _ := raw.(map[string]any); return m[key] }
 
-func (cluster *kubectlCluster) retireEnvironment(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) (map[string]any, []byte, error) {
+func (cluster *kubectlCluster) retireEnvironment(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) (map[string]any, []byte, map[string]any, error) {
 	retired := cluster.envRetirements[retirementResourceKey(desired)]
 	if len(retired) == 0 {
-		return desired, encoded, nil
+		return desired, encoded, nil, nil
 	}
 	raw, err := cluster.getResource(ctx, identity)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	live, err := decodeJSONObject(raw)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	patch, expected, err := retirementPatch(desired, live, release.Workload.FieldManager, retired)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if len(patch) == 0 {
-		return desired, encoded, nil
+		return desired, encoded, nil, nil
 	}
 	data, err := declarativerelease.CanonicalJSON(patch)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	args := []string{"patch", strings.ToLower(identity.Kind), identity.Name, "--namespace", identity.Namespace, "--type=json", "--field-manager", release.Workload.FieldManager, "--patch", string(data), "--output", "json"}
 	if dryRun {
@@ -274,27 +274,27 @@ func (cluster *kubectlCluster) retireEnvironment(ctx context.Context, release de
 	}
 	patched, err := cluster.kubectlRun(ctx, nil, args...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("retire reviewed environment: %w", err)
+		return nil, nil, nil, fmt.Errorf("retire reviewed environment: %w", err)
 	}
 	fresh, err := decodeJSONObject(patched)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	fm, lm := mapField(fresh, "metadata"), mapField(live, "metadata")
 	if stringValue(fm["uid"]) != stringValue(lm["uid"]) || !validKubernetesResourceVersion(stringValue(fm["resourceVersion"])) || digestJSON(sanitizeObservedResource(expected)) != digestJSON(sanitizeObservedResource(fresh)) {
-		return nil, nil, errors.New("environment retirement changed unreviewed resource fields")
+		return nil, nil, nil, errors.New("environment retirement changed unreviewed resource fields")
 	}
 	if dryRun {
-		return desired, encoded, nil
+		return desired, encoded, nil, nil
 	}
 	if stringValue(fm["resourceVersion"]) == stringValue(lm["resourceVersion"]) || int64Value(fm["generation"]) != int64Value(lm["generation"])+1 {
-		return nil, nil, errors.New("environment retirement generation witness invalid")
+		return nil, nil, nil, errors.New("environment retirement generation witness invalid")
 	}
 	rebound, err := decodeJSONObject(encoded)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	mapField(rebound, "metadata")["resourceVersion"] = fm["resourceVersion"]
 	output, err := declarativerelease.CanonicalJSON(rebound)
-	return rebound, output, err
+	return rebound, output, fresh, err
 }

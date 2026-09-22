@@ -193,7 +193,7 @@ esac
 			}
 			cluster.kubectl, cluster.timeout = script, time.Second
 			id := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "system", Name: "dns-agent"}
-			output, _, err := cluster.retireEnvironment(context.Background(), r, id, desired, mustJSON(t, desired), scenario == "dry-run")
+			output, _, _, err := cluster.retireEnvironment(context.Background(), r, id, desired, mustJSON(t, desired), scenario == "dry-run")
 			if scenario == "response-loss" || scenario == "extra-change" || scenario == "wrong-generation" {
 				if err == nil {
 					t.Fatal("unproven patch accepted")
@@ -263,5 +263,94 @@ func TestEnvironmentRetirementAcceptsOnlyKubernetesEmptyStringDefault(t *testing
 	anySlice(c["env"])[1].(map[string]any)["valueFrom"] = map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.name"}}
 	if _, _, err := retirementPatch(desired, live, r.Workload.FieldManager, retired); err == nil {
 		t.Fatal("reference treated as empty literal")
+	}
+}
+
+func TestEnvironmentRetirementApplyRetriesOnlyObservationCASUpdates(t *testing.T) {
+	for _, scenario := range []string{"status-only", "spec-race", "uid-race", "generation-race", "exhausted"} {
+		t.Run(scenario, func(t *testing.T) {
+			r, old, next, cluster := retirementFixture(t)
+			live := retirementLive(t, r, old)
+			desired := bindRetirementCAS(t, next, live)
+			_, patched, err := retirementPatch(desired, live, r.Workload.FieldManager, cluster.envRetirements[retirementResourceKey(desired)])
+			if err != nil {
+				t.Fatal(err)
+			}
+			mapField(patched, "metadata")["resourceVersion"] = "42"
+			mapField(patched, "metadata")["generation"] = json.Number("8")
+			latest := deepCopyJSONMap(t, patched)
+			m := mapField(latest, "metadata")
+			m["resourceVersion"] = "43"
+			latest["status"] = map[string]any{"numberReady": 0}
+			switch scenario {
+			case "spec-race":
+				c, _, _ := retirementContainer(latest, "containers", "dns")
+				c["image"] = "raced"
+			case "uid-race":
+				m["uid"] = "replacement"
+			case "generation-race":
+				m["generation"] = json.Number("9")
+			}
+			d := t.TempDir()
+			script := filepath.Join(d, "kubectl")
+			t.Setenv("RETIRE_APPLY_DIR", d)
+			t.Setenv("RETIRE_APPLY_MODE", scenario)
+			for n, v := range map[string]map[string]any{"live": live, "patched": patched, "latest": latest} {
+				if err := os.WriteFile(filepath.Join(d, n), mustJSON(t, v), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			program := `#!/bin/sh
+set -eu
+case "$1" in
+ get)
+  if [ -f "$RETIRE_APPLY_DIR/patch-done" ]; then
+   cat "$RETIRE_APPLY_DIR/latest"
+  else cat "$RETIRE_APPLY_DIR/live"; fi;;
+ patch) touch "$RETIRE_APPLY_DIR/patch-done";cat "$RETIRE_APPLY_DIR/patched";;
+ apply)
+  if [ -f "$RETIRE_APPLY_DIR/apply-count" ]; then n=$(cat "$RETIRE_APPLY_DIR/apply-count"); else n=0; fi
+  n=$((n+1));printf '%s' "$n" > "$RETIRE_APPLY_DIR/apply-count"
+  cat > "$RETIRE_APPLY_DIR/request-$n"
+  if [ "$n" -eq 1 ] || [ "$RETIRE_APPLY_MODE" = exhausted ]; then
+   printf 'Operation cannot be fulfilled: the object has been modified\n' >&2;exit 1
+  fi
+  cat "$RETIRE_APPLY_DIR/latest";;
+ *) exit 43;;
+esac
+`
+			if err := os.WriteFile(script, []byte(program), 0700); err != nil {
+				t.Fatal(err)
+			}
+			cluster.kubectl, cluster.timeout = script, time.Second
+			id := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "system", Name: "dns-agent"}
+			err = cluster.applyResourceWithOwnershipConvergence(context.Background(), r, id, desired, mustJSON(t, desired), false)
+			countRaw, _ := os.ReadFile(filepath.Join(d, "apply-count"))
+			count := string(countRaw)
+			if scenario == "status-only" {
+				if err != nil || count != "2" {
+					t.Fatal("safe status race not retried", count, err)
+				}
+				raw, _ := os.ReadFile(filepath.Join(d, "request-2"))
+				retry, _ := decodeJSONObject(raw)
+				if mapField(retry, "metadata")["resourceVersion"] != "43" {
+					t.Fatal("retry CAS not refreshed")
+				}
+				c, _, _ := retirementContainer(retry, "containers", "dns")
+				if c["image"] != "new" {
+					t.Fatal("retry lost reviewed target")
+				}
+			} else {
+				if err == nil {
+					t.Fatal("unsafe race accepted")
+				}
+				if scenario != "exhausted" && count != "1" {
+					t.Fatal("spec drift retried", count)
+				}
+				if scenario == "exhausted" && !strings.Contains(err.Error(), "object has been modified") {
+					t.Fatal("original conflict lost", err)
+				}
+			}
+		})
 	}
 }

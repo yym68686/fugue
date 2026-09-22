@@ -1064,11 +1064,31 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 // accepts only the same typed proof.
 func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
 	var retireErr error
-	desired, encoded, retireErr = cluster.retireEnvironment(ctx, release, identity, desired, encoded, dryRun)
+	var retirementWitness map[string]any
+	desired, encoded, retirementWitness, retireErr = cluster.retireEnvironment(ctx, release, identity, desired, encoded, dryRun)
 	if retireErr != nil {
 		return retireErr
 	}
 	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
+	// Removing a shared env entry starts a DaemonSet reconciliation. Only an
+	// observation-only RV update may rebind the subsequent ordinary SSA.
+	for attempt := 1; !dryRun && retirementWitness != nil && objectModifiedConflict(applyErr) && attempt < maxScalarOwnershipApplyAttempts; attempt++ {
+		latestRaw, getErr := cluster.getResource(ctx, identity)
+		if getErr != nil {
+			return errors.Join(applyErr, getErr)
+		}
+		latest, decodeErr := decodeJSONObject(latestRaw)
+		if decodeErr != nil {
+			return errors.Join(applyErr, decodeErr)
+		}
+		rebound, rebindErr := rebindDesiredResourceVersionAfterScalarTransfer(desired, retirementWitness, latest)
+		if rebindErr != nil {
+			return errors.Join(applyErr, rebindErr)
+		}
+		desired, _ = decodeJSONObject(rebound)
+		retirementWitness = latest
+		_, applyErr = cluster.kubectlRun(ctx, rebound, applyArguments(release, false)...)
+	}
 	if applyErr != nil {
 		// A server-side apply may commit before the client loses its response.
 		// Continue only when a fresh GET proves the same pre-existing UID now
@@ -1098,7 +1118,7 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 			return decodeErr
 		}
 		if evidenceErr := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, release.Workload.FieldManager, applyErr); evidenceErr != nil {
-			return evidenceErr
+			return errors.Join(applyErr, evidenceErr)
 		}
 		if dryRun {
 			return nil
