@@ -314,6 +314,11 @@ func (s *Service) probeDNSServingListener(st *dnsServingState) error {
 		if err != nil {
 			return errors.New("DNS serving listener unavailable")
 		}
+		// Go accepts :port as an unspecified listener. Probe the local
+		// IPv4 endpoint exactly as for an explicit 0.0.0.0 binding.
+		if host == "" {
+			host = "127.0.0.1"
+		}
 		ip := net.ParseIP(host)
 		if ip == nil {
 			return errors.New("DNS listener must bind an IP")

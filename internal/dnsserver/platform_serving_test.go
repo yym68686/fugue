@@ -225,9 +225,16 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 		t.Fatal("invalid parent signature activated DNS", err)
 	}
 	parent.Provenance.Signature = signature
+	// The production listener convention uses an empty host (:53).
+	// Keep the real UDP/TCP servers and prove the activated artifact locally.
+	udpAddress, tcpAddress := s.Config.UDPAddr, s.Config.TCPAddr
+	_, udpPort, _ := net.SplitHostPort(udpAddress)
+	_, tcpPort, _ := net.SplitHostPort(tcpAddress)
+	s.Config.UDPAddr, s.Config.TCPAddr = ":"+udpPort, ":"+tcpPort
 	if err = s.syncPlatformDNSServingOnce(ctx, probe, s.probeDNSServingListener); err != nil {
 		t.Fatal(err)
 	}
+	s.Config.UDPAddr, s.Config.TCPAddr = udpAddress, tcpAddress
 	if reports != 1 || !s.Status().Healthy || s.Status().PlatformServing.State != "serving" {
 		t.Fatal("serving not verified", s.Status())
 	}
