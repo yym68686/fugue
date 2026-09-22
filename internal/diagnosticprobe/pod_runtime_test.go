@@ -155,3 +155,51 @@ func TestPodRuntimeCollectorRejectsArbitraryRuntimeAndTarget(t *testing.T) {
 		}
 	}
 }
+
+func TestCRIReaderResolvesVersionedHostSymlinkInsideHostRoot(t *testing.T) {
+	for _, scenario := range []string{"absolute", "relative", "outside", "not_versioned", "wrong_binary_link", "missing_binary"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			data := "/var/lib/rancher/k3s/data"
+			version := strings.Repeat("d", 64)
+			dir := filepath.Join(root, data, version, "bin")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "missing_binary" {
+				if err := os.WriteFile(filepath.Join(dir, "k3s"), []byte("test executable"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			target := "k3s"
+			if scenario == "wrong_binary_link" {
+				target = "/bin/sh"
+			}
+			if err := os.Symlink(target, filepath.Join(dir, "crictl")); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(data, version)
+			switch scenario {
+			case "relative":
+				link = version
+			case "outside":
+				link = "/tmp/" + version
+			case "not_versioned":
+				link = filepath.Join(data, "unknown")
+			}
+			if err := os.Symlink(link, filepath.Join(root, data, "current")); err != nil {
+				t.Fatal(err)
+			}
+			got, err := criReaderBinary(root, "/var/lib/rancher/k3s/data/current/bin/crictl")
+			if scenario != "absolute" && scenario != "relative" {
+				if err == nil {
+					t.Fatal("unverified executable accepted")
+				}
+				return
+			}
+			if err != nil || got != filepath.Join(dir, "crictl") {
+				t.Fatal("host pointer resolved outside host", got, err)
+			}
+		})
+	}
+}

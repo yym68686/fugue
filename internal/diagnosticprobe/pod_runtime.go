@@ -76,6 +76,10 @@ func podRuntimeState(ctx context.Context, req livediagnostics.ProbeRequest, c Co
 		return nil, errors.New("unsupported CRI reader socket")
 	}
 	root := filepath.Join(hostProc, "1/root")
+	binary, err := criReaderBinary(root, c.RuntimeBinary)
+	if err != nil {
+		return nil, err
+	}
 	socket := filepath.Join(root, c.Path)
 	info, err := os.Stat(socket)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
@@ -90,14 +94,13 @@ func podRuntimeState(ctx context.Context, req livediagnostics.ProbeRequest, c Co
 		return nil, err
 	}
 	args = append(args, "--config=/dev/null", "--runtime-endpoint=unix://"+socket, "--timeout=3s")
-	binary := filepath.Join(root, c.RuntimeBinary)
 	read := func(ctx context.Context, value any, command ...string) error {
 		ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		defer cancel()
 		argv := append(append([]string(nil), args...), command...)
 		raw, _, truncated, err := diagnosticCommandEvidence(ctx, 1<<20, binary, argv...)
 		if err != nil || truncated {
-			return errors.New("CRI read failed or exceeded output budget")
+			return fmt.Errorf("CRI %s read failed or exceeded output budget", command[0])
 		}
 		if err := json.Unmarshal(raw, value); err != nil {
 			return errors.New("invalid CRI response")
@@ -116,6 +119,35 @@ func podRuntimeState(ctx context.Context, req livediagnostics.ProbeRequest, c Co
 		return nil, errors.New("node boot or runtime process identity changed during observation")
 	}
 	return map[string]any{"node": req.Target.Node, "boot_id": strings.TrimSpace(boot), "runtime_peer": peer, "observed_from": started, "observed_until": time.Now().UTC(), "facts": second, "scope": "current runtime state for this exact Pod UID; no deletion authorization"}, nil
+}
+
+func criReaderBinary(root, name string) (string, error) {
+	if name != "/var/lib/rancher/k3s/data/current/bin/crictl" {
+		return filepath.Join(root, name), nil
+	}
+	// current is commonly an absolute host symlink. Resolve that single
+	// installation pointer inside the observed host root, never our container.
+	const data = "/var/lib/rancher/k3s/data"
+	link, err := os.Readlink(filepath.Join(root, data, "current"))
+	if err != nil {
+		return "", errors.New("installed CRI directory pointer unavailable")
+	}
+	if !filepath.IsAbs(link) {
+		link = filepath.Join(data, link)
+	}
+	link = filepath.Clean(link)
+	if filepath.Dir(link) != data || !criIDPattern.MatchString(filepath.Base(link)) {
+		return "", errors.New("installed CRI directory is outside the versioned runtime data")
+	}
+	binary := filepath.Join(root, link, "bin/crictl")
+	if target, err := os.Readlink(binary); err == nil && target != "k3s" {
+		return "", errors.New("unexpected installed CRI binary link")
+	}
+	info, err := os.Stat(binary)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
+		return "", errors.New("installed CRI executable unavailable")
+	}
+	return binary, nil
 }
 
 func captureStablePodRuntimeFacts(ctx context.Context, target podRuntimeTarget, read criRead, procRoot string) (podRuntimeFacts, error) {
