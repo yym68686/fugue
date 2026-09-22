@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,6 +34,11 @@ type drainWorkloadFixture struct {
 
 func newDrainWorkloadFixture(t *testing.T) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
 	t.Helper()
+	return newDrainWorkloadFixtureWithOutcome(t, false)
+}
+
+func newDrainWorkloadFixtureWithOutcome(t *testing.T, failed bool) (*Service, model.App, model.AppRelease, *drainWorkloadFixture) {
+	t.Helper()
 	st, app, _, op := newSafeRolloutTestState(t)
 	if _, ok, err := st.TryClaimPendingOperation(op.ID); err != nil || !ok {
 		t.Fatal("claim", err)
@@ -48,11 +54,20 @@ func newDrainWorkloadFixture(t *testing.T) (*Service, model.App, model.AppReleas
 		t.Fatal(err)
 	}
 	old.Role, old.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
+	if failed {
+		old.Role, old.Status = model.AppReleaseRoleCandidate, model.AppReleaseStatusFailed
+		old.StatusReason = "canary latency gate failed"
+	}
 	old, err = st.UpdateAppRelease(old)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = st.CompleteManagedOperation(op.ID, "", "done"); err != nil {
+	if failed {
+		_, err = st.FailOperation(op.ID, old.StatusReason)
+	} else {
+		_, err = st.CompleteManagedOperation(op.ID, "", "done")
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	stable, err := st.CreateAppRelease(model.AppRelease{ID: "release-current", TenantID: app.TenantID, AppID: app.ID,
@@ -152,6 +167,85 @@ func newDrainWorkloadFixture(t *testing.T) (*Service, model.App, model.AppReleas
 	svc := &Service{Store: st, Logger: log.New(io.Discard, "", 0), Config: config.ControllerConfig{KubectlApply: true}, newKubeClient: func(string) (*kubeClient, error) { return &kubeClient{baseURL: srv.URL, client: srv.Client()}, nil },
 		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true}}}
 	return svc, app, old, f
+}
+
+func TestFailedCandidateRetiresOnlyAfterVerifiedRollbackAndDrain(t *testing.T) {
+	for _, scenario := range []string{"idle", "busy", "unconfirmed_traffic", "still_referenced", "retention", "retire_grace", "wrong_operation_outcome", "changed_after_drain"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			s, app, failed, f := newDrainWorkloadFixtureWithOutcome(t, scenario != "wrong_operation_outcome")
+			if scenario == "wrong_operation_outcome" {
+				failed.Role, failed.Status = model.AppReleaseRoleCandidate, model.AppReleaseStatusFailed
+				var err error
+				failed, err = s.Store.UpdateAppRelease(failed)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, false, app.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.safeRolloutDrainMetricsQuerier = kubeSafeRolloutDrainObserver{service: s}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			switch scenario {
+			case "busy":
+				f.active = 1
+			case "unconfirmed_traffic":
+				s.safeRolloutEdgeBundleObserver = staticSafeRolloutEdgeObserver{}
+			case "still_referenced":
+				policy.Mode, policy.CandidateReleaseID = model.AppTrafficModeCanary, failed.ID
+				policy.StableWeight, policy.CandidateWeight = 99, 1
+				if _, err = s.Store.UpsertAppTrafficPolicy(policy); err != nil {
+					t.Fatal(err)
+				}
+			case "retention":
+				future := time.Now().Add(time.Hour)
+				failed.RetentionUntil = &future
+				if _, err = s.Store.UpdateAppRelease(failed); err != nil {
+					t.Fatal(err)
+				}
+			case "retire_grace":
+				app.Spec.Continuity.ZeroDowntime.RetireGraceSeconds = 60
+			case "changed_after_drain":
+				calls := 0
+				s.safeRolloutEdgeBundleObserver = retirementTestObserver(func() {
+					calls++
+					if calls == 2 {
+						failed.Status = model.AppReleaseStatusReady
+						if _, err = s.Store.UpdateAppRelease(failed); err != nil {
+							t.Fatal(err)
+						}
+					}
+				})
+			}
+			if err := s.retryDrainingAppReleaseRetirement(ctx, app); err != nil && !(scenario == "busy" && errors.Is(err, context.DeadlineExceeded)) {
+				t.Fatal(err)
+			}
+			got, err := s.Store.GetAppRelease(app.TenantID, false, failed.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "idle" {
+				if got.Status == model.AppReleaseStatusRetired || f.deleteCalls != 0 {
+					t.Fatalf("failed release lost without proof: %s, deletes=%d", got.Status, f.deleteCalls)
+				}
+				return
+			}
+			if got.Status != model.AppReleaseStatusRetired || f.deleteCalls != 2 || f.proxyCalls < 4 {
+				t.Fatalf("failed release did not drain and retire: %s, deletes=%d, observations=%d", got.Status, f.deleteCalls, f.proxyCalls)
+			}
+			op, err := s.Store.GetOperation(failed.RevisionWorkload.OperationID)
+			if err != nil || op.Status != model.OperationStatusFailed {
+				t.Fatal("cleanup rewrote the failed operation", err)
+			}
+			current, err := s.Store.GetAppTrafficPolicy(app.TenantID, false, app.ID)
+			if err != nil || current != policy {
+				t.Fatal("cleanup changed traffic", err)
+			}
+		})
+	}
 }
 
 func TestBoundRevisionRetiresAfterCanonicalAlignmentAndRetriesFailedDeletion(t *testing.T) {

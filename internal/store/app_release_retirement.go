@@ -9,6 +9,13 @@ import (
 	"fugue/internal/model"
 )
 
+// AppReleaseAwaitingDrain identifies withdrawn lifecycle states. It does not
+// authorize retirement: traffic, retention and runtime proof must still pass.
+func AppReleaseAwaitingDrain(release model.AppRelease) bool {
+	return release.Role == model.AppReleaseRolePrevious && release.Status == model.AppReleaseStatusDraining ||
+		release.Role == model.AppReleaseRoleCandidate && release.Status == model.AppReleaseStatusFailed
+}
+
 // RetireDrainedAppRelease commits against the exact release and policy versions
 // observed by the drain/traffic gates. It never overwrites a newer rollback,
 // retention decision or canonical target with the caller's stale snapshot.
@@ -48,7 +55,7 @@ func (s *Store) RetireDrainedAppRelease(ctx context.Context, previous, stable mo
 func retireDrainedRelease(currentPrevious, currentStable model.AppRelease, currentPolicy model.AppTrafficPolicy, previous, stable model.AppRelease, policy model.AppTrafficPolicy, now time.Time) (model.AppRelease, error) {
 	if !reflect.DeepEqual(currentPrevious, previous) || !reflect.DeepEqual(currentStable, stable) || !reflect.DeepEqual(currentPolicy, policy) ||
 		previous.AppID != policy.AppID || previous.TenantID != policy.TenantID || stable.AppID != policy.AppID || stable.TenantID != policy.TenantID ||
-		previous.Role != model.AppReleaseRolePrevious || previous.Status != model.AppReleaseStatusDraining ||
+		!AppReleaseAwaitingDrain(previous) ||
 		stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing ||
 		policy.Mode != model.AppTrafficModeSingle || policy.StableReleaseID != stable.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 ||
 		previous.RetentionUntil != nil && now.Before(*previous.RetentionUntil) {
@@ -60,6 +67,9 @@ func retireDrainedRelease(currentPrevious, currentStable model.AppRelease, curre
 	currentPrevious.RetiredAt = &now
 	currentPrevious.UpdatedAt = now
 	currentPrevious.StatusReason = "safe rollout previous stable drained"
+	if previous.Status == model.AppReleaseStatusFailed {
+		currentPrevious.StatusReason = "failed candidate drained after rollback"
+	}
 	currentPrevious.ReleaseMessage = "retired after verified traffic withdrawal and Pod drain"
 	return currentPrevious, nil
 }

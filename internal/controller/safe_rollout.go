@@ -836,8 +836,17 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 	if previous.RetentionUntil != nil && time.Now().UTC().Before(*previous.RetentionUntil) {
 		return
 	}
-	if continuity := state.CandidateApp.Spec.Continuity; continuity != nil && continuity.ZeroDowntime != nil && state.Candidate.PromotedAt != nil && time.Now().Before(state.Candidate.PromotedAt.Add(time.Duration(continuity.ZeroDowntime.RetireGraceSeconds)*time.Second)) {
-		return
+	if continuity := state.CandidateApp.Spec.Continuity; continuity != nil && continuity.ZeroDowntime != nil {
+		graceSince := policy.UpdatedAt
+		if state.Candidate.PromotedAt != nil && state.Candidate.PromotedAt.After(graceSince) {
+			graceSince = *state.Candidate.PromotedAt
+		}
+		if previous.UpdatedAt.After(graceSince) {
+			graceSince = previous.UpdatedAt
+		}
+		if time.Now().Before(graceSince.Add(time.Duration(continuity.ZeroDowntime.RetireGraceSeconds) * time.Second)) {
+			return
+		}
 	}
 	if s.Config.KubectlApply && previous.RevisionWorkload == nil {
 		return
@@ -884,7 +893,14 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_resource_cleanup", model.ReleaseStepStatusCompleted, "retired release resources removed", retired.ID, nil)
 	}
 	drainEvidence, _ := json.Marshal(metrics.Summary)
-	s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retired", retired.ID, map[string]string{
+	action := "app.release.previous_retired"
+	if previous.Status == model.AppReleaseStatusFailed {
+		action = "app.release.failed_retired"
+	}
+	s.appendSafeRolloutAuditEvent(state.CandidateApp, action, retired.ID, map[string]string{
+		"source_role":         previous.Role,
+		"source_status":       previous.Status,
+		"source_reason":       previous.StatusReason,
 		"drain_evidence":      string(drainEvidence),
 		"observed_at":         metrics.ObservedAt.UTC().Format(time.RFC3339Nano),
 		"operation_id":        op.ID,

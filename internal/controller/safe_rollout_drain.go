@@ -18,6 +18,7 @@ import (
 	"fugue/internal/drainprotocol"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 type kubeSafeRolloutDrainObserver struct{ service *Service }
@@ -62,7 +63,7 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	// would not prove anything about this release's original connections.
 	if previous.ID == "" || previous.AppID != app.ID || previous.TenantID != app.TenantID ||
 		previous.DeploymentName == "" || previous.DeploymentName == runtime.RuntimeAppResourceName(app) ||
-		previous.RuntimeID == "" || previous.ResolvedImageRef == "" || previous.Role != model.AppReleaseRolePrevious || previous.Status != model.AppReleaseStatusDraining {
+		previous.RuntimeID == "" || previous.ResolvedImageRef == "" || !store.AppReleaseAwaitingDrain(previous) {
 		return out, fmt.Errorf("drain requires an independent release workload identity")
 	}
 	policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)

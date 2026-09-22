@@ -457,7 +457,7 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 			}
 			continue
 		}
-		if previous.Role != model.AppReleaseRolePrevious || previous.Status != model.AppReleaseStatusDraining {
+		if !store.AppReleaseAwaitingDrain(previous) {
 			continue
 		}
 		if previous.RevisionWorkload == nil || previous.RevisionWorkload.OperationID == "" {
@@ -470,7 +470,11 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 			}
 			return fmt.Errorf("load retirement operation %s: %w", previous.RevisionWorkload.OperationID, err)
 		}
-		if op.AppID != app.ID || op.TenantID != app.TenantID || op.Type != model.OperationTypeDeploy || op.Status != model.OperationStatusCompleted {
+		if op.AppID != app.ID || op.TenantID != app.TenantID || op.Type != model.OperationTypeDeploy {
+			continue
+		}
+		if previous.Status == model.AppReleaseStatusFailed && op.Status != model.OperationStatusFailed ||
+			previous.Status == model.AppReleaseStatusDraining && op.Status != model.OperationStatusCompleted {
 			continue
 		}
 		previousApp := app
