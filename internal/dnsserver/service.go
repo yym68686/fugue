@@ -63,6 +63,7 @@ type edgeDNSLiveHealthFunc func(string, string) bool
 type edgeDNSPeerHealthFunc func(model.EdgeDNSAnswerCandidate) string
 
 type Service struct {
+	listenerFailed          atomic.Bool
 	platformServing         atomic.Pointer[dnsServingState]
 	platformServingBound    atomic.Bool
 	platformServingReported time.Time
@@ -750,9 +751,20 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /livez", s.handleLivez)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	return mux
+}
+
+// Dependency readiness must not restart an executor that can still recover
+// its signed configuration. Keep this path independent of serving locks.
+func (s *Service) handleLivez(w http.ResponseWriter, _ *http.Request) {
+	if s.listenerFailed.Load() {
+		httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "failed"})
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Service) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -1801,6 +1813,7 @@ func (s *Service) startHTTPServer() (func(context.Context) error, error) {
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.listenerFailed.Store(true)
 			s.Logger.Printf("dns health server failed: %v", err)
 		}
 	}()
@@ -1817,6 +1830,7 @@ func (s *Service) startDNSServers() (func(), error) {
 		server := &miekgdns.Server{PacketConn: packetConn, Net: "udp", Handler: s}
 		go func() {
 			if err := server.ActivateAndServe(); err != nil && !errors.Is(err, net.ErrClosed) {
+				s.listenerFailed.Store(true)
 				s.Logger.Printf("dns udp server failed: %v", err)
 			}
 		}()
@@ -1833,6 +1847,7 @@ func (s *Service) startDNSServers() (func(), error) {
 		server := &miekgdns.Server{Listener: listener, Net: "tcp", Handler: s}
 		go func() {
 			if err := server.ActivateAndServe(); err != nil && !errors.Is(err, net.ErrClosed) {
+				s.listenerFailed.Store(true)
 				s.Logger.Printf("dns tcp server failed: %v", err)
 			}
 		}()

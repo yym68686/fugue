@@ -179,6 +179,12 @@ x-fugue-dns-artifact-serving:
     corrupt recovery state serves SERVFAIL until a valid published release and
     fresh proofs are available. Legacy bundle sync, legacy cache fallback and
     ambient overrides cannot supply serving data to an enrolled consumer.
+    The DNS node-local HTTP server exposes GET /livez for execution liveness,
+    returning 200 with status=ok while its process and configured listeners
+    have no fatal error, or 503 with status=failed after a listener error.
+    This check does not require an artifact, control-plane access or serving
+    proofs and never grants DNS serving eligibility. GET /healthz retains
+    the full serving-readiness status and remains the readiness probe.
 x-fugue-edge-candidate-execution:
   schema: fugue.edge.candidate-execution/v1
   semantics: >-
