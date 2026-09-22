@@ -35,10 +35,12 @@ type releaseDrainPod struct {
 }
 
 type releaseDrainWorkload struct {
-	DeploymentUID string            `json:"deployment_uid"`
-	Generation    int64             `json:"generation"`
-	Pods          []releaseDrainPod `json:"pods"`
-	ReplicaSets   []string          `json:"replica_set_uids"`
+	DeploymentUID     string            `json:"deployment_uid"`
+	DeploymentVersion string            `json:"deployment_version"`
+	ServiceVersion    string            `json:"service_version"`
+	Generation        int64             `json:"generation"`
+	Pods              []releaseDrainPod `json:"pods"`
+	ReplicaSets       []string          `json:"replica_set_uids"`
 }
 
 func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.Context, app model.App, previous model.AppRelease, since time.Time) (safeRolloutDrainMetrics, error) {
@@ -47,6 +49,15 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	if s == nil || s.Store == nil || !s.Config.KubectlApply {
 		return out, fmt.Errorf("release drain observer is not configured")
 	}
+	expected := previous
+	binding := previous.RevisionWorkload
+	if binding == nil || binding.Namespace != runtime.NamespaceForTenant(app.TenantID) || binding.DeploymentUID == "" || binding.ServiceUID == "" || binding.ReleaseKey == "" || binding.DeploymentGeneration < 1 ||
+		binding.RuntimeID != previous.RuntimeID || !s.migrationImageRefsEquivalent(app, binding.ImageRef, previous.ResolvedImageRef) {
+		return out, fmt.Errorf("drain requires an immutable revision workload binding")
+	}
+	previous.DeploymentName, previous.ServiceName, previous.UpstreamURL = binding.DeploymentName, binding.ServiceName, ""
+	out.Summary["previous_deployment"] = previous.DeploymentName
+	out.Summary["revision_workload"] = *binding
 	// A canonical Deployment can now serve a different release. Draining it
 	// would not prove anything about this release's original connections.
 	if previous.ID == "" || previous.AppID != app.ID || previous.TenantID != app.TenantID ||
@@ -62,7 +73,7 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 	if err != nil {
 		return out, fmt.Errorf("read stable release before drain: %w", err)
 	}
-	if stable.DeploymentName == previous.DeploymentName || (previous.UpstreamURL != "" && stable.UpstreamURL == previous.UpstreamURL) {
+	if stable.DeploymentName == previous.DeploymentName || stable.ServiceName == previous.ServiceName {
 		return out, fmt.Errorf("stable traffic still uses the previous workload")
 	}
 	proof, err := s.edgeBundleObserverForSafeRollout().WaitForSafeRolloutEdgeRouteBundle(ctx, app, stable, 0, since)
@@ -132,10 +143,11 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 		return out, fmt.Errorf("traffic policy changed during drain observation")
 	}
 	currentRelease, err := s.Store.GetAppRelease(app.TenantID, true, previous.ID)
-	if err != nil || !sameReleaseDrainTarget(previous, currentRelease) || drainCtx.Err() != nil {
+	if err != nil || !sameReleaseDrainTarget(expected, currentRelease) || drainCtx.Err() != nil {
 		return out, fmt.Errorf("release target changed during drain observation")
 	}
 	out.Ready = true
+	out.Workload = &after
 	out.ObservedAt = time.Now().UTC()
 	out.Summary["ready"] = true
 	out.Summary["active_connections"] = out.ActiveConnections
@@ -145,7 +157,7 @@ func (q kubeSafeRolloutDrainObserver) QuerySafeRolloutDrainMetrics(ctx context.C
 
 func sameReleaseDrainTarget(a, b model.AppRelease) bool {
 	return a.ID == b.ID && a.TenantID == b.TenantID && a.AppID == b.AppID && a.RuntimeID == b.RuntimeID && a.ResolvedImageRef == b.ResolvedImageRef &&
-		a.DeploymentName == b.DeploymentName && a.ServiceName == b.ServiceName && a.UpstreamURL == b.UpstreamURL && a.Role == b.Role && a.Status == b.Status && a.UpdatedAt.Equal(b.UpdatedAt)
+		a.DeploymentName == b.DeploymentName && a.ServiceName == b.ServiceName && a.UpstreamURL == b.UpstreamURL && a.Role == b.Role && a.Status == b.Status && a.UpdatedAt.Equal(b.UpdatedAt) && reflect.DeepEqual(a.RevisionWorkload, b.RevisionWorkload)
 }
 
 func (s *Service) captureReleaseDrainWorkload(ctx context.Context, client *kubeClient, app model.App, release model.AppRelease) (releaseDrainWorkload, error) {
@@ -163,12 +175,29 @@ func (s *Service) captureReleaseDrainWorkload(ctx context.Context, client *kubeC
 	if !owner(meta) || objectStringField(meta, "deletionTimestamp") != "" {
 		return out, fmt.Errorf("release Deployment ownership or lifecycle differs")
 	}
+	binding := release.RevisionWorkload
+	if binding == nil || binding.DeploymentUID != objectStringField(meta, "uid") || binding.ReleaseKey != objectStringMapValue(nestedObjectValue(deployment, "spec", "template", "metadata", "annotations"))[runtime.FugueAnnotationReleaseKey] {
+		return out, fmt.Errorf("drain Deployment differs from immutable binding")
+	}
+	service, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(ns)+"/services/"+url.PathEscape(binding.ServiceName))
+	if err != nil || !found {
+		return out, fmt.Errorf("drain Service unavailable")
+	}
+	sm := objectMapField(service, "metadata")
+	selector := objectStringMapValue(nestedObjectValue(service, "spec", "selector"))
+	if objectStringField(sm, "uid") != binding.ServiceUID || objectStringField(sm, "deletionTimestamp") != "" || !owner(sm) || selector[runtime.FugueLabelAppWorkload] != binding.DeploymentName || selector[runtime.FugueLabelAppReleaseID] != release.ID {
+		return out, fmt.Errorf("drain Service differs from immutable binding")
+	}
 	var dep kubeDeployment
 	data, _ := json.Marshal(deployment)
 	if err := json.Unmarshal(data, &dep); err != nil || dep.Metadata.UID == "" || dep.Spec.Replicas == nil || *dep.Spec.Replicas < 1 || *dep.Spec.Replicas > 32 || !managedDeploymentStatusReady(dep, *dep.Spec.Replicas) || !s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(dep), release.ResolvedImageRef) {
 		return out, fmt.Errorf("release Deployment is not a complete current workload")
 	}
+	if dep.Metadata.Generation < binding.DeploymentGeneration {
+		return out, fmt.Errorf("drain Deployment generation regressed")
+	}
 	out.DeploymentUID, out.Generation = dep.Metadata.UID, dep.Metadata.Generation
+	out.DeploymentVersion, out.ServiceVersion = objectStringField(meta, "resourceVersion"), objectStringField(sm, "resourceVersion")
 	var replicas, pods kubeObjectList
 	// Follow ownership even when a child's selector labels have changed. A
 	// label-only list could hide an old Pod that still owns active connections.
@@ -204,6 +233,9 @@ func (s *Service) captureReleaseDrainWorkload(ctx context.Context, client *kubeC
 		}
 		if !owner(pm) || objectStringField(pm, "uid") == "" || objectStringField(pm, "deletionTimestamp") != "" {
 			return out, fmt.Errorf("release Pod ownership or lifecycle differs")
+		}
+		if objectStringMapValue(pm["annotations"])[runtime.FugueAnnotationReleaseKey] != binding.ReleaseKey || objectStringMapValue(pm["labels"])[runtime.FugueLabelAppWorkload] != binding.DeploymentName {
+			return out, fmt.Errorf("drain Pod belongs to another executable revision")
 		}
 		p := releaseDrainPod{Name: objectStringField(pm, "name"), UID: objectStringField(pm, "uid")}
 		appContainers := mapSlice(nestedObjectValue(pod, "spec", "containers"))

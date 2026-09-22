@@ -55,6 +55,7 @@ type safeRolloutDrainMetrics struct {
 	Source               string
 	ObservedAt           time.Time
 	Summary              map[string]any
+	Workload             *releaseDrainWorkload
 }
 
 type storeSafeRolloutEdgeBundleObserver struct {

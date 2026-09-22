@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/schemamigrate"
@@ -123,5 +124,63 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 		if _, err = s.UpsertAppTrafficPolicy(policy); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, change := range []string{"none", "previous", "stable", "policy", "retention", "canceled"} {
+		t.Run("cas_"+change, func(t *testing.T) {
+			r := create(model.AppReleaseRolePrevious, model.AppReleaseStatusDraining)
+			stableNow, err := s.GetAppRelease(app.TenantID, false, stable.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := s.GetAppTrafficPolicy(app.TenantID, false, app.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			switch change {
+			case "previous":
+				copy := r
+				copy.DeploymentName = "new-target"
+				if _, err = s.UpdateAppRelease(copy); err != nil {
+					t.Fatal(err)
+				}
+			case "stable":
+				copy := stableNow
+				copy.UpstreamURL = "http://different.example"
+				if _, err = s.UpdateAppRelease(copy); err != nil {
+					t.Fatal(err)
+				}
+			case "policy":
+				copy := p
+				copy.StickyCookie = "changed"
+				if _, err = s.UpsertAppTrafficPolicy(copy); err != nil {
+					t.Fatal(err)
+				}
+			case "retention":
+				future := time.Now().Add(time.Hour)
+				r.RetentionUntil = &future
+				r, err = s.UpdateAppRelease(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "canceled":
+				cancel()
+			}
+			result, err := s.RetireDrainedAppRelease(ctx, r, stableNow, p)
+			if change == "none" {
+				if err != nil || !AppReleaseIsRetired(result) {
+					t.Fatal("verified retirement failed", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("retirement accepted changed %s", change)
+			}
+			kept, err := s.GetAppRelease(app.TenantID, false, r.ID)
+			if err != nil || AppReleaseIsRetired(kept) {
+				t.Fatal("conflict lost retained release", err)
+			}
+		})
 	}
 }

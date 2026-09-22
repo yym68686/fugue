@@ -224,8 +224,14 @@ func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing
 	deleted := []string{}
 	preconditions := map[string]string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			http.NotFound(w, r)
+		if r.Method == http.MethodGet {
+			uid := "deployment-uid"
+			if strings.Contains(r.URL.Path, "/services/") {
+				uid = "service-uid"
+			}
+			workload := runtime.RuntimeAppResourceNameWithOptions(app, runtime.RenderOptions{Revision: safeRolloutCandidateRevision("apprel_retired")})
+			labels := map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID, runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue, runtime.FugueLabelAppReleaseID: "apprel_retired", runtime.FugueLabelAppWorkload: workload}
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"uid": uid, "resourceVersion": "1", "labels": labels}, "spec": map[string]any{"selector": labels, "template": map[string]any{"metadata": map[string]any{"annotations": map[string]string{runtime.FugueAnnotationReleaseKey: "key"}}}}})
 			return
 		}
 		mu.Lock()
@@ -250,7 +256,10 @@ func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing
 	}
 	revision := safeRolloutCandidateRevision("apprel_retired")
 	retired := model.AppRelease{
+		ID: "apprel_retired", AppID: app.ID, TenantID: app.TenantID, Role: model.AppReleaseRoleRetired, Status: model.AppReleaseStatusRetired,
 		RevisionWorkload: &model.AppReleaseWorkload{
+			Namespace:      namespace,
+			ReleaseKey:     "key",
 			DeploymentName: runtime.RuntimeAppResourceNameWithOptions(app, runtime.RenderOptions{Revision: revision}),
 			DeploymentUID:  "deployment-uid",
 			ServiceName:    runtime.RuntimeAppServiceNameWithOptions(app, runtime.RenderOptions{Revision: revision}),
@@ -1585,6 +1594,9 @@ func TestRetryDrainingAppReleaseRetirementUsesPersistedBinding(t *testing.T) {
 	bound.Role, bound.Status, bound.PromotedAt = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining, &now
 	previous, err = st.UpdateAppRelease(bound)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.CompleteManagedOperation(op.ID, "", "completed"); err != nil {
 		t.Fatal(err)
 	}
 	stable, err := st.CreateAppRelease(model.AppRelease{ID: "current-stable", TenantID: app.TenantID, AppID: app.ID,

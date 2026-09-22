@@ -420,19 +420,37 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	if s == nil || s.Store == nil {
 		return nil
 	}
-	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true})
+	active, err := s.appHasActiveOperation(app)
+	if err != nil || active {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
 	if err != nil {
 		return fmt.Errorf("list draining releases: %w", err)
 	}
 	policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
-	if err != nil || policy.StableReleaseID == "" || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if policy.Mode != model.AppTrafficModeSingle || policy.StableReleaseID == "" || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
 		return nil
 	}
 	stable, err := s.Store.GetAppRelease(app.TenantID, true, policy.StableReleaseID)
-	if err != nil || stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
+	if err != nil {
+		return err
+	}
+	if stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
 		return nil
 	}
 	for _, previous := range releases {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if previous.Status == model.AppReleaseStatusRetired && previous.RevisionWorkload != nil {
 			if err := s.retryRetiredAppReleaseCleanup(ctx, app, previous, stable); err != nil {
 				return fmt.Errorf("cleanup retired release %s: %w", previous.ID, err)
@@ -451,6 +469,9 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 				continue
 			}
 			return fmt.Errorf("load retirement operation %s: %w", previous.RevisionWorkload.OperationID, err)
+		}
+		if op.AppID != app.ID || op.TenantID != app.TenantID || op.Type != model.OperationTypeDeploy || op.Status != model.OperationStatusCompleted {
+			continue
 		}
 		previousApp := app
 		if previous.SpecSnapshot != nil {
@@ -475,6 +496,9 @@ func (s *Service) retryRetiredAppReleaseCleanup(ctx context.Context, app model.A
 	}
 	if stable.ID == retired.ID || stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
 		return nil
+	}
+	if stable.DeploymentName == retired.RevisionWorkload.DeploymentName || stable.ServiceName == retired.RevisionWorkload.ServiceName {
+		return fmt.Errorf("stable still references retired workload")
 	}
 	return s.cleanupSafeRolloutRetiredResources(ctx, app, retired)
 }
@@ -3028,9 +3052,10 @@ func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind
 		return nil
 	}
 	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{
-		TenantID:      app.TenantID,
-		AppID:         app.ID,
-		PlatformAdmin: true,
+		TenantID:       app.TenantID,
+		AppID:          app.ID,
+		PlatformAdmin:  true,
+		IncludeRetired: true,
 	})
 	if err != nil {
 		return fmt.Errorf("list active app releases before stale-object pruning: %w", err)
@@ -3053,9 +3078,13 @@ func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind
 		// Canonical alignment replaces the current target fields, but cannot
 		// release the independently named revision before this release retires.
 		revision := runtime.RenderOptions{Revision: safeRolloutCandidateRevision(release.ID)}
+		boundDeployment, boundService := "", ""
+		if b := release.RevisionWorkload; b != nil {
+			boundDeployment, boundService = b.DeploymentName, b.ServiceName
+		}
 		for kind, names := range map[string][]string{
-			"Deployment": {release.DeploymentName, runtime.RuntimeAppResourceNameWithOptions(app, revision)},
-			"Service":    {release.ServiceName, runtime.RuntimeAppServiceNameWithOptions(app, revision)},
+			"Deployment": {release.DeploymentName, boundDeployment, runtime.RuntimeAppResourceNameWithOptions(app, revision)},
+			"Service":    {release.ServiceName, boundService, runtime.RuntimeAppServiceNameWithOptions(app, revision)},
 		} {
 			if desiredByKind[kind] == nil {
 				desiredByKind[kind] = make(map[string]struct{})

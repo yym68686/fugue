@@ -1458,16 +1458,20 @@ func (c *kubeClient) deleteServiceWithUID(ctx context.Context, namespace, name, 
 	return c.deleteObjectWithUID(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/services/"+url.PathEscape(name), uid)
 }
 
-func (c *kubeClient) deleteObjectWithUID(ctx context.Context, apiPath, uid string) error {
+func (c *kubeClient) deleteObjectWithUID(ctx context.Context, apiPath, uid string, versions ...string) error {
 	uid = strings.TrimSpace(uid)
 	if uid == "" {
 		return fmt.Errorf("UID precondition is required for release cleanup")
+	}
+	preconditions := map[string]any{"uid": uid}
+	if len(versions) > 0 {
+		preconditions["resourceVersion"] = versions[0]
 	}
 	body := map[string]any{
 		"apiVersion":        "v1",
 		"kind":              "DeleteOptions",
 		"propagationPolicy": "Background",
-		"preconditions":     map[string]any{"uid": uid},
+		"preconditions":     preconditions,
 	}
 	status, err := c.doRequest(ctx, http.MethodDelete, apiPath, "application/json", body, nil)
 	if status == http.StatusConflict {

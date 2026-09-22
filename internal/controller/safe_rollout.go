@@ -3,8 +3,11 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -830,6 +833,15 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: previous release unavailable", state.Candidate.ID, map[string]any{"error": err.Error()})
 		return
 	}
+	if previous.RetentionUntil != nil && time.Now().UTC().Before(*previous.RetentionUntil) {
+		return
+	}
+	if continuity := state.CandidateApp.Spec.Continuity; continuity != nil && continuity.ZeroDowntime != nil && state.Candidate.PromotedAt != nil && time.Now().Before(state.Candidate.PromotedAt.Add(time.Duration(continuity.ZeroDowntime.RetireGraceSeconds)*time.Second)) {
+		return
+	}
+	if s.Config.KubectlApply && previous.RevisionWorkload == nil {
+		return
+	}
 	metrics, ok := s.querySafeRolloutDrainMetrics(ctx, op, state.CandidateApp, previous, state.Candidate.PromotedAt)
 	if !ok {
 		return
@@ -839,7 +851,26 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 	if !s.waitSafeRolloutEdgeRouteBundleApplied(ctx, op, state) {
 		return
 	}
-	retired, err := s.appReleaseService().RetireRelease(ctx, state.CandidateApp, previous, "safe rollout previous stable drained")
+	if s.Config.KubectlApply {
+		if metrics.Workload == nil || metrics.ObservedAt.IsZero() || time.Since(metrics.ObservedAt) > 15*time.Second {
+			return
+		}
+		client, err := s.kubeClient()
+		if err != nil {
+			return
+		}
+		target := previous
+		target.DeploymentName = previous.RevisionWorkload.DeploymentName
+		target.ServiceName = previous.RevisionWorkload.ServiceName
+		fresh, err := s.captureReleaseDrainWorkload(ctx, client, state.CandidateApp, target)
+		if err != nil || !reflect.DeepEqual(metrics.Workload, &fresh) {
+			return
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	retired, err := s.Store.RetireDrainedAppRelease(ctx, previous, state.Candidate, policy)
 	if err != nil {
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: release record update failed", state.Candidate.ID, map[string]any{"error": err.Error(), "drain_metrics": metrics.Summary})
 		return
@@ -852,7 +883,10 @@ func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op
 	} else if s.Config.KubectlApply {
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_resource_cleanup", model.ReleaseStepStatusCompleted, "retired release resources removed", retired.ID, nil)
 	}
+	drainEvidence, _ := json.Marshal(metrics.Summary)
 	s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retired", retired.ID, map[string]string{
+		"drain_evidence":      string(drainEvidence),
+		"observed_at":         metrics.ObservedAt.UTC().Format(time.RFC3339Nano),
 		"operation_id":        op.ID,
 		"candidate_release":   state.Candidate.ID,
 		"active_connections":  fmt.Sprintf("%d", metrics.ActiveConnections),
@@ -870,30 +904,49 @@ func (s *Service) cleanupSafeRolloutRetiredResources(ctx context.Context, app mo
 	if retired.RevisionWorkload == nil {
 		return fmt.Errorf("retired release has no immutable workload binding; retain resources until migration")
 	}
+	if retired.ID == "" || retired.AppID != app.ID || retired.TenantID != app.TenantID || retired.Role != model.AppReleaseRoleRetired || retired.Status != model.AppReleaseStatusRetired || retired.RevisionWorkload.Namespace != runtime.NamespaceForTenant(app.TenantID) {
+		return fmt.Errorf("cleanup requires an owned retired release and namespace")
+	}
 	deploymentName := strings.TrimSpace(retired.RevisionWorkload.DeploymentName)
 	serviceName := strings.TrimSpace(retired.RevisionWorkload.ServiceName)
-	if deploymentName == "" || strings.EqualFold(deploymentName, canonicalDeployment) {
-		deploymentName = ""
-	}
-	if serviceName == "" || strings.EqualFold(serviceName, canonicalService) {
-		serviceName = ""
-	}
-	if deploymentName == "" && serviceName == "" {
-		return nil
+	if deploymentName == "" || strings.EqualFold(deploymentName, canonicalDeployment) || serviceName == "" || strings.EqualFold(serviceName, canonicalService) || retired.RevisionWorkload.DeploymentUID == "" || retired.RevisionWorkload.ServiceUID == "" {
+		return fmt.Errorf("cleanup requires complete independent revision identities")
 	}
 	client, err := s.kubeClient()
 	if err != nil {
 		return fmt.Errorf("initialize retired release cleanup client: %w", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
-	if deploymentName != "" {
-		if err := client.deleteDeploymentWithUID(ctx, namespace, deploymentName, retired.RevisionWorkload.DeploymentUID); err != nil {
-			return fmt.Errorf("delete retired release deployment %s/%s: %w", namespace, deploymentName, err)
+	for _, target := range []struct{ path, uid, kind string }{
+		{deploymentAPIPath(namespace, deploymentName), retired.RevisionWorkload.DeploymentUID, "Deployment"},
+		{"/api/v1/namespaces/" + url.PathEscape(namespace) + "/services/" + url.PathEscape(serviceName), retired.RevisionWorkload.ServiceUID, "Service"},
+	} {
+		object, found, err := client.getRawObject(ctx, target.path)
+		if err != nil {
+			return err
 		}
-	}
-	if serviceName != "" {
-		if err := client.deleteServiceWithUID(ctx, namespace, serviceName, retired.RevisionWorkload.ServiceUID); err != nil {
-			return fmt.Errorf("delete retired release service %s/%s: %w", namespace, serviceName, err)
+		if !found {
+			continue
+		}
+		meta := objectMapField(object, "metadata")
+		if objectStringField(meta, "uid") != target.uid || !appWorkloadOwnerMatches(meta, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) || objectStringMapValue(meta["labels"])[runtime.FugueLabelAppReleaseID] != retired.ID {
+			return fmt.Errorf("retired %s identity changed before cleanup", target.kind)
+		}
+		if target.kind == "Deployment" && objectStringMapValue(nestedObjectValue(object, "spec", "template", "metadata", "annotations"))[runtime.FugueAnnotationReleaseKey] != retired.RevisionWorkload.ReleaseKey {
+			return fmt.Errorf("retired Deployment executable revision changed")
+		}
+		if target.kind == "Service" {
+			selector := objectStringMapValue(nestedObjectValue(object, "spec", "selector"))
+			if selector[runtime.FugueLabelAppReleaseID] != retired.ID || selector[runtime.FugueLabelAppWorkload] != deploymentName {
+				return fmt.Errorf("retired Service selects another revision")
+			}
+		}
+		version := objectStringField(meta, "resourceVersion")
+		if version == "" {
+			return fmt.Errorf("retired resource has no version")
+		}
+		if err = client.deleteObjectWithUID(ctx, target.path, target.uid, version); err != nil {
+			return err
 		}
 	}
 	return nil
