@@ -170,7 +170,7 @@ func TestDNSMigrationComparisonAPIRequiresExactTrustedPublicationAndIsReadOnly(t
 	}
 	invalid := compiled.DNSArtifact
 	invalid.Metadata = map[string]string{}
-	if _, _, err := platformDNSMigrationView(invalid, "dns-a", "example.test"); err == nil {
+	if _, _, err := platformDNSArtifactView(invalid, "dns-a", "example.test"); err == nil {
 		t.Fatal("unbound policy lineage accepted")
 	}
 	bad := bundle

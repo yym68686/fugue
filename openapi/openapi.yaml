@@ -2394,6 +2394,13 @@ paths:
   /v1/admin/robustness/status:
     get:
       operationId: getRobustnessStatus
+      description: >-
+        Reports serving diagnostics from current signed TrafficReleaseSets and
+        authenticated consumer facts. The generated_artifact_edge_route_intent
+        and generated_artifact_edge_dns_bundle check names remain compatible,
+        but no longer compile temporary legacy configuration. Their evidence
+        identifies the actual publication, artifact digests and convergence.
+        Missing or rejected state fails closed and diagnostics never publish.
       summary: Get Robustness Status
       tags: [Admin]
       x-fugue-handler: handleGetRobustnessStatus
@@ -4256,6 +4263,11 @@ paths:
         consumers use fresh physical-node facts projected onto the declared
         zone, followed by real zone probes; stale per-zone aliases cannot
         override the physical serving snapshot.
+        route_dns_invariant validates the currently selected signed traffic
+        parent, all three members, exact DNS consumer zone views, and fresh
+        authenticated convergence for that publication. It never simulates a
+        legacy DNS bundle from business tables or environment; missing artifacts
+        or consumers fail instead of passing an empty-inventory check.
       tags: [DNS]
       x-fugue-handler: handleDNSDelegationPreflight
       security:

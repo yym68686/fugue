@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -541,4 +542,22 @@ func (s *Server) writeEdgeDNSArtifactMetrics(w io.Writer) {
 	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_lookups_total", map[string]string{"outcome": "error"}, float64(handlerLookupErrorCount))
 	observability.WriteMetricHeader(w, "fugue_edge_dns_artifact_handler_source_total", "Successful Edge DNS handler lookups by artifact source.", "counter")
 	observability.WriteMetricSample(w, "fugue_edge_dns_artifact_handler_source_total", map[string]string{"source": "immutable_full"}, float64(handlerImmutableFullCount))
+}
+
+// Historical request-time derivation is no longer linked into production.
+func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptions) (model.EdgeDNSBundle, error) {
+	now := time.Now().UTC()
+	snapshot, err := s.loadEdgeDNSBundleCompileSnapshot(r.Context(), []string{options.Zone}, now)
+	if err != nil {
+		return model.EdgeDNSBundle{}, err
+	}
+	if options.AuthorityService != "" {
+		groupID, nodeIDs, err := s.edgeDNSAuthorityReady(r.Context(), options.AuthorityService, options.EdgeGroupID, now)
+		if err != nil {
+			return model.EdgeDNSBundle{}, err
+		}
+		snapshot.healthyEdgeGroups[groupID] = true
+		snapshot.healthyEdgeNodeIDsByGroup[groupID] = nodeIDs
+	}
+	return s.compileEdgeDNSBundle(r.Context(), options, snapshot)
 }

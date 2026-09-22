@@ -360,110 +360,27 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 }
 
 func (s *Server) robustnessGeneratedArtifactChecks(r *http.Request, dnsOpts dnsDelegationPreflightOptions) ([]model.RobustnessCheck, error) {
+	hint, err := s.verifiedDNSDelegationHints(dnsOpts.Zone)
+	var diagnostic trafficArtifactDiagnostic
+	if err == nil {
+		diagnostic, err = s.inspectPublishedTrafficArtifacts(r.Context(), dnsOpts.Zone, hint.ConsumerGroups)
+	}
 	checks := []model.RobustnessCheck{}
-	routeIntents, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
-	if err != nil {
-		checks = append(checks, model.RobustnessCheck{
-			Name:       "generated_artifact_edge_route_intent",
-			Pass:       false,
-			Severity:   model.RobustnessSeverityWarning,
-			Subject:    "edge_route_intent",
-			Expected:   "canonical route intent snapshot can be derived and validated",
-			Observed:   err.Error(),
-			Message:    "edge route intent derivation failed",
-			RepairHint: "inspect app route and runtime inputs before Edge Control materializes group bundles",
-			Evidence:   map[string]string{"guardian": "bundle-rollout", "artifact_kind": model.PlatformArtifactKindEdgeRouteIntent, "validation_path": "validateEdgeRouteIntentSnapshotForDiagnostics"},
-		})
-	} else if err := validateEdgeRouteIntentSnapshotForDiagnostics(routeIntents); err != nil {
-		checks = append(checks, model.RobustnessCheck{
-			Name:       "generated_artifact_edge_route_intent",
-			Pass:       false,
-			Severity:   model.RobustnessSeverityBlockPublish,
-			Subject:    "edge_route_intent",
-			Expected:   "canonical route intent snapshot passes identity and generation validation",
-			Observed:   err.Error(),
-			Message:    "edge route intent validation failed",
-			RepairHint: "repair the canonical route intent before Edge Control materializes group bundles",
-			Evidence:   map[string]string{"guardian": "bundle-rollout", "artifact_kind": model.PlatformArtifactKindEdgeRouteIntent, "validation_path": "validateEdgeRouteIntentSnapshotForDiagnostics", "generation": routeIntents.Generation},
-		})
-	} else {
-		checks = append(checks, model.RobustnessCheck{
-			Name:     "generated_artifact_edge_route_intent",
-			Pass:     true,
-			Severity: model.RobustnessSeverityInfo,
-			Subject:  "edge_route_intent",
-			Expected: "canonical route intent snapshot can be derived and validated",
-			Observed: fmt.Sprintf("generation=%s routes=%d tls_allowlist=%d", routeIntents.Generation, len(routeIntents.Routes), len(routeIntents.TLSAllowlist)),
-			Evidence: map[string]string{
-				"guardian":        "bundle-rollout",
-				"artifact_kind":   model.PlatformArtifactKindEdgeRouteIntent,
-				"validation_path": "validateEdgeRouteIntentSnapshotForDiagnostics",
-				"generation":      routeIntents.Generation,
-			},
-		})
-	}
-
-	zone := normalizeExternalAppDomain(dnsOpts.Zone)
-	if zone == "" {
-		zone = normalizeExternalAppDomain(s.appBaseDomain)
-	}
-	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(r.Context())
-	if err != nil {
-		return nil, err
-	}
-	answerIPs := edgeDNSAllHealthyAnswerIPs("", edgeAnswerIPsByGroup)
-	if len(answerIPs) == 0 {
-		checks = append(checks, model.RobustnessCheck{
-			Name:     "generated_artifact_edge_dns_bundle",
-			Pass:     true,
-			Severity: model.RobustnessSeverityInfo,
-			Subject:  "edge_dns_bundle",
-			Expected: "DNS bundle validation is skipped when no route-publishable edge IP exists",
-			Observed: "answer_ips=0",
-			Evidence: map[string]string{
-				"guardian":        "bundle-rollout",
-				"artifact_kind":   "edge_dns_bundle",
-				"validation_path": "validateEdgeDNSBundleForPublish",
-			},
-		})
-		return checks, nil
-	}
-	dnsBundle, err := s.deriveEdgeDNSBundle(r, edgeDNSBundleOptions{
-		Zone:      zone,
-		AnswerIPs: answerIPs,
-		TTL:       defaultEdgeDNSTTL,
-	})
-	if err != nil {
-		if failures := bundleInvariantChecks(err); len(failures) > 0 {
-			checks = append(checks, robustnessChecksWithGuardian(failures, "bundle-rollout")...)
-			return checks, nil
+	for _, member := range []struct {
+		name, kind string
+		count      int
+	}{
+		{"generated_artifact_edge_route_intent", model.PlatformArtifactKindEdgeRouteBundle, diagnostic.Routes},
+		{"generated_artifact_edge_dns_bundle", model.PlatformArtifactKindDNSAnswerBundle, diagnostic.DNSRecords},
+	} {
+		check := model.RobustnessCheck{Name: member.name, Pass: err == nil, Severity: model.RobustnessSeverityInfo, Subject: member.kind, Expected: "current signed traffic artifacts and authenticated consumer convergence", Observed: fmt.Sprintf("records=%d releases=%s", member.count, strings.Join(diagnostic.Releases, ",")), Evidence: diagnostic.evidence()}
+		check.Evidence["artifact_kind"] = member.kind
+		if err != nil {
+			check.Severity = model.RobustnessSeverityBlockPublish
+			check.Message = err.Error()
+			check.RepairHint = "inspect the selected TrafficReleaseSet, member signatures and exact consumer facts; preserve the verified LKG"
 		}
-		checks = append(checks, model.RobustnessCheck{
-			Name:       "generated_artifact_edge_dns_bundle",
-			Pass:       false,
-			Severity:   model.RobustnessSeverityWarning,
-			Subject:    "edge_dns_bundle",
-			Expected:   "DNS bundle can be derived and validated",
-			Observed:   err.Error(),
-			Message:    "edge DNS bundle derivation failed",
-			RepairHint: "inspect route/DNS invariant inputs before publishing DNS bundles",
-			Evidence:   map[string]string{"guardian": "bundle-rollout", "validation_path": "validateEdgeDNSBundleForPublish"},
-		})
-	} else {
-		checks = append(checks, model.RobustnessCheck{
-			Name:     "generated_artifact_edge_dns_bundle",
-			Pass:     true,
-			Severity: model.RobustnessSeverityInfo,
-			Subject:  "edge_dns_bundle",
-			Expected: "DNS bundle can be derived and validated",
-			Observed: fmt.Sprintf("version=%s records=%d answer_ips=%d", dnsBundle.Version, len(dnsBundle.Records), len(answerIPs)),
-			Evidence: map[string]string{
-				"guardian":        "bundle-rollout",
-				"artifact_kind":   "edge_dns_bundle",
-				"validation_path": "validateEdgeDNSBundleForPublish",
-				"generation":      dnsBundle.Generation,
-			},
-		})
+		checks = append(checks, check)
 	}
 	return checks, nil
 }

@@ -78,7 +78,7 @@ func seedVerifiedDNSDelegationFixture(t *testing.T, s *Server, zone string) {
 		}
 		return a
 	}
-	intent := platformconfig.NormalizePlatformIntent(platformconfig.PlatformIntent{Scope: "global", Generation: "delegation-base", DNSConsumers: consumers})
+	intent := platformconfig.NormalizePlatformIntent(platformconfig.PlatformIntent{Scope: "global", Generation: "delegation-base", DNSConsumers: consumers, Routes: []platformconfig.RouteIntent{{Hostname: "disabled." + zone, UpstreamURL: "http://origin:8080", Enabled: false}}})
 	base := save(model.PlatformArtifactKindPlatformIntent, "global", intent.Generation, intent)
 	probe := &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096}
 	policyInput := platformproducer.ProjectionPolicyInput{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: "delegation-policy", Authorities: authorities, Clients: clients, DNSReadiness: probe, TLSReadiness: probe, Cohorts: []platformconfig.TrafficRolloutCohort{{ID: "complete", EdgeGroupIDs: uniqueSortedStrings(groups)}}}

@@ -286,23 +286,6 @@ func (snapshot *edgeDNSBundleCompileSnapshot) compileRouteBinding(s *Server, ctx
 	return binding
 }
 
-func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptions) (model.EdgeDNSBundle, error) {
-	now := time.Now().UTC()
-	snapshot, err := s.loadEdgeDNSBundleCompileSnapshot(r.Context(), []string{options.Zone}, now)
-	if err != nil {
-		return model.EdgeDNSBundle{}, err
-	}
-	if options.AuthorityService != "" {
-		groupID, nodeIDs, err := s.edgeDNSAuthorityReady(r.Context(), options.AuthorityService, options.EdgeGroupID, now)
-		if err != nil {
-			return model.EdgeDNSBundle{}, err
-		}
-		snapshot.healthyEdgeGroups[groupID] = true
-		snapshot.healthyEdgeNodeIDsByGroup[groupID] = nodeIDs
-	}
-	return s.compileEdgeDNSBundle(r.Context(), options, snapshot)
-}
-
 func (s *Server) compileEdgeDNSBundle(ctx context.Context, options edgeDNSBundleOptions, snapshot *edgeDNSBundleCompileSnapshot) (model.EdgeDNSBundle, error) {
 	if snapshot == nil {
 		return model.EdgeDNSBundle{}, errors.New("edge DNS compile snapshot is unavailable")

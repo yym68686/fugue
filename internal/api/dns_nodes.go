@@ -364,47 +364,15 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 }
 
 func (s *Server) buildRouteDNSInvariantPreflightCheck(ctx context.Context, opts dnsDelegationPreflightOptions) model.DNSDelegationPreflightCheck {
-	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(ctx)
+	hint, err := s.verifiedDNSDelegationHints(opts.Zone)
 	if err != nil {
-		return model.DNSDelegationPreflightCheck{
-			Name:    "route_dns_invariant",
-			Pass:    false,
-			Message: fmt.Sprintf("cannot load edge answer inventory: %v", err),
-		}
+		return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Message: err.Error()}
 	}
-	answerIPs := edgeDNSAllHealthyAnswerIPs("", edgeAnswerIPsByGroup)
-	if len(answerIPs) == 0 {
-		return model.DNSDelegationPreflightCheck{
-			Name:    "route_dns_invariant",
-			Pass:    true,
-			Message: "skipped route/DNS invariant bundle simulation because no route-publishable edge IPs are registered",
-		}
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/v1/dns/delegation/preflight", nil)
+	diagnostic, err := s.inspectPublishedTrafficArtifacts(ctx, opts.Zone, hint.ConsumerGroups)
 	if err != nil {
-		return model.DNSDelegationPreflightCheck{
-			Name:    "route_dns_invariant",
-			Pass:    false,
-			Message: fmt.Sprintf("cannot build invariant request context: %v", err),
-		}
+		return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Message: err.Error()}
 	}
-	bundle, err := s.deriveEdgeDNSBundle(req, edgeDNSBundleOptions{
-		Zone:      opts.Zone,
-		AnswerIPs: answerIPs,
-		TTL:       defaultEdgeDNSTTL,
-	})
-	if err != nil {
-		return model.DNSDelegationPreflightCheck{
-			Name:    "route_dns_invariant",
-			Pass:    false,
-			Message: fmt.Sprintf("route/DNS invariant failed: %v", err),
-		}
-	}
-	return model.DNSDelegationPreflightCheck{
-		Name:    "route_dns_invariant",
-		Pass:    true,
-		Message: fmt.Sprintf("validated %d DNS records against route-ready edge answers", len(bundle.Records)),
-	}
+	return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Pass: true, Message: fmt.Sprintf("published traffic release=%s routes=%d DNS consumer records=%d required consumers=%d", strings.Join(diagnostic.Releases, ","), diagnostic.Routes, diagnostic.DNSRecords, diagnostic.RequiredConsumers)}
 }
 
 func (s *Server) buildEdgeTLSReadinessPreflightCheck(ctx context.Context, principal model.Principal) model.DNSDelegationPreflightCheck {
