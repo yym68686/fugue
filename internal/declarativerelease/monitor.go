@@ -219,6 +219,10 @@ func RestoreMonitoredLKG(ctx context.Context, cluster Cluster, plan Plan, prepar
 		result.Reason = "continuous-rollback-plan-invalid"
 		return sealResult(result)
 	}
+	if err := bindManifestTransition(cluster, release, forwardManifest, lkgManifest); err != nil {
+		result.Reason, result.FailureDetail = "manifest-transition-invalid", err.Error()
+		return sealResult(result)
+	}
 	current, err := cluster.Observe(ctx, healthRelease, prepared.Forward, forwardManifest)
 	if err != nil || !current.Matches(prepared.Forward, healthRelease, false) {
 		// A reviewed emergency write can make the live image unverifiable as the
@@ -300,6 +304,10 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 	if err != nil || prepared.Validate(plan, forwardManifest, lkgManifest) != nil || healthRelease.ComponentID != release.ComponentID ||
 		healthRelease.Workload != release.Workload || healthRelease.Concurrency != release.Concurrency {
 		result.Reason = "continuous-repair-plan-invalid"
+		return sealResult(result)
+	}
+	if err := bindManifestTransition(cluster, release, forwardManifest, lkgManifest); err != nil {
+		result.Reason, result.FailureDetail = "manifest-transition-invalid", err.Error()
 		return sealResult(result)
 	}
 	current, forwardErr := cluster.Observe(ctx, healthRelease, prepared.Forward, forwardManifest)

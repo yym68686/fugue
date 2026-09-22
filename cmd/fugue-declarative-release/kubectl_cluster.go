@@ -108,6 +108,7 @@ type kubectlCluster struct {
 	trustedCurrent   *declarativerelease.ArtifactReceipt
 	registryMu       sync.Mutex
 	registryVerified map[string]declarativerelease.RegistryVerification
+	envRetirements   map[string][]retiredEnvironment
 }
 
 type healthSoakTracker struct {
@@ -1062,6 +1063,11 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 // or using unconditional conflict takeover. Prepare remains read-only and
 // accepts only the same typed proof.
 func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
+	var retireErr error
+	desired, encoded, retireErr = cluster.retireEnvironment(ctx, release, identity, desired, encoded, dryRun)
+	if retireErr != nil {
+		return retireErr
+	}
 	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
 	if applyErr != nil {
 		// A server-side apply may commit before the client loses its response.

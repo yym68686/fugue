@@ -115,6 +115,18 @@ type Cluster interface {
 	VerifyOwnershipConverged(context.Context, PlanRelease, []byte) error
 }
 
+// A production adapter may derive bounded field retirements from the two
+// digest-verified manifests. Binding is read-only and grants no authority to
+// delete fields discovered only in live state.
+func bindManifestTransition(cluster Cluster, release PlanRelease, forward, lkg []byte) error {
+	if binder, ok := cluster.(interface {
+		BindManifestTransition(PlanRelease, []byte, []byte) error
+	}); ok {
+		return binder.BindManifestTransition(release, forward, lkg)
+	}
+	return nil
+}
+
 // CommittedForwardReconciler verifies a transition whose authority transaction
 // committed even though the original executor did not produce a verified
 // terminal receipt. Implementations must be read-only and bind all runtime
@@ -239,6 +251,9 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	}
 	if digestOf(rendered.Forward) != rendered.ForwardDigest || digestOf(rendered.LKG) != rendered.LKGDigest {
 		return ExecutionPlan{}, errors.New("rendered manifest digest mismatch")
+	}
+	if err := bindManifestTransition(cluster, release, rendered.Forward, rendered.LKG); err != nil {
+		return ExecutionPlan{}, err
 	}
 	lkg := TargetIdentity{
 		Present:        release.ExpectedPreviousPresent,
@@ -613,6 +628,10 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	release, err := releaseByID(releasePlan, prepared.Component)
 	if err != nil || prepared.Validate(releasePlan, forwardManifest, lkgManifest) != nil {
 		result.Reason = "execution-plan-invalid"
+		return sealResult(result)
+	}
+	if err := bindManifestTransition(cluster, release, forwardManifest, lkgManifest); err != nil {
+		result.Status, result.Reason, result.FailureDetail = "failed-no-write", "manifest-transition-invalid", err.Error()
 		return sealResult(result)
 	}
 	observationManifest := forwardManifest
