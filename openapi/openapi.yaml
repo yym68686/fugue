@@ -3717,7 +3717,15 @@ paths:
   /v1/edge/dns:
     get:
       operationId: edgeDNSBundle
-      summary: Edge DNS Bundle
+      summary: Retired Legacy DNS Bundle Endpoint
+      deprecated: true
+      description: >-
+        The independent DNS bundle serving protocol is retired. Authenticated,
+        correctly scoped legacy requests receive 410 and must retain their
+        current verified LKG. DNS consumers use their bound platform identity,
+        serving assignment and signed TrafficReleaseSet artifact instead.
+        No legacy bundle, business projection or ambient configuration is
+        returned, even when an old standalone full bundle remains stored.
       tags: [Edge]
       x-fugue-handler: handleEdgeDNSBundle
       security:
@@ -3766,19 +3774,8 @@ paths:
             minimum: 1
             maximum: 3600
       responses:
-        '200':
-          description: Successful response
-          headers:
-            ETag:
-              schema:
-                type: string
-            X-Fugue-DNS-Bundle-Version:
-              schema:
-                type: string
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EdgeDNSBundle"
+        '410':
+          $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/dns/nodes:

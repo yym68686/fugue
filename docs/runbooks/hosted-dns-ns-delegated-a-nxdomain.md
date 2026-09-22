@@ -49,13 +49,20 @@ dig @ns2.dns.fugue.pro example.com A +short
 
 If authoritative answers are correct but recursive resolvers are stale, wait for delegation and negative cache TTLs to expire.
 
-5. If authoritative answers are missing, inspect the edge DNS bundle:
+5. If authoritative answers are missing, inspect the signed traffic publication and its lineage:
 
 ```bash
-fugue api request GET '/v1/edge/dns?zone=example.com' --json
+fugue api request GET '/v1/platform-state/artifacts/release_set?scope_key=global&channel=full' --json
+fugue api request GET '/v1/platform-state/artifacts/release_set?scope_key=global&channel=gray' --json
+fugue api request GET '/v1/admin/platform-config/hostname-lineage?hostname=example.com' --json
+fugue api request GET '/v1/dns/nodes' --json
 ```
 
-Check that the hosted record is present and the DNS node generation is current.
+Check the applicable full/gray release, its DNS member and the node's actual
+serving generation. A newer gray applies only to its signed cohort. Inspect
+the exact release's expected consumer sets and convergence when its consumers
+disagree. The old `/v1/edge/dns` endpoint returns 410; a retained standalone
+bundle is migration evidence and cannot supply serving configuration.
 
 ## Likely Causes
 

@@ -266,7 +266,7 @@ func TestEdgeDNSBundleDerivesCustomDomainTargetsAndProbe(t *testing.T) {
 	}
 }
 
-func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
+func TestLegacyDNSMigrationReadsPublishedArtifact(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -304,7 +304,7 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&dns_node_id=dns-us-1&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=203.0.113.10&route_a_answer_ip=136.112.185.40&ttl=60", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleMigrationDNSBundleForTest(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -335,13 +335,13 @@ func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
 	}
 }
 
-func TestEdgeDNSBundleRejectsArtifactMissWithoutDerive(t *testing.T) {
+func TestLegacyDNSMigrationRejectsArtifactMissWithoutDerive(t *testing.T) {
 	t.Parallel()
 
 	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleMigrationDNSBundleForTest(recorder, req)
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
 	}
@@ -395,7 +395,7 @@ func TestEdgeDNSBundleRejectsInvalidSignedArtifact(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&dns_node_id=dns-us-1&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=203.0.113.10&ttl=60", nil)
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleMigrationDNSBundleForTest(recorder, req)
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
 	}
@@ -3152,5 +3152,5 @@ func serveEdgeDNSBundleRequest(t *testing.T, server *Server, recorder *httptest.
 			publishFullEdgeDNSArtifactForTest(t, server.store, server, newEdgeDNSBundleArtifact(options, bundle, now))
 		}
 	}
-	server.Handler().ServeHTTP(recorder, req)
+	server.handleMigrationDNSBundleForTest(recorder, req)
 }
