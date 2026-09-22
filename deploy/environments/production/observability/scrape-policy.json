@@ -20,5 +20,81 @@
     "edge-country-[a-z0-9-]+-front;health",
     "fugue-ssh-front;http",
     "fugue-ssh-front-country-[a-z0-9-]+;http"
+  ],
+  "additionalScrapeConfigs": [
+    {
+      "job_name": "fugue-etcd",
+      "scheme": "https",
+      "scrape_interval": "30s",
+      "scrape_timeout": "5s",
+      "sample_limit": 2500,
+      "body_size_limit": "2MB",
+      "authorization": {
+        "credentials_file": "/var/run/secrets/kubernetes.io/serviceaccount/token"
+      },
+      "tls_config": {
+        "ca_file": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+      },
+      "kubernetes_sd_configs": [
+        {
+          "role": "node",
+          "selectors": [
+            {
+              "role": "node",
+              "label": "node-role.kubernetes.io/etcd=true"
+            }
+          ]
+        }
+      ],
+      "relabel_configs": [
+        {
+          "source_labels": [
+            "__meta_kubernetes_node_label_node_role_kubernetes_io_etcd"
+          ],
+          "regex": "true",
+          "action": "keep"
+        },
+        {
+          "target_label": "__address__",
+          "replacement": "kubernetes.default.svc:443"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_node_name"
+          ],
+          "regex": "(.+)",
+          "target_label": "__metrics_path__",
+          "replacement": "/api/v1/nodes/$1:2381/proxy/metrics"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_node_name"
+          ],
+          "target_label": "node"
+        },
+        {
+          "source_labels": [
+            "__meta_kubernetes_node_name"
+          ],
+          "target_label": "instance"
+        }
+      ],
+      "metric_relabel_configs": [
+        {
+          "source_labels": [
+            "__name__"
+          ],
+          "regex": "etcd_.*",
+          "action": "keep"
+        }
+      ]
+    }
+  ],
+  "verificationQueries": [
+    "count(up{job=\"fugue-etcd\"} == 1) == count(up{job=\"fugue-etcd\"})",
+    "count((time() - timestamp(etcd_disk_backend_commit_duration_seconds_count{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})",
+    "count((time() - timestamp(etcd_disk_wal_fsync_duration_seconds_count{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})",
+    "count((time() - timestamp(etcd_mvcc_db_total_size_in_bytes{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})",
+    "count((time() - timestamp(etcd_server_has_leader{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})"
   ]
 }

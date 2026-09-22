@@ -1,4 +1,4 @@
-"""Reconcile one explicit scrape job and reload the existing process.
+"""Reconcile explicit scrape policy and reload the existing process.
 
 This independent configuration lane preserves the Pod and its TSDB. It does
 not deploy component code or derive serving policy from observed health.
@@ -9,6 +9,55 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlencode
+
+MANAGED_BEGIN = "  # BEGIN Fugue additional scrape configs\n"
+MANAGED_END = "  # END Fugue additional scrape configs\n"
+
+
+def additional_scrapes(config, policy):
+    """Own only a marked block; preserve every unrelated job and root setting.
+
+    JSON field values are YAML flow values. promtool validates the complete
+    configuration using the running Prometheus version before any mutation.
+    An empty list removes the managed block, allowing configuration rollback.
+    """
+    jobs = policy.get("additionalScrapeConfigs", [])
+    if not isinstance(jobs, list):
+        raise ValueError("additionalScrapeConfigs must be a list")
+    if config.count(MANAGED_BEGIN) != config.count(MANAGED_END) or config.count(MANAGED_BEGIN) > 1:
+        raise ValueError("ambiguous managed scrape block")
+    if MANAGED_BEGIN in config:
+        start, end = config.index(MANAGED_BEGIN), config.index(MANAGED_END)
+        if end < start:
+            raise ValueError("invalid managed scrape block")
+        config = config[:start] + config[end + len(MANAGED_END):]
+    names = set()
+    blocks = []
+    for job in jobs:
+        name = job.get("job_name", "") if isinstance(job, dict) else ""
+        if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", name) or name in names:
+            raise ValueError("invalid or duplicate additional scrape job name")
+        names.add(name)
+        # A job outside the owned block belongs to Helm or another policy.
+        if re.search(r"(?m)^\s*-\s*job_name:\s*[\"']?" + re.escape(name) + r"[\"']?\s*$", config):
+            raise ValueError("additional scrape job conflicts with existing job: " + name)
+        block = "  - job_name: " + name + "\n"
+        for key, value in job.items():
+            if not re.fullmatch(r"[a-z_]+", key):
+                raise ValueError("invalid scrape config field")
+            if key != "job_name":
+                block += "    " + key + ": " + json.dumps(value, allow_nan=False) + "\n"
+        blocks.append(block)
+    if not blocks:
+        return config
+    headers = list(re.finditer(r"(?m)^scrape_configs:[ \t]*\n", config))
+    if len(headers) != 1:
+        raise ValueError("expected one block-style scrape_configs section")
+    start = headers[0].end()
+    next_root = re.search(r"(?m)^[a-zA-Z_][a-zA-Z0-9_]*:", config[start:])
+    end = start + next_root.start() if next_root else len(config)
+    return config[:end].rstrip("\n") + "\n" + MANAGED_BEGIN + "".join(blocks) + MANAGED_END + config[end:]
 
 
 def run(args, data=None):
@@ -50,7 +99,28 @@ def project(config, policy):
             return replacement
         return ""
     block = rule.sub(replace, block)
-    return config[:start] + block + config[end:]
+    return additional_scrapes(config[:start] + block + config[end:], policy)
+
+
+def query_prometheus(proxy, expression):
+    response = json.loads(run(["kubectl", "get", "--raw", proxy + "/api/v1/query?" + urlencode({"query": expression})]))
+    if response.get("status") != "success":
+        raise RuntimeError("Prometheus verification query failed")
+    return response.get("data", {}).get("result", [])
+
+
+def verify_queries(proxy, queries):
+    # Each configured predicate returns a nonempty vector on success. A stale
+    # metric or an absent target must not be accepted as a successful rollout.
+    deadline = time.monotonic() + 120
+    pending = list(queries)
+    while pending:
+        pending = [expression for expression in queries if not query_prometheus(proxy, expression)]
+        if not pending:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Prometheus metric verification failed: " + "; ".join(pending))
+        time.sleep(5)
 
 
 def main():
@@ -85,7 +155,14 @@ def main():
                 raise RuntimeError("projected Prometheus config has not converged")
             time.sleep(5)
         run(base + ["exec", name, "-c", policy["container"], "--", "/bin/promtool", "check", "config", policy["configPath"]])
+        proxy = "/api/v1/namespaces/" + policy["namespace"] + "/pods/" + name + ":9090/proxy"
+        before = query_prometheus(proxy, "prometheus_config_last_reload_success_timestamp_seconds")
+        if not before:
+            raise RuntimeError("Prometheus config reload timestamp is unavailable")
+        previous_reload = max(float(sample["value"][1]) for sample in before)
         run(base + ["exec", name, "-c", policy["container"], "--", "/bin/sh", "-c", "kill -HUP 1"])
+        verify_queries(proxy, ["prometheus_config_last_reload_successful == 1",
+                               "prometheus_config_last_reload_success_timestamp_seconds > " + str(previous_reload)])
     # Inspect the live loaded configuration, not just the mounted file.
     for pod in pods:
         proxy = "/api/v1/namespaces/" + policy["namespace"] + "/pods/" + pod["metadata"]["name"] + ":9090/proxy/api/v1/status/config"
@@ -93,11 +170,14 @@ def main():
         while True:
             loaded = json.loads(run(["kubectl", "get", "--raw", proxy]))
             yaml = loaded.get("data", {}).get("yaml", "")
-            if "|".join(policy["componentPorts"]) in yaml:
+            extra_loaded = all(re.search(r"(?m)^\s*- job_name: " + re.escape(job["job_name"]) + r"\s*$", yaml)
+                               for job in policy.get("additionalScrapeConfigs", []))
+            if "|".join(policy["componentPorts"]) in yaml and extra_loaded:
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError("Prometheus did not load the new scrape policy")
             time.sleep(2)
+        verify_queries(proxy.removesuffix("/api/v1/status/config"), policy.get("verificationQueries", []))
     print("Prometheus scrape policy loaded without replacing Pods or TSDB")
 
 
