@@ -88,6 +88,9 @@ func pgReleaseWorkloadSourceEvents(ctx context.Context, db interface {
 }
 
 func migrateReleaseWorkload(current, expected model.AppRelease, op, source model.Operation, workload model.AppReleaseWorkload, events []model.AuditEvent) (model.AppRelease, error) {
+	// GetOperation attaches independently stored timing observations; the row
+	// lock read intentionally excludes them. They are not executable provenance.
+	op.ControllerTimingSegments, source.ControllerTimingSegments = nil, nil
 	if !reflect.DeepEqual(current, expected) || !reflect.DeepEqual(op, source) || current.RevisionWorkload != nil ||
 		current.SpecSnapshot == nil || op.DesiredSpec == nil || op.Type != model.OperationTypeDeploy || op.ID != workload.OperationID ||
 		op.CreatedAt.IsZero() || op.CompletedAt == nil || op.CompletedAt.Before(op.CreatedAt) ||

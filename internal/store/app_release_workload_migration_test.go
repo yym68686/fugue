@@ -87,6 +87,13 @@ func testHistoricalReleaseWorkloadMigration(t *testing.T, s *Store, app model.Ap
 			if err != nil {
 				t.Fatal(err)
 			}
+			if _, err = s.SetOperationControllerTiming(op.ID, []model.OperationControllerTimingSegment{{Name: "apply", DurationMilliseconds: 42}}); err != nil {
+				t.Fatal(err)
+			}
+			op, err = s.GetOperation(op.ID)
+			if err != nil || len(op.ControllerTimingSegments) != 1 {
+				t.Fatal("missing timing facts", err)
+			}
 			w := model.AppReleaseWorkload{OperationID: op.ID, Namespace: "tenant", DeploymentName: "revision", DeploymentUID: "dep-uid", DeploymentGeneration: 1, ServiceName: "revision", ServiceUID: "svc-uid", ReleaseKey: "key", RuntimeID: r.RuntimeID, ImageRef: r.ResolvedImageRef}
 			id, sourceErr := s.FindAppReleaseWorkloadSource(context.Background(), r)
 			invalidSource := scenario == "missing_source" || scenario == "wrong_actor" || scenario == "wrong_app" || scenario == "ambiguous_source"

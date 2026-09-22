@@ -22,7 +22,7 @@ func (s *Service) migrateSafeRolloutWorkload(ctx context.Context, app model.App,
 	if historical.Spec.RuntimeID != release.RuntimeID || !s.migrationImageRefsEquivalent(historical, historical.Spec.Image, release.ResolvedImageRef) {
 		return release, fmt.Errorf("historical executable spec differs from its source operation")
 	}
-	historical = s.Renderer.PrepareApp(s.appWithResolvedLaunchOverride(ctx, historical))
+	historical = s.Renderer.PrepareApp(historical)
 	base, err := s.managedSchedulingConstraints(historical.Spec.RuntimeID)
 	if err != nil {
 		return release, err
@@ -37,9 +37,13 @@ func (s *Service) migrateSafeRolloutWorkload(ctx context.Context, app model.App,
 		return release, err
 	}
 	live, found, err := client.getDeployment(ctx, runtime.NamespaceForTenant(app.TenantID), target.DeploymentName)
-	if err != nil || !found {
-		return release, fmt.Errorf("historical revision Deployment is unavailable")
+	if err != nil {
+		return release, err
 	}
+	if !found {
+		return release, store.ErrNotFound
+	}
+	historical = s.Renderer.PrepareApp(s.appWithResolvedLaunchOverride(ctx, historical))
 	// Keep its observed placement rather than choosing a new node for an old
 	// workload. It must still satisfy the runtime's required node labels.
 	scheduling := runtime.SchedulingConstraints{NodeSelector: live.Spec.Template.Spec.NodeSelector, Tolerations: live.Spec.Template.Spec.Tolerations}
