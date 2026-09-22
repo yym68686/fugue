@@ -45,6 +45,9 @@ x-fugue-traffic-serving-evidence:
     Positive route evidence requires matching signed parent/child provenance,
     a durable verified bundle, matching route index and Caddy applied version,
     and fresh nonce-bound HTTPS route proofs through the local Caddy listener.
+    Locally excluded routes require an explicit excluded-state proof matching
+    the signed exclusion and exact loaded route; they never provide DNS placement
+    or application traffic readiness evidence.
     TLS evidence additionally verifies every locally owned certificate reference.
     Assignment, activation and serving bundle are rechecked before heartbeat.
     Durable receipts record artifact references and fresh probe results; restarts
@@ -332,7 +335,7 @@ x-fugue-edge-route-probe:
     headers:
       X-Fugue-Route-Probe: '1'
       X-Fugue-Route-Probe-Nonce: 32 lowercase hexadecimal characters from a fresh random nonce
-      X-Fugue-Route-Probe-State: Optional disabled or unavailable; proves an exact loaded local error-page route with no upstream. Omission requires active routing.
+      X-Fugue-Route-Probe-State: Optional disabled, unavailable, or excluded. Disabled/unavailable prove an exact loaded local error-page route with no upstream; excluded proves this exact worker or group is excluded by the loaded route. Omission requires active routing.
   response:
     success: 204
     headers:
@@ -343,8 +346,8 @@ x-fugue-edge-route-probe:
       X-Fugue-Route-Valid-Until: Original signed bundle expiry in RFC3339Nano
       X-Fugue-Route-Edge-Id: Loaded worker identity
       X-Fugue-Route-Edge-Group: Loaded worker group identity
-      X-Fugue-Route-Probe-State: Echoes the explicitly requested inactive state only when that exact local route is loaded with no upstream.
-    errors: Invalid probe requests return 400; missing routes return 404; mismatched state, inactive routes without an explicit state request, foreign-group, expired, or excluded routes return 503. Errors contain no proof headers.
+      X-Fugue-Route-Probe-State: Echoes the explicitly requested inactive state for a local route without upstreams, or excluded only when this worker/group is explicitly excluded by the exact loaded route.
+    errors: Invalid probe requests return 400; missing routes return 404; mismatched state, inactive routes without an explicit state request, foreign-group, expired, or excluded routes without an explicit excluded-state request return 503. Errors contain no proof headers.
   semantics: |-
     This protocol runs on the Edge proxy listener, not the control API. It reads one
     immutable route index snapshot and never proxies to an origin or peer. Responses

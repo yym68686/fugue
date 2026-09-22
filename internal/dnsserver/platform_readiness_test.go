@@ -74,6 +74,7 @@ func TestDNSReadinessRejectsWrongIdentityFutureStateAndBoundsFreshness(t *testin
 		"identity": func(p *routeprobe.Proof) { p.EdgeID = "other" },
 		"digest":   func(p *routeprobe.Proof) { p.Digest = "other" },
 		"state":    func(p *routeprobe.Proof) { p.State = "disabled" },
+		"excluded": func(p *routeprobe.Proof) { p.State = "excluded" },
 		"future":   func(p *routeprobe.Proof) { p.CheckedAt = time.Now().Add(time.Hour) },
 		"expired":  func(p *routeprobe.Proof) { p.ValidUntil = time.Now().Add(-time.Second) },
 	} {

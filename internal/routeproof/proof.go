@@ -23,6 +23,7 @@ const (
 	GroupHeader   = "X-Fugue-Route-Edge-Group"
 	StateHeader   = "X-Fugue-Route-Probe-State"
 	TrafficHeader = "X-Fugue-Traffic-Release"
+	StateExcluded = "excluded"
 	// AppTrafficHeader carries a digest of the release identities, upstream
 	// metadata and weights actually loaded by Edge for an application route.
 	// The payload is intentionally never returned.

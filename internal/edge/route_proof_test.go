@@ -10,8 +10,61 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/routeprobe"
 	"fugue/internal/routeproof"
 )
+
+func TestExcludedRouteProofCannotAuthorizeServingOrContactOrigin(t *testing.T) {
+	for _, scenario := range []string{"edge", "group", "omitted", "wrong_edge", "wrong_group", "foreign", "candidate", "expired", "inactive_request"} {
+		t.Run(scenario, func(t *testing.T) {
+			var calls atomic.Int32
+			origin := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+			defer origin.Close()
+			s := NewService(config.EdgeConfig{EdgeID: "edge-a", EdgeGroupID: "group-a"}, nil)
+			route := model.EdgeRouteBinding{Hostname: "app.example.test", PathPrefix: "/", Status: model.EdgeRouteStatusActive, RoutePolicy: model.EdgeRoutePolicyEnabled, EdgeGroupID: "group-a", UpstreamURL: origin.URL, ExcludedEdgeIDs: []string{"edge-a"}}
+			bundle := model.EdgeRouteBundle{Version: "bound", ValidUntil: time.Now().Add(time.Minute)}
+			state := routeproof.StateExcluded
+			switch scenario {
+			case "group":
+				route.ExcludedEdgeIDs, route.ExcludedEdgeGroupIDs = nil, []string{"group-a"}
+			case "omitted":
+				state = ""
+			case "wrong_edge":
+				route.ExcludedEdgeIDs = []string{"other-edge"}
+			case "wrong_group":
+				route.ExcludedEdgeIDs, route.ExcludedEdgeGroupIDs = nil, []string{"other-group"}
+			case "foreign":
+				route.EdgeGroupID = "other-group"
+			case "expired":
+				bundle.ValidUntil = time.Now().Add(-time.Minute)
+			case "inactive_request":
+				state = model.EdgeRouteStatusDisabled
+			}
+			bundle.Routes = []model.EdgeRouteBinding{route}
+			s.recordSyncSuccessWithPublication(bundle, "", time.Now(), false, routePublicationMetadata{Candidate: scenario == "candidate"})
+			r := httptest.NewRequest(http.MethodHead, "https://app.example.test/", nil)
+			r.Header.Set(routeproof.RequestHeader, "1")
+			r.Header.Set(routeproof.NonceHeader, "0123456789abcdef0123456789abcdef")
+			if state != "" {
+				r.Header.Set(routeproof.StateHeader, state)
+			}
+			w := httptest.NewRecorder()
+			s.ProxyHandler().ServeHTTP(w, r)
+			if scenario == "edge" || scenario == "group" {
+				proof, err := routeprobe.ParseResponse(w.Result(), r.Header.Get(routeproof.NonceHeader), time.Now())
+				digest, _ := routeproof.Digest(route)
+				if err != nil || proof.State != routeproof.StateExcluded || proof.Digest != digest || proof.AppTrafficDigest != "" {
+					t.Fatal("excluded proof differs", proof, err)
+				}
+			} else if w.Code != http.StatusServiceUnavailable || w.Header().Get(routeproof.DigestHeader) != "" {
+				t.Fatal("invalid exclusion obtained evidence", w)
+			}
+			if calls.Load() != 0 {
+				t.Fatal("exclusion proof reached origin")
+			}
+		})
+	}
+}
 
 func TestRouteProofUsesLoadedPathAndNeverContactsOrigin(t *testing.T) {
 	var calls atomic.Int32

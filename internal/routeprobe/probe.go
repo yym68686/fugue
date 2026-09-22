@@ -113,7 +113,7 @@ func ParseResponse(response *http.Response, nonce string, now time.Time) (Proof,
 		return Proof{}, fail
 	}
 	state := response.Header.Get(routeproof.StateHeader)
-	if len(response.Header.Values(routeproof.StateHeader)) > 1 || (len(response.Header.Values(routeproof.StateHeader)) == 1 && state != "disabled" && state != "unavailable") {
+	if len(response.Header.Values(routeproof.StateHeader)) > 1 || (len(response.Header.Values(routeproof.StateHeader)) == 1 && state != "disabled" && state != "unavailable" && state != routeproof.StateExcluded) {
 		return Proof{}, fail
 	}
 	digest := response.Header.Get(routeproof.DigestHeader)

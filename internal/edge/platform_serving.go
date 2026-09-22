@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -420,10 +421,7 @@ func (s *Service) observePlatformServingRoutes(ctx context.Context, bundle model
 				p, e := probe(ctx, routes[i], time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
 				now := time.Now().UTC()
 				d, _ := routeproof.Digest(routes[i])
-				state := ""
-				if routes[i].Status != model.EdgeRouteStatusActive {
-					state = routes[i].Status
-				}
+				state := s.platformServingRouteProofState(routes[i])
 				if e == nil && (p.Digest != d || p.Version != bundle.Version || p.EdgeID != s.Config.EdgeID || p.GroupID != s.Config.EdgeGroupID || p.State != state || p.CheckedAt.IsZero() || p.CheckedAt.After(now) || !p.ValidUntil.After(now)) {
 					e = errors.New("traffic route proof mismatch")
 				}
@@ -449,6 +447,16 @@ func (s *Service) observePlatformServingRoutes(ctx context.Context, bundle model
 		}
 	}
 	return proofs, ctx.Err()
+}
+
+func (s *Service) platformServingRouteProofState(route model.EdgeRouteBinding) string {
+	if slices.Contains(route.ExcludedEdgeIDs, s.Config.EdgeID) || slices.Contains(route.ExcludedEdgeGroupIDs, s.Config.EdgeGroupID) {
+		return routeproof.StateExcluded
+	}
+	if route.Status != model.EdgeRouteStatusActive {
+		return route.Status
+	}
+	return ""
 }
 
 func (s *Service) probePlatformServingRoute(ctx context.Context, route model.EdgeRouteBinding, timeout time.Duration) (routeprobe.Proof, error) {
@@ -489,8 +497,8 @@ func (s *Service) probePlatformServingRouteWithRoots(ctx context.Context, route 
 	}
 	req.Header.Set(routeproof.RequestHeader, "1")
 	req.Header.Set(routeproof.NonceHeader, token)
-	if route.Status != model.EdgeRouteStatusActive {
-		req.Header.Set(routeproof.StateHeader, route.Status)
+	if state := s.platformServingRouteProofState(route); state != "" {
+		req.Header.Set(routeproof.StateHeader, state)
 	}
 	response, err := client.Do(req)
 	if err != nil {

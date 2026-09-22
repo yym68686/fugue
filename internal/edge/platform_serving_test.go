@@ -327,6 +327,16 @@ func TestTrafficServingRouteProbeUsesTLSAndNonce(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(proof.TrafficRelease, binding) {
 		t.Fatal("HTTPS traffic proof lost release binding", proof, err)
 	}
+	excluded := route
+	excluded.ExcludedEdgeGroupIDs = []string{s.Config.EdgeGroupID}
+	s.recordSyncSuccess(model.EdgeRouteBundle{Version: "excluded", ValidUntil: now.Add(time.Minute), TrafficRelease: binding, Routes: []model.EdgeRouteBinding{excluded}}, "", now, false)
+	proof, err = s.probePlatformServingRouteWithRoots(context.Background(), excluded, time.Second, roots)
+	if err != nil || proof.State != routeproof.StateExcluded || proof.AppTrafficDigest != "" || !reflect.DeepEqual(proof.TrafficRelease, binding) {
+		t.Fatal("excluded route did not prove exact negative state", proof, err)
+	}
+	if _, err = s.probePlatformServingRouteWithRoots(context.Background(), route, time.Second, roots); err == nil {
+		t.Fatal("excluded route returned active readiness proof")
+	}
 	binding = trafficbinding.Clone(binding)
 	binding.ReleaseChannel = "shadow"
 	s.recordSyncSuccess(model.EdgeRouteBundle{Version: "invalid", ValidUntil: now.Add(time.Minute), TrafficRelease: binding, Routes: []model.EdgeRouteBinding{route}}, "", now, false)
@@ -339,5 +349,30 @@ func TestTrafficServingRouteProbeUsesTLSAndNonce(t *testing.T) {
 	route.Hostname = "other.example.test"
 	if _, err = s.probePlatformServingRouteWithRoots(context.Background(), route, time.Second, roots); err == nil {
 		t.Fatal("wrong hostname accepted")
+	}
+}
+
+func TestTrafficServingObservationRequiresExactExclusionProof(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		s := NewService(config.EdgeConfig{EdgeID: "edge-a", EdgeGroupID: "group-a"}, nil)
+		route := model.EdgeRouteBinding{Hostname: "app.example.test", PathPrefix: "/", Status: model.EdgeRouteStatusActive, EdgeGroupID: "group-a", RoutePolicy: model.EdgeRoutePolicyEnabled, ExcludedEdgeIDs: []string{"edge-a"}}
+		bundle := model.EdgeRouteBundle{Version: "bound", Routes: []model.EdgeRouteBinding{route}}
+		policy := &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 10, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 1, MaxProbes: 10}
+		proofs, err := s.observePlatformServingRoutes(context.Background(), bundle, policy, func(context.Context, model.EdgeRouteBinding, time.Duration) (routeprobe.Proof, error) {
+			digest, _ := routeproof.Digest(route)
+			now := time.Now().UTC()
+			state := routeproof.StateExcluded
+			if mismatch {
+				state = ""
+			}
+			return routeprobe.Proof{Digest: digest, Version: bundle.Version, EdgeID: "edge-a", GroupID: "group-a", State: state, CheckedAt: now, ValidUntil: now.Add(time.Minute)}, nil
+		})
+		if mismatch {
+			if err == nil {
+				t.Fatal("active proof accepted for excluded route")
+			}
+		} else if err != nil || len(proofs) != 1 || proofs[0].State != routeproof.StateExcluded {
+			t.Fatal("negative exclusion proof was skipped or rejected", proofs, err)
+		}
 	}
 }

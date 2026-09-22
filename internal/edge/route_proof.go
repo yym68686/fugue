@@ -17,7 +17,7 @@ import (
 func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	expectedState := r.Header.Get(routeproof.StateHeader)
-	if len(r.Header.Values(routeproof.StateHeader)) > 1 || (len(r.Header.Values(routeproof.StateHeader)) == 1 && expectedState != model.EdgeRouteStatusDisabled && expectedState != model.EdgeRouteStatusUnavailable) {
+	if len(r.Header.Values(routeproof.StateHeader)) > 1 || (len(r.Header.Values(routeproof.StateHeader)) == 1 && expectedState != model.EdgeRouteStatusDisabled && expectedState != model.EdgeRouteStatusUnavailable && expectedState != routeproof.StateExcluded) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -35,16 +35,19 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	stateMatches := !fallback && route.Status == model.EdgeRouteStatusActive
-	if expectedState != "" {
+	excluded := slices.Contains(route.ExcludedEdgeIDs, s.Config.EdgeID) || slices.Contains(route.ExcludedEdgeGroupIDs, s.Config.EdgeGroupID)
+	stateMatches := !fallback && route.Status == model.EdgeRouteStatusActive && !excluded
+	if expectedState == routeproof.StateExcluded {
+		// This proves the loaded exclusion only, never serving eligibility.
+		stateMatches = excluded && routeMatchesCurrentEdgeGroup(route, s.Config.EdgeGroupID)
+	} else if expectedState != "" {
 		// Inactive index entries use the error-page fallback path even when
 		// local. Check actual ownership and forbid any remaining upstream.
-		stateMatches = route.Status == expectedState && routeMatchesCurrentEdgeGroup(route, s.Config.EdgeGroupID) && route.UpstreamURL == "" && len(route.Upstreams) == 0
+		stateMatches = !excluded && route.Status == expectedState && routeMatchesCurrentEdgeGroup(route, s.Config.EdgeGroupID) && route.UpstreamURL == "" && len(route.Upstreams) == 0
 	}
 	if index.publication.Candidate || !stateMatches || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) ||
 		strings.TrimSpace(s.Config.EdgeID) == "" || strings.TrimSpace(s.Config.EdgeGroupID) == "" || version == "" ||
-		!index.validUntil.After(time.Now()) || slices.Contains(route.ExcludedEdgeIDs, s.Config.EdgeID) ||
-		slices.Contains(route.ExcludedEdgeGroupIDs, s.Config.EdgeGroupID) {
+		!index.validUntil.After(time.Now()) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
