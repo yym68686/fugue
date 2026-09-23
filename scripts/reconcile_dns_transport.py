@@ -83,6 +83,32 @@ def validate_existing(current, desired):
     digest = "sha256:" + hashlib.sha256(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if digest != metadata.get("annotations", {}).get(DIGEST):
         raise ValueError("current Service differs from its last transport declaration")
+    for owner in metadata.get("managedFields", []):
+        if owner.get("manager") == MANAGER:
+            continue
+        fields = owner.get("fieldsV1", {})
+        owned_meta = fields.get("f:metadata", {})
+        if fields.get("f:spec") or any("f:" + key in owned_meta.get("f:annotations", {}) for key in [GENERATION, DIGEST]) or "f:app.kubernetes.io/managed-by" in owned_meta.get("f:labels", {}):
+            raise ValueError("transport fields have a foreign manager")
+
+
+def update_patch(current, desired):
+    validate_existing(current, desired)
+    metadata = current["metadata"]
+    if not metadata.get("uid") or not metadata.get("resourceVersion"):
+        raise ValueError("Service UID/resourceVersion required for update")
+    patch = [{"op": "test", "path": "/metadata/uid", "value": metadata["uid"]},
+             {"op": "test", "path": "/metadata/resourceVersion", "value": metadata["resourceVersion"]},
+             {"op": "test", "path": "/spec", "value": current["spec"]},
+             {"op": "test", "path": "/metadata/annotations", "value": metadata["annotations"]},
+             {"op": "test", "path": "/metadata/labels", "value": metadata["labels"]}]
+    for key, value in desired["spec"].items():
+        if current["spec"].get(key) != value:
+            patch.append({"op": "add", "path": "/spec/" + key, "value": value})
+    for key, value in desired["metadata"]["annotations"].items():
+        if metadata["annotations"].get(key) != value:
+            patch.append({"op": "add", "path": "/metadata/annotations/" + key.replace("~", "~0").replace("/", "~1"), "value": value})
+    return patch
 
 
 def kubectl(*args, body=None):
@@ -121,14 +147,16 @@ def reconcile(config, apply=False):
         if listener["address"] not in addresses:
             raise ValueError("public listener address has no ready node-local backend")
         if current:
-            desired["metadata"]["resourceVersion"] = current["metadata"]["resourceVersion"]
-        command = ["apply", "--server-side", "--field-manager=" + MANAGER] if current else ["create", "--field-manager=" + MANAGER]
-        body = json.dumps(desired)
-        kubectl(*command, "--dry-run=server", "-f", "-", body=body)
+            command = ["patch", "service", listener["name"], "-n", config["namespace"], "--type=json", "--field-manager=" + MANAGER, "--patch-file=/dev/stdin"]
+            body = json.dumps(update_patch(current, desired))
+        else:
+            command = ["create", "--field-manager=" + MANAGER, "-f", "-"]
+            body = json.dumps(desired)
+        kubectl(*command, "--dry-run=server", body=body)
         planned.append((command, body, listener["name"]))
     if apply:
         for command, body, name in planned:
-            kubectl(*command, "-f", "-", body=body)
+            kubectl(*command, body=body)
             print("reconciled Service/" + name, flush=True)
     return len(planned)
 

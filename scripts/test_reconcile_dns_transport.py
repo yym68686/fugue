@@ -43,6 +43,25 @@ class TransportTests(unittest.TestCase):
             mutate(config)
             with self.assertRaises(ValueError): self.load(config)
 
+    def test_update_binds_identity_and_preserves_allocated_and_foreign_fields(self):
+        config = self.config()
+        old = transport.service(config, config["listeners"][0])
+        old["metadata"].update(uid="fixed-uid", resourceVersion="17")
+        old["metadata"]["annotations"]["unrelated"] = "keep"
+        old["spec"]["clusterIP"] = "10.0.0.1"
+        config["generation"] = 2
+        config["listeners"][0]["port"] = 53
+        desired = transport.service(config, config["listeners"][0])
+        patch = transport.update_patch(old, desired)
+        self.assertEqual(patch[:2], [{"op": "test", "path": "/metadata/uid", "value": "fixed-uid"}, {"op": "test", "path": "/metadata/resourceVersion", "value": "17"}])
+        self.assertEqual(patch[2], {"op": "test", "path": "/spec", "value": old["spec"]})
+        changes = [p for p in patch if p["op"] != "test"]
+        self.assertEqual({p["path"] for p in changes}, {"/spec/ports", "/metadata/annotations/transport.fugue.dev~1generation", "/metadata/annotations/transport.fugue.dev~1digest"})
+        self.assertEqual(old["metadata"]["annotations"]["unrelated"], "keep")
+        self.assertEqual(old["spec"]["clusterIP"], "10.0.0.1")
+        old["metadata"]["managedFields"] = [{"manager": "other", "fieldsV1": {"f:spec": {"f:ports": {}}}}]
+        with self.assertRaises(ValueError): transport.update_patch(old, desired)
+
     def test_preflight_all_listeners_before_any_write(self):
         config = self.config()
         calls = []
