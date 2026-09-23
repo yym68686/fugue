@@ -164,23 +164,23 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
 		return
 	}
-	snapshot, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
-	if err != nil {
-		s.writeStoreError(w, err)
+	group, ok := routeDiagnosticGroup(w, r)
+	if !ok {
 		return
 	}
-	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups(r.Context())
+	snapshot, healthyEdgeGroups, err := s.publishedRouteDiagnostics(r.Context(), group)
 	if err != nil {
-		s.writeStoreError(w, err)
+		writeRouteDiagnosticError(w, err)
 		return
 	}
-	response := model.RouteExplainResponse{
-		Hostname:          hostname,
-		ServingMode:       "unrouted",
-		HealthyEdgeGroups: healthyEdgeGroups,
-		GeneratedAt:       time.Now().UTC(),
+	response := publishedRouteExplainResponse{
+		TrafficRelease: snapshot.TrafficRelease,
+		RouteExplainResponse: model.RouteExplainResponse{
+			Hostname: hostname, ServingMode: "unrouted",
+			HealthyEdgeGroups: healthyEdgeGroups, GeneratedAt: time.Now().UTC(),
+		},
 	}
-	for _, route := range edgeRouteIntentDiagnosticBindings(snapshot.Routes) {
+	for _, route := range publishedRouteDiagnosticBindings(snapshot, healthyEdgeGroups) {
 		if !strings.EqualFold(normalizeExternalAppDomain(route.Hostname), hostname) {
 			continue
 		}
@@ -193,6 +193,7 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 			response.Reasons = routeExplainReasons(route)
 		}
 	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"explain": response})
 }
 
@@ -202,16 +203,21 @@ func (s *Server) handleListRouteServingModes(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
 		return
 	}
-	snapshot, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
+	group, ok := routeDiagnosticGroup(w, r)
+	if !ok {
+		return
+	}
+	snapshot, healthy, err := s.publishedRouteDiagnostics(r.Context(), group)
 	if err != nil {
-		s.writeStoreError(w, err)
+		writeRouteDiagnosticError(w, err)
 		return
 	}
 	generatedAt := time.Now().UTC()
-	routes := routeServingModes(edgeRouteIntentDiagnosticBindings(snapshot.Routes), generatedAt)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"routes":       routes,
-		"generated_at": generatedAt,
+	routes := routeServingModes(publishedRouteDiagnosticBindings(snapshot, healthy), generatedAt)
+	w.Header().Set("Cache-Control", "private, no-store")
+	httpx.WriteJSON(w, http.StatusOK, publishedRouteServingModesResponse{
+		TrafficRelease: snapshot.TrafficRelease, HealthyEdgeGroups: healthy,
+		RouteServingModeListResponse: model.RouteServingModeListResponse{Routes: routes, GeneratedAt: generatedAt},
 	})
 }
 

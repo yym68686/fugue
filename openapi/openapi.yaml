@@ -1661,10 +1661,13 @@ paths:
     get:
       operationId: listRouteServingModes
       summary: List Route Serving Modes
+      description: Read-only projection of the signed published TrafficReleaseSet and fresh consumer facts. Business rows and process route configuration are never serving evidence. Without edge_group_id all currently assigned groups must select the same publication; mixed gray/full publications return 409. Missing or invalid artifacts or prepared membership return 503. Stale consumer evidence is reported as degraded, not replaced with business intent.
       tags: [Admin]
       x-fugue-handler: handleListRouteServingModes
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RouteDiagnosticEdgeGroup"
       responses:
         '200':
           description: Successful response
@@ -1672,17 +1675,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RouteServingModeListResponse"
+        '409':
+          description: Current groups select different publications; specify edge_group_id.
+        '503':
+          description: Published artifacts or prepared membership are unavailable.
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/routes/explain/{hostname}:
     get:
       operationId: explainRoute
       summary: Explain Route
+      description: Explains the signed published route and its exact consumer evidence, without compiling business rows or reading ambient routes. A missing hostname in an otherwise valid publication is unrouted. Mixed publications require edge_group_id; missing or invalid publication returns 503. The traffic_release field binds the response to artifact lineage and release fence. Healthy groups require fresh route, DNS and TLS consumer evidence.
       tags: [Admin]
       x-fugue-handler: handleExplainRoute
       security:
         - BearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/RouteDiagnosticEdgeGroup"
         - in: path
           name: hostname
           required: true
@@ -1695,6 +1704,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RouteExplainResponseEnvelope"
+        '409':
+          description: Current groups select different publications; specify edge_group_id.
+        '503':
+          description: Published artifacts or prepared membership are unavailable.
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform/autonomy/status:
@@ -13288,6 +13301,15 @@ components:
       in: query
       name: download_token
   parameters:
+    RouteDiagnosticEdgeGroup:
+      in: query
+      name: edge_group_id
+      required: false
+      description: One current publication cohort. Required when gray and full groups select different releases. Duplicate, empty or noncanonical values are rejected.
+      schema:
+        type: string
+        maxLength: 128
+        pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'
     IdPathParam:
       in: path
       name: id
@@ -28972,6 +28994,8 @@ components:
       type: object
       additionalProperties: true
       properties:
+        traffic_release:
+          $ref: "#/components/schemas/TrafficReleaseBinding"
         hostname:
           type: string
         serving_mode:
@@ -29034,6 +29058,12 @@ components:
       additionalProperties: false
       required: [routes, generated_at]
       properties:
+        traffic_release:
+          $ref: "#/components/schemas/TrafficReleaseBinding"
+        healthy_edge_groups:
+          type: object
+          additionalProperties:
+            type: boolean
         routes:
           type: array
           items:
