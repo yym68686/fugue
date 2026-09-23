@@ -30,6 +30,14 @@ type platformConsumerIdentityPolicy struct {
 	ArtifactKinds []string `json:"artifact_kinds"`
 }
 
+func decodePlatformConsumerIdentityPolicy(raw string) (platformConsumerIdentityPolicy, bool) {
+	var policy platformConsumerIdentityPolicy
+	decoder := json.NewDecoder(bytes.NewBufferString(raw))
+	decoder.DisallowUnknownFields()
+	valid := len(raw) <= 4096 && decoder.Decode(&policy) == nil && decoder.Decode(&struct{}{}) == io.EOF && policy.Version == "v1" && policy.Component != "" && policy.ScopeKey != "" && policy.ScopeKey == strings.ToLower(strings.TrimSpace(policy.ScopeKey)) && len(policy.ArtifactKinds) > 0
+	return policy, valid
+}
+
 func (s *Server) handleExchangePlatformConsumerIdentity(w http.ResponseWriter, r *http.Request) {
 	// Deliberately require a header-only credential; query credentials are not
 	// accepted and neither Kubernetes nor signing errors include token material.
@@ -73,11 +81,8 @@ func (s *Server) handleExchangePlatformConsumerIdentity(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusForbidden, "live Pod identity does not match the credential")
 		return
 	}
-	raw := pod.Annotations[platformConsumerIdentityAnnotation]
-	var policy platformConsumerIdentityPolicy
-	decoder := json.NewDecoder(bytes.NewBufferString(raw))
-	decoder.DisallowUnknownFields()
-	if len(raw) > 4096 || decoder.Decode(&policy) != nil || decoder.Decode(&struct{}{}) != io.EOF || policy.Version != "v1" || policy.Component == "" || policy.ScopeKey == "" || policy.ScopeKey != strings.ToLower(strings.TrimSpace(policy.ScopeKey)) || len(policy.ArtifactKinds) == 0 {
+	policy, valid := decodePlatformConsumerIdentityPolicy(pod.Annotations[platformConsumerIdentityAnnotation])
+	if !valid {
 		httpx.WriteError(w, http.StatusForbidden, "Pod has no valid consumer authorization")
 		return
 	}
