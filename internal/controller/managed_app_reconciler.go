@@ -140,6 +140,14 @@ func (s *Service) reconcileManagedApps(ctx context.Context) error {
 			s.Logger.Printf("managed app %s/%s reconcile error: %v", managed.Metadata.Namespace, managed.Metadata.Name, err)
 		}
 	}
+	if err := client.reconcileTerminatingPostgresCredentialSecrets(ctx); err != nil {
+		if firstErr == nil {
+			firstErr = err
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("managed postgres credential deletion recovery deferred: %v", err)
+		}
+	}
 	if s.Logger != nil {
 		if summary := client.writeStats.summary(); summary != "" {
 			s.Logger.Printf(
@@ -275,6 +283,11 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 			return fmt.Errorf("patch deleting status for managed app %s/%s: %w", namespace, managed.Metadata.Name, err)
 		}
 		return nil
+	}
+	var credentialErr error
+	app, credentialErr = s.reconcileManagedPostgresCredentials(ctx, client, namespace, app)
+	if credentialErr != nil {
+		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile postgres credentials: %w", credentialErr))
 	}
 	if syncStoredManagedAppSnapshot {
 		app = s.appWithResolvedLaunchOverride(ctx, app)
@@ -2439,6 +2452,9 @@ func managedBackingServiceClusterDeploymentReady(deployment runtime.ManagedBacki
 	if !cloudNativePGClusterNonHibernated(cluster) {
 		return false
 	}
+	if !managedPostgresCredentialAcknowledged(deployment, cluster) {
+		return false
+	}
 	desiredInstances := managedBackingServiceDesiredInstances(deployment, cluster)
 	if cluster.Status.ReadyInstances < desiredInstances {
 		return false
@@ -2474,6 +2490,9 @@ func managedBackingServiceClusterRuntimeStatus(deployment runtime.ManagedBacking
 	}
 	if failureMessage := cloudNativePGHibernationFailureMessage(cluster); failureMessage != "" {
 		return model.ManagedPostgresRuntimePhaseError, failureMessage
+	}
+	if !deployment.Suspended && !managedPostgresCredentialAcknowledged(deployment, cluster) {
+		return model.ManagedPostgresRuntimePhaseUnknown, fmt.Sprintf("waiting for backing service cluster %s credential reference and password version acknowledgement", clusterName)
 	}
 
 	desiredInstances := managedBackingServiceDesiredInstances(deployment, cluster)

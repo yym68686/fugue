@@ -628,6 +628,12 @@ func reconcileManagedPostgresRuntimeResources(desired, current *model.AppPostgre
 	if desired == nil {
 		return nil
 	}
+	if desired.CredentialSecretName != "" && (current == nil || desired.CredentialSecretName != current.CredentialSecretName) {
+		return ErrInvalidInput
+	}
+	if current != nil {
+		desired.CredentialSecretName = current.CredentialSecretName
+	}
 	if desired.RuntimeResources != nil {
 		if current == nil || current.RuntimeResources == nil || *desired.RuntimeResources != *current.RuntimeResources {
 			return ErrInvalidInput

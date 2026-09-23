@@ -2161,6 +2161,7 @@ type AppPostgresSpec struct {
 	User                             string `json:"user,omitempty"`
 	Password                         string `json:"password,omitempty"`
 	ServiceName                      string `json:"service_name,omitempty"`
+	CredentialSecretName             string `json:"credential_secret_name,omitempty"`
 	RuntimeID                        string `json:"runtime_id,omitempty"`
 	FailoverTargetRuntimeID          string `json:"failover_target_runtime_id,omitempty"`
 	PrimaryNodeName                  string `json:"primary_node_name,omitempty"`

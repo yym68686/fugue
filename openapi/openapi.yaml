@@ -19608,6 +19608,10 @@ components:
           type: string
         service_name:
           type: string
+        credential_secret_name:
+          type: string
+          readOnly: true
+          description: Persisted Kubernetes credential identity owned by this backing service. Fugue allocates it independently of display names and preserves it across code releases, renames and ordinary configuration updates. Existing credentials are adopted only after ownership and reference validation.
         runtime_id:
           type: string
         failover_target_runtime_id:

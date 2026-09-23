@@ -1861,7 +1861,7 @@ func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *te
 	want := []string{
 		"DELETE /api/v1/namespaces/fg-tenant-demo/services/app-demo",
 		"DELETE /api/v1/namespaces/fg-tenant-demo/services/sample-api-web-api-db-postgres",
-		"DELETE /api/v1/namespaces/fg-tenant-demo/secrets/sample-api-web-api-pgsec",
+		"DELETE /api/v1/namespaces/fg-tenant-demo/secrets/" + runtime.ManagedPostgresCredentialSecretName("", app.ID, *app.Spec.Postgres),
 		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/app-demo",
 		"DELETE /apis/postgresql.cnpg.io/v1/namespaces/fg-tenant-demo/clusters/sample-api-web-api-db-postgres",
 	}

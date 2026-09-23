@@ -140,22 +140,38 @@ type kubeCloudNativePGCluster struct {
 	Spec struct {
 		Instances int            `json:"instances,omitempty"`
 		Affinity  map[string]any `json:"affinity,omitempty"`
-		Storage   struct {
+		Managed   struct {
+			Roles []struct {
+				Name           string `json:"name"`
+				PasswordSecret struct {
+					Name string `json:"name"`
+				} `json:"passwordSecret"`
+			} `json:"roles"`
+		} `json:"managed"`
+		Storage struct {
 			Size         string `json:"size,omitempty"`
 			StorageClass string `json:"storageClass,omitempty"`
 		} `json:"storage,omitempty"`
 	} `json:"spec"`
 	Status struct {
-		Phase                  string                        `json:"phase,omitempty"`
-		PhaseReason            string                        `json:"phaseReason,omitempty"`
-		Instances              int                           `json:"instances,omitempty"`
-		ReadyInstances         int                           `json:"readyInstances,omitempty"`
-		DanglingPVC            []string                      `json:"danglingPVC,omitempty"`
-		CurrentPrimary         string                        `json:"currentPrimary,omitempty"`
-		TargetPrimary          string                        `json:"targetPrimary,omitempty"`
-		TargetPrimaryTimestamp string                        `json:"targetPrimaryTimestamp,omitempty"`
-		SystemID               string                        `json:"systemID,omitempty"`
-		Conditions             []runtime.ManagedAppCondition `json:"conditions,omitempty"`
+		Phase                  string   `json:"phase,omitempty"`
+		PhaseReason            string   `json:"phaseReason,omitempty"`
+		Instances              int      `json:"instances,omitempty"`
+		ReadyInstances         int      `json:"readyInstances,omitempty"`
+		DanglingPVC            []string `json:"danglingPVC,omitempty"`
+		CurrentPrimary         string   `json:"currentPrimary,omitempty"`
+		TargetPrimary          string   `json:"targetPrimary,omitempty"`
+		TargetPrimaryTimestamp string   `json:"targetPrimaryTimestamp,omitempty"`
+		SystemID               string   `json:"systemID,omitempty"`
+		ManagedRolesStatus     struct {
+			PasswordStatus map[string]struct {
+				ResourceVersion string `json:"resourceVersion"`
+			} `json:"passwordStatus"`
+		} `json:"managedRolesStatus"`
+		SecretsResourceVersion struct {
+			ManagedRoleSecretVersion map[string]string `json:"managedRoleSecretVersion"`
+		} `json:"secretsResourceVersion"`
+		Conditions []runtime.ManagedAppCondition `json:"conditions,omitempty"`
 	} `json:"status"`
 }
 
@@ -289,6 +305,9 @@ func kubeObjectKindKey(obj map[string]any) string {
 }
 
 func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out any) error {
+	if postgresCredentialSecret(obj) {
+		return c.applyPostgresCredentialSecret(ctx, obj, out)
+	}
 	normalizeDeploymentStrategyForApply(obj)
 	apiPath, err := runtime.ObjectAPIPath(c.namespace, obj)
 	if err != nil {
@@ -340,6 +359,7 @@ func (c *kubeClient) shouldSkipApply(ctx context.Context, apiPath string, obj ma
 	if err != nil || !found {
 		return "", false, err
 	}
+	preservePostgresBootstrap(current, obj)
 	if cloudNativePGObject(obj) && skipExistingCloudNativePGWrites(ctx) {
 		return "apply_skipped_existing", true, nil
 	}
@@ -708,6 +728,9 @@ func (c *kubeClient) applyObjects(ctx context.Context, objects []map[string]any)
 	if len(objects) == 0 {
 		return nil
 	}
+	if err := c.preflightPostgresCredentialSecrets(ctx, objects); err != nil {
+		return err
+	}
 	if err := c.prepareAppServiceWorkloads(ctx, objects); err != nil {
 		return err
 	}
@@ -881,12 +904,14 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 				return nil
 			}
 			preserveCloudNativePGResizePolicy(current, obj)
+			preservePostgresBootstrap(current, obj)
 			if desiredSpecAlreadyApplied(current, obj) {
 				c.writeStats.record("replace_spec_skipped_noop", obj)
 				return nil
 			}
 		}
 	}
+	spec = obj["spec"]
 	ops := []map[string]any{{
 		"op":    "replace",
 		"path":  "/spec",
@@ -969,6 +994,7 @@ func (c *kubeClient) patchCloudNativePGManagedRoles(
 	ctx context.Context,
 	namespace, name string,
 	roles []map[string]any,
+	observed ...map[string]any,
 ) error {
 	body := map[string]any{
 		"spec": map[string]any{
@@ -976,6 +1002,15 @@ func (c *kubeClient) patchCloudNativePGManagedRoles(
 				"roles": roles,
 			},
 		},
+	}
+	if len(observed) > 0 {
+		metadata := normalizeKubeMap(observed[0]["metadata"])
+		if metadata["resourceVersion"] != nil {
+			body["metadata"] = map[string]any{"resourceVersion": metadata["resourceVersion"], "uid": metadata["uid"]}
+		}
+	}
+	if len(observed) > 1 && observed[1] != nil {
+		body["spec"].(map[string]any)["bootstrap"] = observed[1]
 	}
 	obj := map[string]any{
 		"apiVersion": runtime.CloudNativePGAPIVersion,
@@ -1506,7 +1541,17 @@ func (c *kubeClient) deleteVolSyncReplicationSource(ctx context.Context, namespa
 }
 
 func (c *kubeClient) deleteSecret(ctx context.Context, namespace, name string) error {
-	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/secrets/"+url.PathEscape(name), "", nil, nil)
+	current, found, err := c.getRawObject(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/secrets/"+url.PathEscape(name))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	if postgresCredentialSecret(current) {
+		return c.deletePostgresCredentialSecret(ctx, namespace, name, current)
+	}
+	_, err = c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/secrets/"+url.PathEscape(name), "", nil, nil)
 	return normalizeDeleteNotFound(err)
 }
 

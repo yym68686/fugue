@@ -476,6 +476,10 @@ func attachOwnerReference(objects []map[string]any, ownerRef *OwnerReference) {
 		if labels[FugueLabelComponent] == projectSharedStorageComponent {
 			continue
 		}
+		if labels[FugueLabelBackingServiceType] == model.BackingServiceTypePostgres && labels[FugueLabelOwnerAppID] == "" {
+			// Independently managed backing services outlive any one consumer.
+			continue
+		}
 		metadata["ownerReferences"] = references
 	}
 }

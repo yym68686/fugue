@@ -118,6 +118,11 @@ func buildAppObjectsWithOwnerAndOptions(app model.App, scheduling SchedulingCons
 	}
 
 	for _, postgres := range postgresResources {
+		// Bound consumers need connection/network metadata, but may not take
+		// ownership of the provider's database or rewrite its credentials.
+		if postgres.ownerAppID != "" && postgres.ownerAppID != app.ID {
+			continue
+		}
 		objects = append(objects, buildManagedPostgresObjects(namespace, postgres)...)
 	}
 
@@ -1127,14 +1132,16 @@ type postgresRuntimeResource struct {
 }
 
 type ManagedBackingServiceDeployment struct {
-	ServiceID        string
-	ResourceName     string
-	ResourceKind     string
-	RuntimeKey       string
-	DesiredInstances int
-	Suspended        bool
-	StorageClassName string
-	StorageSize      string
+	ServiceID            string
+	ResourceName         string
+	ResourceKind         string
+	RuntimeKey           string
+	DesiredInstances     int
+	Suspended            bool
+	StorageClassName     string
+	StorageSize          string
+	CredentialSecretName string
+	CredentialUser       string
 }
 
 func ManagedAppReleaseKey(app model.App, scheduling SchedulingConstraints) string {
@@ -1162,14 +1169,16 @@ func ManagedBackingServiceDeploymentsWithPlacements(app model.App, scheduling Sc
 		}
 		object := buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec, resource.placements)
 		deployments = append(deployments, ManagedBackingServiceDeployment{
-			ServiceID:        resource.serviceID,
-			ResourceName:     resource.resourceName,
-			ResourceKind:     CloudNativePGClusterKind,
-			RuntimeKey:       managedDeploymentRuntimeKey(object),
-			DesiredInstances: resource.spec.Instances,
-			Suspended:        resource.spec.Suspended,
-			StorageClassName: strings.TrimSpace(resource.spec.StorageClassName),
-			StorageSize:      strings.TrimSpace(resource.spec.StorageSize),
+			ServiceID:            resource.serviceID,
+			ResourceName:         resource.resourceName,
+			ResourceKind:         CloudNativePGClusterKind,
+			RuntimeKey:           managedDeploymentRuntimeKey(object),
+			DesiredInstances:     resource.spec.Instances,
+			Suspended:            resource.spec.Suspended,
+			StorageClassName:     strings.TrimSpace(resource.spec.StorageClassName),
+			StorageSize:          strings.TrimSpace(resource.spec.StorageSize),
+			CredentialSecretName: resource.spec.CredentialSecretName,
+			CredentialUser:       resource.spec.User,
 		})
 	}
 	return deployments
@@ -1198,7 +1207,7 @@ func managedPostgresResources(namespace string, app model.App, postgresPlacement
 		resources = append(resources, postgresRuntimeResource{
 			baseName:     baseName,
 			resourceName: spec.ServiceName,
-			secretName:   postgresSecretName(baseName),
+			secretName:   ManagedPostgresCredentialSecretName(service.ID, app.ID, spec),
 			spec:         spec,
 			placements:   postgresPlacements[spec.ServiceName],
 			serviceID:    service.ID,
@@ -1215,7 +1224,7 @@ func managedPostgresResources(namespace string, app model.App, postgresPlacement
 		resources = append(resources, postgresRuntimeResource{
 			baseName:     baseName,
 			resourceName: spec.ServiceName,
-			secretName:   postgresSecretName(baseName),
+			secretName:   ManagedPostgresCredentialSecretName("", app.ID, spec),
 			spec:         spec,
 			placements:   postgresPlacements[spec.ServiceName],
 			serviceType:  model.BackingServiceTypePostgres,
@@ -3176,6 +3185,24 @@ func postgresResourceName(appName string) string {
 
 func postgresSecretName(appName string) string {
 	return appName + "-pgsec"
+}
+
+// ManagedPostgresCredentialSecretName uses stable service identity, never a
+// display name. Existing services acquire an explicit persisted reference
+// after the controller validates the live legacy reference.
+func ManagedPostgresCredentialSecretName(serviceID, appID string, spec model.AppPostgresSpec) string {
+	if spec.CredentialSecretName != "" {
+		return spec.CredentialSecretName
+	}
+	identity := "service:" + serviceID
+	if serviceID == "" {
+		identity = "app:" + appID
+	}
+	if serviceID == "" && appID == "" {
+		identity = "database:" + spec.ServiceName
+	}
+	digest := sha256.Sum256([]byte(identity))
+	return "pgcred-" + hex.EncodeToString(digest[:24])
 }
 
 func normalizePostgresResourceName(name, baseName string) string {

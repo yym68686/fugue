@@ -32,10 +32,11 @@ func reconcileCloudNativePGManagedRoles(ctx context.Context, client *kubeClient,
 		}
 		currentRoles := cloudNativePGManagedRolesFromObject(current)
 		mergedRoles, changed := mergeCloudNativePGManagedRoles(currentRoles, desiredRoles)
-		if !changed {
+		bootstrap, bootstrapChanged := postgresBootstrapWithCredential(current, desiredRoles)
+		if !changed && !bootstrapChanged {
 			continue
 		}
-		if err := client.patchCloudNativePGManagedRoles(ctx, namespace, name, mergedRoles); err != nil {
+		if err := client.patchCloudNativePGManagedRoles(ctx, namespace, name, mergedRoles, current, bootstrap); err != nil {
 			return fmt.Errorf("patch cloudnativepg cluster %s/%s managed roles: %w", namespace, name, err)
 		}
 	}
