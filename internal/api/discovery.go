@@ -53,15 +53,10 @@ func (s *Server) deriveDiscoveryBundle(r *http.Request, principal model.Principa
 	edgeNodes = eligibleDiscoveryEdgeNodes(edgeNodes, now, s.activeNodeQuarantineByName())
 	dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
 	edgeGroups = activeEdgeGroupsForInventory(edgeGroups, edgeNodes, dnsNodes)
-	edgeRoutes, err := s.store.ListEdgeRoutePolicies()
-	if err != nil {
-		return model.DiscoveryBundle{}, err
-	}
 	edgeGroups = dedupeEdgeGroups(edgeGroups)
 	sort.Slice(edgeNodes, func(i, j int) bool { return edgeNodes[i].ID < edgeNodes[j].ID })
 	sort.Slice(dnsNodes, func(i, j int) bool { return dnsNodes[i].ID < dnsNodes[j].ID })
 	sort.Slice(nodePolicies, func(i, j int) bool { return nodePolicies[i].NodeName < nodePolicies[j].NodeName })
-	sort.Slice(edgeRoutes, func(i, j int) bool { return edgeRoutes[i].Hostname < edgeRoutes[j].Hostname })
 
 	platformRoutes, err := s.publishedDiscoveryPlatformRoutes()
 	if err != nil {
@@ -83,7 +78,7 @@ func (s *Server) deriveDiscoveryBundle(r *http.Request, principal model.Principa
 		PlatformRoutes:      platformRoutes,
 		PublicRuntimeEnv:    s.discoveryRuntimeEnv(apiURL),
 	}
-	bundle.Generation = discoveryBundleGeneration(bundle, nodePolicies, edgeRoutes)
+	bundle.Generation = discoveryBundleGeneration(bundle, nodePolicies, nil)
 	bundle = signDiscoveryBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
 	return bundle, nil
 }
