@@ -300,7 +300,7 @@ func (s *Server) handlePreflightKeyRotation(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusBadRequest, "set dry_run=true, stage=true, or confirm_revoke=true")
 		return
 	}
-	preflight, err := s.keyRotationPreflight(req)
+	preflight, err := s.keyRotationPreflight(r.Context(), req)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -475,7 +475,11 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 	}
 	now := time.Now().UTC()
 	edgeNodesForAutonomy := activeEdgeNodesForAutonomy(edgeNodes, nodePolicies, now)
-	dnsNodesForAutonomy := activeDNSNodesForAutonomy(dnsNodes, nodePolicies, now)
+	dnsNodes, err = s.dnsInventoryServingFacts(r.Context(), activeDNSNodesForPolicy(dnsNodes, nodePolicies))
+	if err != nil {
+		return model.PlatformAutonomyStatus{}, err
+	}
+	dnsNodesForAutonomy := freshDNSNodes(dnsNodes, now)
 	registryPass, registryMessage := s.registryReachabilityCheck(r.Context())
 	headscalePass, headscaleMessage := s.headscaleReachabilityCheck(r.Context())
 	checks := []model.StoreInvariantCheck{
@@ -1321,12 +1325,16 @@ func failureDrillChecks(status model.PlatformAutonomyStatus) []model.StoreInvari
 	}
 }
 
-func (s *Server) keyRotationPreflight(req model.KeyRotationPreflightRequest) (model.KeyRotationPreflight, error) {
+func (s *Server) keyRotationPreflight(ctx context.Context, req model.KeyRotationPreflightRequest) (model.KeyRotationPreflight, error) {
 	edgeNodes, _, err := s.store.ListEdgeNodes("")
 	if err != nil {
 		return model.KeyRotationPreflight{}, err
 	}
 	dnsNodes, err := s.store.ListDNSNodes("")
+	if err != nil {
+		return model.KeyRotationPreflight{}, err
+	}
+	dnsNodes, err = s.dnsInventoryServingFacts(ctx, dnsNodes)
 	if err != nil {
 		return model.KeyRotationPreflight{}, err
 	}

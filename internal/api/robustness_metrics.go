@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"strconv"
 	"strings"
@@ -11,7 +12,7 @@ import (
 	"fugue/internal/store"
 )
 
-func (s *Server) writeRobustnessMetrics(w io.Writer) {
+func (s *Server) writeRobustnessMetrics(ctx context.Context, w io.Writer) {
 	for _, guardian := range []string{"route-dns", "edge-tls", "node-health", "bundle-rollout", "traffic-safety", "release-guard", "request-attribution", "runtime-continuity", "platform-state-release"} {
 		observability.WriteGaugeMetric(w, "fugue_robustness_guardian_enabled", "Robustness guardian classes available in the control plane.", map[string]string{"guardian": guardian}, 1)
 	}
@@ -28,10 +29,22 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 			observability.WriteMetricSample(w, "fugue_robustness_lkg_serving", labels, boolMetric(robustnessNodeServingLKG(node.CacheStatus, node.RouteBundleVersion, node.ServingGeneration, node.LKGGeneration)))
 		}
 	}
-	if dnsNodes, err := s.store.ListDNSNodes(""); err == nil {
+	dnsNodes, dnsErr := s.store.ListDNSNodes("")
+	if dnsErr == nil {
+		dnsNodes, dnsErr = s.dnsInventoryServingFacts(ctx, dnsNodes)
+	}
+	if dnsErr == nil {
 		expectedByScope := mostCommonNonEmptyDNSGenerationByScope(dnsNodes)
+		observability.WriteMetricHeader(w, "fugue_robustness_dns_selected_backend", "Current selected DNS artifact consumer observation state; evaluate snapshot freshness separately.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_robustness_dns_query_errors", "DNS node query errors reported by authoritative DNS nodes.", "gauge")
 		for _, node := range dnsNodes {
+			if node.ServingObservation != nil {
+				labels := map[string]string{"node_id": node.ID, "state": node.ServingObservation.State}
+				observability.WriteMetricSample(w, "fugue_robustness_dns_selected_backend", labels, 1)
+				// Inventory counters have no current Pod attribution. Do not
+				// export them as current-backend query errors or majority drift.
+				continue
+			}
 			expected := expectedByScope[dnsGenerationScopeKey(node)]
 			labels := map[string]string{"kind": "dns", "node_id": node.ID, "edge_group_id": node.EdgeGroupID, "zone": node.Zone}
 			observability.WriteMetricSample(w, "fugue_robustness_node_generation_drift_seconds", labels, robustnessGenerationDriftSeconds(now, expected, firstNonEmpty(node.DNSBundleVersion, node.ServingGeneration), node.LastHeartbeatAt, node.UpdatedAt))

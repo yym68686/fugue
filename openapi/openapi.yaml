@@ -3889,6 +3889,12 @@ paths:
     get:
       operationId: listDNSNodes
       summary: List DNS Nodes
+      description: >-
+        Registered Kubernetes artifact consumers obtain serving health and
+        generations from the current identity-bound public backend observation.
+        Unavailable observations return unknown health and retain node membership;
+        they never reuse legacy inventory health. Counters and endpoint metadata
+        remain historical inventory values, identified by serving_observation.
       tags: [DNS]
       x-fugue-handler: handleListDNSNodes
       security:
@@ -4260,6 +4266,11 @@ paths:
     get:
       operationId: getDNSNode
       summary: Get DNS Node
+      description: >-
+        Kubernetes artifact-consumer serving health uses the selected backend's
+        verified runtime facts. Unavailable or mismatched facts yield unknown
+        health. Legacy counters remain historical and are not current-backend
+        readiness evidence; see serving_observation.inventory_observed_at.
       tags: [DNS]
       x-fugue-handler: handleGetDNSNode
       security:
@@ -19088,6 +19099,12 @@ components:
           $ref: "#/components/schemas/DNSACMEChallenge"
     DNSNode:
       type: object
+      description: >-
+        Node inventory with an optional authoritative serving observation.
+        When serving_observation is present, status, healthy and serving
+        generations reflect that observation. Numeric counters, listener
+        addresses, record_count and inventory timestamps remain historical
+        legacy inventory values and do not authorize current serving readiness.
       additionalProperties: false
       required:
         - id
@@ -19187,6 +19204,36 @@ components:
         updated_at:
           type: string
           format: date-time
+        serving_observation:
+          $ref: "#/components/schemas/DNSNodeServingObservation"
+    DNSNodeServingObservation:
+      type: object
+      additionalProperties: false
+      required: [source, state, evaluated_at]
+      properties:
+        source:
+          type: string
+          enum: [selected_artifact_consumer]
+        state:
+          type: string
+          enum: [ready, not_ready, unknown]
+        evaluated_at:
+          type: string
+          format: date-time
+        observed_at:
+          type: string
+          format: date-time
+        inventory_observed_at:
+          type: string
+          format: date-time
+        backend_pod_uid:
+          type: string
+        artifact_id:
+          type: string
+        release_set_id:
+          type: string
+        artifact_release_id:
+          type: string
     DNSNodeListResponse:
       type: object
       additionalProperties: false
@@ -19342,6 +19389,10 @@ components:
           type: string
     DNSDelegationNodeCheck:
       type: object
+      description: >-
+        For enrolled Kubernetes consumers, serving_observation supplies current
+        serving health. Legacy counters remain historical and cannot independently
+        pass or fail the selected backend cache/readiness gate.
       additionalProperties: false
       required:
         - dns_node_id
@@ -19362,6 +19413,8 @@ components:
       properties:
         dns_node_id:
           type: string
+        serving_observation:
+          $ref: "#/components/schemas/DNSNodeServingObservation"
         physical_node_id:
           type: string
         edge_group_id:

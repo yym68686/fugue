@@ -47,6 +47,10 @@ func (s *Server) deriveDiscoveryBundle(r *http.Request, principal model.Principa
 	if err != nil {
 		return model.DiscoveryBundle{}, err
 	}
+	dnsNodes, err = s.dnsInventoryServingFacts(r.Context(), dnsNodes)
+	if err != nil {
+		return model.DiscoveryBundle{}, err
+	}
 	nodePolicies, err := s.loadClusterNodePolicyStatuses(r.Context(), principal)
 	if err != nil {
 		if s.log != nil {
@@ -57,6 +61,12 @@ func (s *Server) deriveDiscoveryBundle(r *http.Request, principal model.Principa
 	edgeNodes = activeEdgeNodesForPolicy(edgeNodes, nodePolicies)
 	edgeNodes = eligibleDiscoveryEdgeNodes(edgeNodes, now, s.activeNodeQuarantineByName())
 	dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
+	// Existing signed-bundle consumers canonicalize the original DNSNode
+	// shape. Keep observation details on the admin API, not in this legacy
+	// signed payload until its consumers negotiate the extended schema.
+	for i := range dnsNodes {
+		dnsNodes[i].ServingObservation = nil
+	}
 	edgeGroups = activeEdgeGroupsForInventory(edgeGroups, edgeNodes, dnsNodes)
 	edgeGroups = dedupeEdgeGroups(edgeGroups)
 	sort.Slice(edgeNodes, func(i, j int) bool { return edgeNodes[i].ID < edgeNodes[j].ID })

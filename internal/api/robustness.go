@@ -486,6 +486,10 @@ func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Prin
 	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), principal); policyErr == nil {
 		dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
 	}
+	dnsNodes, err = s.dnsInventoryServingFacts(r.Context(), dnsNodes)
+	if err != nil {
+		return nil, err
+	}
 	dnsNodes = freshDNSNodes(dnsNodes, now)
 	expectedDNSGenerationByScope := mostCommonNonEmptyDNSGenerationByScope(dnsNodes)
 	checks = append(checks, model.RobustnessCheck{
@@ -506,6 +510,9 @@ func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Prin
 		expectedDNSGeneration := expectedDNSGenerationByScope[scopeKey]
 		dnsGeneration := firstNonEmpty(strings.TrimSpace(node.DNSBundleVersion), strings.TrimSpace(node.ServingGeneration))
 		generationPass := expectedDNSGeneration == "" || dnsGeneration == "" || dnsGeneration == expectedDNSGeneration
+		if node.ServingObservation != nil {
+			generationPass = node.ServingObservation.State == "ready" && dnsGeneration != ""
+		}
 		checks = append(checks, model.RobustnessCheck{
 			Name:     "dns_generation_drift",
 			Pass:     generationPass,

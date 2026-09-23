@@ -61,7 +61,9 @@ func freshDNSNodes(nodes []model.DNSNode, now time.Time) []model.DNSNode {
 	}
 	out := make([]model.DNSNode, 0, len(nodes))
 	for _, node := range nodes {
-		if dnsNodeHeartbeatFresh(node, now) {
+		// An unavailable enrolled backend remains a required member and an
+		// explicit unknown result, never disappears due to old inventory age.
+		if node.ServingObservation != nil || dnsNodeHeartbeatFresh(node, now) {
 			out = append(out, node)
 		}
 	}

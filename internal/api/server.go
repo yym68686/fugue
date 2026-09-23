@@ -402,7 +402,7 @@ func (s *Server) collectMetrics(ctx context.Context, w io.Writer) error {
 	if err := s.writeBackupMetrics(ctx, w); err != nil {
 		return err
 	}
-	s.writeRobustnessMetrics(w)
+	s.writeRobustnessMetrics(ctx, w)
 	s.writeAutomationShadowLoopMetrics(w)
 	s.writeEdgeQualityRollupMetrics(w)
 	s.writeDNSObservationMetrics(w)

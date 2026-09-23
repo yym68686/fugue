@@ -95,6 +95,27 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 	if reads != 2 {
 		t.Fatal("node observations were cached", reads)
 	}
+	legacy := model.DNSNode{ID: f.claims.NodeID, PhysicalNodeID: f.claims.NodeID, EdgeGroupID: "edge-group-a", Zone: "example.test", PublicIPv4: "8.8.8.8", Status: model.EdgeHealthDegraded, Healthy: false, LastError: "old unselected Pod: HTTP 409", QueryCount: 19, QueryErrorCount: 3, CacheWriteErrors: 2, DNSBundleVersion: "old-generation", ServingGeneration: "old-generation", LKGGeneration: "old-lkg", LastHeartbeatAt: &now}
+	projected, err := s.dnsInventoryServingFacts(context.Background(), []model.DNSNode{legacy, legacy})
+	if err != nil || len(projected) != 2 || reads != 3 {
+		t.Fatal("inventory projection did not deduplicate physical node reads", err, reads)
+	}
+	for _, node := range projected {
+		if !node.Healthy || node.Status != model.EdgeHealthHealthy || node.LastError != "" || node.DNSBundleVersion != child.Generation || node.LKGGeneration != child.Generation || node.ServingObservation == nil || node.ServingObservation.BackendPodUID != string(f.pod.UID) || node.ServingObservation.State != "ready" || node.QueryCount != legacy.QueryCount || node.CacheWriteErrors != legacy.CacheWriteErrors || node.LastHeartbeatAt != legacy.LastHeartbeatAt || !node.ServingObservation.ObservedAt.Equal(snapshot.ObservedAt) {
+			t.Fatalf("selected backend did not replace legacy health while preserving history: %+v", node)
+		}
+	}
+	if legacy.Status != model.EdgeHealthDegraded || legacy.ServingObservation != nil {
+		t.Fatal("read mutated the source inventory")
+	}
+	getNode := performJSONRequest(t, s, "GET", "/v1/dns/nodes/"+f.claims.NodeID, "facts-admin", nil)
+	var nodeResponse struct {
+		Node model.DNSNode `json:"node"`
+	}
+	mustDecodeJSON(t, getNode, &nodeResponse)
+	if getNode.Code != 200 || !nodeResponse.Node.Healthy || nodeResponse.Node.ServingObservation == nil || nodeResponse.Node.ServingObservation.BackendPodUID != string(f.pod.UID) {
+		t.Fatal("DNS node API did not expose the selected backend projection", getNode.Code, getNode.Body.String())
+	}
 	after, _ := os.ReadFile(path)
 	if !reflect.DeepEqual(baseline, after) {
 		t.Fatal("read mutated durable state")
@@ -187,6 +208,15 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 				if response.Ready {
 					t.Fatal("negative/expired/unready snapshot became ready")
 				}
+			}
+			// Legacy inventory health cannot hide failed, expired or replaced
+			// current backend evidence, even if its last heartbeat was fresh.
+			projected, projectionErr := s.dnsInventoryServingFacts(context.Background(), []model.DNSNode{legacy})
+			if projectionErr != nil || len(projected) != 1 || projected[0].Healthy || projected[0].ServingObservation == nil {
+				t.Fatal("unavailable backend reused legacy health or dropped membership", projectionErr, projected)
+			}
+			if len(freshDNSNodes(projected, now.Add(24*time.Hour))) != 1 {
+				t.Fatal("unavailable enrolled node disappeared with stale inventory")
 			}
 			if scenario != "publication changed" && scenario != "artifact corrupt" {
 				after, _ := os.ReadFile(path)

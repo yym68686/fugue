@@ -85,6 +85,11 @@ func (s *Server) handleListDNSNodes(w http.ResponseWriter, r *http.Request) {
 	} else if s.log != nil {
 		s.log.Printf("dns node inventory continuing without node policy filter: %v", err)
 	}
+	nodes, err = s.dnsInventoryServingFacts(r.Context(), nodes)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	nodes = freshDNSNodes(nodes, time.Now().UTC())
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
 }
@@ -100,7 +105,12 @@ func (s *Server) handleGetDNSNode(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": node})
+	nodes, err := s.dnsInventoryServingFacts(r.Context(), []model.DNSNode{node})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": nodes[0]})
 }
 
 func (s *Server) handleDNSHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -261,6 +271,9 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 			DelegationPlan: model.DNSDelegationPlan{CurrentParentNS: []string{}, PlannedARecords: []model.DNSDelegationRecord{}, PlannedNSRecords: []model.DNSDelegationRecord{}, RollbackDeleteRecords: []model.DNSDelegationRecord{}}}
 	}
 	nodes, err := s.store.ListDNSNodes(opts.EdgeGroupID)
+	if err == nil {
+		nodes, err = s.dnsInventoryServingFacts(ctx, nodes)
+	}
 	checks := []model.DNSDelegationPreflightCheck{{Name: "dns_delegation_configuration", Pass: true, Message: "delegation declared by verified traffic intent and policy"}}
 	if err != nil {
 		return model.DNSDelegationPreflightResponse{
@@ -465,6 +478,11 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 	nodeReady := known && policy.Ready
 	nodeDiskPressure := known && policy.DiskPressure
 	cacheOK := dnsNodeCacheHealthy(node.CacheStatus, node.DNSBundleVersion, node.CacheWriteErrors, node.CacheLoadErrors)
+	if node.ServingObservation != nil {
+		// Historical counters belong to the inventory writer, which may now
+		// be an unselected Pod. Only the verified current observation gates.
+		cacheOK = node.ServingObservation.State == "ready" && node.CacheStatus == "ready"
+	}
 	bundleOK := strings.TrimSpace(node.DNSBundleVersion) != ""
 	healthOK := dnsNodeServingHealthOK(node)
 	kubeOK := policyErr == nil && known && nodeReady && !nodeDiskPressure
@@ -500,6 +518,7 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 	}
 
 	return model.DNSDelegationNodeCheck{
+		ServingObservation:  node.ServingObservation,
 		DNSNodeID:           node.ID,
 		PhysicalNodeID:      firstNonEmpty(node.PhysicalNodeID, node.ID),
 		EdgeGroupID:         node.EdgeGroupID,
@@ -704,6 +723,12 @@ func dnsNodeCacheHealthyAll(checks []model.DNSDelegationNodeCheck) bool {
 		return false
 	}
 	for _, check := range checks {
+		if check.ServingObservation != nil {
+			if check.ServingObservation.State != "ready" || check.CacheStatus != "ready" {
+				return false
+			}
+			continue
+		}
 		if !dnsNodeCacheHealthy(check.CacheStatus, check.DNSBundleVersion, check.CacheWriteErrors, check.CacheLoadErrors) {
 			return false
 		}

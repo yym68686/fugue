@@ -35,21 +35,24 @@ type dnsRuntimeBackend struct {
 }
 
 type platformDNSRuntimeFactsResponse struct {
-	Backend       dnsRuntimeBackend `json:"backend"`
-	Snapshot      dnsfacts.Snapshot `json:"snapshot"`
-	EvaluatedAt   time.Time         `json:"evaluated_at"`
-	Ready         bool              `json:"ready"`
-	ReadyProbeIDs []string          `json:"ready_probe_ids"`
+	lkgGeneration       string
+	heartbeatValidUntil time.Time
+	Backend             dnsRuntimeBackend `json:"backend"`
+	Snapshot            dnsfacts.Snapshot `json:"snapshot"`
+	EvaluatedAt         time.Time         `json:"evaluated_at"`
+	Ready               bool              `json:"ready"`
+	ReadyProbeIDs       []string          `json:"ready_probe_ids"`
 }
 
 type dnsFactSource struct {
-	consumer       model.PlatformConsumerInstance
-	claims         platformcontrol.PlatformComponentIdentityClaims
-	parent         model.PlatformArtifact
-	lookup         consumerArtifactLookup
-	payload        platformDNSArtifactPayload
-	trafficBinding *model.TrafficReleaseBinding
-	group, routeID string
+	heartbeatValidUntil time.Time
+	consumer            model.PlatformConsumerInstance
+	claims              platformcontrol.PlatformComponentIdentityClaims
+	parent              model.PlatformArtifact
+	lookup              consumerArtifactLookup
+	payload             platformDNSArtifactPayload
+	trafficBinding      *model.TrafficReleaseBinding
+	group, routeID      string
 }
 
 func (s *Server) handleGetPlatformDNSRuntimeFacts(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +148,7 @@ func (s *Server) currentDNSFactSource(node string) (dnsFactSource, error) {
 		if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
 			return fail()
 		}
-		source = &dnsFactSource{consumer: *fact, claims: claims, parent: parent, lookup: item, payload: payload, group: group, routeID: projection.TrafficRelease.RouteArtifactID, trafficBinding: projection.TrafficRelease}
+		source = &dnsFactSource{consumer: *fact, claims: claims, parent: parent, lookup: item, payload: payload, group: group, routeID: projection.TrafficRelease.RouteArtifactID, trafficBinding: projection.TrafficRelease, heartbeatValidUntil: fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second)}
 	}
 	if source == nil {
 		return fail()
@@ -189,6 +192,8 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	response.EvaluatedAt = time.Now().UTC()
 	response.ReadyProbeIDs, response.Ready, err = evaluateDNSRuntimeSnapshot(response.Snapshot, current, response.EvaluatedAt)
 	response.Ready = response.Ready && transportReady
+	response.lkgGeneration = current.consumer.LKGGeneration
+	response.heartbeatValidUntil = current.heartbeatValidUntil
 	if err != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}

@@ -1010,38 +1010,53 @@ type EdgeNode struct {
 }
 
 type DNSNode struct {
-	ID                string            `json:"id"`
-	PhysicalNodeID    string            `json:"physical_node_id,omitempty"`
-	EdgeGroupID       string            `json:"edge_group_id"`
-	PublicHostname    string            `json:"public_hostname,omitempty"`
-	PublicIPv4        string            `json:"public_ipv4,omitempty"`
-	PublicIPv6        string            `json:"public_ipv6,omitempty"`
-	MeshIP            string            `json:"mesh_ip,omitempty"`
-	Zone              string            `json:"zone"`
-	Status            string            `json:"status"`
-	Healthy           bool              `json:"healthy"`
-	DNSBundleVersion  string            `json:"dns_bundle_version,omitempty"`
-	ServingGeneration string            `json:"serving_generation,omitempty"`
-	LKGGeneration     string            `json:"lkg_generation,omitempty"`
-	RecordCount       int               `json:"record_count"`
-	CacheStatus       string            `json:"cache_status,omitempty"`
-	CacheWriteErrors  uint64            `json:"cache_write_errors"`
-	CacheLoadErrors   uint64            `json:"cache_load_errors"`
-	BundleSyncErrors  uint64            `json:"bundle_sync_errors"`
-	QueryCount        uint64            `json:"query_count"`
-	QueryErrorCount   uint64            `json:"query_error_count"`
-	QueryRCodeCounts  map[string]uint64 `json:"query_rcode_counts,omitempty"`
-	QueryQTypeCounts  map[string]uint64 `json:"query_qtype_counts,omitempty"`
-	ListenAddr        string            `json:"listen_addr,omitempty"`
-	UDPAddr           string            `json:"udp_addr,omitempty"`
-	TCPAddr           string            `json:"tcp_addr,omitempty"`
-	UDPListen         bool              `json:"udp_listen"`
-	TCPListen         bool              `json:"tcp_listen"`
-	LastError         string            `json:"last_error,omitempty"`
-	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
-	LastHeartbeatAt   *time.Time        `json:"last_heartbeat_at,omitempty"`
-	CreatedAt         time.Time         `json:"created_at"`
-	UpdatedAt         time.Time         `json:"updated_at"`
+	ServingObservation *DNSNodeServingObservation `json:"serving_observation,omitempty"`
+	ID                 string                     `json:"id"`
+	PhysicalNodeID     string                     `json:"physical_node_id,omitempty"`
+	EdgeGroupID        string                     `json:"edge_group_id"`
+	PublicHostname     string                     `json:"public_hostname,omitempty"`
+	PublicIPv4         string                     `json:"public_ipv4,omitempty"`
+	PublicIPv6         string                     `json:"public_ipv6,omitempty"`
+	MeshIP             string                     `json:"mesh_ip,omitempty"`
+	Zone               string                     `json:"zone"`
+	Status             string                     `json:"status"`
+	Healthy            bool                       `json:"healthy"`
+	DNSBundleVersion   string                     `json:"dns_bundle_version,omitempty"`
+	ServingGeneration  string                     `json:"serving_generation,omitempty"`
+	LKGGeneration      string                     `json:"lkg_generation,omitempty"`
+	RecordCount        int                        `json:"record_count"`
+	CacheStatus        string                     `json:"cache_status,omitempty"`
+	CacheWriteErrors   uint64                     `json:"cache_write_errors"`
+	CacheLoadErrors    uint64                     `json:"cache_load_errors"`
+	BundleSyncErrors   uint64                     `json:"bundle_sync_errors"`
+	QueryCount         uint64                     `json:"query_count"`
+	QueryErrorCount    uint64                     `json:"query_error_count"`
+	QueryRCodeCounts   map[string]uint64          `json:"query_rcode_counts,omitempty"`
+	QueryQTypeCounts   map[string]uint64          `json:"query_qtype_counts,omitempty"`
+	ListenAddr         string                     `json:"listen_addr,omitempty"`
+	UDPAddr            string                     `json:"udp_addr,omitempty"`
+	TCPAddr            string                     `json:"tcp_addr,omitempty"`
+	UDPListen          bool                       `json:"udp_listen"`
+	TCPListen          bool                       `json:"tcp_listen"`
+	LastError          string                     `json:"last_error,omitempty"`
+	LastSeenAt         *time.Time                 `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt    *time.Time                 `json:"last_heartbeat_at,omitempty"`
+	CreatedAt          time.Time                  `json:"created_at"`
+	UpdatedAt          time.Time                  `json:"updated_at"`
+}
+
+// ServingObservation is a read-time projection, never persisted by the legacy
+// inventory heartbeat writer. Legacy metrics retain their original timestamps.
+type DNSNodeServingObservation struct {
+	Source              string     `json:"source"`
+	State               string     `json:"state"`
+	EvaluatedAt         time.Time  `json:"evaluated_at"`
+	ObservedAt          *time.Time `json:"observed_at,omitempty"`
+	InventoryObservedAt *time.Time `json:"inventory_observed_at,omitempty"`
+	BackendPodUID       string     `json:"backend_pod_uid,omitempty"`
+	ArtifactID          string     `json:"artifact_id,omitempty"`
+	ReleaseSetID        string     `json:"release_set_id,omitempty"`
+	ArtifactReleaseID   string     `json:"artifact_release_id,omitempty"`
 }
 
 type DNSDelegationRecord struct {
@@ -1067,31 +1082,32 @@ type DNSDelegationPreflightCheck struct {
 }
 
 type DNSDelegationNodeCheck struct {
-	DNSNodeID           string     `json:"dns_node_id"`
-	PhysicalNodeID      string     `json:"physical_node_id,omitempty"`
-	EdgeGroupID         string     `json:"edge_group_id,omitempty"`
-	PublicIP            string     `json:"public_ip,omitempty"`
-	Zone                string     `json:"zone,omitempty"`
-	Status              string     `json:"status,omitempty"`
-	Healthy             bool       `json:"healthy"`
-	DNSBundleVersion    string     `json:"dns_bundle_version,omitempty"`
-	RecordCount         int        `json:"record_count"`
-	CacheStatus         string     `json:"cache_status,omitempty"`
-	CacheWriteErrors    uint64     `json:"cache_write_errors"`
-	CacheLoadErrors     uint64     `json:"cache_load_errors"`
-	BundleSyncErrors    uint64     `json:"bundle_sync_errors"`
-	QueryCount          uint64     `json:"query_count"`
-	QueryErrorCount     uint64     `json:"query_error_count"`
-	UDP53Reachable      bool       `json:"udp_53_reachable"`
-	TCP53Reachable      bool       `json:"tcp_53_reachable"`
-	ProbePass           bool       `json:"probe_pass"`
-	ProbeAnswers        []string   `json:"probe_answers,omitempty"`
-	KubernetesNodeKnown bool       `json:"kubernetes_node_known"`
-	NodeReady           bool       `json:"node_ready"`
-	NodeDiskPressure    bool       `json:"node_disk_pressure"`
-	LastSeenAt          *time.Time `json:"last_seen_at,omitempty"`
-	Pass                bool       `json:"pass"`
-	Message             string     `json:"message,omitempty"`
+	ServingObservation  *DNSNodeServingObservation `json:"serving_observation,omitempty"`
+	DNSNodeID           string                     `json:"dns_node_id"`
+	PhysicalNodeID      string                     `json:"physical_node_id,omitempty"`
+	EdgeGroupID         string                     `json:"edge_group_id,omitempty"`
+	PublicIP            string                     `json:"public_ip,omitempty"`
+	Zone                string                     `json:"zone,omitempty"`
+	Status              string                     `json:"status,omitempty"`
+	Healthy             bool                       `json:"healthy"`
+	DNSBundleVersion    string                     `json:"dns_bundle_version,omitempty"`
+	RecordCount         int                        `json:"record_count"`
+	CacheStatus         string                     `json:"cache_status,omitempty"`
+	CacheWriteErrors    uint64                     `json:"cache_write_errors"`
+	CacheLoadErrors     uint64                     `json:"cache_load_errors"`
+	BundleSyncErrors    uint64                     `json:"bundle_sync_errors"`
+	QueryCount          uint64                     `json:"query_count"`
+	QueryErrorCount     uint64                     `json:"query_error_count"`
+	UDP53Reachable      bool                       `json:"udp_53_reachable"`
+	TCP53Reachable      bool                       `json:"tcp_53_reachable"`
+	ProbePass           bool                       `json:"probe_pass"`
+	ProbeAnswers        []string                   `json:"probe_answers,omitempty"`
+	KubernetesNodeKnown bool                       `json:"kubernetes_node_known"`
+	NodeReady           bool                       `json:"node_ready"`
+	NodeDiskPressure    bool                       `json:"node_disk_pressure"`
+	LastSeenAt          *time.Time                 `json:"last_seen_at,omitempty"`
+	Pass                bool                       `json:"pass"`
+	Message             string                     `json:"message,omitempty"`
 }
 
 type DNSDelegationPreflightResponse struct {
