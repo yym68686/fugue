@@ -12,6 +12,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/routeartifact"
+	"fugue/internal/store"
 )
 
 func (s *Server) handleDiscoveryBundle(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +255,9 @@ func (s *Server) publishedDiscoveryPlatformRoutes() ([]model.PlatformRoute, erro
 		// Discovery remains available for bootstrap metadata, but carries no
 		// serving routes until a verified TrafficReleaseSet exists.
 		return []model.PlatformRoute{}, nil
+	}
+	if check := s.validateReleaseSetReferences(parent); !check.Pass {
+		return nil, store.ErrConflict
 	}
 	child, err := consumerAssignmentChild(parent, model.PlatformArtifactKindEdgeRouteBundle, s.store.GetPlatformArtifact)
 	if err != nil {
