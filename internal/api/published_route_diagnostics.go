@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
-	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -179,7 +178,7 @@ func (s *Server) publishedRouteDiagnostics(ctx context.Context, group string) (m
 		if err != nil {
 			return fail(err)
 		}
-		status := platformcontrol.EvaluateConsumerConvergence(set, consumers, time.Now().UTC(), binding)
+		status := s.evaluateLiveConsumerConvergence(ctx, set, consumers, binding)
 		counts := map[string]int{}
 		for _, a := range status.Assessments {
 			g := a.Expected.Cohort

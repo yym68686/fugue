@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -369,7 +370,7 @@ func TestReleaseSetConvergenceBlocksRequiredConsumers(t *testing.T) {
 	if _, err := s.CreatePlatformExpectedConsumerSet(set); err != nil {
 		t.Fatalf("create expected set: %v", err)
 	}
-	result := server.validateReleaseSetConvergence(model.PlatformArtifact{ID: "release-set-convergence"})
+	result := server.validateReleaseSetConvergence(context.Background(), model.PlatformArtifact{ID: "release-set-convergence"})
 	if result.Pass || !strings.Contains(result.Message, "have not converged") {
 		t.Fatalf("expected convergence block, got %+v", result)
 	}

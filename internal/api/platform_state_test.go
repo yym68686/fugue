@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -71,7 +72,7 @@ func TestReleaseSetFullPromotionRequiresExpectedConsumerSets(t *testing.T) {
 	if _, err := state.CreatePlatformArtifact(artifact); err != nil {
 		t.Fatal(err)
 	}
-	result := server.validateReleaseSetConvergence(artifact)
+	result := server.validateReleaseSetConvergence(context.Background(), artifact)
 	if result.Pass || !strings.Contains(result.Message, "expected consumer sets are missing") {
 		t.Fatalf("missing expected consumers must block full promotion: %+v", result)
 	}

@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -110,7 +109,7 @@ func (s *Server) inspectPublishedTrafficArtifacts(ctx context.Context, zone stri
 			if binding == nil {
 				return fail("consumer publication binding invalid")
 			}
-			status := platformcontrol.EvaluateConsumerConvergence(platformcontrol.ProjectExpectedConsumerOwners(set), consumers, time.Now().UTC(), binding)
+			status := s.evaluateLiveConsumerConvergence(ctx, platformcontrol.ProjectExpectedConsumerOwners(set), consumers, binding)
 			if !status.Pass || status.RequiredExpected == 0 {
 				return fail("required consumers have not converged for " + set.ArtifactKind)
 			}

@@ -178,6 +178,7 @@ func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing
 	report(candidate, nextGray)
 	server = NewServer(state, auth.New(state, ""), nil, config)
 	seedInventory()
+	assertProducerRejectsRetiredDNSBackend(t, server, path, authority)
 	reconcile()
 	_, nextFull := active("full")
 	if nextFull.ArtifactID != candidate.ID {
@@ -190,6 +191,7 @@ func TestServingProducerProgressesRecoversAndDoesNotRetryFailedSource(t *testing
 		t.Fatal("old gray facts verified full", err)
 	}
 	report(candidate, nextFull)
+	assertProducerRejectsRetiredDNSBackend(t, server, path, authority)
 	reconcile()
 	lkg, err = state.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
 	if err != nil || lkg.ArtifactID != candidate.ID {

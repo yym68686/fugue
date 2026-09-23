@@ -27,6 +27,7 @@ type dnsBackendFixture struct {
 	failPath     string
 	changePath   string
 	extraService bool
+	podListDelay time.Duration
 }
 
 func newDNSBackendFixture(t *testing.T) *dnsBackendFixture {
@@ -64,6 +65,7 @@ func (f *dnsBackendFixture) install(t *testing.T, server *Server) {
 		base := "/api/v1/namespaces/" + f.pod.Namespace
 		switch r.URL.Path {
 		case base + "/pods":
+			time.Sleep(f.podListDelay)
 			if r.URL.Query().Get("fieldSelector") != "spec.nodeName="+f.claims.NodeID {
 				t.Error("node selector missing")
 			}

@@ -60,7 +60,7 @@ func TestConsumerMembershipRetainsSilentEdgesAndBlocksPartialConvergence(t *test
 	if status.RequiredExpected != 2 || status.RequiredObserved != 1 || status.RequiredPassing != 0 || status.Pass {
 		t.Fatal("silent edge disappeared from required membership", status)
 	}
-	gate := server.validateReleaseSetConvergence(model.PlatformArtifact{ID: set.ReleaseSetID})
+	gate := server.validateReleaseSetConvergence(context.Background(), model.PlatformArtifact{ID: set.ReleaseSetID})
 	if gate.Pass {
 		t.Fatal("partial cohort passed full promotion", gate)
 	}

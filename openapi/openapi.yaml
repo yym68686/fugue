@@ -280,6 +280,17 @@ x-fugue-consumer-release-evidence:
     cursor. Legacy expectations without an artifact release reference cannot
     establish ReleaseSet convergence. Fences are lane-scoped; publication time
     orders active releases across channels, never a cross-lane fence comparison.
+    API convergence and artifact-based route/DNS diagnostics also recheck each
+    otherwise passing Kubernetes DNS receipt against its current live authorized
+    Pod and unique Ready public Service backend. Removed/replaced/unready backends
+    fail with dns_public_backend_mismatch; unavailable observations are unknown
+    with dns_public_backend_unavailable. The stored heartbeat, its timestamps,
+    cursor and audit remain unchanged. No backend result is cached across
+    evaluations, and freshness is evaluated again after the bounded lookup.
+    Manual full promotion, manual ReleaseSet LKG verification and automatic
+    producer full/LKG advancement use this preflight; rejection preserves serving
+    artifacts and verified LKG. Independently provisioned non-Kubernetes
+    identities retain their existing authentication contract.
 x-fugue-traffic-canary-targeting:
   semantics: >-
     A gray TrafficReleaseSet requires a canonical cohort=<id> reference to an
@@ -306,6 +317,9 @@ x-fugue-release-set-atomic-convergence:
     a changed topology must be prepared as a new expected-set revision before
     full publication. External Kubernetes observations are not part of the
     database transaction. The API retains its independent topology preflight.
+    Kubernetes DNS backend observation is an additional bounded API preflight,
+    not an atomic lease spanning the external Kubernetes and database systems.
+    It cannot authorize new consumer facts or weaken the transactional checks.
 x-fugue-dns-client-policy:
   semantics: >-
     Typed DNS client policies bind ordered CIDR-to-geography mappings to a physical

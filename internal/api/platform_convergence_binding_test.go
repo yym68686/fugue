@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"fugue/internal/store"
 	"net/http"
@@ -85,7 +86,7 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 	if _, err = state.CreatePlatformExpectedConsumerSet(partial); err != nil {
 		t.Fatal(err)
 	}
-	if gate := server.validateReleaseSetConvergence(compiled.ReleaseArtifact); gate.Pass || !strings.Contains(gate.Message, "missing") {
+	if gate := server.validateReleaseSetConvergence(context.Background(), compiled.ReleaseArtifact); gate.Pass || !strings.Contains(gate.Message, "missing") {
 		t.Fatal("partial member expectations passed", gate)
 	}
 	prepare := func(r model.PlatformArtifactRelease) []model.PlatformExpectedConsumerSet {
@@ -177,7 +178,7 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 	for _, set := range sets {
 		report(set, shadow, 1)
 	}
-	if gate := server.validateReleaseSetConvergence(compiled.ReleaseArtifact); !gate.Pass {
+	if gate := server.validateReleaseSetConvergence(context.Background(), compiled.ReleaseArtifact); !gate.Pass {
 		t.Fatal("exact complete shadow evidence rejected", gate)
 	}
 	gray := release("gray")
@@ -187,7 +188,7 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 	if gray.ID == shadow.ID || gray.LaneKey == shadow.LaneKey {
 		t.Fatal("release authority did not change")
 	}
-	if gate := server.validateReleaseSetConvergence(compiled.ReleaseArtifact); gate.Pass {
+	if gate := server.validateReleaseSetConvergence(context.Background(), compiled.ReleaseArtifact); gate.Pass {
 		t.Fatal("old shadow expectations authorized new gray release")
 	}
 	if server.platformConvergenceBinding(sets[0]) != nil {
@@ -201,13 +202,13 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 			}
 		}
 	}
-	if gate := server.validateReleaseSetConvergence(compiled.ReleaseArtifact); gate.Pass {
+	if gate := server.validateReleaseSetConvergence(context.Background(), compiled.ReleaseArtifact); gate.Pass {
 		t.Fatal("old receipts matched new expectations")
 	}
 	for _, set := range graySets {
 		report(set, gray, 2)
 	}
-	if gate := server.validateReleaseSetConvergence(compiled.ReleaseArtifact); !gate.Pass {
+	if gate := server.validateReleaseSetConvergence(context.Background(), compiled.ReleaseArtifact); !gate.Pass {
 		t.Fatal("current release exact receipts rejected", gate)
 	}
 	// Topology changes get new immutable revisions in the same release.
@@ -217,13 +218,13 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 		t.Fatal(err)
 	}
 	changed := prepare(gray)
-	if gate := server.validateReleaseSetConvergence(compiled.ReleaseArtifact); gate.Pass {
+	if gate := server.validateReleaseSetConvergence(context.Background(), compiled.ReleaseArtifact); gate.Pass {
 		t.Fatal("old cohort authorized a new required node")
 	}
 	for _, set := range changed {
 		report(set, gray, 3)
 	}
-	if gate := server.validateReleaseSetConvergence(compiled.ReleaseArtifact); !gate.Pass {
+	if gate := server.validateReleaseSetConvergence(context.Background(), compiled.ReleaseArtifact); !gate.Pass {
 		t.Fatal("current topology receipts rejected", gate)
 	}
 	if !reflect.DeepEqual(changed, prepare(gray)) {

@@ -94,7 +94,7 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 	if time.Since(current.ReleasedAt) < time.Duration(minimum)*time.Second {
 		return true, nil
 	}
-	if result := s.validateReleaseSetConvergence(parent); !result.Pass {
+	if result := s.validateReleaseSetConvergence(ctx, parent); !result.Pass {
 		return true, nil
 	}
 	if err := ctx.Err(); err != nil {

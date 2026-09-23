@@ -377,7 +377,7 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 			return
 		}
 		if req.ReleaseChannel == model.PlatformArtifactReleaseChannelFull {
-			if convergenceResult := s.validateReleaseSetConvergence(releaseArtifact); !convergenceResult.Pass {
+			if convergenceResult := s.validateReleaseSetConvergence(r.Context(), releaseArtifact); !convergenceResult.Pass {
 				httpx.WriteError(w, http.StatusConflict, convergenceResult.Message)
 				return
 			}
@@ -435,7 +435,7 @@ func (s *Server) platformConsumerTopology(ctx context.Context, principal model.P
 	return platformcontrol.ExpectedConsumerTopology{EdgeNodes: edges, DNSNodes: dns, NodeUpdaters: updaters, Runtimes: runtimes}, nil
 }
 
-func (s *Server) validateReleaseSetConvergence(artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {
+func (s *Server) validateReleaseSetConvergence(ctx context.Context, artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {
 	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: artifact.ID, Limit: 200})
 	if err != nil {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
@@ -447,7 +447,7 @@ func (s *Server) validateReleaseSetConvergence(artifact model.PlatformArtifact) 
 	if err != nil {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "required release set consumers have not converged: " + err.Error()}
 	}
-	topology, topologyErr := s.platformConsumerTopology(context.Background(), model.Principal{})
+	topology, topologyErr := s.platformConsumerTopology(ctx, model.Principal{})
 	if topologyErr != nil {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer topology could not be evaluated"}
 	}
@@ -462,7 +462,7 @@ func (s *Server) validateReleaseSetConvergence(artifact model.PlatformArtifact) 
 		if consumerErr != nil {
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
 		}
-		status := platformcontrol.EvaluateConsumerConvergence(set, consumers, time.Now().UTC(), s.platformConvergenceBinding(set))
+		status := s.evaluateLiveConsumerConvergence(ctx, set, consumers, s.platformConvergenceBinding(set))
 		if set.RequiresConsumers && !status.Pass {
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "required release set consumers have not converged", Evidence: map[string]string{"expected_consumer_set_id": set.ID, "state": status.State, "required_passing": fmt.Sprintf("%d", status.RequiredPassing), "required_expected": fmt.Sprintf("%d", status.RequiredExpected)}}
 		}
@@ -600,6 +600,27 @@ func (s *Server) handleVerifyPlatformArtifactReleaseLKG(w http.ResponseWriter, r
 	if nonPassing := nonPassingPlatformVerificationEvidence(evidenceStates); len(nonPassing) > 0 {
 		httpx.WriteError(w, http.StatusConflict, "verification evidence did not pass: "+strings.Join(nonPassing, ","))
 		return
+	}
+	targetRelease, err := s.store.GetPlatformArtifactRelease(r.PathValue("release_id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if targetRelease.ArtifactKind == model.PlatformArtifactKindReleaseSet {
+		parent, err := s.store.GetPlatformArtifact(targetRelease.ArtifactID)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		current, err := s.latestActiveReleaseSetPublication(parent)
+		if err != nil || current.ID != targetRelease.ID {
+			httpx.WriteError(w, http.StatusConflict, "LKG verification requires the current ReleaseSet publication")
+			return
+		}
+		if result := s.validateReleaseSetConvergence(r.Context(), parent); !result.Pass {
+			httpx.WriteError(w, http.StatusConflict, result.Message)
+			return
+		}
 	}
 	artifact, release, message, lkg, err := s.store.VerifyPlatformArtifactReleaseLKG(r.PathValue("release_id"), req, principal)
 	if err != nil {
@@ -852,7 +873,7 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 			s.writeStoreError(w, consumerErr)
 			return
 		}
-		statuses = append(statuses, platformcontrol.EvaluateConsumerConvergence(set, consumers, time.Now().UTC(), s.platformConvergenceBinding(set)))
+		statuses = append(statuses, s.evaluateLiveConsumerConvergence(r.Context(), set, consumers, s.platformConvergenceBinding(set)))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"convergence": statuses, "generated_at": time.Now().UTC()})
 }
