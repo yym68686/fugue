@@ -2,14 +2,13 @@ package declarativerelease
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-// The initial isolated DNS lane may coexist with the selected legacy lane,
-// but it must never share that lane's listener, cache or inventory credential.
+// An isolated DNS lane may coexist with the legacy lane before and after
+// selection, but cannot share its listener, cache or inventory credential.
 func TestProductionDNSCandidateHasIsolatedExecutionAndRelease(t *testing.T) {
 	read := func(name string) []byte {
 		t.Helper()
@@ -31,16 +30,20 @@ func TestProductionDNSCandidateHasIsolatedExecutionAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var transport struct {
-		Listeners []struct {
-			Selector map[string]string `json:"selector"`
-		} `json:"listeners"`
-	}
-	if err := json.Unmarshal(read("deploy/environments/production/dns-transport/transport.json"), &transport); err != nil {
-		t.Fatal(err)
-	}
-	if len(transport.Listeners) == 0 {
-		t.Fatal("no current DNS listeners to check for selector isolation")
+	legacySelectors := []map[string]string{}
+	for _, group := range edges.Groups {
+		resources, err := DecodeResourceSet(bytes.NewReader(read(group.Client.ManifestPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, resource := range resources.Items {
+			if stringField(resource, "kind") != "DaemonSet" {
+				continue
+			}
+			spec, _ := objectField(resource, "spec")
+			selector, _ := objectField(spec, "selector")
+			legacySelectors = append(legacySelectors, ensureReadStringMap(selector, "matchLabels"))
+		}
 	}
 	cacheOwners := map[string]string{}
 	found := 0
@@ -81,13 +84,13 @@ func TestProductionDNSCandidateHasIsolatedExecutionAndRelease(t *testing.T) {
 					}
 					metadata, _ := objectField(template, "metadata")
 					labels := ensureReadStringMap(metadata, "labels")
-					for _, listener := range transport.Listeners {
+					for _, selector := range legacySelectors {
 						matches := true
-						for key, value := range listener.Selector {
+						for key, value := range selector {
 							matches = matches && labels[key] == value
 						}
 						if matches {
-							t.Fatal("unverified candidate is selected by an existing listener", component.ID)
+							t.Fatal("independent slot overlaps a legacy workload selector", component.ID)
 						}
 					}
 					env, _ := container["env"].([]any)

@@ -1,7 +1,7 @@
 {
   "apiVersion": "transport.fugue.dev/v1",
   "kind": "DNSLocalTransport",
-  "generation": 2,
+  "generation": 3,
   "namespace": "fugue-system",
   "listeners": [
     {
@@ -10,7 +10,7 @@
       "port": 15353,
       "targetPort": 53,
       "selector": {
-        "app.kubernetes.io/component": "dns-country-de",
+        "app.kubernetes.io/component": "dns-de-b",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       }
@@ -32,7 +32,7 @@
       "port": 53,
       "targetPort": 53,
       "selector": {
-        "app.kubernetes.io/component": "dns-country-de",
+        "app.kubernetes.io/component": "dns-de-b",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       }
