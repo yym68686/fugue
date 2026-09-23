@@ -80,6 +80,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/platform-config/routes/compare", s.auth.RequireAPI(http.HandlerFunc(s.handleComparePlatformRouteMigration)))
 	mux.Handle("GET /v1/admin/platform-config/routes/project", s.auth.RequireAPI(http.HandlerFunc(s.handleProjectPlatformIntent)))
 	mux.Handle("GET /v1/admin/platform-state/convergence", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformConsumerConvergence)))
+	mux.Handle("GET /v1/admin/platform-state/dns-runtime-facts/{node_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformDNSRuntimeFacts)))
 	mux.Handle("GET /v1/admin/platform-state/runtime-facts", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformRuntimeFacts)))
 	mux.Handle("GET /v1/admin/platform/autonomy/status", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformAutonomyStatus)))
 	mux.Handle("POST /v1/admin/platform/failure-drills", s.auth.RequireAPI(http.HandlerFunc(s.handleRunPlatformFailureDrill)))

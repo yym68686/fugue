@@ -28,6 +28,7 @@ type dnsBackendFixture struct {
 	changePath   string
 	extraService bool
 	podListDelay time.Duration
+	proxyHandler http.HandlerFunc
 }
 
 func newDNSBackendFixture(t *testing.T) *dnsBackendFixture {
@@ -105,6 +106,13 @@ func (f *dnsBackendFixture) install(t *testing.T, server *Server) {
 				items.Items[0].Endpoints = nil
 			}
 			json.NewEncoder(w).Encode(items)
+		case base + "/pods/" + f.pod.Name + ":8081/proxy/runtime-facts":
+			if f.proxyHandler == nil {
+				t.Error("unexpected Pod proxy request")
+				w.WriteHeader(500)
+				return
+			}
+			f.proxyHandler(w, r)
 		default:
 			t.Errorf("unexpected backend metadata request %s", r.URL.Path)
 			w.WriteHeader(404)

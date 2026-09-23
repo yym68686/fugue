@@ -29,6 +29,12 @@ const dnsTransportManager = "fugue-dns-transport"
 // selection without overwriting the serving instance's receipt. This is an
 // observation of Kubernetes transport, never a source of DNS serving config.
 func (s *Server) validateDNSHeartbeatBackend(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope) int {
+	return s.inspectDNSBackend(ctx, claims, h, nil)
+}
+
+// A reader runs only after transport identity validation and before the final
+// metadata recheck. It must not retain the client or use Pod data as configuration.
+func (s *Server) inspectDNSBackend(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int) int {
 	if claims.Component != model.PlatformConsumerComponentDNSServer || !strings.HasPrefix(claims.CredentialID, "kubernetes:") {
 		return http.StatusOK
 	}
@@ -120,6 +126,12 @@ func (s *Server) validateDNSHeartbeatBackend(ctx context.Context, claims platfor
 	}
 	if !dnsBackendEndpointsMatch(*selected, *pod, endpoints.Items, positive) {
 		return http.StatusConflict
+	}
+	if read != nil {
+		ready := dnsBackendPodReady(*pod) && dnsBackendEndpointsMatch(*selected, *pod, endpoints.Items, true)
+		if status := read(ctx, client, *pod, *selected, ready); status != http.StatusOK {
+			return status
+		}
 	}
 	// Fail on an observed replacement or readiness/selector change during the
 	// lookup. Resource versions fence observations, not a lease on serving.

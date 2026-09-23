@@ -3289,6 +3289,51 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform-state/dns-runtime-facts/{node_id}:
+    get:
+      operationId: getPlatformDNSRuntimeFacts
+      summary: Read DNS observations from the current authenticated public backend
+      description: >-
+        Requires platform admin and artifact.read. Resolves a fresh verified
+        Kubernetes DNS heartbeat, the current signed traffic assignment and the
+        uniquely selected public Service backend. Reads runtime-facts through
+        the Kubernetes Pod proxy using the DNS container's declared HTTP readiness
+        port, with redirects disabled and an 8 MiB response limit. Pod UID,
+        Service and EndpointSlice observations are checked around the read;
+        current publication and expectation are checked again afterwards.
+        Proof IDs, plan digest, node/group and release bindings are validated
+        against signed artifacts. ready_probe_ids and ready are evaluated at
+        evaluated_at; expired or negative proofs cannot pass. The snapshot keeps
+        its original timestamps and values. A failed or ambiguous lookup returns
+        503 without fallback, probing, configuration writes or proof renewal.
+        This is a diagnostic observation, not serving authorization or a
+        transaction spanning Kubernetes and the publication store.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformDNSRuntimeFacts
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: node_id
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 253}
+      responses:
+        '200':
+          description: Backend-bound original observations and current readiness assessment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDNSRuntimeFactsResponse"
+        '400':
+          $ref: "#/components/responses/ErrorResponse"
+        '401':
+          $ref: "#/components/responses/ErrorResponse"
+        '403':
+          $ref: "#/components/responses/ErrorResponse"
+        '503':
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-state/runtime-facts:
     get:
       operationId: listPlatformRuntimeFacts
@@ -33361,6 +33406,30 @@ components:
           type: array
           items:
             type: string
+    PlatformDNSRuntimeFactsResponse:
+      type: object
+      additionalProperties: false
+      required: [backend, snapshot, evaluated_at, ready, ready_probe_ids]
+      properties:
+        backend:
+          type: object
+          additionalProperties: false
+          required: [namespace, pod_name, pod_uid, service_name, service_uid]
+          properties:
+            namespace: {type: string}
+            pod_name: {type: string}
+            pod_uid: {type: string}
+            service_name: {type: string}
+            service_uid: {type: string}
+        snapshot:
+          $ref: "#/components/schemas/DNSServingRuntimeFacts"
+        evaluated_at: {type: string, format: date-time}
+        ready: {type: boolean}
+        ready_probe_ids:
+          type: array
+          maxItems: 4096
+          uniqueItems: true
+          items: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
     DNSServingRuntimeFacts:
       type: object
       additionalProperties: false
