@@ -50,6 +50,10 @@ func (s *Service) applyManagedAppDesiredStateResult(ctx context.Context, app mod
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app = s.Renderer.PrepareApp(app)
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	app, err = s.reconcileManagedPostgresCredentials(ctx, client, namespace, app)
+	if err != nil {
+		return model.App{}, fmt.Errorf("resolve postgres credentials before operation snapshot: %w", err)
+	}
 	name := runtime.ManagedAppResourceName(app)
 	managed, found, err := client.getManagedApp(ctx, namespace, name)
 	if err != nil {

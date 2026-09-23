@@ -15,6 +15,10 @@ import (
 // Recovering a database credential reference must not depend on a new image
 // being deployable. No database/PVC/Deployment is created or replaced here.
 func (s *Service) reconcileManagedPostgresCredentials(ctx context.Context, client *kubeClient, namespace string, app model.App) (model.App, error) {
+	// App is passed by value but its backing-service slice may be shared with
+	// an operation's already-applied snapshot. Never mutate that snapshot while
+	// assigning configuration metadata, or its waiter expects a different hash.
+	app.BackingServices = cloneControllerBackingServices(app.BackingServices)
 	for index, service := range app.BackingServices {
 		if service.Spec.Postgres == nil || service.Type != model.BackingServiceTypePostgres || (service.OwnerAppID != "" && service.OwnerAppID != app.ID) {
 			continue

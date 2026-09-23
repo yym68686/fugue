@@ -253,9 +253,13 @@ func TestCredentialMigrationFromSharedSecretPersistsAndKeepsDatabases(t *testing
 	}
 	for round := 0; round < 3; round++ {
 		for i, app := range apps {
+			beforeServices := cloneControllerBackingServices(app.BackingServices)
 			next, err := svc.reconcileManagedPostgresCredentials(ctx, c, namespace, app)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(beforeServices, app.BackingServices) {
+				t.Fatal("credential assignment changed the caller's already-applied operation snapshot")
 			}
 			apps[i] = next
 		}
