@@ -15,7 +15,7 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
-func seedVerifiedDNSDelegationFixture(t *testing.T, s *Server, zone string) {
+func seedVerifiedDNSDelegationFixture(t *testing.T, s *Server, zone string, compiledExtras ...platformconfig.RouteIntent) {
 	t.Helper()
 	nodes, err := s.store.ListDNSNodes("")
 	if err != nil {
@@ -91,6 +91,7 @@ func seedVerifiedDNSDelegationFixture(t *testing.T, s *Server, zone string) {
 	}
 	policy := platformconfig.PolicySnapshot{Scope: "global", Generation: "delegation-compiled-policy", DNSReadiness: probe, DNSAuthorities: authorities, DNSClientPolicies: clients, TrafficRolloutCohorts: policyInput.Cohorts}
 	intent.Generation = "delegation-compiled-intent"
+	intent.Routes = append(intent.Routes, compiledExtras...)
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: observations, Facts: map[string]any{"configuration_producer": map[string]any{"policy_release_id": pr.ID, "source_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "static_intent_artifact_id": base.ID, "static_intent_digest": base.ContentHash, "dns_policy_artifact_id": pa.ID, "dns_policy_digest": pa.ContentHash}}}})
 	if err != nil {
 		t.Fatal(err)

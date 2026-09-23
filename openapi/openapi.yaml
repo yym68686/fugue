@@ -5324,6 +5324,16 @@ paths:
     get:
       operationId: getDiscoveryBundle
       summary: Get Discovery Bundle
+      description: >-
+        Public bootstrap topology with a summary of explicitly declared static
+        platform entry routes from the verified global TrafficReleaseSet LKG.
+        The signed parent, all member signatures and lineage, and pinned base
+        intent identity/digest are verified. Application-owned and non-root
+        routes are excluded; weighted targets are never flattened to one origin.
+        Group modes, TTL, disabled state and route policy retain artifact semantics.
+        Missing initial LKG returns topology without platform routes. Invalid or
+        changing verified configuration returns 503 without a signed bundle.
+        Environment routes and mutable business policies are not fallback sources.
       tags: [Cluster]
       x-fugue-handler: handleDiscoveryBundle
       responses:
@@ -5342,6 +5352,11 @@ paths:
                 $ref: "#/components/schemas/DiscoveryBundle"
         '304':
           description: Discovery bundle unchanged
+        '503':
+          description: Verified platform route summary is unavailable or changed during observation.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/cluster/pods:
@@ -16281,6 +16296,7 @@ components:
           items:
             $ref: "#/components/schemas/DNSNode"
         platform_routes:
+          description: Explicit static platform entry routes from the verified traffic artifact; excludes application-owned routes and path-specific routing.
           type: array
           items:
             $ref: "#/components/schemas/PlatformRoute"

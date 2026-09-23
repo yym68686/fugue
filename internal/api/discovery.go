@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
@@ -11,15 +12,18 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
-	"fugue/internal/routeartifact"
-	"fugue/internal/store"
 )
 
 func (s *Server) handleDiscoveryBundle(w http.ResponseWriter, r *http.Request) {
 	principal := discoveryBundlePrincipal()
 	bundle, err := s.deriveDiscoveryBundle(r, principal)
 	if err != nil {
-		s.writeStoreError(w, err)
+		if errors.Is(err, errDiscoveryRoutesUnavailable) {
+			w.Header().Set("Cache-Control", "no-store")
+			httpx.WriteError(w, http.StatusServiceUnavailable, errDiscoveryRoutesUnavailable.Error())
+		} else {
+			s.writeStoreError(w, err)
+		}
 		return
 	}
 	etag := edgeRouteBundleETag(bundle.Generation)
@@ -241,44 +245,4 @@ func dedupeEdgeGroups(groups []model.EdgeGroup) []model.EdgeGroup {
 		out = append(out, group)
 	}
 	return out
-}
-
-// Discovery carries a route summary for node bootstrap, but it is derived only
-// from the verified global TrafficReleaseSet. It cannot reintroduce environment
-// route configuration as a serving source.
-func (s *Server) publishedDiscoveryPlatformRoutes() ([]model.PlatformRoute, error) {
-	parent, found, err := s.verifiedPlatformArtifactForScope(model.PlatformArtifactKindReleaseSet, "global")
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		// Discovery remains available for bootstrap metadata, but carries no
-		// serving routes until a verified TrafficReleaseSet exists.
-		return []model.PlatformRoute{}, nil
-	}
-	if check := s.validateReleaseSetReferences(parent); !check.Pass {
-		return nil, store.ErrConflict
-	}
-	child, err := consumerAssignmentChild(parent, model.PlatformArtifactKindEdgeRouteBundle, s.store.GetPlatformArtifact)
-	if err != nil {
-		return nil, err
-	}
-	snapshot, err := routeartifact.Project(child)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]model.PlatformRoute, 0, len(snapshot.Routes))
-	for _, route := range snapshot.Routes {
-		upstream := route.UpstreamURL
-		if upstream == "" && len(route.Upstreams) > 0 {
-			upstream = route.Upstreams[0].UpstreamURL
-		}
-		status := route.OriginStatus
-		if status == "" {
-			status = model.EdgeRouteStatusActive
-		}
-		out = append(out, model.PlatformRoute{Hostname: route.Hostname, Kind: route.RouteKind, UpstreamKind: route.UpstreamKind, UpstreamScope: route.UpstreamScope, UpstreamURL: upstream, TLSPolicy: route.TLSPolicy, RoutePolicy: route.RoutePolicy, EdgeGroupMode: route.TargetGroupMode, EdgeGroupID: route.PinnedEdgeGroupID, Status: status, StatusReason: route.OriginStatusReason})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Hostname < out[j].Hostname })
-	return out, nil
 }
