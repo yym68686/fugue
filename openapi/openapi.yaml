@@ -7,6 +7,22 @@ info:
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
 servers:
   - url: /
+x-fugue-dns-runtime-facts:
+  endpoint: GET /runtime-facts on the DNS node HTTP listener
+  response_schema: '#/components/schemas/DNSServingRuntimeFacts'
+  semantics: >-
+    Read-only observations from the exact in-memory DNS serving snapshot, never
+    from a staged candidate, legacy bundle or persisted probe cache. This is a
+    node HTTP endpoint, not a control-plane route. Readers must authenticate the
+    node transport and verify node, assignment, artifact, plan and publication
+    identities against the current release; the unsigned response is not serving
+    authorization. Proof timestamps and validity are never renewed by reading.
+    Ready is evaluated at evaluated_at with the signed probe policy and current
+    checkpoint expiry; stale or mismatched proofs remain negative. Missing state
+    or a concurrent serving replacement returns 503. Responses contain opaque
+    probe identities and proof bindings, without hostnames, origin URLs, tokens,
+    artifact payloads or raw probe errors. No request performs probing or writes
+    serving, cache, heartbeat, intent, policy or LKG state.
 x-fugue-edge-cache-recovery:
   semantics: >-
     An empty inactive-slot candidate response retains the previously verified
@@ -33316,6 +33332,48 @@ components:
           type: array
           items:
             type: string
+    DNSServingRuntimeFacts:
+      type: object
+      additionalProperties: false
+      required: [schema, node_id, edge_group_id, assignment, parent_digest, route_artifact_id, plan_digest, observed_at, evaluated_at, checkpoint_valid_until, ready, facts]
+      properties:
+        schema: {type: string, enum: [fugue.dns.runtime-facts/v1]}
+        node_id: {type: string}
+        edge_group_id: {type: string}
+        assignment:
+          $ref: "#/components/schemas/PlatformConsumerAssignment"
+        parent_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        route_artifact_id: {type: string}
+        plan_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        observed_at: {type: string, format: date-time}
+        evaluated_at: {type: string, format: date-time}
+        checkpoint_valid_until: {type: string, format: date-time}
+        ready: {type: boolean}
+        facts:
+          type: array
+          maxItems: 4096
+          items:
+            type: object
+            additionalProperties: false
+            required: [probe_id, ready, proof]
+            properties:
+              probe_id: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+              ready: {type: boolean}
+              proof:
+                type: object
+                additionalProperties: false
+                required: [digest, version, edge_id, group_id, valid_until, checked_at]
+                properties:
+                  digest: {type: string}
+                  version: {type: string}
+                  edge_id: {type: string}
+                  group_id: {type: string}
+                  state: {type: string}
+                  app_traffic_digest: {type: string}
+                  traffic_release:
+                    $ref: "#/components/schemas/TrafficReleaseBinding"
+                  valid_until: {type: string, format: date-time}
+                  checked_at: {type: string, format: date-time}
     PlatformConsumerAssignment:
       type: object
       additionalProperties: false

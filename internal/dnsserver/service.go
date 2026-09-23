@@ -753,6 +753,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.handleLivez)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /runtime-facts", s.handleRuntimeFacts)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	return mux
 }
