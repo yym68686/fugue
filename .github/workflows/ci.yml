@@ -75,6 +75,37 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  dns_transport:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-dns-transport, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Validate and reconcile DNS network transport
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/dns-transport/transport.json
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_dns_transport.py scripts/test_reconcile_dns_transport.py; then
+            git fetch origin main
+            if ! git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_transport.py; then
+              echo "Newer DNS transport configuration supersedes this run."
+              exit 0
+            fi
+            python3 -m unittest scripts.test_reconcile_dns_transport
+            python3 scripts/reconcile_dns_transport.py "$config"
+            python3 scripts/reconcile_dns_transport.py "$config" --apply
+          fi
+
   postgres_protection:
     # Database recovery must remain possible when an application build fails.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

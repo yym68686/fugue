@@ -49,11 +49,20 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	dnsTransport := yamlMappingValue(t, jobs, "dns_transport")
+	for _, key := range yamlMappingKeys(t, dnsTransport) {
+		if key == "needs" {
+			t.Fatal("DNS transport recovery must not depend on rebuilding consumer code")
+		}
+	}
+	if yamlMappingValue(t, dnsTransport, "environment").Value != "production" || !strings.Contains(source, `scripts/reconcile_dns_transport.py "$config" --apply`) {
+		t.Fatal("DNS transport must use the production declarative reconciler")
+	}
 	externalController := yamlMappingValue(t, jobs, "external_controller_release")
 	if yamlMappingValue(t, externalController, "environment").Value != "production" || yamlMappingValue(t, externalController, "needs").Value != "prepush" {
 		t.Fatal("external controller release must use the production CI gate")
