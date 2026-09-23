@@ -408,7 +408,7 @@ func TestEnrolledDNSMissingAllCheckpointsCannotServeLegacyOrFetchBusiness(t *tes
 }
 
 func TestEnrolledDNSStartupDoesNotRequireAmbientServingConfiguration(t *testing.T) {
-	cfg := config.DNSConfig{APIURL: "https://control.example.test", EdgeToken: "inventory-token", DNSNodeID: "dns-a", EdgeGroupID: "group-a", Zone: "example.test", CachePath: filepath.Join(t.TempDir(), "cache"), PublicIPv4: "192.0.2.8", ListenAddr: ":7834", UDPAddr: ":5353", TCPAddr: ":5353"}
+	cfg := config.DNSConfig{APIURL: "https://control.example.test", DNSNodeID: "dns-a", EdgeGroupID: "group-a", Zone: "example.test", CachePath: filepath.Join(t.TempDir(), "cache"), PublicIPv4: "192.0.2.8", ListenAddr: ":7834", UDPAddr: ":5353", TCPAddr: ":5353"}
 	s := NewService(cfg, nil)
 	s.PlatformTokenFile = "/var/run/identity/token"
 	if err := s.validateConfig(); err != nil {
@@ -435,6 +435,20 @@ func TestEnrolledDNSStartupDoesNotRequireAmbientServingConfiguration(t *testing.
 		}
 	}
 	s.PlatformTokenFile = ""
+	if err := s.validateConfig(); err == nil {
+		t.Fatal("bootstrap accepted missing consumer credentials")
+	}
+	s.platformServingBound.Store(true)
+	if err := s.validateConfig(); err == nil {
+		t.Fatal("a retained snapshot bypassed explicit credential enrollment")
+	}
+	s.PlatformTokenFile = " "
+	if err := s.validateConfig(); err == nil {
+		t.Fatal("blank Pod credential path bypassed authentication")
+	}
+	s.PlatformTokenFile = ""
+	s.platformServingBound.Store(false)
+	s.Config.EdgeToken = "inventory-token"
 	if err := s.validateConfig(); err == nil {
 		t.Fatal("legacy bootstrap accepted missing answer configuration")
 	}

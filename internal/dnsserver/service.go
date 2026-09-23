@@ -1758,8 +1758,11 @@ func (s *Service) validateConfig() error {
 	if strings.TrimSpace(s.Config.APIURL) == "" {
 		return fmt.Errorf("FUGUE_API_URL is required")
 	}
-	if strings.TrimSpace(s.Config.EdgeToken) == "" {
-		return fmt.Errorf("FUGUE_DNS_TOKEN or FUGUE_EDGE_TOKEN is required")
+	// An explicitly enrolled artifact consumer authenticates with its bound
+	// Pod credential. Inventory registration is optional and must not force a
+	// parallel candidate to impersonate the currently selected DNS instance.
+	if strings.TrimSpace(s.Config.EdgeToken) == "" && strings.TrimSpace(s.PlatformTokenFile) == "" {
+		return fmt.Errorf("FUGUE_DNS_PLATFORM_TOKEN_FILE, FUGUE_DNS_TOKEN or FUGUE_EDGE_TOKEN is required")
 	}
 	if normalizeName(s.Config.Zone) == "" {
 		return fmt.Errorf("FUGUE_DNS_ZONE is required")

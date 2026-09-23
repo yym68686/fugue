@@ -1,0 +1,271 @@
+{
+  "apiVersion": "release.fugue.dev/v2",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/component": "dns-de-b",
+          "app.kubernetes.io/instance": "fugue",
+          "app.kubernetes.io/name": "fugue"
+        },
+        "name": "fugue-dns-de-b",
+        "namespace": "fugue-system"
+      },
+      "spec": {
+        "revisionHistoryLimit": 2,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "dns-de-b",
+            "app.kubernetes.io/instance": "fugue",
+            "app.kubernetes.io/name": "fugue"
+          }
+        },
+        "template": {
+          "metadata": {
+            "annotations": {
+              "fugue.pro/consumer-identity": "{\"version\":\"v1\",\"component\":\"dns-server\",\"scope_key\":\"global\",\"artifact_kinds\":[\"dns_answer_bundle\"]}"
+            },
+            "labels": {
+              "app.kubernetes.io/component": "dns-de-b",
+              "app.kubernetes.io/instance": "fugue",
+              "app.kubernetes.io/name": "fugue"
+            }
+          },
+          "spec": {
+            "automountServiceAccountToken": false,
+            "containers": [
+              {
+                "command": [
+                  "/usr/local/bin/fugue-dns"
+                ],
+                "env": [
+                  {
+                    "name": "FUGUE_API_URL",
+                    "value": "http://fugue-fugue:80?authority_service=edge-control-de"
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "FUGUE_BUNDLE_SIGNING_KEY",
+                        "name": "fugue-fugue-config"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_KEY_ID",
+                    "value": "control-plane"
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
+                        "name": "fugue-fugue-config",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_REVOKED_KEY_IDS"
+                  },
+                  {
+                    "name": "FUGUE_DNS_NODE_ID",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "spec.nodeName"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_GROUP_ID",
+                    "value": "edge-group-country-de"
+                  },
+                  {
+                    "name": "FUGUE_DNS_ZONE",
+                    "value": "fugue.pro"
+                  },
+                  {
+                    "name": "FUGUE_DNS_LISTEN_ADDR",
+                    "value": ":7834"
+                  },
+                  {
+                    "name": "FUGUE_DNS_UDP_ADDR",
+                    "value": ":53"
+                  },
+                  {
+                    "name": "FUGUE_DNS_TCP_ADDR",
+                    "value": ":53"
+                  },
+                  {
+                    "name": "FUGUE_DNS_CACHE_PATH",
+                    "value": "/var/lib/fugue/dns/dns-cache.json"
+                  },
+                  {
+                    "name": "FUGUE_DNS_CACHE_ARCHIVE_LIMIT",
+                    "value": "5"
+                  },
+                  {
+                    "name": "FUGUE_DNS_HTTP_TIMEOUT",
+                    "value": "10s"
+                  },
+                  {
+                    "name": "FUGUE_DNS_PLATFORM_TOKEN_FILE",
+                    "value": "/var/run/secrets/fugue-platform-consumer/token"
+                  },
+                  {
+                    "name": "FUGUE_DNS_PUBLIC_IPV4",
+                    "value": "51.38.126.103"
+                  }
+                ],
+                "image": "ghcr.io/yym68686/fugue-edge@sha256:7f608a13eaf821d5d9cc1a7d0257bc64c0f47530515435f463c50b47a9ebd7a1",
+                "imagePullPolicy": "IfNotPresent",
+                "livenessProbe": {
+                  "failureThreshold": 12,
+                  "httpGet": {
+                    "path": "/livez",
+                    "port": "http",
+                    "scheme": "HTTP"
+                  },
+                  "initialDelaySeconds": 30,
+                  "periodSeconds": 10,
+                  "successThreshold": 1,
+                  "timeoutSeconds": 3
+                },
+                "name": "dns",
+                "ports": [
+                  {
+                    "containerPort": 7834,
+                    "name": "http",
+                    "protocol": "TCP"
+                  },
+                  {
+                    "containerPort": 53,
+                    "name": "dns-udp",
+                    "protocol": "UDP"
+                  },
+                  {
+                    "containerPort": 53,
+                    "name": "dns-tcp",
+                    "protocol": "TCP"
+                  }
+                ],
+                "readinessProbe": {
+                  "failureThreshold": 3,
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "http",
+                    "scheme": "HTTP"
+                  },
+                  "periodSeconds": 5,
+                  "successThreshold": 1,
+                  "timeoutSeconds": 3
+                },
+                "resources": {
+                  "limits": {
+                    "ephemeral-storage": "256Mi",
+                    "memory": "256Mi"
+                  },
+                  "requests": {
+                    "cpu": "25m",
+                    "ephemeral-storage": "32Mi",
+                    "memory": "64Mi"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "readOnlyRootFilesystem": true
+                },
+                "terminationMessagePath": "/dev/termination-log",
+                "terminationMessagePolicy": "File",
+                "volumeMounts": [
+                  {
+                    "mountPath": "/var/lib/fugue/dns",
+                    "name": "dns-cache"
+                  },
+                  {
+                    "mountPath": "/var/run/secrets/fugue-platform-consumer",
+                    "name": "platform-consumer-identity",
+                    "readOnly": true
+                  }
+                ]
+              }
+            ],
+            "dnsPolicy": "ClusterFirst",
+            "nodeSelector": {
+              "fugue.io/location-country-code": "de",
+              "fugue.io/role.dns": "true",
+              "fugue.io/schedulable": "true"
+            },
+            "restartPolicy": "Always",
+            "schedulerName": "default-scheduler",
+            "securityContext": {},
+            "serviceAccountName": "fugue-dns-de-b",
+            "terminationGracePeriodSeconds": 30,
+            "tolerations": [
+              {
+                "effect": "NoSchedule",
+                "key": "fugue.io/dedicated",
+                "operator": "Equal",
+                "value": "dns"
+              },
+              {
+                "effect": "NoSchedule",
+                "key": "fugue.io/dedicated",
+                "operator": "Equal",
+                "value": "edge"
+              },
+              {
+                "effect": "NoSchedule",
+                "key": "fugue.io/tenant",
+                "operator": "Exists"
+              }
+            ],
+            "volumes": [
+              {
+                "hostPath": {
+                  "path": "/var/lib/fugue/dns-slots/b",
+                  "type": "DirectoryOrCreate"
+                },
+                "name": "dns-cache"
+              },
+              {
+                "name": "platform-consumer-identity",
+                "projected": {
+                  "defaultMode": 256,
+                  "sources": [
+                    {
+                      "serviceAccountToken": {
+                        "expirationSeconds": 600,
+                        "path": "token"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "updateStrategy": {
+          "type": "OnDelete"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "automountServiceAccountToken": false,
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "fugue-dns-de-b",
+        "namespace": "fugue-system"
+      }
+    }
+  ],
+  "kind": "ComponentResourceSet"
+}
