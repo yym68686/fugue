@@ -197,13 +197,13 @@ func TestBusinessRouteDraftRetainsEvidenceTimeAndDesiredIntent(t *testing.T) {
 
 func TestBusinessRouteDraftPreservesConfiguredPlatformMaintenance(t *testing.T) {
 	route := model.EdgeRouteIntent{Hostname: "platform.example", PathPrefix: "/", TargetGroupMode: model.EdgeRouteIntentGroupModePinnedGroup, PinnedEdgeGroupID: "edge-group-test", OriginStatus: model.EdgeRouteStatusUnavailable}
-	configured := model.PlatformRoute{Hostname: route.Hostname, UpstreamURL: "http://configured:8080", Status: model.EdgeRouteStatusUnavailable, StatusReason: "planned maintenance"}
+	configured := model.PlatformRoute{Hostname: route.Hostname, UpstreamURL: "http://configured:8080", EdgeGroupMode: model.PlatformRouteEdgeGroupModePinned, EdgeGroupID: "edge-group-test", TTL: 180, Status: model.EdgeRouteStatusUnavailable, StatusReason: "planned maintenance"}
 	result, err := projectBusinessRouteDraft(model.EdgeRouteIntentSnapshot{Routes: []model.EdgeRouteIntent{route}}, nil, nil, []model.PlatformRoute{configured}, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := result.Intent.Routes[0]
-	if got.EdgeGroupMode != model.PlatformRouteEdgeGroupModePinned || got.EdgeGroupID != "edge-group-test" || got.Status != configured.Status || got.StatusReason != configured.StatusReason || got.UpstreamURL != configured.UpstreamURL {
+	if got.EdgeGroupMode != model.PlatformRouteEdgeGroupModePinned || got.EdgeGroupID != "edge-group-test" || got.TTL != configured.TTL || got.Status != configured.Status || got.StatusReason != configured.StatusReason || got.UpstreamURL != configured.UpstreamURL {
 		t.Fatalf("platform configuration changed: %+v", got)
 	}
 }

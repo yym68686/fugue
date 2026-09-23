@@ -446,6 +446,10 @@ func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot,
 				return result, fmt.Errorf("platform route configuration missing")
 			}
 			route.UpstreamURL, route.Status, route.StatusReason = configured.UpstreamURL, configured.Status, configured.StatusReason
+			// EdgeRouteIntent deliberately collapses region-aware to all-groups
+			// for execution and has no TTL field. Restore these desired fields
+			// from the pinned static input, never from that lossy projection.
+			route.EdgeGroupMode, route.EdgeGroupID, route.TTL = configured.EdgeGroupMode, configured.EdgeGroupID, configured.TTL
 			route.Enabled = configured.Status != model.EdgeRouteStatusDisabled
 		}
 		intent.Routes = append(intent.Routes, route)

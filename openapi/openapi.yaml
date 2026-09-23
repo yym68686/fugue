@@ -87,6 +87,9 @@ x-fugue-platform-producer:
     explicit promotion settings and complete pinned configuration inputs. business-static-intent pins a validated signed
     PlatformIntent by exact ID and content digest for static platform routes and
     DNS records; missing, invalid or revoked input never falls back to environment.
+    Static platform route projection retains the pinned TTL and group mode;
+    the executor's all-groups routing projection cannot erase region-aware intent.
+    Application-owned routes retain their own business ownership and placement.
     Optional pinned DNS policy supplies authority, client rules, probe parameters
     and rollout cohorts. Consumer identity/base zones come from the same pinned
     intent; endpoint addresses stay runtime facts. Explicit hosted-zone templates
