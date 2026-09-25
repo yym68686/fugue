@@ -6,8 +6,10 @@ edge inventory, dynamic route authority, or Kubernetes to manage configurations.
 Management failure does not stop the separately supervised Caddy process.
 
 This release ships the CLI and `fugue-static-edge-manager` (Linux amd64/arm64)
-artifacts. Installing the CLI does **not** install managers, provision a CA,
-adopt a shared public proxy, rewrite routes or deploy production workloads.
+artifacts. Installing the CLI does not alter any server. Explicit `bootstrap
+--execute` provisions a dedicated Linux amd64 candidate, its management PKI and
+initial signed configuration. Explicit `cutover run --execute` updates only the
+allowlisted Cloudflare A records. Neither command uses the Fugue API.
 
 ## Ownership and boundaries
 
@@ -81,7 +83,115 @@ wrapper that accesses **only** this socket. Do not grant arbitrary sudo/shell
 access for routine manager operations. An already authorized root SSH alias
 works without copying SSH private keys into Fugue.
 
-## Manager bootstrap (separate from business cutover)
+## Automated bootstrap and DNS cutover
+
+Create a Cloudflare API token with **Zone / DNS / Edit**, restricted to the exact
+zone. A zone ID avoids needing Zone Read. The token can change all DNS records in
+that zone; the CLI additionally restricts writes to the explicit hostname list.
+Store it only on the operator machine, not on the edge or in a bundle:
+
+```sh
+fugue static-edge cloudflare auth import --zone example.com --token-stdin
+fugue static-edge cloudflare auth show --zone example.com
+```
+
+The import reads a single token from stdin and saves it with mode `0600`. It does
+not echo the token or put it in process arguments. The default state directory is
+the OS user configuration directory under `fugue/static-edge`; override with
+`FUGUE_STATIC_EDGE_STATE_DIR`. `FUGUE_STATIC_EDGE_CLOUDFLARE_TOKEN_FILE` selects an
+explicit credential file, and `FUGUE_STATIC_EDGE_CLOUDFLARE_TOKEN` is an ephemeral
+environment override. No Fugue API token is reused.
+
+Bootstrap supports a clean Linux amd64/systemd VPS reachable through an existing,
+host-key-verified root SSH alias. It checks the claimed local public IPv4, clock,
+ports and existing ownership before writes. The source Caddy binary must match
+the reviewed digest. The manager comes from the same tagged release as the CLI,
+with its published archive checksum verified. No source service is changed.
+
+```sh
+fugue static-edge bootstrap --ssh-host entry-next --source-ssh entry-current \
+  --edge-id entry-next --public-ip 192.0.2.20 \
+  --hostname example.com --hostname api.example.com \
+  --origin-ip 192.0.2.40 --origin-port 19443 \
+  --origin-server-name origin.example.internal \
+  --caddy-sha256 REVIEWED_64_CHARACTER_SHA256 \
+  --business-ca /secure/business-ca.pem \
+  --business-ca-key /secure/business-ca.key --execute
+```
+
+The business private key is generated on the candidate. Only its CSR leaves the
+node; the existing business CA signs it locally. Neither the CA private key nor
+the old edge's business private key is copied to the new node. Management CA,
+client credentials and signing key are separate and saved privately on the
+operator machine. The server receives only its management server key, CA public
+certificate, client fingerprint grant and bundle verification public key.
+
+For the supported Caddy storage layout, bootstrap copies only the named hosts'
+valid public certificate/key/metadata files as a migration seed. Caddy on the new
+node keeps normal automatic HTTPS enabled and maintains its own writable storage
+and renewal after DNS points to it. This is an explicit certificate-key transfer,
+not DNS-01 issuance. It does not copy the source ACME account or DNS API token.
+Public certificates must have at least seven days remaining; operator-managed
+management/business certificates are valid for at most one year and require
+rotation before expiry. The offline management CA is retained locally.
+
+Bootstrap writes a durable receipt and immutable local assets before touching the
+candidate. Repeating the same command resumes the exact intent. Once the data
+plane is running, bootstrap verifies rather than overwrites or restarts it.
+An inactive previously started candidate or configuration drift stops recovery
+for inspection. Bootstrap only manages its dedicated instance, never a shared
+public Caddy. A read-only default invocation reports intent; it is not a remote
+readiness assertion.
+
+After bootstrap, one command validates both public endpoints and the candidate
+manager, snapshots exact DNS records, patches only their `content`, reads every
+write back and observes overlap health:
+
+```sh
+fugue static-edge cutover run --zone example.com --zone-id ZONE_ID \
+  --hostname example.com --hostname api.example.com \
+  --from-ip 192.0.2.10 --to-ip 192.0.2.20 --candidate entry-next \
+  --check example.com/=307 --check api.example.com/v1/health=200 \
+  --observe 60s --execute
+```
+
+Only non-billable GET endpoints should be passed as checks. The default primary
+probe is `/_static-edge/health` and must return 200 with normal public TLS
+verification and exact SNI. There is no production skip-probe flag. Extra checks
+are constrained to the hostname allowlist. The candidate must have an active,
+healthy, non-draining bundle whose runtime/startup state matches the manager.
+
+`cutover plan` runs the same preflight without DNS writes. Repeating `run` with the
+same intent resumes its deterministic operation ID: previously committed writes
+are recognized, including writes whose HTTP response was lost. The CLI never
+blindly retries a mutation. Unexpected A/AAAA/CNAME/HTTPS/SVCB state, record
+attribute drift or a different manager identity fails closed. DNS TTL, proxy
+mode, record ID, comments and tags are preserved. A crash-safe local lock excludes
+concurrent invocations on the same machine. Operators must maintain a single
+writer across machines; GET/PATCH/readback is not a Cloudflare server-side CAS.
+
+```sh
+fugue static-edge cutover status --operation fse_OPERATION_ID
+fugue static-edge cutover rollback --operation fse_OPERATION_ID --execute
+```
+
+Rollback also verifies both endpoints, preserves record attributes and refuses
+external drift. It keeps both servers running. A DNS update is not globally
+atomic, and existing connections/cached old addresses still need the old server.
+Completion means `completed_old_retained`, with bounded probe evidence and API
+record verification, not proof about every client or permission to retire the
+old server. No drain/restart/stop/kill operation is part of DNS cutover. Natural
+business traffic and authoritative/recursive DNS should also be reviewed before
+declaring the production migration accepted.
+
+The automated renderer deliberately implements only the fixed two-hop proxy
+template used by this subsystem; custom source header/path rewrites are not
+inferred. Review the generated configuration and origin contract before cutover.
+Source certificate storage and paths are explicit flags. Advanced certificate
+issuance, arbitrary operating systems/architectures, automatic old-node retirement
+and global distributed locks are not implemented.
+
+## Manual manager bootstrap (separate from business cutover)
 
 1. Download the tagged manager artifact and verify its checksum. Keep a previous
    manager binary. Install with a controlled release/bootstrap process.
