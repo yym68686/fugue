@@ -51,8 +51,8 @@ func loadStaticEdgeBundle(path string) (c.Bundle, error) {
 	return b, e
 }
 func (cli *CLI) newStaticEdgeCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "static-edge", Short: "Manage standalone edges directly using mTLS or SSH; no Fugue API", Long: "Manage independent edge/origin managers. Local contexts, signing keys and manager identities are separate from Fugue API credentials. No automatic SSH fallback. Every write requires an expected revision and returns a durable receipt."}
-	cmd.AddCommand(cli.newStaticEdgeContextCommand(), cli.newStaticEdgeCloudflareCommand(), cli.newStaticEdgeCutoverCommand(), cli.newStaticEdgeBootstrapCommand(), cli.staticEdgeLocalBundle("validate"), cli.staticEdgeLocalBundle("plan"), cli.staticEdgeKeys(), cli.staticEdgeSign())
+	cmd := &cobra.Command{Use: "static-edge", Short: "Manage standalone edges directly or record account metadata", Long: "Manage independent edge/origin managers. Direct contexts, signing keys and manager identities are separate from Fugue API credentials; the registry subcommand is an optional Fugue API metadata view and never becomes the runtime or DNS authority. No automatic SSH fallback. Every direct write requires an expected revision and returns a durable receipt."}
+	cmd.AddCommand(cli.newStaticEdgeContextCommand(), cli.newStaticEdgeCloudflareCommand(), cli.newStaticEdgeCutoverCommand(), cli.newStaticEdgeBootstrapCommand(), cli.newStaticEdgeRegistryCommand(), cli.staticEdgeLocalBundle("validate"), cli.staticEdgeLocalBundle("plan"), cli.staticEdgeKeys(), cli.staticEdgeSign())
 	bundle := &cobra.Command{Use: "bundle", Short: "Validate and sign configuration bundles"}
 	bundle.AddCommand(cli.staticEdgeLocalBundle("validate"), cli.staticEdgeSign())
 	cmd.AddCommand(bundle)

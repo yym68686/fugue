@@ -3452,6 +3452,7 @@ type State struct {
 	Projects                   []Project                      `json:"projects"`
 	ProjectDeleteRequests      map[string]time.Time           `json:"project_delete_requests,omitempty"`
 	ProjectRuntimeReservations []ProjectRuntimeReservation    `json:"project_runtime_reservations,omitempty"`
+	StaticEdgeRegistrations    []StaticEdgeRegistration       `json:"static_edge_registrations,omitempty"`
 	APIKeys                    []APIKey                       `json:"api_keys"`
 	SSHKeys                    []SSHKey                       `json:"ssh_keys,omitempty"`
 	AppSSHEndpoints            []AppSSHEndpoint               `json:"app_ssh_endpoints,omitempty"`

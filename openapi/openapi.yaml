@@ -4540,6 +4540,120 @@ paths:
                 $ref: "#/components/schemas/ProjectResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/static-edges:
+    get:
+      operationId: listStaticEdgeRegistrations
+      summary: List Static Edge Registrations
+      tags: [StaticEdges]
+      x-fugue-handler: handleListStaticEdgeRegistrations
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: project_id
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Static edge registrations visible to the principal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaticEdgeRegistrationListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createStaticEdgeRegistration
+      summary: Register Static Edge Metadata
+      description: Records account and project ownership metadata for an independent static edge. The standalone executor remains the runtime, health, credential, and DNS authority.
+      tags: [StaticEdges]
+      x-fugue-handler: handleCreateStaticEdgeRegistration
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStaticEdgeRegistrationRequest"
+      responses:
+        '201':
+          description: Static edge registration created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaticEdgeRegistrationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/static-edges/{id}:
+    get:
+      operationId: getStaticEdgeRegistration
+      summary: Get Static Edge Registration
+      tags: [StaticEdges]
+      x-fugue-handler: handleGetStaticEdgeRegistration
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Static edge registration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaticEdgeRegistrationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: revokeStaticEdgeRegistration
+      summary: Revoke Static Edge Registration
+      tags: [StaticEdges]
+      x-fugue-handler: handleRevokeStaticEdgeRegistration
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Static edge registration revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaticEdgeRegistrationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/static-edges/{id}/proof:
+    post:
+      operationId: updateStaticEdgePossessionProof
+      summary: Record Static Edge Possession Observation
+      description: Stores the digest and signing-key identifier produced by a direct executor observation. This control-plane record does not grant the API authority over the independent edge.
+      tags: [StaticEdges]
+      x-fugue-handler: handleUpdateStaticEdgePossessionProof
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateStaticEdgePossessionProofRequest"
+      responses:
+        '200':
+          description: Static edge possession observation recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaticEdgeRegistrationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/projects/image-usage:
     get:
       operationId: listProjectImageUsage
@@ -22563,6 +22677,105 @@ components:
       properties:
         project:
           $ref: "#/components/schemas/Project"
+    StaticEdgeRegistration:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, project_id, name, edge_id, transport, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        name:
+          type: string
+        edge_id:
+          type: string
+        transport:
+          type: string
+          enum: [mtls, ssh]
+        manager_url:
+          type: string
+          format: uri
+        certificate_fingerprint:
+          type: string
+        signing_key_id:
+          type: string
+        possession_proof_digest:
+          type: string
+        status:
+          type: string
+          enum: [pending, ready, revoked]
+        last_proof_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    StaticEdgeRegistrationListResponse:
+      type: object
+      additionalProperties: false
+      required: [registrations, generated_at]
+      properties:
+        registrations:
+          type: array
+          items:
+            $ref: "#/components/schemas/StaticEdgeRegistration"
+        generated_at:
+          type: string
+          format: date-time
+    StaticEdgeRegistrationResponse:
+      type: object
+      additionalProperties: false
+      required: [registration]
+      properties:
+        registration:
+          $ref: "#/components/schemas/StaticEdgeRegistration"
+    CreateStaticEdgeRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [project_id, name, edge_id, transport, possession_proof_digest, signing_key_id]
+      properties:
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        name:
+          type: string
+        edge_id:
+          type: string
+        transport:
+          type: string
+          enum: [mtls, ssh]
+        manager_url:
+          type: string
+          format: uri
+        certificate_fingerprint:
+          type: string
+        signing_key_id:
+          type: string
+        possession_proof_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+          description: Digest of a direct possession observation; the API stores this metadata and does not perform the executor handshake.
+    UpdateStaticEdgePossessionProofRequest:
+      type: object
+      additionalProperties: false
+      required: [possession_proof_digest, signing_key_id]
+      properties:
+        possession_proof_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+          description: Digest of a direct possession observation; the API stores this metadata and does not perform the executor handshake.
+        signing_key_id:
+          type: string
+        ready:
+          type: boolean
+          default: true
     PutProjectRouteTableRequest:
       type: object
       additionalProperties: false

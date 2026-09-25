@@ -277,7 +277,9 @@ Environment variables:
 			}
 			// Static-edge management must work with the Fugue API disconnected,
 			// invalid API credentials and a broken control-plane context.
-			if strings.HasPrefix(cmd.CommandPath(), "fugue static-edge ") {
+			commandPath := cmd.CommandPath()
+			isStaticEdgeDirect := strings.HasPrefix(commandPath, "fugue static-edge ") && commandPath != "fugue static-edge registry" && !strings.HasPrefix(commandPath, "fugue static-edge registry ")
+			if isStaticEdgeDirect {
 				if c.root.SaveToken {
 					return fmt.Errorf("--save-token is not supported for independent static-edge management")
 				}

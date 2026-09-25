@@ -283,6 +283,25 @@ var postgresSchemaStatements = []string{
 		UNIQUE (runtime_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_project_runtime_reservations_project_id ON fugue_project_runtime_reservations (project_id, created_at ASC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_static_edge_registrations (
+		id TEXT PRIMARY KEY CHECK (btrim(id) <> ''),
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		project_id TEXT NOT NULL REFERENCES fugue_projects(id) ON DELETE CASCADE,
+		name TEXT NOT NULL CHECK (btrim(name) <> ''),
+		edge_id TEXT NOT NULL CHECK (btrim(edge_id) <> ''),
+		transport TEXT NOT NULL CHECK (transport IN ('mtls', 'ssh')),
+		manager_url TEXT NOT NULL DEFAULT '',
+		certificate_fingerprint TEXT NOT NULL DEFAULT '',
+		signing_key_id TEXT NOT NULL DEFAULT '',
+		possession_proof_digest TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'revoked')),
+		last_proof_at TIMESTAMPTZ NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		UNIQUE (tenant_id, project_id, name),
+		UNIQUE (tenant_id, project_id, edge_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_static_edge_registrations_tenant_project ON fugue_static_edge_registrations (tenant_id, project_id, updated_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_apps (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
