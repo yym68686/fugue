@@ -151,6 +151,7 @@ write back and observes overlap health:
 fugue static-edge cutover run --zone example.com --zone-id ZONE_ID \
   --hostname example.com --hostname api.example.com \
   --from-ip 192.0.2.10 --to-ip 192.0.2.20 --candidate entry-next \
+  --probe-ssh entry-next \
   --check example.com/=307 --check api.example.com/v1/health=200 \
   --observe 60s --execute
 ```
@@ -160,6 +161,13 @@ probe is `/_static-edge/health` and must return 200 with normal public TLS
 verification and exact SNI. There is no production skip-probe flag. Extra checks
 are constrained to the hostname allowlist. The candidate must have an active,
 healthy, non-draining bundle whose runtime/startup state matches the manager.
+Candidate responses must include the exact edge identity. A local VPN or proxy
+that reroutes by SNI cannot satisfy this check with a successful old-edge response.
+`--probe-ssh` explicitly selects a trusted SSH vantage (with Python 3) for bounded,
+certificate-verified public probes. This is not automatic transport fallback.
+Bootstrap probes from the candidate itself; cutover may probe from another
+trusted node to verify external reachability. Management uses the certificate's
+IP SAN and verifies the real target IP, avoiding synthetic DNS/SNI dependencies.
 
 `cutover plan` runs the same preflight without DNS writes. Repeating `run` with the
 same intent resumes its deterministic operation ID: previously committed writes

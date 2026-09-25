@@ -35,6 +35,7 @@ type staticEdgeCutoverOptions struct {
 	ToIP      string        `json:"to_ip"`
 	Candidate string        `json:"candidate"`
 	ProbePath string        `json:"probe_path"`
+	ProbeSSH  string        `json:"probe_ssh,omitempty"`
 	Checks    []string      `json:"checks"`
 	Observe   time.Duration `json:"observe_ns"`
 	Timeout   time.Duration `json:"timeout_ns"`
@@ -220,6 +221,7 @@ func (cli *CLI) newStaticEdgeCutoverCommand() *cobra.Command {
 		f.StringVar(&o.ToIP, "to-ip", "", "Candidate IPv4")
 		f.StringVar(&o.Candidate, "candidate", "", "Independent candidate manager context")
 		f.StringVar(&o.ProbePath, "probe-path", o.ProbePath, "Non-billable GET path expected to return HTTP 200")
+		f.StringVar(&o.ProbeSSH, "probe-ssh", "", "Explicit trusted SSH probe vantage when local networking intercepts TLS/SNI")
 		f.StringSliceVar(&o.Checks, "check", nil, "Additional non-billable check hostname/path=status; repeat as needed")
 		f.DurationVar(&o.Observe, "observe", o.Observe, "Overlap observation duration (5s-10m)")
 		f.DurationVar(&o.Timeout, "timeout", o.Timeout, "Per-request timeout")
@@ -274,6 +276,9 @@ func normalizeStaticEdgeCutover(o staticEdgeCutoverOptions) (staticEdgeCutoverOp
 	}
 	if !c.ValidID(o.Candidate) {
 		return o, errors.New("candidate manager context required")
+	}
+	if o.ProbeSSH != "" && !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`).MatchString(o.ProbeSSH) {
+		return o, errors.New("probe-ssh must be a local SSH alias")
 	}
 	if !strings.HasPrefix(o.ProbePath, "/") || strings.ContainsAny(o.ProbePath, "?#\r\n") {
 		return o, errors.New("probe path must have no query or fragment")
@@ -545,9 +550,17 @@ func verifyStaticEdgeCandidate(ctx context.Context, o staticEdgeCutoverOptions) 
 	return nil
 }
 func probeStaticEdgeBoth(ctx context.Context, o staticEdgeCutoverOptions) error {
+	cfg, e := loadStaticEdgeContext(o.Candidate)
+	if e != nil {
+		return e
+	}
 	for _, ip := range []string{o.FromIP, o.ToIP} {
+		expectedEdge := ""
+		if ip == o.ToIP {
+			expectedEdge = cfg.EdgeID
+		}
 		for _, h := range o.Hostnames {
-			if e := probeStaticEdgeEndpoint(ctx, ip, h, 443, o.ProbePath, o.Timeout); e != nil {
+			if e := probeStaticEdgeVerified(ctx, o.ProbeSSH, ip, h, o.ProbePath, 200, expectedEdge, o.Timeout); e != nil {
 				return e
 			}
 		}
@@ -556,7 +569,7 @@ func probeStaticEdgeBoth(ctx context.Context, o staticEdgeCutoverOptions) error 
 			if e != nil {
 				return e
 			}
-			if e = probeStaticEdgeEndpointStatus(ctx, ip, host, 443, path, o.Timeout, status); e != nil {
+			if e = probeStaticEdgeVerified(ctx, o.ProbeSSH, ip, host, path, status, expectedEdge, o.Timeout); e != nil {
 				return e
 			}
 		}

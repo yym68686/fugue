@@ -190,7 +190,7 @@ func (cli *CLI) bootstrapStaticEdge(ctx context.Context, o staticEdgeBootstrapOp
 		}
 	}
 	if receipt.Schema == 0 {
-		preflight := "set -eu; test \"$(id -u)\" = 0; test \"$(uname -s)\" = Linux; test \"$(uname -m)\" = x86_64; command -v openssl >/dev/null; command -v systemctl >/dev/null; test ! -e /etc/fugue-static-edge; test ! -e /etc/systemd/system/static-caddy.service; test ! -e /opt/static-caddy; if ss -lntu | grep -Eq '[:](80|443|9443|18480)[[:space:]]'; then exit 31; fi; ip -o -4 addr show | grep -F ' " + o.PublicIP + "/' >/dev/null; date -u +%s"
+		preflight := "set -eu; test \"$(id -u)\" = 0; test \"$(uname -s)\" = Linux; test \"$(uname -m)\" = x86_64; command -v openssl >/dev/null; command -v python3 >/dev/null; command -v systemctl >/dev/null; test ! -e /etc/fugue-static-edge; test ! -e /etc/systemd/system/static-caddy.service; test ! -e /opt/static-caddy; if ss -lntu | grep -Eq '[:](80|443|9443|18480)[[:space:]]'; then exit 31; fi; ip -o -4 addr show | grep -F ' " + o.PublicIP + "/' >/dev/null; date -u +%s"
 		now, e := staticEdgeSSHOutput(ctx, o.SSHHost, nil, preflight)
 		if e != nil {
 			return fmt.Errorf("target is not a clean Linux amd64 VPS with the claimed IP and free ports: %w", e)
@@ -419,7 +419,7 @@ func (cli *CLI) bootstrapStaticEdge(ctx context.Context, o staticEdgeBootstrapOp
 		}
 	}
 	for _, host := range o.Hostnames {
-		if e = probeStaticEdgeEndpoint(ctx, o.PublicIP, host, 443, "/_static-edge/health", 20*time.Second); e != nil {
+		if e = probeStaticEdgeVerified(ctx, o.SSHHost, o.PublicIP, host, "/_static-edge/health", 200, o.EdgeID, 20*time.Second); e != nil {
 			return e
 		}
 	}
