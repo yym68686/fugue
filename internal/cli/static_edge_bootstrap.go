@@ -674,7 +674,7 @@ func staticEdgeBootstrapCaddyfile(o staticEdgeBootstrapOptions) string {
   persist_config off
   grace_period 120s
 }
-http://127.0.0.1:18480 {
+:18480 {
   bind 127.0.0.1
   handle /_static-edge/health {
     %s

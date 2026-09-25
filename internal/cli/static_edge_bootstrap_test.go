@@ -92,7 +92,10 @@ func TestStaticEdgeBootstrapCaddyConfigIsLocalAndBounded(t *testing.T) {
 		}
 		Apps struct {
 			HTTP struct {
-				Servers map[string]struct{ Listen []string }
+				Servers map[string]struct {
+					Listen []string
+					Routes []json.RawMessage
+				}
 			}
 		}
 	}
@@ -110,6 +113,17 @@ func TestStaticEdgeBootstrapCaddyConfigIsLocalAndBounded(t *testing.T) {
 			}
 			if listen == "127.0.0.1:18480" {
 				found = true
+				for _, route := range server.Routes {
+					var r struct{ Match []map[string]json.RawMessage }
+					if e = json.Unmarshal(route, &r); e != nil {
+						t.Fatal(e)
+					}
+					for _, matcher := range r.Match {
+						if _, ok := matcher["host"]; ok {
+							t.Fatal("local upstream must accept preserved public Host, not only 127.0.0.1")
+						}
+					}
+				}
 			}
 		}
 	}
