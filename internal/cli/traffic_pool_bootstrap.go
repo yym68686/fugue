@@ -209,8 +209,8 @@ func (cli *CLI) bootstrapTrafficPool(ctx context.Context, o trafficPoolBootstrap
 		return err
 	}
 	// Bootstrap is additive. Existing policy or identity files must match exactly.
-	files := map[string][]byte{"policy.json": signedRaw, "signing.pub": identity.SigningPublic, "server.pem": identity.ServerCert, "server.key": identity.ServerKey, "ca.pem": identity.CA}
-	settings := map[string]any{"state_dir": state, "policy_path": base + "/policy.json", "vault_key_path": base + "/vault.key", "listen": net.JoinHostPort(o.PublicIP, fmt.Sprint(o.Port)),
+	files := map[string][]byte{"signing.pub": identity.SigningPublic, "server.pem": identity.ServerCert, "server.key": identity.ServerKey, "ca.pem": identity.CA}
+	settings := map[string]any{"state_dir": state, "policy_path": state + "/policy.json", "vault_key_path": base + "/vault.key", "listen": net.JoinHostPort(o.PublicIP, fmt.Sprint(o.Port)),
 		"verification_keys": map[string]string{"bootstrap": base + "/signing.pub"}, "initial_credential_slot": "current",
 		"credential_slots": map[string]any{"current": map[string]any{"server_cert": base + "/server.pem", "server_key": base + "/server.key", "client_ca": base + "/ca.pem", "grants": map[string]string{identity.ClientFingerprint: "admin"}}}}
 	files["config.json"], err = json.Marshal(settings)
@@ -227,11 +227,19 @@ func (cli *CLI) bootstrapTrafficPool(ctx context.Context, o trafficPoolBootstrap
 			return err
 		}
 	}
+	policyRemote := state + "/policy.json"
+	checkPolicy := "if test -e " + policyRemote + "; then test \"$(sha256sum " + policyRemote + " | cut -d ' ' -f 1)\" = " + strings.TrimPrefix(c.Hash(signedRaw), "sha256:") + "; fi"
+	if _, err = staticEdgeSSHOutput(ctx, o.SSHHost, nil, checkPolicy); err != nil {
+		return errors.New("existing executor policy differs; use policy apply")
+	}
+	if err = staticEdgeSSHWrite(ctx, o.SSHHost, policyRemote, signedRaw, "0600", "fuguefailover:fuguefailover"); err != nil {
+		return err
+	}
 	unitBytes := []byte(fmt.Sprintf(trafficPoolSystemdUnit, installDir, base, state, state))
 	if err = staticEdgeSSHWrite(ctx, o.SSHHost, "/etc/systemd/system/"+unit, unitBytes, "0644", "root:root"); err != nil {
 		return err
 	}
-	start := "set -eu; chown root:fuguefailover " + base + "; chmod 0750 " + base + "; install -d -m 0700 -o fuguefailover -g fuguefailover " + state + "; if ! test -e " + base + "/vault.key; then umask 077; openssl rand -hex 32 > " + base + "/vault.key; chown fuguefailover:fuguefailover " + base + "/vault.key; chmod 0600 " + base + "/vault.key; fi; systemctl daemon-reload; systemctl enable --now " + unit + "; systemctl is-active --quiet " + unit
+	start := "set -eu; chown root:fuguefailover " + base + "; chmod 0750 " + base + "; chown fuguefailover:fuguefailover " + state + "; chmod 0700 " + state + "; if ! test -e " + base + "/vault.key; then umask 077; openssl rand -hex 32 > " + base + "/vault.key; chown fuguefailover:fuguefailover " + base + "/vault.key; chmod 0600 " + base + "/vault.key; fi; systemctl daemon-reload; systemctl enable --now " + unit + "; systemctl is-active --quiet " + unit
 	if _, err = staticEdgeSSHOutput(ctx, o.SSHHost, nil, start); err != nil {
 		return err
 	}
