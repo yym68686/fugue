@@ -275,6 +275,14 @@ Environment variables:
 			if err := c.validateRedactionMode(); err != nil {
 				return err
 			}
+			// Static-edge management must work with the Fugue API disconnected,
+			// invalid API credentials and a broken control-plane context.
+			if strings.HasPrefix(cmd.CommandPath(), "fugue static-edge ") {
+				if c.root.SaveToken {
+					return fmt.Errorf("--save-token is not supported for independent static-edge management")
+				}
+				return nil
+			}
 			if err := c.saveRootTokenIfRequested(cmd); err != nil {
 				return err
 			}
@@ -320,6 +328,7 @@ Environment variables:
 		c.newContextCommand(),
 		c.newCapabilitiesCommand(),
 		c.newSSHKeyCommand(),
+		c.newStaticEdgeCommand(),
 		c.newTenantCommand(),
 		c.newProjectCommand(),
 		c.newAutomationCommand(),

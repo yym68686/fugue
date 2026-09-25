@@ -1,0 +1,21 @@
+{
+  "schema": "fugue.static-edge/v1",
+  "edge_id": "entry-a",
+  "role": "edge",
+  "generation": 1,
+  "mode": "serving",
+  "signing_key_id": "release-admin",
+  "health_checks": ["local-health"],
+  "caddy_config": {
+    "admin": {"listen": "unix//run/static-caddy/admin.sock", "config": {"persist": false}},
+    "apps": {
+      "http": {"servers": {"entry": {
+        "listen": ["127.0.0.1:18480"],
+        "routes": [
+          {"match": [{"path": ["/healthz"]}], "handle": [{"handler": "static_response", "body": "ok", "status_code": 200}]},
+          {"handle": [{"handler": "static_response", "body": "configure an explicit mTLS origin before production", "status_code": 503}]}
+        ]
+      }}}
+    }
+  }
+}

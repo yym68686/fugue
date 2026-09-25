@@ -260,3 +260,10 @@ internal/store             PostgreSQL 状态存储
 deploy/helm/fugue          控制面 Helm Chart
 docs/                      部署、HA/DR 与产品战略文档
 ```
+
+### 独立 static edge 管理
+
+`fugue static-edge` 使用独立 mTLS manager 或本机 SSH alias，管理过程不依赖
+Fugue API。支持本地 context、签名 bundle、只读健康与证据、分阶段激活、CAS、
+故障恢复、回滚和预置管理证书槽位轮换。CLI 安装不会自动接管现有公网 Caddy。
+部署边界、命令示例与验收方法见 [独立 static edge 管理](docs/static-edge-management.md)。

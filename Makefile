@@ -95,3 +95,8 @@ run-agent: build-agent
 
 run-telemetry-agent: build-telemetry-agent
 	$(BIN_DIR)/fugue-telemetry-agent
+
+.PHONY: build-static-edge-manager
+build-static-edge-manager:
+	mkdir -p $(BIN_DIR)
+	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-static-edge-manager ./cmd/fugue-static-edge-manager

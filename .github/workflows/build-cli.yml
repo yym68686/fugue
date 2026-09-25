@@ -7,6 +7,9 @@ on:
     paths:
       - '.github/workflows/build-cli.yml'
       - 'cmd/fugue/**'
+      - 'cmd/fugue-static-edge-manager/**'
+      - 'contracts/static-edge-management.openapi.yaml'
+      - 'scripts/test_static_edge_isolation.sh'
       - 'internal/cli/**'
       - 'internal/**'
       - 'go.mod'
@@ -38,6 +41,11 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+      - name: Verify independent manager against real Caddy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/test_static_edge_isolation.sh
 
       - name: Package fugue CLI archives
         run: ./scripts/package_fugue_cli.sh "${RUNNER_TEMP}/fugue-cli"

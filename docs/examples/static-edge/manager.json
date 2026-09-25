@@ -1,0 +1,25 @@
+{
+  "edge_id": "entry-a",
+  "role": "edge",
+  "state_dir": "/var/lib/fugue-static-edge-manager",
+  "listen": "192.0.2.10:9443",
+  "socket": "/run/fugue-static-edge-manager/manager.sock",
+  "ssh_grant": "admin",
+  "verification_keys": {"release-admin": "/etc/fugue-static-edge/signing.pub"},
+  "credential_slots": {
+    "current": {
+      "server_cert": "/etc/fugue-static-edge/management/server.pem",
+      "server_key": "/etc/fugue-static-edge/management/server.key",
+      "client_ca": "/etc/fugue-static-edge/management/ca.pem",
+      "grants": {"REPLACE_WITH_CLIENT_CERT_SHA256_HEX": "admin"}
+    }
+  },
+  "initial_credential_slot": "current",
+  "caddy": {
+    "binary": "/opt/static-caddy/current/caddy",
+    "binary_sha256": "sha256:REPLACE_WITH_VERIFIED_BINARY_HASH",
+    "admin_socket": "/run/static-caddy/admin.sock",
+    "config_file": "/etc/fugue-static-edge/caddy.json",
+    "checks": {"local-health": {"url": "http://127.0.0.1:18480/healthz", "status": 200, "body": "ok"}}
+  }
+}

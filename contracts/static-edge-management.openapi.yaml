@@ -1,0 +1,110 @@
+openapi: 3.0.3
+info:
+  title: Autonomous Static Edge Management
+  version: 1.0.0
+  description: Independent of the Fugue API. mTLS and restricted SSH stdio use identical typed RPC envelopes. Local Unix sockets are permission restricted. Configuration changes require signed bundles and an exact state revision. An uncertain result must be queried by its request_id; never silently replay a mutation.
+paths:
+  /v1/static-edge/manager:
+    post:
+      operationId: staticEdgeManagerCall
+      description: Authenticated manager RPC. Peer certificate SHA256 fingerprints map to local read/operator/admin grants. SSH uses the local socket grant. Staging never changes traffic. Adoption verifies an existing runtime. Activation, rollback and drain have durable crash-recovery journals and runtime validation. Drain requires a signed draining replacement configuration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Request'}
+      responses:
+        '200':
+          description: Typed observed state and optional durable receipt; not a guarantee of all client outcomes.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Response'}
+        '400': {description: Invalid or unsupported input}
+        '403': {description: "Identity, grant or signature rejected"}
+        '409': {description: "Revision conflict, runtime drift, interrupted operation or idempotency key conflict"}
+        '503': {description: Runtime verification failed; recovery outcome included in receipt}
+components:
+  schemas:
+    Request:
+      type: object
+      additionalProperties: false
+      required: [schema, edge_id, request_id, operation]
+      properties:
+        schema: {type: string, enum: [fugue.static-edge.rpc/v1]}
+        edge_id: {type: string}
+        request_id: {type: string, minLength: 1, maxLength: 96}
+        operation: {type: string, enum: [status, health, evidence, operation, plan, stage, adopt, activate, drain, undrain, rollback, recover, cert-status, cert-rotate]}
+        expected_revision: {type: integer, minimum: 0}
+        target_digest: {type: string}
+        lookup_request_id: {type: string}
+        credential_slot: {type: string}
+        bundle: {$ref: '#/components/schemas/Bundle'}
+    Bundle:
+      type: object
+      additionalProperties: false
+      required: [schema, edge_id, role, generation, mode, caddy_config, health_checks, signing_key_id]
+      properties:
+        schema: {type: string, enum: [fugue.static-edge/v1]}
+        edge_id: {type: string}
+        role: {type: string, enum: [edge, origin]}
+        generation: {type: integer, minimum: 1}
+        mode: {type: string, enum: [serving, draining]}
+        caddy_config:
+          type: object
+          description: Exact native JSON for a dedicated Caddy instance, signed by an authorized configuration signer. Includes local file references, never private key bytes. Admin listener and persistence authority are fixed by local manager policy. Existing shared public Caddy must not be silently adopted.
+          additionalProperties: true
+        health_checks: {type: array, minItems: 1, uniqueItems: true, items: {type: string}}
+        bundle_digest: {type: string}
+        signature: {type: string}
+        signing_key_id: {type: string}
+    Response:
+      type: object
+      additionalProperties: false
+      required: [schema, request_id, edge_id, ok, status]
+      properties:
+        schema: {type: string, enum: [fugue.static-edge.rpc/v1]}
+        request_id: {type: string}
+        edge_id: {type: string}
+        ok: {type: boolean}
+        status: {type: integer}
+        error: {type: string}
+        result: {$ref: '#/components/schemas/Observed'}
+        receipt: {$ref: '#/components/schemas/Receipt'}
+        receipts: {type: array, items: {$ref: '#/components/schemas/Receipt'}}
+    Observed:
+      type: object
+      additionalProperties: false
+      required: [edge_id, role, revision, ready, draining, runtime_matches, credential_slot]
+      properties:
+        edge_id: {type: string}
+        role: {type: string}
+        revision: {type: integer}
+        active_generation: {type: integer}
+        candidate_generation: {type: integer}
+        lkg_generation: {type: integer}
+        active_digest: {type: string}
+        candidate_digest: {type: string}
+        lkg_digest: {type: string}
+        runtime_digest: {type: string}
+        runtime_matches: {type: boolean}
+        draining: {type: boolean}
+        ready: {type: boolean}
+        pending_request_id: {type: string}
+        last_error: {type: string}
+        credential_slot: {type: string}
+        certificate_not_after: {type: string, format: date-time}
+    Receipt:
+      type: object
+      additionalProperties: false
+      required: [request_id, operation, actor, outcome, revision, created_at]
+      properties:
+        request_id: {type: string}
+        operation: {type: string}
+        actor: {type: string}
+        outcome: {type: string, enum: [staged, adopted, activated, rolled_back, drained, undrained, credentials_rotated, failed_restored, recovery_required, recovered]}
+        revision: {type: integer}
+        bundle_digest: {type: string}
+        runtime_verified: {type: boolean}
+        lkg_preserved: {type: boolean}
+        error: {type: string}
+        created_at: {type: string, format: date-time}
