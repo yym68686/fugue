@@ -95,10 +95,10 @@ func summarize(results []ProbeResult, errorsByVantage int, required int) string 
 			bad++
 		}
 	}
-	if good >= required && bad == 0 {
+	if good >= required {
 		return "healthy"
 	}
-	if bad >= required && good == 0 {
+	if bad >= required {
 		return "unhealthy"
 	}
 	if errorsByVantage > 0 || (good < required && bad < required) {

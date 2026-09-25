@@ -79,3 +79,32 @@ func TestAutomaticFailoverDoesNotInferFailureFromMissingVantage(t *testing.T) {
 		t.Fatalf("DNS written with one vantage: %d", dns.writes)
 	}
 }
+
+func TestThreeVantageQuorumAllowsOneDisagreementButNotTwo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		good int
+		want string
+	}{
+		{name: "two good one bad", good: 2, want: "healthy"},
+		{name: "one good two bad", good: 1, want: "unhealthy"},
+		{name: "one good one bad one missing", good: 1, want: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var results []ProbeResult
+			for i := 0; i < 3; i++ {
+				if tc.name == "one good one bad one missing" && i == 2 {
+					continue
+				}
+				results = append(results, ProbeResult{Healthy: i < tc.good})
+			}
+			missing := 0
+			if tc.name == "one good one bad one missing" {
+				missing = 1
+			}
+			if got := summarize(results, missing, 2); got != tc.want {
+				t.Fatalf("quorum=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
