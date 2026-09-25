@@ -901,7 +901,7 @@ func staticEdgeSSHOutput(ctx context.Context, alias string, stdin []byte, remote
 }
 
 func staticEdgeSSHWrite(ctx context.Context, alias, path string, data []byte, mode, owner string) error {
-	if !staticEdgeSafeRemotePath.MatchString(path) || strings.Contains(path, "..") || !regexp.MustCompile(`^0[0-7]{3}$`).MatchString(mode) || !regexp.MustCompile(`^[a-z]+:[a-z]+$`).MatchString(owner) {
+	if !staticEdgeSafeRemotePath.MatchString(path) || strings.Contains(path, "..") || !regexp.MustCompile(`^0[0-7]{3}$`).MatchString(mode) || !regexp.MustCompile(`^[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$`).MatchString(owner) {
 		return errors.New("unsafe remote file destination")
 	}
 	dir := filepath.Dir(path)

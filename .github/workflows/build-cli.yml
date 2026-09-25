@@ -8,7 +8,9 @@ on:
       - '.github/workflows/build-cli.yml'
       - 'cmd/fugue/**'
       - 'cmd/fugue-static-edge-manager/**'
+      - 'cmd/fugue-entry-failover/**'
       - 'contracts/static-edge-management.openapi.yaml'
+      - 'contracts/entry-failover.openapi.yaml'
       - 'scripts/test_static_edge_isolation.sh'
       - 'internal/cli/**'
       - 'internal/**'
@@ -16,6 +18,7 @@ on:
       - 'go.sum'
       - 'Makefile'
       - 'scripts/package_fugue_cli.sh'
+      - 'scripts/package_fugue_entry_failover.sh'
       - 'scripts/install_fugue_cli.sh'
       - 'scripts/install_fugue_cli.ps1'
   workflow_dispatch:
@@ -49,6 +52,9 @@ jobs:
 
       - name: Package fugue CLI archives
         run: ./scripts/package_fugue_cli.sh "${RUNNER_TEMP}/fugue-cli"
+
+      - name: Package standalone entry failover executors
+        run: bash ./scripts/package_fugue_entry_failover.sh "${RUNNER_TEMP}/fugue-cli"
 
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,0 +1,298 @@
+openapi: 3.0.3
+info:
+  title: Independent Fugue Entry Failover
+  version: 1.0.0
+  description: Standalone mTLS executor, separate from the Fugue API and static edge manager. One process owns one pool and its exact Cloudflare record set. The same signed policy binds tenant, project, zone, allowed hostnames, targets, checks, vantages, generation, mode and expiry.
+paths:
+  /v1/entry-failover/status:
+    get:
+      operationId: entryFailoverStatus
+      description: Read-only current policy and credential metadata. Does not return a token.
+      responses:
+        '200':
+          description: Executor status
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Status'}
+        '403': {description: Client mTLS identity rejected}
+  /v1/entry-failover/evidence:
+    get:
+      operationId: entryFailoverEvidence
+      description: Read-only latest decision and bounded health evidence.
+      responses:
+        '200':
+          description: Latest decision
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Decision'}
+        '403': {description: Client mTLS identity rejected}
+  /v1/entry-failover/operation:
+    get:
+      operationId: entryFailoverOperation
+      description: Read-only active DNS operation journal and freshly observed DNS phase. Unknown outcomes do not authorize a retry.
+      responses:
+        '200':
+          description: Saved operation and current record observation
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [operation, observed_phase]
+                properties:
+                  operation: {$ref: '#/components/schemas/Operation', nullable: true}
+                  observed_phase: {type: string}
+        '403': {description: Client mTLS identity rejected}
+        '503': {description: DNS observation unavailable}
+  /v1/entry-failover/preflight:
+    get:
+      operationId: entryFailoverPreflight
+      description: Read-only bounded checks of current DNS baseline, credential presence, TLS validity and each signed target from each signed vantage. Does not alter serving configuration.
+      responses:
+        '200':
+          description: Preflight results; errors and unhealthy checks are included in the body
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Preflight'}
+        '403': {description: Client mTLS identity rejected}
+  /v1/entry-failover/credential:
+    post:
+      operationId: entryFailoverCredentialImport
+      description: Admin-only import or rotation of Cloudflare token. Token is encrypted in the independent vault and never returned. Cloudflare grants zone-wide DNS Write; the executor restricts exact record names and candidate values.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token: {type: string, minLength: 1, maxLength: 512, writeOnly: true}
+      responses:
+        '200':
+          description: Encrypted credential version saved
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [stored, version]
+                properties:
+                  stored: {type: boolean}
+                  version: {type: integer, minimum: 1}
+        '400': {description: Invalid token envelope}
+        '403': {description: Admin grant required}
+  /v1/entry-failover/policy:
+    post:
+      operationId: entryFailoverApplyPolicy
+      description: Admin-only atomic activation of a higher-generation signed policy for the same tenant, project, pool and zone. An unresolved DNS write blocks replacement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SignedPolicy'}
+      responses:
+        '200':
+          description: Policy accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [policy_digest]
+                properties:
+                  policy_digest: {type: string}
+        '403': {description: Admin grant required}
+        '409': {description: "Invalid policy, ownership, generation or unresolved operation"}
+  /v1/entry-failover/switch:
+    post:
+      operationId: entryFailoverSwitch
+      description: Operator/admin explicit switch to a signed target. Complete candidate route proof, DNS baseline, local exclusive writer lock and durable operation journal are mandatory. A response timeout is indeterminate until the operation state and DNS are inspected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [target_id, expected_policy_digest]
+              properties:
+                target_id: {type: string}
+                expected_policy_digest: {type: string}
+      responses:
+        '200':
+          description: DNS switch completed or target already selected
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
+        '403': {description: Operator or admin grant required}
+        '409': {description: "Policy conflict, DNS drift, unhealthy target or indeterminate write"}
+components:
+  schemas:
+    Check:
+      type: object
+      additionalProperties: false
+      required: [hostname, path, status]
+      properties:
+        hostname: {type: string}
+        path: {type: string}
+        status: {type: integer, minimum: 200, maximum: 399}
+    Target:
+      type: object
+      additionalProperties: false
+      required: [id, kind, address, priority]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [static-ip, fugue-domain]}
+        address: {type: string}
+        edge_id: {type: string}
+        priority: {type: integer, minimum: 0, maximum: 10000}
+    Vantage:
+      type: object
+      additionalProperties: false
+      required: [id, transport]
+      properties:
+        id: {type: string}
+        transport: {type: string, enum: [local, ssh]}
+        ssh_host: {type: string}
+        binary_path: {type: string}
+        public_key_path: {type: string}
+    Policy:
+      type: object
+      additionalProperties: false
+      required: [schema, pool_id, tenant_id, project_id, generation, expires_at, zone, zone_id, hostnames, dns_baseline, checks, targets, vantages, mode, failure_threshold, success_threshold, interval_seconds, probe_timeout_seconds, min_tls_validity_hours, failback]
+      properties:
+        schema: {type: string, enum: [fugue.entry-failover/v1]}
+        pool_id: {type: string}
+        tenant_id: {type: string}
+        project_id: {type: string}
+        generation: {type: integer, minimum: 1}
+        expires_at: {type: string, format: date-time}
+        zone: {type: string}
+        zone_id: {type: string}
+        hostnames: {type: array, minItems: 1, maxItems: 16, uniqueItems: true, items: {type: string}}
+        dns_baseline: {type: array, minItems: 1, maxItems: 16, items: {$ref: '#/components/schemas/DNSRecord'}}
+        checks: {type: array, minItems: 1, maxItems: 32, items: {$ref: '#/components/schemas/Check'}}
+        targets: {type: array, minItems: 2, maxItems: 16, items: {$ref: '#/components/schemas/Target'}}
+        vantages: {type: array, minItems: 1, maxItems: 8, items: {$ref: '#/components/schemas/Vantage'}}
+        mode: {type: string, enum: [off, shadow, automatic]}
+        failure_threshold: {type: integer, minimum: 2, maximum: 20}
+        success_threshold: {type: integer, minimum: 2, maximum: 20}
+        interval_seconds: {type: integer, minimum: 5, maximum: 300}
+        probe_timeout_seconds: {type: integer, minimum: 1, maximum: 20}
+        min_tls_validity_hours: {type: integer, minimum: 24, maximum: 720}
+        failback: {type: string, enum: [manual, automatic]}
+    SignedPolicy:
+      type: object
+      additionalProperties: false
+      required: [policy, key_id, digest, signature]
+      properties:
+        policy: {$ref: '#/components/schemas/Policy'}
+        key_id: {type: string}
+        digest: {type: string}
+        signature: {type: string}
+    HealthStreak:
+      type: object
+      additionalProperties: false
+      required: [success, failure]
+      properties:
+        success: {type: integer, minimum: 0}
+        failure: {type: integer, minimum: 0}
+    DNSRecord:
+      type: object
+      additionalProperties: false
+      required: [id, name, type, content, ttl, proxied]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        type: {type: string, enum: [A, CNAME]}
+        content: {type: string}
+        ttl: {type: integer, minimum: 1}
+        proxied: {type: boolean}
+        comment: {type: string}
+        tags: {type: array, items: {type: string}}
+        settings: {type: object, additionalProperties: true}
+    Decision:
+      type: object
+      required: [at, mode, reason, health, streaks]
+      properties:
+        at: {type: string, format: date-time}
+        mode: {type: string}
+        current: {type: string}
+        active_operation_id: {type: string}
+        active_phase: {type: string}
+        selected: {type: string}
+        reason: {type: string}
+        health: {type: object, additionalProperties: {type: string}}
+        streaks: {type: object, additionalProperties: {$ref: '#/components/schemas/HealthStreak'}}
+        operation: {$ref: '#/components/schemas/Operation'}
+    Operation:
+      type: object
+      required: [schema, policy_digest, from, to, phase]
+      properties:
+        schema: {type: string}
+        id: {type: string}
+        policy_digest: {type: string}
+        from: {type: string}
+        to: {type: string}
+        before: {type: object, additionalProperties: true}
+        phase: {type: string}
+        started_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        error: {type: string}
+    Status:
+      type: object
+      required: [schema, runtime_version, pool_id, tenant_id, project_id, policy_digest, policy_generation, policy_expires_at, mode, credential_present, last_decision]
+      properties:
+        schema: {type: string}
+        runtime_version: {type: string}
+        pool_id: {type: string}
+        tenant_id: {type: string}
+        project_id: {type: string}
+        policy_digest: {type: string}
+        policy_generation: {type: integer}
+        policy_expires_at: {type: string, format: date-time}
+        mode: {type: string}
+        credential_present: {type: boolean}
+        credential_version: {type: integer}
+        current: {type: string}
+        last_decision: {$ref: '#/components/schemas/Decision'}
+        last_error: {type: string}
+    ProbeCheck:
+      type: object
+      required: [hostname, path, address, status, duration_ns]
+      properties:
+        hostname: {type: string}
+        path: {type: string}
+        address: {type: string}
+        status: {type: integer}
+        duration_ns: {type: integer}
+        edge_id: {type: string}
+        certificate_not_after: {type: string, format: date-time}
+        error: {type: string}
+    ProbeResult:
+      type: object
+      required: [target_id, at, healthy, checks]
+      properties:
+        target_id: {type: string}
+        at: {type: string, format: date-time}
+        healthy: {type: boolean}
+        checks: {type: array, items: {$ref: '#/components/schemas/ProbeCheck'}}
+        error: {type: string}
+    Preflight:
+      type: object
+      required: [schema, policy_digest, credential_ready, policy_valid, targets]
+      properties:
+        schema: {type: string}
+        policy_digest: {type: string}
+        current: {type: string}
+        records: {type: object, additionalProperties: {$ref: '#/components/schemas/DNSRecord'}}
+        credential_ready: {type: boolean}
+        policy_valid: {type: boolean}
+        targets:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: {$ref: '#/components/schemas/ProbeResult'}
+        errors: {type: array, items: {type: string}}

@@ -329,6 +329,7 @@ Environment variables:
 		c.newCapabilitiesCommand(),
 		c.newSSHKeyCommand(),
 		c.newStaticEdgeCommand(),
+		c.newTrafficPoolCommand(),
 		c.newTenantCommand(),
 		c.newProjectCommand(),
 		c.newAutomationCommand(),

@@ -39,6 +39,9 @@ jobs:
       - name: Package standalone static edge managers
         run: ./scripts/package_fugue_static_edge_manager.sh "${RUNNER_TEMP}/fugue-cli"
 
+      - name: Package standalone entry failover executors
+        run: bash ./scripts/package_fugue_entry_failover.sh "${RUNNER_TEMP}/fugue-cli"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
