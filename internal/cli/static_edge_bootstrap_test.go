@@ -26,6 +26,16 @@ func TestStaticEdgeBootstrapUniqueClientAndDurableIdentity(t *testing.T) {
 	if e = cli.saveStaticEdgeBootstrapIdentity("candidate", &identity); e != nil {
 		t.Fatal(e)
 	}
+	server, e := staticEdgeParseCertificate(identity.ServerCert)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = server.VerifyHostname("192.0.2.20"); e != nil {
+		t.Fatal("management IP identity", e)
+	}
+	if !strings.Contains(staticEdgePrepareServicesCommand(), "runuser -u caddy -- /opt/static-caddy/current/caddy validate") {
+		t.Fatal("validation must run with serving identity")
+	}
 	original := append([]byte(nil), identity.ClientCert...)
 	again, e := createStaticEdgeManagementIdentity("candidate", "192.0.2.20")
 	if e != nil {

@@ -330,8 +330,16 @@ func (cli *CLI) bootstrapStaticEdge(ctx context.Context, o staticEdgeBootstrapOp
 		return e
 	}
 	if strings.TrimSpace(string(active)) == "inactive" {
-		if receipt.Phase == "ready" || receipt.Phase == "candidate_running" {
+		if receipt.Phase == "ready" {
 			return errors.New("previously started candidate is now inactive; refusing bootstrap overwrite; inspect its service and LKG")
+		}
+		if receipt.Phase == "candidate_running" {
+			if e = verifyStaticEdgeUnadopted(ctx, receipt.Context); e != nil {
+				return e
+			}
+		}
+		if e = cli.repairStaticEdgeManagementIP(ctx, o, &receipt, receiptPath); e != nil {
+			return e
 		}
 		for _, a := range receipt.Assets {
 			data, e := os.ReadFile(a.Local)
@@ -340,6 +348,9 @@ func (cli *CLI) bootstrapStaticEdge(ctx context.Context, o staticEdgeBootstrapOp
 			}
 			if c.Hash(data) != a.SHA256 {
 				return errors.New("prepared bootstrap asset digest mismatch")
+			}
+			if got, checkErr := staticEdgeSSHOutput(ctx, o.SSHHost, nil, "test -f "+a.Path+" && sha256sum "+a.Path); checkErr == nil && strings.HasPrefix(string(got), strings.TrimPrefix(a.SHA256, "sha256:")+" ") {
+				continue
 			}
 			if e = staticEdgeSSHWrite(ctx, o.SSHHost, a.Path, data, a.Mode, a.Owner); e != nil {
 				return e
@@ -358,11 +369,16 @@ func (cli *CLI) bootstrapStaticEdge(ctx context.Context, o staticEdgeBootstrapOp
 		if e = staticEdgeSSHWrite(ctx, o.SSHHost, "/etc/fugue-static-edge/client.crt", cert, "0644", "caddy:caddy"); e != nil {
 			return e
 		}
-		prepare := "set -eu; chown -R caddy:caddy /var/lib/caddy; chown root:caddy /etc/fugue-static-edge; chmod 2750 /etc/fugue-static-edge; chown root:caddy /etc/fugue-static-edge/caddy.json; chmod 0640 /etc/fugue-static-edge/caddy.json; /opt/static-caddy/current/caddy validate --config /etc/fugue-static-edge/caddy.json >/dev/null; systemctl daemon-reload; systemctl enable --now static-caddy.service; systemctl enable --now fugue-static-edge-manager.service"
+		prepare := staticEdgePrepareServicesCommand()
 		if _, e = staticEdgeSSHOutput(ctx, o.SSHHost, nil, prepare); e != nil {
 			return fmt.Errorf("candidate service preparation: %w", e)
 		}
 	} else {
+		if receipt.Phase != "ready" {
+			if e = cli.repairStaticEdgeManagementIP(ctx, o, &receipt, receiptPath); e != nil {
+				return e
+			}
+		}
 		// Never overwrite/restart a live candidate, even if bootstrap previously lost
 		// its response. Verify immutable files and resume only management adoption.
 		for _, a := range receipt.Assets {
@@ -438,6 +454,110 @@ func (cli *CLI) bootstrapStaticEdge(ctx context.Context, o staticEdgeBootstrapOp
 		return e
 	}
 	return cli.writeJSON(map[string]any{"ready": true, "edge_id": o.EdgeID, "public_ip": o.PublicIP, "hostnames": o.Hostnames, "manager_transport": "mtls", "business_identity": "unique CSR signed by existing CA", "old_edge_untouched": true, "receipt": receiptPath})
+}
+func staticEdgePrepareServicesCommand() string {
+	return "set -eu; chown -R caddy:caddy /var/lib/caddy; chown root:caddy /etc/fugue-static-edge; chmod 2750 /etc/fugue-static-edge; chown root:caddy /etc/fugue-static-edge/caddy.json; chmod 0640 /etc/fugue-static-edge/caddy.json; runuser -u caddy -- /opt/static-caddy/current/caddy validate --config /etc/fugue-static-edge/caddy.json >/dev/null; systemctl daemon-reload; systemctl reset-failed static-caddy.service; systemctl enable --now static-caddy.service; systemctl enable --now fugue-static-edge-manager.service"
+}
+func verifyStaticEdgeUnadopted(ctx context.Context, cfg staticEdgeContext) error {
+	cfg.Transport = "ssh"
+	out, e := staticEdgeCall(ctx, cfg, c.Request{Schema: c.RPCSchema, EdgeID: cfg.EdgeID, RequestID: newStaticRequestID(), Operation: "status"})
+	if e != nil {
+		return e
+	}
+	if out.Result == nil || out.Result.Revision != 0 || out.Result.ActiveDigest != "" || out.Result.PendingRequestID != "" {
+		return errors.New("candidate is already managed or pending; refusing bootstrap repair")
+	}
+	return nil
+}
+func (cli *CLI) repairStaticEdgeManagementIP(ctx context.Context, o staticEdgeBootstrapOptions, r *staticEdgeBootstrapReceipt, receiptPath string) error {
+	if r.Context.ServerName == o.PublicIP {
+		return nil
+	}
+	if e := verifyStaticEdgeUnadopted(ctx, r.Context); e != nil {
+		return e
+	}
+	p := filepath.Join(staticEdgeConfigDir(), "identities", o.EdgeID, "identity.json")
+	raw, e := os.ReadFile(p)
+	if e != nil {
+		return e
+	}
+	var identity staticEdgeBootstrapIdentity
+	if e = c.StrictJSON(raw, &identity); e != nil {
+		return e
+	}
+	if e = reissueStaticEdgeServerIP(&identity, o.PublicIP); e != nil {
+		return e
+	}
+	raw, e = json.Marshal(identity)
+	if e != nil {
+		return e
+	}
+	if e = staticEdgeWriteFile(p, raw); e != nil {
+		return e
+	}
+	for i := range r.Assets {
+		a := &r.Assets[i]
+		if a.Path != "/etc/fugue-static-edge/management/server.pem" {
+			continue
+		}
+		if e = staticEdgeWriteFile(a.Local, identity.ServerCert); e != nil {
+			return e
+		}
+		a.SHA256 = c.Hash(identity.ServerCert)
+		if e = staticEdgeSSHWrite(ctx, o.SSHHost, a.Path, identity.ServerCert, a.Mode, a.Owner); e != nil {
+			return e
+		}
+	}
+	r.Context.ServerName = o.PublicIP
+	if e = saveStaticEdgeBootstrapReceipt(receiptPath, *r); e != nil {
+		return e
+	}
+	// Management process only. It has no stop dependency on the data plane.
+	_, e = staticEdgeSSHOutput(ctx, o.SSHHost, nil, "systemctl restart fugue-static-edge-manager.service")
+	return e
+}
+func reissueStaticEdgeServerIP(x *staticEdgeBootstrapIdentity, ip string) error {
+	ca, e := staticEdgeParseCertificate(x.CA)
+	if e != nil {
+		return e
+	}
+	block, _ := pem.Decode(x.CAKey)
+	if block == nil {
+		return errors.New("management issuer key missing")
+	}
+	v, e := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if e != nil {
+		return e
+	}
+	issuer, ok := v.(crypto.Signer)
+	if !ok {
+		return errors.New("management issuer not a signer")
+	}
+	block, _ = pem.Decode(x.ServerKey)
+	if block == nil {
+		return errors.New("management server key missing")
+	}
+	v, e = x509.ParsePKCS8PrivateKey(block.Bytes)
+	if e != nil {
+		return e
+	}
+	key, ok := v.(crypto.Signer)
+	if !ok {
+		return errors.New("management key not a signer")
+	}
+	serial, e := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if e != nil {
+		return e
+	}
+	now := time.Now()
+	tpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: ip}, IPAddresses: []net.IP{net.ParseIP(ip)}, NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(1, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, e := x509.CreateCertificate(rand.Reader, tpl, ca, key.Public(), issuer)
+	if e != nil {
+		return e
+	}
+	x.ServerCert = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	x.ServerName = ip
+	return nil
 }
 func saveStaticEdgeBootstrapReceipt(p string, r staticEdgeBootstrapReceipt) error {
 	b, e := json.MarshalIndent(r, "", "  ")
@@ -538,7 +658,7 @@ type staticEdgeBootstrapIdentity struct {
 
 func createStaticEdgeManagementIdentity(edgeID, ip string) (staticEdgeBootstrapIdentity, error) {
 	var out staticEdgeBootstrapIdentity
-	out.ServerName = edgeID + ".static-edge.invalid"
+	out.ServerName = ip
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return out, err
@@ -569,6 +689,10 @@ func createStaticEdgeManagementIdentity(edgeID, ip string) (staticEdgeBootstrapI
 			return nil, nil, nil, e
 		}
 		tpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: name}, DNSNames: dns, NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(1, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{usage}}
+		if usage == x509.ExtKeyUsageServerAuth {
+			tpl.DNSNames = nil
+			tpl.IPAddresses = []net.IP{net.ParseIP(ip)}
+		}
 		der, e := x509.CreateCertificate(rand.Reader, tpl, caCert, &key.PublicKey, caKey)
 		if e != nil {
 			return nil, nil, nil, e
