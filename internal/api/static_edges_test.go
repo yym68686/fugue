@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -87,5 +88,75 @@ func TestStaticEdgeRegistrationRequiresDedicatedScope(t *testing.T) {
 	response := performJSONRequest(t, server, http.MethodGet, "/v1/static-edges", tenantKey, nil)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("expected static edge read to require an explicit scope, got %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestStaticEdgeRegistrationEmptyListIsArray(t *testing.T) {
+	t.Parallel()
+	_, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "example.com")
+	response := performJSONRequest(t, server, http.MethodGet, "/v1/static-edges?tenant_id="+app.TenantID, platformAdminKey, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("empty list: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body["registrations"]) != "[]" {
+		t.Fatalf("empty list must be an array, got %s", body["registrations"])
+	}
+}
+
+func TestStaticEdgeRegistrationTenantCredentialCannotCrossProjects(t *testing.T) {
+	t.Parallel()
+	stateStore, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "example.com")
+	_, ownerKey, err := stateStore.CreateAPIKey(app.TenantID, "edge-owner", []string{"static_edge.read", "static_edge.write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTenant, err := stateStore.CreateTenant("other-edge-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProject, err := stateStore.CreateProject(otherTenant.ID, "other", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherKey, err := stateStore.CreateAPIKey(otherTenant.ID, "edge-owner", []string{"static_edge.read", "static_edge.write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createBody := map[string]any{
+		"project_id": app.ProjectID, "name": "edge", "edge_id": "edge-one", "transport": "mtls",
+		"signing_key_id": "key-one", "possession_proof_digest": "sha256:" + strings.Repeat("a", 64),
+	}
+	if response := performJSONRequest(t, server, http.MethodPost, "/v1/static-edges", otherKey, createBody); response.Code != http.StatusForbidden {
+		t.Fatalf("foreign project create: status=%d body=%s", response.Code, response.Body.String())
+	}
+	createBody["project_id"] = otherProject.ID
+	if response := performJSONRequest(t, server, http.MethodPost, "/v1/static-edges", ownerKey, createBody); response.Code != http.StatusForbidden {
+		t.Fatalf("foreign project create: status=%d body=%s", response.Code, response.Body.String())
+	}
+	createBody["project_id"] = app.ProjectID
+	created := performJSONRequest(t, server, http.MethodPost, "/v1/static-edges", ownerKey, createBody)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("owner create: status=%d body=%s", created.Code, created.Body.String())
+	}
+	var body model.StaticEdgeRegistrationResponse
+	mustDecodeJSON(t, created, &body)
+	if response := performJSONRequest(t, server, http.MethodGet, "/v1/static-edges/"+body.Registration.ID, otherKey, nil); response.Code != http.StatusNotFound {
+		t.Fatalf("foreign registration read: status=%d body=%s", response.Code, response.Body.String())
+	}
+	listed := performJSONRequest(t, server, http.MethodGet, "/v1/static-edges?tenant_id="+otherTenant.ID, ownerKey, nil)
+	var ownerList model.StaticEdgeRegistrationListResponse
+	mustDecodeJSON(t, listed, &ownerList)
+	if listed.Code != http.StatusOK || len(ownerList.Registrations) != 1 || ownerList.Registrations[0].TenantID != app.TenantID {
+		t.Fatalf("tenant filter crossed credential boundary: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	adminList := performJSONRequest(t, server, http.MethodGet, "/v1/static-edges?tenant_id="+otherTenant.ID, platformAdminKey, nil)
+	var filtered model.StaticEdgeRegistrationListResponse
+	mustDecodeJSON(t, adminList, &filtered)
+	if adminList.Code != http.StatusOK || filtered.Registrations == nil || len(filtered.Registrations) != 0 {
+		t.Fatalf("admin tenant filter returned other tenant: status=%d body=%s", adminList.Code, adminList.Body.String())
 	}
 }

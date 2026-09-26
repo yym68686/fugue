@@ -302,6 +302,7 @@ var postgresSchemaStatements = []string{
 		UNIQUE (tenant_id, project_id, edge_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_static_edge_registrations_tenant_project ON fugue_static_edge_registrations (tenant_id, project_id, updated_at DESC)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_static_edge_registrations_name_lower ON fugue_static_edge_registrations (tenant_id, project_id, lower(name))`,
 	`CREATE TABLE IF NOT EXISTS fugue_apps (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

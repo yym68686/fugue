@@ -24,7 +24,7 @@ type createStaticEdgeRegistrationRequest struct {
 type updateStaticEdgePossessionProofRequest struct {
 	PossessionProofDigest string `json:"possession_proof_digest"`
 	SigningKeyID          string `json:"signing_key_id"`
-	Ready                 bool   `json:"ready,omitempty"`
+	Ready                 bool   `json:"ready"`
 }
 
 func (c *Client) ListStaticEdgeRegistrations(tenantID, projectID string) (model.StaticEdgeRegistrationListResponse, error) {

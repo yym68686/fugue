@@ -149,7 +149,7 @@ func (s *Server) handleUpdateStaticEdgePossessionProof(w http.ResponseWriter, r 
 	if !ok {
 		return
 	}
-	var request updateStaticEdgePossessionProofRequest
+	request := updateStaticEdgePossessionProofRequest{Ready: true}
 	if err := httpx.DecodeJSON(r, &request); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return

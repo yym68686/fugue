@@ -28,7 +28,7 @@ func (s *Store) ListStaticEdgeRegistrations(filter StaticEdgeRegistrationFilter)
 	if s.usingDatabase() {
 		return s.pgListStaticEdgeRegistrations(filter)
 	}
-	var out []model.StaticEdgeRegistration
+	out := []model.StaticEdgeRegistration{}
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, registration := range state.StaticEdgeRegistrations {
 			if !staticEdgeVisible(registration, filter) {
@@ -154,6 +154,7 @@ func (s *Store) RevokeStaticEdgeRegistration(id, tenantID string, platformAdmin 
 			if state.StaticEdgeRegistrations[index].ID != registration.ID {
 				continue
 			}
+			registration = cloneStaticEdgeRegistration(state.StaticEdgeRegistrations[index])
 			registration.Status = model.StaticEdgeStatusRevoked
 			registration.UpdatedAt = time.Now().UTC()
 			state.StaticEdgeRegistrations[index] = cloneStaticEdgeRegistration(registration)
@@ -165,7 +166,7 @@ func (s *Store) RevokeStaticEdgeRegistration(id, tenantID string, platformAdmin 
 }
 
 func staticEdgeVisible(registration model.StaticEdgeRegistration, filter StaticEdgeRegistrationFilter) bool {
-	return (filter.PlatformAdmin || registration.TenantID == filter.TenantID) &&
+	return (filter.TenantID == "" || registration.TenantID == filter.TenantID) &&
 		(filter.ProjectID == "" || registration.ProjectID == filter.ProjectID)
 }
 
@@ -195,8 +196,8 @@ func normalizeStaticEdgeRegistration(in model.StaticEdgeRegistration) (model.Sta
 	if in.Status == "" {
 		in.Status = model.StaticEdgeStatusPending
 	}
-	if in.Status != model.StaticEdgeStatusPending && in.Status != model.StaticEdgeStatusReady && in.Status != model.StaticEdgeStatusRevoked {
-		return model.StaticEdgeRegistration{}, fmt.Errorf("%w: invalid static edge status", ErrInvalidInput)
+	if in.Status != model.StaticEdgeStatusPending {
+		return model.StaticEdgeRegistration{}, fmt.Errorf("%w: new registrations must be pending", ErrInvalidInput)
 	}
 	if err := validateStaticEdgeProof(in.PossessionProofDigest, in.SigningKeyID); err != nil {
 		return model.StaticEdgeRegistration{}, err
@@ -250,7 +251,7 @@ func (s *Store) pgListStaticEdgeRegistrations(filter StaticEdgeRegistrationFilte
 		return nil, fmt.Errorf("list static edge registrations: %w", err)
 	}
 	defer rows.Close()
-	var out []model.StaticEdgeRegistration
+	out := []model.StaticEdgeRegistration{}
 	for rows.Next() {
 		registration, err := scanStaticEdgeRegistration(rows)
 		if err != nil {
@@ -281,7 +282,7 @@ func (s *Store) pgCreateStaticEdgeRegistration(registration model.StaticEdgeRegi
 	now := time.Now().UTC()
 	registration.ID = model.NewID("static_edge")
 	registration.CreatedAt, registration.UpdatedAt = now, now
-	row := s.db.QueryRowContext(context.Background(), `INSERT INTO fugue_static_edge_registrations (`+staticEdgeRegistrationSelectColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING `+staticEdgeRegistrationSelectColumns,
+	row := s.db.QueryRowContext(context.Background(), `INSERT INTO fugue_static_edge_registrations (`+staticEdgeRegistrationSelectColumns+`) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14 FROM fugue_projects WHERE id=$3 AND tenant_id=$2 RETURNING `+staticEdgeRegistrationSelectColumns,
 		registration.ID, registration.TenantID, registration.ProjectID, registration.Name, registration.EdgeID, registration.Transport, registration.ManagerURL,
 		registration.CertificateFingerprint, registration.SigningKeyID, registration.PossessionProofDigest, registration.Status, registration.LastProofAt, registration.CreatedAt, registration.UpdatedAt)
 	return scanStaticEdgeRegistration(row)
@@ -291,12 +292,28 @@ func (s *Store) pgUpdateStaticEdgeRegistrationProof(id, tenantID, digest, signin
 	if err := s.ensureDatabaseReady(); err != nil {
 		return model.StaticEdgeRegistration{}, err
 	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return model.StaticEdgeRegistration{}, err
+	}
+	defer tx.Rollback()
+	current, err := scanStaticEdgeRegistration(tx.QueryRowContext(context.Background(), `SELECT `+staticEdgeRegistrationSelectColumns+` FROM fugue_static_edge_registrations WHERE id=$1 AND tenant_id=$2 FOR UPDATE`, id, tenantID))
+	if err != nil {
+		return model.StaticEdgeRegistration{}, err
+	}
+	if current.Status == model.StaticEdgeStatusRevoked {
+		return model.StaticEdgeRegistration{}, ErrConflict
+	}
 	status := model.StaticEdgeStatusPending
 	if ready {
 		status = model.StaticEdgeStatusReady
 	}
 	now := time.Now().UTC()
-	return scanStaticEdgeRegistration(s.db.QueryRowContext(context.Background(), `UPDATE fugue_static_edge_registrations SET possession_proof_digest=$3, signing_key_id=$4, status=$5, last_proof_at=$6, updated_at=$6 WHERE id=$1 AND tenant_id=$2 AND status <> 'revoked' RETURNING `+staticEdgeRegistrationSelectColumns, id, tenantID, digest, signingKeyID, status, now))
+	updated, err := scanStaticEdgeRegistration(tx.QueryRowContext(context.Background(), `UPDATE fugue_static_edge_registrations SET possession_proof_digest=$3, signing_key_id=$4, status=$5, last_proof_at=$6, updated_at=$6 WHERE id=$1 AND tenant_id=$2 RETURNING `+staticEdgeRegistrationSelectColumns, id, tenantID, digest, signingKeyID, status, now))
+	if err != nil {
+		return model.StaticEdgeRegistration{}, err
+	}
+	return updated, tx.Commit()
 }
 
 func (s *Store) pgRevokeStaticEdgeRegistration(id, tenantID string, platformAdmin bool) (model.StaticEdgeRegistration, error) {
