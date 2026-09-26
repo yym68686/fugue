@@ -56,6 +56,16 @@ func TestAutomaticFailoverRequiresTwoVantagesAndManualFailback(t *testing.T) {
 	if got.Selected != "managed" || dns.writes != 1 {
 		t.Fatalf("manual failback violated: %+v writes=%d", got, dns.writes)
 	}
+	probe.health["managed"] = false
+	for i := 0; i < 2; i++ {
+		if got := cycle(); got.Reason != "current_failure_unconfirmed" || dns.writes != 1 {
+			t.Fatalf("early reverse failover=%+v writes=%d", got, dns.writes)
+		}
+	}
+	got = cycle()
+	if got.Reason != "switched" || got.Selected != "west" || dns.writes != 2 {
+		t.Fatalf("reverse failover=%+v writes=%d", got, dns.writes)
+	}
 }
 
 func TestAutomaticFailoverDoesNotInferFailureFromMissingVantage(t *testing.T) {
