@@ -3895,6 +3895,8 @@ paths:
         Unavailable observations return unknown health and retain node membership;
         they never reuse legacy inventory health. Counters and endpoint metadata
         remain historical inventory values, identified by serving_observation.
+        Historical zone aliases of an enrolled physical node are omitted when
+        its canonical inventory row exists; aliases are not separate consumers.
       tags: [DNS]
       x-fugue-handler: handleListDNSNodes
       security:
@@ -4271,6 +4273,8 @@ paths:
         verified runtime facts. Unavailable or mismatched facts yield unknown
         health. Legacy counters remain historical and are not current-backend
         readiness evidence; see serving_observation.inventory_observed_at.
+        A historical zone-alias detail remains readable but reports unknown
+        serving health rather than inheriting its physical node's authorization.
       tags: [DNS]
       x-fugue-handler: handleGetDNSNode
       security:
