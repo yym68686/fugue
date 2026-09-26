@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/certsync"
 	"fugue/internal/entryfailover"
 	sc "fugue/internal/staticedgecontract"
 	m "fugue/internal/staticedgemanager"
@@ -43,7 +44,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("run or probe command required")
+		return errors.New("run, probe, or cert-sync command required")
 	}
 	switch args[0] {
 	case "version":
@@ -54,13 +55,37 @@ func run(args []string) error {
 		return nil
 	case "run":
 		return runServer(args[1:])
+	case "cert-sync":
+		return runCertificateSync(args[1:])
 	case "probe":
 		return runProbe(args[1:])
 	case "probe-rpc":
 		return runProbeRPC(args[1:])
 	default:
-		return errors.New("run or probe command required")
+		return errors.New("run, probe, or cert-sync command required")
 	}
+}
+
+func runCertificateSync(args []string) error {
+	fs := flag.NewFlagSet("cert-sync", flag.ContinueOnError)
+	file := fs.String("config", "", "private certificate sync config JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *file == "" {
+		return errors.New("cert-sync requires --config")
+	}
+	var cfg certsync.Config
+	if err := m.ReadConfig(*file, &cfg); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	results, err := (certsync.Synchronizer{Config: cfg}).Run(ctx)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"certificates": results})
 }
 
 func runProbeRPC(args []string) error {

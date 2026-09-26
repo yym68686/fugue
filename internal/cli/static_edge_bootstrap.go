@@ -797,6 +797,17 @@ func staticEdgeBootstrapCaddyfile(o staticEdgeBootstrapOptions) string {
   admin unix//run/static-caddy/admin.sock
   persist_config off
   grace_period 120s
+  log {
+    format filter {
+      wrap json
+      request>headers>Authorization delete
+      request>headers>Cookie delete
+      request>headers>Proxy-Authorization delete
+      request>headers>X-Api-Key delete
+      request>headers>Api-Key delete
+      request>headers>X-Auth-Token delete
+    }
+  }
 }
 :18480 {
   bind 127.0.0.1
@@ -814,7 +825,15 @@ func staticEdgeBootstrapCaddyfile(o staticEdgeBootstrapOptions) string {
       roll_size 10MiB
       roll_keep 3
     }
-    format json
+    format filter {
+      wrap json
+      request>headers>Authorization delete
+      request>headers>Cookie delete
+      request>headers>Proxy-Authorization delete
+      request>headers>X-Api-Key delete
+      request>headers>Api-Key delete
+      request>headers>X-Auth-Token delete
+    }
   }
   reverse_proxy 127.0.0.1:18480 {
     flush_interval -1

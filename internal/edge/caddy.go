@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	caddyConfigReapplyInterval = 5 * time.Minute
-	defaultCaddyDataDir        = "/data/caddy"
-	defaultCaddyIssuerStorage  = "acme-v02.api.letsencrypt.org-directory"
+	caddyConfigReapplyInterval    = 5 * time.Minute
+	caddySharedTLSRefreshInterval = time.Hour
+	defaultCaddyDataDir           = "/data/caddy"
+	defaultCaddyIssuerStorage     = "acme-v02.api.letsencrypt.org-directory"
 
 	caddyTLSModeOff            = "off"
 	caddyTLSModeInternal       = "internal"
@@ -90,6 +91,12 @@ func (s *Service) applyCaddyConfigOnly(ctx context.Context, bundle model.EdgeRou
 			return "", err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		s.mu.Lock()
+		changed := strings.TrimSpace(s.metrics.CaddyAppliedSignature) != strings.TrimSpace(configSignature)
+		s.mu.Unlock()
+		if changed {
+			req.Header.Set("Cache-Control", "must-revalidate")
+		}
 		resp, err := s.HTTPClient.Do(req)
 		if err != nil {
 			err = fmt.Errorf("apply caddy config: %w", err)
@@ -345,6 +352,7 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	default:
 		return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, or public-on-demand")
 	}
+	loadFiles := make([]any, 0, 1)
 	if certFile, keyFile := strings.TrimSpace(s.Config.CaddyStaticTLSCertFile), strings.TrimSpace(s.Config.CaddyStaticTLSKeyFile); certFile != "" || keyFile != "" {
 		if certFile == "" || keyFile == "" {
 			return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE and FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE must be configured together")
@@ -352,15 +360,18 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 		if tlsMode == caddyTLSModeOff {
 			return nil, 0, fmt.Errorf("static Caddy TLS files require TLS mode to be internal or public-on-demand")
 		}
-		tlsApp := ensureCaddyTLSApp(apps)
-		tlsApp["certificates"] = map[string]any{
-			"load_files": []any{
-				map[string]any{
-					"certificate": certFile,
-					"key":         keyFile,
-				},
-			},
+		loadFiles = append(loadFiles, map[string]any{"certificate": certFile, "key": keyFile})
+	}
+	if tlsMode == caddyTLSModePublicOnDemand {
+		for _, host := range s.customDomainTLSHosts(bundle) {
+			certFile, keyFile, _, ok := s.importedCaddyTLSFiles(host)
+			if ok {
+				loadFiles = append(loadFiles, map[string]any{"certificate": certFile, "key": keyFile})
+			}
 		}
+	}
+	if len(loadFiles) > 0 {
+		ensureCaddyTLSApp(apps)["certificates"] = map[string]any{"load_files": loadFiles}
 	}
 
 	config := map[string]any{
@@ -369,22 +380,15 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 		},
 		"logging": map[string]any{
 			"logs": map[string]any{
+				"default": map[string]any{
+					"encoder": caddySecretRedactionEncoder(),
+					"exclude": []string{"http.log.access.fugue_edge_access"},
+				},
 				"fugue_edge_access": map[string]any{
 					"writer": map[string]any{
 						"output": "stdout",
 					},
-					"encoder": map[string]any{
-						"format": "filter",
-						"wrap": map[string]any{
-							"format": "json",
-						},
-						"fields": map[string]any{
-							"request>headers>Authorization":         map[string]string{"filter": "delete"},
-							"request>headers>Cookie":                map[string]string{"filter": "delete"},
-							"request>headers>Proxy-Authorization":   map[string]string{"filter": "delete"},
-							"request>headers>X-Tailscale-Handshake": map[string]string{"filter": "delete"},
-						},
-					},
+					"encoder": caddySecretRedactionEncoder(),
 					"include": []string{"http.log.access.fugue_edge_access"},
 				},
 			},
@@ -396,6 +400,14 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 		return nil, 0, fmt.Errorf("marshal caddy config: %w", err)
 	}
 	return data, len(hosts), nil
+}
+
+func caddySecretRedactionEncoder() map[string]any {
+	fields := map[string]any{}
+	for _, header := range []string{"Authorization", "Cookie", "Proxy-Authorization", "X-Api-Key", "Api-Key", "X-Auth-Token", "X-Tailscale-Handshake"} {
+		fields["request>headers>"+header] = map[string]string{"filter": "delete"}
+	}
+	return map[string]any{"format": "filter", "wrap": map[string]string{"format": "json"}, "fields": fields}
 }
 
 func (s *Service) caddyListenerWrappers(tlsMode string) ([]any, error) {
@@ -575,6 +587,14 @@ func (s *Service) caddyConfigSignature(bundle model.EdgeRouteBundle) (string, er
 		}
 		parts = append(parts, "static_tls="+fingerprint)
 	}
+	if s.normalizedCaddyTLSMode() == caddyTLSModePublicOnDemand {
+		for _, host := range s.customDomainTLSHosts(bundle) {
+			_, _, fingerprint, ok := s.importedCaddyTLSFiles(host)
+			if ok {
+				parts = append(parts, "imported_tls="+host+":"+fingerprint)
+			}
+		}
+	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
 	return hex.EncodeToString(sum[:]), nil
 }
@@ -600,6 +620,28 @@ func staticTLSFileFingerprint(certFile, keyFile string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+func (s *Service) importedCaddyTLSFiles(host string) (certFile, keyFile, fingerprint string, ok bool) {
+	host = normalizeRouteHost(host)
+	if !validCaddyStorageSegment(host) {
+		return "", "", "", false
+	}
+	dir := filepath.Join(s.caddyDataDir(), "certificates", tlscertificate.ImportedIssuerStorage, host)
+	certFile, keyFile = filepath.Join(dir, host+".crt"), filepath.Join(dir, host+".key")
+	certPEM, certErr := os.ReadFile(certFile)
+	keyPEM, keyErr := os.ReadFile(keyFile)
+	if certErr != nil || keyErr != nil {
+		return "", "", "", false
+	}
+	if _, err := tlscertificate.ValidatePublic(host, string(certPEM), string(keyPEM), time.Now().UTC(), s.caddyImportedTLSRoots); err != nil {
+		return "", "", "", false
+	}
+	h := sha256.New()
+	_, _ = h.Write(certPEM)
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(keyPEM)
+	return certFile, keyFile, hex.EncodeToString(h.Sum(nil)), true
+}
+
 func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.EdgeRouteBundle, configSignature string) error {
 	hosts := s.caddyWarmupHosts(bundle)
 	dialAddress := caddyProxyDialAddress(s.Config.CaddyListenAddr)
@@ -613,6 +655,11 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 	customDomainHosts := s.customDomainTLSHosts(bundle)
 	if syncErr := s.syncSharedCaddyTLSCertificates(ctx, customDomainHosts); syncErr != nil && s.Logger != nil {
 		s.Logger.Printf("edge caddy shared TLS sync failed; hosts=%d error=%s", len(customDomainHosts), s.redact(syncErr.Error()))
+	}
+	if updatedSignature, applyErr := s.applyCaddyConfigOnly(ctx, bundle); applyErr != nil {
+		return applyErr
+	} else {
+		warmupSignature = s.caddyTLSWarmupSignature(bundle, updatedSignature)
 	}
 	warmup := s.caddyWarmup
 	if warmup == nil {
@@ -900,8 +947,14 @@ func (s *Service) installSharedCaddyTLSCertificate(hostname string, bundle caddy
 	if !validCaddyStorageSegment(bundle.IssuerStorage) {
 		return false, fmt.Errorf("shared TLS certificate issuer storage for %s is invalid", hostname)
 	}
-	if _, err := tlscertificate.Validate(hostname, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC()); err != nil {
-		return false, err
+	var certErr error
+	if bundle.IssuerStorage == tlscertificate.ImportedIssuerStorage {
+		_, certErr = tlscertificate.ValidatePublic(hostname, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC(), s.caddyImportedTLSRoots)
+	} else {
+		_, certErr = tlscertificate.Validate(hostname, bundle.CertificatePEM, bundle.PrivateKeyPEM, time.Now().UTC())
+	}
+	if certErr != nil {
+		return false, certErr
 	}
 	s.caddyTLSInstallMu.Lock()
 	defer s.caddyTLSInstallMu.Unlock()
@@ -1006,6 +1059,17 @@ func (s *Service) readLocalCaddyTLSCertificate(hostname string) (caddyTLSCertifi
 	hostname = normalizeRouteHost(hostname)
 	if hostname == "" {
 		return caddyTLSCertificateBundle{}, fmt.Errorf("hostname is required")
+	}
+	if certPath, keyPath, _, ok := s.importedCaddyTLSFiles(hostname); ok {
+		certPEM, certErr := os.ReadFile(certPath)
+		keyPEM, keyErr := os.ReadFile(keyPath)
+		if certErr == nil && keyErr == nil {
+			metadata, _ := os.ReadFile(filepath.Join(filepath.Dir(certPath), hostname+".json"))
+			return caddyTLSCertificateBundle{
+				CertificatePEM: strings.TrimSpace(string(certPEM)), PrivateKeyPEM: strings.TrimSpace(string(keyPEM)),
+				MetadataJSON: strings.TrimSpace(string(metadata)), IssuerStorage: tlscertificate.ImportedIssuerStorage,
+			}, nil
+		}
 	}
 	pattern := filepath.Join(s.caddyDataDir(), "certificates", "*", hostname, hostname+".crt")
 	matches, err := filepath.Glob(pattern)

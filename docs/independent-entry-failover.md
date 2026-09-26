@@ -13,6 +13,50 @@ handshake, store secrets, grant DNS authority, or drive the executor. Registry
 `ready` is an observation at `last_proof_at`, not continuously measured health.
 Revoking a registry record does not drain or stop its independent edge.
 
+## Standby custom-domain certificates
+
+An independent primary can continue serving if the Fugue API is unavailable,
+but a managed standby must retain its own valid certificate for every business
+hostname. Caddy's ordinary HTTP/TLS validation on the standby may not renew
+while DNS points to the independent primary. `fugue-entry-failover cert-sync`
+copies an existing publicly trusted certificate from an independent Caddy
+storage directory into an app-scoped Fugue certificate endpoint. It neither
+requests a new certificate nor writes DNS. The dedicated API key needs only
+`app.tls.read` and `app.tls.write`; the source node does not receive a Fugue
+deployment or traffic-control credential. The source certificate remains
+autonomously managed by its Caddy while the primary DNS points to it.
+
+Configure the one-shot command with a root-private JSON file and token file:
+
+```json
+{
+  "api_url": "https://api.fugue.pro",
+  "api_token_file": "/etc/fugue-certificate-sync/api-token",
+  "app_id": "app-example",
+  "hostnames": ["example.test", "api.example.test"],
+  "caddy_data_dir": "/var/lib/caddy/.local/share/caddy",
+  "minimum_days_left": 21
+}
+```
+
+Use the generic service and timer in `deploy/certificate-sync/`. The service
+runs as root only to read Caddy's mode-0600 key files; its own config and API
+token must also be root-private. It does not restart or reload the primary.
+It verifies the source key pair, hostname, public trust chain and remaining
+validity, then compares the stored fingerprint before import. An older source
+certificate cannot replace a newer valid standby certificate. A failed API
+call affects only replication, not primary serving; an unsuccessful timer and
+certificate expiry must be monitored. A successful import means stored
+material only. Managed edge workers periodically fetch it, validate again,
+reload their own Caddy and require direct TLS handshake evidence before the
+standby can be considered ready.
+
+Do not infer perpetual renewal from a currently valid source certificate.
+Confirm Caddy's own automatic renewal in the primary's actual DNS position,
+the timer's last successful run, and the certificate fingerprint served by
+every intended standby. During failover, when DNS points to Fugue, its Caddy
+can also use its existing on-demand ACME path.
+
 ## Read-only operations
 
 ```sh

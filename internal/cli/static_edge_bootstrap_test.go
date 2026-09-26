@@ -150,6 +150,17 @@ func TestStaticEdgeBootstrapCaddyConfigIsLocalAndBounded(t *testing.T) {
 	}
 }
 
+func TestStaticEdgeBootstrapCaddyfileRedactsCredentialHeaders(t *testing.T) {
+	config := staticEdgeBootstrapCaddyfile(staticEdgeBootstrapOptions{EdgeID: "test-edge",
+		Hostnames: []string{"example.test"}, OriginIP: "192.0.2.40", OriginPort: 19443,
+		OriginServerName: "origin.example.test"})
+	for _, header := range []string{"Authorization", "Cookie", "Proxy-Authorization", "X-Api-Key", "Api-Key", "X-Auth-Token"} {
+		if strings.Count(config, "request>headers>"+header+" delete") != 2 {
+			t.Fatalf("default and access loggers must both remove %s", header)
+		}
+	}
+}
+
 func TestStaticEdgeBootstrapRejectsUnsafeHostAndPaths(t *testing.T) {
 	o := staticEdgeBootstrapOptions{SSHHost: "new", SourceSSH: "old", EdgeID: "edge", PublicIP: "192.0.2.1", Hostnames: []string{"example.test"}, OriginIP: "192.0.2.2", OriginPort: 19443, OriginServerName: "origin.example.test", SourceCaddy: "/usr/bin/caddy", SourceCertRoot: "/certs", SourceClientDir: "/client", CaddySHA256: strings.Repeat("a", 64), BusinessCA: "/ca.pem", BusinessCAKey: "/ca.key"}
 	if e := validateStaticEdgeBootstrap(o); e != nil {

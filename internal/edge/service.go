@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -78,6 +79,7 @@ type Service struct {
 	InventoryProducerHTTPClient   *http.Client
 	Logger                        *log.Logger
 	caddyWarmup                   func(context.Context, string, string) error
+	caddyImportedTLSRoots         *x509.CertPool
 	cacheWarmupClientFactory      func(string, string) *http.Client
 	proxyBase                     http.RoundTripper
 	proxyTransportMu              sync.Mutex
@@ -4153,7 +4155,10 @@ func (s *Service) needsCaddyWarmup(signature string) bool {
 	if strings.TrimSpace(s.metrics.CaddyWarmupLastError) != "" {
 		return true
 	}
-	return s.metrics.CaddyWarmupAt == nil
+	if s.metrics.CaddyWarmupAt == nil {
+		return true
+	}
+	return s.caddySharedTLSEnabled() && time.Since(*s.metrics.CaddyWarmupAt) >= caddySharedTLSRefreshInterval
 }
 
 func (s *Service) recordCaddyWarmup(signature, host string, duration time.Duration, err error) {

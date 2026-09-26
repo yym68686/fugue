@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 )
 
 type Server struct {
+	certificateImportRoots                 *x509.CertPool
 	newObjectStorageClient                 func(string, string) *objectstorage.Client
 	store                                  *store.Store
 	auth                                   *auth.Authenticator

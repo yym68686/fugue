@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/tlscertificate"
 )
 
 func (s *Store) pgGetEdgeTLSCertificate(hostname string) (model.EdgeTLSCertificate, error) {
@@ -48,9 +49,17 @@ ON CONFLICT (hostname) DO UPDATE SET
 	uploaded_by_edge_id = EXCLUDED.uploaded_by_edge_id,
 	uploaded_by_edge_group_id = EXCLUDED.uploaded_by_edge_group_id,
 	updated_at = EXCLUDED.updated_at
+WHERE (fugue_edge_tls_certificates.issuer_storage IS DISTINCT FROM $15 OR fugue_edge_tls_certificates.not_after IS NULL OR fugue_edge_tls_certificates.not_after <= $14)
+	AND (fugue_edge_tls_certificates.not_after IS NULL
+	OR fugue_edge_tls_certificates.not_after <= $14
+	OR (EXCLUDED.certificate_sha256 <> '' AND EXCLUDED.certificate_sha256 = fugue_edge_tls_certificates.certificate_sha256)
+	OR EXCLUDED.not_after > fugue_edge_tls_certificates.not_after)
 RETURNING hostname, tenant_id, app_id, certificate_pem, private_key_pem, metadata_json, issuer_storage, certificate_sha256, not_after, uploaded_by_edge_id, uploaded_by_edge_group_id, created_at, updated_at
-`, cert.Hostname, cert.TenantID, cert.AppID, cert.CertificatePEM, cert.PrivateKeyPEM, cert.MetadataJSON, cert.IssuerStorage, cert.CertificateSHA256, cert.NotAfter, cert.UploadedByEdgeID, cert.UploadedByEdgeGroupID, cert.CreatedAt, cert.UpdatedAt)
+`, cert.Hostname, cert.TenantID, cert.AppID, cert.CertificatePEM, cert.PrivateKeyPEM, cert.MetadataJSON, cert.IssuerStorage, cert.CertificateSHA256, cert.NotAfter, cert.UploadedByEdgeID, cert.UploadedByEdgeGroupID, cert.CreatedAt, cert.UpdatedAt, now, tlscertificate.ImportedIssuerStorage)
 	stored, err := scanEdgeTLSCertificate(row)
+	if err == sql.ErrNoRows {
+		return s.pgGetEdgeTLSCertificate(cert.Hostname)
+	}
 	if err != nil {
 		return model.EdgeTLSCertificate{}, mapDBErr(err)
 	}

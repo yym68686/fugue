@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/tlscertificate"
 )
 
 func (s *Store) GetEdgeTLSCertificate(hostname string) (model.EdgeTLSCertificate, error) {
@@ -43,6 +44,10 @@ func (s *Store) PutEdgeTLSCertificate(cert model.EdgeTLSCertificate) (model.Edge
 		index := findEdgeTLSCertificate(state, cert.Hostname)
 		if index >= 0 {
 			existing := state.EdgeTLSCertificates[index]
+			if retainCurrentTLSCertificate(existing, cert, now) {
+				out = cloneEdgeTLSCertificate(existing)
+				return nil
+			}
 			if cert.CreatedAt.IsZero() {
 				cert.CreatedAt = existing.CreatedAt
 			}
@@ -59,6 +64,20 @@ func (s *Store) PutEdgeTLSCertificate(cert model.EdgeTLSCertificate) (model.Edge
 		return nil
 	})
 	return out, err
+}
+
+// Older edge observations must not replace a still-valid newer certificate.
+func retainCurrentTLSCertificate(current, incoming model.EdgeTLSCertificate, now time.Time) bool {
+	if current.NotAfter == nil || !current.NotAfter.After(now) {
+		return false
+	}
+	if current.IssuerStorage == tlscertificate.ImportedIssuerStorage {
+		return true
+	}
+	if incoming.CertificateSHA256 != "" && incoming.CertificateSHA256 == current.CertificateSHA256 {
+		return false
+	}
+	return incoming.NotAfter == nil || !incoming.NotAfter.After(*current.NotAfter)
 }
 
 func (s *Store) DeleteEdgeTLSCertificate(hostname string) (model.EdgeTLSCertificate, error) {

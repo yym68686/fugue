@@ -7681,6 +7681,67 @@ paths:
                 $ref: "#/components/schemas/AppDomainResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/domains/{hostname}/certificate:
+    get:
+      operationId: getAppDomainCertificateMetadata
+      summary: Inspect a custom-domain certificate without reading private material
+      description: Requires app.tls.read or app.tls.write and the app tenant/project boundary. Stored material is not proof of current edge serving state.
+      tags: [Apps]
+      x-fugue-handler: handleGetAppDomainCertificateMetadata
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Certificate metadata only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainCertificateMetadata"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: importAppDomainCertificate
+      summary: Import a publicly trusted certificate for a verified app domain
+      description: >-
+        Requires app.tls.write and the app tenant/project boundary. Every certificate
+        DNS name must belong to a verified domain of this app. A compare-and-swap
+        fingerprint prevents overwriting a concurrently replaced certificate;
+        an identical retry is idempotent. Imports never change DNS, domain
+        verification, TLS readiness or serving route configuration. Existing edge
+        certificate delivery consumes the material; serving requires live evidence.
+      tags: [Apps]
+      x-fugue-handler: handleImportAppDomainCertificate
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportAppDomainCertificateRequest"
+      responses:
+        '200':
+          description: Validated certificate material stored; this is not a serving acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainCertificateMetadata"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/domains/availability:
     get:
       operationId: getAppDomainAvailability
@@ -22720,6 +22781,41 @@ components:
         updated_at:
           type: string
           format: date-time
+    AppDomainCertificateMetadata:
+      type: object
+      additionalProperties: false
+      required: [hostname, app_id, present]
+      properties:
+        hostname:
+          type: string
+        app_id:
+          type: string
+        present:
+          type: boolean
+        certificate_sha256:
+          type: string
+        not_after:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ImportAppDomainCertificateRequest:
+      type: object
+      additionalProperties: false
+      required: [certificate_pem, private_key_pem, expected_certificate_sha256]
+      properties:
+        certificate_pem:
+          type: string
+          maxLength: 65536
+        private_key_pem:
+          type: string
+          maxLength: 16384
+          writeOnly: true
+        expected_certificate_sha256:
+          type: string
+          pattern: '^([0-9a-f]{64})?$'
+          description: Empty only when no certificate is currently stored.
     StaticEdgeRegistrationListResponse:
       type: object
       additionalProperties: false

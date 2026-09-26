@@ -1,0 +1,19 @@
+[Unit]
+Description=Replicate independent edge certificates to Fugue standby
+After=network-online.target static-caddy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fugue-entry-failover cert-sync --config /etc/fugue-certificate-sync/config.json
+TimeoutStartSec=180s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=128M
+TasksMax=32

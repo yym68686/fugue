@@ -161,6 +161,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/apps/{id}/domains/diagnosis", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppDomainDiagnosis)))
 	mux.Handle("POST /v1/apps/{id}/domains/repair", s.auth.RequireAPI(http.HandlerFunc(s.handleRepairAppDomain)))
 	mux.Handle("POST /v1/apps/{id}/domains/verify", s.auth.RequireAPI(http.HandlerFunc(s.handleVerifyAppDomain)))
+	mux.Handle("GET /v1/apps/{id}/domains/{hostname}/certificate", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppDomainCertificateMetadata)))
+	mux.Handle("PUT /v1/apps/{id}/domains/{hostname}/certificate", s.auth.RequireAPI(http.HandlerFunc(s.handleImportAppDomainCertificate)))
 	mux.Handle("GET /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppEnv)))
 	mux.Handle("PATCH /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppEnv)))
 	mux.Handle("POST /v1/apps/{id}/failover", s.auth.RequireAPI(http.HandlerFunc(s.handleFailoverApp)))
