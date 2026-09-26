@@ -142,6 +142,18 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route draft cannot be captured")
 	}
+	if static.EdgeTopology != nil {
+		clone := static.EdgeTopology.Clone()
+		projection.Intent.EdgeTopology = &clone
+		projection.Intent.Generation, err = platformconfig.PlatformIntentGeneration(projection.Intent)
+		if err != nil {
+			return platformIntentProjectionResponse{}, err
+		}
+		projection.RuntimeSnapshot.IntentGeneration = projection.Intent.Generation
+		if err := platformconfig.ValidatePlatformIntent(projection.Intent); err != nil {
+			return platformIntentProjectionResponse{}, err
+		}
+	}
 	if err := s.captureReleaseRuntimeReadiness(ctx, &projection, business); err != nil {
 		return platformIntentProjectionResponse{}, err
 	}

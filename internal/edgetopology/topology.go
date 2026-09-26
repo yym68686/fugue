@@ -41,6 +41,21 @@ type Edge struct {
 	Labels          map[string]string `json:"labels,omitempty"`
 }
 
+func (intent Intent) Clone() Intent {
+	out := Intent{SchemaVersion: intent.SchemaVersion}
+	out.Cells = append([]AuthorityCell(nil), intent.Cells...)
+	out.Pools = append([]ServingPool(nil), intent.Pools...)
+	out.Edges = make([]Edge, len(intent.Edges))
+	for i, edge := range intent.Edges {
+		out.Edges[i] = edge
+		out.Edges[i].ServingPoolIDs = append([]string(nil), edge.ServingPoolIDs...)
+		out.Edges[i].Capabilities = append([]string(nil), edge.Capabilities...)
+		out.Edges[i].FailureDomains = cloneDomains(edge.FailureDomains)
+		out.Edges[i].Labels = cloneDomains(edge.Labels)
+	}
+	return out
+}
+
 func Decode(reader io.Reader) (Intent, error) {
 	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()

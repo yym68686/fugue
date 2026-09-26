@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 )
 
@@ -22,6 +23,7 @@ const (
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
 	ApplicationDomains *ApplicationDomainsIntent `json:"application_domains,omitempty"`
+	EdgeTopology       *edgetopology.Intent      `json:"edge_topology,omitempty"`
 	DNSConsumers       []DNSConsumerIntent       `json:"dns_consumers,omitempty"`
 	ACMEChallenges     []ACMEChallengeIntent     `json:"acme_challenges,omitempty"`
 	SchemaVersion      string                    `json:"schema_version"`
@@ -454,6 +456,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 func normalizeIntent(in PlatformIntent) PlatformIntent {
 	out := in
 	out.ApplicationDomains = CloneApplicationDomains(in.ApplicationDomains)
+	if in.EdgeTopology != nil {
+		clone := in.EdgeTopology.Clone()
+		out.EdgeTopology = &clone
+	}
 	out.DNSConsumers = normalizeDNSConsumers(in.DNSConsumers)
 	out.SchemaVersion = firstNonEmpty(strings.TrimSpace(in.SchemaVersion), SchemaVersion)
 	out.Scope = firstNonEmpty(strings.TrimSpace(in.Scope), GlobalScopeKey)
@@ -573,6 +579,11 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 }
 
 func validateIntent(in PlatformIntent) error {
+	if in.EdgeTopology != nil {
+		if err := in.EdgeTopology.Validate(); err != nil {
+			return fmt.Errorf("edge topology: %w", err)
+		}
+	}
 	if err := ValidateApplicationDomains(in.ApplicationDomains); err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package platformproducer
 
 import (
 	"encoding/json"
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"testing"
@@ -52,5 +53,30 @@ func TestStaticIntentRejectsLossyOrDynamicMigration(t *testing.T) {
 				t.Fatal("lossy static input accepted")
 			}
 		})
+	}
+}
+
+func TestStaticIntentPreservesEdgeTopology(t *testing.T) {
+	topology := edgetopology.Intent{SchemaVersion: edgetopology.SchemaVersion,
+		Cells: []edgetopology.AuthorityCell{{ID: "cell-a", LegacyGroupID: "edge-group-a"}},
+		Pools: []edgetopology.ServingPool{{ID: "pool-a"}},
+		Edges: []edgetopology.Edge{{ID: "edge-a", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-a"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "host-a"}}},
+	}
+	intent := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Generation: "static", Scope: "global", EdgeTopology: &topology}
+	raw, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPlatformIntent, ScopeKey: "global", Generation: intent.Generation}
+	if err := json.Unmarshal(raw, &artifact.Content); err != nil {
+		t.Fatal(err)
+	}
+	out, err := DecodeStaticIntent(artifact)
+	if err != nil || out.EdgeTopology == nil || out.EdgeTopology.Edges[0].ID != "edge-a" {
+		t.Fatalf("signed static topology was lost: %+v, %v", out, err)
+	}
+	out.EdgeTopology.Edges[0].FailureDomains["host"] = "changed"
+	if topology.Edges[0].FailureDomains["host"] != "host-a" {
+		t.Fatal("static topology aliased caller input")
 	}
 }

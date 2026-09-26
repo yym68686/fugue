@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/edgetopology"
 )
 
 func TestRoutePathCompilerPreservesLegacyIntentDigest(t *testing.T) {
@@ -17,6 +19,43 @@ func TestRoutePathCompilerPreservesLegacyIntentDigest(t *testing.T) {
 	encoded, err := json.Marshal(NormalizePlatformIntent(input))
 	if err != nil || string(encoded) != string(legacy) {
 		t.Fatalf("legacy intent digest input changed: %s, error: %v", encoded, err)
+	}
+}
+
+func TestEdgeTopologyIsSignedIntentWithoutChangingServingContent(t *testing.T) {
+	topology := edgetopology.Intent{
+		SchemaVersion: edgetopology.SchemaVersion,
+		Cells:         []edgetopology.AuthorityCell{{ID: "cell-a", LegacyGroupID: "edge-group-a"}},
+		Pools:         []edgetopology.ServingPool{{ID: "pool-a"}},
+		Edges:         []edgetopology.Edge{{ID: "edge-a", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-a"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "host-a"}}},
+	}
+	request := CompileRequest{
+		Intent: PlatformIntent{Generation: "intent-a", Routes: []RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin", Enabled: true}}, DNS: []DNSIntent{{Hostname: "example.test", Type: "TXT", Values: []string{"proof"}, TTL: 60}}},
+		Policy: PolicySnapshot{Generation: "policy-a"},
+	}
+	without, err := Compile(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Intent.EdgeTopology = &topology
+	with, err := Compile(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(with.Lineage.IntentDigest, without.Lineage.IntentDigest) ||
+		!reflect.DeepEqual(with.RouteArtifact.Content["routes"], without.RouteArtifact.Content["routes"]) ||
+		!reflect.DeepEqual(with.DNSArtifact.Content["records"], without.DNSArtifact.Content["records"]) ||
+		with.IntentArtifact.Content["edge_topology"] == nil {
+		t.Fatal("topology was not signed independently of serving route and DNS content")
+	}
+	normalized := NormalizePlatformIntent(request.Intent)
+	topology.Edges[0].FailureDomains["host"] = "changed"
+	if normalized.EdgeTopology.Edges[0].FailureDomains["host"] != "host-a" {
+		t.Fatal("topology normalization aliased caller input")
+	}
+	request.Intent.EdgeTopology.Cells[0].ID = "unknown"
+	if _, err := Compile(request); err == nil {
+		t.Fatal("invalid topology was accepted")
 	}
 }
 

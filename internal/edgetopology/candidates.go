@@ -229,6 +229,9 @@ func routeProofsComplete(ready, required []string) bool {
 }
 
 func cloneDomains(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
 	out := make(map[string]string, len(values))
 	for key, value := range values {
 		out[key] = value

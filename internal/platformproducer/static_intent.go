@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
@@ -14,6 +15,7 @@ import (
 // instead of silently dropping executable intent during migration.
 type StaticIntentInput struct {
 	ApplicationDomains *platformconfig.ApplicationDomainsIntent
+	EdgeTopology       *edgetopology.Intent
 	Routes             []model.PlatformRoute
 	DNS                []model.EdgeDNSRecord
 	Consumers          []platformconfig.DNSConsumerIntent
@@ -40,6 +42,10 @@ func DecodeStaticIntent(a model.PlatformArtifact) (StaticIntentInput, error) {
 		return fail()
 	}
 	out := StaticIntentInput{ApplicationDomains: platformconfig.CloneApplicationDomains(intent.ApplicationDomains), Consumers: platformconfig.NormalizePlatformIntent(intent).DNSConsumers}
+	if intent.EdgeTopology != nil {
+		clone := intent.EdgeTopology.Clone()
+		out.EdgeTopology = &clone
+	}
 	for _, r := range intent.Routes {
 		if r.PathPrefix != "" && r.PathPrefix != "/" || r.ServicePort != 0 || r.Streaming != nil || len(r.Upstreams) > 0 || r.CachePolicyID != "" || r.CacheNamespace != "" || r.DeploymentGeneration != "" || len(r.RequestBodyPolicies) > 0 || r.AppID != "" || r.TenantID != "" || r.RuntimeID != "" || r.OriginRef != "" {
 			return fail()

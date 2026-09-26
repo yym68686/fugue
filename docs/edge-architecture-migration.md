@@ -16,6 +16,13 @@ DiscoveryBundle lists globally healthy Edge nodes and does not grant any tenant
 or hostname access. No consumer may expand a signed route's serving scope based
 only on this file or on the discovery audit.
 
+The same topology schema can now be carried in a signed static `PlatformIntent`
+as `edge_topology`. The producer preserves it in the projected intent and its
+lineage. The field is optional, and neither its presence nor a clean audit
+changes route bundles, DNS answers, or current Edge selection. Serving
+authorization still requires an explicit grant derived from that signed intent
+and matching runtime facts.
+
 `edgetopology.EligibleCandidates` is a non-serving compiler for a verified
 tenant/hostname grant and authenticated runtime facts. Its grant must list every
 path route digest required by the hostname for each authorized authority cell:

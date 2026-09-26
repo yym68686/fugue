@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
@@ -123,5 +124,22 @@ func TestImportedEnvironmentMatchesLegacyRouteAndDNSProjection(t *testing.T) {
 	second, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: imported.Intent, Policy: platformconfig.PolicySnapshot{Generation: "policy"}, CreatedAt: time.Now().Add(time.Hour)})
 	if err != nil || !reflect.DeepEqual(first.RouteArtifact.Content, second.RouteArtifact.Content) {
 		t.Fatal("compiler replay changed imported route content")
+	}
+}
+
+func TestStaticTopologySurvivesProducerProjection(t *testing.T) {
+	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	topology := edgetopology.Intent{SchemaVersion: edgetopology.SchemaVersion,
+		Cells: []edgetopology.AuthorityCell{{ID: "cell-a", LegacyGroupID: "edge-group-a"}},
+		Pools: []edgetopology.ServingPool{{ID: "pool-a"}},
+		Edges: []edgetopology.Edge{{ID: "edge-a", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-a"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "host-a"}}},
+	}
+	projection, err := server.capturePlatformIntentWithStatic(context.Background(), platformProducerPrincipal(), platformproducer.StaticIntentInput{EdgeTopology: &topology})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Intent.EdgeTopology == nil || !reflect.DeepEqual(*projection.Intent.EdgeTopology, topology) ||
+		projection.RuntimeSnapshot.IntentGeneration != projection.Intent.Generation {
+		t.Fatalf("topology or generation was lost in projection: %+v", projection.Intent)
 	}
 }
