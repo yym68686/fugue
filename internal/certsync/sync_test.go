@@ -103,9 +103,20 @@ func TestSynchronizerImportsOnlyValidatedNewerCertificate(t *testing.T) {
 	roots.AddCert(leaf)
 	s := Synchronizer{Config: Config{APIURL: api.URL, APITokenFile: tokenPath, AppID: appID,
 		Hostnames: []string{host}, CaddyDataDir: root, MinimumDaysLeft: 21}, Roots: roots, Client: api.Client()}
-	for index, want := range []string{"imported", "unchanged", "standby_newer"} {
+	for index, want := range []string{"imported", "unchanged", "imported", "standby_newer"} {
 		if index == 2 {
-			expires := time.Now().Add(40 * 24 * time.Hour)
+			certPEM, keyPEM, leaf = fixtureCertificate(t, host, 60*24*time.Hour)
+			roots.AddCert(leaf)
+			for suffix, value := range map[string]string{"crt": certPEM, "key": keyPEM} {
+				if err := os.WriteFile(filepath.Join(dir, host+"."+suffix), []byte(value), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sum = sha256.Sum256(leaf.Raw)
+			fingerprint = hex.EncodeToString(sum[:])
+		}
+		if index == 3 {
+			expires := time.Now().Add(70 * 24 * time.Hour)
 			stored = metadata{Hostname: host, AppID: appID, Present: true, CertificateSHA256: strings.Repeat("a", 64), NotAfter: &expires}
 		}
 		results, err := s.Run(t.Context())
@@ -113,8 +124,8 @@ func TestSynchronizerImportsOnlyValidatedNewerCertificate(t *testing.T) {
 			t.Fatalf("sync %d: results=%+v err=%v", index, results, err)
 		}
 	}
-	if puts != 1 {
-		t.Fatalf("expected one import, got %d", puts)
+	if puts != 2 {
+		t.Fatalf("expected initial and renewed certificate imports, got %d", puts)
 	}
 }
 
