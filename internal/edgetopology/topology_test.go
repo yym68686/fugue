@@ -73,6 +73,18 @@ func TestTopologyRejectsAmbiguousOrCountryRisk(t *testing.T) {
 	}
 }
 
+func TestNeutralCellCanRetireLegacyGroupAlias(t *testing.T) {
+	intent := productionIntent(t)
+	intent.Cells[0].LegacyGroupID = ""
+	if err := intent.Validate(); err != nil {
+		t.Fatalf("neutral cell identity was rejected: %v", err)
+	}
+	audit := intent.Audit([]ObservedEdge{{ID: "vps-84c8f0a9", LegacyGroupID: "cell-public-a"}})
+	if len(audit.MismatchedGroups) != 0 || len(audit.UnknownEdges) != 0 {
+		t.Fatalf("neutral serving identity failed audit: %+v", audit)
+	}
+}
+
 func TestDecodeRejectsUnknownAndTrailingFields(t *testing.T) {
 	raw, err := os.ReadFile("../../deploy/edge/topology.json")
 	if err != nil {

@@ -25,7 +25,7 @@ type Intent struct {
 
 type AuthorityCell struct {
 	ID            string `json:"id"`
-	LegacyGroupID string `json:"legacy_group_id"`
+	LegacyGroupID string `json:"legacy_group_id,omitempty"`
 }
 
 type ServingPool struct {
@@ -36,6 +36,7 @@ type Edge struct {
 	ID              string            `json:"id"`
 	AuthorityCellID string            `json:"authority_cell_id"`
 	ServingPoolIDs  []string          `json:"serving_pool_ids"`
+	Capabilities    []string          `json:"capabilities"`
 	FailureDomains  map[string]string `json:"failure_domains"`
 	Labels          map[string]string `json:"labels,omitempty"`
 }
@@ -67,17 +68,18 @@ func (intent Intent) Validate() error {
 	cells := make(map[string]string, len(intent.Cells))
 	legacyGroups := make(map[string]struct{}, len(intent.Cells))
 	for i, cell := range intent.Cells {
-		if !validID(cell.ID) || !validID(cell.LegacyGroupID) || !strings.HasPrefix(cell.LegacyGroupID, "edge-group-") {
+		if !validID(cell.ID) || (cell.LegacyGroupID != "" && (!validID(cell.LegacyGroupID) || !strings.HasPrefix(cell.LegacyGroupID, "edge-group-"))) {
 			return fmt.Errorf("authority cell %d has an invalid identity", i)
 		}
 		if i > 0 && intent.Cells[i-1].ID >= cell.ID {
 			return errors.New("authority cells must be ordered by unique id")
 		}
-		if _, exists := legacyGroups[cell.LegacyGroupID]; exists {
-			return fmt.Errorf("legacy edge group %q maps to multiple authority cells", cell.LegacyGroupID)
+		groupID := cell.ServingGroupID()
+		if _, exists := legacyGroups[groupID]; exists {
+			return fmt.Errorf("serving edge group %q maps to multiple authority cells", groupID)
 		}
-		cells[cell.ID] = cell.LegacyGroupID
-		legacyGroups[cell.LegacyGroupID] = struct{}{}
+		cells[cell.ID] = groupID
+		legacyGroups[groupID] = struct{}{}
 	}
 	pools := make(map[string]struct{}, len(intent.Pools))
 	for i, pool := range intent.Pools {
@@ -114,6 +116,14 @@ func (intent Intent) Validate() error {
 			}
 			usedPools[poolID] = struct{}{}
 		}
+		if len(edge.Capabilities) == 0 {
+			return fmt.Errorf("edge %q has no declared capabilities", edge.ID)
+		}
+		for j, capability := range edge.Capabilities {
+			if !validID(capability) || (j > 0 && edge.Capabilities[j-1] >= capability) {
+				return fmt.Errorf("edge %q capabilities must be ordered and unique", edge.ID)
+			}
+		}
 		if len(edge.FailureDomains) == 0 {
 			return fmt.Errorf("edge %q needs explicit failure domains", edge.ID)
 		}
@@ -136,6 +146,13 @@ func (intent Intent) Validate() error {
 
 func validID(value string) bool { return identityPattern.MatchString(value) && len(value) <= 128 }
 
+func (cell AuthorityCell) ServingGroupID() string {
+	if cell.LegacyGroupID != "" {
+		return cell.LegacyGroupID
+	}
+	return cell.ID
+}
+
 // Audit compares explicit intent with a read-only discovery snapshot. Discovery
 // eligibility is global; a clean audit never authorizes a tenant route or DNS.
 type Audit struct {
@@ -154,7 +171,7 @@ type ObservedEdge struct {
 func (intent Intent) Audit(observed []ObservedEdge) Audit {
 	cells := make(map[string]string, len(intent.Cells))
 	for _, cell := range intent.Cells {
-		cells[cell.ID] = cell.LegacyGroupID
+		cells[cell.ID] = cell.ServingGroupID()
 	}
 	edges := make(map[string]Edge, len(intent.Edges))
 	for _, edge := range intent.Edges {

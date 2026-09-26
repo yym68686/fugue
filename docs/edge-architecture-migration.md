@@ -5,6 +5,9 @@ The serving system still uses `edge_group_id` as its compatibility identity.
 maps each existing group to a neutral release boundary; a serving pool can span
 multiple cells; an Edge has a stable ID and explicit risk dimensions. Country
 and region are labels, not risk domains or release identities.
+The `legacy_group_id` alias is transitional. Once a cell's runtime, release
+ledger, inventory and LKG use the neutral cell ID, remove the alias in a
+separate verified configuration step.
 
 The topology file contains no endpoints, health, traffic weights, loaded bundle
 digests, or code revision. Those are runtime facts or signed artifacts. A pool
@@ -12,6 +15,16 @@ membership is not route authorization. In particular, the current public
 DiscoveryBundle lists globally healthy Edge nodes and does not grant any tenant
 or hostname access. No consumer may expand a signed route's serving scope based
 only on this file or on the discovery audit.
+
+`edgetopology.EligibleCandidates` is a non-serving compiler for a verified
+tenant/hostname grant and authenticated runtime facts. Its grant must list every
+path route digest required by the hostname. Each Edge must have current proof
+for all of them, the matching TLS hostname, health, capacity and pool/capability
+membership; exclusions, optional residency and requested risk diversity are
+hard gates. The caller must bind both the grant and facts to the current signed
+TrafficReleaseSet before using any result for serving. This binding and the
+shadow comparison are not yet connected to the production compiler, so the
+new candidate result cannot affect DNS or Agent traffic.
 
 For a read-only consistency check against the currently visible Edge nodes:
 

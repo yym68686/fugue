@@ -8,8 +8,8 @@
     {"id": "pool-public"}
   ],
   "edges": [
-    {"id": "bwg", "authority_cell_id": "cell-public-b", "serving_pool_ids": ["pool-public"], "failure_domains": {"host": "bwg"}, "labels": {"country": "us", "region": "us"}},
-    {"id": "vps-591f4447", "authority_cell_id": "cell-public-b", "serving_pool_ids": ["pool-public"], "failure_domains": {"host": "vps-591f4447"}, "labels": {"country": "us", "region": "us"}},
-    {"id": "vps-84c8f0a9", "authority_cell_id": "cell-public-a", "serving_pool_ids": ["pool-public"], "failure_domains": {"host": "vps-84c8f0a9"}, "labels": {"country": "de", "region": "de"}}
+    {"id": "bwg", "authority_cell_id": "cell-public-b", "serving_pool_ids": ["pool-public"], "capabilities": ["http", "tls"], "failure_domains": {"host": "bwg"}, "labels": {"country": "us", "region": "us"}},
+    {"id": "vps-591f4447", "authority_cell_id": "cell-public-b", "serving_pool_ids": ["pool-public"], "capabilities": ["http", "tls"], "failure_domains": {"host": "vps-591f4447"}, "labels": {"country": "us", "region": "us"}},
+    {"id": "vps-84c8f0a9", "authority_cell_id": "cell-public-a", "serving_pool_ids": ["pool-public"], "capabilities": ["http", "tls"], "failure_domains": {"host": "vps-84c8f0a9"}, "labels": {"country": "de", "region": "de"}}
   ]
 }
