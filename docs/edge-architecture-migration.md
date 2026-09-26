@@ -18,7 +18,9 @@ only on this file or on the discovery audit.
 
 `edgetopology.EligibleCandidates` is a non-serving compiler for a verified
 tenant/hostname grant and authenticated runtime facts. Its grant must list every
-path route digest required by the hostname. Each Edge must have current proof
+path route digest required by the hostname for each authorized authority cell:
+the existing route proof includes the serving group ID, so digests differ
+between cells. Cells omitted from the grant are not candidates. Each Edge must have current proof
 for all of them, the matching TLS hostname, health, capacity and pool/capability
 membership; exclusions, optional residency and requested risk diversity are
 hard gates. The caller must bind both the grant and facts to the current signed

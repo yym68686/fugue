@@ -15,17 +15,17 @@ var hostnamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`)
 // RouteGrant is the policy projection for one tenant and hostname. Its caller
 // must verify the signed source artifact before using this compiler for serving.
 type RouteGrant struct {
-	TenantID             string         `json:"tenant_id"`
-	Hostname             string         `json:"hostname"`
-	RequiredRouteDigests []string       `json:"required_route_digests"`
-	AllowedPoolIDs       []string       `json:"allowed_pool_ids"`
-	AllowedCountries     []string       `json:"allowed_countries,omitempty"`
-	RequiredCapabilities []string       `json:"required_capabilities"`
-	ExcludedEdgeIDs      []string       `json:"excluded_edge_ids,omitempty"`
-	MinCandidates        int            `json:"min_candidates"`
-	MinDistinctCells     int            `json:"min_distinct_cells,omitempty"`
-	MinDistinctDomains   map[string]int `json:"min_distinct_domains,omitempty"`
-	FactMaxAgeSeconds    int            `json:"fact_max_age_seconds"`
+	TenantID                   string              `json:"tenant_id"`
+	Hostname                   string              `json:"hostname"`
+	RequiredRouteDigestsByCell map[string][]string `json:"required_route_digests_by_cell"`
+	AllowedPoolIDs             []string            `json:"allowed_pool_ids"`
+	AllowedCountries           []string            `json:"allowed_countries,omitempty"`
+	RequiredCapabilities       []string            `json:"required_capabilities"`
+	ExcludedEdgeIDs            []string            `json:"excluded_edge_ids,omitempty"`
+	MinCandidates              int                 `json:"min_candidates"`
+	MinDistinctCells           int                 `json:"min_distinct_cells,omitempty"`
+	MinDistinctDomains         map[string]int      `json:"min_distinct_domains,omitempty"`
+	FactMaxAgeSeconds          int                 `json:"fact_max_age_seconds"`
 }
 
 // RouteFact is an observation of the exact loaded route and TLS hostname on
@@ -64,12 +64,21 @@ func (grant RouteGrant) Validate(intent Intent) error {
 			return fmt.Errorf("route grant hostname is invalid")
 		}
 	}
-	if len(grant.AllowedPoolIDs) == 0 || len(grant.RequiredCapabilities) == 0 || len(grant.RequiredRouteDigests) == 0 || len(grant.RequiredRouteDigests) > 4096 {
-		return fmt.Errorf("route grant requires pools, capabilities, and every hostname route digest")
+	if len(grant.AllowedPoolIDs) == 0 || len(grant.RequiredCapabilities) == 0 || len(grant.RequiredRouteDigestsByCell) == 0 || len(grant.RequiredRouteDigestsByCell) > len(intent.Cells) {
+		return fmt.Errorf("route grant requires pools, capabilities, and cell-specific route proofs")
 	}
-	for i, digest := range grant.RequiredRouteDigests {
-		if !routeDigestPattern.MatchString(digest) || (i > 0 && grant.RequiredRouteDigests[i-1] >= digest) {
-			return fmt.Errorf("route grant digests must be valid, ordered, and unique")
+	knownCells := make(map[string]struct{}, len(intent.Cells))
+	for _, cell := range intent.Cells {
+		knownCells[cell.ID] = struct{}{}
+	}
+	for cellID, digests := range grant.RequiredRouteDigestsByCell {
+		if _, ok := knownCells[cellID]; !ok || len(digests) == 0 || len(digests) > 4096 {
+			return fmt.Errorf("route grant has invalid route proofs for cell %q", cellID)
+		}
+		for i, digest := range digests {
+			if !routeDigestPattern.MatchString(digest) || (i > 0 && digests[i-1] >= digest) {
+				return fmt.Errorf("route grant digests must be valid, ordered, and unique")
+			}
 		}
 	}
 	knownPools := make(map[string]struct{}, len(intent.Pools))
@@ -128,12 +137,14 @@ func (intent Intent) EligibleCandidates(grant RouteGrant, facts []RouteFact, now
 		}
 		seenFacts[fact.EdgeID] = struct{}{}
 		edge, known := edges[fact.EdgeID]
+		requiredDigests, cellAllowed := grant.RequiredRouteDigestsByCell[edge.AuthorityCellID]
 		if !known || cells[edge.AuthorityCellID] != fact.LegacyGroupID ||
+			!cellAllowed ||
 			!hasAny(edge.ServingPoolIDs, grant.AllowedPoolIDs) ||
 			slices.Contains(grant.ExcludedEdgeIDs, edge.ID) ||
 			!hasAll(edge.Capabilities, grant.RequiredCapabilities) ||
 			(len(grant.AllowedCountries) > 0 && !slices.Contains(grant.AllowedCountries, edge.Labels["country"])) ||
-			!routeProofsComplete(fact.ReadyRouteDigests, grant.RequiredRouteDigests) || fact.TLSHostname != grant.Hostname ||
+			!routeProofsComplete(fact.ReadyRouteDigests, requiredDigests) || fact.TLSHostname != grant.Hostname ||
 			!fact.Healthy || !fact.RouteReady || !fact.TLSReady || !fact.CapacityAvailable ||
 			fact.Draining || fact.Quarantined || fact.ObservedAt.After(now) ||
 			now.Sub(fact.ObservedAt) > time.Duration(grant.FactMaxAgeSeconds)*time.Second ||
