@@ -1,0 +1,15 @@
+{
+  "schema_version": "edge-topology/v1",
+  "authority_cells": [
+    {"id": "cell-public-a", "legacy_group_id": "edge-group-country-de"},
+    {"id": "cell-public-b", "legacy_group_id": "edge-group-country-us"}
+  ],
+  "serving_pools": [
+    {"id": "pool-public"}
+  ],
+  "edges": [
+    {"id": "bwg", "authority_cell_id": "cell-public-b", "serving_pool_ids": ["pool-public"], "failure_domains": {"host": "bwg"}, "labels": {"country": "us", "region": "us"}},
+    {"id": "vps-591f4447", "authority_cell_id": "cell-public-b", "serving_pool_ids": ["pool-public"], "failure_domains": {"host": "vps-591f4447"}, "labels": {"country": "us", "region": "us"}},
+    {"id": "vps-84c8f0a9", "authority_cell_id": "cell-public-a", "serving_pool_ids": ["pool-public"], "failure_domains": {"host": "vps-84c8f0a9"}, "labels": {"country": "de", "region": "de"}}
+  ]
+}
