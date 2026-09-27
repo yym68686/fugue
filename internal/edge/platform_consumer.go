@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"slices"
@@ -270,12 +271,70 @@ func (s *Service) verifyPlatformRouteCandidate(artifact model.PlatformArtifact, 
 	if err != nil || payload.Policy.Scope != assignment.ScopeKey || payload.Lineage.IntentGeneration != payload.Generation || payload.Lineage.PolicyGeneration != payload.Policy.Generation || payload.Lineage.PolicyDigest != policyDigest {
 		return payload, errors.New("edge platform candidate policy lineage invalid")
 	}
+	if !shadowEdgeGrantsMatchPolicy(payload) {
+		return payload, errors.New("edge platform candidate shadow grants differ from signed policy")
+	}
 	for key, value := range map[string]string{"intent_generation": payload.Lineage.IntentGeneration, "policy_generation": payload.Lineage.PolicyGeneration, "intent_digest": payload.Lineage.IntentDigest, "policy_digest": payload.Lineage.PolicyDigest, "input_snapshot_digest": payload.Lineage.InputSnapshotDigest, "compiler_version": payload.Lineage.CompilerVersion} {
 		if value == "" || artifact.Metadata[key] != value {
 			return payload, errors.New("edge platform candidate lineage binding mismatch")
 		}
 	}
 	return payload, nil
+}
+
+func shadowEdgeGrantsMatchPolicy(payload platformRouteCandidatePayload) bool {
+	constraints := payload.Policy.EdgeSelectionConstraints
+	if len(constraints) != len(payload.EdgeSelectionGrants) {
+		return false
+	}
+	if len(constraints) == 0 {
+		return true
+	}
+	byHost := make(map[string]platformconfig.EdgeSelectionConstraint, len(constraints))
+	for _, constraint := range constraints {
+		if _, exists := byHost[constraint.Hostname]; exists {
+			return false
+		}
+		byHost[constraint.Hostname] = constraint
+	}
+	seen := make(map[string]bool, len(constraints))
+	for _, grant := range payload.EdgeSelectionGrants {
+		constraint, ok := byHost[grant.Hostname]
+		if !ok || seen[grant.Hostname] || grant.TenantID != constraint.TenantID ||
+			!slices.Equal(grant.AllowedPoolIDs, constraint.AllowedPoolIDs) ||
+			!slices.Equal(grant.RequiredCapabilities, constraint.RequiredCapabilities) ||
+			!slices.Equal(grant.AllowedCountries, constraint.AllowedCountries) ||
+			grant.MinCandidates != constraint.MinCandidates || grant.MinDistinctCells != constraint.MinDistinctCells ||
+			!maps.Equal(grant.MinDistinctDomains, constraint.MinDistinctDomains) || grant.FactMaxAgeSeconds != constraint.FactMaxAgeSeconds ||
+			len(grant.RequiredRouteDigestsByCell) == 0 {
+			return false
+		}
+		seen[grant.Hostname] = true
+		paths := 0
+		for _, route := range payload.Routes {
+			if route.Hostname == grant.Hostname {
+				if route.TenantID != grant.TenantID {
+					return false
+				}
+				paths++
+			}
+		}
+		if paths == 0 {
+			return false
+		}
+		for _, digests := range grant.RequiredRouteDigestsByCell {
+			if len(digests) != paths || !slices.IsSorted(digests) {
+				return false
+			}
+			for i, digest := range digests {
+				decoded, err := hex.DecodeString(strings.TrimPrefix(digest, "sha256:"))
+				if err != nil || len(decoded) != 32 || len(digest) != 71 || !strings.HasPrefix(digest, "sha256:") || strings.ToLower(digest) != digest || i > 0 && digests[i-1] == digest {
+					return false
+				}
+			}
+		}
+	}
+	return len(seen) == len(constraints)
 }
 
 func materializePlatformRouteCandidate(artifact model.PlatformArtifact, group string, snapshots ...model.EdgeRouteIntentSnapshot) (model.EdgeRouteBundle, error) {

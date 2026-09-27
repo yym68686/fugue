@@ -55,6 +55,48 @@ func TestValidatePlatformCandidateIndexIsDeterministicAndRejectsEmpty(t *testing
 	}
 }
 
+func TestShadowEdgeGrantsMatchSignedPolicyAndRouteOwner(t *testing.T) {
+	constraint := platformconfig.EdgeSelectionConstraint{
+		TenantID: "tenant-a", Hostname: "app.example.test", AllowedPoolIDs: []string{"pool-public"},
+		RequiredCapabilities: []string{"http", "tls"}, MinCandidates: 1, FactMaxAgeSeconds: 60,
+	}
+	grant := edgetopology.RouteGrant{
+		TenantID: constraint.TenantID, Hostname: constraint.Hostname, AllowedPoolIDs: constraint.AllowedPoolIDs,
+		RequiredCapabilities: constraint.RequiredCapabilities, MinCandidates: 1, FactMaxAgeSeconds: 60,
+		RequiredRouteDigestsByCell: map[string][]string{"cell-a": {"sha256:" + strings.Repeat("a", 64)}},
+	}
+	fixture := func() platformRouteCandidatePayload {
+		return platformRouteCandidatePayload{
+			Policy:              platformconfig.PolicySnapshot{EdgeSelectionConstraints: []platformconfig.EdgeSelectionConstraint{constraint}},
+			EdgeSelectionGrants: []edgetopology.RouteGrant{grant},
+			Routes:              []platformconfig.CompiledRoute{{RouteIntent: platformconfig.RouteIntent{Hostname: constraint.Hostname, TenantID: constraint.TenantID}}},
+		}
+	}
+	if !shadowEdgeGrantsMatchPolicy(fixture()) {
+		t.Fatal("matching signed grant was rejected")
+	}
+	for name, mutate := range map[string]func(*platformRouteCandidatePayload){
+		"missing grant": func(p *platformRouteCandidatePayload) { p.EdgeSelectionGrants = nil },
+		"wrong tenant":  func(p *platformRouteCandidatePayload) { p.Routes[0].TenantID = "tenant-b" },
+		"broader pool": func(p *platformRouteCandidatePayload) {
+			p.EdgeSelectionGrants[0].AllowedPoolIDs = []string{"pool-other"}
+		},
+		"missing proof": func(p *platformRouteCandidatePayload) { p.EdgeSelectionGrants[0].RequiredRouteDigestsByCell = nil },
+		"invalid digest": func(p *platformRouteCandidatePayload) {
+			p.EdgeSelectionGrants[0].RequiredRouteDigestsByCell = map[string][]string{"cell-a": {"sha256:" + strings.Repeat("z", 64)}}
+		},
+		"extra path": func(p *platformRouteCandidatePayload) { p.Routes = append(p.Routes, p.Routes[0]) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := fixture()
+			mutate(&payload)
+			if shadowEdgeGrantsMatchPolicy(payload) {
+				t.Fatal("inconsistent shadow grant accepted")
+			}
+		})
+	}
+}
+
 func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scenario string) {
 	keyring := bundleauth.NewKeyring("synthetic-platform-key", "signer", "", "", nil)
 	request := platformconfig.CompileRequest{
