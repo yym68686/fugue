@@ -82,6 +82,18 @@ func TestProductionDNSCandidateHasIsolatedExecutionAndRelease(t *testing.T) {
 					if !surgeOK || surge != 0 || !unavailableOK || unavailable != 1 {
 						t.Fatal("candidate must serialize replacement to preserve its single cache writer", component.ID)
 					}
+					readiness, _ := objectField(container, "readinessProbe")
+					get, _ := objectField(readiness, "httpGet")
+					if stringField(get, "path") != "/readyz" {
+						t.Fatal("one record failure can remove the whole DNS transport backend", component.ID)
+					}
+					completeHealth := false
+					for _, health := range component.Health {
+						completeHealth = completeHealth || health.Type == "pod-http" && health.Path == "/healthz" && health.Expected == `"healthy":true`
+					}
+					if !completeHealth {
+						t.Fatal("listener readiness replaced complete release health", component.ID)
+					}
 					ports, _ := container["ports"].([]any)
 					for _, raw := range ports {
 						port, _ := raw.(map[string]any)

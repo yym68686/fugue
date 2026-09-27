@@ -64,6 +64,8 @@ type edgeDNSPeerHealthFunc func(model.EdgeDNSAnswerCandidate) string
 
 type Service struct {
 	listenerFailed          atomic.Bool
+	udpListening            atomic.Bool
+	tcpListening            atomic.Bool
 	platformServing         atomic.Pointer[dnsServingState]
 	platformServingBound    atomic.Bool
 	platformServingReported time.Time
@@ -753,6 +755,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.handleLivez)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /runtime-facts", s.handleRuntimeFacts)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	return mux
@@ -1831,8 +1834,9 @@ func (s *Service) startDNSServers() (func(), error) {
 		if err != nil {
 			return nil, fmt.Errorf("listen dns udp %s: %w", addr, err)
 		}
-		server := &miekgdns.Server{PacketConn: packetConn, Net: "udp", Handler: s}
+		server := &miekgdns.Server{PacketConn: packetConn, Net: "udp", Handler: s, NotifyStartedFunc: func() { s.udpListening.Store(true) }}
 		go func() {
+			defer s.udpListening.Store(false)
 			if err := server.ActivateAndServe(); err != nil && !errors.Is(err, net.ErrClosed) {
 				s.listenerFailed.Store(true)
 				s.Logger.Printf("dns udp server failed: %v", err)
@@ -1848,8 +1852,9 @@ func (s *Service) startDNSServers() (func(), error) {
 			}
 			return nil, fmt.Errorf("listen dns tcp %s: %w", addr, err)
 		}
-		server := &miekgdns.Server{Listener: listener, Net: "tcp", Handler: s}
+		server := &miekgdns.Server{Listener: listener, Net: "tcp", Handler: s, NotifyStartedFunc: func() { s.tcpListening.Store(true) }}
 		go func() {
+			defer s.tcpListening.Store(false)
 			if err := server.ActivateAndServe(); err != nil && !errors.Is(err, net.ErrClosed) {
 				s.listenerFailed.Store(true)
 				s.Logger.Printf("dns tcp server failed: %v", err)
@@ -1858,6 +1863,8 @@ func (s *Service) startDNSServers() (func(), error) {
 		servers = append(servers, server)
 	}
 	return func() {
+		s.udpListening.Store(false)
+		s.tcpListening.Store(false)
 		for _, server := range servers {
 			_ = server.Shutdown()
 		}

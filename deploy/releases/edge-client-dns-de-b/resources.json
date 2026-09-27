@@ -159,7 +159,7 @@
                 "readinessProbe": {
                   "failureThreshold": 3,
                   "httpGet": {
-                    "path": "/healthz",
+                    "path": "/readyz",
                     "port": "http",
                     "scheme": "HTTP"
                   },
