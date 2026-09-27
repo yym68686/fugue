@@ -11,11 +11,14 @@ import ipaddress
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 MANAGER = "fugue-dns-transport"
 GENERATION = "transport.fugue.dev/generation"
 DIGEST = "transport.fugue.dev/digest"
+HANDOFF_ATTEMPTS = 6
+HANDOFF_RETRY_SECONDS = 5
 
 
 def load_config(path):
@@ -218,18 +221,33 @@ def handoff_witness(config, listener, current):
     if len(owners) != 1 or not owners[0]["metadata"].get("uid") or owners[0]["metadata"].get("deletionTimestamp"):
         raise ValueError("DNS handoff listener must belong to one live node")
     node = owners[0]["metadata"]["name"]
-    old = handoff_backend(namespace, current["spec"]["selector"], node, listener["targetPort"])
-    candidate = handoff_backend(namespace, listener["selector"], node, listener["targetPort"])
-    if old["pod"]["metadata"]["uid"] == candidate["pod"]["metadata"]["uid"]:
-        raise ValueError("DNS handoff selectors do not isolate different instances")
-    slices = read_json("get", "endpointslices", "-n", namespace, "-l",
-                       "kubernetes.io/service-name=" + current["metadata"]["name"], "-o", "json")["items"]
-    validate_handoff_endpoints(current, old["pod"], slices, listener["targetPort"])
-    validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
-    return {"node_uid": owners[0]["metadata"]["uid"], "old_uid": old["pod"]["metadata"]["uid"],
-            "candidate_uid": candidate["pod"]["metadata"]["uid"],
-            "assignment": candidate["snapshot"]["assignment"], "parent_digest": candidate["snapshot"]["parent_digest"],
-            "plan_digest": candidate["snapshot"]["plan_digest"]}
+    last_error = None
+    for attempt in range(HANDOFF_ATTEMPTS):
+        try:
+            old = handoff_backend(namespace, current["spec"]["selector"], node, listener["targetPort"])
+            candidate = handoff_backend(namespace, listener["selector"], node, listener["targetPort"])
+            if old["pod"]["metadata"]["uid"] == candidate["pod"]["metadata"]["uid"]:
+                raise ValueError("DNS handoff selectors do not isolate different instances")
+            slices = read_json("get", "endpointslices", "-n", namespace, "-l",
+                               "kubernetes.io/service-name=" + current["metadata"]["name"], "-o", "json")["items"]
+            validate_handoff_endpoints(current, old["pod"], slices, listener["targetPort"])
+            validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
+            return {"node_uid": owners[0]["metadata"]["uid"], "old_uid": old["pod"]["metadata"]["uid"],
+                    "candidate_uid": candidate["pod"]["metadata"]["uid"],
+                    "assignment": candidate["snapshot"]["assignment"], "parent_digest": candidate["snapshot"]["parent_digest"],
+                    "plan_digest": candidate["snapshot"]["plan_digest"]}
+        except ValueError as error:
+            last_error = error
+            message = str(error)
+            retryable = any(fragment in message for fragment in [
+                "exactly one live Ready backend", "runtime snapshot is not ready", "requires unique positive proofs",
+                "different artifact assignments", "different probe membership", "expired or future observations",
+                "proof belongs to another release",
+            ])
+            if not retryable or attempt + 1 == HANDOFF_ATTEMPTS:
+                raise
+            time.sleep(HANDOFF_RETRY_SECONDS)
+    raise last_error or ValueError("DNS handoff witness unavailable")
 
 
 def validate_handoff_endpoints(service, pod, slices, target_port):
