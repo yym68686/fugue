@@ -220,3 +220,18 @@ func TestRetainValidDNSReadinessFactsAcrossTransientRefresh(t *testing.T) {
 		t.Fatal("retention mutated its inputs")
 	}
 }
+
+func TestDNSReadinessFailureSummaryContainsOnlyBoundedCodes(t *testing.T) {
+	plan, policy := readinessTestPlan()
+	facts := []dnsReadinessFact{
+		{ProbeID: plan.Probes[0].ID, Reason: "not_observed"},
+		{ProbeID: plan.Probes[1].ID, Reason: "probe_unavailable"},
+		{ProbeID: plan.Probes[2].ID, Reason: "traffic_release_mismatch"},
+		{ProbeID: plan.Probes[3].ID, Reason: "raw private upstream failure"},
+	}
+	got := dnsReadinessFailureSummary(&plan, &policy, facts, time.Now())
+	want := "invalid_or_expired=1,not_observed=1,probe_unavailable=1,traffic_release_mismatch=1"
+	if got != want {
+		t.Fatalf("diagnostic codes are not bounded and deterministic: %q", got)
+	}
+}

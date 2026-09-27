@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -164,6 +166,29 @@ func retainValidDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy 
 		}
 	}
 	return retained
+}
+
+func dnsReadinessFailureSummary(plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, now time.Time) string {
+	valid := validDNSReadinessFacts(plan, policy, facts, now)
+	counts := map[string]int{}
+	for _, fact := range facts {
+		if _, ready := valid[fact.ProbeID]; ready {
+			continue
+		}
+		reason := fact.Reason
+		switch reason {
+		case "not_observed", "probe_failed", "probe_unavailable", "route_digest_mismatch", "endpoint_identity_mismatch", "route_state_mismatch", "proof_not_fresh", "traffic_release_mismatch":
+		default:
+			reason = "invalid_or_expired"
+		}
+		counts[reason]++
+	}
+	parts := make([]string, 0, len(counts))
+	for reason, count := range counts {
+		parts = append(parts, fmt.Sprintf("%s=%d", reason, count))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 func summarizeDNSReadiness(plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, digest string, checkedAt, now time.Time) DNSReadinessStatus {

@@ -15,6 +15,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/routeprobe"
 	"github.com/miekg/dns"
 )
@@ -168,6 +169,88 @@ func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t 
 				if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) != 1 || !dnsServingReady(actual, time.Now()) {
 					t.Fatal("valid old release stopped serving", answer)
 				}
+			}
+		})
+	}
+}
+
+func TestRetainedDNSRefreshReusesOnlyBoundObservations(t *testing.T) {
+	parent, candidate := dnsServingFixture(t, true)
+	s := NewService(config.DNSConfig{DNSNodeID: "dns-a", EdgeGroupID: "edge-group-a", Zone: "example.test", BundleSigningKey: "synthetic-dns-serving-secret", BundleSigningKeyID: "key"}, nil)
+	payload, routeID, err := s.verifyDNSServingRelease(parent, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	facts := make([]dnsReadinessFact, 0, len(payload.Plan.Probes))
+	for _, requirement := range payload.Plan.Probes {
+		facts = append(facts, dnsReadinessFact{ProbeID: requirement.ID, Ready: true, Proof: routeprobe.Proof{
+			Digest: requirement.RouteDigest, EdgeID: requirement.EdgeID, GroupID: requirement.EdgeGroupID, State: requirement.State,
+			Version: "observed", CheckedAt: now, ValidUntil: now.Add(time.Minute),
+			TrafficRelease: &model.TrafficReleaseBinding{ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: routeID,
+				PolicyDigest: payload.Lineage.PolicyDigest, IntentDigest: payload.Lineage.IntentDigest, InputSnapshotDigest: payload.Lineage.InputSnapshotDigest,
+				ReleaseID: candidate.Release.ID, ReleaseChannel: candidate.Release.ReleaseChannel, FencingToken: candidate.Release.FencingToken, ScopeKey: "global"},
+		}})
+	}
+	old := &dnsServingState{record: dnsServingCheckpoint{Parent: parent, Candidate: candidate}, payload: payload, routeID: routeID}
+	for _, scenario := range []string{"unchanged", "missing", "changed requirement", "duplicate", "foreign release", "negative", "stricter freshness"} {
+		t.Run(scenario, func(t *testing.T) {
+			observed := append([]dnsReadinessFact(nil), facts...)
+			binding := *observed[0].Proof.TrafficRelease
+			observed[0].Proof.TrafficRelease = &binding
+			bridge := &dnsReleaseBridge{parent: parent, candidate: candidate, payload: payload, routeID: routeID}
+			wantCalls := 0
+			switch scenario {
+			case "missing":
+				observed = observed[1:]
+				wantCalls = 1
+			case "changed requirement":
+				plan := *payload.Plan
+				plan.Probes = append([]platformconfig.DNSReadinessProbe(nil), payload.Plan.Probes...)
+				plan.Probes[0].Address = "9.9.9.9"
+				bridge.payload.Plan = &plan
+				wantCalls = 1
+			case "duplicate":
+				observed = append(observed, observed[0])
+				wantCalls = 1
+			case "foreign release":
+				binding.ReleaseID = "foreign"
+				wantCalls = 1
+			case "negative":
+				observed[0].Ready = false
+				observed[0].Reason = "route_state_mismatch"
+			case "stricter freshness":
+				observed[0].Proof.ValidUntil = now.Add(time.Hour)
+			}
+			before := mustDNSJSON(t, observed)
+			var calls atomic.Int32
+			got := collectRetainedDNSReadinessFacts(context.Background(), old, bridge, observed, func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
+				calls.Add(1)
+				for i, requirement := range payload.Plan.Probes {
+					if requirement.Hostname == host && requirement.Path == path && requirement.Address == address {
+						proof := facts[i].Proof
+						proof.Version = "reprobed"
+						return proof, nil
+					}
+				}
+				return routeprobe.Proof{}, errors.New("unexpected target")
+			})
+			if len(got) != len(facts) || int(calls.Load()) != wantCalls {
+				t.Fatal("retained refresh repeated or skipped required probes", len(got), calls.Load(), wantCalls)
+			}
+			for i, fact := range got {
+				if fact.ProbeID != facts[i].ProbeID || !fact.Proof.ValidUntil.Equal(facts[i].Proof.ValidUntil) {
+					t.Fatal("retained refresh changed identity or extended proof expiry")
+				}
+			}
+			if wantCalls > 0 && got[0].Proof.Version != "reprobed" {
+				t.Fatal("ambiguous or foreign observation replaced an independent probe")
+			}
+			if scenario == "negative" && (got[0].Ready || got[0].Reason != "route_state_mismatch") {
+				t.Fatal("reuse hid negative route evidence")
+			}
+			if string(before) != string(mustDNSJSON(t, observed)) {
+				t.Fatal("retained scan mutated the candidate observations")
 			}
 		})
 	}

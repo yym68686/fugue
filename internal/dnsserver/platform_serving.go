@@ -18,6 +18,7 @@ import (
 
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/routeprobe"
@@ -161,6 +162,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	old := s.platformServing.Load()
 	fallbackReason := "candidate_rejected"
 	var bridge *dnsReleaseBridge
+	var observations []dnsReadinessFact
 	defer func() {
 		// An assignment race invalidates this observation, including the bridge
 		// just downloaded. Do not replace still-valid serving facts with probes
@@ -173,7 +175,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// An applied candidate or an explicit negative readiness observation
 		// already replaced the runtime view and must not be overwritten here.
 		if syncErr != nil && ctx.Err() == nil && old != nil && s.platformServing.Load() == old {
-			s.refreshDNSServingFacts(ctx, old, probe, fallbackReason, bridge)
+			s.refreshDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations)
 		}
 	}()
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
@@ -221,6 +223,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		return s.reportDNSServing(ctx, client, id, old)
 	}
 	facts := collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe)
+	// Keep the original observations for the retained release. Candidate
+	// assignment filtering below must not erase a valid old-release proof.
+	observations = append([]dnsReadinessFact(nil), facts...)
 	now := time.Now().UTC()
 	if same {
 		facts = retainValidDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, old.facts, facts, now)
@@ -257,7 +262,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			s.platformServing.Store(st)
 			_ = s.reportDNSServingState(ctx, client, id, st, false)
 		}
-		return errors.New("DNS candidate required readiness is incomplete")
+		return fmt.Errorf("DNS candidate required readiness is incomplete: %s", dnsReadinessFailureSummary(p.Plan, p.Policy.DNSReadiness, facts, now))
 	}
 	if err = probeDNSServingSnapshot(st); err != nil {
 		return err
@@ -319,8 +324,8 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, st.facts, "", st.checkedAt, now)
 	return status.ReadyRecords == status.Records
 }
-func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge) {
-	facts := collectDNSReadinessFacts(ctx, old.payload.Plan, old.payload.Policy.DNSReadiness, probe)
+func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact) {
+	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe)
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe
 	// has a transient transport failure. Keep only proofs that are still valid;
@@ -340,6 +345,55 @@ func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingSta
 		st.fallback = reason
 		s.platformServing.Store(st)
 	}
+}
+
+// A failed candidate scan already contains current observations for unchanged
+// requirements. Reuse them with their original timestamps and apply the old
+// release/verified-successor checks below; only changed or missing requirements
+// need another probe. This avoids a second full scan starving serving proofs.
+func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState, bridge *dnsReleaseBridge, observations []dnsReadinessFact, probe dnsReadinessProbeFunc) []dnsReadinessFact {
+	if bridge == nil || bridge.payload.Plan == nil || len(observations) == 0 {
+		return collectDNSReadinessFacts(ctx, old.payload.Plan, old.payload.Policy.DNSReadiness, probe)
+	}
+	observedRequirements := make(map[string]platformconfig.DNSReadinessProbe, len(bridge.payload.Plan.Probes))
+	for _, requirement := range bridge.payload.Plan.Probes {
+		observedRequirements[requirement.ID] = requirement
+	}
+	byID := make(map[string]dnsReadinessFact, len(observations))
+	duplicates := make(map[string]bool)
+	for _, fact := range observations {
+		if _, exists := byID[fact.ProbeID]; exists {
+			duplicates[fact.ProbeID] = true
+		}
+		byID[fact.ProbeID] = fact
+	}
+	missing := *old.payload.Plan
+	missing.Probes = nil
+	bridgeAllowed := compatibleDNSReleaseProbes(old, bridge)
+	facts := make([]dnsReadinessFact, len(old.payload.Plan.Probes))
+	for i, requirement := range old.payload.Plan.Probes {
+		fact, found := byID[requirement.ID]
+		usable := !fact.Ready || dnsProofMatchesRelease(fact.Proof, old.record.Parent, old.record.Candidate, old.routeID) ||
+			bridgeAllowed[requirement.ID] && dnsProofMatchesRelease(fact.Proof, bridge.parent, bridge.candidate, bridge.routeID)
+		if observedRequirements[requirement.ID] == requirement && found && !duplicates[requirement.ID] && usable {
+			limit := fact.Proof.CheckedAt.Add(time.Duration(old.payload.Policy.DNSReadiness.FactFreshnessSeconds) * time.Second)
+			if limit.Before(fact.Proof.ValidUntil) {
+				fact.Proof.ValidUntil = limit
+			}
+			facts[i] = fact
+		} else {
+			missing.Probes = append(missing.Probes, requirement)
+		}
+	}
+	collected := collectDNSReadinessFacts(ctx, &missing, old.payload.Policy.DNSReadiness, probe)
+	next := 0
+	for i := range facts {
+		if facts[i].ProbeID == "" {
+			facts[i] = collected[next]
+			next++
+		}
+	}
+	return facts
 }
 
 func probeDNSServingSnapshot(st *dnsServingState) error {

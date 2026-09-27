@@ -128,6 +128,25 @@ those observations in the DNS query view; a derived selection-mode change also
 changes policy and can trigger publication. Future placement must keep those
 ranking observations separate from endpoint authorization.
 
+Each DNS location now has independent A/B execution slots, with separate Pod
+selectors, identities and durable caches. Code updates target only an unselected
+slot. A separate versioned transport declaration moves a public listener after
+both backends prove the same current artifact assignment and record readiness.
+The workload guard rejects replacement of a publicly selected DNS executor.
+
+Serving refreshes retain an unexpired in-memory proof after transport timeout
+or an unobserved requirement, without extending its original deadline or the
+checkpoint authority. TLS, route-state, digest and identity errors remain
+negative. A restarted process cannot reuse persisted transient readiness.
+An assignment race rejects the whole observation and rereads authority at most
+three times; both positive and negative observations must pass the assignment
+check before replacing serving facts. A rejected candidate scan can supply its
+original observations to the retained release only for identical requirements
+and the existing release/compatible-successor authority checks. Changed,
+missing, ambiguous or foreign-release requirements are independently reprobed.
+This avoids a second full scan of unchanged requirements. Failure diagnostics
+count bounded reason codes rather than exposing hostnames or raw probe errors.
+
 Cutover prerequisites remain:
 
 - Both worker slots and public DNS consumers must understand the explicit
