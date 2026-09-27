@@ -43,6 +43,22 @@ signed TrafficReleaseSet before using any result for serving. Runtime fact
 collection, shadow comparison with the old selection, and cutover gates are
 still outstanding. The grant alone cannot affect DNS or Agent traffic.
 
+Runtime Agent already initiates HTTP control requests through `ServerURL` in
+`internal/runtime/agent_service.go`. This is a real selection surface even
+without an Agent-to-Edge business tunnel. Dynamic control-request transport
+must keep the configured API hostname and TLS identity, choose only fresh
+authorized endpoints, and avoid automatically replaying mutating requests.
+Bootstrap, enrollment, heartbeat, operation polling and completion must retain
+their existing authentication and retry semantics.
+
+The public DiscoveryBundle currently uses HMAC authentication. Its signing key
+must not be distributed to Runtime Agents merely to let them verify discovery:
+that would also let a verifier mint authority. Independent client validation
+requires a public verification mechanism and separately managed trust anchors,
+bound to exact publication, hostname, audience and absolute expiration. An
+authenticated API response or a healthy TLS endpoint alone is not a replacement
+for that candidate authorization.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh
@@ -63,8 +79,8 @@ LKG boundaries:
 2. Compile per-tenant, per-hostname candidate authorization from signed route
    intent plus pool membership and current route/TLS/health facts. Compare its
    shadow result with the old decision before allowing any traffic.
-3. Add measured sticky primary/standby selection only for connections actually
-   initiated by a Runtime Agent. Public clients continue to use the DNS/entry
+3. Add measured sticky primary/standby selection only for control requests
+   actually initiated by a Runtime Agent. Public clients continue to use the DNS/entry
    path; the independent DNS failover executor remains the sole writer for its
    declared records.
 4. Migrate publication, inventory, Lease, and LKG one authority cell at a time.
@@ -75,3 +91,14 @@ Before each cutover, verify the exact previous positive LKG, route and TLS
 proof for the target hostname, DNS ownership, cell health, and the other cell's
 unchanged state. A rejected or incomplete candidate preserves the current
 serving artifact. A failed code release cannot revoke a serving configuration.
+
+Production observation on 2026-09-27: during periodic producer refresh, DNS
+candidate readiness can briefly be incomplete while Edge route proofs move to
+the new release. The old positive checkpoint remains intact, but once its
+route proofs expire, the authoritative DNS node may temporarily return no A
+answer. The next release converged and both authoritative nodes returned the
+same A answer, but a positive LKG alone did not guarantee answer continuity.
+Before enabling dynamic placement or neutral-cell cutover, require an explicit
+overlap/ordering acceptance check that proves public DNS answers remain present
+through gray/full transitions and validates the exact current ReleaseSet on
+both DNS consumers. Never extend a stale proof merely to keep an answer.
