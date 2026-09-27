@@ -136,6 +136,15 @@ old public key until its grants have expired; removal or revocation is another
 explicit higher-generation trust declaration. Neither API requests nor this CI
 reconciler can manufacture a replacement root.
 
+The initial observational policy is declared in
+`deploy/environments/production/agent-edge-policy/shadow.json` and published by
+the independent `agent_edge_shadow_policy` CI lane. The publisher validates the
+immutable artifact through the API, checks its predecessor before publication,
+uses an idempotency key and reads the resulting authority back. It accepts only
+shadow policies and stops if full Agent authority exists. It never submits LKG
+verification claims. Actual Agent observations and a separately reviewed full
+policy publication are required before active control traffic can be accepted.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh

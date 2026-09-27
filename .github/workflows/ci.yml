@@ -75,6 +75,40 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  agent_edge_shadow_policy:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-agent-edge-policy, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select current observational Agent policy
+        id: policy
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/agent-edge-policy/shadow.json
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/publish_agent_edge_shadow.py scripts/test_publish_agent_edge_shadow.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/publish_agent_edge_shadow.py; then
+              python3 -m unittest scripts.test_publish_agent_edge_shadow
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Publish validated observational policy without traffic activation
+        if: steps.policy.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 scripts/publish_agent_edge_shadow.py deploy/environments/production/agent-edge-policy/shadow.json
+
   agent_edge_trust:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

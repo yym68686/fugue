@@ -48,12 +48,21 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_trust", "audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_shadow_policy", "agent_edge_trust", "audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	agentPolicy := yamlMappingValue(t, jobs, "agent_edge_shadow_policy")
+	for _, key := range yamlMappingKeys(t, agentPolicy) {
+		if key == "needs" {
+			t.Fatal("Agent policy recovery must remain independent from serving code releases")
+		}
+	}
+	if yamlMappingValue(t, agentPolicy, "environment").Value != "production" || !strings.Contains(source, "scripts/publish_agent_edge_shadow.py deploy/environments/production/agent-edge-policy/shadow.json") {
+		t.Fatal("Agent observation policy must use its independent declarative publisher")
+	}
 	agentTrust := yamlMappingValue(t, jobs, "agent_edge_trust")
 	for _, key := range yamlMappingKeys(t, agentTrust) {
 		if key == "needs" {
