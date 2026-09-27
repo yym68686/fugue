@@ -7,6 +7,21 @@ info:
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
 servers:
   - url: /
+x-fugue-dns-readiness:
+  endpoint: GET /readyz on the DNS node HTTP listener
+  response_schema: '#/components/schemas/DNSListenerReadiness'
+  semantics: >-
+    Returns 200 only while both DNS listeners are open and an authenticated
+    positive serving checkpoint remains within its original maximum age.
+    An individual record losing fresh route proofs does not remove the whole
+    DNS listener from network transport; that record fails closed on query.
+    Missing, negative, future or expired checkpoints return 503. Legacy mode
+    additionally requires legacy bundle health. Responses are no-store and
+    never probe, renew evidence, alter configuration or acknowledge a release.
+    GET /healthz retains the complete record-readiness health view. Release
+    handoff still requires matching current assignments and fresh positive
+    runtime facts from both old and candidate backends; /readyz alone cannot
+    authorize a handoff or promote LKG.
 x-fugue-dns-runtime-facts:
   endpoint: GET /runtime-facts on the DNS node HTTP listener
   response_schema: '#/components/schemas/DNSServingRuntimeFacts'
@@ -13933,6 +13948,16 @@ components:
       schema:
         type: string
   schemas:
+    DNSListenerReadiness:
+      type: object
+      additionalProperties: false
+      required: [ready, reason]
+      properties:
+        ready:
+          type: boolean
+        reason:
+          type: string
+          enum: [ready, listeners_unavailable, checkpoint_unavailable, checkpoint_expired, legacy_unready]
     EdgeAuthorityReadStatus:
       type: object
       additionalProperties: false
