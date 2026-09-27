@@ -79,6 +79,9 @@ func (s *Service) verifyDNSServingRelease(parent model.PlatformArtifact, c dnsPl
 	if json.Unmarshal(raw, &p) != nil || !reflect.DeepEqual(p.Lineage, set.Lineage) || p.Plan == nil || p.Policy.DNSReadiness == nil || len(p.Queries) == 0 || len(p.Policy.DNSAuthorities) == 0 {
 		return fail()
 	}
+	if !dnsEdgeSelectionRequirementsComplete(p.Plan, p.Policy.EdgeSelectionConstraints) {
+		return fail()
+	}
 	consumers := map[string]*platformconfig.DNSConsumerIntent{}
 	for _, v := range p.Views {
 		c := consumers[v.NodeID]
@@ -96,6 +99,37 @@ func (s *Service) verifyDNSServingRelease(parent model.PlatformArtifact, c dnsPl
 		return fail()
 	}
 	return p, routeID, nil
+}
+
+func dnsEdgeSelectionRequirementsComplete(plan *platformconfig.DNSReadinessPlan, constraints []platformconfig.EdgeSelectionConstraint) bool {
+	if len(constraints) == 0 {
+		return true
+	}
+	if plan == nil {
+		return false
+	}
+	for _, constraint := range constraints {
+		edges := make(map[string]bool)
+		probes := make(map[string]platformconfig.DNSReadinessProbe)
+		for _, probe := range plan.Probes {
+			if probe.Hostname == constraint.Hostname {
+				probes[probe.ID] = probe
+			}
+		}
+		for _, record := range plan.Records {
+			for _, target := range record.Targets {
+				for _, id := range target.ProbeIDs {
+					if probe, ok := probes[id]; ok && probe.EdgeID == target.EdgeID && probe.EdgeGroupID == target.EdgeGroupID && probe.Address == target.Address {
+						edges[target.EdgeID] = true
+					}
+				}
+			}
+		}
+		if len(edges) < constraint.MinCandidates {
+			return false
+		}
+	}
+	return true
 }
 func (s *Service) platformDNSKeys() bundleauth.Keyring {
 	return bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)
