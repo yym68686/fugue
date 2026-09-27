@@ -10,6 +10,29 @@ from scripts import reconcile_dns_transport as transport
 
 
 class TransportTests(unittest.TestCase):
+    def test_production_listeners_select_declared_dns_workloads(self):
+        root = Path(__file__).resolve().parents[1]
+        config = transport.load_config(root / 'deploy/environments/production/dns-transport/transport.json')
+        workloads = []
+        for path in (root / 'deploy/releases').glob('*/resources.json'):
+            for item in json.loads(path.read_text()).get('items', []):
+                if item.get('kind') != 'DaemonSet':
+                    continue
+                pod = item['spec']['template']
+                if any(c.get('name') == 'dns' for c in pod['spec']['containers']):
+                    workloads.append((item['metadata'], pod))
+        for listener in config['listeners']:
+            matching = [(meta, pod) for meta, pod in workloads
+                        if meta.get('namespace') == config['namespace'] and
+                        all(pod['metadata']['labels'].get(key) == value
+                            for key, value in listener['selector'].items())]
+            self.assertEqual(len(matching), 1, listener['name'])
+            ports = [port for container in matching[0][1]['spec']['containers']
+                     for port in container.get('ports', [])]
+            for protocol in ('UDP', 'TCP'):
+                self.assertEqual(sum(p.get('containerPort') == listener['targetPort'] and
+                                     p.get('protocol', 'TCP') == protocol for p in ports), 1)
+
     def config(self):
         return {"apiVersion": "transport.fugue.dev/v1", "kind": "DNSLocalTransport", "generation": 1,
                 "namespace": "system", "listeners": [{"name": "listener", "address": "8.8.8.8", "port": 15353,

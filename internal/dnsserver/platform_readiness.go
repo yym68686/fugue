@@ -116,6 +116,8 @@ func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadi
 				fact := dnsReadinessFact{ProbeID: requirement.ID, Proof: proof}
 				now := time.Now().UTC()
 				switch {
+				case errors.Is(err, routeprobe.ErrUnavailable):
+					fact.Reason = "probe_unavailable"
 				case err != nil:
 					fact.Reason = "probe_failed"
 				case proof.Digest != requirement.RouteDigest:
@@ -153,7 +155,7 @@ func retainValidDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy 
 	validPrevious := validDNSReadinessFacts(plan, policy, previous, now)
 	retained := append([]dnsReadinessFact(nil), current...)
 	for i := range retained {
-		if retained[i].Ready {
+		if retained[i].Ready || (retained[i].Reason != "probe_unavailable" && retained[i].Reason != "not_observed") {
 			continue
 		}
 		if fact, ok := validPrevious[retained[i].ProbeID]; ok {

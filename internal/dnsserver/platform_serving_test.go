@@ -362,6 +362,31 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	stale := *old
 	stale.checkedAt = time.Now().Add(-time.Hour)
 	s.platformServing.Store(&stale)
+	if err = s.syncPlatformDNSServingOnce(ctx, func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+		return routeprobe.Proof{}, routeprobe.ErrUnavailable
+	}, s.probeDNSServingListener); err != nil || lastProbeStatus != "passed" {
+		t.Fatal("transport timeout discarded unexpired serving proof", err, lastProbeStatus)
+	}
+	retained := s.platformServing.Load()
+	if !reflect.DeepEqual(retained.record, old.record) {
+		t.Fatal("cached proof renewed checkpoint authority")
+	}
+	for i := range old.facts {
+		if !reflect.DeepEqual(retained.facts[i].Proof, old.facts[i].Proof) {
+			t.Fatal("cached proof was renewed or rebound")
+		}
+	}
+	if got := retained.answer(query, "", time.Now()); got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 {
+		t.Fatal("retained proof lost wire answer", got)
+	}
+	if got := retained.answer(query, "", time.Now().Add(2*time.Minute)); got.Rcode != dns.RcodeServerFailure {
+		t.Fatal("retained proof served after expiry", got)
+	}
+	retainedBytes, readErr := os.ReadFile(cfg.CachePath + ".platform-serving.json")
+	if readErr != nil || string(retainedBytes) != string(saved) {
+		t.Fatal("transport timeout changed persisted checkpoint", readErr)
+	}
+	s.platformServing.Store(&stale)
 	allowFailed = true
 	if err = s.syncPlatformDNSServingOnce(ctx, func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
 		return routeprobe.Proof{}, errors.New("readiness lost")

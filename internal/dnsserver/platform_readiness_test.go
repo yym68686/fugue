@@ -192,7 +192,7 @@ func TestRetainValidDNSReadinessFactsAcrossTransientRefresh(t *testing.T) {
 				CheckedAt: checked, ValidUntil: now.Add(20 * time.Second), State: requirement.State,
 			},
 		})
-		current = append(current, dnsReadinessFact{ProbeID: requirement.ID, Reason: "probe_failed"})
+		current = append(current, dnsReadinessFact{ProbeID: requirement.ID, Reason: "probe_unavailable"})
 	}
 	retained := retainValidDNSReadinessFacts(&plan, &policy, previous, current, now)
 	status := summarizeDNSReadiness(&plan, &policy, retained, "digest", now, now)
@@ -207,5 +207,16 @@ func TestRetainValidDNSReadinessFactsAcrossTransientRefresh(t *testing.T) {
 	expired := retainValidDNSReadinessFacts(&plan, &policy, previous, current, now.Add(25*time.Second))
 	if got := summarizeDNSReadiness(&plan, &policy, expired, "digest", now, now.Add(25*time.Second)); got.ReadyProbes != 0 || got.ReadyRecords != 0 {
 		t.Fatalf("expired serving proofs retained readiness: %+v", got)
+	}
+	for _, reason := range []string{"probe_failed", "route_digest_mismatch", "endpoint_identity_mismatch", "route_state_mismatch", "proof_not_fresh", "traffic_release_mismatch"} {
+		negative := append([]dnsReadinessFact(nil), current...)
+		negative[0].Reason = reason
+		got := retainValidDNSReadinessFacts(&plan, &policy, previous, negative, now)
+		if got[0].Ready || got[0].Reason != reason {
+			t.Fatalf("explicit negative evidence masked by cached proof: %s", reason)
+		}
+	}
+	if current[0].Ready || previous[0].Reason != "" {
+		t.Fatal("retention mutated its inputs")
 	}
 }

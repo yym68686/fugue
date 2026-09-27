@@ -203,14 +203,25 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		return s.reportDNSServing(ctx, client, id, old)
 	}
 	facts := collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe)
+	now := time.Now().UTC()
+	if same {
+		facts = retainValidDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, old.facts, facts, now)
+	}
 	for i := range facts {
 		if !dnsProofMatchesRelease(facts[i].Proof, parent, candidate, routeID) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
 		}
 	}
-	now := time.Now().UTC()
 	checkpoint := dnsServingCheckpoint{Schema: "fugue.dns.positive-checkpoint/v1", NodeID: s.Config.DNSNodeID, GroupID: s.Config.EdgeGroupID, Parent: parent, Candidate: candidate, AppliedAt: now, Positive: true}
+	if same {
+		for _, fact := range facts {
+			if fact.Reason == "retained_valid_proof" {
+				checkpoint = old.record
+				break
+			}
+		}
+	}
 	st, err := buildDNSServingState(checkpoint, p, routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, now)
 	if err != nil {
 		return err

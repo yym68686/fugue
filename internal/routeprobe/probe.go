@@ -37,6 +37,19 @@ type Proof struct {
 	CheckedAt        time.Time                    `json:"checked_at"`
 }
 
+// ErrUnavailable means no authenticated response was obtained before the
+// transport deadline. Invalid TLS identities, proofs and route exclusions
+// deliberately do not use this error.
+var ErrUnavailable = errors.New("placement probe transport timed out")
+
+func classifyTransportError(err error) error {
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+		return ErrUnavailable
+	}
+	return errors.New("placement TLS probe unavailable")
+}
+
 func Probe(ctx context.Context, host, path, address, expectedState string, timeout time.Duration) (Proof, error) {
 	if timeout < time.Second || timeout > 10*time.Second {
 		return Proof{}, errors.New("invalid route probe timeout")
@@ -74,7 +87,7 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 	}
 	response, err := client.Do(req)
 	if err != nil {
-		return Proof{}, errors.New("placement TLS probe unavailable")
+		return Proof{}, classifyTransportError(err)
 	}
 	defer response.Body.Close()
 	checkedAt := time.Now().UTC()

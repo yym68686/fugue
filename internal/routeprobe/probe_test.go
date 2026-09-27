@@ -1,13 +1,38 @@
 package routeprobe
 
 import (
+	"context"
+	"crypto/x509"
+	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/routeproof"
 )
+
+func TestOnlyTransportTimeoutsAllowBoundedProofRetention(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		transient bool
+	}{
+		{"deadline", context.DeadlineExceeded, true},
+		{"wrapped timeout", &url.Error{Op: "Head", URL: "https://app.example.test/", Err: &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}}, true},
+		{"cancelled", context.Canceled, false},
+		{"certificate", &url.Error{Op: "Head", URL: "https://app.example.test/", Err: x509.UnknownAuthorityError{}}, false},
+		{"explicit failure", errors.New("invalid route proof"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errors.Is(classifyTransportError(tc.err), ErrUnavailable); got != tc.transient {
+				t.Fatalf("transient=%v, want %v", got, tc.transient)
+			}
+		})
+	}
+}
 
 func TestParseResponseAppTrafficProofIsOptionalButStrict(t *testing.T) {
 	now := time.Now().UTC()
