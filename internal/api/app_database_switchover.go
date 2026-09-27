@@ -243,6 +243,16 @@ func (s *Server) handleLocalizeAppDatabase(w http.ResponseWriter, r *http.Reques
 	if storageClassName := strings.TrimSpace(req.StorageClassName); storageClassName != "" {
 		databaseCopy.StorageClassName = storageClassName
 	}
+	sourceRuntimeID := strings.TrimSpace(database.RuntimeID)
+	if sourceRuntimeID == "" {
+		sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	if store.ManagedPostgresStorageGrowthInPlace(database, &databaseCopy, sourceRuntimeID, targetRuntimeID, req.TargetNodeName) {
+		// Capacity growth must not implicitly disable HA or clear placement intent.
+		storageSize := databaseCopy.StorageSize
+		databaseCopy = *cloneAppPostgresSpec(database)
+		databaseCopy.StorageSize = storageSize
+	}
 	desiredSpec.Postgres = &databaseCopy
 
 	op, err := s.store.CreateOperation(model.Operation{

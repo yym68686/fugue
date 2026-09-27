@@ -121,6 +121,16 @@ func (s *Server) handleAdminListImageCacheInventory(w http.ResponseWriter, r *ht
 		s.writeStoreError(w, err)
 		return
 	}
+	if parseImageCacheBoolQuery(r.URL.Query().Get("summary")) {
+		for i := range nodes {
+			nodes[i].UnreferencedBlobs = nil
+		}
+		if nodes == nil {
+			nodes = []model.ImageCacheNodeInventory{}
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"nodes": nodes, "manifests": []model.ImageCacheManifest{}})
+		return
+	}
 	manifestFilter := model.ImageCacheManifestFilter{
 		NodeID:            filter.NodeID,
 		ClusterNodeName:   filter.ClusterNodeName,
@@ -173,6 +183,9 @@ func (s *Server) handleAdminGetImageCachePrunePlan(w http.ResponseWriter, r *htt
 			return
 		}
 	}
+	if parseImageCacheBoolQuery(r.URL.Query().Get("summary")) {
+		plan = imageCachePrunePlanSummary(plan)
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"plan": plan})
 }
 
@@ -183,6 +196,7 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 		return
 	}
 	var req struct {
+		Summary         bool   `json:"summary"`
 		NodeID          string `json:"node_id"`
 		ClusterNodeName string `json:"cluster_node_name"`
 		RuntimeID       string `json:"runtime_id"`
@@ -227,6 +241,9 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 		return
 	}
 	if (plan.CandidateManifestCount == 0 && plan.CandidateBlobCount == 0) || mode == model.ImageCachePruneModeObserve {
+		if req.Summary {
+			plan = imageCachePrunePlanSummary(plan)
+		}
 		httpx.WriteJSON(w, http.StatusCreated, map[string]any{"plan": plan})
 		return
 	}
@@ -271,7 +288,18 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 		"mode":              plan.Mode,
 		"task_id":           task.ID,
 	})
+	if req.Summary {
+		plan = imageCachePrunePlanSummary(plan)
+	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"plan": plan, "task": task})
+}
+
+func imageCachePrunePlanSummary(plan model.ImageCachePrunePlan) model.ImageCachePrunePlan {
+	plan.Candidates = nil
+	plan.ProtectedManifests = nil
+	plan.SkippedManifests = nil
+	plan.UnreferencedBlobs = nil
+	return plan
 }
 
 func (s *Server) handleAdminListLocalPVInventory(w http.ResponseWriter, r *http.Request) {
@@ -556,7 +584,16 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 	}
 	classified := make([]model.ImageCachePruneCandidate, 0, len(manifests))
 	for _, manifest := range manifests {
-		classified = append(classified, imageCachePruneCandidateForManifest(manifest, protected, now))
+		candidate := imageCachePruneCandidateForManifest(manifest, protected, now)
+		// Apply the executor's eligibility policy before graph propagation, so
+		// children/aliases of an unsafe manifest remain protected as well.
+		if mode == model.ImageCachePruneModeDelete && !candidate.Protected {
+			if reason := imageCacheAutomaticDeleteUnsafeCandidateReason(candidate.Reason); reason != "" {
+				candidate.Protected = true
+				candidate.SkipReason = reason
+			}
+		}
+		classified = append(classified, candidate)
 	}
 	classified = protectImageCacheSharedDigestAliases(classified)
 	classified = imagecachegraph.ProtectManifestGraph(manifests, classified)

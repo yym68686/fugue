@@ -297,8 +297,22 @@ func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType stri
 }
 
 func (s *Store) ListNodeUpdateTasks(tenantID string, platformAdmin bool, updaterID, status string) ([]model.NodeUpdateTask, error) {
+	return s.ListNodeUpdateTasksWithOptions(tenantID, platformAdmin, updaterID, status, NodeUpdateTaskListOptions{})
+}
+
+type NodeUpdateTaskListOptions struct {
+	TaskID  string
+	Limit   int
+	Summary bool
+}
+
+func (s *Store) ListNodeUpdateTasksWithOptions(tenantID string, platformAdmin bool, updaterID, status string, options NodeUpdateTaskListOptions) ([]model.NodeUpdateTask, error) {
+	if options.Limit < 0 || options.Limit > 1000 {
+		return nil, ErrInvalidInput
+	}
+	options.TaskID = strings.TrimSpace(options.TaskID)
 	if s.usingDatabase() {
-		return s.pgListNodeUpdateTasks(tenantID, platformAdmin, updaterID, status)
+		return s.pgListNodeUpdateTasks(tenantID, platformAdmin, updaterID, status, options)
 	}
 	tenantID = strings.TrimSpace(tenantID)
 	updaterID = strings.TrimSpace(updaterID)
@@ -306,6 +320,9 @@ func (s *Store) ListNodeUpdateTasks(tenantID string, platformAdmin bool, updater
 	tasks := []model.NodeUpdateTask{}
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, task := range state.NodeUpdateTasks {
+			if options.TaskID != "" && task.ID != options.TaskID {
+				continue
+			}
 			if !platformAdmin && strings.TrimSpace(task.TenantID) != tenantID {
 				continue
 			}
@@ -315,6 +332,10 @@ func (s *Store) ListNodeUpdateTasks(tenantID string, platformAdmin bool, updater
 			if status != "" && strings.TrimSpace(task.Status) != status {
 				continue
 			}
+			if options.Summary {
+				task.Payload = nil
+				task.Logs = nil
+			}
 			tasks = append(tasks, redactNodeUpdateTask(task))
 		}
 		return nil
@@ -323,8 +344,14 @@ func (s *Store) ListNodeUpdateTasks(tenantID string, platformAdmin bool, updater
 		return nil, err
 	}
 	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
+			return tasks[i].ID > tasks[j].ID
+		}
 		return tasks[i].CreatedAt.After(tasks[j].CreatedAt)
 	})
+	if options.Limit > 0 && len(tasks) > options.Limit {
+		tasks = tasks[:options.Limit]
+	}
 	return tasks, nil
 }
 

@@ -3754,10 +3754,16 @@ WHERE app_id = $1
 			op.DesiredSpec.Postgres = model.CloneAppPostgresSpec(postgresSpec)
 		}
 		op.DesiredSpec.Postgres.RuntimeID = targetRuntimeID
-		op.DesiredSpec.Postgres.FailoverTargetRuntimeID = ""
-		op.DesiredSpec.Postgres.Instances = 1
-		op.DesiredSpec.Postgres.SynchronousReplicas = 0
-		op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance = false
+		if ManagedPostgresStorageGrowthInPlace(postgresSpec, op.DesiredSpec.Postgres, sourceRuntimeID, targetRuntimeID, op.DesiredSpec.Postgres.PrimaryNodeName) {
+			size := op.DesiredSpec.Postgres.StorageSize
+			op.DesiredSpec.Postgres = model.CloneAppPostgresSpec(postgresSpec)
+			op.DesiredSpec.Postgres.StorageSize = size
+		} else {
+			op.DesiredSpec.Postgres.FailoverTargetRuntimeID = ""
+			op.DesiredSpec.Postgres.Instances = 1
+			op.DesiredSpec.Postgres.SynchronousReplicas = 0
+			op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance = false
+		}
 		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}

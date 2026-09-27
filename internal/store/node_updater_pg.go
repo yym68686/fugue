@@ -342,12 +342,16 @@ func (s *Store) pgNodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runt
 	return nodeUpdaterSupportsTask(updater, taskType), nil
 }
 
-func (s *Store) pgListNodeUpdateTasks(tenantID string, platformAdmin bool, updaterID, status string) ([]model.NodeUpdateTask, error) {
+func (s *Store) pgListNodeUpdateTasks(tenantID string, platformAdmin bool, updaterID, status string, options NodeUpdateTaskListOptions) ([]model.NodeUpdateTask, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	clauses := []string{}
 	args := []any{}
+	if options.TaskID != "" {
+		args = append(args, options.TaskID)
+		clauses = append(clauses, fmt.Sprintf("id = $%d", len(args)))
+	}
 	if !platformAdmin {
 		args = append(args, strings.TrimSpace(tenantID))
 		clauses = append(clauses, fmt.Sprintf("tenant_id = $%d", len(args)))
@@ -363,10 +367,18 @@ func (s *Store) pgListNodeUpdateTasks(tenantID string, platformAdmin bool, updat
 	query := `
 SELECT id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
 FROM fugue_node_update_tasks`
+	if options.Summary {
+		query = strings.Replace(query, "payload_json,", "'{}'::jsonb AS payload_json,", 1)
+		query = strings.Replace(query, "logs_json,", "'[]'::jsonb AS logs_json,", 1)
+	}
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY created_at DESC, id DESC"
+	if options.Limit > 0 {
+		args = append(args, options.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, mapDBErr(err)

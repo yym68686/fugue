@@ -454,11 +454,21 @@ func (s *Server) handleCreateNodeUpdateTask(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleListNodeUpdateTasks(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	tasks, err := s.store.ListNodeUpdateTasks(
+	options := store.NodeUpdateTaskListOptions{TaskID: r.URL.Query().Get("task_id"), Summary: r.URL.Query().Get("details") == "false"}
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 1000 {
+			httpx.WriteError(w, http.StatusBadRequest, "limit must be between 1 and 1000")
+			return
+		}
+		options.Limit = limit
+	}
+	tasks, err := s.store.ListNodeUpdateTasksWithOptions(
 		principal.TenantID,
 		principal.IsPlatformAdmin(),
 		r.URL.Query().Get("node_updater_id"),
 		r.URL.Query().Get("status"),
+		options,
 	)
 	if err != nil {
 		s.writeStoreError(w, err)

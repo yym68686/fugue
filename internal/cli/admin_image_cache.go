@@ -29,6 +29,7 @@ type adminImageCacheNodeFilter struct {
 	NodeID          string
 	ClusterNodeName string
 	RuntimeID       string
+	Details         bool
 }
 
 func (c *CLI) newAdminImageCacheInventoryCommand() *cobra.Command {
@@ -42,7 +43,7 @@ func (c *CLI) newAdminImageCacheInventoryCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			nodes, manifests, err := client.ListImageCacheInventory(opts.NodeID, opts.ClusterNodeName, opts.RuntimeID)
+			nodes, manifests, err := client.ListImageCacheInventory(opts.NodeID, opts.ClusterNodeName, opts.RuntimeID, !opts.Details)
 			if err != nil {
 				return err
 			}
@@ -93,7 +94,7 @@ blob-only GC pass is available.
 			if err != nil {
 				return err
 			}
-			plan, err := client.GetImageCachePrunePlan(opts.NodeID, opts.ClusterNodeName, opts.RuntimeID, opts.Mode, opts.Persist)
+			plan, err := client.GetImageCachePrunePlan(opts.NodeID, opts.ClusterNodeName, opts.RuntimeID, opts.Mode, opts.Persist, !opts.Details)
 			if err != nil {
 				return err
 			}
@@ -149,6 +150,7 @@ unreferenced blob candidates even if there are no manifest candidates.
 				return err
 			}
 			plan, task, err := client.CreateImageCachePrunePlanTask(createImageCachePrunePlanTaskRequest{
+				Summary:         !opts.Details,
 				NodeID:          opts.NodeID,
 				ClusterNodeName: opts.ClusterNodeName,
 				RuntimeID:       opts.RuntimeID,
@@ -183,6 +185,7 @@ unreferenced blob candidates even if there are no manifest candidates.
 }
 
 func addImageCacheNodeFilterFlags(cmd *cobra.Command, opts *adminImageCacheNodeFilter) {
+	cmd.Flags().BoolVar(&opts.Details, "details", false, "Include large manifest/blob detail arrays (default is a compact summary)")
 	cmd.Flags().StringVar(&opts.ClusterNodeName, "node", "", "Filter by cluster node name")
 	cmd.Flags().StringVar(&opts.ClusterNodeName, "cluster-node", "", "Filter by cluster node name")
 	cmd.Flags().StringVar(&opts.NodeID, "node-id", "", "Filter by machine/node ID")

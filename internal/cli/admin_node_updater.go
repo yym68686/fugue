@@ -168,6 +168,7 @@ func (c *CLI) newAdminNodeUpdaterTaskCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAdminNodeUpdaterTaskListCommand(),
+		c.newAdminNodeUpdaterTaskShowCommand(),
 		c.newAdminNodeUpdaterTaskCreateCommand(),
 	)
 	return cmd
@@ -260,6 +261,8 @@ func (c *CLI) newAdminNodeUpdaterTaskListCommand() *cobra.Command {
 	opts := struct {
 		NodeUpdaterID string
 		Status        string
+		Limit         int
+		Details       bool
 	}{}
 	cmd := &cobra.Command{
 		Use:     "ls",
@@ -271,7 +274,7 @@ func (c *CLI) newAdminNodeUpdaterTaskListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tasks, err := client.ListNodeUpdateTasks(opts.NodeUpdaterID, opts.Status)
+			tasks, err := client.ListNodeUpdateTasksWithOptions(opts.NodeUpdaterID, opts.Status, "", opts.Limit, opts.Details)
 			if err != nil {
 				return err
 			}
@@ -283,9 +286,32 @@ func (c *CLI) newAdminNodeUpdaterTaskListCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.NodeUpdaterID, "node-updater", "", "Filter by node updater ID")
 	cmd.Flags().StringVar(&opts.NodeUpdaterID, "node-updater-id", "", "Filter by node updater ID")
+	cmd.Flags().IntVar(&opts.Limit, "limit", 100, "Maximum newest tasks (1-1000)")
+	cmd.Flags().BoolVar(&opts.Details, "details", false, "Include large task payloads and logs")
 	cmd.Flags().StringVar(&opts.Status, "status", "", "Filter by task status")
 	_ = cmd.Flags().MarkHidden("node-updater-id")
 	return cmd
+}
+
+func (c *CLI) newAdminNodeUpdaterTaskShowCommand() *cobra.Command {
+	return &cobra.Command{Use: "show <task-id>", Short: "Read one exact maintenance task without downloading task history", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			tasks, err := client.ListNodeUpdateTasksWithOptions("", "", args[0], 1, true)
+			if err != nil {
+				return err
+			}
+			if len(tasks) != 1 || tasks[0].ID != args[0] {
+				return fmt.Errorf("task %s not found or exact task lookup unsupported by server", args[0])
+			}
+			if c.wantsJSON() {
+				return c.writeJSON(map[string]any{"task": tasks[0]})
+			}
+			return writeNodeUpdateTask(c.stdout, tasks[0])
+		}}
 }
 
 func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {

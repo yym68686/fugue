@@ -136,7 +136,7 @@ func waitImageVerifyTask(ctx context.Context, client *Client, last model.NodeUpd
 	scoped := *client
 	scoped.context = ctx
 	for {
-		tasks, err := scoped.ListNodeUpdateTasks(last.NodeUpdaterID, "")
+		tasks, err := scoped.ListNodeUpdateTasksWithOptions(last.NodeUpdaterID, "", last.ID, 1, true)
 		if err != nil {
 			return last, err
 		}

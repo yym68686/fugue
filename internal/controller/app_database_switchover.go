@@ -549,7 +549,6 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		// authoritative so a retry after a partial expansion remains resumable.
 		if qLive, errLive := resource.ParseQuantity(liveSize); errLive == nil {
 			if qDesired, errDesired := resource.ParseQuantity(strings.TrimSpace(desiredDatabase.StorageSize)); errDesired != nil || qLive.Cmp(qDesired) > 0 {
-				currentDatabase.StorageSize = liveSize
 				desiredDatabase.StorageSize = liveSize
 			}
 		}
@@ -575,10 +574,17 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	}
 	inPlaceStorageExpansionRequired := managedPostgresInPlaceStorageExpansionRequired(currentDatabase, desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
 	if !inPlaceStorageExpansionRequired {
-		targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
+		inPlaceStorageExpansionRequired, err = s.resumingPostgresStorageGrowth(op, currentDatabase, desiredDatabase, sourceRuntimeID, targetRuntimeID)
 		if err != nil {
 			return err
 		}
+	}
+	if inPlaceStorageExpansionRequired {
+		return s.executeManagedPostgresStorageGrowth(ctx, op, app, *target, client, namespace, clusterName, desiredDatabase.StorageSize)
+	}
+	targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
+	if err != nil {
+		return err
 	}
 	restoreStorageExpansion, err := s.prepareManagedPostgresStorageMigrationExpansion(ctx, client, namespace, clusterName, storageTarget)
 	if err != nil {
@@ -591,12 +597,6 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 			}
 		}()
 	}
-	if inPlaceStorageExpansionRequired {
-		if err := s.prepareManagedPostgresInPlaceStorageExpansionForExistingCluster(ctx, client, namespace, clusterName, storageTarget); err != nil {
-			return err
-		}
-	}
-
 	targetPrimary := ""
 	currentPrimary, alreadyLocalized, err := s.managedPostgresPrimaryMatchesTarget(ctx, client, namespace, clusterName, targetRuntimeID, targetNodeName)
 	if err != nil {
@@ -609,15 +609,13 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		}
 		alreadyLocalized = storageReady
 	}
-	if inPlaceStorageExpansionRequired {
-		targetPrimary = currentPrimary
-	} else if alreadyLocalized {
+	if alreadyLocalized {
 		targetPrimary = currentPrimary
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("observed managed postgres primary %s on localization target; resuming finalization", targetPrimary))
 	} else {
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("preparing localized managed postgres standby on runtime %s", targetRuntimeID))
 		stageSpec := databaseLocalizeStageSpec(app.Spec, desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
-		if storageMigrationRequired && !inPlaceStorageExpansionRequired && stageSpec.Postgres != nil {
+		if storageMigrationRequired && stageSpec.Postgres != nil {
 			ensureDatabaseLocalizeStorageMigrationCapacity(stageSpec.Postgres, currentDatabase)
 		}
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
@@ -667,13 +665,7 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("finalization", fmt.Errorf("finalize localized managed postgres state: %w", err))
 	}
-	// In-place expansion must take precedence over the normal primary check:
-	// a healthy primary says nothing about PVC or filesystem resize completion.
-	if inPlaceStorageExpansionRequired {
-		if err := s.waitForManagedPostgresStorageExpansion(ctx, client, namespace, clusterName, op.ID, storageTarget); err != nil {
-			return recoverableManagedPostgresTransitionError("storage convergence", fmt.Errorf("wait for expanded managed postgres to settle: %w", err))
-		}
-	} else if targetPrimary != "" {
+	if targetPrimary != "" {
 		if _, err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
 			return recoverableManagedPostgresTransitionError("final convergence", fmt.Errorf("wait for localized managed postgres to settle: %w", err))
 		}
@@ -762,10 +754,17 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	}
 	inPlaceStorageExpansionRequired := managedPostgresInPlaceStorageExpansionRequired(currentDatabase, desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
 	if !inPlaceStorageExpansionRequired {
-		targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
+		inPlaceStorageExpansionRequired, err = s.resumingPostgresStorageGrowth(op, currentDatabase, desiredDatabase, sourceRuntimeID, targetRuntimeID)
 		if err != nil {
 			return err
 		}
+	}
+	if inPlaceStorageExpansionRequired {
+		return s.executeManagedPostgresStorageGrowth(ctx, op, app, target, client, namespace, clusterName, desiredDatabase.StorageSize)
+	}
+	targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
+	if err != nil {
+		return err
 	}
 	restoreStorageExpansion, err := s.prepareManagedPostgresStorageMigrationExpansion(ctx, client, namespace, clusterName, storageTarget)
 	if err != nil {
@@ -778,12 +777,6 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 			}
 		}()
 	}
-	if inPlaceStorageExpansionRequired {
-		if err := s.prepareManagedPostgresInPlaceStorageExpansionForExistingCluster(ctx, client, namespace, clusterName, storageTarget); err != nil {
-			return err
-		}
-	}
-
 	targetPrimary := ""
 	currentPrimary, alreadyLocalized, err := s.managedPostgresPrimaryMatchesTarget(ctx, client, namespace, clusterName, targetRuntimeID, targetNodeName)
 	if err != nil {
@@ -796,15 +789,13 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		}
 		alreadyLocalized = storageReady
 	}
-	if inPlaceStorageExpansionRequired {
-		targetPrimary = currentPrimary
-	} else if alreadyLocalized {
+	if alreadyLocalized {
 		targetPrimary = currentPrimary
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("observed managed postgres service %s primary %s on localization target; resuming finalization", target.ServiceID, targetPrimary))
 	} else {
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("preparing localized managed postgres service %s standby on runtime %s", target.ServiceID, targetRuntimeID))
 		stagePostgres := databaseLocalizeStagePostgresSpec(desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
-		if storageMigrationRequired && !inPlaceStorageExpansionRequired {
+		if storageMigrationRequired {
 			ensureDatabaseLocalizeStorageMigrationCapacity(&stagePostgres, currentDatabase)
 		}
 		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
@@ -857,13 +848,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("finalization", fmt.Errorf("apply finalized managed postgres service %s state: %w", target.ServiceID, err))
 	}
-	// In-place expansion must take precedence over the normal primary check:
-	// a healthy primary says nothing about PVC or filesystem resize completion.
-	if inPlaceStorageExpansionRequired {
-		if err := s.waitForManagedPostgresStorageExpansion(ctx, client, namespace, clusterName, op.ID, storageTarget); err != nil {
-			return recoverableManagedPostgresTransitionError("storage convergence", fmt.Errorf("wait for expanded managed postgres service %s to settle: %w", target.ServiceID, err))
-		}
-	} else if targetPrimary != "" {
+	if targetPrimary != "" {
 		if _, err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
 			return recoverableManagedPostgresTransitionError("final convergence", fmt.Errorf("wait for localized managed postgres service %s to settle: %w", target.ServiceID, err))
 		}
@@ -1005,32 +990,7 @@ func managedPostgresLiveStorageSize(ctx context.Context, client *kubeClient, nam
 }
 
 func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppPostgresSpec, sourceRuntimeID, targetRuntimeID, requestedTargetNodeName string) bool {
-	if current == nil || desired == nil {
-		return false
-	}
-	if strings.TrimSpace(sourceRuntimeID) == "" ||
-		strings.TrimSpace(targetRuntimeID) == "" ||
-		strings.TrimSpace(sourceRuntimeID) != strings.TrimSpace(targetRuntimeID) ||
-		strings.TrimSpace(requestedTargetNodeName) != "" {
-		return false
-	}
-	if strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) {
-		return false
-	}
-	currentSize := strings.TrimSpace(current.StorageSize)
-	desiredSize := strings.TrimSpace(desired.StorageSize)
-	if currentSize == "" || desiredSize == "" || currentSize == desiredSize {
-		return false
-	}
-	currentQuantity, err := resource.ParseQuantity(currentSize)
-	if err != nil {
-		return false
-	}
-	desiredQuantity, err := resource.ParseQuantity(desiredSize)
-	if err != nil {
-		return false
-	}
-	return desiredQuantity.Cmp(currentQuantity) > 0
+	return store.ManagedPostgresStorageGrowthInPlace(current, desired, sourceRuntimeID, targetRuntimeID, requestedTargetNodeName)
 }
 
 func databaseLocalizeStorageTarget(required bool, postgres *model.AppPostgresSpec) managedPostgresStorageTarget {
@@ -1357,7 +1317,16 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	namespace, clusterName string,
 	target managedPostgresStorageTarget,
 	requireExistingDataPVC bool,
+	beforePatch ...func() error,
 ) error {
+	guard := func() error {
+		for _, check := range beforePatch {
+			if err := check(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if target.isZero() || strings.TrimSpace(target.StorageSize) == "" {
 		return nil
 	}
@@ -1431,7 +1400,7 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 	// target, there is no storage operation to prepare or storage class to
 	// validate.
 	if len(pvcNames) > 0 && len(plans) == 0 {
-		return nil
+		return guard()
 	}
 
 	storageClassName := strings.TrimSpace(target.StorageClassName)
@@ -1478,6 +1447,9 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 		if err := s.validateManagedPostgresLocalPVExpansionCapacity(ctx, client, namespace, storageClass, targetQuantity, plans); err != nil {
 			return err
 		}
+	}
+	if err := guard(); err != nil {
+		return err
 	}
 	for _, plan := range plans {
 		if plan.RequestConverged {

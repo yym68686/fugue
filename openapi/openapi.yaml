@@ -1525,6 +1525,10 @@ paths:
         - BearerAuth: []
       parameters:
         - in: query
+          name: summary
+          description: Omit manifest and blob detail arrays; retain node totals. Defaults to false.
+          schema: {type: boolean, default: false}
+        - in: query
           name: node_id
           schema:
             type: string
@@ -1554,6 +1558,10 @@ paths:
       security:
         - BearerAuth: []
       parameters:
+        - in: query
+          name: summary
+          description: Omit per-manifest and per-blob arrays; retain plan ID, counts and reason summaries. Defaults to false.
+          schema: {type: boolean, default: false}
         - in: query
           name: node_id
           schema:
@@ -10670,6 +10678,18 @@ paths:
       security:
         - BearerAuth: []
       parameters:
+        - in: query
+          name: task_id
+          description: Retrieve one exact task within the caller's authorized tenant scope.
+          schema: {type: string}
+        - in: query
+          name: limit
+          description: Maximum newest tasks returned. Omission preserves the legacy unbounded list.
+          schema: {type: integer, minimum: 1, maximum: 1000}
+        - in: query
+          name: details
+          description: Include payload and logs. False avoids loading those large fields from storage.
+          schema: {type: boolean, default: true}
         - in: query
           name: node_updater_id
           required: false
@@ -22695,6 +22715,14 @@ components:
           type: string
     LocalizeAppDatabaseRequest:
       type: object
+      description: >-
+        Same-runtime, same-storage-class capacity growth without a new primary
+        node is performed in place. An unchanged existing primary node pin is
+        not a placement change. This path preserves database topology, affinity,
+        resources and the application; it never falls back to a restart or
+        switchover. Completion requires volume/filesystem convergence and an
+        unchanged ready primary identity. Other placement or class changes use
+        the localization workflow.
       additionalProperties: false
       properties:
         target_node_name:
@@ -25594,6 +25622,10 @@ components:
       type: object
       additionalProperties: false
       properties:
+        summary:
+          type: boolean
+          default: false
+          description: Return a compact plan receipt without per-manifest/blob arrays. The full plan remains persisted under its ID.
         node_id:
           type: string
         cluster_node_name:

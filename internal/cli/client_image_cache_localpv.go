@@ -28,6 +28,7 @@ type imageRetentionPlanResponse struct {
 }
 
 type createImageCachePrunePlanTaskRequest struct {
+	Summary         bool   `json:"summary,omitempty"`
 	NodeID          string `json:"node_id,omitempty"`
 	ClusterNodeName string `json:"cluster_node_name,omitempty"`
 	RuntimeID       string `json:"runtime_id,omitempty"`
@@ -41,8 +42,11 @@ type localPVInventoryListResponse struct {
 	Inventories []model.LocalPVInventory `json:"inventories"`
 }
 
-func (c *Client) ListImageCacheInventory(nodeID, clusterNodeName, runtimeID string) ([]model.ImageCacheNodeInventory, []model.ImageCacheManifest, error) {
+func (c *Client) ListImageCacheInventory(nodeID, clusterNodeName, runtimeID string, summary ...bool) ([]model.ImageCacheNodeInventory, []model.ImageCacheManifest, error) {
 	query := url.Values{}
+	if len(summary) > 0 && summary[0] {
+		query.Set("summary", "true")
+	}
 	if strings.TrimSpace(nodeID) != "" {
 		query.Set("node_id", strings.TrimSpace(nodeID))
 	}
@@ -63,8 +67,11 @@ func (c *Client) ListImageCacheInventory(nodeID, clusterNodeName, runtimeID stri
 	return response.Nodes, response.Manifests, nil
 }
 
-func (c *Client) GetImageCachePrunePlan(nodeID, clusterNodeName, runtimeID, mode string, persist bool) (model.ImageCachePrunePlan, error) {
+func (c *Client) GetImageCachePrunePlan(nodeID, clusterNodeName, runtimeID, mode string, persist bool, summary ...bool) (model.ImageCachePrunePlan, error) {
 	query := url.Values{}
+	if len(summary) > 0 && summary[0] {
+		query.Set("summary", "true")
+	}
 	if strings.TrimSpace(nodeID) != "" {
 		query.Set("node_id", strings.TrimSpace(nodeID))
 	}

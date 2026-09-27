@@ -1777,7 +1777,18 @@ func (c *Client) GetNodeDeepHealthResult(nodeUpdaterID string) (model.NodeDeepHe
 }
 
 func (c *Client) ListNodeUpdateTasks(nodeUpdaterID, status string) ([]model.NodeUpdateTask, error) {
+	return c.ListNodeUpdateTasksWithOptions(nodeUpdaterID, status, "", 0, true)
+}
+
+func (c *Client) ListNodeUpdateTasksWithOptions(nodeUpdaterID, status, taskID string, limit int, details bool) ([]model.NodeUpdateTask, error) {
 	query := url.Values{}
+	if limit > 0 {
+		query.Set("limit", fmt.Sprint(limit))
+	}
+	query.Set("details", fmt.Sprint(details))
+	if strings.TrimSpace(taskID) != "" {
+		query.Set("task_id", strings.TrimSpace(taskID))
+	}
 	if strings.TrimSpace(nodeUpdaterID) != "" {
 		query.Set("node_updater_id", strings.TrimSpace(nodeUpdaterID))
 	}
