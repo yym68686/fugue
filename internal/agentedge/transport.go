@@ -76,7 +76,7 @@ func (t *transport) RoundTrip(request *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
-	response.Body = &leaseBody{ReadCloser: response.Body, cancel: cancel}
+	response.Body = &leaseBody{ReadCloser: response.Body, cancel: cancel, ctx: ctx, validUntil: choice.ValidUntil, now: t.now}
 	return response, nil
 }
 
@@ -132,8 +132,33 @@ func (t *transport) CloseIdleConnections() {
 
 type leaseBody struct {
 	io.ReadCloser
-	cancel context.CancelFunc
-	once   sync.Once
+	cancel     context.CancelFunc
+	ctx        context.Context
+	validUntil time.Time
+	now        func() time.Time
+	once       sync.Once
+}
+
+func (b *leaseBody) leaseError() error {
+	if !b.now().Before(b.validUntil) {
+		return context.DeadlineExceeded
+	}
+	return b.ctx.Err()
+}
+
+// A peer may end an HTTP/2 stream as cancellation arrives. In that race the
+// underlying Body can return a successful EOF. Check the original absolute
+// lease around every read so expired bytes/EOF cannot become a successful
+// control response, even before the context timer has been scheduled.
+func (b *leaseBody) Read(p []byte) (int, error) {
+	if err := b.leaseError(); err != nil {
+		return 0, err
+	}
+	n, err := b.ReadCloser.Read(p)
+	if expired := b.leaseError(); expired != nil {
+		return 0, expired
+	}
+	return n, err
 }
 
 func (b *leaseBody) Close() error {

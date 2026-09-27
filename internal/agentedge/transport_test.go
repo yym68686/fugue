@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -204,5 +205,29 @@ func TestSelectedTransportResponseCannotOutliveGrant(t *testing.T) {
 	response.Body.Close()
 	if err == nil || time.Since(started) > 1700*time.Millisecond {
 		t.Fatal("response ignored original grant expiry", err, time.Since(started))
+	}
+}
+
+type lateControlResponse struct{ advance func() }
+
+func (b lateControlResponse) Read(p []byte) (int, error) {
+	b.advance()
+	return copy(p, "late response"), io.EOF
+}
+
+func (lateControlResponse) Close() error { return nil }
+
+func TestLeaseBodyRejectsSuccessfulEOFAfterAbsoluteExpiry(t *testing.T) {
+	now := time.Now()
+	until := now.Add(time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	body := &leaseBody{ReadCloser: lateControlResponse{advance: func() { now = until }}, ctx: ctx, cancel: cancel, validUntil: until, now: func() time.Time { return now }}
+	data, err := io.ReadAll(body)
+	if !errors.Is(err, context.DeadlineExceeded) || len(data) != 0 || ctx.Err() != nil {
+		t.Fatal("late successful EOF escaped the absolute lease before timer cancellation", string(data), err)
+	}
+	if err := body.Close(); err != nil || ctx.Err() != context.Canceled {
+		t.Fatal("response cleanup lost context cancellation", err)
 	}
 }
