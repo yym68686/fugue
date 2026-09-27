@@ -154,3 +154,50 @@ func TestEdgeSelectionPolicyNormalizationDoesNotAliasCaller(t *testing.T) {
 		t.Fatal("normalizing Edge selection policy mutated caller")
 	}
 }
+
+func TestPlatformServiceGrantCannotAuthorizeTenantOrAppRoutes(t *testing.T) {
+	fixture := func() CompileRequest {
+		r := edgeSelectionFixture()
+		r.Policy.EdgeSelectionConstraints[0].OwnerKind = "platform"
+		r.Policy.EdgeSelectionConstraints[0].TenantID = ""
+		for i := range r.Intent.Routes {
+			r.Intent.Routes[i].Kind = model.EdgeRouteKindPlatform
+			r.Intent.Routes[i].TenantID = ""
+			r.Intent.Routes[i].AppID = ""
+		}
+		r.Intent.DNS[0].TenantID = ""
+		r.Intent.DNS[0].AppID = ""
+		r.Intent.DNS[0].Type = "FUGUE_ROUTE"
+		r.Intent.DNS[0].Values = []string{}
+		r.Intent.DNS[0].Application = nil
+		r.Intent.DNS[0].Route = &DNSRouteIntent{Hostnames: []string{"app.example.test"}, DNSApplicationIntent: DNSApplicationIntent{IPv4Policy: "auto", IPv6Policy: "auto", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}
+		rebindPlacement(&r)
+		return r
+	}
+	r := fixture()
+	compiled, err := Compile(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(compiled.RouteArtifact.Content["edge_selection_grants"])
+	var grants []edgetopology.RouteGrant
+	if json.Unmarshal(raw, &grants) != nil || len(grants) != 1 || grants[0].OwnerKind != "platform" || grants[0].TenantID != "" {
+		t.Fatal("platform service owner was not preserved")
+	}
+	for name, mutate := range map[string]func(*CompileRequest){
+		"tenant owner":       func(r *CompileRequest) { r.Intent.Routes[0].TenantID = "tenant-a" },
+		"app owner":          func(r *CompileRequest) { r.Intent.Routes[0].AppID = "app-a" },
+		"non-platform route": func(r *CompileRequest) { r.Intent.Routes[0].Kind = model.EdgeRouteKindPlatformDomain },
+		"implicit platform":  func(r *CompileRequest) { r.Policy.EdgeSelectionConstraints[0].OwnerKind = "" },
+		"unknown owner kind": func(r *CompileRequest) { r.Policy.EdgeSelectionConstraints[0].OwnerKind = "shared" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := fixture()
+			mutate(&r)
+			rebindPlacement(&r)
+			if _, err := Compile(r); err == nil {
+				t.Fatal("invalid platform owner accepted")
+			}
+		})
+	}
+}

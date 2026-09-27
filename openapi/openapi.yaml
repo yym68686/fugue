@@ -32746,9 +32746,20 @@ components:
     PlatformEdgeSelectionConstraint:
       type: object
       additionalProperties: false
-      required: [tenant_id, hostname, allowed_pool_ids, required_capabilities, min_candidates, fact_max_age_seconds]
+      required: [hostname, allowed_pool_ids, required_capabilities, min_candidates, fact_max_age_seconds]
+      description: Omitted owner_kind preserves tenant ownership. Platform service grants require explicit platform ownership and routes without an app or tenant owner; they cannot authorize tenant applications.
+      oneOf:
+        - required: [tenant_id]
+          properties:
+            owner_kind: {type: string, enum: [tenant]}
+            tenant_id: {type: string, minLength: 1}
+        - required: [owner_kind]
+          properties:
+            owner_kind: {type: string, enum: [platform]}
+            tenant_id: {type: string, enum: [""], maxLength: 0}
       properties:
-        tenant_id: {type: string, minLength: 1, maxLength: 128}
+        owner_kind: {type: string, enum: [tenant, platform]}
+        tenant_id: {type: string, maxLength: 128}
         hostname: {type: string, minLength: 3, maxLength: 253}
         allowed_pool_ids: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {type: string}}
         required_capabilities: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {type: string}}

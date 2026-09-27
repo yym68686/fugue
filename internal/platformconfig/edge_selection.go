@@ -19,6 +19,7 @@ var edgeSelectionHostname = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`)
 // EdgeSelectionConstraint is signed policy for one public hostname. It does
 // not choose an Edge or change the currently published DNS answer.
 type EdgeSelectionConstraint struct {
+	OwnerKind            string         `json:"owner_kind,omitempty"`
 	TenantID             string         `json:"tenant_id"`
 	Hostname             string         `json:"hostname"`
 	AllowedPoolIDs       []string       `json:"allowed_pool_ids"`
@@ -47,7 +48,7 @@ func validateEdgeSelectionConstraints(constraints []EdgeSelectionConstraint) err
 	}
 	seen := make(map[string]bool, len(constraints))
 	for _, c := range constraints {
-		if c.TenantID == "" || len(c.TenantID) > 128 || c.TenantID != strings.TrimSpace(c.TenantID) || strings.ContainsAny(c.TenantID, "\r\n") ||
+		if !edgetopology.ValidGrantOwner(c.OwnerKind, c.TenantID) ||
 			len(c.Hostname) < 3 || len(c.Hostname) > 253 || !edgeSelectionHostname.MatchString(c.Hostname) || strings.Contains(c.Hostname, "..") || seen[c.Hostname] ||
 			c.MinCandidates < 1 || c.MinCandidates > 100 || c.MinDistinctCells < 0 || c.MinDistinctCells > 100 ||
 			c.FactMaxAgeSeconds < 1 || c.FactMaxAgeSeconds > 600 {
@@ -112,7 +113,7 @@ func CompileEdgeSelectionGrants(intent PlatformIntent, policy PolicySnapshot, ro
 			return nil, fmt.Errorf("Edge selection hostname %q lacks complete route or freshness policy", c.Hostname)
 		}
 		for _, route := range hostRoutes {
-			if route.TenantID != c.TenantID || route.OriginStatus != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || c.MinCandidates < route.MinHealthyEdgeNodes {
+			if route.TenantID != c.TenantID || c.OwnerKind == "platform" && (route.RouteKind != model.EdgeRouteKindPlatform || route.AppID != "") || route.OriginStatus != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || c.MinCandidates < route.MinHealthyEdgeNodes {
 				return nil, fmt.Errorf("Edge selection hostname %q has a foreign or inactive path", c.Hostname)
 			}
 		}
@@ -141,7 +142,7 @@ func CompileEdgeSelectionGrants(intent PlatformIntent, policy PolicySnapshot, ro
 			return nil, fmt.Errorf("Edge selection hostname %q has no public DNS dependency", c.Hostname)
 		}
 		grant := edgetopology.RouteGrant{
-			TenantID: c.TenantID, Hostname: c.Hostname, AllowedPoolIDs: append([]string(nil), c.AllowedPoolIDs...),
+			OwnerKind: c.OwnerKind, TenantID: c.TenantID, Hostname: c.Hostname, AllowedPoolIDs: append([]string(nil), c.AllowedPoolIDs...),
 			RequiredCapabilities: append([]string(nil), c.RequiredCapabilities...), AllowedCountries: append([]string(nil), c.AllowedCountries...),
 			MinCandidates: c.MinCandidates, MinDistinctCells: c.MinDistinctCells,
 			MinDistinctDomains: cloneEdgeDomainMinimums(c.MinDistinctDomains), FactMaxAgeSeconds: c.FactMaxAgeSeconds,

@@ -38,6 +38,12 @@ only when explicitly configured. Compilation rejects an unknown tenant,
 inactive path, missing DNS dependency, impossible candidate minimum, or an
 unproved cell. It does not alter the current DNS answer or Edge bundle.
 
+Platform services use explicit `owner_kind: platform` with an empty tenant ID.
+Every path must be a platform route with no application or tenant owner.
+Omitted `owner_kind` retains the tenant grant contract and requires a tenant ID.
+This distinction lets Agent control requests obtain a hostname grant without
+inventing a tenant or admitting application routes into platform authority.
+
 The caller must bind both the grant and authenticated facts to the current
 signed TrafficReleaseSet before using any result for serving. Runtime fact
 collection, shadow comparison with the old selection, and cutover gates are

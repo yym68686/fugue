@@ -15,6 +15,7 @@ var hostnamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`)
 // RouteGrant is the policy projection for one tenant and hostname. Its caller
 // must verify the signed source artifact before using this compiler for serving.
 type RouteGrant struct {
+	OwnerKind                  string              `json:"owner_kind,omitempty"`
 	TenantID                   string              `json:"tenant_id"`
 	Hostname                   string              `json:"hostname"`
 	RequiredRouteDigestsByCell map[string][]string `json:"required_route_digests_by_cell"`
@@ -53,7 +54,7 @@ type Candidate struct {
 }
 
 func (grant RouteGrant) Validate(intent Intent) error {
-	if grant.TenantID == "" || len(grant.TenantID) > 128 || grant.TenantID != strings.TrimSpace(grant.TenantID) || strings.ContainsAny(grant.TenantID, "\r\n") ||
+	if !ValidGrantOwner(grant.OwnerKind, grant.TenantID) ||
 		len(grant.Hostname) > 253 || !hostnamePattern.MatchString(grant.Hostname) || strings.Contains(grant.Hostname, "..") ||
 		grant.MinCandidates < 1 || grant.MinCandidates > 100 ||
 		grant.MinDistinctCells < 0 || grant.MinDistinctCells > 100 || grant.FactMaxAgeSeconds < 1 || grant.FactMaxAgeSeconds > 3600 {
@@ -106,6 +107,14 @@ func (grant RouteGrant) Validate(intent Intent) error {
 		}
 	}
 	return nil
+}
+
+func ValidGrantOwner(kind, tenant string) bool {
+	if kind == "platform" {
+		return tenant == ""
+	}
+	return (kind == "" || kind == "tenant") && tenant != "" && len(tenant) <= 128 &&
+		tenant == strings.TrimSpace(tenant) && !strings.ContainsAny(tenant, "\r\n")
 }
 
 // EligibleCandidates applies hard authorization and current serving evidence.
