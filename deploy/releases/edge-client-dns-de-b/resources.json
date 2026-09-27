@@ -253,7 +253,11 @@
           }
         },
         "updateStrategy": {
-          "type": "OnDelete"
+          "rollingUpdate": {
+            "maxSurge": 0,
+            "maxUnavailable": 1
+          },
+          "type": "RollingUpdate"
         }
       }
     },

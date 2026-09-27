@@ -72,8 +72,15 @@ func TestProductionDNSCandidateHasIsolatedExecutionAndRelease(t *testing.T) {
 				}
 				if candidate {
 					found++
-					if component.Workload.RolloutMode != "on-delete" || podSpec["hostNetwork"] == true || len(containers) != 1 {
+					if component.Workload.RolloutMode != "rolling" || podSpec["hostNetwork"] == true || len(containers) != 1 {
 						t.Fatal("candidate can replace the live listener or couples unrelated executors", component.ID)
+					}
+					strategy, _ := objectField(spec, "updateStrategy")
+					rolling, _ := objectField(strategy, "rollingUpdate")
+					surge, surgeOK := integerField(rolling["maxSurge"])
+					unavailable, unavailableOK := integerField(rolling["maxUnavailable"])
+					if !surgeOK || surge != 0 || !unavailableOK || unavailable != 1 {
+						t.Fatal("candidate must serialize replacement to preserve its single cache writer", component.ID)
 					}
 					ports, _ := container["ports"].([]any)
 					for _, raw := range ports {
