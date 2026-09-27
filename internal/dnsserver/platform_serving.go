@@ -286,6 +286,12 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 }
 func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge) {
 	facts := collectDNSReadinessFacts(ctx, old.payload.Plan, old.payload.Policy.DNSReadiness, probe)
+	now := time.Now().UTC()
+	// A retained positive release may keep serving while an individual probe
+	// has a transient transport failure. Keep only proofs that are still valid;
+	// candidate releases never use this path and therefore still require fresh
+	// evidence for every probe.
+	facts = retainValidDNSReadinessFacts(old.payload.Plan, old.payload.Policy.DNSReadiness, old.facts, facts, now)
 	bridgeAllowed := compatibleDNSReleaseProbes(old, bridge)
 	for i := range facts {
 		if !dnsProofMatchesRelease(facts[i].Proof, old.record.Parent, old.record.Candidate, old.routeID) &&
@@ -294,7 +300,7 @@ func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingSta
 			facts[i].Reason = "traffic_release_mismatch"
 		}
 	}
-	st, err := buildDNSServingState(old.record, old.payload, old.routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, time.Now().UTC())
+	st, err := buildDNSServingState(old.record, old.payload, old.routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, now)
 	if err == nil {
 		st.fallback = reason
 		s.platformServing.Store(st)

@@ -145,6 +145,25 @@ func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadi
 	return facts
 }
 
+// retainValidDNSReadinessFacts carries a still-valid proof across a transient
+// refresh failure for the same already-serving release. The proof deadline is
+// deliberately preserved; this does not renew authority or make a new release
+// ready without a fresh probe.
+func retainValidDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, previous, current []dnsReadinessFact, now time.Time) []dnsReadinessFact {
+	validPrevious := validDNSReadinessFacts(plan, policy, previous, now)
+	retained := append([]dnsReadinessFact(nil), current...)
+	for i := range retained {
+		if retained[i].Ready {
+			continue
+		}
+		if fact, ok := validPrevious[retained[i].ProbeID]; ok {
+			fact.Reason = "retained_valid_proof"
+			retained[i] = fact
+		}
+	}
+	return retained
+}
+
 func summarizeDNSReadiness(plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, digest string, checkedAt, now time.Time) DNSReadinessStatus {
 	status := DNSReadinessStatus{PlanDigest: digest, Probes: len(plan.Probes), Records: len(plan.Records), CheckedAt: checkedAt}
 	validFacts := validDNSReadinessFacts(plan, policy, facts, now)

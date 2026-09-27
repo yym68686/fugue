@@ -176,3 +176,36 @@ func TestDNSReadinessCacheRechecksProofsWithoutRenewingLease(t *testing.T) {
 		t.Fatal("corrupt readiness cache silently reset")
 	}
 }
+
+func TestRetainValidDNSReadinessFactsAcrossTransientRefresh(t *testing.T) {
+	plan, policy := readinessTestPlan()
+	now := time.Now().UTC()
+	previous := make([]dnsReadinessFact, 0, len(plan.Probes))
+	current := make([]dnsReadinessFact, 0, len(plan.Probes))
+	for _, requirement := range plan.Probes {
+		checked := now.Add(-5 * time.Second)
+		previous = append(previous, dnsReadinessFact{
+			ProbeID: requirement.ID,
+			Ready:   true,
+			Proof: routeprobe.Proof{
+				Digest: requirement.RouteDigest, Version: "serving", EdgeID: requirement.EdgeID, GroupID: requirement.EdgeGroupID,
+				CheckedAt: checked, ValidUntil: now.Add(20 * time.Second), State: requirement.State,
+			},
+		})
+		current = append(current, dnsReadinessFact{ProbeID: requirement.ID, Reason: "probe_failed"})
+	}
+	retained := retainValidDNSReadinessFacts(&plan, &policy, previous, current, now)
+	status := summarizeDNSReadiness(&plan, &policy, retained, "digest", now, now)
+	if status.ReadyProbes != len(plan.Probes) || status.ReadyRecords != len(plan.Records) {
+		t.Fatalf("valid serving proofs were not retained: %+v", status)
+	}
+	for _, fact := range retained {
+		if fact.Reason != "retained_valid_proof" || !fact.Proof.ValidUntil.Equal(now.Add(20*time.Second)) {
+			t.Fatalf("retained proof was renewed or mislabeled: %+v", fact)
+		}
+	}
+	expired := retainValidDNSReadinessFacts(&plan, &policy, previous, current, now.Add(25*time.Second))
+	if got := summarizeDNSReadiness(&plan, &policy, expired, "digest", now, now.Add(25*time.Second)); got.ReadyProbes != 0 || got.ReadyRecords != 0 {
+		t.Fatalf("expired serving proofs retained readiness: %+v", got)
+	}
+}
