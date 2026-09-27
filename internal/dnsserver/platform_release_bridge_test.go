@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 func TestDNSReleaseBridgeSeparatesRankingFactsFromRecordAuthority(t *testing.T) {
 	view, plan, readiness, _, now := queryExecutionFixture()
+	view.Records[0].ScopedCandidates = []model.EdgeDNSScopedAnswerCandidates{{ScopeKey: "region:aa", Region: "aa", Candidates: append([]model.EdgeDNSAnswerCandidate(nil), view.Records[0].Candidates...)}}
 	otherProbe := plan.Probes[0]
 	otherProbe.ID, otherProbe.Hostname = "sha256:"+strings.Repeat("d", 64), "other.example.test"
 	plan.Probes = append(plan.Probes, otherProbe)
@@ -25,7 +27,7 @@ func TestDNSReleaseBridgeSeparatesRankingFactsFromRecordAuthority(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, change := range []string{"score", "unrelated rule", "unrelated proof", "proof digest", "record rule", "address", "edge", "tenant", "weight", "quorum", "release replay"} {
+	for _, change := range []string{"score", "ranking order", "scoped ranking order", "ranking order changed weight", "scoped ranking changed address", "unrelated rule", "unrelated proof", "proof digest", "record rule", "address", "edge", "tenant", "weight", "quorum", "release replay"} {
 		t.Run(change, func(t *testing.T) {
 			var previous, next dnsServingPayload
 			if json.Unmarshal(raw, &previous) != nil || json.Unmarshal(raw, &next) != nil {
@@ -51,6 +53,23 @@ func TestDNSReleaseBridgeSeparatesRankingFactsFromRecordAuthority(t *testing.T) 
 				record.Candidates[0].ScoreBreakdown = map[string]float64{"latency": 300}
 				record.Candidates[0].Reason = "new measurement"
 				want = true
+			case "ranking order", "ranking order changed weight":
+				slices.Reverse(record.Candidates)
+				record.Candidates[0].Score = 1000
+				record.Candidates[0].ScoreBreakdown = map[string]float64{"latency": 100}
+				want = true
+				if change == "ranking order changed weight" {
+					record.Candidates[0].Weight++
+					want = false
+				}
+			case "scoped ranking order", "scoped ranking changed address":
+				slices.Reverse(record.ScopedCandidates[0].Candidates)
+				record.ScopedCandidates[0].Candidates[0].Score = 1000
+				want = true
+				if change == "scoped ranking changed address" {
+					record.ScopedCandidates[0].Candidates[0].IP = "1.1.1.1"
+					want = false
+				}
 			case "unrelated rule":
 				bridge.payload.Policy.DNSAnswerRules = append(bridge.payload.Policy.DNSAnswerRules, platformconfig.DNSAnswerRule{NodeID: view.NodeID, Hostname: "other.example.test", Type: "A", SelectionMode: "geo"})
 				want = true

@@ -1,7 +1,9 @@
 package dnsserver
 
 import (
+	"cmp"
 	"reflect"
+	"slices"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -91,5 +93,17 @@ func dnsBridgeCandidates(in []model.EdgeDNSAnswerCandidate) []model.EdgeDNSAnswe
 	for i := range out {
 		out[i].Score, out[i].ScoreBreakdown, out[i].Reason = 0, nil, ""
 	}
+	// Ranking can permute the same authorized endpoints between snapshots.
+	// Canonicalize only this comparison copy; the retained artifact keeps its
+	// exact ordering, weights and query-selection behavior.
+	slices.SortFunc(out, func(a, b model.EdgeDNSAnswerCandidate) int {
+		if c := cmp.Compare(a.EdgeID, b.EdgeID); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.EdgeGroupID, b.EdgeGroupID); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.IP, b.IP)
+	})
 	return out
 }
