@@ -95,6 +95,20 @@ func TestShadowEdgeGrantsMatchSignedPolicyAndRouteOwner(t *testing.T) {
 			}
 		})
 	}
+	platform := fixture()
+	platform.Policy.EdgeSelectionConstraints[0].OwnerKind = "platform"
+	platform.Policy.EdgeSelectionConstraints[0].TenantID = ""
+	platform.EdgeSelectionGrants[0].OwnerKind = "platform"
+	platform.EdgeSelectionGrants[0].TenantID = ""
+	platform.Routes[0].TenantID = ""
+	platform.Routes[0].Kind = model.EdgeRouteKindPlatform
+	if !shadowEdgeGrantsMatchPolicy(platform) {
+		t.Fatal("explicit platform service grant rejected")
+	}
+	platform.Routes[0].AppID = "app-a"
+	if shadowEdgeGrantsMatchPolicy(platform) {
+		t.Fatal("platform grant authorized an application route")
+	}
 }
 
 func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scenario string) {

@@ -300,7 +300,7 @@ func shadowEdgeGrantsMatchPolicy(payload platformRouteCandidatePayload) bool {
 	seen := make(map[string]bool, len(constraints))
 	for _, grant := range payload.EdgeSelectionGrants {
 		constraint, ok := byHost[grant.Hostname]
-		if !ok || seen[grant.Hostname] || grant.TenantID != constraint.TenantID ||
+		if !ok || seen[grant.Hostname] || grant.OwnerKind != constraint.OwnerKind || grant.TenantID != constraint.TenantID ||
 			!slices.Equal(grant.AllowedPoolIDs, constraint.AllowedPoolIDs) ||
 			!slices.Equal(grant.RequiredCapabilities, constraint.RequiredCapabilities) ||
 			!slices.Equal(grant.AllowedCountries, constraint.AllowedCountries) ||
@@ -313,7 +313,7 @@ func shadowEdgeGrantsMatchPolicy(payload platformRouteCandidatePayload) bool {
 		paths := 0
 		for _, route := range payload.Routes {
 			if route.Hostname == grant.Hostname {
-				if route.TenantID != grant.TenantID {
+				if route.TenantID != grant.TenantID || grant.OwnerKind == "platform" && (route.Kind != model.EdgeRouteKindPlatform || route.AppID != "") {
 					return false
 				}
 				paths++
