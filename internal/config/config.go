@@ -202,6 +202,8 @@ type ControllerConfig struct {
 }
 
 type AgentConfig struct {
+	EdgeTrustFile      string
+	EdgeCheckpointFile string
 	ServerURL          string
 	NodeKey            string
 	EnrollToken        string
@@ -584,6 +586,8 @@ func ControllerFromEnv() ControllerConfig {
 func AgentFromEnv() AgentConfig {
 	workDir := getenv("FUGUE_AGENT_WORK_DIR", "./data/agent")
 	return AgentConfig{
+		EdgeTrustFile:      os.Getenv("FUGUE_AGENT_EDGE_TRUST_FILE"),
+		EdgeCheckpointFile: getenv("FUGUE_AGENT_EDGE_CHECKPOINT_FILE", filepath.Join(workDir, "edge-checkpoint.json")),
 		ServerURL:          getenv("FUGUE_AGENT_SERVER", "http://127.0.0.1:8080"),
 		NodeKey:            os.Getenv("FUGUE_AGENT_NODE_KEY"),
 		EnrollToken:        os.Getenv("FUGUE_AGENT_ENROLL_TOKEN"),

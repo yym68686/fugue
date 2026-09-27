@@ -418,3 +418,33 @@ func TestAgentConstraintIntersectionNeverWidensExistingRoutePolicy(t *testing.T)
 		t.Fatal("disjoint pools accepted")
 	}
 }
+
+func TestInitialAgentShadowPolicyCannotAuthorizeActiveTraffic(t *testing.T) {
+	f := setupAgentAuthorityFixture(t)
+	st, s, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	p := f.policy
+	for _, mode := range []string{"shadow", "active"} {
+		p.Mode = mode
+		p.Generation = "initial-agent-" + mode
+		raw, _ := json.Marshal(p)
+		var content map[string]any
+		json.Unmarshal(raw, &content)
+		a, err := st.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{ScopeType: "global", Key: agentedge.PolicyScope}, Generation: p.Generation, Content: content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = st.ValidatePlatformArtifact(a.ID, []model.PlatformArtifactValidationResult{{Name: "test", Pass: true}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, _, err = st.ReleasePlatformArtifact(a.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, platformProducerPrincipal()); err != nil {
+			t.Fatal(err)
+		}
+		got, _, release, err := s.currentAgentAuthority()
+		if mode == "shadow" && (err != nil || got.Mode != "shadow" || release.ReleaseChannel != "shadow") {
+			t.Fatal("initial observational policy unavailable", err)
+		}
+		if mode == "active" && err == nil {
+			t.Fatal("shadow publication authorized active requests")
+		}
+	}
+}

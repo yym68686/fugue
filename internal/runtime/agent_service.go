@@ -15,12 +15,14 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/agentedge"
 	"fugue/internal/config"
 	"fugue/internal/localwal"
 	"fugue/internal/model"
 )
 
 type AgentService struct {
+	edgeControl   *agentedge.Control
 	Config        config.AgentConfig
 	HTTPClient    *http.Client
 	Renderer      Renderer
@@ -74,6 +76,12 @@ func (s *AgentService) Run(ctx context.Context) error {
 		if err := s.bootstrapOrEnroll(); err != nil {
 			return err
 		}
+	}
+	if err := s.startEdgeControl(ctx); err != nil {
+		return err
+	}
+	if s.edgeControl != nil {
+		defer s.edgeControl.Close()
 	}
 
 	cellHTTPShutdown, err := s.startCellHTTPServer(ctx)
@@ -586,7 +594,11 @@ func (s *AgentService) doJSONRequest(ctx context.Context, method, path, bearer s
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 
-	resp, err := s.HTTPClient.Do(req)
+	client := s.HTTPClient
+	if s.edgeControl != nil {
+		client = s.edgeControl.HTTPClient(client)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}

@@ -145,6 +145,7 @@ func (g Grant) Validate() error {
 	p := g.PolicyReference
 	if !identifier.MatchString(p.ArtifactID) || !digestPattern.MatchString(p.ArtifactDigest) || !identifier.MatchString(p.ReleaseID) ||
 		(p.Channel != "shadow" && p.Channel != "full") ||
+		(g.Mode == "active" && p.Channel != "full") ||
 		p.FencingToken <= 0 || p.PublishedAt.IsZero() || p.PublishedAt.After(g.IssuedAt) {
 		return errors.New("Agent Edge policy reference is invalid")
 	}

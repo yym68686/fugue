@@ -10,10 +10,11 @@ import (
 )
 
 type Measurement struct {
-	EdgeID  string
-	Address string
-	Success bool
-	Latency time.Duration
+	EdgeID       string
+	Address      string
+	Success      bool
+	Disqualified bool
+	Latency      time.Duration
 }
 
 // Round binds local measurements to one previously verified permission. A
@@ -106,7 +107,7 @@ func (s *Selector) Observe(round Round, keys map[string]TrustKey, now time.Time)
 	seen := map[string]bool{}
 	for _, m := range round.Measurements {
 		c, known := candidates[m.EdgeID]
-		if !known || seen[m.EdgeID] || c.Address != m.Address || m.Latency < 0 ||
+		if !known || seen[m.EdgeID] || c.Address != m.Address || m.Latency < 0 || m.Success && m.Disqualified ||
 			m.Success && (m.Latency <= 0 || m.Latency > time.Duration(g.Policy.ProbeTimeoutMilliseconds)*time.Millisecond) {
 			return Choice{}, errors.New("Agent Edge measurement target or timing is invalid")
 		}
@@ -124,6 +125,10 @@ func (s *Selector) Observe(round Round, keys map[string]TrustKey, now time.Time)
 				o.latency = (3*o.latency + m.Latency) / 4
 			}
 			o.lastSuccess, o.failures = round.ObservedAt, 0
+		} else if m.Disqualified {
+			// Authenticated negative proofs and identity failures revoke local
+			// eligibility immediately; only transient absence uses hysteresis.
+			o.failures = g.Policy.FailureThreshold
 		} else {
 			o.failures = min(o.failures+1, g.Policy.FailureThreshold)
 		}

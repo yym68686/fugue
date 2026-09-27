@@ -66,8 +66,8 @@ bound to exact publication, hostname, audience and absolute expiration. An
 authenticated API response or a healthy TLS endpoint alone is not a replacement
 for that candidate authorization.
 
-The `agentedge` package stages the client-side boundary without changing the
-running AgentService. Ed25519 grants bind one runtime audience, canonical HTTPS
+The `agentedge` package supplies the optional AgentService control transport.
+Ed25519 grants bind one runtime audience, canonical HTTPS
 origin, each cell's independent traffic publication and route requirements, cell/host diversity,
 signed selection policy and original evidence deadlines. Verification accepts
 only independently provisioned public keys and rejects replay, equivocation,
@@ -91,9 +91,30 @@ keyring leaves issuance unavailable; requests never generate a new trust root.
 
 Private signing configuration and Agent public trust are separate bounded files
 with explicit generations, key lifetimes and revocations. API signing reads
-`FUGUE_AGENT_EDGE_SIGNING_KEY_FILE`; trust provisioning, AgentService integration
-and production activation remain separate steps. Installing this API code does
-not activate a policy or change existing Agent, DNS or business traffic.
+`FUGUE_AGENT_EDGE_SIGNING_KEY_FILE`. AgentService opts in only when
+`FUGUE_AGENT_EDGE_TRUST_FILE` points to independently provisioned public trust.
+`FUGUE_AGENT_EDGE_CHECKPOINT_FILE` defaults to `edge-checkpoint.json` in its work
+directory and must be kept on persistent storage. AgentService first collects
+shadow measurements while retaining its existing request path. Before the first
+full Agent policy, the initial shadow publication can issue only shadow grants.
+An active grant requires a full policy publication and latches the transport to
+authorized candidates. Heartbeat, polling, image reports and operation results
+then use that transport with their existing payloads and retry semantics.
+
+The Agent refreshes grants separately through the configured HTTPS hostname,
+keeps original deadlines during acquisition failures and persists accepted
+policy/cell publication floors, activation state and the trust generation before
+using new permissions. Restart never restores latency measurements. Old trust
+cannot reverse a persisted revocation, and missing or corrupt checkpoints do not
+silently reset an existing checkpoint to a valid native connection. Authenticated
+negative route proofs disqualify a local candidate immediately; transient absence
+uses the signed failure threshold. Grant expiration or an unmet hard floor blocks
+control requests after activation instead of selecting an unauthorized endpoint.
+Explicitly publishing a shadow policy after activation pauses selected requests;
+it does not grant an implicit native bypass. Production Agent opt-in, real fleet
+observations and active-policy publication remain rollout steps. Installing this
+API code does not activate a policy or change existing Agent, DNS or business
+traffic.
 
 Agent trust is declared in
 `deploy/environments/production/agent-edge-trust/package.json`. The independent

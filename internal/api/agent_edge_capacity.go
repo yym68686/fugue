@@ -38,9 +38,10 @@ func agentCapacityNodeReady(node corev1.Node, address string) bool {
 		}
 		conditions[c.Type] = c.Status
 	}
+	network, hasNetwork := conditions[corev1.NodeNetworkUnavailable]
 	return addressOwned && conditions[corev1.NodeReady] == corev1.ConditionTrue &&
 		conditions[corev1.NodeMemoryPressure] == corev1.ConditionFalse && conditions[corev1.NodeDiskPressure] == corev1.ConditionFalse &&
-		conditions[corev1.NodePIDPressure] == corev1.ConditionFalse && conditions[corev1.NodeNetworkUnavailable] != corev1.ConditionTrue
+		conditions[corev1.NodePIDPressure] == corev1.ConditionFalse && (!hasNetwork || network == corev1.ConditionFalse)
 }
 
 func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, address string, p agentedge.CapacityPolicy, now time.Time) (agentCapacityEvidence, error) {

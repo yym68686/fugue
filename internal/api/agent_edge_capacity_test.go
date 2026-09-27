@@ -33,7 +33,7 @@ func agentCapacityFixture(id, address string, now time.Time) (corev1.Node, kubeN
 
 func TestAgentCapacityUsesOriginalAuthenticatedFactsAndRejectsUnknowns(t *testing.T) {
 	now := time.Now().UTC()
-	for _, scenario := range []string{"fresh", "missing cpu", "missing memory", "old cpu", "future memory", "previous node metrics", "cpu saturated", "memory saturated", "foreign address", "draining", "pressure", "unknown readiness", "duplicate condition", "changed uid", "changed allocatable", "drained during observation", "foreign summary", "unauthenticated"} {
+	for _, scenario := range []string{"fresh", "missing cpu", "missing memory", "old cpu", "future memory", "previous node metrics", "cpu saturated", "memory saturated", "foreign address", "draining", "pressure", "unknown readiness", "unknown networking", "duplicate condition", "changed uid", "changed allocatable", "drained during observation", "foreign summary", "unauthenticated"} {
 		t.Run(scenario, func(t *testing.T) {
 			node, summary := agentCapacityFixture("edge-a", "8.8.8.8", now)
 			switch scenario {
@@ -59,6 +59,8 @@ func TestAgentCapacityUsesOriginalAuthenticatedFactsAndRejectsUnknowns(t *testin
 				node.Status.Conditions[1].Status = corev1.ConditionTrue
 			case "unknown readiness":
 				node.Status.Conditions[0].Status = corev1.ConditionUnknown
+			case "unknown networking":
+				node.Status.Conditions = append(node.Status.Conditions, corev1.NodeCondition{Type: corev1.NodeNetworkUnavailable, Status: corev1.ConditionUnknown})
 			case "duplicate condition":
 				node.Status.Conditions = append(node.Status.Conditions, node.Status.Conditions[0])
 			case "foreign summary":

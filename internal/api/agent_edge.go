@@ -146,10 +146,16 @@ type agentCellSource struct {
 
 func (s *Server) currentAgentAuthority() (agentedge.AuthorityPolicy, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
 	a, r, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, agentedge.PolicyScope, "full")
+	if err == nil && !found {
+		a, r, found, err = s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, agentedge.PolicyScope, "shadow")
+	}
 	if err != nil || !found || a.Status != model.PlatformArtifactStatusValidated || r.Status != model.PlatformArtifactReleaseStatusActive || r.ArtifactID != a.ID || s.store.VerifyPlatformArtifactIntegrity(a) != nil {
 		return agentedge.AuthorityPolicy{}, a, r, errAgentEdgeUnavailable
 	}
 	p, err := agentedge.DecodeAuthorityPolicy(a)
+	if err == nil && r.ReleaseChannel == "shadow" && p.Mode != "shadow" {
+		err = errAgentEdgeUnavailable
+	}
 	return p, a, r, err
 }
 
@@ -238,7 +244,9 @@ func (s *Server) agentCellAuthorization(p agentedge.AuthorityPolicy, topology ed
 			result.paths[path] = digest
 		}
 	}
-	if len(result.paths) == 0 || len(result.paths) > 64 {
+	// Local Agent latency measurements use the root route proof. Every other
+	// path remains required in the server's signed evidence as well.
+	if result.paths["/"] == "" || len(result.paths) > 64 {
 		return agentCellSource{}, errAgentEdgeUnavailable
 	}
 	return result, nil
