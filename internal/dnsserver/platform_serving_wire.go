@@ -164,12 +164,17 @@ func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *d
 				resp.Answer = nil
 				return
 			}
+			if len(entry.plan.Records) > 0 && len(entry.plan.Records[0].Targets) > 0 && len(entry.record.Candidates) > 0 && len(records[0].Values) == 0 {
+				resp.Rcode = dns.RcodeServerFailure
+				resp.Answer = nil
+				return
+			}
 			rrs, _, _ := rrForEdgeDNSRecordWithGeoAudit(records[0], name, q.Qtype, hint, nil, nil)
 			resp.Answer = append(resp.Answer, rrs...)
 		}
 	}
 	answer(dns.TypeToString[q.Qtype])
-	if len(resp.Answer) == 0 && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA) {
+	if resp.Rcode == dns.RcodeSuccess && len(resp.Answer) == 0 && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA) {
 		answer("CNAME")
 	}
 	if len(resp.Answer) == 0 && q.Qtype == dns.TypeNS && name == zone {

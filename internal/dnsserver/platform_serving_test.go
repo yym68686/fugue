@@ -52,7 +52,7 @@ func TestDNSArtifactAnswersRecheckQuorumExpiryAndZoneOwnership(t *testing.T) {
 		offset         time.Duration
 		rcode, answers int
 	}{
-		{"target.example.test", dns.TypeA, 0, dns.RcodeSuccess, 1}, {"target.example.test", dns.TypeA, 6 * time.Second, dns.RcodeSuccess, 0},
+		{"target.example.test", dns.TypeA, 0, dns.RcodeSuccess, 1}, {"target.example.test", dns.TypeA, 6 * time.Second, dns.RcodeServerFailure, 0},
 		{"_acme-challenge.example.test", dns.TypeTXT, 0, dns.RcodeSuccess, 0}, {"absent.example.test", dns.TypeA, 0, dns.RcodeNameError, 0},
 		{"alias.example.test", dns.TypeA, 0, dns.RcodeSuccess, 1}, {"a.wild.example.test", dns.TypeTXT, 0, dns.RcodeSuccess, 1},
 		{"child.example.test", dns.TypeTXT, 0, dns.RcodeSuccess, 1}, {"absent.child.example.test", dns.TypeA, 0, dns.RcodeNameError, 0},
@@ -76,6 +76,42 @@ func TestDNSArtifactAnswersRecheckQuorumExpiryAndZoneOwnership(t *testing.T) {
 	after, _ := json.Marshal([]any{views, plan, facts})
 	if string(before) != string(after) {
 		t.Fatal("answering mutated signed input or renewed facts")
+	}
+}
+
+func TestDNSServingTemporaryReadinessLossDoesNotPublishEmptyPositiveAnswer(t *testing.T) {
+	view, plan, policy, facts, now := queryExecutionFixture()
+	p := dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}, Policy: platformconfig.PolicySnapshot{
+		MaxStaleSeconds: 3600, DNSReadiness: &policy,
+		DNSAuthorities:    []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60}},
+		DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: "dns-a"}},
+	}}
+	st, err := buildDNSServingState(dnsServingCheckpoint{AppliedAt: now}, p, "route", "dns-a", "edge-group-a", facts, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := func(name string) *dns.Msg {
+		req := new(dns.Msg)
+		req.SetQuestion(name, dns.TypeA)
+		return st.answer(req, "", now)
+	}
+	if got := query("target.example.test."); got.Rcode != dns.RcodeSuccess || len(got.Answer) == 0 {
+		t.Fatal("fresh dynamic record lost its answer")
+	}
+	st, err = buildDNSServingState(dnsServingCheckpoint{AppliedAt: now}, p, "route", "dns-a", "edge-group-a", nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := query("target.example.test."); got.Rcode != dns.RcodeServerFailure || len(got.Answer) != 0 {
+		t.Fatal("temporary proof loss became an empty positive answer", got)
+	}
+	if got := query("absent.example.test."); got.Rcode != dns.RcodeNameError {
+		t.Fatal("unknown hostname no longer returns NXDOMAIN")
+	}
+	unconfigured := new(dns.Msg)
+	unconfigured.SetQuestion("target.example.test.", dns.TypeAAAA)
+	if got := st.answer(unconfigured, "", now); got.Rcode != dns.RcodeSuccess || len(got.Answer) != 0 {
+		t.Fatal("unconfigured address family no longer returns NODATA", got)
 	}
 }
 
@@ -309,7 +345,7 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	}
 	w := &captureDNSResponseWriter{}
 	restarted.ServeDNS(w, query)
-	if len(w.msg.Answer) != 0 || w.msg.Rcode != dns.RcodeSuccess {
+	if len(w.msg.Answer) != 0 || w.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatal("restart expired facts served dynamic answer")
 	}
 	offline = true
