@@ -244,7 +244,7 @@ def handoff_witness(config, listener, current):
             retryable = any(fragment in message for fragment in [
                 "exactly one live Ready backend", "runtime snapshot is not ready", "requires unique positive proofs",
                 "different artifact assignments", "different probe membership", "expired or future observations",
-                "proof belongs to another release",
+                "proof belongs to another release", "backend changed while reading runtime facts",
             ])
             if not retryable or attempt + 1 == HANDOFF_ATTEMPTS:
                 raise

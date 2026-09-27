@@ -197,6 +197,27 @@ class TransportTests(unittest.TestCase):
                     self.assertIn({'op':'test','path':'/metadata/resourceVersion','value':'10'},writes[0])
                     self.assertIn({'op':'add','path':'/spec/selector','value':{'app':'candidate'}},writes[0])
 
+    def test_runtime_fact_identity_race_is_retried(self):
+        config = self.config()
+        current = transport.service(config, config['listeners'][0])
+        current['metadata'].update(uid='service-uid', resourceVersion='10')
+        candidate_listener = copy.deepcopy(config['listeners'][0])
+        candidate_listener['selector'] = {'app': 'candidate'}
+        observations = [
+            ValueError('DNS handoff backend changed while reading runtime facts'),
+            {'pod': {'metadata': {'uid': 'old'}}, 'snapshot': {}},
+            {'pod': {'metadata': {'uid': 'new'}}, 'snapshot': {'assignment': {},
+             'parent_digest': 'sha256:' + 'a' * 64, 'plan_digest': 'sha256:' + 'b' * 64}},
+        ]
+        with patch.object(transport, 'handoff_backend', side_effect=observations), \
+             patch.object(transport, 'read_json', return_value={'items': [{'metadata': {'name': 'node', 'uid': 'node-uid'}, 'status': {'addresses': [{'address': config['listeners'][0]['address']}]}}]}), \
+             patch.object(transport, 'validate_handoff_endpoints'), \
+             patch.object(transport, 'validate_handoff_snapshots'), \
+             patch.object(transport.time, 'sleep') as sleep:
+            result = transport.handoff_witness(config, candidate_listener, current)
+        self.assertEqual(result['candidate_uid'], 'new')
+        sleep.assert_called_once_with(transport.HANDOFF_RETRY_SECONDS)
+
 
 if __name__ == "__main__":
     unittest.main()
