@@ -113,7 +113,7 @@ both DNS consumers. Never extend a stale proof merely to keep an answer.
 The DNS executor now has two staged mitigations. Temporary loss of a configured
 dynamic address returns SERVFAIL instead of cacheable NOERROR/NODATA. A retained
 positive checkpoint may consume fresh HTTPS observations from a verified newer
-release when its route proof plan and hard policy are identical. Per-record
+release when each retained record's route proof plan and hard policy agree. Per-record
 query authorization and selection rules must still match; changes only to
 candidate score, score breakdown, or explanatory reason may retain the old
 selection. A changed address, Edge identity, owner, weight, quorum or record

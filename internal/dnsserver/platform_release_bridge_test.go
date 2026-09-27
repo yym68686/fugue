@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,12 @@ import (
 
 func TestDNSReleaseBridgeSeparatesRankingFactsFromRecordAuthority(t *testing.T) {
 	view, plan, readiness, _, now := queryExecutionFixture()
+	otherProbe := plan.Probes[0]
+	otherProbe.ID, otherProbe.Hostname = "sha256:"+strings.Repeat("d", 64), "other.example.test"
+	plan.Probes = append(plan.Probes, otherProbe)
+	otherTarget := plan.Records[0].Targets[0]
+	otherTarget.ProbeIDs = []string{otherProbe.ID}
+	plan.Records = append(plan.Records, platformconfig.DNSReadinessRecord{Hostname: otherProbe.Hostname, MinimumHealthyEdges: 1, Targets: []platformconfig.DNSReadinessTarget{otherTarget}})
 	base := dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}, Policy: platformconfig.PolicySnapshot{MaxStaleSeconds: 3600, DNSReadiness: &readiness,
 		DNSAnswerRules: []platformconfig.DNSAnswerRule{{NodeID: view.NodeID, Hostname: plan.Records[0].Hostname, Type: "A", SelectionMode: "global"}},
 	}}
@@ -18,7 +25,7 @@ func TestDNSReleaseBridgeSeparatesRankingFactsFromRecordAuthority(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, change := range []string{"score", "unrelated rule", "record rule", "address", "edge", "tenant", "weight", "quorum", "release replay"} {
+	for _, change := range []string{"score", "unrelated rule", "unrelated proof", "proof digest", "record rule", "address", "edge", "tenant", "weight", "quorum", "release replay"} {
 		t.Run(change, func(t *testing.T) {
 			var previous, next dnsServingPayload
 			if json.Unmarshal(raw, &previous) != nil || json.Unmarshal(raw, &next) != nil {
@@ -47,6 +54,12 @@ func TestDNSReleaseBridgeSeparatesRankingFactsFromRecordAuthority(t *testing.T) 
 			case "unrelated rule":
 				bridge.payload.Policy.DNSAnswerRules = append(bridge.payload.Policy.DNSAnswerRules, platformconfig.DNSAnswerRule{NodeID: view.NodeID, Hostname: "other.example.test", Type: "A", SelectionMode: "geo"})
 				want = true
+			case "unrelated proof":
+				last := len(bridge.payload.Plan.Probes) - 1
+				bridge.payload.Plan.Probes[last].RouteDigest = "sha256:" + strings.Repeat("f", 64)
+				want = true
+			case "proof digest":
+				bridge.payload.Plan.Probes[0].RouteDigest = "sha256:" + strings.Repeat("f", 64)
 			case "record rule":
 				bridge.payload.Policy.DNSAnswerRules[0].SelectionMode = "geo"
 			case "address":
@@ -65,8 +78,12 @@ func TestDNSReleaseBridgeSeparatesRankingFactsFromRecordAuthority(t *testing.T) 
 			allowed := compatibleDNSReleaseProbes(old, bridge)
 			for _, target := range plan.Records[0].Targets {
 				for _, id := range target.ProbeIDs {
-					if allowed[id] != want {
-						t.Fatalf("probe %s bridge=%v want=%v", id, allowed[id], want)
+					wantProbe := want
+					if change == "proof digest" && id != plan.Probes[0].ID {
+						wantProbe = true
+					}
+					if allowed[id] != wantProbe {
+						t.Fatalf("probe %s bridge=%v want=%v", id, allowed[id], wantProbe)
 					}
 				}
 			}

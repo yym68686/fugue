@@ -7,7 +7,7 @@ import (
 	"fugue/internal/platformconfig"
 )
 
-// Only a verified successor with the same route proof plan and hard policy can
+// Only a verified successor with the same per-record route proofs and hard policy can
 // supply fresh facts to the retained checkpoint. Per-record authorization and
 // selection rules must also agree. Scores are observations: retaining the old
 // score cannot introduce a new endpoint or prolong either artifact's authority.
@@ -20,6 +20,8 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 	previous, next := old.payload, bridge.payload
 	oldRules, newRules := dnsBridgeRules(previous.Policy.DNSAnswerRules), dnsBridgeRules(next.Policy.DNSAnswerRules)
 	oldQueries, newQueries := dnsBridgeQueries(previous.Queries), dnsBridgeQueries(next.Queries)
+	oldPlan, newPlan := previous.Plan, next.Plan
+	previous.Plan, next.Plan = nil, nil
 	previous.Generation, next.Generation = "", ""
 	previous.Lineage, next.Lineage = platformconfig.Lineage{}, platformconfig.Lineage{}
 	previous.Policy.Generation, next.Policy.Generation = "", ""
@@ -28,12 +30,23 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 	if !reflect.DeepEqual(previous, next) {
 		return nil
 	}
-	allowed := make(map[string]bool, len(previous.Plan.Probes))
-	for _, probe := range previous.Plan.Probes {
-		allowed[probe.ID] = true
+	nextProbes := make(map[string]platformconfig.DNSReadinessProbe, len(newPlan.Probes))
+	for _, probe := range newPlan.Probes {
+		nextProbes[probe.ID] = probe
 	}
-	for _, record := range previous.Plan.Records {
-		if len(oldQueries[record.Hostname]) > 0 &&
+	nextRecords := make(map[string]platformconfig.DNSReadinessRecord, len(newPlan.Records))
+	for _, record := range newPlan.Records {
+		nextRecords[record.Hostname] = record
+	}
+	allowed := make(map[string]bool, len(oldPlan.Probes))
+	for _, probe := range oldPlan.Probes {
+		if next, exists := nextProbes[probe.ID]; exists && probe == next {
+			allowed[probe.ID] = true
+		}
+	}
+	for _, record := range oldPlan.Records {
+		if next, exists := nextRecords[record.Hostname]; exists && reflect.DeepEqual(record, next) &&
+			len(oldQueries[record.Hostname]) > 0 &&
 			reflect.DeepEqual(oldQueries[record.Hostname], newQueries[record.Hostname]) &&
 			reflect.DeepEqual(oldRules[record.Hostname], newRules[record.Hostname]) {
 			continue
