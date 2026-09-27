@@ -98,6 +98,19 @@ func ValidateEdgeSelectionConstraints(constraints []EdgeSelectionConstraint) err
 // routes and DNS constraints that the signed ReleaseSet will publish. Current
 // runtime evidence must still be verified independently before any selection.
 func CompileEdgeSelectionGrants(intent PlatformIntent, policy PolicySnapshot, routes []CompiledRoute, projected model.EdgeRouteIntentSnapshot) ([]edgetopology.RouteGrant, error) {
+	return compileEdgeSelectionGrants(intent, policy, routes, projected, true)
+}
+
+// CompileAgentControlGrants preserves route ownership, traffic policy, pool,
+// residency, capability and endpoint eligibility. Address-publication quorum
+// does not govern a Runtime Agent's single control connection: its independently
+// signed Agent constraint supplies that availability floor. Explicit per-route
+// EdgeSelectionConstraints are intersected by the caller before this compiler.
+func CompileAgentControlGrants(intent PlatformIntent, policy PolicySnapshot, routes []CompiledRoute, projected model.EdgeRouteIntentSnapshot) ([]edgetopology.RouteGrant, error) {
+	return compileEdgeSelectionGrants(intent, policy, routes, projected, false)
+}
+
+func compileEdgeSelectionGrants(intent PlatformIntent, policy PolicySnapshot, routes []CompiledRoute, projected model.EdgeRouteIntentSnapshot, ingressQuorum bool) ([]edgetopology.RouteGrant, error) {
 	if len(policy.EdgeSelectionConstraints) == 0 {
 		return nil, nil
 	}
@@ -121,11 +134,11 @@ func CompileEdgeSelectionGrants(intent PlatformIntent, policy PolicySnapshot, ro
 	grants := make([]edgetopology.RouteGrant, 0, len(policy.EdgeSelectionConstraints))
 	for _, c := range policy.EdgeSelectionConstraints {
 		hostRoutes := byHost[c.Hostname]
-		if len(hostRoutes) == 0 || len(hostRoutes) != len(compiledByHost[c.Hostname]) || c.FactMaxAgeSeconds > policy.DNSReadiness.FactFreshnessSeconds || c.MinCandidates < policy.MinimumHealthyEdges {
+		if len(hostRoutes) == 0 || len(hostRoutes) != len(compiledByHost[c.Hostname]) || c.FactMaxAgeSeconds > policy.DNSReadiness.FactFreshnessSeconds || ingressQuorum && c.MinCandidates < policy.MinimumHealthyEdges {
 			return nil, fmt.Errorf("Edge selection hostname %q lacks complete route or freshness policy", c.Hostname)
 		}
 		for _, route := range hostRoutes {
-			if route.TenantID != c.TenantID || c.OwnerKind == "platform" && (!PlatformServiceRouteKind(route.RouteKind) || route.AppID != "") || route.OriginStatus != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || c.MinCandidates < route.MinHealthyEdgeNodes {
+			if route.TenantID != c.TenantID || c.OwnerKind == "platform" && (!PlatformServiceRouteKind(route.RouteKind) || route.AppID != "") || route.OriginStatus != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || ingressQuorum && c.MinCandidates < route.MinHealthyEdgeNodes {
 				return nil, fmt.Errorf("Edge selection hostname %q has a foreign or inactive path", c.Hostname)
 			}
 		}

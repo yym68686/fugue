@@ -89,6 +89,14 @@ The admin preview performs the same observations but does not sign or authorize
 traffic. The admin trust endpoint exports only public keys. A missing private
 keyring leaves issuance unavailable; requests never generate a new trust root.
 
+The Agent's availability floor is distinct from the quorum for publishing a
+public DNS address set. Its signed constraint is intersected with explicit
+per-route Edge selection constraints; the general DNS `minimum_healthy_edges`
+and route address-publication minimum do not silently raise the control-client
+floor. Both compilers retain the same ownership, route-policy, pool, residency,
+capability, endpoint exclusion and route-digest checks. Public DNS compilation
+continues to enforce its original quorum without modifying its policy or answers.
+
 Private signing configuration and Agent public trust are separate bounded files
 with explicit generations, key lifetimes and revocations. API signing reads
 `FUGUE_AGENT_EDGE_SIGNING_KEY_FILE`. AgentService opts in only when

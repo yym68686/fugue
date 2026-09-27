@@ -213,15 +213,9 @@ func (s *Server) agentCellAuthorization(p agentedge.AuthorityPolicy, topology ed
 	if err != nil {
 		return agentCellSource{}, err
 	}
-	constraint.MinCandidates = max(constraint.MinCandidates, payload.Policy.MinimumHealthyEdges)
-	for _, r := range snapshot.Routes {
-		if r.Hostname == constraint.Hostname {
-			constraint.MinCandidates = max(constraint.MinCandidates, r.MinHealthyEdgeNodes)
-		}
-	}
 	intent.EdgeTopology = &topology
 	payload.Policy.EdgeSelectionConstraints = []platformconfig.EdgeSelectionConstraint{constraint}
-	grants, err := platformconfig.CompileEdgeSelectionGrants(intent, payload.Policy, payload.Routes, snapshot)
+	grants, err := platformconfig.CompileAgentControlGrants(intent, payload.Policy, payload.Routes, snapshot)
 	if err != nil || len(grants) != 1 || len(grants[0].RequiredRouteDigestsByCell[cell.ID]) == 0 {
 		return agentCellSource{}, errAgentEdgeUnavailable
 	}

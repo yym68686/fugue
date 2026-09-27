@@ -2,6 +2,7 @@ package platformconfig
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -10,6 +11,54 @@ import (
 	"fugue/internal/routebinding"
 	"fugue/internal/routeproof"
 )
+
+func TestAgentControlAvailabilityDoesNotRewritePublicDNSQuorum(t *testing.T) {
+	r := edgeSelectionFixture()
+	compiled, err := Compile(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, err := ProjectRouteArtifact(compiled.RouteArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Routes []CompiledRoute `json:"routes"`
+		Policy PolicySnapshot  `json:"policy"`
+	}
+	raw, _ := json.Marshal(compiled.RouteArtifact.Content)
+	json.Unmarshal(raw, &payload)
+	constraint := payload.Policy.EdgeSelectionConstraints[0]
+	constraint.MinCandidates = 1
+	constraint.MinDistinctCells = 1
+	constraint.MinDistinctDomains = map[string]int{"host": 1}
+	payload.Policy.EdgeSelectionConstraints = []EdgeSelectionConstraint{constraint}
+	before, _ := json.Marshal(payload.Policy)
+	if _, err = CompileEdgeSelectionGrants(r.Intent, payload.Policy, payload.Routes, projected); err == nil {
+		t.Fatal("public DNS minimum was weakened")
+	}
+	grants, err := CompileAgentControlGrants(r.Intent, payload.Policy, payload.Routes, projected)
+	if err != nil || len(grants) != 1 || grants[0].MinCandidates != 1 {
+		t.Fatal("Agent inherited DNS publication quorum", grants, err)
+	}
+	after, _ := json.Marshal(payload.Policy)
+	if string(before) != string(after) || payload.Policy.MinimumHealthyEdges != 2 {
+		t.Fatal("Agent grant rewrote shared traffic configuration")
+	}
+	constraint.MinCandidates = 2
+	payload.Policy.EdgeSelectionConstraints = []EdgeSelectionConstraint{constraint}
+	strict, err := CompileAgentControlGrants(r.Intent, payload.Policy, payload.Routes, projected)
+	if err != nil || strict[0].MinCandidates != 2 {
+		t.Fatal("explicit Agent floor weakened", err)
+	}
+	if !reflect.DeepEqual(grants[0].RequiredRouteDigestsByCell, strict[0].RequiredRouteDigestsByCell) {
+		t.Fatal("separating availability changed route authorization")
+	}
+	projected.Routes[0].RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+	if _, err = CompileAgentControlGrants(r.Intent, payload.Policy, payload.Routes, projected); err == nil {
+		t.Fatal("independent availability bypassed a disabled route")
+	}
+}
 
 func edgeSelectionFixture() CompileRequest {
 	r := dnsReadinessFixture()
