@@ -149,6 +149,7 @@ type PolicySnapshot struct {
 	DependencyOrder          []string                  `json:"dependency_order,omitempty"`
 	ConstraintGraph          ConstraintGraph           `json:"constraint_graph,omitempty"`
 	RouteConstraints         []RoutePolicyConstraint   `json:"route_constraints,omitempty"`
+	EdgeSelectionConstraints []EdgeSelectionConstraint `json:"edge_selection_constraints,omitempty"`
 	TrafficConstraints       []TrafficPolicyConstraint `json:"traffic_constraints,omitempty"`
 	CreatedAt                time.Time                 `json:"created_at,omitempty"`
 }
@@ -386,6 +387,17 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if len(tlsAllowlist) > 0 {
 		routePayload["tls_allowlist"] = tlsAllowlist
 	}
+	if len(policy.EdgeSelectionConstraints) > 0 {
+		projected, err := ProjectRouteArtifact(model.PlatformArtifact{Generation: intent.Generation, Content: routePayload})
+		if err != nil {
+			return CompileResult{}, err
+		}
+		grants, err := CompileEdgeSelectionGrants(intent, policy, compiledRoutes, projected)
+		if err != nil {
+			return CompileResult{}, err
+		}
+		routePayload["edge_selection_grants"] = grants
+	}
 	dnsPayload := map[string]any{
 		"schema_version": SchemaVersion,
 		"generation":     intent.Generation,
@@ -572,8 +584,18 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 			out.RouteConstraints[i].ExclusionExpiresAt = &value
 		}
 	}
+	out.EdgeSelectionConstraints = append([]EdgeSelectionConstraint(nil), in.EdgeSelectionConstraints...)
+	for i := range out.EdgeSelectionConstraints {
+		out.EdgeSelectionConstraints[i].AllowedPoolIDs = append([]string(nil), in.EdgeSelectionConstraints[i].AllowedPoolIDs...)
+		out.EdgeSelectionConstraints[i].RequiredCapabilities = append([]string(nil), in.EdgeSelectionConstraints[i].RequiredCapabilities...)
+		out.EdgeSelectionConstraints[i].AllowedCountries = append([]string(nil), in.EdgeSelectionConstraints[i].AllowedCountries...)
+		out.EdgeSelectionConstraints[i].MinDistinctDomains = cloneEdgeDomainMinimums(in.EdgeSelectionConstraints[i].MinDistinctDomains)
+	}
 	out.TrafficConstraints = append([]TrafficPolicyConstraint(nil), in.TrafficConstraints...)
 	sort.Slice(out.RouteConstraints, func(i, j int) bool { return out.RouteConstraints[i].Hostname < out.RouteConstraints[j].Hostname })
+	sort.Slice(out.EdgeSelectionConstraints, func(i, j int) bool {
+		return out.EdgeSelectionConstraints[i].Hostname < out.EdgeSelectionConstraints[j].Hostname
+	})
 	sort.Slice(out.TrafficConstraints, func(i, j int) bool { return out.TrafficConstraints[i].AppID < out.TrafficConstraints[j].AppID })
 	return out
 }
@@ -713,6 +735,9 @@ func validatePolicy(in PolicySnapshot) error {
 		return err
 	}
 	if err := validateConstraintGraph(in.ConstraintGraph); err != nil {
+		return err
+	}
+	if err := validateEdgeSelectionConstraints(in.EdgeSelectionConstraints); err != nil {
 		return err
 	}
 	return validatePolicyRules(in)

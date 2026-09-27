@@ -30,10 +30,18 @@ the existing route proof includes the serving group ID, so digests differ
 between cells. Cells omitted from the grant are not candidates. Each Edge must have current proof
 for all of them, the matching TLS hostname, health, capacity and pool/capability
 membership; exclusions, optional residency and requested risk diversity are
-hard gates. The caller must bind both the grant and facts to the current signed
-TrafficReleaseSet before using any result for serving. This binding and the
-shadow comparison are not yet connected to the production compiler, so the
-new candidate result cannot affect DNS or Agent traffic.
+hard gates. An optional `edge_selection_constraints` entry in the signed
+PolicySnapshot now derives a hostname grant from the exact projected route
+artifact, every path's cell-specific digest, topology, and existing DNS
+placement constraints. The grant is embedded in that signed route artifact
+only when explicitly configured. Compilation rejects an unknown tenant,
+inactive path, missing DNS dependency, impossible candidate minimum, or an
+unproved cell. It does not alter the current DNS answer or Edge bundle.
+
+The caller must bind both the grant and authenticated facts to the current
+signed TrafficReleaseSet before using any result for serving. Runtime fact
+collection, shadow comparison with the old selection, and cutover gates are
+still outstanding. The grant alone cannot affect DNS or Agent traffic.
 
 For a read-only consistency check against the currently visible Edge nodes:
 

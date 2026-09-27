@@ -17,6 +17,7 @@ type ProjectionPolicyInput struct {
 	MinimumHealthyEdges      *int                                      `json:"minimum_healthy_edges,omitempty"`
 	MaxStaleSeconds          *int                                      `json:"max_stale_seconds,omitempty"`
 	RouteConstraints         *[]platformconfig.RoutePolicyConstraint   `json:"route_constraints,omitempty"`
+	EdgeSelectionConstraints *[]platformconfig.EdgeSelectionConstraint `json:"edge_selection_constraints,omitempty"`
 	DNSRouteStateConstraints *[]platformconfig.DNSRouteStateConstraint `json:"dns_route_state_constraints,omitempty"`
 	SchemaVersion            string                                    `json:"schema_version"`
 	Generation               string                                    `json:"generation"`
@@ -42,7 +43,7 @@ func DecodeProjectionPolicy(a model.PlatformArtifact, consumers []platformconfig
 	if d.Decode(&p) != nil {
 		return fail()
 	}
-	for _, key := range []string{"minimum_healthy_edges", "max_stale_seconds", "route_constraints", "dns_route_state_constraints"} {
+	for _, key := range []string{"minimum_healthy_edges", "max_stale_seconds", "route_constraints", "edge_selection_constraints", "dns_route_state_constraints"} {
 		if value, present := a.Content[key]; present && value == nil {
 			return fail()
 		}
@@ -92,13 +93,16 @@ func (p ProjectionPolicyInput) RouteDefaults() (platformconfig.PolicySnapshot, b
 	fail := func() (platformconfig.PolicySnapshot, bool, error) {
 		return platformconfig.PolicySnapshot{}, false, fmt.Errorf("route projection defaults incomplete or invalid")
 	}
-	if p.MinimumHealthyEdges == nil && p.MaxStaleSeconds == nil && p.RouteConstraints == nil && p.DNSRouteStateConstraints == nil {
+	if p.MinimumHealthyEdges == nil && p.MaxStaleSeconds == nil && p.RouteConstraints == nil && p.EdgeSelectionConstraints == nil && p.DNSRouteStateConstraints == nil {
 		return platformconfig.PolicySnapshot{}, false, nil
 	}
 	if p.MinimumHealthyEdges == nil || p.MaxStaleSeconds == nil || p.RouteConstraints == nil || p.DNSRouteStateConstraints == nil || *p.MinimumHealthyEdges < 1 || *p.MinimumHealthyEdges > 10000 || *p.MaxStaleSeconds < 1 || *p.MaxStaleSeconds > 604800 {
 		return fail()
 	}
 	out := platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: p.Generation, MinimumHealthyEdges: *p.MinimumHealthyEdges, MaxStaleSeconds: *p.MaxStaleSeconds, RouteConstraints: *p.RouteConstraints, DNSRouteStateConstraints: *p.DNSRouteStateConstraints}
+	if p.EdgeSelectionConstraints != nil {
+		out.EdgeSelectionConstraints = *p.EdgeSelectionConstraints
+	}
 	if err := platformconfig.ValidatePolicySnapshot(out); err != nil {
 		return fail()
 	}

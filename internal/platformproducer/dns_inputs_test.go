@@ -112,3 +112,19 @@ func TestProjectionRouteDefaultsRejectPartialNullAndInvalidInputs(t *testing.T) 
 		})
 	}
 }
+
+func TestRouteDefaultsRetainSignedEdgeSelectionPolicy(t *testing.T) {
+	minimum, stale := 2, 90
+	rules := []platformconfig.RoutePolicyConstraint{}
+	states := []platformconfig.DNSRouteStateConstraint{}
+	selection := []platformconfig.EdgeSelectionConstraint{{TenantID: "tenant-a", Hostname: "app.example.test", AllowedPoolIDs: []string{"pool-public"}, RequiredCapabilities: []string{"http", "tls"}, MinCandidates: 2, FactMaxAgeSeconds: 60}}
+	p := ProjectionPolicyInput{Generation: "policy", MinimumHealthyEdges: &minimum, MaxStaleSeconds: &stale, RouteConstraints: &rules, DNSRouteStateConstraints: &states, EdgeSelectionConstraints: &selection}
+	base, present, err := p.RouteDefaults()
+	if err != nil || !present || len(base.EdgeSelectionConstraints) != 1 || base.EdgeSelectionConstraints[0].Hostname != selection[0].Hostname {
+		t.Fatalf("signed Edge selection policy lost in producer projection: %+v %v", base, err)
+	}
+	selection[0].MinDistinctDomains = map[string]int{"country": 2}
+	if _, _, err := p.RouteDefaults(); err == nil {
+		t.Fatal("invalid signed Edge selection policy accepted")
+	}
+}

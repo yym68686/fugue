@@ -32731,12 +32731,34 @@ components:
           maxItems: 4096
           items:
             $ref: "#/components/schemas/PlatformRoutePolicyConstraint"
+        edge_selection_constraints:
+          type: array
+          maxItems: 4096
+          description: Signed, hostname-scoped public Edge candidate policy. Omission preserves existing DNS placement. Compiled grants are shadow evidence and do not authorize standalone serving or replace the current ReleaseSet.
+          items:
+            $ref: "#/components/schemas/PlatformEdgeSelectionConstraint"
         traffic_constraints:
           type: array
           maxItems: 4096
           description: Desired release references and weights. Compilation requires matching fresh release observations. Candidate traffic supports the existing Edge Fugue-Release-Stickiness cookie (or omission); custom cookie names and sticky_header overrides are rejected, never silently ignored. Existing Edge identity precedence remains the built-in cookie, X-Fugue-Release-Stickiness, X-API-Key, Authorization, then per-request trace identity. Sticky declarations remain in signed policy and its digest; no business lookup is required by Edge.
           items:
             $ref: "#/components/schemas/PlatformTrafficPolicyConstraint"
+    PlatformEdgeSelectionConstraint:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, hostname, allowed_pool_ids, required_capabilities, min_candidates, fact_max_age_seconds]
+      properties:
+        tenant_id: {type: string, minLength: 1, maxLength: 128}
+        hostname: {type: string, minLength: 3, maxLength: 253}
+        allowed_pool_ids: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {type: string}}
+        required_capabilities: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {type: string}}
+        allowed_countries: {type: array, maxItems: 100, uniqueItems: true, items: {type: string}}
+        min_candidates: {type: integer, minimum: 1, maximum: 100}
+        min_distinct_cells: {type: integer, minimum: 0, maximum: 100}
+        min_distinct_domains:
+          type: object
+          additionalProperties: {type: integer, minimum: 1, maximum: 100}
+        fact_max_age_seconds: {type: integer, minimum: 1, maximum: 600}
     PlatformRoutePolicyConstraint:
       type: object
       additionalProperties: false
