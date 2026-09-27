@@ -313,7 +313,7 @@ func shadowEdgeGrantsMatchPolicy(payload platformRouteCandidatePayload) bool {
 		paths := 0
 		for _, route := range payload.Routes {
 			if route.Hostname == grant.Hostname {
-				if route.TenantID != grant.TenantID || grant.OwnerKind == "platform" && (route.Kind != model.EdgeRouteKindPlatform || route.AppID != "") {
+				if route.TenantID != grant.TenantID || grant.OwnerKind == "platform" && (!platformconfig.PlatformServiceRouteKind(route.Kind) || route.AppID != "") {
 					return false
 				}
 				paths++

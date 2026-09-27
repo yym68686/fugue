@@ -105,6 +105,12 @@ func TestShadowEdgeGrantsMatchSignedPolicyAndRouteOwner(t *testing.T) {
 	if !shadowEdgeGrantsMatchPolicy(platform) {
 		t.Fatal("explicit platform service grant rejected")
 	}
+	for _, kind := range []string{model.EdgeRouteKindPlatformRoute, model.EdgeRouteKindControlPlaneAPI, "control-plane-mesh"} {
+		platform.Routes[0].Kind = kind
+		if !shadowEdgeGrantsMatchPolicy(platform) {
+			t.Fatalf("platform service subtype %q rejected", kind)
+		}
+	}
 	platform.Routes[0].AppID = "app-a"
 	if shadowEdgeGrantsMatchPolicy(platform) {
 		t.Fatal("platform grant authorized an application route")
