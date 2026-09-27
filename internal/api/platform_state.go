@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"fugue/internal/agentedge"
 	"math"
 	"net/http"
 	"reflect"
@@ -155,6 +156,10 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 }
 
 func validatePlatformPolicyArtifact(artifact model.PlatformArtifact) error {
+	if artifact.ScopeKey == agentedge.PolicyScope {
+		_, err := agentedge.DecodeAuthorityPolicy(artifact)
+		return err
+	}
 	if artifact.ScopeKey == platformproducer.Scope {
 		_, err := platformproducer.Decode(artifact)
 		return err

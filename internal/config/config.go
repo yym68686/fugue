@@ -78,6 +78,7 @@ type APIConfig struct {
 	EdgeActivationPlanSigningKeyID         string
 	EdgeActivationPlanSigningKeyFile       string
 	EdgeActivationPlanSigningProjectionDir string
+	AgentEdgeSigningKeyFile                string
 	EdgeActivationPlanSigningKeyGeneration string
 	ImportWorkDir                          string
 	ShutdownDrainDelay                     time.Duration
@@ -394,6 +395,7 @@ func APIFromEnv() APIConfig {
 		BundleRevokedKeyIDs:                    getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
 		BundleValidFor:                         getenvDuration("FUGUE_BUNDLE_VALID_FOR", 15*time.Minute),
 		EdgeActivationPlanSigningProjectionDir: getenv("FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR", "/var/run/secrets/fugue-edge-activation"),
+		AgentEdgeSigningKeyFile:                getenv("FUGUE_AGENT_EDGE_SIGNING_KEY_FILE", "/var/run/secrets/fugue-agent-edge/keyring.json"),
 		ImportWorkDir:                          getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		ShutdownDrainDelay:                     getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
 		ShutdownTimeout:                        getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),

@@ -11399,6 +11399,132 @@ paths:
                 type: string
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/agent/edge-candidates:
+    get:
+      operationId: "agentEdgeCandidates"
+      summary: "agentEdgeCandidates"
+      description: "Issues a short-lived Ed25519 permission bound to the authenticated runtime and independently published Agent policy. Does not accept caller-selected audience or origin. Verifies signed topology, current per-cell traffic publications, complete hostname route proofs, fresh node capacity, inventory health and quarantine/drain state, then rechecks authority before signing. Missing or stale inputs fail closed without renewing previous evidence. No serving configuration, DNS selection or LKG is changed. Responses are no-store and never include signing keys."
+      tags: ["Agent"]
+      x-fugue-handler: "handleAgentEdgeCandidates"
+      security:
+        -
+          RuntimeBearerAuth: []
+      parameters:
+        - in: header
+          name: X-Fugue-Agent-Current-Edge
+          required: false
+          description: Optional continuity hint within the independently authorized candidate set. It cannot expand pools, ownership, residency, health or capacity eligibility.
+          schema: {type: string, pattern: '^[a-z][a-z0-9-]{0,127}$', maxLength: 128}
+      responses:
+        200:
+          description: "Current bounded read-only result"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SignedAgentEdgeGrant"
+        400:
+          description: "Invalid request"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        403:
+          description: "Caller is not authorized"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        503:
+          description: "Trusted configuration or current observations unavailable"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        default:
+          "$ref": "#/components/responses/ErrorResponse"
+  /v1/admin/agent-edge/preview:
+    get:
+      operationId: "previewAgentEdgeCandidates"
+      summary: "previewAgentEdgeCandidates"
+      description: "Platform admin with artifact.read scope only. Runs the same bounded source and evidence checks for one existing runtime, without producing a signature or granting traffic. Reports bounded per-edge diagnostics and signing-key availability; does not create configuration or keys."
+      tags: ["Admin"]
+      x-fugue-handler: "handlePreviewAgentEdgeCandidates"
+      security:
+        -
+          BearerAuth: []
+      responses:
+        200:
+          description: "Current bounded read-only result"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/AgentEdgePreview"
+        400:
+          description: "Invalid request"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        403:
+          description: "Caller is not authorized"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        503:
+          description: "Trusted configuration or current observations unavailable"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        default:
+          "$ref": "#/components/responses/ErrorResponse"
+      parameters:
+        -
+          in: "query"
+          name: "runtime_id"
+          required: true
+          schema:
+            type: "string"
+            minLength: 1
+            maxLength: 128
+  /v1/admin/agent-edge/trust:
+    get:
+      operationId: "getAgentEdgePublicTrust"
+      summary: "getAgentEdgePublicTrust"
+      description: "Platform admin with artifact.read scope only. Exports the public portion of the independently managed signing-key configuration. Never creates or rotates keys, returns private material, or grants Agent traffic. Used for out-of-band managed trust distribution, not automatic client trust discovery."
+      tags: ["Admin"]
+      x-fugue-handler: "handleGetAgentEdgePublicTrust"
+      security:
+        -
+          BearerAuth: []
+      responses:
+        200:
+          description: "Current bounded read-only result"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/AgentEdgeTrustKeyring"
+        400:
+          description: "Invalid request"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        403:
+          description: "Caller is not authorized"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        503:
+          description: "Trusted configuration or current observations unavailable"
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+        default:
+          "$ref": "#/components/responses/ErrorResponse"
   /v1/agent/heartbeat:
     post:
       operationId: agentHeartbeat
@@ -13948,6 +14074,367 @@ components:
       schema:
         type: string
   schemas:
+    AgentEdgeSelectionPolicy:
+      type: "object"
+      additionalProperties: false
+      required: ["probe_interval_seconds","probe_timeout_milliseconds","fact_max_age_seconds","failure_threshold","better_sample_threshold","switch_improvement_percent","switch_cooldown_seconds","standby_count","desired_distinct_cells","max_candidates"]
+      properties:
+        probe_interval_seconds:
+          type: "integer"
+          minimum: 5
+          maximum: 300
+        probe_timeout_milliseconds:
+          type: "integer"
+          minimum: 100
+          maximum: 10000
+        fact_max_age_seconds:
+          type: "integer"
+          minimum: 10
+          maximum: 300
+        failure_threshold:
+          type: "integer"
+          minimum: 1
+          maximum: 10
+        better_sample_threshold:
+          type: "integer"
+          minimum: 2
+          maximum: 20
+        switch_improvement_percent:
+          type: "integer"
+          minimum: 1
+          maximum: 100
+        switch_cooldown_seconds:
+          type: "integer"
+          minimum: 5
+          maximum: 86400
+        standby_count:
+          type: "integer"
+          minimum: 1
+          maximum: 4
+        desired_distinct_cells:
+          type: "integer"
+          minimum: 1
+          maximum: 5
+        max_candidates:
+          type: "integer"
+          minimum: 2
+          maximum: 32
+    AgentEdgePublication:
+      type: "object"
+      additionalProperties: false
+      required: ["serving_group_id","release_set_id","release_set_digest","route_artifact_id","route_artifact_digest","policy_digest","intent_digest","input_snapshot_digest","topology_digest","scope_key","release_id","channel","fencing_token","published_at"]
+      properties:
+        serving_group_id:
+          type: "string"
+          pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+          maxLength: 128
+        release_set_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        release_set_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        route_artifact_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        route_artifact_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        policy_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        intent_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        input_snapshot_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        topology_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        scope_key:
+          type: "string"
+          enum: ["global"]
+        release_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        channel:
+          type: "string"
+          enum: ["gray","full"]
+        fencing_token:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+        published_at:
+          type: "string"
+          format: "date-time"
+    AgentEdgePolicyReference:
+      type: "object"
+      additionalProperties: false
+      required: ["artifact_id","artifact_digest","release_id","channel","fencing_token","published_at"]
+      properties:
+        artifact_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        artifact_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        release_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        channel:
+          type: "string"
+          enum: ["shadow","full"]
+        fencing_token:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+        published_at:
+          type: "string"
+          format: "date-time"
+    AgentEdgeCandidate:
+      type: "object"
+      additionalProperties: false
+      required: ["publication","edge_id","authority_cell_id","address","route_digests","failure_domains","evidence_digest","evidence_observed_at","evidence_valid_until"]
+      properties:
+        publication:
+          "$ref": "#/components/schemas/AgentEdgePublication"
+        edge_id:
+          type: "string"
+          pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+          maxLength: 128
+        authority_cell_id:
+          type: "string"
+          pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+          maxLength: 128
+        address:
+          type: "string"
+          minLength: 7
+          maxLength: 45
+          description: "Canonical public IP literal; no hostname, URI, private, reserved or mapped address."
+        route_digests:
+          type: "array"
+          minItems: 1
+          maxItems: 64
+          items:
+            type: "string"
+            pattern: "^sha256:[0-9a-f]{64}$"
+        failure_domains:
+          type: "object"
+          minProperties: 1
+          maxProperties: 8
+          additionalProperties:
+            type: "string"
+            pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+            maxLength: 128
+        evidence_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        evidence_observed_at:
+          type: "string"
+          format: "date-time"
+        evidence_valid_until:
+          type: "string"
+          format: "date-time"
+    AgentEdgeGrant:
+      type: "object"
+      additionalProperties: false
+      required: ["schema","purpose","audience","origin","mode","policy_reference","policy","minimum_candidates","min_distinct_cells","min_distinct_domains","candidates","issued_at","valid_until"]
+      properties:
+        schema:
+          type: "string"
+          enum: ["fugue.agent-edge-grant/v1"]
+        purpose:
+          type: "string"
+          enum: ["agent-control"]
+        audience:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        origin:
+          type: "string"
+          format: "uri"
+          maxLength: 261
+          description: "Canonical configured HTTPS origin with a DNS hostname and implicit port 443."
+        mode:
+          type: "string"
+          enum: ["shadow","active"]
+        policy_reference:
+          "$ref": "#/components/schemas/AgentEdgePolicyReference"
+        policy:
+          "$ref": "#/components/schemas/AgentEdgeSelectionPolicy"
+        minimum_candidates:
+          type: "integer"
+          minimum: 1
+          maximum: 32
+        min_distinct_cells:
+          type: "integer"
+          minimum: 1
+          maximum: 32
+        min_distinct_domains:
+          type: "object"
+          maxProperties: 8
+          additionalProperties:
+            type: "integer"
+            minimum: 1
+            maximum: 32
+        candidates:
+          type: "array"
+          minItems: 1
+          maxItems: 32
+          items:
+            "$ref": "#/components/schemas/AgentEdgeCandidate"
+        issued_at:
+          type: "string"
+          format: "date-time"
+        valid_until:
+          type: "string"
+          format: "date-time"
+      description: "Audience-bound permission for Agent control traffic only. Each candidate binds its own exact current cell publication. Signed hard minimums do not silently change during an outage; desired standby and cell redundancy are separately reported as degraded. Absolute validity never outlives original route, capacity, health or signing-key evidence. Shadow permissions allow observation only."
+    SignedAgentEdgeGrant:
+      type: "object"
+      additionalProperties: false
+      required: ["grant","key_id","digest","signature"]
+      properties:
+        grant:
+          "$ref": "#/components/schemas/AgentEdgeGrant"
+        key_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        signature:
+          type: "string"
+          pattern: "^[A-Za-z0-9_-]{86}$"
+    AgentEdgeTrustKey:
+      type: "object"
+      additionalProperties: false
+      required: ["key_id","public_key","not_before","not_after","revoked"]
+      properties:
+        key_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        public_key:
+          type: "string"
+          pattern: "^[A-Za-z0-9_-]{43}$"
+        not_before:
+          type: "string"
+          format: "date-time"
+        not_after:
+          type: "string"
+          format: "date-time"
+        revoked:
+          type: "boolean"
+    AgentEdgeTrustKeyring:
+      type: "object"
+      additionalProperties: false
+      required: ["schema","generation","keys"]
+      properties:
+        schema:
+          type: "string"
+          enum: ["fugue.agent-edge-trust/v1"]
+        generation:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+        keys:
+          type: "array"
+          minItems: 1
+          maxItems: 16
+          items:
+            "$ref": "#/components/schemas/AgentEdgeTrustKey"
+      description: "Public-only export for independent managed trust provisioning. Agents must not accept this configuration from a candidate-grant response or discover an unpinned replacement key automatically."
+    AgentEdgeAuthorityPolicy:
+      type: "object"
+      additionalProperties: false
+      required: ["schema_version","generation","scope","mode","origin","signing_key_id","topology_intent_artifact_id","topology_intent_digest","constraint","selection","capacity","grant_ttl_seconds","minimum_lease_seconds"]
+      properties:
+        schema_version:
+          type: "string"
+          enum: ["fugue.agent-edge-policy/v1"]
+        generation:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        scope:
+          type: "string"
+          enum: ["agent-edge-control"]
+        mode:
+          type: "string"
+          enum: ["shadow","active"]
+        origin:
+          type: "string"
+          format: "uri"
+          maxLength: 261
+          description: "Canonical configured HTTPS origin with a DNS hostname and implicit port 443."
+        signing_key_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        topology_intent_artifact_id:
+          type: "string"
+          minLength: 1
+          maxLength: 128
+        topology_intent_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        constraint:
+          "$ref": "#/components/schemas/PlatformEdgeSelectionConstraint"
+        selection:
+          "$ref": "#/components/schemas/AgentEdgeSelectionPolicy"
+        capacity:
+          type: "object"
+          additionalProperties: false
+          required: ["max_node_cpu_percent","max_node_memory_percent","fact_max_age_seconds"]
+          properties:
+            max_node_cpu_percent:
+              type: "integer"
+              minimum: 1
+              maximum: 100
+            max_node_memory_percent:
+              type: "integer"
+              minimum: 1
+              maximum: 100
+            fact_max_age_seconds:
+              type: "integer"
+              minimum: 10
+              maximum: 300
+        grant_ttl_seconds:
+          type: "integer"
+          minimum: 15
+          maximum: 300
+        minimum_lease_seconds:
+          type: "integer"
+          minimum: 1
+          maximum: 300
+      description: "Independent signed policy_snapshot in agent-edge-control scope. Uses explicit platform ownership, matching HTTPS hostname and a pinned signed topology intent. CPU and memory limits apply to fresh authenticated node resource observations. No DNS policy or traffic artifact is modified by issuing a grant."
+    AgentEdgePreview:
+      type: "object"
+      additionalProperties: false
+      required: ["ready","authorizes_traffic","signing_key_ready","diagnostics"]
+      properties:
+        ready:
+          type: "boolean"
+        authorizes_traffic:
+          type: "boolean"
+          enum: [false]
+        signing_key_ready:
+          type: "boolean"
+        grant:
+          "$ref": "#/components/schemas/AgentEdgeGrant"
+        diagnostics:
+          type: "object"
+          maxProperties: 10000
+          additionalProperties:
+            type: "string"
     DNSListenerReadiness:
       type: object
       additionalProperties: false

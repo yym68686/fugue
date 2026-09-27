@@ -183,6 +183,8 @@ type Server struct {
 	edgeDNSArtifactHandlerFullCount        int64
 	ready                                  atomic.Bool
 	trafficOverrideRouteProbe              trafficOverrideRouteProbeFunc
+	agentEdgeSigningKeyFile                string
+	agentEdgeProbe                         agentEdgeProbeFunc
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
@@ -272,6 +274,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		edgeActivationPlanSigningKeyID:         strings.TrimSpace(cfg.EdgeActivationPlanSigningKeyID),
 		edgeActivationPlanSigningKeyGeneration: strings.TrimSpace(cfg.EdgeActivationPlanSigningKeyGeneration),
 		edgeActivationPlanSigningProjectionDir: strings.TrimSpace(cfg.EdgeActivationPlanSigningProjectionDir),
+		agentEdgeSigningKeyFile:                strings.TrimSpace(cfg.AgentEdgeSigningKeyFile),
 		observabilityConfig:                    cfg.Observability.Normalize(),
 		automationShadowLoopConfig:             normalizeAutomationShadowLoopConfig(cfg.AutomationShadowLoop),
 		importer:                               sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),

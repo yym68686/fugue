@@ -109,6 +109,7 @@ func main() {
 		EdgeActivationPlanSigningKeyID:         cfg.EdgeActivationPlanSigningKeyID,
 		EdgeActivationPlanSigningKeyGeneration: cfg.EdgeActivationPlanSigningKeyGeneration,
 		EdgeActivationPlanSigningProjectionDir: cfg.EdgeActivationPlanSigningProjectionDir,
+		AgentEdgeSigningKeyFile:                cfg.AgentEdgeSigningKeyFile,
 		ImportWorkDir:                          cfg.ImportWorkDir,
 		AutomationShadowLoop: api.AutomationShadowLoopConfig{
 			Enabled:  cfg.AutomationShadowLoopEnabled,

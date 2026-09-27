@@ -23,6 +23,7 @@ import (
 
 const GrantSchema = "fugue.agent-edge-grant/v1"
 const GrantPurpose = "agent-control"
+const PolicyScope = "agent-edge-control"
 const MaxGrantBytes = 256 << 10
 const signatureDomain = "fugue.agent-edge-grant.ed25519/v1\n"
 
@@ -34,6 +35,7 @@ var hostnamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,251}[a-z0-9]$`)
 // Publication binds the permission to the exact signed configuration from
 // which it was derived. A rollback must have its own newer publication.
 type Publication struct {
+	ServingGroupID      string    `json:"serving_group_id"`
 	ReleaseSetID        string    `json:"release_set_id"`
 	ReleaseSetDigest    string    `json:"release_set_digest"`
 	RouteArtifactID     string    `json:"route_artifact_id"`
@@ -49,6 +51,17 @@ type Publication struct {
 	PublishedAt         time.Time `json:"published_at"`
 }
 
+// PolicyReference is independent of any cell's traffic publication. Policies
+// and rollbacks are ordered by their own published authority, not a code SHA.
+type PolicyReference struct {
+	ArtifactID     string    `json:"artifact_id"`
+	ArtifactDigest string    `json:"artifact_digest"`
+	ReleaseID      string    `json:"release_id"`
+	Channel        string    `json:"channel"`
+	FencingToken   int64     `json:"fencing_token"`
+	PublishedAt    time.Time `json:"published_at"`
+}
+
 // Policy is signed configuration, not an Agent-local fallback default.
 type Policy struct {
 	ProbeIntervalSeconds     int `json:"probe_interval_seconds"`
@@ -59,6 +72,7 @@ type Policy struct {
 	SwitchImprovementPercent int `json:"switch_improvement_percent"`
 	SwitchCooldownSeconds    int `json:"switch_cooldown_seconds"`
 	StandbyCount             int `json:"standby_count"`
+	DesiredDistinctCells     int `json:"desired_distinct_cells"`
 	MaxCandidates            int `json:"max_candidates"`
 }
 
@@ -72,6 +86,7 @@ func (p Policy) Validate() error {
 		p.SwitchImprovementPercent < 1 || p.SwitchImprovementPercent > 100 ||
 		p.SwitchCooldownSeconds < p.ProbeIntervalSeconds || p.SwitchCooldownSeconds > 86400 ||
 		p.StandbyCount < 1 || p.StandbyCount > 4 ||
+		p.DesiredDistinctCells < 1 || p.DesiredDistinctCells > p.StandbyCount+1 ||
 		p.MaxCandidates < p.StandbyCount+1 || p.MaxCandidates > 32 {
 		return errors.New("Agent Edge selection policy is outside bounded limits")
 	}
@@ -79,6 +94,7 @@ func (p Policy) Validate() error {
 }
 
 type Candidate struct {
+	Publication        Publication       `json:"publication"`
 	EdgeID             string            `json:"edge_id"`
 	AuthorityCellID    string            `json:"authority_cell_id"`
 	Address            string            `json:"address"`
@@ -90,17 +106,19 @@ type Candidate struct {
 }
 
 type Grant struct {
-	Schema             string         `json:"schema"`
-	Purpose            string         `json:"purpose"`
-	Audience           string         `json:"audience"`
-	Origin             string         `json:"origin"`
-	Publication        Publication    `json:"publication"`
-	Policy             Policy         `json:"policy"`
-	MinDistinctCells   int            `json:"min_distinct_cells"`
-	MinDistinctDomains map[string]int `json:"min_distinct_domains"`
-	Candidates         []Candidate    `json:"candidates"`
-	IssuedAt           time.Time      `json:"issued_at"`
-	ValidUntil         time.Time      `json:"valid_until"`
+	Schema             string          `json:"schema"`
+	Purpose            string          `json:"purpose"`
+	Audience           string          `json:"audience"`
+	Origin             string          `json:"origin"`
+	Mode               string          `json:"mode"`
+	PolicyReference    PolicyReference `json:"policy_reference"`
+	Policy             Policy          `json:"policy"`
+	MinimumCandidates  int             `json:"minimum_candidates"`
+	MinDistinctCells   int             `json:"min_distinct_cells"`
+	MinDistinctDomains map[string]int  `json:"min_distinct_domains"`
+	Candidates         []Candidate     `json:"candidates"`
+	IssuedAt           time.Time       `json:"issued_at"`
+	ValidUntil         time.Time       `json:"valid_until"`
 }
 
 func (g Grant) Validate() error {
@@ -118,23 +136,20 @@ func (g Grant) Validate() error {
 		return errors.New("Agent Edge grant TLS origin must be a DNS hostname")
 	}
 	if g.Schema != GrantSchema || g.Purpose != GrantPurpose || !identifier.MatchString(g.Audience) ||
+		(g.Mode != "shadow" && g.Mode != "active") ||
 		g.IssuedAt.IsZero() || !g.ValidUntil.After(g.IssuedAt) || g.ValidUntil.Sub(g.IssuedAt) > 5*time.Minute ||
-		g.Policy.Validate() != nil || len(g.Candidates) < g.Policy.StandbyCount+1 || len(g.Candidates) > g.Policy.MaxCandidates ||
+		g.Policy.Validate() != nil || g.MinimumCandidates < 1 || len(g.Candidates) < g.MinimumCandidates || len(g.Candidates) > g.Policy.MaxCandidates ||
 		g.MinDistinctCells < 1 || g.MinDistinctCells > len(g.Candidates) || len(g.MinDistinctDomains) > 8 {
 		return errors.New("Agent Edge grant identity, lifetime or candidate bounds are invalid")
 	}
-	source := g.Publication
-	if !identifier.MatchString(source.ReleaseSetID) || !identifier.MatchString(source.RouteArtifactID) || !identifier.MatchString(source.ReleaseID) ||
-		(source.Channel != "gray" && source.Channel != "full") || source.ScopeKey != "global" || source.FencingToken <= 0 ||
-		source.PublishedAt.IsZero() || source.PublishedAt.After(g.IssuedAt) {
-		return errors.New("Agent Edge grant publication is invalid")
-	}
-	for _, digest := range []string{source.ReleaseSetDigest, source.RouteArtifactDigest, source.PolicyDigest, source.IntentDigest, source.InputSnapshotDigest, source.TopologyDigest} {
-		if !digestPattern.MatchString(digest) {
-			return errors.New("Agent Edge grant publication digest is invalid")
-		}
+	p := g.PolicyReference
+	if !identifier.MatchString(p.ArtifactID) || !digestPattern.MatchString(p.ArtifactDigest) || !identifier.MatchString(p.ReleaseID) ||
+		(p.Channel != "shadow" && p.Channel != "full") ||
+		p.FencingToken <= 0 || p.PublishedAt.IsZero() || p.PublishedAt.After(g.IssuedAt) {
+		return errors.New("Agent Edge policy reference is invalid")
 	}
 	cells, addresses := map[string]bool{}, map[string]bool{}
+	cellPublications := map[string]Publication{}
 	domains := map[string]map[string]bool{}
 	for dimension, minimum := range g.MinDistinctDomains {
 		if len(dimension) > 128 || !topologyIdentifier.MatchString(dimension) || dimension == "country" || dimension == "region" || minimum < 1 || minimum > len(g.Candidates) {
@@ -143,6 +158,13 @@ func (g Grant) Validate() error {
 		domains[dimension] = map[string]bool{}
 	}
 	for i, c := range g.Candidates {
+		if err := c.Publication.validate(g.IssuedAt); err != nil {
+			return err
+		}
+		if previous, exists := cellPublications[c.AuthorityCellID]; exists && previous != c.Publication {
+			return errors.New("Agent Edge cell contains mixed publication evidence")
+		}
+		cellPublications[c.AuthorityCellID] = c.Publication
 		ip, parseErr := netip.ParseAddr(c.Address)
 		if len(c.EdgeID) > 128 || len(c.AuthorityCellID) > 128 || !topologyIdentifier.MatchString(c.EdgeID) || !topologyIdentifier.MatchString(c.AuthorityCellID) || i > 0 && g.Candidates[i-1].EdgeID >= c.EdgeID ||
 			parseErr != nil || ip.String() != c.Address || ip.Zone() != "" || !platformconfig.PublicDNSFlattenIP(ip) || addresses[c.Address] ||
@@ -181,6 +203,21 @@ func (g Grant) Validate() error {
 	return nil
 }
 
+func (source Publication) validate(issuedAt time.Time) error {
+	if !identifier.MatchString(source.ReleaseSetID) || !identifier.MatchString(source.RouteArtifactID) || !identifier.MatchString(source.ReleaseID) ||
+		len(source.ServingGroupID) > 128 || !topologyIdentifier.MatchString(source.ServingGroupID) ||
+		(source.Channel != "gray" && source.Channel != "full") || source.ScopeKey != "global" || source.FencingToken <= 0 ||
+		source.PublishedAt.IsZero() || source.PublishedAt.After(issuedAt) {
+		return errors.New("Agent Edge grant publication is invalid")
+	}
+	for _, digest := range []string{source.ReleaseSetDigest, source.RouteArtifactDigest, source.PolicyDigest, source.IntentDigest, source.InputSnapshotDigest, source.TopologyDigest} {
+		if !digestPattern.MatchString(digest) {
+			return errors.New("Agent Edge grant publication digest is invalid")
+		}
+	}
+	return nil
+}
+
 type SignedGrant struct {
 	Grant     Grant  `json:"grant"`
 	KeyID     string `json:"key_id"`
@@ -198,7 +235,8 @@ type TrustKey struct {
 }
 
 type VerifiedGrant struct {
-	signed SignedGrant
+	signed         SignedGrant
+	cellWatermarks map[string]Publication
 }
 
 func (g VerifiedGrant) View() Grant    { return cloneGrant(g.signed.Grant) }
@@ -243,16 +281,34 @@ func Verify(raw []byte, keys map[string]TrustKey, audience, origin string, previ
 		err != nil || !ed25519.Verify(key.PublicKey, signedMessage(s.KeyID, s.Digest), signature) {
 		return VerifiedGrant{}, errors.New("Agent Edge grant has no valid independently trusted signature")
 	}
+	watermarks := map[string]Publication{}
 	if previous != nil && previous.signed.Digest != "" {
 		old := previous.signed.Grant
 		if old.Audience != audience || old.Origin != origin || s.Grant.IssuedAt.Before(old.IssuedAt) ||
-			s.Grant.Publication.PublishedAt.Before(old.Publication.PublishedAt) ||
-			s.Grant.Publication.PublishedAt.Equal(old.Publication.PublishedAt) && s.Grant.Publication != old.Publication ||
+			s.Grant.PolicyReference.PublishedAt.Before(old.PolicyReference.PublishedAt) ||
+			s.Grant.PolicyReference.PublishedAt.Equal(old.PolicyReference.PublishedAt) && s.Grant.PolicyReference != old.PolicyReference ||
+			s.Grant.PolicyReference.PublishedAt.After(old.PolicyReference.PublishedAt) && s.Grant.PolicyReference.Channel == old.PolicyReference.Channel && s.Grant.PolicyReference.FencingToken <= old.PolicyReference.FencingToken ||
 			s.Grant.IssuedAt.Equal(old.IssuedAt) && s.Digest != previous.signed.Digest {
 			return VerifiedGrant{}, errors.New("Agent Edge grant replay or publication equivocation rejected")
 		}
+		if s.Grant.PolicyReference == old.PolicyReference && (s.Grant.Mode != old.Mode || s.Grant.Policy != old.Policy ||
+			s.Grant.MinimumCandidates != old.MinimumCandidates || s.Grant.MinDistinctCells != old.MinDistinctCells || !maps.Equal(s.Grant.MinDistinctDomains, old.MinDistinctDomains)) {
+			return VerifiedGrant{}, errors.New("Agent Edge policy fields changed without a new configuration publication")
+		}
+		watermarks = maps.Clone(previous.cellWatermarks)
 	}
-	return VerifiedGrant{signed: s}, nil
+	for _, c := range s.Grant.Candidates {
+		if old, exists := watermarks[c.AuthorityCellID]; exists && (c.Publication.PublishedAt.Before(old.PublishedAt) ||
+			c.Publication.PublishedAt.Equal(old.PublishedAt) && c.Publication != old ||
+			c.Publication.PublishedAt.After(old.PublishedAt) && c.Publication.Channel == old.Channel && c.Publication.FencingToken <= old.FencingToken) {
+			return VerifiedGrant{}, errors.New("Agent Edge cell publication replay or equivocation rejected")
+		}
+		watermarks[c.AuthorityCellID] = c.Publication
+	}
+	if len(watermarks) > 256 {
+		return VerifiedGrant{}, errors.New("Agent Edge publication history exceeds the bounded cell inventory")
+	}
+	return VerifiedGrant{signed: s, cellWatermarks: watermarks}, nil
 }
 
 func (g VerifiedGrant) Live(keys map[string]TrustKey, now time.Time) bool {

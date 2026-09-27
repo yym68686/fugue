@@ -72,6 +72,7 @@ type ServerConfig struct {
 	EdgeActivationPlanSigningKeyID         string
 	EdgeActivationPlanSigningKeyGeneration string
 	EdgeActivationPlanSigningProjectionDir string
+	AgentEdgeSigningKeyFile                string
 	ImportWorkDir                          string
 	AutomationShadowLoop                   AutomationShadowLoopConfig
 	Observability                          observability.Config

@@ -68,7 +68,7 @@ for that candidate authorization.
 
 The `agentedge` package stages the client-side boundary without changing the
 running AgentService. Ed25519 grants bind one runtime audience, canonical HTTPS
-origin, exact traffic publication and route requirements, cell/host diversity,
+origin, each cell's independent traffic publication and route requirements, cell/host diversity,
 signed selection policy and original evidence deadlines. Verification accepts
 only independently provisioned public keys and rejects replay, equivocation,
 unknown fields, duplicate JSON keys, revoked trust and expired observations.
@@ -77,9 +77,23 @@ rounds and cooldown; duplicate or mixed-grant observations do not advance it.
 The selected HTTP client preserves Host, SNI and certificate verification,
 rejects other origins, disables redirects and does not replay a mutating request
 after a lost response. Requests and response reads cannot outlive the grant.
-Issuance from current authenticated facts, trust provisioning, AgentService
-integration and production activation are separate remaining steps. Neither
-this library nor the public discovery bundle enables dynamic selection alone.
+The API exposes runtime-authenticated `GET /v1/agent/edge-candidates`. Its
+independent `agent-edge-control` policy publication pins a validated topology,
+selection bounds, an explicit availability floor and a separate desired backup
+count. It intersects existing route and DNS constraints; a hint can preserve an
+already eligible Edge but cannot authorize it. Each candidate requires the
+original Edge heartbeat, authenticated Kubernetes identity and capacity facts,
+and HTTPS proofs for every path on the API hostname. The API rechecks policy
+and cell publications before signing and never extends those evidence leases.
+The admin preview performs the same observations but does not sign or authorize
+traffic. The admin trust endpoint exports only public keys. A missing private
+keyring leaves issuance unavailable; requests never generate a new trust root.
+
+Private signing configuration and Agent public trust are separate bounded files
+with explicit generations, key lifetimes and revocations. API signing reads
+`FUGUE_AGENT_EDGE_SIGNING_KEY_FILE`; trust provisioning, AgentService integration
+and production activation remain separate steps. Installing this API code does
+not activate a policy or change existing Agent, DNS or business traffic.
 
 For a read-only consistency check against the currently visible Edge nodes:
 

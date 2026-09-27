@@ -10,6 +10,8 @@ import (
 func selectorFixture(t *testing.T, third bool) (*Selector, Grant, ed25519.PrivateKey, map[string]TrustKey, time.Time, string) {
 	t.Helper()
 	g, private, keys, now := grantFixture(t)
+	g.MinDistinctCells = 1
+	g.MinDistinctDomains = map[string]int{"host": 1}
 	g.Policy.FactMaxAgeSeconds = 180
 	g.ValidUntil = now.Add(150 * time.Second)
 	for i := range g.Candidates {
@@ -18,6 +20,7 @@ func selectorFixture(t *testing.T, third bool) (*Selector, Grant, ed25519.Privat
 	if third {
 		c := cloneCandidate(g.Candidates[0])
 		c.EdgeID, c.AuthorityCellID, c.Address, c.FailureDomains["host"] = "edge-c", "cell-c", "1.1.1.1", "host-c"
+		c.Publication.ServingGroupID = "edge-group-c"
 		g.Candidates = append(g.Candidates, c)
 	}
 	s := &Selector{}
@@ -147,6 +150,7 @@ func TestSelectorChoosesIndependentStandbyAndHonorsRemoval(t *testing.T) {
 	s, g, private, keys, now, digest := selectorFixture(t, true)
 	// The faster alternate shares the primary cell; prefer the independent one.
 	g.Candidates[2].AuthorityCellID = g.Candidates[0].AuthorityCellID
+	g.Candidates[2].Publication = g.Candidates[0].Publication
 	raw := encodeGrant(t, g, private)
 	// This is the initial permission in this test, not a same-time mutation.
 	s = &Selector{}
@@ -197,5 +201,80 @@ func TestSelectorRejectsExpiredRevokedAndTamperedPermission(t *testing.T) {
 	}
 	if _, err := s.Current(keys, g.ValidUntil); err == nil {
 		t.Fatal("selector continued after absolute permission expiry")
+	}
+}
+
+func TestSignedFloorPermitsDegradedSurvivorWithoutPretendingBackupExists(t *testing.T) {
+	g, private, keys, now := grantFixture(t)
+	g.MinDistinctCells = 1
+	g.MinDistinctDomains = map[string]int{"host": 1}
+	g.Candidates = g.Candidates[1:]
+	raw := encodeGrant(t, g, private)
+	s := &Selector{}
+	if err := s.Install(raw, keys, g.Audience, g.Origin, now); err != nil {
+		t.Fatal(err)
+	}
+	v, err := Verify(raw, keys, g.Audience, g.Origin, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice, err := s.Observe(measurementRound(g, v.Digest(), now, time.Millisecond), keys, now)
+	if err != nil || choice.Primary.EdgeID != "edge-b" || !choice.Degraded || len(choice.Standbys) != 0 {
+		t.Fatal("survivor did not retain explicitly authorized degraded operation", choice, err)
+	}
+	shadow := cloneGrant(g)
+	shadow.Mode = "shadow"
+	shadow.IssuedAt = now.Add(time.Second)
+	shadow.PolicyReference.PublishedAt = now
+	shadow.PolicyReference.FencingToken++
+	shadow.PolicyReference.ReleaseID = "policy-shadow"
+	if err := s.Install(encodeGrant(t, shadow, private), keys, g.Audience, g.Origin, shadow.IssuedAt); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewHTTPClient(s, func() map[string]TrustKey { return keys }, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Transport.(*transport).now = func() time.Time { return shadow.IssuedAt }
+	if _, err := client.Get(g.Origin + "/v1/agent/operations"); err == nil || !strings.Contains(err.Error(), "shadow") {
+		t.Fatal("shadow observation granted production transport", err)
+	}
+}
+
+func TestSelectorEnforcesHardFloorsAfterLocalFailure(t *testing.T) {
+	for _, constraint := range []string{"count", "cell", "host"} {
+		t.Run(constraint, func(t *testing.T) {
+			g, private, keys, now := grantFixture(t)
+			g.MinDistinctCells = 1
+			g.MinDistinctDomains = map[string]int{"host": 1}
+			g.Policy.FailureThreshold = 1
+			switch constraint {
+			case "count":
+				g.MinimumCandidates = 2
+			case "cell":
+				g.MinDistinctCells = 2
+			case "host":
+				g.MinDistinctDomains["host"] = 2
+			}
+			raw := encodeGrant(t, g, private)
+			s := &Selector{}
+			if err := s.Install(raw, keys, g.Audience, g.Origin, now); err != nil {
+				t.Fatal(err)
+			}
+			v, err := Verify(raw, keys, g.Audience, g.Origin, nil, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.Observe(measurementRound(g, v.Digest(), now, time.Millisecond, 2*time.Millisecond), keys, now); err != nil {
+				t.Fatal(err)
+			}
+			at := now.Add(10 * time.Second)
+			if _, err = s.Observe(measurementRound(g, v.Digest(), at, 0, 2*time.Millisecond), keys, at); err == nil {
+				t.Fatal("local failure silently weakened a signed hard floor")
+			}
+			if _, err = s.Current(keys, at); err == nil {
+				t.Fatal("transport recovered a policy-ineligible choice")
+			}
+		})
 	}
 }

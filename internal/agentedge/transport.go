@@ -50,6 +50,9 @@ func (t *transport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if err != nil {
 		return reject(err)
 	}
+	if choice.Mode != "active" {
+		return reject(errors.New("shadow Agent Edge policy cannot route control requests"))
+	}
 	origin, err := url.Parse(choice.Origin)
 	if err != nil || request == nil || request.URL == nil || request.URL.Scheme != "https" || request.URL.Host != origin.Host || request.URL.User != nil ||
 		request.URL.Opaque != "" || request.URL.Fragment != "" || request.Host != "" && request.Host != origin.Host {

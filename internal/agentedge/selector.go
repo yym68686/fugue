@@ -33,6 +33,7 @@ type observation struct {
 type Choice struct {
 	GrantDigest  string
 	Origin       string
+	Mode         string
 	ValidUntil   time.Time
 	Primary      Candidate
 	Standbys     []Candidate
@@ -173,6 +174,27 @@ func (s *Selector) choose(now time.Time, newRound bool) (Choice, error) {
 	if len(ready) == 0 {
 		return Choice{}, errors.New("no authorized Agent Edge has fresh successful measurements")
 	}
+	// A desired backup count may degrade, but signed hard floors may not.
+	// Check the whole measured candidate set before changing the primary.
+	readyCells := map[string]bool{}
+	readyDomains := map[string]map[string]bool{}
+	for dimension := range g.MinDistinctDomains {
+		readyDomains[dimension] = map[string]bool{}
+	}
+	for _, candidate := range ready {
+		readyCells[candidate.AuthorityCellID] = true
+		for dimension, values := range readyDomains {
+			values[candidate.FailureDomains[dimension]] = true
+		}
+	}
+	if len(ready) < g.MinimumCandidates || len(readyCells) < g.MinDistinctCells {
+		return Choice{}, errors.New("measured Agent Edge candidates do not meet the signed availability floor")
+	}
+	for dimension, minimum := range g.MinDistinctDomains {
+		if len(readyDomains[dimension]) < minimum {
+			return Choice{}, errors.New("measured Agent Edge candidates do not meet signed fault-domain diversity")
+		}
+	}
 	if current == nil {
 		s.reason = "primary_unavailable_or_removed"
 		if s.primary == "" {
@@ -200,7 +222,7 @@ func (s *Selector) choose(now time.Time, newRound bool) (Choice, error) {
 			s.challenger, s.betterRounds = "", 0
 		}
 	}
-	choice := Choice{GrantDigest: s.grant.Digest(), Origin: g.Origin, ValidUntil: g.ValidUntil, Primary: cloneCandidate(*current), PrimarySince: s.primarySince, Reason: s.reason}
+	choice := Choice{GrantDigest: s.grant.Digest(), Origin: g.Origin, Mode: g.Mode, ValidUntil: g.ValidUntil, Primary: cloneCandidate(*current), PrimarySince: s.primarySince, Reason: s.reason}
 	usedCells := map[string]bool{current.AuthorityCellID: true}
 	usedDomains := map[string]map[string]bool{}
 	for dimension := range g.MinDistinctDomains {
@@ -237,7 +259,7 @@ func (s *Selector) choose(now time.Time, newRound bool) (Choice, error) {
 		}
 		remaining = append(remaining[:best], remaining[best+1:]...)
 	}
-	choice.Degraded = len(choice.Standbys) < g.Policy.StandbyCount || len(usedCells) < g.MinDistinctCells
+	choice.Degraded = len(choice.Standbys) < g.Policy.StandbyCount || len(usedCells) < g.Policy.DesiredDistinctCells
 	for dimension, minimum := range g.MinDistinctDomains {
 		choice.Degraded = choice.Degraded || len(usedDomains[dimension]) < minimum
 	}

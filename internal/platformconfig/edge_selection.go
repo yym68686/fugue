@@ -87,6 +87,13 @@ func validateEdgeSelectionConstraints(constraints []EdgeSelectionConstraint) err
 	return nil
 }
 
+// ValidateEdgeSelectionConstraints validates the typed authorization template
+// independently of runtime facts. The compiler still checks its signed intent
+// and all actual hostname ownership and route dependencies.
+func ValidateEdgeSelectionConstraints(constraints []EdgeSelectionConstraint) error {
+	return validateEdgeSelectionConstraints(constraints)
+}
+
 // CompileEdgeSelectionGrants derives shadow grants from the same compiled
 // routes and DNS constraints that the signed ReleaseSet will publish. Current
 // runtime evidence must still be verified independently before any selection.

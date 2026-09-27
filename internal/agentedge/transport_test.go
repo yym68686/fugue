@@ -54,8 +54,9 @@ func selectedClient(t *testing.T, server *httptest.Server, roots *x509.CertPool,
 	delta := now.Sub(fixed)
 	g.IssuedAt = g.IssuedAt.Add(delta)
 	g.ValidUntil = now.Add(lifetime)
-	g.Publication.PublishedAt = g.Publication.PublishedAt.Add(delta)
+	g.PolicyReference.PublishedAt = g.PolicyReference.PublishedAt.Add(delta)
 	for i := range g.Candidates {
+		g.Candidates[i].Publication.PublishedAt = g.Candidates[i].Publication.PublishedAt.Add(delta)
 		g.Candidates[i].EvidenceObservedAt = g.Candidates[i].EvidenceObservedAt.Add(delta)
 		g.Candidates[i].EvidenceValidUntil = g.Candidates[i].EvidenceValidUntil.Add(delta)
 	}
