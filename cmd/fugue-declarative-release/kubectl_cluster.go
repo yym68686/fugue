@@ -938,6 +938,16 @@ func (cluster *kubectlCluster) applyResourceSet(ctx context.Context, release dec
 	if err != nil {
 		return err
 	}
+	// Check every DNS target before any dependent resource can be written.
+	for _, identity := range identities {
+		item, err := declarativerelease.ResourceSetItem(manifest, identity)
+		if err != nil {
+			return err
+		}
+		if err := cluster.requireUnselectedDNSBackend(ctx, identity, item); err != nil {
+			return err
+		}
+	}
 	primary := declarativerelease.ResourceIdentity{
 		APIVersion: release.Workload.APIVersion,
 		Kind:       release.Workload.Kind,
@@ -971,6 +981,9 @@ func (cluster *kubectlCluster) applyResourceSet(ctx context.Context, release dec
 				return fmt.Errorf("apply Job/%s: %w", identity.Name, jobErr)
 			}
 			continue
+		}
+		if err := cluster.requireUnselectedDNSBackend(ctx, identity, item); err != nil {
+			return err
 		}
 		encoded, encodeErr := declarativerelease.CanonicalJSON(item)
 		if encodeErr != nil {
