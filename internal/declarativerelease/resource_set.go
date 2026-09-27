@@ -210,6 +210,53 @@ func ensureReadStringMap(value map[string]any, name string) map[string]string {
 }
 
 func (set ResourceSet) Primary(workload Workload) (map[string]any, error) {
+	selected, err := set.primaryByIdentity(workload)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePrimaryShape(selected, workload); err != nil {
+		return nil, err
+	}
+	return selected, nil
+}
+
+// PredecessorPrimary validates the historical workload without requiring its
+// rollout strategy to equal the strategy being introduced by this release.
+func (set ResourceSet) PredecessorPrimary(workload Workload) (map[string]any, error) {
+	selected, err := set.primaryByIdentity(workload)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := objectField(selected, "spec")
+	if err != nil {
+		return nil, err
+	}
+	if workload.Kind == "Job" {
+		if err := validatePrimaryShape(selected, workload); err != nil {
+			return nil, err
+		}
+		return selected, nil
+	}
+	strategyKey := map[string]string{"Deployment": "strategy", "DaemonSet": "updateStrategy"}[workload.Kind]
+	if strategyKey == "" {
+		return nil, errors.New("historical primary workload kind is unsupported")
+	}
+	strategy, err := objectField(spec, strategyKey)
+	if err != nil {
+		return nil, err
+	}
+	mode := map[string]string{"RollingUpdate": "rolling", "Recreate": "recreate", "OnDelete": "on-delete"}[stringField(strategy, "type")]
+	if mode == "" || workload.Kind == "Deployment" && mode == "on-delete" || workload.Kind == "DaemonSet" && mode == "recreate" {
+		return nil, errors.New("historical primary rollout strategy is unsupported")
+	}
+	workload.RolloutMode = mode
+	if err := validatePrimaryShape(selected, workload); err != nil {
+		return nil, err
+	}
+	return selected, nil
+}
+
+func (set ResourceSet) primaryByIdentity(workload Workload) (map[string]any, error) {
 	var selected map[string]any
 	for _, item := range set.Items {
 		identity, err := resourceIdentity(item)
@@ -226,9 +273,6 @@ func (set ResourceSet) Primary(workload Workload) (map[string]any, error) {
 	}
 	if selected == nil {
 		return nil, errors.New("component resource set does not contain its primary workload")
-	}
-	if err := validatePrimaryShape(selected, workload); err != nil {
-		return nil, err
 	}
 	return selected, nil
 }

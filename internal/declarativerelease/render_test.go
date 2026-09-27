@@ -346,6 +346,11 @@ func TestRenderManifestsPreservesExplicitLKGConfigurationAndIdentitySet(t *testi
 		!bytes.Contains(rendered.LKG, []byte("LKG_ONLY")) || bytes.Contains(rendered.LKG, []byte("FORWARD_ONLY")) {
 		t.Fatalf("explicit LKG configuration was not kept independent: forward=%s lkg=%s", rendered.Forward, rendered.LKG)
 	}
+	historicalStrategy := bytes.Replace(lkg, []byte(`"type":"RollingUpdate"`), []byte(`"type":"Recreate"`), 1)
+	withHistoricalStrategy, err := RenderManifests(plan, "api", receipt, bytes.NewReader(forward), bytes.NewReader(historicalStrategy))
+	if err != nil || !bytes.Contains(withHistoricalStrategy.LKG, []byte(`"type":"Recreate"`)) {
+		t.Fatalf("historical LKG rollout strategy was not preserved: %v", err)
+	}
 	wrongLKG := bytes.Replace(lkg, []byte("fugue-fugue-api"), []byte("fugue-other-api"), 1)
 	if _, err := RenderManifests(plan, "api", receipt, bytes.NewReader(forward), bytes.NewReader(wrongLKG)); err == nil {
 		t.Fatal("LKG with a different resource identity was accepted")

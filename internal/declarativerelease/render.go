@@ -47,7 +47,7 @@ func BindGuardianLKG(plan Plan, componentID string, rendered RenderedManifests, 
 	if err != nil {
 		return RenderedManifests{}, fmt.Errorf("decode Guardian forward resource set: %w", err)
 	}
-	if _, err := lkg.Primary(release.Workload); err != nil {
+	if _, err := lkg.PredecessorPrimary(release.Workload); err != nil {
 		return RenderedManifests{}, fmt.Errorf("validate exact Guardian LKG primary workload: %w", err)
 	}
 	if !lkgResourceIdentitiesSubset(forward, lkg) {
@@ -253,7 +253,7 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		if err != nil {
 			return RenderedManifests{}, fmt.Errorf("decode LKG resource set: %w", err)
 		}
-		if _, err := lkg.Primary(release.Workload); err != nil {
+		if _, err := lkg.PredecessorPrimary(release.Workload); err != nil {
 			return RenderedManifests{}, fmt.Errorf("validate LKG primary workload: %w", err)
 		}
 		if !lkgResourceIdentitiesSubset(forward, lkg) {
@@ -449,7 +449,13 @@ func mustCanonical(value any) []byte {
 }
 
 func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest string, bindPodArtifactProvenance bool) error {
-	if _, err := set.Primary(release.Workload); err != nil {
+	var err error
+	if bindPodArtifactProvenance {
+		_, err = set.Primary(release.Workload)
+	} else {
+		_, err = set.PredecessorPrimary(release.Workload)
+	}
+	if err != nil {
 		return err
 	}
 	for _, item := range set.Items {

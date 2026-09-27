@@ -23,6 +23,25 @@ func TestResourceSetRequiresOrderedUniqueIdentitiesAndPrimary(t *testing.T) {
 	}
 }
 
+func TestPredecessorPrimaryValidatesHistoricalStrategyIndependently(t *testing.T) {
+	const manifest = `{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"dns-standby","namespace":"test"},"spec":{"updateStrategy":{"type":"OnDelete"}}}],"kind":"ComponentResourceSet"}`
+	set, err := DecodeResourceSet(strings.NewReader(manifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload := Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "test", Name: "dns-standby", RolloutMode: "rolling"}
+	if _, err := set.Primary(workload); err == nil {
+		t.Fatal("forward validation accepted the wrong rollout strategy")
+	}
+	if _, err := set.PredecessorPrimary(workload); err != nil {
+		t.Fatalf("historical strategy rejected: %v", err)
+	}
+	set.Items[0]["spec"].(map[string]any)["updateStrategy"].(map[string]any)["type"] = "Unknown"
+	if _, err := set.PredecessorPrimary(workload); err == nil {
+		t.Fatal("unsupported historical strategy accepted")
+	}
+}
+
 func TestResourceDesiredSubsetAllowsServerDefaultsButRejectsDesiredDrift(t *testing.T) {
 	desired := map[string]any{
 		"apiVersion": "v1", "kind": "Service",
