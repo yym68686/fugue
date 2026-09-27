@@ -104,6 +104,9 @@ class TransportTests(unittest.TestCase):
     def test_handoff_requires_same_fresh_artifact_and_proof_membership(self):
         old = self.snapshot()
         transport.validate_handoff_snapshots(old, copy.deepcopy(old), "node")
+        old_with_transient_negative = copy.deepcopy(old)
+        old_with_transient_negative["facts"][0]["ready"] = False
+        transport.validate_handoff_snapshots(old_with_transient_negative, copy.deepcopy(old), "node")
         mutations = [
             lambda x: x.update(ready=False), lambda x: x.update(node_id="other"),
             lambda x: x.update(plan_digest="sha256:"+"b"*64),
