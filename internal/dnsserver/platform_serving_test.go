@@ -115,6 +115,68 @@ func TestDNSServingTemporaryReadinessLossDoesNotPublishEmptyPositiveAnswer(t *te
 	}
 }
 
+func TestCompatibleDNSReleaseProofRequiresEquivalentPublication(t *testing.T) {
+	parent, previous := dnsServingFixture(t, true)
+	s := NewService(config.DNSConfig{DNSNodeID: "dns-a", EdgeGroupID: "edge-group-a", Zone: "example.test", BundleSigningKey: "synthetic-dns-serving-secret", BundleSigningKeyID: "key"}, nil)
+	payload, routeID, err := s.verifyDNSServingRelease(parent, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := &dnsServingState{record: dnsServingCheckpoint{Parent: parent, Candidate: previous, AppliedAt: time.Now()}, payload: payload, routeID: routeID}
+	next := previous
+	next.Release.ID = "next-release"
+	next.Release.FencingToken++
+	next.Release.ReleasedAt = time.Now().UTC()
+	bridge := &dnsReleaseBridge{parent: parent, candidate: next, payload: payload, routeID: routeID}
+	fact := dnsReadinessFact{Ready: true, ProbeID: payload.Plan.Probes[0].ID, Proof: routeprobe.Proof{TrafficRelease: &model.TrafficReleaseBinding{
+		ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: routeID,
+		PolicyDigest: next.Artifact.Metadata["policy_digest"], IntentDigest: next.Artifact.Metadata["intent_digest"],
+		InputSnapshotDigest: next.Artifact.Metadata["input_snapshot_digest"], ReleaseID: next.Release.ID,
+		ReleaseChannel: next.Release.ReleaseChannel, FencingToken: next.Release.FencingToken, ScopeKey: next.Assignment.ScopeKey,
+	}}}
+	if !compatibleDNSReleaseProof(old, fact, bridge) {
+		t.Fatal("equivalent successor proof rejected")
+	}
+	for name, change := range map[string]func(*dnsServingState, *dnsReadinessFact, *dnsReleaseBridge){
+		"plan": func(_ *dnsServingState, _ *dnsReadinessFact, b *dnsReleaseBridge) {
+			p := b.payload
+			plan := *p.Plan
+			plan.Probes = append([]platformconfig.DNSReadinessProbe(nil), plan.Probes...)
+			plan.Probes[0].RouteDigest = "changed"
+			p.Plan = &plan
+			b.payload = p
+		},
+		"answer": func(_ *dnsServingState, _ *dnsReadinessFact, b *dnsReleaseBridge) {
+			p := b.payload
+			p.Queries = append([]platformconfig.DNSQueryView(nil), p.Queries...)
+			p.Queries[0].Zone = "other.test"
+			b.payload = p
+		},
+		"policy": func(_ *dnsServingState, _ *dnsReadinessFact, b *dnsReleaseBridge) {
+			b.payload.Policy.MaxStaleSeconds++
+		},
+		"binding": func(_ *dnsServingState, f *dnsReadinessFact, _ *dnsReleaseBridge) {
+			f.Proof.TrafficRelease.ReleaseID = "foreign"
+		},
+		"replay": func(_ *dnsServingState, _ *dnsReadinessFact, b *dnsReleaseBridge) {
+			b.candidate.Release.ReleasedAt = previous.Release.ReleasedAt
+		},
+		"unready": func(_ *dnsServingState, f *dnsReadinessFact, _ *dnsReleaseBridge) {
+			f.Ready = false
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			copyBridge, copyFact := *bridge, fact
+			binding := *fact.Proof.TrafficRelease
+			copyFact.Proof.TrafficRelease = &binding
+			change(old, &copyFact, &copyBridge)
+			if compatibleDNSReleaseProof(old, copyFact, &copyBridge) {
+				t.Fatal("changed publication or invalid proof granted readiness")
+			}
+		})
+	}
+}
+
 func dnsServingFixture(t *testing.T, consumerMode ...bool) (model.PlatformArtifact, dnsPlatformCandidate) {
 	t.Helper()
 	now := time.Now().UTC()

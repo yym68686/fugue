@@ -20,7 +20,7 @@ import (
 )
 
 func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t *testing.T) {
-	for _, scenario := range []string{"parent-download", "parent-signature", "replay", "candidate-readiness", "listener", "persistence", "foreign-old-proof", "expired-checkpoint", "cancelled"} {
+	for _, scenario := range []string{"parent-download", "parent-signature", "replay", "candidate-readiness", "listener", "equivalent-successor", "persistence", "foreign-old-proof", "expired-checkpoint", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
 			parent, baseline := dnsServingFixture(t, true)
 			candidate := baseline
@@ -28,6 +28,9 @@ func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t 
 			candidate.Release.FencingToken++
 			candidate.Assignment.ArtifactReleaseID = "next"
 			candidate.Assignment.FencingToken++
+			if scenario == "equivalent-successor" {
+				candidate.Release.ReleasedAt = time.Now().UTC()
+			}
 			if scenario == "replay" {
 				candidate.Release.FencingToken = 1
 				candidate.Assignment.FencingToken = 1
@@ -100,7 +103,7 @@ func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t 
 			probe := func(_ context.Context, host, path, address, state string, _ time.Duration) (routeprobe.Proof, error) {
 				n := probes.Add(1)
 				selected := baseline
-				if (scenario == "listener" || scenario == "persistence") && n <= int32(len(p.Plan.Probes)) {
+				if scenario == "equivalent-successor" || (scenario == "listener" || scenario == "persistence") && n <= int32(len(p.Plan.Probes)) {
 					selected = candidate
 				}
 				for _, req := range p.Plan.Probes {
@@ -121,7 +124,7 @@ func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t 
 				cancel()
 			}
 			err = s.syncPlatformDNSServingOnce(ctx, probe, func(*dnsServingState) error {
-				if scenario == "listener" {
+				if scenario == "listener" || scenario == "equivalent-successor" {
 					return errors.New("candidate listener failed")
 				}
 				return nil

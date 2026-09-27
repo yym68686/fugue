@@ -18,6 +18,7 @@ import (
 
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/routeprobe"
@@ -47,6 +48,13 @@ type DNSServingStatus struct {
 	FallbackReason string              `json:"fallback_reason,omitempty"`
 	LastError      string              `json:"last_error,omitempty"`
 	ReportedAt     time.Time           `json:"reported_at,omitempty"`
+}
+
+type dnsReleaseBridge struct {
+	parent    model.PlatformArtifact
+	candidate dnsPlatformCandidate
+	payload   dnsServingPayload
+	routeID   string
 }
 
 func checkpointMAC(c dnsServingCheckpoint, key string) string {
@@ -142,12 +150,13 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	defer s.platformConsumerMu.Unlock()
 	old := s.platformServing.Load()
 	fallbackReason := "candidate_rejected"
+	var bridge *dnsReleaseBridge
 	defer func() {
 		// Rejection must not starve the retained artifact's independent probes.
 		// An applied candidate or an explicit negative readiness observation
 		// already replaced the runtime view and must not be overwritten here.
 		if syncErr != nil && ctx.Err() == nil && old != nil && s.platformServing.Load() == old {
-			s.refreshDNSServingFacts(ctx, old, probe, fallbackReason)
+			s.refreshDNSServingFacts(ctx, old, probe, fallbackReason, bridge)
 		}
 	}()
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
@@ -181,6 +190,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			return errors.New("DNS serving channel replay rejected")
 		}
 	}
+	bridge = &dnsReleaseBridge{parent: parent, candidate: candidate, payload: p, routeID: routeID}
 	// Same-release observations use only volatile fresh proof cache. Persisted
 	// checkpoint readiness is never reused after restart.
 	same := old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, a)
@@ -275,10 +285,11 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, st.facts, "", st.checkedAt, now)
 	return status.ReadyRecords == status.Records
 }
-func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string) {
+func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge) {
 	facts := collectDNSReadinessFacts(ctx, old.payload.Plan, old.payload.Policy.DNSReadiness, probe)
 	for i := range facts {
-		if !dnsProofMatchesRelease(facts[i].Proof, old.record.Parent, old.record.Candidate, old.routeID) {
+		if !dnsProofMatchesRelease(facts[i].Proof, old.record.Parent, old.record.Candidate, old.routeID) &&
+			!compatibleDNSReleaseProof(old, facts[i], bridge) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
 		}
@@ -288,6 +299,22 @@ func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingSta
 		st.fallback = reason
 		s.platformServing.Store(st)
 	}
+}
+
+// A retained DNS answer may follow an adjacent signed release only when the
+// freshly observed endpoint still serves the identical authorized route and
+// address. This does not change the retained checkpoint or renew its lease.
+func compatibleDNSReleaseProof(old *dnsServingState, fact dnsReadinessFact, bridge *dnsReleaseBridge) bool {
+	if !fact.Ready || bridge == nil || old == nil || old.payload.Plan == nil || bridge.payload.Plan == nil ||
+		!dnsProofMatchesRelease(fact.Proof, bridge.parent, bridge.candidate, bridge.routeID) ||
+		bridge.candidate.Release.ID == old.record.Candidate.Release.ID ||
+		!bridge.candidate.Release.ReleasedAt.After(old.record.Candidate.Release.ReleasedAt) {
+		return false
+	}
+	previous, next := old.payload, bridge.payload
+	previous.Generation, next.Generation = "", ""
+	previous.Lineage, next.Lineage = platformconfig.Lineage{}, platformconfig.Lineage{}
+	return reflect.DeepEqual(previous, next)
 }
 
 func probeDNSServingSnapshot(st *dnsServingState) error {
