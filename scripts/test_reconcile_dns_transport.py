@@ -113,7 +113,7 @@ class TransportTests(unittest.TestCase):
             lambda x: x["assignment"].update(expected_consumer_set_id="next"),
             lambda x: x.update(checkpoint_valid_until=x["observed_at"]),
             lambda x: x.update(evaluated_at=x["checkpoint_valid_until"]),
-            lambda x: x["facts"][0].update(ready=False),
+            lambda x: x.update(ready=False),
             lambda x: x["facts"][0]["proof"].update(valid_until=x["observed_at"]),
             lambda x: x["facts"][0]["proof"]["traffic_release"].update(fencing_token=6),
             lambda x: x["facts"].append(copy.deepcopy(x["facts"][0])),

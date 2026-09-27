@@ -177,8 +177,7 @@ def validate_handoff_snapshots(old, candidate, node_name, now=None):
         return parsed
     def digest(value):
         return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
-    for index, snapshot in enumerate([old, candidate]):
-        positive_facts_required = index == 1
+    for snapshot in [old, candidate]:
         assignment = snapshot.get("assignment", {})
         if (snapshot.get("schema") != "fugue.dns.runtime-facts/v1" or snapshot.get("node_id") != node_name or
                 not snapshot.get("edge_group_id") or snapshot.get("ready") is not True or
@@ -200,8 +199,6 @@ def validate_handoff_snapshots(old, candidate, node_name, now=None):
                 raise ValueError("DNS handoff requires unique positive proofs")
             seen.add(identity)
             if fact.get("ready") is not True:
-                if positive_facts_required:
-                    raise ValueError("DNS handoff requires unique positive proofs")
                 continue
             if not timestamp(proof["checked_at"]) <= evaluated <= now < timestamp(proof["valid_until"]):
                 raise ValueError("DNS handoff proof is expired or from the future")
