@@ -39,7 +39,8 @@ inactive path, missing DNS dependency, impossible candidate minimum, or an
 unproved cell. It does not alter the current DNS answer or Edge bundle.
 
 Platform services use explicit `owner_kind: platform` with an empty tenant ID.
-Every path must be a platform route with no application or tenant owner.
+Every path must be a `platform`, `platform-route`, or canonical
+`control-plane-*` route with no application or tenant owner.
 Omitted `owner_kind` retains the tenant grant contract and requires a tenant ID.
 This distinction lets Agent control requests obtain a hostname grant without
 inventing a tenant or admitting application routes into platform authority.
@@ -108,3 +109,35 @@ Before enabling dynamic placement or neutral-cell cutover, require an explicit
 overlap/ordering acceptance check that proves public DNS answers remain present
 through gray/full transitions and validates the exact current ReleaseSet on
 both DNS consumers. Never extend a stale proof merely to keep an answer.
+
+The DNS executor now has two staged mitigations. Temporary loss of a configured
+dynamic address returns SERVFAIL instead of cacheable NOERROR/NODATA. A retained
+positive checkpoint may consume fresh HTTPS observations from a verified newer
+release when its route proof plan and hard policy are identical. Per-record
+query authorization and selection rules must still match; changes only to
+candidate score, score breakdown, or explanatory reason may retain the old
+selection. A changed address, Edge identity, owner, weight, quorum or record
+rule is rejected. Neither the checkpoint's applied time nor a proof deadline is
+extended. Cross-release observations are not reported as successful application
+of the new release. These mitigations must pass isolated DNS observation before
+public DNS rollout; they do not complete the architecture migration.
+
+The producer's source digest excludes raw runtime scores, so a score change
+alone does not immediately trigger publication. Periodic refresh still embeds
+those observations in the DNS query view; a derived selection-mode change also
+changes policy and can trigger publication. Future placement must keep those
+ranking observations separate from endpoint authorization.
+
+Cutover prerequisites remain:
+
+- Both worker slots and public DNS consumers must understand the explicit
+  platform owner and platform route kinds before enabling signed grants.
+- Route, TLS, health, drain/quarantine and capacity observations must be bound
+  to the exact signed release; pool membership alone remains insufficient.
+- Agent endpoint authorization needs a public verification key and independently
+  managed trust anchors, followed by hostname-preserving transport selection.
+- Public DNS continuity must be verified through real gray/full refresh cycles,
+  including fail-closed behavior for changed route authorization.
+- Neutral authority-cell identities must replace country-derived identities in
+  release authority, inventory, leases and LKG before removing compatibility
+  aliases. Country labels remain optional locality or residency inputs.
