@@ -66,6 +66,21 @@ bound to exact publication, hostname, audience and absolute expiration. An
 authenticated API response or a healthy TLS endpoint alone is not a replacement
 for that candidate authorization.
 
+The `agentedge` package stages the client-side boundary without changing the
+running AgentService. Ed25519 grants bind one runtime audience, canonical HTTPS
+origin, exact traffic publication and route requirements, cell/host diversity,
+signed selection policy and original evidence deadlines. Verification accepts
+only independently provisioned public keys and rejects replay, equivocation,
+unknown fields, duplicate JSON keys, revoked trust and expired observations.
+Selection uses measured latency, independent standby cells, consecutive winning
+rounds and cooldown; duplicate or mixed-grant observations do not advance it.
+The selected HTTP client preserves Host, SNI and certificate verification,
+rejects other origins, disables redirects and does not replay a mutating request
+after a lost response. Requests and response reads cannot outlive the grant.
+Issuance from current authenticated facts, trust provisioning, AgentService
+integration and production activation are separate remaining steps. Neither
+this library nor the public discovery bundle enables dynamic selection alone.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh
