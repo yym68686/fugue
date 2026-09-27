@@ -141,7 +141,18 @@ func (s *Service) loadDNSServingCache() (bool, error) {
 }
 
 func (s *Service) SyncPlatformDNSServingOnce(ctx context.Context) error {
-	return s.syncPlatformDNSServingOnce(ctx, routeprobe.Probe, s.probeDNSServingListener)
+	return s.syncPlatformDNSServing(ctx, routeprobe.Probe, s.probeDNSServingListener)
+}
+
+func (s *Service) syncPlatformDNSServing(ctx context.Context, probe dnsReadinessProbeFunc, wireProbe func(*dnsServingState) error) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		err = s.syncPlatformDNSServingOnce(ctx, probe, wireProbe)
+		if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || ctx.Err() != nil {
+			return err
+		}
+	}
+	return err
 }
 
 func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadinessProbeFunc, wireProbe func(*dnsServingState) error) (syncErr error) {
@@ -151,6 +162,13 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	fallbackReason := "candidate_rejected"
 	var bridge *dnsReleaseBridge
 	defer func() {
+		// An assignment race invalidates this observation, including the bridge
+		// just downloaded. Do not replace still-valid serving facts with probes
+		// checked against that superseded publication. The bounded outer retry
+		// rereads authority; existing proof deadlines continue to expire normally.
+		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) {
+			return
+		}
 		// Rejection must not starve the retained artifact's independent probes.
 		// An applied candidate or an explicit negative readiness observation
 		// already replaced the runtime view and must not be overwritten here.
@@ -227,6 +245,12 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		return err
 	}
 	if !dnsServingReady(st, now) {
+		// Negative observations also belong to an exact assignment. A publisher
+		// may advance while probing, so check authority before replacing any
+		// previously positive facts or refreshing with this candidate's bridge.
+		if err = client.CheckServingAssignment(ctx, id, a); err != nil {
+			return err
+		}
 		if same {
 			st.record = old.record
 			st.fallback = "readiness_incomplete"

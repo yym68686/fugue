@@ -28,6 +28,10 @@ type Client struct {
 
 var ErrNoServingAssignment = errors.New("no serving traffic assignment")
 
+// ErrAssignmentChanged identifies a publication race, not negative serving
+// evidence. Consumers may reread the assignment before observing again.
+var ErrAssignmentChanged = errors.New("platform assignment changed during observation")
+
 func (c Client) SyncServing(ctx context.Context, component, nodeID, scope, kind string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
 	return c.syncChannel(ctx, component, nodeID, scope, kind, "serving")
 }
@@ -137,13 +141,13 @@ func (c Client) checkAssignment(ctx context.Context, identity Identity, assignme
 	for _, item := range current.Assignments {
 		if item.ScopeKey == assignment.ScopeKey && item.ArtifactKind == assignment.ArtifactKind && item.ReleaseChannel == assignment.ReleaseChannel {
 			if !reflect.DeepEqual(item, assignment) {
-				return errors.New("platform assignment changed during observation")
+				return ErrAssignmentChanged
 			}
 			matches++
 		}
 	}
 	if matches != 1 {
-		return errors.New("platform assignment changed during observation")
+		return ErrAssignmentChanged
 	}
 	return nil
 }
