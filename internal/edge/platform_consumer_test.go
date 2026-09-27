@@ -18,6 +18,7 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/config"
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -25,7 +26,7 @@ import (
 )
 
 func TestEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T) {
-	for _, scenario := range []string{"legacy", "query strategy", "compiled placement", "compiled placement and cache", "compiled domain TLS"} {
+	for _, scenario := range []string{"legacy", "query strategy", "compiled placement", "compiled placement and cache", "compiled domain TLS", "shadow Edge selection"} {
 		t.Run(scenario, func(t *testing.T) {
 			testEdgePlatformShadowPreservesServingAndChecksBindings(t, scenario)
 		})
@@ -87,6 +88,39 @@ func testEdgePlatformShadowPreservesServingAndChecksBindings(t *testing.T, scena
 		request.Intent.TLS = []platformconfig.TLSIntent{{Hostname: route.Hostname, Policy: "custom-domain", AppID: route.AppID, TenantID: route.TenantID, DomainRef: "domain-ref"}}
 		original := request.RuntimeSnapshot.CapturedAt.Add(-24 * time.Hour)
 		request.RuntimeSnapshot.TLSDomains = []platformconfig.TLSDomainObservation{{Ref: "domain-ref", Hostname: route.Hostname, AppID: route.AppID, TenantID: route.TenantID, Status: "verified", TLSStatus: "ready", VerifiedAt: &original, TLSReadyAt: &original}}
+	}
+	if scenario == "shadow Edge selection" {
+		route := &request.Intent.Routes[0]
+		route.AppID, route.TenantID = "app", "tenant"
+		request.Intent.EdgeTopology = &edgetopology.Intent{
+			SchemaVersion: edgetopology.SchemaVersion,
+			Cells:         []edgetopology.AuthorityCell{{ID: "cell-a", LegacyGroupID: "edge-group-test"}},
+			Pools:         []edgetopology.ServingPool{{ID: "pool-public"}},
+			Edges: []edgetopology.Edge{
+				{ID: "edge-a", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "host-a"}},
+				{ID: "edge-b", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "host-b"}},
+			},
+		}
+		request.Intent.DNS = []platformconfig.DNSIntent{{Hostname: route.Hostname, AppID: "app", TenantID: "tenant", Type: "FUGUE_APP", Values: []string{"app"}, TTL: 60, Application: &platformconfig.DNSApplicationIntent{IPv4Policy: "ipv4_only", IPv6Policy: "ipv4_only", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}}
+		request.Policy.DNSReadiness = &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 120, MaxConcurrency: 2, MaxProbes: 16}
+		request.Policy.EdgeSelectionConstraints = []platformconfig.EdgeSelectionConstraint{{TenantID: "tenant", Hostname: route.Hostname, AllowedPoolIDs: []string{"pool-public"}, RequiredCapabilities: []string{"http", "tls"}, MinCandidates: 2, FactMaxAgeSeconds: 60}}
+		compiledRoutes, err := platformconfig.ResolveRouteOrigins(request.Intent.Routes, request.RuntimeSnapshot, request.Policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compiledRoutes, err = platformconfig.ApplyRoutePolicyConstraints(compiledRoutes, request.Policy, request.RuntimeSnapshot.CapturedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest, err := platformconfig.DNSPlacementInputDigest(request.Intent.DNS[0], compiledRoutes, request.Policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		captured := *request.RuntimeSnapshot.CapturedAt
+		request.RuntimeSnapshot.DNSPlacements = []platformconfig.DNSPlacementObservation{{InputDigest: digest, CheckedAt: captured, Status: "resolved", TargetTTL: 60, Candidates: []platformconfig.DNSPlacementCandidate{
+			{EdgeID: "edge-a", EdgeGroupID: "edge-group-test", ServingGeneration: "serving", ObservedAt: captured, ValidUntil: captured.Add(time.Minute), Healthy: true, RouteReady: true, TLSReady: true, A: []string{"8.8.8.8"}},
+			{EdgeID: "edge-b", EdgeGroupID: "edge-group-test", ServingGeneration: "serving", ObservedAt: captured, ValidUntil: captured.Add(time.Minute), Healthy: true, RouteReady: true, TLSReady: true, A: []string{"8.8.4.4"}},
+		}}}
 	}
 	compiled, err := platformconfig.Compile(request)
 	if err != nil {

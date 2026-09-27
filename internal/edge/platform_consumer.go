@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fugue/internal/bundleauth"
+	"fugue/internal/edgetopology"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -232,13 +233,14 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 }
 
 type platformRouteCandidatePayload struct {
-	Schema        string                         `json:"schema_version"`
-	Generation    string                         `json:"generation"`
-	Routes        []platformconfig.CompiledRoute `json:"routes"`
-	CachePolicies []model.CachePolicy            `json:"cache_policies,omitempty"`
-	TLSAllowlist  []model.EdgeTLSAllowlistEntry  `json:"tls_allowlist,omitempty"`
-	Policy        platformconfig.PolicySnapshot  `json:"policy"`
-	Lineage       platformconfig.Lineage         `json:"lineage"`
+	EdgeSelectionGrants []edgetopology.RouteGrant      `json:"edge_selection_grants,omitempty"`
+	Schema              string                         `json:"schema_version"`
+	Generation          string                         `json:"generation"`
+	Routes              []platformconfig.CompiledRoute `json:"routes"`
+	CachePolicies       []model.CachePolicy            `json:"cache_policies,omitempty"`
+	TLSAllowlist        []model.EdgeTLSAllowlistEntry  `json:"tls_allowlist,omitempty"`
+	Policy              platformconfig.PolicySnapshot  `json:"policy"`
+	Lineage             platformconfig.Lineage         `json:"lineage"`
 }
 
 func (s *Service) verifyPlatformRouteCandidate(artifact model.PlatformArtifact, assignment model.PlatformConsumerAssignment, release model.PlatformArtifactRelease) (payload platformRouteCandidatePayload, err error) {
