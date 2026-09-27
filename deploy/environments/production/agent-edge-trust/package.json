@@ -1,0 +1,22 @@
+{
+  "apiVersion": "trust.fugue.dev/v1",
+  "kind": "AgentEdgeTrust",
+  "namespace": "fugue-system",
+  "signingSecret": "fugue-agent-edge-signing",
+  "trustConfigMap": "fugue-agent-edge-trust",
+  "expectedPreviousGeneration": 0,
+  "expectedPreviousTrustDigest": "",
+  "publicTrust": {
+    "schema": "fugue.agent-edge-trust/v1",
+    "generation": 1,
+    "keys": [
+      {
+        "key_id": "agent-control-root-1",
+        "public_key": "G9WXyBCOwOoActW0WzMaLC1s8OgD7ZOI0Q06q5b2Swc",
+        "not_before": "2026-09-27T19:49:05Z",
+        "not_after": "2027-09-27T19:50:05Z",
+        "revoked": false
+      }
+    ]
+  }
+}

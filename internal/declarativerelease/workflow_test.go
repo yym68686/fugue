@@ -48,12 +48,28 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_trust", "audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "observability_configuration", "postgres_protection", "prepush", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	agentTrust := yamlMappingValue(t, jobs, "agent_edge_trust")
+	for _, key := range yamlMappingKeys(t, agentTrust) {
+		if key == "needs" {
+			t.Fatal("Agent trust recovery must not depend on a serving component build")
+		}
+	}
+	trustSource, err := yaml.Marshal(agentTrust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if yamlMappingValue(t, agentTrust, "environment").Value != "production" ||
+		!strings.Contains(string(trustSource), "secrets.FUGUE_AGENT_EDGE_SIGNING_KEYRING") ||
+		!strings.Contains(string(trustSource), "scripts/reconcile_agent_edge_trust.py") ||
+		!strings.Contains(string(trustSource), "--check") || strings.Contains(string(trustSource), " generate ") {
+		t.Fatal("Agent trust requires explicit encrypted material, independent reconciliation and read-back; no implicit root generation")
+	}
 	dnsTransport := yamlMappingValue(t, jobs, "dns_transport")
 	for _, key := range yamlMappingKeys(t, dnsTransport) {
 		if key == "needs" {

@@ -95,6 +95,26 @@ with explicit generations, key lifetimes and revocations. API signing reads
 and production activation remain separate steps. Installing this API code does
 not activate a policy or change existing Agent, DNS or business traffic.
 
+Agent trust is declared in
+`deploy/environments/production/agent-edge-trust/package.json`. The independent
+`agent_edge_trust` CI lane validates the encrypted production environment secret
+`FUGUE_AGENT_EDGE_SIGNING_KEYRING` against that public declaration, then writes
+the public ConfigMap and private Secret using generation and Kubernetes
+UID/resourceVersion guards. It runs independently of component builds and does
+not restart workloads or publish selection policy. A partial write can resume
+at the same generation; drift, replay and replacement of foreign resources are
+rejected. API mounts the Secret as an optional, read-only projected directory,
+so missing trust cannot prevent the API from serving its existing configuration.
+
+Generate a new root only through the explicit `fugue-agent-edge-keyring generate`
+command, with an absolute private output path, key ID, generation and absolute
+validity dates. It refuses to overwrite an existing private file and prints only
+the public projection. Rotation first distributes a keyring containing both old
+and new public keys, then publishes a new policy selecting the new key. Keep the
+old public key until its grants have expired; removal or revocation is another
+explicit higher-generation trust declaration. Neither API requests nor this CI
+reconciler can manufacture a replacement root.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh

@@ -75,6 +75,55 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  agent_edge_trust:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-agent-edge-trust, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select current independent trust declaration
+        id: trust
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/agent-edge-trust/package.json
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_agent_edge_trust.py scripts/test_reconcile_agent_edge_trust.py cmd/fugue-agent-edge-keyring internal/agentedge/keyring.go; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_agent_edge_trust.py cmd/fugue-agent-edge-keyring internal/agentedge/keyring.go; then
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Setup independent trust validator
+        if: steps.trust.outputs.selected == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Validate reconciliation and key handling
+        if: steps.trust.outputs.selected == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_reconcile_agent_edge_trust
+          go test ./cmd/fugue-agent-edge-keyring
+          go build -trimpath -o "$RUNNER_TEMP/fugue-agent-edge-keyring" ./cmd/fugue-agent-edge-keyring
+      - name: Reconcile explicit private and public trust configuration
+        if: steps.trust.outputs.selected == 'true'
+        env:
+          FUGUE_AGENT_EDGE_SIGNING_KEYRING: ${{ secrets.FUGUE_AGENT_EDGE_SIGNING_KEYRING }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/agent-edge-trust/package.json
+          python3 scripts/reconcile_agent_edge_trust.py "$config" --validator "$RUNNER_TEMP/fugue-agent-edge-keyring"
+          python3 scripts/reconcile_agent_edge_trust.py "$config" --validator "$RUNNER_TEMP/fugue-agent-edge-keyring" --check
+
   dns_transport:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
