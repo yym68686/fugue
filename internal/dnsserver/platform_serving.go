@@ -18,7 +18,6 @@ import (
 
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
-	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/routeprobe"
@@ -287,9 +286,10 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 }
 func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge) {
 	facts := collectDNSReadinessFacts(ctx, old.payload.Plan, old.payload.Policy.DNSReadiness, probe)
+	bridgeAllowed := compatibleDNSReleaseProbes(old, bridge)
 	for i := range facts {
 		if !dnsProofMatchesRelease(facts[i].Proof, old.record.Parent, old.record.Candidate, old.routeID) &&
-			!compatibleDNSReleaseProof(old, facts[i], bridge) {
+			!(bridgeAllowed[facts[i].ProbeID] && facts[i].Ready && dnsProofMatchesRelease(facts[i].Proof, bridge.parent, bridge.candidate, bridge.routeID)) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
 		}
@@ -299,22 +299,6 @@ func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingSta
 		st.fallback = reason
 		s.platformServing.Store(st)
 	}
-}
-
-// A retained DNS answer may follow an adjacent signed release only when the
-// freshly observed endpoint still serves the identical authorized route and
-// address. This does not change the retained checkpoint or renew its lease.
-func compatibleDNSReleaseProof(old *dnsServingState, fact dnsReadinessFact, bridge *dnsReleaseBridge) bool {
-	if !fact.Ready || bridge == nil || old == nil || old.payload.Plan == nil || bridge.payload.Plan == nil ||
-		!dnsProofMatchesRelease(fact.Proof, bridge.parent, bridge.candidate, bridge.routeID) ||
-		bridge.candidate.Release.ID == old.record.Candidate.Release.ID ||
-		!bridge.candidate.Release.ReleasedAt.After(old.record.Candidate.Release.ReleasedAt) {
-		return false
-	}
-	previous, next := old.payload, bridge.payload
-	previous.Generation, next.Generation = "", ""
-	previous.Lineage, next.Lineage = platformconfig.Lineage{}, platformconfig.Lineage{}
-	return reflect.DeepEqual(previous, next)
 }
 
 func probeDNSServingSnapshot(st *dnsServingState) error {

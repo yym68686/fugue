@@ -134,7 +134,7 @@ func TestCompatibleDNSReleaseProofRequiresEquivalentPublication(t *testing.T) {
 		InputSnapshotDigest: next.Artifact.Metadata["input_snapshot_digest"], ReleaseID: next.Release.ID,
 		ReleaseChannel: next.Release.ReleaseChannel, FencingToken: next.Release.FencingToken, ScopeKey: next.Assignment.ScopeKey,
 	}}}
-	if !compatibleDNSReleaseProof(old, fact, bridge) {
+	if !compatibleDNSReleaseProbes(old, bridge)[fact.ProbeID] || !dnsProofMatchesRelease(fact.Proof, bridge.parent, bridge.candidate, bridge.routeID) {
 		t.Fatal("equivalent successor proof rejected")
 	}
 	for name, change := range map[string]func(*dnsServingState, *dnsReadinessFact, *dnsReleaseBridge){
@@ -170,7 +170,7 @@ func TestCompatibleDNSReleaseProofRequiresEquivalentPublication(t *testing.T) {
 			binding := *fact.Proof.TrafficRelease
 			copyFact.Proof.TrafficRelease = &binding
 			change(old, &copyFact, &copyBridge)
-			if compatibleDNSReleaseProof(old, copyFact, &copyBridge) {
+			if compatibleDNSReleaseProbes(old, &copyBridge)[copyFact.ProbeID] && copyFact.Ready && dnsProofMatchesRelease(copyFact.Proof, copyBridge.parent, copyBridge.candidate, copyBridge.routeID) {
 				t.Fatal("changed publication or invalid proof granted readiness")
 			}
 		})
