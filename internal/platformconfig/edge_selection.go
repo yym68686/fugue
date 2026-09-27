@@ -16,6 +16,11 @@ import (
 var edgeSelectionID = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 var edgeSelectionHostname = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`)
 
+func PlatformServiceRouteKind(kind string) bool {
+	return kind == model.EdgeRouteKindPlatform || kind == model.EdgeRouteKindPlatformRoute ||
+		(strings.HasPrefix(kind, "control-plane-") && len(kind) <= 128 && edgeSelectionID.MatchString(kind))
+}
+
 // EdgeSelectionConstraint is signed policy for one public hostname. It does
 // not choose an Edge or change the currently published DNS answer.
 type EdgeSelectionConstraint struct {
@@ -113,7 +118,7 @@ func CompileEdgeSelectionGrants(intent PlatformIntent, policy PolicySnapshot, ro
 			return nil, fmt.Errorf("Edge selection hostname %q lacks complete route or freshness policy", c.Hostname)
 		}
 		for _, route := range hostRoutes {
-			if route.TenantID != c.TenantID || c.OwnerKind == "platform" && (route.RouteKind != model.EdgeRouteKindPlatform || route.AppID != "") || route.OriginStatus != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || c.MinCandidates < route.MinHealthyEdgeNodes {
+			if route.TenantID != c.TenantID || c.OwnerKind == "platform" && (!PlatformServiceRouteKind(route.RouteKind) || route.AppID != "") || route.OriginStatus != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) || c.MinCandidates < route.MinHealthyEdgeNodes {
 				return nil, fmt.Errorf("Edge selection hostname %q has a foreign or inactive path", c.Hostname)
 			}
 		}

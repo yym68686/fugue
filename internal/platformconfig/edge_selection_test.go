@@ -184,6 +184,18 @@ func TestPlatformServiceGrantCannotAuthorizeTenantOrAppRoutes(t *testing.T) {
 	if json.Unmarshal(raw, &grants) != nil || len(grants) != 1 || grants[0].OwnerKind != "platform" || grants[0].TenantID != "" {
 		t.Fatal("platform service owner was not preserved")
 	}
+	for _, kind := range []string{model.EdgeRouteKindPlatformRoute, model.EdgeRouteKindControlPlaneAPI, "control-plane-mesh"} {
+		t.Run(kind, func(t *testing.T) {
+			r := fixture()
+			for i := range r.Intent.Routes {
+				r.Intent.Routes[i].Kind = kind
+			}
+			rebindPlacement(&r)
+			if _, err := Compile(r); err != nil {
+				t.Fatalf("platform service subtype rejected: %v", err)
+			}
+		})
+	}
 	for name, mutate := range map[string]func(*CompileRequest){
 		"tenant owner":       func(r *CompileRequest) { r.Intent.Routes[0].TenantID = "tenant-a" },
 		"app owner":          func(r *CompileRequest) { r.Intent.Routes[0].AppID = "app-a" },

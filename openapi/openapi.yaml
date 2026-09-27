@@ -16783,7 +16783,7 @@ components:
           type: string
         route_kind:
           type: string
-          enum: [platform, custom-domain, platform-domain, platform-route, control-plane-api]
+          pattern: '^(platform|custom-domain|platform-domain|platform-route|control-plane-[a-z][a-z0-9]*(?:-[a-z0-9]+)*)$'
         app_id:
           type: string
         tenant_id:
@@ -16958,7 +16958,7 @@ components:
           type: string
         route_kind:
           type: string
-          enum: [platform, custom-domain, platform-domain, platform-route, control-plane-api]
+          pattern: '^(platform|custom-domain|platform-domain|platform-route|control-plane-[a-z][a-z0-9]*(?:-[a-z0-9]+)*)$'
         app_id:
           type: string
         tenant_id:
