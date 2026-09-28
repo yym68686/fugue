@@ -11,6 +11,20 @@ def fixture():
 
 
 class FrontObservationTests(unittest.TestCase):
+    def test_read_retries_only_failed_transport_with_bounded_attempts(self):
+        from types import SimpleNamespace
+        failed = SimpleNamespace(returncode=1, stdout="")
+        valid = SimpleNamespace(returncode=0, stdout='{"generation":2}')
+        with patch.object(front.subprocess, "run", side_effect=[failed, valid]) as run, patch.object(front.time, "sleep"):
+            self.assertEqual(front.read("get", "pod", "one"), {"generation": 2})
+            self.assertEqual(run.call_count, 2)
+        with patch.object(front.subprocess, "run", return_value=failed) as run, patch.object(front.time, "sleep"), self.assertRaises(ValueError):
+            front.read("get", "pod", "one")
+        self.assertEqual(run.call_count, 3)
+        with patch.object(front.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="corrupt")) as run, self.assertRaises(ValueError):
+            front.read("get", "pod", "one")
+        self.assertEqual(run.call_count, 1)
+
     def test_declaration_is_explicit_bounded_and_cannot_name_same_front(self):
         config = fixture()
         front.validate(config)

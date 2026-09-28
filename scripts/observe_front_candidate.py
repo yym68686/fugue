@@ -32,10 +32,21 @@ def timestamp(value):
 
 
 def read(*args):
-    result = subprocess.run(["kubectl", *args], capture_output=True, text=True, timeout=20)
-    if result.returncode or len(result.stdout) > 4 << 20:
-        raise ValueError("Front observation unavailable")
-    return json.loads(result.stdout)
+    # Read-only transport failures may be retried; the caller still compares
+    # Pod identity and activation before and after the complete observation.
+    # Invalid returned data is never replaced with an earlier successful read.
+    for attempt in range(3):
+        try:
+            result = subprocess.run(["kubectl", *args], capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            result = None
+        if result is not None and result.returncode == 0:
+            if len(result.stdout) > 4 << 20:
+                raise ValueError("Front observation exceeds size bound")
+            return json.loads(result.stdout)
+        if attempt < 2:
+            time.sleep(1)
+    raise ValueError("Front observation unavailable after bounded read attempts")
 
 
 def validate(config):

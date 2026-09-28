@@ -1,0 +1,12 @@
+{
+  "schema": "fugue.front-serving-stage/v1",
+  "generation": 1,
+  "namespace": "fugue-system",
+  "services": [
+    {
+      "name": "fugue-front-serving-public-a",
+      "observation": "deploy/environments/production/front-observation/public-a.json",
+      "probeListener": "fugue-front-probe-public-a"
+    }
+  ]
+}
