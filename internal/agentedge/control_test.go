@@ -371,6 +371,40 @@ func TestControlAcquisitionPreservesOriginAuthAndDoesNotFollowRedirects(t *testi
 	}
 }
 
+func TestControlRecoversMissingStandbyOnProbeCadenceWithoutRenewingOldLease(t *testing.T) {
+	m, g, private, _, now := controlFixture(t)
+	g.ValidUntil = now.Add(90 * time.Second)
+	for i := range g.Candidates {
+		g.Candidates[i].EvidenceValidUntil = now.Add(120 * time.Second)
+	}
+	all := append([]Candidate(nil), g.Candidates...)
+	g.Candidates = g.Candidates[:1]
+	fetches := 0
+	m.fetch = func(context.Context, string) ([]byte, error) {
+		fetches++
+		return encodeGrant(t, g, private), nil
+	}
+	if err := m.Step(context.Background()); err != nil || !m.Status().Degraded || m.Status().Primary == "" {
+		t.Fatal("explicitly permitted single-cell grant failed", m.Status(), err)
+	}
+	deadline := m.refreshAt
+	originalExpiry := m.Status().ValidUntil
+	for i := 0; i < g.Policy.ProbeIntervalSeconds-1; i++ {
+		*now = now.Add(time.Second)
+		if err := m.Step(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fetches != 1 || m.refreshAt != deadline || m.Status().ValidUntil != originalExpiry {
+		t.Fatal("degraded retry spun, moved its deadline or renewed old evidence")
+	}
+	*now = now.Add(time.Second)
+	g.Candidates, g.IssuedAt = all, *now
+	if err := m.Step(context.Background()); err != nil || fetches != 2 || m.Status().Degraded || len(m.Status().Standbys) != 1 {
+		t.Fatal("standby did not rejoin on next probe cadence", m.Status(), err)
+	}
+}
+
 func TestControlLocalProofRequiresExactAuthorityAndOriginalLease(t *testing.T) {
 	m, g, _, _, now := controlFixture(t)
 	c := g.Candidates[0]

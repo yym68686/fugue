@@ -178,6 +178,7 @@ func (m *Control) acceptGrant(raw []byte, measured ...Round) error {
 		}
 		m.lastProbe = measured[0].ObservedAt
 		m.refreshAt = v.signed.Grant.IssuedAt.Add(v.signed.Grant.ValidUntil.Sub(v.signed.Grant.IssuedAt) / 2)
+		m.refreshDegradedSooner(v.signed.Grant, keys)
 		return nil
 	}
 	// Persist the replay floor and activation latch before changing transport.
@@ -292,6 +293,7 @@ func (m *Control) Step(ctx context.Context) error {
 			if probeErr == nil {
 				_, probeErr = m.selector.Observe(round, keys, m.now())
 				m.lastProbe = round.ObservedAt
+				m.refreshDegradedSooner(g, keys)
 				for _, measurement := range round.Measurements {
 					if measurement.Disqualified {
 						m.refreshAt = time.Time{}
@@ -301,6 +303,20 @@ func (m *Control) Step(ctx context.Context) error {
 		}
 	}
 	return errors.Join(trustErr, fetchErr, permissionErr, probeErr)
+}
+
+// A temporarily missing independent standby must not wait half the grant lease
+// before it can rejoin. Retry on the signed probe cadence while preserving the
+// current grant's absolute expiry and measured primary. Do not postpone an
+// earlier retry or repeatedly reset the deadline on every Step.
+func (m *Control) refreshDegradedSooner(g Grant, keys map[string]TrustKey) {
+	choice, err := m.selector.Current(keys, m.now())
+	if err == nil && choice.Degraded {
+		next := m.now().Add(time.Duration(g.Policy.ProbeIntervalSeconds) * time.Second)
+		if next.Before(m.refreshAt) {
+			m.refreshAt = next
+		}
+	}
 }
 
 func (m *Control) measure(ctx context.Context, v VerifiedGrant) (Round, error) {
