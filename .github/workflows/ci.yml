@@ -356,7 +356,7 @@ jobs:
       - name: Attribute held connections to the original and candidate Front
         if: steps.transport.outputs.selected == 'true'
         run: |
-          python3 -m unittest scripts.test_front_connection_witness
+          python3 -m unittest scripts.test_front_connection_witness scripts.test_read_front_conntrack
           python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-held-connections.json"
       - name: Retain held Front connection evidence
         if: steps.transport.outputs.selected == 'true'

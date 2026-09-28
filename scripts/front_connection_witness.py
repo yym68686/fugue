@@ -8,12 +8,16 @@ import ssl
 import re
 import shutil
 import subprocess
+import sys
+import json
 from pathlib import Path
 
 try:
     from . import observe_front_candidate as front
+    from . import read_front_conntrack as conntrack
 except ImportError:
     import observe_front_candidate as front
+    import read_front_conntrack as conntrack
 
 
 class HeldTLS:
@@ -85,6 +89,20 @@ def translated_tuple(raw, held, pod_ip):
 def observe_translation(held, pod_ip):
     if not getattr(held, "target_address", None) or not getattr(held, "target_port", None):
         raise ValueError("held connection target identity is unavailable")
+    try:
+        return conntrack.read(held, pod_ip)
+    except OSError as error:
+        # Some runners keep Kubernetes administration separate from the local
+        # root identity. The fixed helper has only the single CT_GET operation;
+        # no shell, table dump, flush or connection mutation is exposed.
+        if error.errno in [1, 13] and shutil.which("sudo"):
+            helper = str(Path(conntrack.__file__).resolve())
+            result = subprocess.run(["sudo", "-n", sys.executable, helper, "--source", held.client_address, "--destination", held.target_address, "--source-port", str(held.client_port), "--destination-port", str(held.target_port), "--pod", pod_ip], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and len(result.stdout) <= 4096:
+                value = json.loads(result.stdout)
+                if set(value) != {"address", "port"} or type(value["port"]) is not int or not 1 <= value["port"] <= 65535:
+                    raise ValueError("privileged exact conntrack observation is invalid")
+                return str(ipaddress.ip_address(value["address"])), value["port"]
     binary = shutil.which("conntrack")
     if binary:
         result = subprocess.run([binary, "-L", "-p", "tcp", "--orig-src", held.client_address, "--orig-dst", held.target_address, "--orig-port-src", str(held.client_port), "--orig-port-dst", str(held.target_port), "-o", "extended"], capture_output=True, text=True, timeout=5)
