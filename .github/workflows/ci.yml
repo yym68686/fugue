@@ -381,6 +381,7 @@ jobs:
           python3 -m unittest scripts.test_observe_front_public_probe
           python3 scripts/observe_front_public_probe.py deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-external-observation.json"
       - name: Retain external Front observations
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: fugue-front-external-observation-${{ github.run_id }}-${{ github.run_attempt }}
@@ -506,6 +507,7 @@ jobs:
       - name: Verify public Front ingress after the handoff from outside the cluster
         run: python3 scripts/observe_front_public_probe.py deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-public-external.json"
       - name: Retain independent public Front acceptance
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: fugue-front-public-external-${{ github.run_id }}-${{ github.run_attempt }}
@@ -552,7 +554,7 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- scripts/observe_front_drain.py scripts/test_observe_front_drain.py deploy/environments/production/front-serving-handoff; then
+          if ! git diff --quiet "$base" HEAD -- scripts/observe_front_drain.py scripts/test_observe_front_drain.py scripts/stage_front_serving_transport.py scripts/observe_front_public_probe.py deploy/environments/production/front-serving-handoff; then
             git fetch origin main
             if git diff --quiet HEAD origin/main -- scripts/observe_front_drain.py scripts/stage_front_serving_transport.py scripts/handoff_front_serving_transport.py scripts/front_connection_witness.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-serving-handoff deploy/environments/production/front-observation; then
               python3 -m unittest scripts.test_observe_front_drain
