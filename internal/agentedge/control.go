@@ -147,7 +147,7 @@ func (m *Control) reloadTrust() error {
 	return nil
 }
 
-func (m *Control) acceptGrant(raw []byte) error {
+func (m *Control) acceptGrant(raw []byte, measured ...Round) error {
 	m.mu.RLock()
 	c := m.checkpoint
 	keys := m.keys
@@ -163,6 +163,23 @@ func (m *Control) acceptGrant(raw []byte) error {
 	c.LastGrant = &v.signed
 	c.Cells = maps.Clone(v.cellWatermarks)
 	c.Activated = c.Activated || v.signed.Grant.Mode == "active"
+	if len(measured) == 1 {
+		err = m.selector.installObserved(raw, keys, m.options.Audience, m.options.Origin, measured[0], m.now(), func(VerifiedGrant) error {
+			if err := writeCheckpoint(m.options.CheckpointFile, c); err != nil {
+				return err
+			}
+			m.mu.Lock()
+			m.checkpoint = c
+			m.mu.Unlock()
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		m.lastProbe = measured[0].ObservedAt
+		m.refreshAt = v.signed.Grant.IssuedAt.Add(v.signed.Grant.ValidUntil.Sub(v.signed.Grant.IssuedAt) / 2)
+		return nil
+	}
 	// Persist the replay floor and activation latch before changing transport.
 	if err = writeCheckpoint(m.options.CheckpointFile, c); err != nil {
 		return err
@@ -242,7 +259,24 @@ func (m *Control) Step(ctx context.Context) error {
 		}
 		raw, err := m.fetch(ctx, hint)
 		if err == nil {
-			err = m.acceptGrant(raw)
+			// Verify before any candidate dial, then stage fresh measurements
+			// while the selected client continues to use the positive grant.
+			m.mu.RLock()
+			c := m.checkpoint
+			m.mu.RUnlock()
+			var previous VerifiedGrant
+			if c.LastGrant != nil {
+				previous = VerifiedGrant{signed: *c.LastGrant, cellWatermarks: c.Cells}
+			}
+			next, verifyErr := Verify(raw, keys, m.options.Audience, m.options.Origin, &previous, m.now())
+			err = verifyErr
+			if err == nil {
+				var round Round
+				round, err = m.measure(ctx, next)
+				if err == nil {
+					err = m.acceptGrant(raw, round)
+				}
+			}
 		}
 		fetchErr = err
 		if err != nil {
@@ -253,26 +287,8 @@ func (m *Control) Step(ctx context.Context) error {
 	if permissionErr == nil {
 		g := v.View()
 		if m.lastProbe.IsZero() || m.now().Sub(m.lastProbe) >= time.Duration(g.Policy.ProbeIntervalSeconds)*time.Second {
-			round := Round{GrantDigest: v.Digest(), ObservedAt: m.now(), Measurements: make([]Measurement, len(g.Candidates))}
-			ctx, cancel := context.WithDeadline(ctx, g.ValidUntil)
-			var wg sync.WaitGroup
-			sem := make(chan struct{}, 4)
-			for i, candidate := range g.Candidates {
-				wg.Add(1)
-				go func(i int, candidate Candidate) {
-					defer wg.Done()
-					select {
-					case sem <- struct{}{}:
-						defer func() { <-sem }()
-					case <-ctx.Done():
-						return
-					}
-					round.Measurements[i] = m.probe(ctx, g, candidate)
-				}(i, candidate)
-			}
-			wg.Wait()
-			probeErr = ctx.Err()
-			cancel()
+			var round Round
+			round, probeErr = m.measure(ctx, v)
 			if probeErr == nil {
 				_, probeErr = m.selector.Observe(round, keys, m.now())
 				m.lastProbe = round.ObservedAt
@@ -285,6 +301,30 @@ func (m *Control) Step(ctx context.Context) error {
 		}
 	}
 	return errors.Join(trustErr, fetchErr, permissionErr, probeErr)
+}
+
+func (m *Control) measure(ctx context.Context, v VerifiedGrant) (Round, error) {
+	g := v.View()
+	round := Round{GrantDigest: v.Digest(), ObservedAt: m.now(), Measurements: make([]Measurement, len(g.Candidates))}
+	ctx, cancel := context.WithDeadline(ctx, g.ValidUntil)
+	defer cancel()
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for i, candidate := range g.Candidates {
+		wg.Add(1)
+		go func(i int, candidate Candidate) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			round.Measurements[i] = m.probe(ctx, g, candidate)
+		}(i, candidate)
+	}
+	wg.Wait()
+	return round, ctx.Err()
 }
 
 func (m *Control) probeCandidate(ctx context.Context, g Grant, c Candidate) Measurement {

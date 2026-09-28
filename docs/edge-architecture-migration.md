@@ -118,6 +118,12 @@ silently reset an existing checkpoint to a valid native connection. Authenticate
 negative route proofs disqualify a local candidate immediately; transient absence
 uses the signed failure threshold. Grant expiration or an unmet hard floor blocks
 control requests after activation instead of selecting an unauthorized endpoint.
+Renewal probes the new signed candidates before installing them. The selector
+atomically replaces the permission and its validated measurements only after
+the new checkpoint is durable. Failed replacement probes retain the previous
+positive grant to its original expiry; authenticated negative proofs still
+disqualify the affected endpoint immediately. This avoids an unmeasured interval
+between accepting a new route publication and the next periodic probe round.
 Explicitly publishing a shadow policy after activation pauses selected requests;
 it does not grant an implicit native bypass. Production Agent opt-in, real fleet
 observations and active-policy publication remain rollout steps. Installing this

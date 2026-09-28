@@ -252,6 +252,92 @@ func TestControlMissingInitializedCheckpointFailsClosed(t *testing.T) {
 	}
 }
 
+func TestControlStagesRenewalWithoutExposingAnUnmeasuredPermission(t *testing.T) {
+	m, g, private, _, now := controlFixture(t)
+	if err := m.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	g = activateControl(t, m, g, private, now)
+	old, err := m.selector.Current(m.currentKeys(), *now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(11 * time.Second)
+	next := cloneGrant(g)
+	next.IssuedAt = *now
+	for i := range next.Candidates {
+		next.Candidates[i].RouteDigests = []string{"sha256:" + strings.Repeat("b", 64)}
+		next.Candidates[i].Publication.ReleaseID = "next-release"
+		next.Candidates[i].Publication.PublishedAt = *now
+		next.Candidates[i].Publication.FencingToken++
+	}
+	raw := encodeGrant(t, next, private)
+	m.fetch = func(context.Context, string) ([]byte, error) { return raw, nil }
+	m.refreshAt = time.Time{}
+	entered, release := make(chan struct{}, len(next.Candidates)), make(chan struct{})
+	m.probe = func(_ context.Context, _ Grant, c Candidate) Measurement {
+		entered <- struct{}{}
+		<-release
+		return Measurement{EdgeID: c.EdgeID, Address: c.Address, Success: true, Latency: time.Millisecond}
+	}
+	done := make(chan error, 1)
+	go func() { done <- m.Step(context.Background()) }()
+	<-entered
+	during, err := m.selector.Current(m.currentKeys(), *now)
+	if err != nil || during.GrantDigest != old.GrantDigest {
+		close(release)
+		<-done
+		t.Fatal("probing replacement displaced positive measured permission", during, err)
+	}
+	close(release)
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	after, err := m.selector.Current(m.currentKeys(), *now)
+	if err != nil || after.GrantDigest == old.GrantDigest || after.Primary.EdgeID == "" {
+		t.Fatal("atomic renewal did not publish fresh measurements with its grant", after, err)
+	}
+	checkpoint, _, err := readCheckpoint(m.options.CheckpointFile, g.Audience, g.Origin)
+	if err != nil || checkpoint.LastGrant.Digest != after.GrantDigest {
+		t.Fatal("measured activation outran durable grant", err)
+	}
+}
+
+func TestFailedReplacementKeepsPositiveGrantOnlyToOriginalExpiry(t *testing.T) {
+	m, g, private, _, now := controlFixture(t)
+	if err := m.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	g = activateControl(t, m, g, private, now)
+	old, err := m.selector.Current(m.currentKeys(), *now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(time.Second)
+	next := cloneGrant(g)
+	next.IssuedAt = *now
+	for i := range next.Candidates {
+		next.Candidates[i].RouteDigests = []string{"sha256:" + strings.Repeat("b", 64)}
+	}
+	raw := encodeGrant(t, next, private)
+	m.fetch = func(context.Context, string) ([]byte, error) { return raw, nil }
+	m.refreshAt = time.Time{}
+	m.probe = func(_ context.Context, _ Grant, c Candidate) Measurement {
+		return Measurement{EdgeID: c.EdgeID, Address: c.Address}
+	}
+	if err = m.Step(context.Background()); err == nil {
+		t.Fatal("failed replacement appeared successful")
+	}
+	current, err := m.selector.Current(m.currentKeys(), *now)
+	if err != nil || current.GrantDigest != old.GrantDigest || current.ValidUntil != old.ValidUntil {
+		t.Fatal("failed new probes revoked or renewed positive LKG", current, err)
+	}
+	*now = old.ValidUntil
+	if _, err = m.selector.Current(m.currentKeys(), *now); err == nil {
+		t.Fatal("failed replacement renewed old grant expiration")
+	}
+}
+
 func TestControlAcquisitionPreservesOriginAuthAndDoesNotFollowRedirects(t *testing.T) {
 	m, g, private, _, _ := controlFixture(t)
 	raw := encodeGrant(t, g, private)

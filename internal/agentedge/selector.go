@@ -88,15 +88,20 @@ func (s *Selector) Install(raw []byte, keys map[string]TrustKey, audience, origi
 }
 
 func (s *Selector) Observe(round Round, keys map[string]TrustKey, now time.Time) (Choice, error) {
+	return s.observe(round, keys, now, true)
+}
+
+func (s *Selector) observe(round Round, keys map[string]TrustKey, now time.Time, enforceInterval bool) (Choice, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.grant.Live(keys, now) {
 		return Choice{}, errors.New("no live Agent Edge permission")
 	}
 	g := s.grant.signed.Grant
+	newRound := s.lastRound.IsZero() || round.ObservedAt.Sub(s.lastRound) >= time.Duration(g.Policy.ProbeIntervalSeconds)*time.Second
 	if round.GrantDigest != s.grant.Digest() || round.ObservedAt.IsZero() || round.ObservedAt.After(now) ||
 		round.ObservedAt.Before(g.IssuedAt) || !round.ObservedAt.After(s.lastRound) ||
-		!s.lastRound.IsZero() && round.ObservedAt.Sub(s.lastRound) < time.Duration(g.Policy.ProbeIntervalSeconds)*time.Second ||
+		enforceInterval && !newRound ||
 		now.Sub(round.ObservedAt) > time.Duration(g.Policy.FactMaxAgeSeconds)*time.Second || len(round.Measurements) != len(g.Candidates) {
 		return Choice{}, errors.New("Agent Edge measurements are stale, replayed or belong to another grant")
 	}
@@ -135,7 +140,44 @@ func (s *Selector) Observe(round Round, keys map[string]TrustKey, now time.Time)
 		s.observations[m.EdgeID] = o
 	}
 	s.lastRound = round.ObservedAt
-	return s.choose(now, true)
+	return s.choose(now, newRound)
+}
+
+// installObserved replaces authorization and measured eligibility together.
+// The caller probes before entering this critical section; failed staging or
+// persistence leaves the previous positive grant at its original expiry.
+func (s *Selector) installObserved(raw []byte, keys map[string]TrustKey, audience, origin string, round Round, now time.Time, persist func(VerifiedGrant) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	staged := &Selector{grant: s.grant, observations: maps.Clone(s.observations), lastRound: s.lastRound, primary: s.primary, primarySince: s.primarySince, reason: s.reason, challenger: s.challenger, betterRounds: s.betterRounds}
+	if err := staged.Install(raw, keys, audience, origin, now); err != nil {
+		return err
+	}
+	if _, err := staged.observe(round, keys, now, false); err != nil {
+		// Authenticated negative evidence cannot retain eligibility merely
+		// because the replacement failed its hard floor.
+		for _, m := range round.Measurements {
+			if !m.Disqualified {
+				continue
+			}
+			for _, c := range s.grant.signed.Grant.Candidates {
+				if c.EdgeID == m.EdgeID && c.Address == m.Address {
+					if o, exists := s.observations[c.EdgeID]; exists {
+						o.failures = s.grant.signed.Grant.Policy.FailureThreshold
+						s.observations[c.EdgeID] = o
+					}
+				}
+			}
+		}
+		return err
+	}
+	if err := persist(staged.grant); err != nil {
+		return err
+	}
+	s.grant, s.observations, s.lastRound = staged.grant, staged.observations, staged.lastRound
+	s.primary, s.primarySince, s.reason = staged.primary, staged.primarySince, staged.reason
+	s.challenger, s.betterRounds = staged.challenger, staged.betterRounds
+	return nil
 }
 
 // Current rechecks expiry, current trust and measured liveness without making
