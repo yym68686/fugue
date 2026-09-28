@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 )
@@ -610,7 +611,7 @@ func runtimeByID(state *model.State, id string) (model.Runtime, bool) {
 }
 
 func edgeGroupIDForRuntime(runtimeObj model.Runtime) string {
-	if edgeGroupID := firstRuntimeLabelValue(runtimeObj.Labels, runtimepkg.EdgeGroupIDLabelKey, "edge_group_id", "edgeGroupID"); strings.HasPrefix(edgeGroupID, "edge-group-") {
+	if edgeGroupID := firstRuntimeLabelValue(runtimeObj.Labels, runtimepkg.EdgeGroupIDLabelKey, "edge_group_id", "edgeGroupID"); edgetopology.ValidAuthorityID(edgeGroupID) {
 		return edgeGroupID
 	}
 	return ""

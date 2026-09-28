@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"fugue/internal/bundleauth"
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -2080,7 +2081,7 @@ func normalizeManagedSharedLocationLabels(labels map[string]string) map[string]s
 	} else if value := strings.TrimSpace(labels[runtimepkg.RegionLabelKey]); value != "" {
 		normalized[runtimepkg.RegionLabelKey] = value
 	}
-	if value := strings.TrimSpace(labels[runtimepkg.EdgeGroupIDLabelKey]); strings.HasPrefix(value, "edge-group-") {
+	if value := strings.TrimSpace(labels[runtimepkg.EdgeGroupIDLabelKey]); edgetopology.ValidAuthorityID(value) {
 		normalized[runtimepkg.EdgeGroupIDLabelKey] = value
 	}
 	if len(normalized) == 0 {

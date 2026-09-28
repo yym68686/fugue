@@ -367,3 +367,28 @@ traffic promotion. The exact connection inventory is checked again immediately
 before deletion. Configuration-only LKG recovery can still switch authority
 without waiting for code replacement; its retained executor remains protected
 by the deletion gate.
+
+A neutral identity change now has a bounded local planning command:
+
+```sh
+go run ./cmd/fugue-edge-topology -topology previous.json -next-topology next.json
+```
+
+The plan binds the complete previous and next topology digests, exactly one
+cell's old and new authority IDs, and its unchanged Edge IDs. It rejects
+concurrent pool, capability, risk, locality or placement changes and any
+second cell transition. The output explicitly grants no traffic authority.
+It is input preparation for the signed artifact and runtime migration, never
+a replacement for that migration's evidence or a command to rewrite live state.
+
+The remaining cutover must establish a neutral candidate without changing the
+flat Edge inventory projection. Both new and retained authorities may observe
+the same stable Edge ID while only the selected authority may publish its
+serving projection. Neutral route, DNS and TLS cohorts must be explicitly bound
+to the signed TrafficReleaseSet before the new control process may fetch route
+intent. A label change or unsigned snapshot copy cannot provide this grant.
+Public Front transport is now independent, but the Fronts still read the
+legacy group activation. The target authority needs independently scoped keys,
+leases, inventory, current/LKG artifacts and equivalent route proofs before
+its transport can be selected. Source authority remains recoverable through
+the overlap and retained connections.

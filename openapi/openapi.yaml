@@ -7,6 +7,15 @@ info:
     Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
 servers:
   - url: /
+x-fugue-authority-identity-labels:
+  semantics: >-
+    Explicit runtime authority labels accept canonical edge-group-* and cell-*
+    identities. HTTP route derivation, managed-shared runtime label retention
+    and SSH routing preserve the same explicit authority ID. These identities
+    do not derive a country or region, and labels alone never authorize serving,
+    grant candidate eligibility or migrate existing authority. Invalid authority
+    labels retain the existing absent-label behavior. Traffic publication,
+    authenticated inventory, original leases and verified LKG remain independent.
 x-fugue-dns-readiness:
   endpoint: GET /readyz on the DNS node HTTP listener
   response_schema: '#/components/schemas/DNSListenerReadiness'

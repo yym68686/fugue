@@ -17,6 +17,13 @@ const SchemaVersion = "edge-topology/v1"
 // semantics; callers must verify exact signed scope and current authority.
 const AuthorityIDPattern = `^(?:edge-group-|cell-)[a-z0-9]+(?:-[a-z0-9]+)*$`
 
+var authorityIDPattern = regexp.MustCompile(AuthorityIDPattern)
+
+// ValidAuthorityID validates an opaque authority scope; it does not derive locality.
+func ValidAuthorityID(value string) bool {
+	return len(value) <= 128 && authorityIDPattern.MatchString(value)
+}
+
 var identityPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 
 // Intent describes placement and shared risk. Endpoints, health, loaded

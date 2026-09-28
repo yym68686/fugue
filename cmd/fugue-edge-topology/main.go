@@ -15,6 +15,7 @@ import (
 
 func main() {
 	topologyPath := flag.String("topology", "deploy/edge/topology.json", "edge topology intent")
+	nextTopologyPath := flag.String("next-topology", "", "optional single-cell identity transition preview; authorizes no traffic")
 	discoveryURL := flag.String("discovery", "", "optional read-only DiscoveryBundle URL")
 	flag.Parse()
 	file, err := os.Open(*topologyPath)
@@ -25,6 +26,28 @@ func main() {
 	_ = file.Close()
 	if err != nil {
 		fail(err)
+	}
+	if *nextTopologyPath != "" {
+		if *discoveryURL != "" {
+			fail(errors.New("identity transition planning and live discovery auditing are separate operations"))
+		}
+		file, err := os.Open(*nextTopologyPath)
+		if err != nil {
+			fail(err)
+		}
+		next, err := edgetopology.Decode(file)
+		_ = file.Close()
+		if err != nil {
+			fail(err)
+		}
+		plan, err := edgetopology.PlanCellTransition(intent, next)
+		if err != nil {
+			fail(err)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(plan); err != nil {
+			fail(err)
+		}
+		return
 	}
 	if *discoveryURL == "" {
 		fmt.Printf("validated %d cells, %d pools, %d edges\n", len(intent.Cells), len(intent.Pools), len(intent.Edges))

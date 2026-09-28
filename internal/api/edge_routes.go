@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	runtimepkg "fugue/internal/runtime"
@@ -1150,7 +1151,7 @@ func edgeNodeHasRouteState(node model.EdgeNode) bool {
 
 func edgeGroupIDFromEdgeID(edgeID string) string {
 	edgeID = strings.TrimSpace(edgeID)
-	if strings.HasPrefix(edgeID, "edge-group-") {
+	if edgetopology.ValidAuthorityID(edgeID) {
 		return edgeID
 	}
 	return ""
@@ -1168,7 +1169,7 @@ func derivedEdgeGroupIDForRuntime(runtimeObj model.Runtime, runtimeFound bool, n
 
 func derivedEdgeGroupIDForLabels(labels map[string]string) string {
 	if edgeGroupID := firstRuntimeLabelValue(labels, runtimepkg.EdgeGroupIDLabelKey, "edge_group_id", "edgeGroupID"); edgeGroupID != "" {
-		if strings.HasPrefix(edgeGroupID, "edge-group-") {
+		if edgetopology.ValidAuthorityID(edgeGroupID) {
 			return edgeGroupID
 		}
 	}
