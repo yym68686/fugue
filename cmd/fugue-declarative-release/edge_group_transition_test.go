@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,96 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
+
+func TestExactFrontConnectionCountRequiresCompleteUniqueInventory(t *testing.T) {
+	active := []any{map[string]any{"id": "conn-a"}, map[string]any{"id": "conn-b"}}
+	if count, ok := exactFrontConnectionCount(map[string]any{"count": int64(2), "active": active}); !ok || count != 2 {
+		t.Fatalf("complete inventory was rejected: count=%d ok=%t", count, ok)
+	}
+	for name, value := range map[string]map[string]any{
+		"count mismatch": {"count": int64(1), "active": active},
+		"duplicate id":   {"count": int64(2), "active": []any{map[string]any{"id": "conn-a"}, map[string]any{"id": "conn-a"}}},
+		"missing id":     {"count": int64(1), "active": []any{map[string]any{}}},
+		"wrong active":   {"count": int64(0), "active": "not-a-list"},
+		"missing count":  {"active": []any{}},
+		"invalid count":  {"count": "bad", "active": []any{}},
+		"null count":     {"count": nil, "active": []any{}},
+		"fraction":       {"count": json.Number("0.5"), "active": []any{}},
+		"overflow":       {"count": json.Number("9999999999999999999999"), "active": []any{}},
+	} {
+		if count, ok := exactFrontConnectionCount(value); ok {
+			t.Fatalf("%s accepted incomplete inventory: count=%d", name, count)
+		}
+	}
+	if count, ok := exactFrontConnectionCount(map[string]any{"count": int64(0), "active": []any{}}); !ok || count != 0 {
+		t.Fatalf("empty inventory was rejected: count=%d ok=%t", count, ok)
+	}
+}
+
+func TestReadEdgeFrontConnectionCountFailsClosedOnObserverFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/edge/tcp-connections" {
+			t.Fatalf("unexpected path %s", request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"count":0,"active":[]}`))
+	}))
+	defer server.Close()
+	host, rawPort, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster := &kubectlCluster{}
+	count, err := cluster.readEdgeFrontConnectionCount(context.Background(), edgeGroupPod{Name: "front", PodIP: host, HealthPort: port})
+	if err != nil || count != 0 {
+		t.Fatalf("healthy observer: count=%d err=%v", count, err)
+	}
+	server.Close()
+	if _, err := cluster.readEdgeFrontConnectionCount(context.Background(), edgeGroupPod{Name: "front", PodIP: host, HealthPort: port}); err == nil {
+		t.Fatal("observer failure was not fail-closed")
+	}
+}
+
+func TestFrontDeletionRequiresObservedZeroConnections(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		deleted    bool
+	}{
+		{"active", `{"count":1,"active":[{"id":"held-connection"}]}`, 200, false},
+		{"incomplete", `{"count":1,"active":[]}`, 200, false},
+		{"unavailable", `{}`, 503, false},
+		{"empty", `{"count":0,"active":[]}`, 200, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			host, rawPort, _ := net.SplitHostPort(server.Listener.Addr().String())
+			port, _ := strconv.Atoi(rawPort)
+			pod := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": "front", "namespace": "test-system", "uid": "front-uid", "resourceVersion": "42"},
+			}}
+			client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), pod)
+			err := (&kubectlCluster{}).deleteDrainedEdgeFrontPod(context.Background(), client, "test-system", edgeGroupPod{Name: "front", UID: "front-uid", ResourceVersion: "42", PodIP: host, HealthPort: port})
+			deleted := false
+			for _, action := range client.Actions() {
+				if action.GetVerb() == "delete" {
+					deleted = true
+				}
+			}
+			if deleted != tc.deleted || (err == nil) != tc.deleted {
+				t.Fatalf("deletion=%t error=%v; wanted deletion=%t", deleted, err, tc.deleted)
+			}
+		})
+	}
+}
 
 func TestReadEdgeCandidateStageStatusAcceptsFullAuthorityResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

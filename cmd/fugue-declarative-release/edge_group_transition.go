@@ -2441,6 +2441,71 @@ func (cluster *kubectlCluster) readEdgeFrontHealth(ctx context.Context, pod edge
 	return health, nil
 }
 
+// readEdgeFrontConnectionCount is a deletion gate for the legacy Front
+// executor. A public Service handoff may move new connections to a candidate
+// while the old hostPort executor still owns long-lived connections. The
+// release controller must observe an exact, complete inventory before it can
+// delete that executor; any observer failure fails closed.
+func (cluster *kubectlCluster) readEdgeFrontConnectionCount(ctx context.Context, pod edgeGroupPod) (int, error) {
+	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, IP: pod.PodIP, Port: pod.HealthPort}, "/edge/tcp-connections")
+	if err != nil {
+		return 0, fmt.Errorf("read Front connection inventory for Pod/%s: %w", pod.Name, err)
+	}
+	value, err := decodeJSONObject(body)
+	if err != nil {
+		return 0, fmt.Errorf("decode Front connection inventory for Pod/%s: %w", pod.Name, err)
+	}
+	count, ok := exactFrontConnectionCount(value)
+	if !ok {
+		return 0, fmt.Errorf("Front connection inventory for Pod/%s is incomplete", pod.Name)
+	}
+	return count, nil
+}
+
+func exactFrontConnectionCount(value map[string]any) (int, bool) {
+	rawCount, ok := value["count"]
+	if !ok {
+		return 0, false
+	}
+	var parsed int64
+	switch value := rawCount.(type) {
+	case json.Number:
+		var err error
+		parsed, err = value.Int64()
+		if err != nil {
+			return 0, false
+		}
+	case int64:
+		parsed = value
+	default:
+		return 0, false
+	}
+	if parsed < 0 || parsed > 16384 {
+		return 0, false
+	}
+	count := int(parsed)
+	active, ok := value["active"].([]any)
+	if !ok || len(active) != count {
+		return 0, false
+	}
+	seen := make(map[string]struct{}, count)
+	for _, raw := range active {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return 0, false
+		}
+		id := strings.TrimSpace(stringValue(item["id"]))
+		if id == "" {
+			return 0, false
+		}
+		if _, exists := seen[id]; exists {
+			return 0, false
+		}
+		seen[id] = struct{}{}
+	}
+	return count, true
+}
+
 func (cluster *kubectlCluster) rollEdgeDaemonSet(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error) {
 	return cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, name, target, true, false, nil)
 }
@@ -2482,7 +2547,12 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 		if edgePodMatchesTarget(pod, target) && (!replaceUnready || pod.Ready && (!includeHealth || edgePodHasGroupAuthority(pod))) {
 			continue
 		}
-		if err := deleteEdgePodExact(ctx, client, release.Workload.Namespace, pod); err != nil {
+		if name == transition.FrontName {
+			err = cluster.deleteDrainedEdgeFrontPod(ctx, client, release.Workload.Namespace, pod)
+		} else {
+			err = deleteEdgePodExact(ctx, client, release.Workload.Namespace, pod)
+		}
+		if err != nil {
 			return nil, err
 		}
 		if _, err := cluster.waitEdgePodTarget(ctx, release, transition, name, container, node, pod.UID, target, includeHealth, requireGroupAuthority, progress); err != nil {
@@ -2494,6 +2564,17 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 
 func edgeRollIncludesWorkerHealth(transition declarativerelease.EdgeGroupABTransition, name string) bool {
 	return name != transition.FrontName
+}
+
+func (cluster *kubectlCluster) deleteDrainedEdgeFrontPod(ctx context.Context, client dynamic.Interface, namespace string, pod edgeGroupPod) error {
+	count, err := cluster.readEdgeFrontConnectionCount(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("refuse to replace Front Pod/%s before complete connection observation: %w", pod.Name, err)
+	}
+	if count != 0 {
+		return fmt.Errorf("refuse to replace Front Pod/%s while %d active connections remain", pod.Name, count)
+	}
+	return deleteEdgePodExact(ctx, client, namespace, pod)
 }
 
 func deleteEdgePodExact(ctx context.Context, client dynamic.Interface, namespace string, pod edgeGroupPod) error {
