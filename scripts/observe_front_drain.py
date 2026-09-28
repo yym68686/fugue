@@ -45,6 +45,7 @@ def observe(config, samples=3, interval=10):
         selected = serving(config, staging, service, profile)
         old = front.pod(profile, profile['legacySelector'], False)
         candidate = front.pod(profile, profile['candidateSelector'], True)
+        endpoint = stage.selected_endpoint_witness(staging, service, profile, candidate, selected)
         current_ids = (selected['metadata']['uid'], old['metadata']['uid'], candidate['metadata']['uid'])
         if old['metadata']['uid'] == candidate['metadata']['uid'] or identities is not None and current_ids != identities:
             raise ValueError('Front identities changed during drain observation')
@@ -63,7 +64,7 @@ def observe(config, samples=3, interval=10):
                 latest = front.pod(profile, selector, is_candidate)
                 if latest['metadata']['uid'] != observed['metadata']['uid'] or latest['spec'] != observed['spec']:
                     raise ValueError('Front executor changed during drain observation')
-            records.append({'at': front.now().isoformat(), 'old_front_uid': old['metadata']['uid'], 'old_connections': inventory, 'public_connection': fact, 'service_uid': selected['metadata']['uid'], 'service_version': selected['metadata']['resourceVersion']})
+            records.append({'at': front.now().isoformat(), 'old_front_uid': old['metadata']['uid'], 'old_connections': inventory, 'public_connection': fact, 'endpoint': endpoint, 'service_uid': selected['metadata']['uid'], 'service_version': selected['metadata']['resourceVersion']})
         finally:
             held.close()
         if index+1 < samples:

@@ -64,6 +64,14 @@ def validate_existing(current, target):
 def endpoint_witness(config, service, profile, candidate):
     current = probe.kubectl("get", "service", service["name"], "-n", config["namespace"], "-o", "json")
     validate_existing(current, desired(config, service, profile))
+    return selected_endpoint_witness(config, service, profile, candidate, current)
+
+
+def selected_endpoint_witness(config, service, profile, candidate, current):
+    # Local traffic policy does not isolate every in-cluster externalIP path.
+    # Require the entire Service endpoint set to contain this one executor.
+    if current["metadata"].get("name") != service["name"] or current["metadata"].get("namespace") != config["namespace"] or not current["metadata"].get("uid") or not current["metadata"].get("resourceVersion"):
+        raise ValueError("Front endpoint observation has a different Service identity")
     slices = front.read("get", "endpointslices", "-n", config["namespace"], "-l", "kubernetes.io/service-name=" + service["name"], "-o", "json")
     if slices.get("metadata", {}).get("continue"):
         raise ValueError("Front endpoint observation incomplete")
@@ -75,8 +83,9 @@ def endpoint_witness(config, service, profile, candidate):
         if {(p.get("name"), p.get("protocol"), p.get("port")) for p in item.get("ports", [])} != {("http", "TCP", 80), ("https", "TCP", 443)}:
             raise ValueError("Front endpoint ports differ from declared listeners")
         for endpoint in item.get("endpoints", []):
-            if endpoint.get("nodeName") == profile["node"]:
-                local.append(endpoint)
+            if endpoint.get("nodeName") != profile["node"]:
+                raise ValueError("Front Service includes an endpoint on another node")
+            local.append(endpoint)
     if len(local) != 1:
         raise ValueError("exactly one local Front endpoint required")
     endpoint = local[0]

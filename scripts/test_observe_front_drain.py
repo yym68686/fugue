@@ -27,7 +27,7 @@ class FrontDrainTests(unittest.TestCase):
                     return out
                 socket=SimpleNamespace(proof=lambda _: {'edge':'node-a','group':'cell-a'},close=lambda: None)
                 inventories=[{'count':1 if failure=='existing connection' else 0,'connection_ids':['active'] if failure=='existing connection' else []},{'count':0,'connection_ids':[]},{'count':0,'connection_ids':[]}]
-                with patch.object(drain.handoff,'load_stage',return_value=({}, {}, profile)),patch.object(drain,'serving',side_effect=serving),patch.object(drain.front,'pod',side_effect=pod),patch.object(drain.connection,'HeldTLS',return_value=socket),patch.object(drain.connection,'fact',return_value={'pod_uid':'new','connection_id':'fresh'}),patch.object(drain,'connections',side_effect=inventories),patch.object(drain.time,'sleep'):
+                with patch.object(drain.handoff,'load_stage',return_value=({}, {}, profile)),patch.object(drain,'serving',side_effect=serving),patch.object(drain.front,'pod',side_effect=pod),patch.object(drain.connection,'HeldTLS',return_value=socket),patch.object(drain.connection,'fact',return_value={'pod_uid':'new','connection_id':'fresh'}),patch.object(drain,'connections',side_effect=inventories),patch.object(drain.stage,'selected_endpoint_witness',return_value={'pod_uid':'new'}),patch.object(drain.time,'sleep'):
                     if failure in ['recreated','transport changed']:
                         with self.assertRaises(ValueError):drain.observe(config)
                     else:

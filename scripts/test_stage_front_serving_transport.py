@@ -54,7 +54,7 @@ class InternalFrontStageTests(unittest.TestCase):
         value, p, current = config(), profile(), service()
         candidate = {"metadata": {"uid": "pod-one", "name": "candidate"}, "status": {"podIP": "10.0.0.2"}}
         base = {"items": [{"metadata": {"ownerReferences": [{"kind": "Service", "uid": "service-one", "controller": True}]}, "ports": [{"name": "http", "protocol": "TCP", "port": 80}, {"name": "https", "protocol": "TCP", "port": 443}], "endpoints": [{"nodeName": "node-a", "addresses": ["10.0.0.2"], "conditions": {"ready": True}, "targetRef": {"kind": "Pod", "uid": "pod-one", "name": "candidate", "namespace": "test-system"}}]}]}
-        for bad in [None, "owner", "pod", "node", "ready", "terminating", "ports", "duplicate", "truncated"]:
+        for bad in [None, "owner", "pod", "node", "ready", "terminating", "ports", "duplicate", "remote extra", "foreign service", "truncated"]:
             observed = copy.deepcopy(base)
             item = observed["items"][0]
             endpoint = item["endpoints"][0]
@@ -65,8 +65,11 @@ class InternalFrontStageTests(unittest.TestCase):
             if bad == "terminating": endpoint["conditions"]["terminating"] = True
             if bad == "ports": item["ports"][1]["port"] = 8443
             if bad == "duplicate": item["endpoints"].append(copy.deepcopy(endpoint))
+            if bad == "remote extra": item["endpoints"].append(dict(copy.deepcopy(endpoint), nodeName="node-b"))
+            selected_current = copy.deepcopy(current)
+            if bad == "foreign service": selected_current["metadata"]["name"] = "foreign"
             if bad == "truncated": observed["metadata"] = {"continue": "next"}
-            with self.subTest(bad=bad), patch.object(stage.probe, "kubectl", return_value=current), patch.object(stage.front, "read", return_value=observed):
+            with self.subTest(bad=bad), patch.object(stage.probe, "kubectl", return_value=selected_current), patch.object(stage.front, "read", return_value=observed):
                 if bad:
                     with self.assertRaises(ValueError): stage.endpoint_witness(value, value["services"][0], p, candidate)
                 else:
