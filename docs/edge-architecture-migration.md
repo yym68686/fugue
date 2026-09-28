@@ -241,6 +241,14 @@ and the node's current TCP listeners, then uses generation and UID/resourceVersi
 guards. After creation, the public probe port must return the same freshly
 authenticated HTTPS route proof as the candidate Pod. This tests the transport
 path without changing the production listeners or deleting either Front.
+An independent hosted runner also probes the listener from outside the cluster;
+cluster-local routing alone cannot establish external ingress. Before public
+handoff, an internal-only Service stages ports 80/443 with no external address.
+Its EndpointSlice must identify the exact Ready candidate Pod on the declared
+node. A separate held-connection witness uses one verified TLS socket for
+repeated nonce proofs and matches its exact client tuple to the Front's active
+connection ID. It cannot reconnect after a closed socket. This establishes the
+observation needed to test existing connection preservation during handoff.
 
 Before each cutover, verify the exact previous positive LKG, route and TLS
 proof for the target hostname, DNS ownership, cell health, and the other cell's

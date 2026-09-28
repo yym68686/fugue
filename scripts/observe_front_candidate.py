@@ -117,28 +117,32 @@ def proof(address, host, path, port=443):
         certificate_until = datetime.datetime.fromtimestamp(ssl.cert_time_to_seconds(conn.sock.getpeercert()["notAfter"]), datetime.timezone.utc)
         conn.request("HEAD", path, headers={"Host": host, "X-Fugue-Route-Probe": "1", "X-Fugue-Route-Probe-Nonce": nonce})
         response = conn.getresponse()
-        headers = response.getheaders()
-        def exact(name):
-            values = [v for k, v in headers if k.lower() == name.lower()]
-            if len(values) != 1 or not values[0] or values[0] != values[0].strip():
-                raise ValueError("ambiguous or missing Front route proof")
-            return values[0]
-        if response.status != 204 or exact("X-Fugue-Route-Probe-Nonce") != nonce or exact("Cache-Control") != "no-store" or any(k.lower() == "x-fugue-route-probe-state" for k, _ in headers):
-            raise ValueError("Front route proof is not fresh positive evidence")
-        expiry = min(timestamp(exact("X-Fugue-Route-Valid-Until")), certificate_until)
-        digest = exact("X-Fugue-Route-Proof")
-        if expiry <= now() + datetime.timedelta(seconds=15) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-            raise ValueError("Front proof lease or digest is invalid")
-        traffic = exact("X-Fugue-Traffic-Release")
-        if len(traffic) > 8192:
-            raise ValueError("Front traffic binding exceeds limit")
-        binding = json.loads(base64.urlsafe_b64decode(traffic + "=" * (-len(traffic) % 4)))
-        if not binding.get("release_id") or type(binding.get("fencing_token")) is not int or binding["fencing_token"] <= 0 or binding.get("release_channel") not in ["gray", "full"]:
-            raise ValueError("Front traffic publication is missing")
-        return {"digest": digest, "version": exact("X-Fugue-Route-Bundle-Version"), "edge": exact("X-Fugue-Route-Edge-Id"), "group": exact("X-Fugue-Route-Edge-Group"), "traffic": binding, "app_traffic": response.getheader("X-Fugue-App-Traffic-Proof", "")}
+        return parse_proof(response, nonce, certificate_until)
     finally:
         conn.close()
         raw.close()
+
+
+def parse_proof(response, nonce, certificate_until):
+    headers = response.getheaders()
+    def exact(name):
+        values = [v for k, v in headers if k.lower() == name.lower()]
+        if len(values) != 1 or not values[0] or values[0] != values[0].strip():
+            raise ValueError("ambiguous or missing Front route proof")
+        return values[0]
+    if response.status != 204 or exact("X-Fugue-Route-Probe-Nonce") != nonce or exact("Cache-Control") != "no-store" or any(k.lower() == "x-fugue-route-probe-state" for k, _ in headers):
+        raise ValueError("Front route proof is not fresh positive evidence")
+    expiry = min(timestamp(exact("X-Fugue-Route-Valid-Until")), certificate_until)
+    digest = exact("X-Fugue-Route-Proof")
+    if expiry <= now() + datetime.timedelta(seconds=15) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("Front proof lease or digest is invalid")
+    traffic = exact("X-Fugue-Traffic-Release")
+    if len(traffic) > 8192:
+        raise ValueError("Front traffic binding exceeds limit")
+    binding = json.loads(base64.urlsafe_b64decode(traffic + "=" * (-len(traffic) % 4)))
+    if not binding.get("release_id") or type(binding.get("fencing_token")) is not int or binding["fencing_token"] <= 0 or binding.get("release_channel") not in ["gray", "full"]:
+        raise ValueError("Front traffic publication is missing")
+    return {"digest": digest, "version": exact("X-Fugue-Route-Bundle-Version"), "edge": exact("X-Fugue-Route-Edge-Id"), "group": exact("X-Fugue-Route-Edge-Group"), "traffic": binding, "app_traffic": response.getheader("X-Fugue-App-Traffic-Proof", "")}
 
 
 def observe(config):

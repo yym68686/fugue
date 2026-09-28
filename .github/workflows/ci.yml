@@ -332,7 +332,7 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_front_probe_transport.py scripts/test_reconcile_front_probe_transport.py; then
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_front_probe_transport.py scripts/test_reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/test_front_connection_witness.py; then
             git fetch origin main
             if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_front_probe_transport.py scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
               python3 -m unittest scripts.test_observe_front_candidate scripts.test_reconcile_front_probe_transport
@@ -353,6 +353,19 @@ jobs:
       - name: Apply and verify isolated Front probe listener
         if: steps.transport.outputs.selected == 'true'
         run: python3 scripts/reconcile_front_probe_transport.py apply deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-probe-transport.json"
+      - name: Attribute held connections to the original and candidate Front
+        if: steps.transport.outputs.selected == 'true'
+        run: |
+          python3 -m unittest scripts.test_front_connection_witness
+          python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-held-connections.json"
+      - name: Retain held Front connection evidence
+        if: steps.transport.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-held-connections-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-held-connections.json
+          if-no-files-found: error
+          retention-days: 30
 
   front_external_observation:
     needs: [front_probe_transport]
