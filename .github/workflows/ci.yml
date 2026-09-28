@@ -341,7 +341,7 @@ jobs:
           fi
       - name: Prepare observed Front probe transport
         if: steps.transport.outputs.selected == 'true'
-        run: python3 scripts/reconcile_front_probe_transport.py prepare deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-primary --evidence "$RUNNER_TEMP/front-probe-transport.json"
+        run: python3 scripts/reconcile_front_probe_transport.py prepare deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-secondary --evidence "$RUNNER_TEMP/front-probe-transport.json"
       - name: Retain Front probe witness before network changes
         if: steps.transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -352,12 +352,12 @@ jobs:
           retention-days: 30
       - name: Apply and verify isolated Front probe listener
         if: steps.transport.outputs.selected == 'true'
-        run: python3 scripts/reconcile_front_probe_transport.py apply deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-primary --evidence "$RUNNER_TEMP/front-probe-transport.json"
+        run: python3 scripts/reconcile_front_probe_transport.py apply deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-secondary --evidence "$RUNNER_TEMP/front-probe-transport.json"
       - name: Attribute held connections to the original and candidate Front
         if: steps.transport.outputs.selected == 'true'
         run: |
           python3 -m unittest scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
-          python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-primary --evidence "$RUNNER_TEMP/front-held-connections.json"
+          python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-secondary --evidence "$RUNNER_TEMP/front-held-connections.json"
       - name: Retain held Front connection evidence
         if: steps.transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -419,7 +419,7 @@ jobs:
           fi
       - name: Prepare observed internal Front transport
         if: steps.transport.outputs.selected == 'true'
-        run: python3 scripts/stage_front_serving_transport.py prepare deploy/environments/production/front-serving-stage/services.json --service fugue-front-serving-public-b-primary --evidence "$RUNNER_TEMP/front-serving-stage.json"
+        run: python3 scripts/stage_front_serving_transport.py prepare deploy/environments/production/front-serving-stage/services.json --service fugue-front-serving-public-b-secondary --evidence "$RUNNER_TEMP/front-serving-stage.json"
       - name: Retain Front stage witness before internal Service creation
         if: steps.transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -430,7 +430,7 @@ jobs:
           retention-days: 30
       - name: Create and verify internal Front Service endpoints
         if: steps.transport.outputs.selected == 'true'
-        run: python3 scripts/stage_front_serving_transport.py apply deploy/environments/production/front-serving-stage/services.json --service fugue-front-serving-public-b-primary --evidence "$RUNNER_TEMP/front-serving-stage.json"
+        run: python3 scripts/stage_front_serving_transport.py apply deploy/environments/production/front-serving-stage/services.json --service fugue-front-serving-public-b-secondary --evidence "$RUNNER_TEMP/front-serving-stage.json"
 
   front_serving_handoff:
     outputs:

@@ -12,6 +12,11 @@
       "name": "fugue-front-serving-public-b-primary",
       "observation": "deploy/environments/production/front-observation/public-b-primary.json",
       "probeListener": "fugue-front-probe-public-b-primary"
+    },
+    {
+      "name": "fugue-front-serving-public-b-secondary",
+      "observation": "deploy/environments/production/front-observation/public-b-secondary.json",
+      "probeListener": "fugue-front-probe-public-b-secondary"
     }
   ]
 }
