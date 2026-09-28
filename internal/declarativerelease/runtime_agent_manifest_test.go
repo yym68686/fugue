@@ -43,6 +43,9 @@ func TestRuntimeAgentCanaryCannotExecuteExistingBusinessWorkloads(t *testing.T) 
 	env := map[string]any{}
 	for _, r := range container["env"].([]any) {
 		v := r.(map[string]any)
+		if value, ok := v["value"]; ok && value == "" {
+			t.Fatal("Kubernetes omits empty env values; declarations must not require their serialization")
+		}
 		env[v["name"].(string)] = v
 	}
 	if env["FUGUE_AGENT_APPLY_WITH_KUBECTL"].(map[string]any)["value"] != "false" || env["FUGUE_AGENT_EDGE_TRUST_FILE"] == nil || env["FUGUE_AGENT_EDGE_CHECKPOINT_FILE"] == nil {
