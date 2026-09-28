@@ -14,6 +14,24 @@ from scripts import front_connection_witness as witness
 
 
 class HeldFrontConnectionTests(unittest.TestCase):
+    def test_nat_attribution_requires_exact_original_and_reply_kernel_tuples(self):
+        from types import SimpleNamespace
+        held = SimpleNamespace(client_address="192.0.2.5", client_port=43123, target_address="192.0.2.9", target_port=15443)
+        line = "ipv4 2 tcp 6 421957 ESTABLISHED src=192.0.2.5 dst=192.0.2.9 sport=43123 dport=15443 src=10.0.0.2 dst=10.0.1.1 sport=443 dport=43200 [ASSURED] mark=0 use=1"
+        self.assertEqual(witness.translated_tuple(line, held, "10.0.0.2"), ("10.0.1.1", 43200))
+        for bad in [line.replace("sport=43123", "sport=43124"), line.replace("dst=192.0.2.9", "dst=192.0.2.10"), line.replace("src=10.0.0.2", "src=10.0.0.3"), line.replace("ESTABLISHED", "TIME_WAIT"), line.replace("[ASSURED]", "[UNREPLIED]"), line+" zone=2", line+"\n"+line]:
+            with self.subTest(raw=bad), self.assertRaises(ValueError): witness.translated_tuple(bad, held, "10.0.0.2")
+
+    def test_nat_fact_uses_kernel_mapping_instead_of_accepting_any_private_address(self):
+        from types import SimpleNamespace
+        held = SimpleNamespace(client_address="192.0.2.5", client_port=43123, target_address="192.0.2.9", target_port=15443)
+        pod = {"metadata": {"name": "front", "uid": "front-one"}, "status": {"podIP": "10.0.0.2"}}
+        active = {"count": 1, "active": [{"id": "one", "downstream_remote": "10.0.1.1:43200", "protocol": "https", "started_at": "2026-01-01T00:00:00Z", "slot": "a", "target": "192.0.2.9:18443"}]}
+        with patch.object(witness.front, "read", return_value=active), patch.object(witness, "observe_translation", return_value=("10.0.1.1", 43200)):
+            self.assertEqual(witness.fact({"namespace": "test"}, pod, held)["source_evidence"], "kernel_conntrack")
+        with patch.object(witness.front, "read", return_value=active), patch.object(witness, "observe_translation", side_effect=ValueError("unavailable")), self.assertRaises(ValueError):
+            witness.fact({"namespace": "test"}, pod, held)
+
     def test_same_verified_tls_socket_survives_repeated_proofs_and_never_reconnects(self):
         with tempfile.TemporaryDirectory() as directory:
             key, cert = Path(directory)/"key.pem", Path(directory)/"cert.pem"

@@ -5,6 +5,10 @@ import ipaddress
 import secrets
 import socket
 import ssl
+import re
+import shutil
+import subprocess
+from pathlib import Path
 
 try:
     from . import observe_front_candidate as front
@@ -16,6 +20,7 @@ class HeldTLS:
     def __init__(self, address, host, port=443):
         ipaddress.ip_address(address)
         self.host = host
+        self.target_address, self.target_port = address, port
         context = ssl.create_default_context()
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         raw = socket.create_connection((address, port), timeout=5)
@@ -54,26 +59,75 @@ class HeldTLS:
         self.socket.close()
 
 
+def translated_tuple(raw, held, pod_ip):
+    if len(raw) > 4 << 20:
+        raise ValueError("connection tracking observation exceeds bound")
+    matches = []
+    for line in raw.splitlines():
+        tokens = line.split()
+        if "tcp" not in tokens or "ESTABLISHED" not in tokens or "[UNREPLIED]" in tokens or any(t.startswith("zone=") and t != "zone=0" for t in tokens):
+            continue
+        fields = {key: re.findall(r"(?:^|\s)"+key+r"=([^\s]+)", line) for key in ["src", "dst", "sport", "dport"]}
+        if any(len(values) != 2 for values in fields.values()):
+            continue
+        try:
+            original = (str(ipaddress.ip_address(fields["src"][0])), str(ipaddress.ip_address(fields["dst"][0])), int(fields["sport"][0]), int(fields["dport"][0]))
+            reply = (str(ipaddress.ip_address(fields["src"][1])), str(ipaddress.ip_address(fields["dst"][1])), int(fields["sport"][1]), int(fields["dport"][1]))
+        except ValueError:
+            continue
+        if original == (held.client_address, held.target_address, held.client_port, held.target_port) and reply[0] == pod_ip and reply[2] == 443 and 1 <= reply[3] <= 65535:
+            matches.append((reply[1], reply[3]))
+    if len(matches) != 1:
+        raise ValueError("held connection lacks one exact original/reply kernel mapping")
+    return matches[0]
+
+
+def observe_translation(held, pod_ip):
+    if not getattr(held, "target_address", None) or not getattr(held, "target_port", None):
+        raise ValueError("held connection target identity is unavailable")
+    binary = shutil.which("conntrack")
+    if binary:
+        result = subprocess.run([binary, "-L", "-p", "tcp", "--orig-src", held.client_address, "--orig-dst", held.target_address, "--orig-port-src", str(held.client_port), "--orig-port-dst", str(held.target_port), "-o", "extended"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return translated_tuple(result.stdout, held, pod_ip)
+    for path in ["/proc/net/nf_conntrack", "/proc/net/ip_conntrack"]:
+        try:
+            with Path(path).open() as stream:
+                raw = stream.read((4 << 20)+1)
+        except OSError:
+            continue
+        return translated_tuple(raw, held, pod_ip)
+    raise ValueError("kernel connection tracking is unavailable for exact NAT attribution")
+
+
 def fact(profile, pod, held):
     namespace, name = profile["namespace"], pod["metadata"]["name"]
     value = front.read("get", "--raw", "/api/v1/namespaces/" + namespace + "/pods/" + name + ":7831/proxy/edge/tcp-connections")
     active = value.get("active")
     if not isinstance(active, list) or type(value.get("count")) is not int or value["count"] != len(active) or len(active) > 16384:
         raise ValueError("Front connection observation is incomplete")
-    expected = str(ipaddress.ip_address(held.client_address))
-    matches = []
-    for item in active:
-        remote = item.get("downstream_remote", "")
-        host, separator, port = remote.rpartition(":")
-        if not separator or not port.isdigit():
-            continue
-        host = host.strip("[]")
-        if str(ipaddress.ip_address(host)) == expected and int(port) == held.client_port and item.get("protocol") == "https":
-            matches.append(item)
+    def select(expected, expected_port):
+        matches = []
+        for item in active:
+            host, separator, port = item.get("downstream_remote", "").rpartition(":")
+            if not separator or not port.isdigit():
+                continue
+            if str(ipaddress.ip_address(host.strip("[]"))) == expected and int(port) == expected_port and item.get("protocol") == "https":
+                matches.append(item)
+        return matches
+    matches = select(str(ipaddress.ip_address(held.client_address)), held.client_port)
+    source_evidence = "socket"
+    if not matches and pod.get("status", {}).get("podIP"):
+        # Node-originated Service flows may be SNATed. Do not guess the node's
+        # address: require the exact kernel original/reply tuple for this held
+        # socket, destination and candidate Pod before matching the Front fact.
+        address, port = observe_translation(held, pod["status"]["podIP"])
+        matches = select(address, port)
+        source_evidence = "kernel_conntrack"
     if len(matches) != 1 or not matches[0].get("id"):
         raise ValueError("held connection cannot be attributed to exactly one Front executor")
     item = matches[0]
-    return {"pod_uid": pod["metadata"]["uid"], "connection_id": item["id"], "started_at": item["started_at"], "slot": item["slot"], "target": item["target"]}
+    return {"pod_uid": pod["metadata"]["uid"], "connection_id": item["id"], "started_at": item["started_at"], "slot": item["slot"], "target": item["target"], "source_evidence": source_evidence}
 
 
 def observe_pair(profile, address, port):
