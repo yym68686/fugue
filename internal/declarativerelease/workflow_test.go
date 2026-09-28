@@ -81,6 +81,9 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	if yamlMappingValue(t, agentActivation, "environment").Value != "production" || !strings.Contains(source, "Retain activation evidence before publication") || !strings.Contains(source, "Retain selected-traffic verification witness") {
 		t.Fatal("Agent activation requires retained evidence before publication and LKG verification")
 	}
+	if strings.Contains(source, `scripts/test_activate_agent_edge_policy.py cmd/fugue-agent-edge-keyring .github/workflows/ci.yml; then`) {
+		t.Fatal("unrelated workflow jobs must not republish or re-attest an unchanged Agent policy")
+	}
 	agentPolicy := yamlMappingValue(t, jobs, "agent_edge_shadow_policy")
 	for _, key := range yamlMappingKeys(t, agentPolicy) {
 		if key == "needs" {

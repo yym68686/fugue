@@ -96,7 +96,7 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/activate_agent_edge_policy.py scripts/test_activate_agent_edge_policy.py cmd/fugue-agent-edge-keyring .github/workflows/ci.yml; then
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/activate_agent_edge_policy.py scripts/test_activate_agent_edge_policy.py cmd/fugue-agent-edge-keyring; then
             git fetch origin main
             if git diff --quiet HEAD origin/main -- "$config" scripts/activate_agent_edge_policy.py cmd/fugue-agent-edge-keyring .github/workflows/ci.yml; then
               python3 -m unittest scripts.test_activate_agent_edge_policy
