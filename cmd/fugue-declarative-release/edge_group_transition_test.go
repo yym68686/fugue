@@ -947,6 +947,7 @@ type fakeEdgeGroupRuntime struct {
 	rollUnready         []bool
 	activationState     *edgeActivationState
 	standbyErr          error
+	frontDrainErr       error
 	applyFailures       map[string]int
 	declared            map[string]declarativerelease.TargetIdentity
 	stageDegraded       bool
@@ -963,6 +964,10 @@ func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, err
 	value := fake.snapshots[0]
 	fake.snapshots = fake.snapshots[1:]
 	return value, nil
+}
+
+func (fake *fakeEdgeGroupRuntime) RequireFrontReplacementDrained(context.Context, edgeGroupState, declarativerelease.TargetIdentity) error {
+	return fake.frontDrainErr
 }
 
 func (fake *fakeEdgeGroupRuntime) ApplySharedResources(context.Context) error {
@@ -1196,6 +1201,24 @@ func TestEdgeGroupTargetMatchingRequiresExactSourceAndImmutableRef(t *testing.T)
 	}
 	if _, err := immutableDigestFromRef("ghcr.io/example/fugue-edge:latest"); err == nil {
 		t.Fatal("mutable edge reference yielded a digest")
+	}
+}
+
+func TestEdgeForwardPreflightStopsBeforeWorkerOrAuthorityMutation(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old, target := edgeTargetFixture("1", "a"), edgeTargetFixture("2", "b")
+	for _, failure := range []string{"retained connections", "observer unavailable"} {
+		t.Run(failure, func(t *testing.T) {
+			runtime := &fakeEdgeGroupRuntime{
+				snapshots:     []edgeGroupState{edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})},
+				declared:      map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.FrontName: target},
+				frontDrainErr: errors.New(failure),
+			}
+			err := executeEdgeGroupAB(context.Background(), runtime, declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA}, transition, target)
+			if err == nil || !strings.Contains(err.Error(), failure) || strings.Join(runtime.calls, ",") != "snapshot" {
+				t.Fatalf("failed drain preflight performed mutations: calls=%v error=%v", runtime.calls, err)
+			}
+		})
 	}
 }
 
@@ -1449,6 +1472,7 @@ func TestExecuteEdgeGroupABCompensationSwitchesBeforeRestoringFront(t *testing.T
 		},
 		waits:           []map[string]edgeFrontHealth{{"node-1": finalHealth}},
 		activationState: before.FrontActivation,
+		frontDrainErr:   errors.New("retained Front connections"),
 		declared:        map[string]declarativerelease.TargetIdentity{transition.WorkerAName: lkg, transition.WorkerBName: lkg, transition.FrontName: lkg},
 	}
 	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: lkg.ConfigSHA}

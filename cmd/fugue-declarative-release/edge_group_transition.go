@@ -178,6 +178,7 @@ type edgeGroupState struct {
 
 type edgeGroupTransitionRuntime interface {
 	Snapshot(context.Context) (edgeGroupState, error)
+	RequireFrontReplacementDrained(context.Context, edgeGroupState, declarativerelease.TargetIdentity) error
 	ApplySharedResources(context.Context) error
 	ApplyCandidateResources(context.Context, string) error
 	StageCandidate(context.Context, edgeGroupState, string, declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error)
@@ -409,6 +410,12 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	}
 	if target.ConfigSHA == release.ExpectedPreviousConfigSHA {
 		return executeEdgeGroupLKGRestore(ctx, runtime, transition, target, plan)
+	}
+	// Reject a code transition before staging or promoting any worker when
+	// its planned Front replacement would discard existing connections.
+	// Configuration-only LKG recovery remains independent of code maintenance.
+	if err := runtime.RequireFrontReplacementDrained(ctx, plan.before, plan.frontTarget); err != nil {
+		return fmt.Errorf("edge code transition is waiting for retained Front connections: %w", err)
 	}
 	if err := runtime.ApplySharedResources(ctx); err != nil {
 		return fmt.Errorf("apply shared edge group resources before candidate staging: %w", err)
@@ -743,6 +750,26 @@ func edgeFrontNeedsCodeRecovery(state edgeGroupState, target declarativerelease.
 
 func (runtime *kubectlEdgeGroupRuntime) Snapshot(ctx context.Context) (edgeGroupState, error) {
 	return runtime.cluster.readEdgeGroupState(ctx, runtime.release, runtime.transition)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) RequireFrontReplacementDrained(ctx context.Context, state edgeGroupState, target declarativerelease.TargetIdentity) error {
+	if len(state.Front) == 0 || len(state.Front) != runtime.transition.ExpectedNodes {
+		return errors.New("Front drain preflight has an incomplete node cohort")
+	}
+	for _, node := range sortedEdgeNodes(state.Front) {
+		pod := state.Front[node]
+		if edgePodMatchesTarget(pod, target) {
+			continue
+		}
+		count, err := runtime.cluster.readEdgeFrontConnectionCount(ctx, pod)
+		if err != nil {
+			return err
+		}
+		if count != 0 {
+			return fmt.Errorf("Pod/%s retains %d active connections", pod.Name, count)
+		}
+	}
+	return nil
 }
 
 func (runtime *kubectlEdgeGroupRuntime) ApplySharedResources(ctx context.Context) error {

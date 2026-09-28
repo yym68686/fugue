@@ -359,3 +359,11 @@ per-node Front executors with disjoint selectors and exact hostname placement.
 They keep reading the existing authority without acquiring public ports. Probe
 and serving Services bind only to that node's executor; country is not a
 placement or selection input.
+
+Forward Worker code transitions also check the complete legacy Front cohort
+before applying shared resources or staging any Worker authority. A Front that
+needs code replacement and still owns connections stops the transition before
+traffic promotion. The exact connection inventory is checked again immediately
+before deletion. Configuration-only LKG recovery can still switch authority
+without waiting for code replacement; its retained executor remains protected
+by the deletion gate.
