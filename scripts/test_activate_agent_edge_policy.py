@@ -10,6 +10,7 @@ from scripts import activate_agent_edge_policy as active
 def fixture():
     policy = {"schema_version": "fugue.agent-edge-policy/v1", "scope": active.SCOPE, "generation": "agent-active-one", "mode": "active", "origin": "https://api.example.test", "constraint": {"min_candidates": 1}}
     config = {"apiVersion": "configuration.fugue.dev/v1", "kind": "AgentEdgeActivePolicy", "origin": policy["origin"], "expectedShadowGeneration": "agent-shadow-one", "policy": policy, "consumer": {"namespace": "test-system", "deployment": "test-agent", "container": "agent", "runtimeId": "runtime_test", "sourceSha": "a" * 40, "checkpointPath": "/state/checkpoint.json"}, "observation": {"samples": 5, "intervalSeconds": 10, "minimumGrants": 3, "minimumDistinctCells": 2, "maxHeartbeatAgeSeconds": 45}}
+    config["observation"]["maxRecoveredDegradationSeconds"] = 0
     baseline = dict(policy, mode="shadow", generation="agent-shadow-one")
     authority = {"artifact": {"id": "policy-one", "artifact_kind": "policy_snapshot", "scope_key": active.SCOPE, "generation": baseline["generation"], "content": baseline, "status": "validated", "content_hash": active.digest(baseline)}, "release": {"id": "release-one", "status": "active", "release_channel": "shadow", "fencing_token": 1}}
     public = {"generation": 1}
@@ -56,6 +57,35 @@ class ActivationTests(unittest.TestCase):
             if error == "acquisition": logs += " error=Agent Edge acquisition returned HTTP 503"
             if error == "other error": logs += " error=invalid signature"
             with self.assertRaises(ValueError): active.measured_choice(logs+"\n"+good,"grant")
+
+    def test_explicit_recovery_bound_requires_measured_recovery_and_live_primary(self):
+        clock = active.now()
+        def entry(seconds, *, degraded=False, grant="old", error="", primary="edge-a", expired=False):
+            at = clock + datetime.timedelta(seconds=seconds)
+            value = {"grant_digest": grant, "primary": primary, "standbys": [] if degraded else ["edge-b"], "degraded": degraded, "valid_until": (at - datetime.timedelta(seconds=1) if expired else clock + datetime.timedelta(seconds=30)).isoformat()}
+            return at.isoformat() + " agent_edge_selection " + json.dumps(value) + error
+
+        good = entry(-100) + "\n" + entry(-80, degraded=True) + "\n" + entry(-60, grant="current")
+        choice = active.measured_choice(good, "current", 30)
+        self.assertEqual(choice["recovery"], {"degradations": 1, "max_degraded_seconds": 20, "acquisition_failures": 0})
+        acquisition = entry(-100) + "\n" + entry(-80, error=" error=Agent Edge acquisition returned HTTP 503") + "\n" + entry(-60, grant="current")
+        self.assertEqual(active.measured_choice(acquisition, "current", 30)["recovery"]["acquisition_failures"], 1)
+        for bad in [
+            entry(-80, degraded=True) + "\n" + entry(-60, grant="current"),
+            entry(-100) + "\n" + entry(-80, degraded=True),
+            entry(-100) + "\n" + entry(-80, degraded=True) + "\n" + entry(-20, grant="current"),
+            entry(-100) + "\n" + entry(-80, primary="") + "\n" + entry(-60, grant="current"),
+            entry(-100) + "\n" + entry(-80, expired=True) + "\n" + entry(-60, grant="current"),
+            entry(-100) + "\n" + entry(-80, error=" error=invalid signature") + "\n" + entry(-60, grant="current"),
+            entry(-100) + "\n" + entry(-80, error=" error=Agent Edge acquisition returned HTTP 503") + "\n" + entry(-60),
+            entry(-100, error=" error=Agent Edge acquisition returned HTTP 503") + "\n" + entry(-70, error=" error=Agent Edge acquisition returned HTTP 503") + "\n" + entry(-50, grant="current"),
+            good + "\nheartbeat failed: request failed",
+            good + "\npoll failed: no live Agent Edge permission",
+            entry(-80) + "\n" + entry(-100, grant="current"),
+            entry(10, grant="current"),
+        ]:
+            with self.subTest(logs=bad), self.assertRaises(ValueError):
+                active.measured_choice(bad, "current", 30)
 
     def test_witness_tampering_expiration_and_wrong_declaration_are_rejected_before_write(self):
         config, authority, public = fixture()

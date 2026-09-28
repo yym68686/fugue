@@ -47,7 +47,7 @@ def validate(config):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", c[key]):
             raise ValueError("canonical consumer identity required")
     o = config["observation"]
-    if set(o) != {"samples", "intervalSeconds", "minimumGrants", "minimumDistinctCells", "maxHeartbeatAgeSeconds"} or any(type(v) is not int for v in o.values()) or not 5 <= o["samples"] <= 20 or not 10 <= o["intervalSeconds"] <= 60 or not 3 <= o["minimumGrants"] <= o["samples"] or not 1 <= o["minimumDistinctCells"] <= 5 or not 15 <= o["maxHeartbeatAgeSeconds"] <= 90:
+    if set(o) != {"samples", "intervalSeconds", "minimumGrants", "minimumDistinctCells", "maxHeartbeatAgeSeconds", "maxRecoveredDegradationSeconds"} or any(type(v) is not int for v in o.values()) or not 5 <= o["samples"] <= 20 or not 10 <= o["intervalSeconds"] <= 60 or not 3 <= o["minimumGrants"] <= o["samples"] or not 1 <= o["minimumDistinctCells"] <= 5 or not 15 <= o["maxHeartbeatAgeSeconds"] <= 90 or not 0 <= o["maxRecoveredDegradationSeconds"] <= 60:
         raise ValueError("bounded explicit observation window required")
     return config
 
@@ -84,22 +84,67 @@ def verify_grant(validator, public, signed, runtime_id, origin):
         return strict_json(result.stdout)
 
 
-def measured_choice(logs, grant_digest):
+def measured_choice(logs, grant_digest, max_recovered_seconds=0):
     observations = []
+    degraded_since = None
+    acquisition_failure = None
+    previous_at = None
+    previous_valid_until = None
+    healthy_seen = False
+    recovery = {"degradations": 0, "max_degraded_seconds": 0, "acquisition_failures": 0}
     for line in logs.splitlines():
-        if any(text in line for text in ["heartbeat failed:", "poll failed:", "no live Agent Edge permission", "agent exited:", "Agent Edge acquisition returned HTTP 503"]):
+        if any(text in line for text in ["heartbeat failed:", "poll failed:", "no live Agent Edge permission", "agent exited:"]):
             raise ValueError("recent canary control or permission gap observed")
         if "agent_edge_selection " in line:
-            value, suffix_start = json.JSONDecoder().raw_decode(line.split("agent_edge_selection ", 1)[1])
-            if value.get("degraded") or not value.get("primary"):
-                raise ValueError("recent canary measurements were degraded")
-            if "error=" in line.split("agent_edge_selection ", 1)[1][suffix_start:]:
-                raise ValueError("recent canary selection error observed")
+            raw = line.split("agent_edge_selection ", 1)[1]
+            value, suffix_start = json.JSONDecoder().raw_decode(raw)
+            if not value.get("primary"):
+                raise ValueError("recent canary lacked an authorized measured primary")
+            error = raw[suffix_start:].strip()
+            if max_recovered_seconds == 0:
+                if value.get("degraded") or error:
+                    raise ValueError("recent canary measurements were degraded or failed")
+            else:
+                # Kubernetes timestamps bound actual recovery duration. Missing
+                # history cannot turn an indefinitely degraded state into a pass.
+                at = timestamp(line.split()[0])
+                valid_until = timestamp(value["valid_until"])
+                if at > now() or previous_at is not None and at < previous_at or valid_until <= at or previous_valid_until is not None and previous_valid_until < at:
+                    raise ValueError("canary observation is unordered or has no live grant")
+                previous_at = at
+                previous_valid_until = valid_until
+                if value.get("degraded"):
+                    if not healthy_seen:
+                        raise ValueError("degradation began before available observation history")
+                    if degraded_since is None:
+                        degraded_since = at
+                elif degraded_since is not None:
+                    elapsed = (at - degraded_since).total_seconds()
+                    if elapsed > max_recovered_seconds:
+                        raise ValueError("independent standby exceeded its declared recovery bound")
+                    recovery["degradations"] += 1
+                    recovery["max_degraded_seconds"] = max(recovery["max_degraded_seconds"], elapsed)
+                    degraded_since = None
+                if error:
+                    if error != "error=Agent Edge acquisition returned HTTP 503":
+                        raise ValueError("recent canary selection error observed")
+                    acquisition_failure = (acquisition_failure[0] if acquisition_failure else at, value["grant_digest"])
+                    recovery["acquisition_failures"] += 1
+                elif acquisition_failure and value["grant_digest"] != acquisition_failure[1]:
+                    if (at - acquisition_failure[0]).total_seconds() > max_recovered_seconds:
+                        raise ValueError("permission acquisition exceeded its declared recovery bound")
+                    acquisition_failure = None
+                healthy_seen = healthy_seen or not value.get("degraded")
             if value.get("grant_digest") == grant_digest:
                 observations.append(value)
-    if not observations:
+    if degraded_since is not None or acquisition_failure is not None:
+        raise ValueError("canary recovery is not yet observed")
+    if not observations or observations[-1].get("degraded"):
         raise ValueError("consumer lacks current measured primary and independent standby")
-    return observations[-1]
+    result = dict(observations[-1])
+    if max_recovered_seconds:
+        result["recovery"] = recovery
+    return result
 
 
 def sample(config, api, authority, mode, public, validator):
@@ -124,7 +169,7 @@ def sample(config, api, authority, mode, public, validator):
     if verified.get("verified") is not True or checkpoint.get("activated") != (mode == "active") or grant["mode"] != mode or grant["policy_reference"]["artifact_id"] != authority["artifact"]["id"] or grant["policy_reference"]["release_id"] != authority["release"]["id"] or timestamp(grant["valid_until"]) <= now() + datetime.timedelta(seconds=10):
         raise ValueError("consumer has not accepted the exact live policy publication")
     logs = kubectl(["-n", c["namespace"], "logs", pod["metadata"]["name"], "-c", c["container"], "--since=120s", "--timestamps=true"])
-    choice = measured_choice(logs, verified["digest"])
+    choice = measured_choice(logs, verified["digest"], o["maxRecoveredDegradationSeconds"])
     selected = set([choice["primary"], *choice.get("standbys", [])])
     cells = {candidate["authority_cell_id"] for candidate in grant["candidates"] if candidate["edge_id"] in selected}
     if len(cells) < o["minimumDistinctCells"]:
@@ -134,7 +179,7 @@ def sample(config, api, authority, mode, public, validator):
     observed = timestamp(runtime.get("labels", {}).get("fugue.io/cell-observed-at", ""))
     if runtime.get("connection_mode") != "agent" or runtime.get("status") != "active" or runtime.get("access_mode") != "private" or runtime.get("pool_mode") != "dedicated" or heartbeat > now() or observed > now() or min(heartbeat, observed) < now() - datetime.timedelta(seconds=o["maxHeartbeatAgeSeconds"]):
         raise ValueError("actual Agent heartbeat is stale or no longer isolated")
-    return {"at": now().isoformat(), "pod_uid": pod["metadata"]["uid"], "image_id": status["imageID"], "grant_digest": verified["digest"], "grant_valid_until": grant["valid_until"], "policy_release_id": authority["release"]["id"], "primary": choice["primary"], "cells": sorted(cells), "heartbeat": heartbeat.isoformat(), "mode": mode, "publication_ids": sorted({candidate["publication"]["release_id"] for candidate in grant["candidates"]})}
+    return {"at": now().isoformat(), "pod_uid": pod["metadata"]["uid"], "image_id": status["imageID"], "grant_digest": verified["digest"], "grant_valid_until": grant["valid_until"], "policy_release_id": authority["release"]["id"], "primary": choice["primary"], "cells": sorted(cells), "heartbeat": heartbeat.isoformat(), "mode": mode, "publication_ids": sorted({candidate["publication"]["release_id"] for candidate in grant["candidates"]}), "recovery": choice.get("recovery", {})}
 
 
 def prepare_window(config, api, public, validator):

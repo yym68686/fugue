@@ -55,7 +55,7 @@
     "deployment": "fugue-runtime-agent-canary",
     "container": "agent",
     "runtimeId": "runtime_1790554359_f435e3d2f868",
-    "sourceSha": "8487d02e893a6d23c193d8d56f523ee2020a574a",
+    "sourceSha": "d0743deecf0f453ca1f7fa964e3b66b10b2676dc",
     "checkpointPath": "/var/lib/fugue-agent/edge-checkpoint.json"
   },
   "observation": {
@@ -63,6 +63,7 @@
     "intervalSeconds": 30,
     "minimumGrants": 3,
     "minimumDistinctCells": 2,
-    "maxHeartbeatAgeSeconds": 45
+    "maxHeartbeatAgeSeconds": 45,
+    "maxRecoveredDegradationSeconds": 30
   }
 }

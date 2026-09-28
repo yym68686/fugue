@@ -179,6 +179,15 @@ the window. It retains that witness before seeding the observed shadow policy's
 LKG and publishing a full active policy with identical constraints. A second
 window verifies the selected transport before active LKG promotion. The lane
 does not promote based only on a green Deployment or an unsigned preview.
+An explicit observation bound can allow a recovered loss of the desired standby
+while the signed hard floor and a live measured primary remain intact. It must
+retain ordered timestamps, grant continuity, the recovery duration and any
+acquisition failures in the witness. An acquisition 503 must be followed by a
+different independently verified grant within the same bound. Unknown errors,
+missing history, expired permissions, control failures and unrecovered loss
+still reject the window. Every acceptance sample requires restored cell
+diversity. The Agent accelerates candidate refresh to the signed probe cadence
+while degraded; it never extends the old lease to make this check pass.
 
 For a read-only consistency check against the currently visible Edge nodes:
 
