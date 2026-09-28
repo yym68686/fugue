@@ -147,7 +147,7 @@ def measured_choice(logs, grant_digest, max_recovered_seconds=0):
     return result
 
 
-def sample(config, api, authority, mode, public, validator):
+def sample(config, api, authority, mode, public, validator, log_start_at=None):
     c, o = config["consumer"], config["observation"]
     deployment = strict_json(kubectl(["get", "deployment", c["deployment"], "-n", c["namespace"], "-o", "json"]))
     template = deployment["spec"]["template"]
@@ -168,7 +168,8 @@ def sample(config, api, authority, mode, public, validator):
     grant = verified["grant"]
     if verified.get("verified") is not True or checkpoint.get("activated") != (mode == "active") or grant["mode"] != mode or grant["policy_reference"]["artifact_id"] != authority["artifact"]["id"] or grant["policy_reference"]["release_id"] != authority["release"]["id"] or timestamp(grant["valid_until"]) <= now() + datetime.timedelta(seconds=10):
         raise ValueError("consumer has not accepted the exact live policy publication")
-    logs = kubectl(["-n", c["namespace"], "logs", pod["metadata"]["name"], "-c", c["container"], "--since=120s", "--timestamps=true"])
+    log_start_at = log_start_at or (now() - datetime.timedelta(seconds=120)).isoformat()
+    logs = kubectl(["-n", c["namespace"], "logs", pod["metadata"]["name"], "-c", c["container"], "--since-time=" + log_start_at, "--timestamps=true"])
     choice = measured_choice(logs, verified["digest"], o["maxRecoveredDegradationSeconds"])
     selected = set([choice["primary"], *choice.get("standbys", [])])
     cells = {candidate["authority_cell_id"] for candidate in grant["candidates"] if candidate["edge_id"] in selected}
@@ -179,12 +180,13 @@ def sample(config, api, authority, mode, public, validator):
     observed = timestamp(runtime.get("labels", {}).get("fugue.io/cell-observed-at", ""))
     if runtime.get("connection_mode") != "agent" or runtime.get("status") != "active" or runtime.get("access_mode") != "private" or runtime.get("pool_mode") != "dedicated" or heartbeat > now() or observed > now() or min(heartbeat, observed) < now() - datetime.timedelta(seconds=o["maxHeartbeatAgeSeconds"]):
         raise ValueError("actual Agent heartbeat is stale or no longer isolated")
-    return {"at": now().isoformat(), "pod_uid": pod["metadata"]["uid"], "image_id": status["imageID"], "grant_digest": verified["digest"], "grant_valid_until": grant["valid_until"], "policy_release_id": authority["release"]["id"], "primary": choice["primary"], "cells": sorted(cells), "heartbeat": heartbeat.isoformat(), "mode": mode, "publication_ids": sorted({candidate["publication"]["release_id"] for candidate in grant["candidates"]}), "recovery": choice.get("recovery", {})}
+    return {"at": now().isoformat(), "log_start_at": log_start_at, "pod_uid": pod["metadata"]["uid"], "image_id": status["imageID"], "grant_digest": verified["digest"], "grant_valid_until": grant["valid_until"], "policy_release_id": authority["release"]["id"], "primary": choice["primary"], "cells": sorted(cells), "heartbeat": heartbeat.isoformat(), "mode": mode, "publication_ids": sorted({candidate["publication"]["release_id"] for candidate in grant["candidates"]}), "recovery": choice.get("recovery", {})}
 
 
 def prepare_window(config, api, public, validator):
     authority, mode = selected_authority(api, config)
     observations = []
+    log_start_at = None
     for index in range(config["observation"]["samples"]):
         fresh, current_mode = selected_authority(api, config)
         if fresh.get("release") != authority.get("release") or current_mode != mode:
@@ -195,13 +197,17 @@ def prepare_window(config, api, public, validator):
             for attempt in range(13):
                 try:
                     observation = sample(config, api, authority, mode, public, validator)
+                    log_start_at = observation["log_start_at"]
                     break
                 except ValueError:
                     if attempt == 12:
                         raise
                     time.sleep(5)
         else:
-            observation = sample(config, api, authority, mode, public, validator)
+            # Preserve the successful baseline's entire log interval. A sliding
+            # tail can drop the healthy event before a completed recovery and
+            # cannot prove a continuous observation window.
+            observation = sample(config, api, authority, mode, public, validator, log_start_at)
         observations.append(observation)
         if index + 1 < config["observation"]["samples"]:
             time.sleep(config["observation"]["intervalSeconds"])
@@ -243,7 +249,7 @@ def activate(config, api, public, validator, witness):
     authority, mode = selected_authority(api, config)
     if authority["release"]["id"] != witness["authority"]["release"]["id"] or mode != witness["mode"]:
         raise ValueError("authority changed after witness retention")
-    sample(config, api, authority, mode, public, validator)
+    sample(config, api, authority, mode, public, validator, witness["observations"][0]["log_start_at"])
     if mode == "active":
         return authority
     attest_lkg(api, authority, witness, initial=not bool(authority.get("lkg")))
@@ -295,7 +301,7 @@ def main():
             authority, mode = selected_authority(api, config)
             if mode != "active" or witness["mode"] != "active" or authority["release"]["id"] != witness["authority"]["release"]["id"]:
                 raise ValueError("active verification lacks current selected-transport evidence")
-            sample(config, api, authority, mode, public, args.validator)
+            sample(config, api, authority, mode, public, args.validator, witness["observations"][0]["log_start_at"])
             attest_lkg(api, authority, witness, initial=False)
         print(canonical({"operation": args.operation, "artifact_id": authority["artifact"]["id"], "release_id": authority["release"]["id"], "mode": "active"}))
 

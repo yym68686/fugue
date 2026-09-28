@@ -26,7 +26,7 @@ class ActivationTests(unittest.TestCase):
                 def sample(*_):
                     i = sample.calls
                     sample.calls += 1
-                    return {"pod_uid": str(i) if bad == "pod" else "pod-one", "image_id": str(i) if bad == "image" else "image-one", "grant_digest": "same" if bad == "grant" else str(i), "heartbeat": "same" if bad == "heartbeat" else str(i)}
+                    return {"pod_uid": str(i) if bad == "pod" else "pod-one", "image_id": str(i) if bad == "image" else "image-one", "grant_digest": "same" if bad == "grant" else str(i), "heartbeat": "same" if bad == "heartbeat" else str(i), "log_start_at": "2026-01-01T00:00:00Z"}
                 sample.calls = 0
                 with patch.object(active, "selected_authority", return_value=(authority, "shadow")), patch.object(active, "sample", side_effect=sample), patch.object(active.time, "sleep"):
                     if bad:
@@ -43,6 +43,18 @@ class ActivationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 active.prepare(config, lambda *args: calls.append(args), public, "validator")
         self.assertEqual(calls, [])
+
+    def test_watch_retains_baseline_log_interval_across_all_samples(self):
+        config, authority, public = fixture()
+        calls = []
+        def sample(*args):
+            calls.append(args)
+            i = len(calls)
+            return {"pod_uid": "one", "image_id": "one", "grant_digest": str(i), "heartbeat": str(i), "log_start_at": "2026-01-01T00:00:00Z"}
+        with patch.object(active, "selected_authority", return_value=(authority, "active")), patch.object(active, "sample", side_effect=sample), patch.object(active.time, "sleep"):
+            active.prepare_window(config, None, public, "validator")
+        self.assertEqual(len(calls[0]), 6)
+        self.assertEqual([x[6] for x in calls[1:]], ["2026-01-01T00:00:00Z"] * (config["observation"]["samples"] - 1))
 
     def test_degraded_or_acquisition_gap_stops_active_window(self):
         base = {"grant_digest":"grant","primary":"edge-a","standbys":["edge-b"],"degraded":False,"mode":"shadow"}
