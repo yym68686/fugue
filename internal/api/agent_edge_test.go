@@ -35,9 +35,10 @@ type agentAuthorityFixture struct {
 	keys                                 map[string]agentedge.TrustKey
 	topology                             edgetopology.Intent
 	compiled                             platformConfigCompileResponse
+	inputSnapshot                        platformconfig.RuntimeSnapshot
 }
 
-func setupAgentAuthorityFixture(t *testing.T) agentAuthorityFixture {
+func setupAgentAuthorityFixture(t *testing.T, fullBaseline ...bool) agentAuthorityFixture {
 	t.Helper()
 	st, s, tenant, admin, app, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	_, secret, err := st.CreateEnrollmentToken(app.TenantID, "agent-test", time.Hour)
@@ -72,7 +73,7 @@ func setupAgentAuthorityFixture(t *testing.T) agentAuthorityFixture {
 	}
 	policy := platformconfig.PolicySnapshot{Scope: "global", Generation: "traffic-policy", MinimumHealthyEdges: 1, MaxStaleSeconds: 120,
 		DNSReadiness:          &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 10, ProbeTimeoutSeconds: 2, FactFreshnessSeconds: 120, MaxConcurrency: 4, MaxProbes: 64},
-		TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "both", EdgeGroupIDs: []string{"edge-group-a", "edge-group-b"}}}}
+		TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "both", EdgeGroupIDs: []string{"edge-group-a", "edge-group-b"}}, {ID: "only-a", EdgeGroupIDs: []string{"edge-group-a"}}}}
 	intent = platformconfig.NormalizePlatformIntent(intent)
 	policy = platformconfig.NormalizePolicySnapshot(policy)
 	routes, err := platformconfig.ResolveRouteOrigins(intent.Routes, platformconfig.RuntimeSnapshot{CapturedAt: &now}, policy)
@@ -98,7 +99,11 @@ func setupAgentAuthorityFixture(t *testing.T) agentAuthorityFixture {
 	if err != nil {
 		t.Fatal("store traffic", err)
 	}
-	for phase, channel := range []string{"shadow", "gray"} {
+	channels := []string{"shadow", "gray"}
+	if len(fullBaseline) > 0 && fullBaseline[0] {
+		channels = append(channels, "full")
+	}
+	for phase, channel := range channels {
 		request := model.PlatformArtifactReleaseRequest{ReleaseChannel: channel}
 		if channel == "gray" {
 			request.CanaryRuleRef = "cohort=both"
@@ -146,6 +151,12 @@ func setupAgentAuthorityFixture(t *testing.T) agentAuthorityFixture {
 				}
 			}
 		}
+		if channel == "gray" && len(channels) == 3 {
+			_, _, _, _, err = st.VerifyPlatformArtifactReleaseLKG(release.ID, model.PlatformArtifactVerifyLKGRequest{FencingToken: release.FencingToken, AllowInitialLKG: true, Reason: "synthetic verified baseline", Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true, EvidenceRefs: []string{"synthetic-fixture"}}}, platformProducerPrincipal())
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -168,7 +179,7 @@ func setupAgentAuthorityFixture(t *testing.T) agentAuthorityFixture {
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	f := agentAuthorityFixture{s: s, admin: admin, tenant: tenant, runtimeID: runtime.ID, runtimeKey: runtimeKey, policy: p, keys: keys, topology: topology, compiled: c}
+	f := agentAuthorityFixture{s: s, admin: admin, tenant: tenant, runtimeID: runtime.ID, runtimeKey: runtimeKey, policy: p, keys: keys, topology: topology, compiled: c, inputSnapshot: compiled.InputSnapshot}
 	f.publishPolicy(t, p)
 	kube := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer capacity-token" {
@@ -366,6 +377,58 @@ func TestAgentGrantRefusesAuthorityChangesDuringObservation(t *testing.T) {
 	r := performJSONRequest(t, f.s, http.MethodGet, "/v1/agent/edge-candidates", f.runtimeKey, nil)
 	if r.Code != 503 {
 		t.Fatal("mixed authority observation was signed", r.Code, r.Body.String())
+	}
+}
+
+func TestAgentGrantKeepsIndependentCellWhenAnotherPublicationChanges(t *testing.T) {
+	f := setupAgentAuthorityFixture(t, true)
+	var intent platformconfig.PlatformIntent
+	var policy platformconfig.PolicySnapshot
+	raw, _ := json.Marshal(f.compiled.IntentArtifact.Content)
+	json.Unmarshal(raw, &intent)
+	raw, _ = json.Marshal(f.compiled.PolicyArtifact.Content)
+	json.Unmarshal(raw, &policy)
+	intent.Generation = "next-agent-traffic"
+	f.inputSnapshot.IntentGeneration = intent.Generation
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: f.inputSnapshot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.s.materializePlatformCompilation(context.Background(), compiled, platformProducerPrincipal(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, shadow, _, _, err := f.s.store.ReleasePlatformArtifact(next.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, platformProducerPrincipal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, child := range []model.PlatformArtifact{next.RouteArtifact, next.DNSArtifact, next.TLSArtifact} {
+		set, e := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: next.ReleaseArtifact.ID, ArtifactReleaseID: shadow.ID, ArtifactKind: child.ArtifactKind, ScopeKey: "global", Generation: child.Generation, Revision: int64(i + 1), Topology: platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "edge-a", EdgeGroupID: "edge-group-a"}}, DNSNodes: []model.DNSNode{{ID: "dns-a", PhysicalNodeID: "dns-a", EdgeGroupID: "edge-group-a", Zone: "example.test"}}}})
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = f.s.store.CreatePlatformExpectedConsumerSet(set); e != nil {
+			t.Fatal(e)
+		}
+	}
+	original := f.s.agentEdgeProbe
+	var once sync.Once
+	var publicationErr error
+	f.s.agentEdgeProbe = func(ctx context.Context, host, path, address, state string, timeout time.Duration) (routeprobe.Proof, error) {
+		once.Do(func() {
+			_, _, _, _, publicationErr = f.s.store.ReleasePlatformArtifact(next.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=only-a", IdempotencyKey: "advance-only-a"}, platformProducerPrincipal())
+		})
+		return original(ctx, host, path, address, state, timeout)
+	}
+	grant, _, diagnostics, err := f.s.captureAgentEdgeGrant(context.Background(), f.runtimeID, "")
+	if publicationErr != nil {
+		t.Fatal(publicationErr)
+	}
+	if err != nil || len(grant.Candidates) != 1 || grant.Candidates[0].EdgeID != "edge-b" || diagnostics["edge-a"] != "cell_publication_changed" {
+		t.Fatal("one cell's update revoked unrelated stable authority", grant, diagnostics, err)
+	}
+	if !f.s.agentGrantAuthorityUnchanged(grant) {
+		t.Fatal("surviving independent publication was not valid for signing")
 	}
 }
 

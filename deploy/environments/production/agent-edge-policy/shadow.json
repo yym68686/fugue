@@ -2,10 +2,10 @@
   "apiVersion": "configuration.fugue.dev/v1",
   "kind": "AgentEdgeShadowPolicy",
   "origin": "https://api.fugue.pro",
-  "expectedPreviousGeneration": "agent-edge-shadow-1",
+  "expectedPreviousGeneration": "agent-edge-shadow-2",
   "policy": {
     "schema_version": "fugue.agent-edge-policy/v1",
-    "generation": "agent-edge-shadow-2",
+    "generation": "agent-edge-shadow-3",
     "scope": "agent-edge-control",
     "mode": "shadow",
     "origin": "https://api.fugue.pro",
@@ -47,7 +47,7 @@
       "max_node_memory_percent": 85,
       "fact_max_age_seconds": 120
     },
-    "grant_ttl_seconds": 60,
+    "grant_ttl_seconds": 90,
     "minimum_lease_seconds": 20
   }
 }
