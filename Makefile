@@ -5,6 +5,7 @@ DOCKER ?= docker
 .PHONY: test test-scripts prepush generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
+	python3 -m unittest scripts.test_provision_runtime_agent_identity
 	python3 -m unittest scripts.test_publish_agent_edge_shadow
 	python3 -m unittest scripts.test_reconcile_agent_edge_trust
 	python3 -m unittest scripts.test_reconcile_dns_transport
@@ -21,6 +22,7 @@ test:
 	env GOCACHE=$(GOCACHE) go test ./...
 
 test-scripts:
+	python3 -m unittest scripts.test_provision_runtime_agent_identity
 	python3 -m unittest scripts.test_publish_agent_edge_shadow
 	python3 -m unittest scripts.test_reconcile_agent_edge_trust
 	python3 -m unittest scripts.test_reconcile_dns_transport

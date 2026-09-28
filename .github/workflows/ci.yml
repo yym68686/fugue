@@ -75,6 +75,40 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  runtime_agent_identity:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-runtime-agent-identity, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select declared Runtime Agent identity
+        id: identity
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/runtime-agent-canary/identity.json
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/provision_runtime_agent_identity.py scripts/test_provision_runtime_agent_identity.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/provision_runtime_agent_identity.py; then
+              python3 -m unittest scripts.test_provision_runtime_agent_identity
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Persist private Runtime Agent credentials without rotating existing identities
+        if: steps.identity.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 scripts/provision_runtime_agent_identity.py deploy/environments/production/runtime-agent-canary/identity.json
+
   agent_edge_shadow_policy:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
@@ -778,6 +812,20 @@ jobs:
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: telemetry, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+
+  deploy_runtime_agent:
+    needs: [prepush, component-build, runtime_agent_identity]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.runtime_agent_identity.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'runtime-agent-canary') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-runtime-agent-canary, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: runtime-agent-canary, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_api:
     needs: [prepush, component-build, deploy_schema, deploy_release_guardian]

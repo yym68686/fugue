@@ -153,6 +153,17 @@ shadow policies and stops if full Agent authority exists. It never submits LKG
 verification claims. Actual Agent observations and a separately reviewed full
 policy publication are required before active control traffic can be accepted.
 
+`runtime-agent-canary` is an isolated first Runtime Agent release lane. Its
+private external runtime identity is declared separately and its credential
+Secret is immutable: replay reuses that exact identity, while an existing
+runtime with missing credentials blocks rather than rotating its key. The
+canary has no Kubernetes service-account token and cannot apply workloads. Its
+own persistent volume retains trust and publication floors across restarts and
+rollback. It does not change any application's runtime assignment. This canary
+provides real Agent heartbeat, operation polling, shadow measurement and later
+selected-transport evidence; creating it is not evidence that the rest of the
+fleet or authority cells have migrated.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh

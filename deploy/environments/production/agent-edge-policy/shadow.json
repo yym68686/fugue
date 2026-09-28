@@ -2,10 +2,10 @@
   "apiVersion": "configuration.fugue.dev/v1",
   "kind": "AgentEdgeShadowPolicy",
   "origin": "https://api.fugue.pro",
-  "expectedPreviousGeneration": "",
+  "expectedPreviousGeneration": "agent-edge-shadow-1",
   "policy": {
     "schema_version": "fugue.agent-edge-policy/v1",
-    "generation": "agent-edge-shadow-1",
+    "generation": "agent-edge-shadow-2",
     "scope": "agent-edge-control",
     "mode": "shadow",
     "origin": "https://api.fugue.pro",

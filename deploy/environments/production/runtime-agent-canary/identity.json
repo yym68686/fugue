@@ -1,0 +1,16 @@
+{
+  "apiVersion": "identity.fugue.dev/v1",
+  "kind": "RuntimeAgentIdentity",
+  "origin": "https://api.fugue.pro",
+  "namespace": "fugue-system",
+  "secretName": "fugue-runtime-agent-canary",
+  "runtime": {
+    "name": "edge-control-canary",
+    "type": "external-owned",
+    "endpoint": "",
+    "labels": {
+      "purpose": "control-observation",
+      "managed-by": "fugue-declarative-runtime-agent"
+    }
+  }
+}
