@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"fugue/internal/edgetopology"
 	"log"
 	"net"
 	"net/http"
@@ -31,7 +32,7 @@ const (
 	maxReconcileInterval       = 5 * time.Minute
 )
 
-var edgeGroupIDPattern = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var edgeGroupIDPattern = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 
 type config struct {
 	Enabled                 bool

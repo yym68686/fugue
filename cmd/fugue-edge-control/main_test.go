@@ -21,6 +21,18 @@ import (
 	"time"
 )
 
+func TestAuthorityStartupAcceptsExplicitNeutralCellIDs(t *testing.T) {
+	groups, err := parseEdgeGroupIDs("cell-public-a")
+	if err != nil || !reflect.DeepEqual(groups, []string{"cell-public-a"}) {
+		t.Fatal("neutral cell startup scope rejected", groups, err)
+	}
+	for _, raw := range []string{"cell-", "cell-Public", "cell-a/../../other", "country-us"} {
+		if _, err := parseEdgeGroupIDs(raw); err == nil {
+			t.Fatal("malformed authority scope accepted", raw)
+		}
+	}
+}
+
 func TestConfigDefaultsAreLocalAndNonAuthoritative(t *testing.T) {
 	t.Parallel()
 
