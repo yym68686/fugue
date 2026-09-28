@@ -9,11 +9,12 @@
     "app.kubernetes.io/name": "fugue"
   },
   "candidateSelector": {
-    "app.kubernetes.io/component": "edge-client-front-public-b",
+    "app.kubernetes.io/component": "edge-client-front-public-b-secondary",
     "app.kubernetes.io/instance": "fugue",
-    "app.kubernetes.io/name": "fugue"
+    "app.kubernetes.io/name": "fugue",
+    "fugue.io/edge-node": "bwg"
   },
-  "candidateSource": "e20fb839169fdfc1ec8f3ef6b27b41823a480aae",
+  "candidateSource": "1cbdd6f16a934e1c404e0e2ce41bbcb7961260d8",
   "activationPath": "/var/lib/fugue-edge-front/activation.json",
   "probes": [
     {

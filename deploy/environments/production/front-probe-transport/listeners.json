@@ -1,6 +1,6 @@
 {
   "schema": "fugue.front-probe-transport/v1",
-  "generation": 1,
+  "generation": 2,
   "namespace": "fugue-system",
   "listeners": [
     {
