@@ -83,7 +83,7 @@ jobs:
     timeout-minutes: 30
     permissions: {contents: read}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - name: Select current explicit Agent activation intent
         id: activation
@@ -96,9 +96,9 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/activate_agent_edge_policy.py scripts/test_activate_agent_edge_policy.py; then
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/activate_agent_edge_policy.py scripts/test_activate_agent_edge_policy.py cmd/fugue-agent-edge-keyring .github/workflows/ci.yml; then
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/activate_agent_edge_policy.py; then
+            if git diff --quiet HEAD origin/main -- "$config" scripts/activate_agent_edge_policy.py cmd/fugue-agent-edge-keyring .github/workflows/ci.yml; then
               python3 -m unittest scripts.test_activate_agent_edge_policy
               echo 'selected=true' >> "$GITHUB_OUTPUT"
             fi

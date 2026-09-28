@@ -3,6 +3,7 @@ package declarativerelease
 import (
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -40,6 +41,23 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatal("CI workflow root is invalid")
 	}
 	root := document.Content[0]
+	var checkActionPins func(*yaml.Node)
+	checkActionPins = func(node *yaml.Node) {
+		if node.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				if node.Content[i].Value == "uses" {
+					value := node.Content[i+1].Value
+					if !strings.HasPrefix(value, "./") && !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$`).MatchString(value) {
+						t.Fatalf("external Action must pin a complete commit SHA: %s", value)
+					}
+				}
+			}
+		}
+		for _, child := range node.Content {
+			checkActionPins(child)
+		}
+	}
+	checkActionPins(root)
 	on := yamlMappingValue(t, root, "on")
 	triggerKeys := yamlMappingKeys(t, on)
 	if !reflect.DeepEqual(triggerKeys, []string{"pull_request", "push", "schedule"}) {
