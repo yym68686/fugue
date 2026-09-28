@@ -332,10 +332,10 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_front_probe_transport.py scripts/test_reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/test_front_connection_witness.py scripts/read_front_conntrack.py scripts/test_read_front_conntrack.py; then
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_front_probe_transport.py scripts/test_reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/test_front_connection_witness.py scripts/read_front_conntrack.py scripts/test_read_front_conntrack.py scripts/observe_front_node_conntrack.py scripts/test_observe_front_node_conntrack.py deploy/environments/production/front-connection-observation; then
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
-              python3 -m unittest scripts.test_observe_front_candidate scripts.test_reconcile_front_probe_transport scripts.test_front_connection_witness scripts.test_read_front_conntrack
+            if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
+              python3 -m unittest scripts.test_observe_front_candidate scripts.test_reconcile_front_probe_transport scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
               echo 'selected=true' >> "$GITHUB_OUTPUT"
             fi
           fi
@@ -356,7 +356,7 @@ jobs:
       - name: Attribute held connections to the original and candidate Front
         if: steps.transport.outputs.selected == 'true'
         run: |
-          python3 -m unittest scripts.test_front_connection_witness scripts.test_read_front_conntrack
+          python3 -m unittest scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
           python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-held-connections.json"
       - name: Retain held Front connection evidence
         if: steps.transport.outputs.selected == 'true'
@@ -411,7 +411,7 @@ jobs:
           fi
           if ! git diff --quiet "$base" HEAD -- "$config" scripts/stage_front_serving_transport.py scripts/test_stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py; then
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
+            if git diff --quiet HEAD origin/main -- "$config" scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
               python3 -m unittest scripts.test_observe_front_candidate scripts.test_stage_front_serving_transport
               echo 'selected=true' >> "$GITHUB_OUTPUT"
             fi

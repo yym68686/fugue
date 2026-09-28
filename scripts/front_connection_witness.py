@@ -15,9 +15,11 @@ from pathlib import Path
 try:
     from . import observe_front_candidate as front
     from . import read_front_conntrack as conntrack
+    from . import observe_front_node_conntrack as node_conntrack
 except ImportError:
     import observe_front_candidate as front
     import read_front_conntrack as conntrack
+    import observe_front_node_conntrack as node_conntrack
 
 
 class HeldTLS:
@@ -118,6 +120,8 @@ def observe_translation(held, pod_ip):
         except OSError:
             continue
         return translated_tuple(raw, held, pod_ip)
+    if node_conntrack.CONFIG.exists():
+        return node_conntrack.read(held, pod_ip)
     raise ValueError("kernel connection tracking is unavailable for exact NAT attribution: "+"; ".join(failures))
 
 
@@ -148,7 +152,10 @@ def fact(profile, pod, held):
     if len(matches) != 1 or not matches[0].get("id"):
         raise ValueError("held connection cannot be attributed to exactly one Front executor")
     item = matches[0]
-    return {"pod_uid": pod["metadata"]["uid"], "connection_id": item["id"], "started_at": item["started_at"], "slot": item["slot"], "target": item["target"], "source_evidence": source_evidence}
+    result = {"pod_uid": pod["metadata"]["uid"], "connection_id": item["id"], "started_at": item["started_at"], "slot": item["slot"], "target": item["target"], "source_evidence": source_evidence}
+    if source_evidence == "kernel_conntrack" and getattr(held, "nat_observer", None):
+        result["nat_observer"] = held.nat_observer
+    return result
 
 
 def observe_pair(profile, address, port):

@@ -1,0 +1,10 @@
+{
+  "schema": "fugue.front-connection-observer/v1",
+  "namespace": "fugue-system",
+  "selector": {"app.kubernetes.io/component": "node-janitor", "app.kubernetes.io/instance": "fugue", "app.kubernetes.io/name": "fugue"},
+  "daemonSet": "fugue-fugue-node-janitor",
+  "container": "node-janitor",
+  "image": "ghcr.io/yym68686/fugue-controller@sha256:48d83d4e1c52441661398db5f215c45acff8dec53d9b93f66c01f598631d89cc",
+  "hostRoot": "/host",
+  "python": "/usr/bin/python3"
+}
