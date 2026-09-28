@@ -57,7 +57,10 @@ def parse_response(raw, sequence, held, pod_ip):
     if not 20 <= len(raw) <= 65536:
         raise ValueError("conntrack response size invalid")
     length, kind, flags, response_sequence, _ = struct.unpack("=IHHII", raw[:16])
-    if response_sequence != sequence or length != len(raw) or flags & 2:
+    # Linux marks even an exact CT_GET unicast reply NLM_F_MULTI whenever
+    # the requester has a port ID. Bound to one complete returned message;
+    # the outgoing request still never sets any dump flag.
+    if response_sequence != sequence or length != len(raw) or flags & ~2:
         raise ValueError("conntrack response does not match the exact query")
     if kind == 2:
         errno = struct.unpack("=i", raw[16:20])[0]

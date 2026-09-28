@@ -89,9 +89,11 @@ def translated_tuple(raw, held, pod_ip):
 def observe_translation(held, pod_ip):
     if not getattr(held, "target_address", None) or not getattr(held, "target_port", None):
         raise ValueError("held connection target identity is unavailable")
+    failures = []
     try:
         return conntrack.read(held, pod_ip)
     except OSError as error:
+        failures.append("CT_GET errno="+str(error.errno))
         # Some runners keep Kubernetes administration separate from the local
         # root identity. The fixed helper has only the single CT_GET operation;
         # no shell, table dump, flush or connection mutation is exposed.
@@ -103,6 +105,7 @@ def observe_translation(held, pod_ip):
                 if set(value) != {"address", "port"} or type(value["port"]) is not int or not 1 <= value["port"] <= 65535:
                     raise ValueError("privileged exact conntrack observation is invalid")
                 return str(ipaddress.ip_address(value["address"])), value["port"]
+            failures.append("privileged CT_GET exit="+str(result.returncode)+": "+result.stderr.strip().split("\n")[-1][:300])
     binary = shutil.which("conntrack")
     if binary:
         result = subprocess.run([binary, "-L", "-p", "tcp", "--orig-src", held.client_address, "--orig-dst", held.target_address, "--orig-port-src", str(held.client_port), "--orig-port-dst", str(held.target_port), "-o", "extended"], capture_output=True, text=True, timeout=5)
@@ -115,7 +118,7 @@ def observe_translation(held, pod_ip):
         except OSError:
             continue
         return translated_tuple(raw, held, pod_ip)
-    raise ValueError("kernel connection tracking is unavailable for exact NAT attribution")
+    raise ValueError("kernel connection tracking is unavailable for exact NAT attribution: "+"; ".join(failures))
 
 
 def fact(profile, pod, held):
