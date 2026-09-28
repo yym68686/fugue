@@ -354,6 +354,27 @@ jobs:
         if: steps.transport.outputs.selected == 'true'
         run: python3 scripts/reconcile_front_probe_transport.py apply deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-probe-transport.json"
 
+  front_external_observation:
+    needs: [front_probe_transport]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Verify Front ingress from outside the production cluster
+        run: |
+          python3 -m unittest scripts.test_observe_front_public_probe
+          python3 scripts/observe_front_public_probe.py deploy/environments/production/front-probe-transport/listeners.json --evidence "$RUNNER_TEMP/front-external-observation.json"
+      - name: Retain external Front observations
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-external-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-external-observation.json
+          if-no-files-found: error
+          retention-days: 30
+
   front_serving_stage:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
