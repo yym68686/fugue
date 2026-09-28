@@ -452,7 +452,7 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          config=deploy/environments/production/front-serving-handoff/public-b-primary.json
+          config=deploy/environments/production/front-serving-handoff/public-b-secondary.json
           base="$BASE_SHA"
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
@@ -472,7 +472,7 @@ jobs:
           path: ${{ runner.temp }}/front-handoff-external
       - name: Prepare exact public Front handoff and compensation
         if: steps.handoff.outputs.selected == 'true'
-        run: python3 scripts/handoff_front_serving_transport.py prepare deploy/environments/production/front-serving-handoff/public-b-primary.json --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json"
+        run: python3 scripts/handoff_front_serving_transport.py prepare deploy/environments/production/front-serving-handoff/public-b-secondary.json --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json"
       - name: Retain Front handoff witness before public address CAS
         id: handoff_witness
         if: steps.handoff.outputs.selected == 'true'
@@ -484,7 +484,7 @@ jobs:
           retention-days: 30
       - name: Handoff public address while preserving the existing Front connection
         if: steps.handoff.outputs.selected == 'true'
-        run: python3 scripts/handoff_front_serving_transport.py apply deploy/environments/production/front-serving-handoff/public-b-primary.json --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json" --result "$RUNNER_TEMP/front-public-handoff-result.json"
+        run: python3 scripts/handoff_front_serving_transport.py apply deploy/environments/production/front-serving-handoff/public-b-secondary.json --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json" --result "$RUNNER_TEMP/front-public-handoff-result.json"
       - name: Retain verified public Front connection continuity
         if: steps.handoff.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -529,7 +529,7 @@ jobs:
           name: fugue-front-public-handoff-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/front-handoff-recovery
       - name: Restore the exact previous ingress after failed independent public acceptance
-        run: python3 scripts/handoff_front_serving_transport.py recover deploy/environments/production/front-serving-handoff/public-b-primary.json --evidence "$RUNNER_TEMP/front-handoff-recovery/front-public-handoff.json"
+        run: python3 scripts/handoff_front_serving_transport.py recover deploy/environments/production/front-serving-handoff/public-b-secondary.json --evidence "$RUNNER_TEMP/front-handoff-recovery/front-public-handoff.json"
 
   front_drain_observation:
     needs: [front_external_observation, front_public_verification]
