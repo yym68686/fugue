@@ -282,7 +282,7 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          config=deploy/environments/production/front-observation/public-a.json
+          config=deploy/environments/production/front-observation
           base="$BASE_SHA"
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
@@ -296,13 +296,18 @@ jobs:
           fi
       - name: Observe actual Front route and activation equivalence
         if: steps.observation.outputs.selected == 'true'
-        run: python3 scripts/observe_front_candidate.py deploy/environments/production/front-observation/public-a.json --evidence "$RUNNER_TEMP/front-observation.json"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/front-observations"
+          for config in deploy/environments/production/front-observation/*.json; do
+            python3 scripts/observe_front_candidate.py "$config" --evidence "$RUNNER_TEMP/front-observations/$(basename "$config")"
+          done
       - name: Retain independent Front observations
         if: steps.observation.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: fugue-front-observation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/front-observation.json
+          path: ${{ runner.temp }}/front-observations/*.json
           if-no-files-found: error
           retention-days: 30
 

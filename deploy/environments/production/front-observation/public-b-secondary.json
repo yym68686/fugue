@@ -1,0 +1,30 @@
+{
+  "schema": "fugue.front-observation/v1",
+  "namespace": "fugue-system",
+  "node": "bwg",
+  "group": "edge-group-country-us",
+  "legacySelector": {
+    "app.kubernetes.io/component": "edge-front",
+    "app.kubernetes.io/instance": "fugue",
+    "app.kubernetes.io/name": "fugue"
+  },
+  "candidateSelector": {
+    "app.kubernetes.io/component": "edge-client-front-public-b",
+    "app.kubernetes.io/instance": "fugue",
+    "app.kubernetes.io/name": "fugue"
+  },
+  "candidateSource": "e20fb839169fdfc1ec8f3ef6b27b41823a480aae",
+  "activationPath": "/var/lib/fugue-edge-front/activation.json",
+  "probes": [
+    {
+      "host": "api.fugue.pro",
+      "path": "/"
+    },
+    {
+      "host": "fugue.pro",
+      "path": "/"
+    }
+  ],
+  "samples": 5,
+  "intervalSeconds": 20
+}

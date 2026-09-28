@@ -225,7 +225,14 @@ Front on the explicitly named Edge node. It has no host ports or API credential,
 and reads the existing activation directory through a read-only mount. It can
 be measured without changing the public listener or activation state. A later
 independent transport declaration must prove equivalent routes and preserve
-the old Front until its existing connections drain before retiring it.
+the old Front until its existing connections drain before retiring it. The
+second independent lane targets the two explicit nodes in `cell-public-b`;
+neither lane derives placement from country labels. The read-only
+`front_observation` job compares immutable Pod identities, the durable
+activation record and freshly authenticated HTTPS route proofs against the
+existing Front over a bounded window. Its retained evidence explicitly grants
+no serving authority. Public transport handoff and connection-drain evidence
+remain separate prerequisites.
 
 Before each cutover, verify the exact previous positive LKG, route and TLS
 proof for the target hostname, DNS ownership, cell health, and the other cell's
