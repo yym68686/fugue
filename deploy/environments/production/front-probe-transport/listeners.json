@@ -1,0 +1,13 @@
+{
+  "schema": "fugue.front-probe-transport/v1",
+  "generation": 1,
+  "namespace": "fugue-system",
+  "listeners": [
+    {
+      "name": "fugue-front-probe-public-a",
+      "address": "51.38.126.103",
+      "port": 15443,
+      "observation": "deploy/environments/production/front-observation/public-a.json"
+    }
+  ]
+}

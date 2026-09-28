@@ -234,6 +234,14 @@ existing Front over a bounded window. Its retained evidence explicitly grants
 no serving authority. Public transport handoff and connection-drain evidence
 remain separate prerequisites.
 
+The independent `front_probe_transport` lane can create an isolated high-port
+listener after retaining the Front observation witness. Its schema cannot name
+80, 443 or other privileged ports. It checks declared Service/host-port owners
+and the node's current TCP listeners, then uses generation and UID/resourceVersion
+guards. After creation, the public probe port must return the same freshly
+authenticated HTTPS route proof as the candidate Pod. This tests the transport
+path without changing the production listeners or deleting either Front.
+
 Before each cutover, verify the exact previous positive LKG, route and TLS
 proof for the target hostname, DNS ownership, cell health, and the other cell's
 unchanged state. A rejected or incomplete candidate preserves the current

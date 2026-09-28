@@ -95,12 +95,12 @@ def state(config, p):
     return activation
 
 
-def proof(address, host, path):
+def proof(address, host, path, port=443):
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     nonce = secrets.token_hex(16)
     conn = http.client.HTTPSConnection(host, 443, context=context, timeout=5)
-    raw = socket.create_connection((address, 443), timeout=5)
+    raw = socket.create_connection((address, port), timeout=5)
     try:
         conn.sock = context.wrap_socket(raw, server_hostname=host)
         certificate_until = datetime.datetime.fromtimestamp(ssl.cert_time_to_seconds(conn.sock.getpeercert()["notAfter"]), datetime.timezone.utc)
