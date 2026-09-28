@@ -2,6 +2,7 @@ package declarativerelease
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,7 +93,7 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 	for _, component := range registry.Components {
 		got = append(got, component.ID)
 	}
-	want := []string{"api", "controller", "edge-client-dns-de-a", "edge-client-dns-de-b", "edge-client-dns-us-a", "edge-client-dns-us-b"}
+	want := []string{"api", "controller", "edge-client-dns-de-a", "edge-client-dns-de-b", "edge-client-dns-us-a", "edge-client-dns-us-b", "edge-client-front-public-a"}
 	for _, group := range edgeRegistry.Groups {
 		want = append(want, group.Client.ID, group.Control.ID, group.Worker.ID)
 	}
@@ -289,6 +290,54 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		canonicalIntent, err := CanonicalJSON(intent)
 		if err != nil || !bytes.Equal(intentRaw, append(canonicalIntent, '\n')) {
 			t.Fatalf("%s intent is not canonical JSON", component.ID)
+		}
+	}
+}
+
+func TestIndependentFrontBootstrapCannotAcquirePublicPortsOrWriteActivation(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/releases/edge-client-front-public-a/resources.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var set struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &set); err != nil || len(set.Items) != 1 {
+		t.Fatal("independent Front bootstrap must contain only its executor", err)
+	}
+	workload := set.Items[0]
+	if workload["kind"] != "DaemonSet" {
+		t.Fatal("independent Front created public transport")
+	}
+	spec, _ := objectField(workload, "spec")
+	template, _ := objectField(spec, "template")
+	pod, _ := objectField(template, "spec")
+	if pod["hostNetwork"] == true || pod["automountServiceAccountToken"] != false {
+		t.Fatal("shadow Front acquired node network or API mutation credentials")
+	}
+	selector, _ := objectField(pod, "nodeSelector")
+	if selector["fugue.io/location-country-code"] != nil || selector["kubernetes.io/hostname"] == nil {
+		t.Fatal("shadow Front placement still infers identity from country")
+	}
+	containers := pod["containers"].([]any)
+	if len(containers) != 1 {
+		t.Fatal("unexpected Front bootstrap containers")
+	}
+	container := containers[0].(map[string]any)
+	for _, raw := range container["ports"].([]any) {
+		if _, present := raw.(map[string]any)["hostPort"]; present {
+			t.Fatal("shadow Front reserves an existing public listener")
+		}
+	}
+	for _, raw := range container["volumeMounts"].([]any) {
+		if raw.(map[string]any)["readOnly"] != true {
+			t.Fatal("Front can mutate the existing activation authority")
+		}
+	}
+	for _, raw := range pod["volumes"].([]any) {
+		host, _ := objectField(raw.(map[string]any), "hostPath")
+		if host["type"] != "Directory" {
+			t.Fatal("Front can manufacture an empty activation directory")
 		}
 	}
 }

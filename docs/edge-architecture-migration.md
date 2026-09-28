@@ -217,6 +217,16 @@ LKG boundaries:
    Retire the country-derived group identity only after both cells serve from
    neutral identities with verified rollback and public route probes.
 
+Front code needs an independent executor before changing live authority IDs.
+The original Front owns host ports 80/443, and deleting that Pod during a worker
+rollout can interrupt both new and established connections. The
+`edge-client-front-public-a` bootstrap lane creates one separate Pod-network
+Front on the explicitly named Edge node. It has no host ports or API credential,
+and reads the existing activation directory through a read-only mount. It can
+be measured without changing the public listener or activation state. A later
+independent transport declaration must prove equivalent routes and preserve
+the old Front until its existing connections drain before retiring it.
+
 Before each cutover, verify the exact previous positive LKG, route and TLS
 proof for the target hostname, DNS ownership, cell health, and the other cell's
 unchanged state. A rejected or incomplete candidate preserves the current
