@@ -10,7 +10,8 @@ import (
 )
 
 // Transport selection is independently configured. A code rollout cannot
-// restart the selected DNS executor; publish a verified transport handoff first.
+// restart a selected DNS or independent Front executor. Publish a verified
+// transport handoff before replacing code.
 func (cluster *kubectlCluster) requireUnselectedDNSBackend(ctx context.Context, identity declarativerelease.ResourceIdentity, desired map[string]any) error {
 	if identity.Kind != "DaemonSet" && identity.Kind != "Deployment" {
 		return nil
@@ -20,7 +21,9 @@ func (cluster *kubectlCluster) requireUnselectedDNSBackend(ctx context.Context, 
 	var policy struct {
 		Component string `json:"component"`
 	}
-	if json.Unmarshal([]byte(stringValue(annotations["fugue.pro/consumer-identity"])), &policy) != nil || policy.Component != "dns-server" {
+	_ = json.Unmarshal([]byte(stringValue(annotations["fugue.pro/consumer-identity"])), &policy)
+	front := annotations["fugue.pro/edge-front-transport"] == "independent/v1"
+	if policy.Component != "dns-server" && !front {
 		return nil
 	}
 	raw, err := cluster.getResource(ctx, identity)
@@ -56,8 +59,8 @@ func (cluster *kubectlCluster) requireUnselectedDNSBackend(ctx context.Context, 
 		return errors.New("DNS public transport observation is incomplete")
 	}
 	for _, service := range services.Items {
-		if dnsPublicServiceSelects(service, labels) {
-			return fmt.Errorf("DNS workload %s/%s is selected by public Service %s; a verified DNS transport handoff is required before code replacement", identity.Kind, identity.Name, stringValue(mapField(service, "metadata")["name"]))
+		if (!front && dnsPublicServiceSelects(service, labels)) || (front && frontPublicServiceSelects(service, labels)) {
+			return fmt.Errorf("workload %s/%s is selected by public Service %s; a verified transport handoff is required before code replacement", identity.Kind, identity.Name, stringValue(mapField(service, "metadata")["name"]))
 		}
 	}
 	return nil
@@ -77,6 +80,31 @@ func dnsPublicServiceSelects(service map[string]any, labels map[string]any) bool
 	}
 	selector := mapField(spec, "selector")
 	if !publicDNS || len(selector) == 0 {
+		return false
+	}
+	for key, value := range selector {
+		if labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func frontPublicServiceSelects(service map[string]any, labels map[string]any) bool {
+	spec := mapField(service, "spec")
+	addresses, _ := spec["externalIPs"].([]any)
+	if len(addresses) == 0 && spec["type"] != "LoadBalancer" && spec["type"] != "NodePort" {
+		return false
+	}
+	ports, _ := spec["ports"].([]any)
+	public := false
+	for _, raw := range ports {
+		port, _ := raw.(map[string]any)
+		protocol := stringValue(port["protocol"])
+		public = public || (protocol == "" || protocol == "TCP") && (fmt.Sprint(port["port"]) == "80" || fmt.Sprint(port["port"]) == "443")
+	}
+	selector := mapField(spec, "selector")
+	if !public || len(selector) == 0 {
 		return false
 	}
 	for key, value := range selector {
