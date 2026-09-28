@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"fugue/internal/edgetopology"
 	"io"
 	"net/netip"
 	"path"
@@ -30,7 +31,7 @@ const (
 
 var (
 	componentIDPattern           = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
-	edgeGroupIDPattern           = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	edgeGroupIDPattern           = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 	shaPattern                   = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	digestPattern                = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	repositoryPattern            = regexp.MustCompile(`^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+$`)

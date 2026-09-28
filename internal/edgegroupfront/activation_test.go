@@ -86,6 +86,33 @@ func TestActivationCASAllowsExactlyOneConcurrentGroupTransition(t *testing.T) {
 	}
 }
 
+func TestNeutralCellActivationPreservesExactCASAndRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "activation.json")
+	now := time.Now().UTC()
+	request := activationRequest(ActivationOperationInit, 0, "a", "a", "bundle-a", 0)
+	request.GroupID = "cell-public-a"
+	if _, err := ApplyActivationCAS(path, request, now); err != nil {
+		t.Fatal(err)
+	}
+	request = activationRequest(ActivationOperationPromote, 1, "a", "b", "bundle-b", 0)
+	request.GroupID = "cell-public-b"
+	if _, err := ApplyActivationCAS(path, request, now.Add(time.Second)); !errors.Is(err, ErrActivationCASConflict) {
+		t.Fatal("another neutral cell bypassed the exact authority CAS", err)
+	}
+	request.GroupID = "cell-public-a"
+	if _, err := ApplyActivationCAS(path, request, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	request = activationRequest(ActivationOperationRollback, 2, "b", "a", "bundle-a", 2)
+	request.GroupID = "cell-public-a"
+	if _, err := ApplyActivationCAS(path, request, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if slot, state, err := readActiveSlot(path, "cell-public-a"); err != nil || slot != "a" || state.Generation != 3 {
+		t.Fatal("neutral cell did not retain verified rollback state", slot, state, err)
+	}
+}
+
 func TestReadActiveSlotRejectsAnotherGroupAndPreservesLastGoodActivation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "activation.json")
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)

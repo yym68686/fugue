@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"fugue/internal/edgetopology"
 	"io"
 	"os"
 	"path/filepath"
@@ -26,7 +27,7 @@ const (
 )
 
 var (
-	activationGroupPattern  = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	activationGroupPattern  = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 	activationCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	activationDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	activationReasonPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._:/-]{7,255}$`)

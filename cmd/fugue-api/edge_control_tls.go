@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fugue/internal/edgecontrolsupport"
+	"fugue/internal/edgetopology"
 )
 
 const (
@@ -18,10 +19,10 @@ const (
 	edgeControlRouteIntentTLSDirectory = "/var/run/secrets/fugue-api-tls"
 )
 
-var edgeControlRouteIntentQuery = regexp.MustCompile(`^edge_group_id=edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var edgeControlRouteIntentQuery = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 
 func validEdgeControlRouteIntentQuery(raw string) bool {
-	return raw == "" || (len(raw) <= len("edge_group_id=")+128 && edgeControlRouteIntentQuery.MatchString(raw))
+	return raw == "" || (strings.HasPrefix(raw, "edge_group_id=") && len(raw) <= len("edge_group_id=")+128 && edgeControlRouteIntentQuery.MatchString(strings.TrimPrefix(raw, "edge_group_id=")))
 }
 
 type edgeControlRouteIntentTLSConfig struct {

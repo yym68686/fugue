@@ -127,6 +127,10 @@ func TestEdgeGroupABTransitionIsStrictAndArtifactBound(t *testing.T) {
 	if err := registry.Validate(); err != nil {
 		t.Fatalf("valid edge group transition: %v", err)
 	}
+	registry.Components[0].Transition.EdgeGroupAB.GroupID = "cell-public-a"
+	if err := registry.Validate(); err != nil {
+		t.Fatalf("neutral cell transition rejected: %v", err)
+	}
 	registry.Components[0].Transition.EdgeGroupAB.WorkerBName = "another-worker"
 	if err := registry.Validate(); err == nil || !strings.Contains(err.Error(), "not artifact-bound") {
 		t.Fatalf("unbound edge worker was accepted: %v", err)

@@ -2,15 +2,45 @@ package edgecontrol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
+
+func TestNeutralCellsCompileIndependentInventoriesWithoutGrantingAuthority(t *testing.T) {
+	now := time.Date(2026, 8, 4, 9, 30, 0, 0, time.UTC)
+	intent := routeIntentFixture()
+	raw, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(strings.ReplaceAll(string(raw), "edge-group-country-us", "cell-public-a"), "edge-group-country-de", "cell-public-b")), &intent); err != nil {
+		t.Fatal(err)
+	}
+	reader := &shadowInventoryReader{snapshots: map[string]GroupInventorySnapshot{}}
+	for _, cell := range []string{"cell-public-a", "cell-public-b"} {
+		reader.snapshots[cell] = groupInventoryFixture(cell, "b", "epoch-b", "inventory-7", false)
+	}
+	ledger := NewMemoryGroupShadowLedger()
+	compiler := GroupShadowCompiler{Inventory: reader, Ledger: ledger, Now: func() time.Time { return now }}
+	batch, err := compiler.Reconcile(context.Background(), intent, []string{"cell-public-a", "cell-public-b"})
+	if err != nil || batch.Succeeded != 2 || batch.Failed != 0 {
+		t.Fatal("neutral inventories did not compile", batch, err)
+	}
+	for _, cell := range []string{"cell-public-a", "cell-public-b"} {
+		history := ledger.History(cell)
+		if len(history) != 1 || history[0].Bundle == nil || history[0].Bundle.EdgeGroupID != cell || history[0].PublicationEnabled || history[0].Authority != "none" {
+			t.Fatal("neutral identity mixed scope or granted unverified authority", history)
+		}
+	}
+}
 
 func TestGroupShadowCompilerIsolatesMixedGroupFailures(t *testing.T) {
 	t.Parallel()

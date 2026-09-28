@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"fugue/internal/edgetopology"
 	"regexp"
 	"sort"
 	"strconv"
@@ -48,7 +49,7 @@ var (
 	errGroupInventoryInvalid     = errors.New("edge-control group inventory is invalid")
 	errNoHealthyActiveInstances  = errors.New("edge-control group has no healthy active instances")
 	errNoRoutableRoutes          = errors.New("edge-control group has no routable routes")
-	edgeGroupIDPattern           = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	edgeGroupIDPattern           = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 	topologyIdentityPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 )
 

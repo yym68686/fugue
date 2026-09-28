@@ -44,7 +44,13 @@ func TestEdgeControlRouteIntentTLSHandlerExposesOnlyExactGET(t *testing.T) {
 	if groupRecorder.Code != http.StatusNoContent || calls.Load() != 2 {
 		t.Fatalf("documented group query rejected by TLS boundary: status=%d calls=%d", groupRecorder.Code, calls.Load())
 	}
-	for _, query := range []string{"edge_group_id=", "edge_group_id=other", "edge_group_id=edge-group-test&scope=global", "edge_group_id=edge-group-test&edge_group_id=edge-group-other", "edge_group_id=%65dge-group-test", "edge_group_id=edge-group-TEST", "edge_group_id=edge-group-test;scope=global"} {
+	request.URL.RawQuery = "edge_group_id=cell-public-a"
+	neutral := httptest.NewRecorder()
+	handler.ServeHTTP(neutral, request)
+	if neutral.Code != http.StatusNoContent || calls.Load() != 3 {
+		t.Fatal("neutral cell rejected at TLS boundary")
+	}
+	for _, query := range []string{"edge_group_id=cell-a&edge_group_id=cell-b", "edge_group_id=cell-A", "edge_group_id=cell-", "edge_group_id=%63ell-a", "edge_group_id=", "edge_group_id=other", "edge_group_id=edge-group-test&scope=global", "edge_group_id=edge-group-test&edge_group_id=edge-group-other", "edge_group_id=%65dge-group-test", "edge_group_id=edge-group-TEST", "edge_group_id=edge-group-test;scope=global"} {
 		request.URL.RawQuery = query
 		bad := httptest.NewRecorder()
 		handler.ServeHTTP(bad, request)
@@ -84,7 +90,7 @@ func TestEdgeControlRouteIntentTLSHandlerExposesOnlyExactGET(t *testing.T) {
 	if wrongSNIRecorder.Code != http.StatusNotFound {
 		t.Fatalf("wrong SNI reached RouteIntent handler: status=%d", wrongSNIRecorder.Code)
 	}
-	if calls.Load() != 2 {
+	if calls.Load() != 3 {
 		t.Fatalf("rejected request reached API handler: calls=%d", calls.Load())
 	}
 }
