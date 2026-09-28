@@ -48,12 +48,21 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_shadow_policy", "agent_edge_trust", "audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	agentActivation := yamlMappingValue(t, jobs, "agent_edge_activation")
+	for _, key := range yamlMappingKeys(t, agentActivation) {
+		if key == "needs" {
+			t.Fatal("Agent policy activation and recovery cannot depend on code-release jobs")
+		}
+	}
+	if yamlMappingValue(t, agentActivation, "environment").Value != "production" || !strings.Contains(source, "Retain activation evidence before publication") || !strings.Contains(source, "Retain selected-traffic verification witness") {
+		t.Fatal("Agent activation requires retained evidence before publication and LKG verification")
+	}
 	agentPolicy := yamlMappingValue(t, jobs, "agent_edge_shadow_policy")
 	for _, key := range yamlMappingKeys(t, agentPolicy) {
 		if key == "needs" {

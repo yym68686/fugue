@@ -164,6 +164,16 @@ provides real Agent heartbeat, operation polling, shadow measurement and later
 selected-transport evidence; creating it is not evidence that the rest of the
 fleet or authority cells have migrated.
 
+`active.json` declares the initial active policy and the exact canary image
+source used for acceptance. The independent `agent_edge_activation` lane first
+collects a bounded window of the actual Pod UID/image, independently verified
+checkpoint signatures, measured primary/standby diversity, renewed grants and
+fresh Runtime Agent heartbeats. Recent permission gaps or control failures stop
+the window. It retains that witness before seeding the observed shadow policy's
+LKG and publishing a full active policy with identical constraints. A second
+window verifies the selected transport before active LKG promotion. The lane
+does not promote based only on a green Deployment or an unsigned preview.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh

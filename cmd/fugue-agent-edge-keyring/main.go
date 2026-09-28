@@ -31,8 +31,41 @@ func run(args []string, out io.Writer) error {
 	generation := f.Uint64("generation", 0, "explicit positive keyring generation")
 	before := f.String("not-before", "", "absolute RFC3339 start")
 	after := f.String("not-after", "", "absolute RFC3339 end")
-	if err := f.Parse(args[1:]); err != nil || f.NArg() != 0 || !filepath.IsAbs(*privatePath) {
+	grantFile := f.String("grant-file", "", "absolute signed grant path")
+	audience := f.String("audience", "", "expected runtime identity")
+	origin := f.String("origin", "", "expected HTTPS origin")
+	if err := f.Parse(args[1:]); err != nil || f.NArg() != 0 {
 		return errors.New("invalid keyring command or private path")
+	}
+	if args[0] == "verify-grant" {
+		if *privatePath != "" || *id != "" || *generation != 0 || *before != "" || *after != "" || !filepath.IsAbs(*publicPath) || !filepath.IsAbs(*grantFile) || *audience == "" || *origin == "" {
+			return errors.New("grant verification requires only grant, public trust and expected audience/origin")
+		}
+		trust, err := agentedge.LoadTrustKeyring(*publicPath)
+		if err != nil {
+			return err
+		}
+		keys, err := trust.PublicKeys()
+		if err != nil {
+			return err
+		}
+		file, err := os.Open(*grantFile)
+		if err != nil {
+			return errors.New("signed grant file unavailable")
+		}
+		defer file.Close()
+		raw, err := io.ReadAll(io.LimitReader(file, agentedge.MaxGrantBytes+1))
+		if err != nil {
+			return errors.New("signed grant read failed")
+		}
+		verified, err := agentedge.Verify(raw, keys, *audience, *origin, nil, time.Now())
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(map[string]any{"verified": true, "trust_generation": trust.Generation, "digest": verified.Digest(), "grant": verified.View()})
+	}
+	if !filepath.IsAbs(*privatePath) || *grantFile != "" || *audience != "" || *origin != "" {
+		return errors.New("invalid keyring command arguments")
 	}
 	switch args[0] {
 	case "generate":

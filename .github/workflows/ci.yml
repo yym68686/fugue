@@ -75,6 +75,80 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  agent_edge_activation:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-agent-edge-policy, cancel-in-progress: false}
+    timeout-minutes: 30
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select current explicit Agent activation intent
+        id: activation
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/agent-edge-policy/active.json
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/activate_agent_edge_policy.py scripts/test_activate_agent_edge_policy.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/activate_agent_edge_policy.py; then
+              python3 -m unittest scripts.test_activate_agent_edge_policy
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Setup independent evidence verifier
+        if: steps.activation.outputs.selected == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version-file: go.mod, cache: false}
+      - name: Build evidence verifier
+        if: steps.activation.outputs.selected == 'true'
+        run: |
+          go test ./cmd/fugue-agent-edge-keyring
+          go build -trimpath -o "$RUNNER_TEMP/fugue-agent-edge-keyring" ./cmd/fugue-agent-edge-keyring
+      - name: Observe actual Agent before activation
+        if: steps.activation.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 scripts/activate_agent_edge_policy.py prepare deploy/environments/production/agent-edge-policy/active.json --trust deploy/environments/production/agent-edge-trust/package.json --validator "$RUNNER_TEMP/fugue-agent-edge-keyring" --evidence "$RUNNER_TEMP/agent-edge-before.json"
+      - name: Retain activation evidence before publication
+        if: steps.activation.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-agent-edge-before-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/agent-edge-before.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish explicitly observed active policy
+        if: steps.activation.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 scripts/activate_agent_edge_policy.py activate deploy/environments/production/agent-edge-policy/active.json --trust deploy/environments/production/agent-edge-trust/package.json --validator "$RUNNER_TEMP/fugue-agent-edge-keyring" --evidence "$RUNNER_TEMP/agent-edge-before.json"
+      - name: Observe actual selected control traffic
+        if: steps.activation.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 scripts/activate_agent_edge_policy.py prepare deploy/environments/production/agent-edge-policy/active.json --trust deploy/environments/production/agent-edge-trust/package.json --validator "$RUNNER_TEMP/fugue-agent-edge-keyring" --evidence "$RUNNER_TEMP/agent-edge-after.json"
+      - name: Retain selected-traffic verification witness
+        if: steps.activation.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-agent-edge-after-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/agent-edge-after.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Verify active policy LKG from retained observations
+        if: steps.activation.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: python3 scripts/activate_agent_edge_policy.py verify deploy/environments/production/agent-edge-policy/active.json --trust deploy/environments/production/agent-edge-trust/package.json --validator "$RUNNER_TEMP/fugue-agent-edge-keyring" --evidence "$RUNNER_TEMP/agent-edge-after.json"
+
   runtime_agent_identity:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Publish Agent control authority only after bounded real consumer evidence.
+
+Preparation is read-only and emits a reviewable witness. The workflow retains
+that witness before invoking the separate publication operation. No code image,
+DNS artifact or application assignment is changed by this publisher.
+"""
+import argparse
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import time
+
+try:
+    from .publish_agent_edge_shadow import API, SCOPE, canonical, current, digest, target_matches
+    from .reconcile_agent_edge_trust import kubectl, strict_json
+except ImportError:
+    from publish_agent_edge_shadow import API, SCOPE, canonical, current, digest, target_matches
+    from reconcile_agent_edge_trust import kubectl, strict_json
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def timestamp(value):
+    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def validate(config):
+    if set(config) != {"apiVersion", "kind", "origin", "expectedShadowGeneration", "policy", "consumer", "observation"} or config["apiVersion"] != "configuration.fugue.dev/v1" or config["kind"] != "AgentEdgeActivePolicy":
+        raise ValueError("invalid active policy declaration")
+    p = config["policy"]
+    if p.get("schema_version") != "fugue.agent-edge-policy/v1" or p.get("scope") != SCOPE or p.get("mode") != "active" or p.get("origin") != config["origin"] or not re.fullmatch(r"https://[a-z0-9][a-z0-9.-]+[a-z0-9]", config["origin"]):
+        raise ValueError("explicit active policy and canonical origin required")
+    for value in [p.get("generation", ""), config["expectedShadowGeneration"]]:
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", value):
+            raise ValueError("explicit policy generation required")
+    c = config["consumer"]
+    if set(c) != {"namespace", "deployment", "container", "runtimeId", "sourceSha", "checkpointPath"} or not re.fullmatch(r"[0-9a-f]{40}", c["sourceSha"]) or not re.fullmatch(r"runtime_[a-zA-Z0-9_]+", c["runtimeId"]) or not c["checkpointPath"].startswith("/"):
+        raise ValueError("declared immutable canary identity required")
+    for key in ["namespace", "deployment", "container"]:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", c[key]):
+            raise ValueError("canonical consumer identity required")
+    o = config["observation"]
+    if set(o) != {"samples", "intervalSeconds", "minimumGrants", "minimumDistinctCells", "maxHeartbeatAgeSeconds"} or any(type(v) is not int for v in o.values()) or not 5 <= o["samples"] <= 20 or not 10 <= o["intervalSeconds"] <= 60 or not 3 <= o["minimumGrants"] <= o["samples"] or not 1 <= o["minimumDistinctCells"] <= 5 or not 15 <= o["maxHeartbeatAgeSeconds"] <= 90:
+        raise ValueError("bounded explicit observation window required")
+    return config
+
+
+def selected_authority(api, config):
+    full = current(api, "full")
+    if full.get("artifact"):
+        if not target_matches(full["artifact"], config["policy"]) or full.get("release", {}).get("status") != "active":
+            raise ValueError("another full Agent authority exists")
+        return full, "active"
+    shadow = current(api, "shadow")
+    artifact, release = shadow.get("artifact", {}), shadow.get("release", {})
+    if artifact.get("generation") != config["expectedShadowGeneration"] or artifact.get("status") != "validated" or release.get("status") != "active" or artifact.get("content", {}).get("mode") != "shadow":
+        raise ValueError("expected observational authority is unavailable")
+    candidate, baseline = dict(config["policy"]), dict(artifact["content"])
+    for item in [candidate, baseline]:
+        item.pop("generation", None)
+        item.pop("mode", None)
+    if candidate != baseline:
+        raise ValueError("active policy differs from observed shadow constraints")
+    return shadow, "shadow"
+
+
+def verify_grant(validator, public, signed, runtime_id, origin):
+    with tempfile.TemporaryDirectory(prefix="fugue-agent-observation-") as directory:
+        trust_path, grant_path = Path(directory) / "trust.json", Path(directory) / "grant.json"
+        for path, value in [(trust_path, public), (grant_path, signed)]:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(canonical(value))
+        result = subprocess.run([validator, "verify-grant", "-public-file", str(trust_path), "-grant-file", str(grant_path), "-audience", runtime_id, "-origin", origin], capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            raise ValueError("consumer checkpoint has no live independent signature")
+        return strict_json(result.stdout)
+
+
+def measured_choice(logs, grant_digest):
+    observations = []
+    for line in logs.splitlines():
+        if any(text in line for text in ["heartbeat failed:", "poll failed:", "no live Agent Edge permission", "agent exited:", "Agent Edge acquisition returned HTTP 503"]):
+            raise ValueError("recent canary control or permission gap observed")
+        if "agent_edge_selection " in line:
+            value, suffix_start = json.JSONDecoder().raw_decode(line.split("agent_edge_selection ", 1)[1])
+            if value.get("degraded") or not value.get("primary"):
+                raise ValueError("recent canary measurements were degraded")
+            if "error=" in line.split("agent_edge_selection ", 1)[1][suffix_start:]:
+                raise ValueError("recent canary selection error observed")
+            if value.get("grant_digest") == grant_digest:
+                observations.append(value)
+    if not observations:
+        raise ValueError("consumer lacks current measured primary and independent standby")
+    return observations[-1]
+
+
+def sample(config, api, authority, mode, public, validator):
+    c, o = config["consumer"], config["observation"]
+    deployment = strict_json(kubectl(["get", "deployment", c["deployment"], "-n", c["namespace"], "-o", "json"]))
+    template = deployment["spec"]["template"]
+    if deployment["spec"]["replicas"] != 1 or deployment.get("status", {}).get("readyReplicas") != 1 or template["metadata"]["annotations"].get("fugue.pro/source-commit") != c["sourceSha"]:
+        raise ValueError("declared canary code is not the one healthy replica")
+    selector = ",".join(k + "=" + v for k, v in sorted(deployment["spec"]["selector"]["matchLabels"].items()))
+    pods = strict_json(kubectl(["get", "pods", "-n", c["namespace"], "-l", selector, "-o", "json"]))["items"]
+    pods = [p for p in pods if not p["metadata"].get("deletionTimestamp")]
+    if len(pods) != 1:
+        raise ValueError("canary ownership is ambiguous")
+    pod = pods[0]
+    status = next(s for s in pod["status"]["containerStatuses"] if s["name"] == c["container"])
+    if not status.get("ready") or status.get("restartCount") != 0 or not status.get("imageID", "").startswith("ghcr.io/") or "@sha256:" not in status.get("imageID", ""):
+        raise ValueError("canary restarted or has no immutable healthy image")
+    prefix = ["-n", c["namespace"], "exec", pod["metadata"]["name"], "-c", c["container"], "--"]
+    checkpoint = strict_json(kubectl([*prefix, "cat", c["checkpointPath"]]))
+    verified = verify_grant(validator, public, checkpoint["last_grant"], c["runtimeId"], config["origin"])
+    grant = verified["grant"]
+    if verified.get("verified") is not True or checkpoint.get("activated") != (mode == "active") or grant["mode"] != mode or grant["policy_reference"]["artifact_id"] != authority["artifact"]["id"] or grant["policy_reference"]["release_id"] != authority["release"]["id"] or timestamp(grant["valid_until"]) <= now() + datetime.timedelta(seconds=10):
+        raise ValueError("consumer has not accepted the exact live policy publication")
+    logs = kubectl(["-n", c["namespace"], "logs", pod["metadata"]["name"], "-c", c["container"], "--since=120s", "--timestamps=true"])
+    choice = measured_choice(logs, verified["digest"])
+    selected = set([choice["primary"], *choice.get("standbys", [])])
+    cells = {candidate["authority_cell_id"] for candidate in grant["candidates"] if candidate["edge_id"] in selected}
+    if len(cells) < o["minimumDistinctCells"]:
+        raise ValueError("measured candidate diversity below activation requirement")
+    runtime = api("GET", "/v1/runtimes/" + c["runtimeId"])["runtime"]
+    heartbeat = timestamp(runtime["last_heartbeat_at"])
+    observed = timestamp(runtime.get("labels", {}).get("fugue.io/cell-observed-at", ""))
+    if runtime.get("connection_mode") != "agent" or runtime.get("status") != "active" or runtime.get("access_mode") != "private" or runtime.get("pool_mode") != "dedicated" or heartbeat > now() or observed > now() or min(heartbeat, observed) < now() - datetime.timedelta(seconds=o["maxHeartbeatAgeSeconds"]):
+        raise ValueError("actual Agent heartbeat is stale or no longer isolated")
+    return {"at": now().isoformat(), "pod_uid": pod["metadata"]["uid"], "image_id": status["imageID"], "grant_digest": verified["digest"], "grant_valid_until": grant["valid_until"], "policy_release_id": authority["release"]["id"], "primary": choice["primary"], "cells": sorted(cells), "heartbeat": heartbeat.isoformat(), "mode": mode, "publication_ids": sorted({candidate["publication"]["release_id"] for candidate in grant["candidates"]})}
+
+
+def prepare_window(config, api, public, validator):
+    authority, mode = selected_authority(api, config)
+    observations = []
+    for index in range(config["observation"]["samples"]):
+        fresh, current_mode = selected_authority(api, config)
+        if fresh.get("release") != authority.get("release") or current_mode != mode:
+            raise ValueError("policy authority changed during observation window")
+        # Allow the first receipt to catch up to an already-published policy;
+        # once the watch starts, any failure invalidates the entire window.
+        if index == 0:
+            for attempt in range(13):
+                try:
+                    observation = sample(config, api, authority, mode, public, validator)
+                    break
+                except ValueError:
+                    if attempt == 12:
+                        raise
+                    time.sleep(5)
+        else:
+            observation = sample(config, api, authority, mode, public, validator)
+        observations.append(observation)
+        if index + 1 < config["observation"]["samples"]:
+            time.sleep(config["observation"]["intervalSeconds"])
+    if len({x["pod_uid"] for x in observations}) != 1 or len({x["image_id"] for x in observations}) != 1 or len({x["grant_digest"] for x in observations}) < config["observation"]["minimumGrants"] or len({x["heartbeat"] for x in observations}) != len(observations):
+        raise ValueError("consumer did not remain stable and renew permission and heartbeat")
+    result = {"schema": "fugue.agent-edge-activation-evidence/v1", "declaration_digest": digest(config), "trust_digest": digest(public), "authority": authority, "mode": mode, "observations": observations, "completed_at": now().isoformat()}
+    result["evidence_digest"] = digest(result)
+    return result
+
+
+def prepare(config, api, public, validator):
+    for attempt in range(3):
+        try:
+            return prepare_window(config, api, public, validator)
+        except ValueError:
+            if attempt == 2:
+                raise
+            print(canonical({"observation_window_rejected": True, "attempt": attempt + 1}), flush=True)
+            time.sleep(30)
+
+
+def validate_witness(config, public, witness):
+    unsigned = dict(witness)
+    actual = unsigned.pop("evidence_digest", None)
+    if actual != digest(unsigned) or witness.get("schema") != "fugue.agent-edge-activation-evidence/v1" or witness.get("declaration_digest") != digest(config) or witness.get("trust_digest") != digest(public) or not now() - datetime.timedelta(minutes=5) < timestamp(witness["completed_at"]) <= now() or len(witness.get("observations", [])) != config["observation"]["samples"]:
+        raise ValueError("activation evidence is stale or not bound to this declaration")
+
+
+def attest_lkg(api, authority, witness, initial):
+    artifact, release = authority["artifact"], authority["release"]
+    lkg = authority.get("lkg")
+    if lkg and lkg.get("artifact_id") == artifact["id"] and lkg.get("verified_by_release_id") == release["id"]:
+        return
+    api("POST", "/v1/admin/artifact-releases/" + release["id"] + "/verify-lkg", {"fencing_token": release["fencing_token"], "allow_initial_lkg": initial, "reason": "verified actual Runtime Agent signature, primary/standby measurements, stable pod and renewed heartbeat over the retained observation window", "evidence": {"consumer_convergence": True, "local_probe": True, "platform_evidence": True, "watch_window": True, "baseline_monotonic": True, "database_rollback_compatible": True, "evidence_refs": [witness["evidence_digest"], artifact["id"], release["id"]]}})
+
+
+def activate(config, api, public, validator, witness):
+    validate_witness(config, public, witness)
+    authority, mode = selected_authority(api, config)
+    if authority["release"]["id"] != witness["authority"]["release"]["id"] or mode != witness["mode"]:
+        raise ValueError("authority changed after witness retention")
+    sample(config, api, authority, mode, public, validator)
+    if mode == "active":
+        return authority
+    attest_lkg(api, authority, witness, initial=not bool(authority.get("lkg")))
+    policy = config["policy"]
+    candidates = api("GET", "/v1/admin/artifacts?kind=policy_snapshot&scope=" + SCOPE + "&limit=100")["artifacts"]
+    matches = [a for a in candidates if a.get("generation") == policy["generation"]]
+    if len(matches) > 1:
+        raise ValueError("ambiguous active policy generation")
+    artifact = matches[0] if matches else api("POST", "/v1/admin/artifacts", {"artifact_kind": "policy_snapshot", "scope": {"scope_type": "global", "key": SCOPE}, "generation": policy["generation"], "content": policy})["artifact"]
+    if not target_matches(artifact, policy):
+        raise ValueError("stored active policy differs from explicit intent")
+    validation = api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/validate", {"dry_run": False})
+    if validation.get("pass") is not True or validation.get("artifact", {}).get("status") != "validated":
+        raise ValueError("active policy failed typed validation")
+    current_authority, current_mode = selected_authority(api, config)
+    if current_mode != mode or current_authority["release"]["id"] != authority["release"]["id"]:
+        raise ValueError("authority changed immediately before activation")
+    api("POST", "/v1/admin/artifacts/" + artifact["id"] + "/release", {"release_channel": "full", "idempotency_key": "git-agent-active/" + policy["generation"] + "/" + digest(policy), "reason": "activate explicitly observed Agent control transport; retained witness " + witness["evidence_digest"]})
+    result, mode = selected_authority(api, config)
+    if mode != "active":
+        raise ValueError("full Agent authority did not activate")
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("operation", choices=["prepare", "activate", "verify"])
+    parser.add_argument("config")
+    parser.add_argument("--trust", required=True)
+    parser.add_argument("--validator", required=True)
+    parser.add_argument("--evidence", required=True)
+    args = parser.parse_args()
+    config = validate(strict_json(Path(args.config).read_bytes()))
+    public = strict_json(Path(args.trust).read_bytes())["publicTrust"]
+    token = os.environ.pop("FUGUE_API_KEY", "")
+    if not token:
+        raise ValueError("configuration writer credential missing")
+    api = API(config["origin"], token)
+    if args.operation == "prepare":
+        witness = prepare(config, api, public, args.validator)
+        Path(args.evidence).write_text(canonical(witness) + "\n")
+        print(canonical({"prepared": True, "mode": witness["mode"], "evidence_digest": witness["evidence_digest"]}))
+    else:
+        witness = strict_json(Path(args.evidence).read_bytes())
+        if args.operation == "activate":
+            authority = activate(config, api, public, args.validator, witness)
+        else:
+            validate_witness(config, public, witness)
+            authority, mode = selected_authority(api, config)
+            if mode != "active" or witness["mode"] != "active" or authority["release"]["id"] != witness["authority"]["release"]["id"]:
+                raise ValueError("active verification lacks current selected-transport evidence")
+            sample(config, api, authority, mode, public, args.validator)
+            attest_lkg(api, authority, witness, initial=False)
+        print(canonical({"operation": args.operation, "artifact_id": authority["artifact"]["id"], "release_id": authority["release"]["id"], "mode": "active"}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        raise SystemExit("Agent Edge activation stopped: " + str(error)) from None

@@ -1,0 +1,68 @@
+{
+  "apiVersion": "configuration.fugue.dev/v1",
+  "kind": "AgentEdgeActivePolicy",
+  "origin": "https://api.fugue.pro",
+  "expectedShadowGeneration": "agent-edge-shadow-3",
+  "policy": {
+    "schema_version": "fugue.agent-edge-policy/v1",
+    "generation": "agent-edge-active-1",
+    "scope": "agent-edge-control",
+    "mode": "active",
+    "origin": "https://api.fugue.pro",
+    "signing_key_id": "agent-control-root-1",
+    "topology_intent_artifact_id": "artifact_1790467429_af153b9ea9f0",
+    "topology_intent_digest": "sha256:0ddf5a9a5845c4512665d7eecfc7a955a6fe1d23d8c3c81b9a2bed9867aa787d",
+    "constraint": {
+      "owner_kind": "platform",
+      "tenant_id": "",
+      "hostname": "api.fugue.pro",
+      "allowed_pool_ids": [
+        "pool-public"
+      ],
+      "required_capabilities": [
+        "http",
+        "tls"
+      ],
+      "min_candidates": 1,
+      "min_distinct_cells": 1,
+      "min_distinct_domains": {
+        "host": 1
+      },
+      "fact_max_age_seconds": 120
+    },
+    "selection": {
+      "probe_interval_seconds": 10,
+      "probe_timeout_milliseconds": 2000,
+      "fact_max_age_seconds": 120,
+      "failure_threshold": 3,
+      "better_sample_threshold": 3,
+      "switch_improvement_percent": 15,
+      "switch_cooldown_seconds": 60,
+      "standby_count": 1,
+      "desired_distinct_cells": 2,
+      "max_candidates": 8
+    },
+    "capacity": {
+      "max_node_cpu_percent": 85,
+      "max_node_memory_percent": 85,
+      "fact_max_age_seconds": 120
+    },
+    "grant_ttl_seconds": 90,
+    "minimum_lease_seconds": 20
+  },
+  "consumer": {
+    "namespace": "fugue-system",
+    "deployment": "fugue-runtime-agent-canary",
+    "container": "agent",
+    "runtimeId": "runtime_1790554359_f435e3d2f868",
+    "sourceSha": "c84809d1fc4e7d2b6e2eb5041f3afaba4b07a2e6",
+    "checkpointPath": "/var/lib/fugue-agent/edge-checkpoint.json"
+  },
+  "observation": {
+    "samples": 7,
+    "intervalSeconds": 30,
+    "minimumGrants": 3,
+    "minimumDistinctCells": 2,
+    "maxHeartbeatAgeSeconds": 45
+  }
+}
