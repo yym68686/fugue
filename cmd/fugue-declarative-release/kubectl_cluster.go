@@ -2380,24 +2380,12 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	// explicitly absent first-install predecessor was observed; treating null
 	// as a workload makes prepare wait for a target that cannot exist yet.
 	if resourceAbsent(trimmedWorkload) {
-		// A first-install LKG is the canonical empty resource set. Keep an
-		// absent CAS witness for every declared resource so the prewrite bind can
-		// prove that no predecessor object existed, including auxiliary objects.
-		identities, identityErr := declarativerelease.ResourceSetIdentities(manifest)
-		if identityErr != nil {
-			return declarativerelease.Observation{}, identityErr
-		}
-		resources := make([]declarativerelease.ResourceObservation, 0, len(identities))
-		for _, identity := range identities {
-			desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
-			if desiredErr != nil {
-				return declarativerelease.Observation{}, desiredErr
-			}
-			metadata := mapField(desired, "metadata")
-			resources = append(resources, declarativerelease.ResourceObservation{
-				Identity:         identity,
-				RetainOnRollback: mapStringField(metadata, "annotations")["fugue.pro/release-retain-on-rollback"] == "true",
-			})
+		// Auxiliary resources may survive an earlier compensated first install.
+		// Capture their actual UID/RV/spec for the same CAS comparison used by
+		// execute; an absent primary is not evidence that its PVC is absent.
+		resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
+		if err != nil {
+			return declarativerelease.Observation{}, err
 		}
 		return declarativerelease.Observation{Present: false, Primary: primary, Resources: resources}, nil
 	}

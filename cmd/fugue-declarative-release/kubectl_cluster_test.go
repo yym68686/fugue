@@ -345,6 +345,30 @@ func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	}
 }
 
+func TestAbsentPrimaryCapturesRetainedPVCForPrewriteCAS(t *testing.T) {
+	release := declarativerelease.PlanRelease{ComponentID: "agent-canary", Workload: declarativerelease.Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "test-system", Name: "agent-canary", Container: "agent", FieldManager: "test-manager", Replicas: 1}}
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","kind":"ComponentResourceSet","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"agent-canary","namespace":"test-system"}},{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"annotations":{"fugue.pro/release-retain-on-rollback":"true"},"name":"agent-state","namespace":"test-system"},"spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"1Gi"}}}}]}`)
+	pvc := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]any{"name": "agent-state", "namespace": "test-system", "uid": "retained-uid", "resourceVersion": "12", "annotations": map[string]any{"fugue.pro/release-retain-on-rollback": "true"}}, "spec": map[string]any{"accessModes": []any{"ReadWriteOnce"}, "resources": map[string]any{"requests": map[string]any{"storage": "1Gi"}}}}}
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), pvc)
+	cluster := &kubectlCluster{resources: client}
+	observation, err := cluster.Observe(context.Background(), release, declarativerelease.TargetIdentity{Present: false}, manifest)
+	if err != nil || observation.Present || len(observation.Resources) != 2 || !observation.Resources[1].Present || observation.Resources[1].UID != "retained-uid" || !observation.Resources[1].RetainOnRollback {
+		t.Fatal("retained state fabricated as absent", observation, err)
+	}
+	cas, err := cluster.ObserveCAS(context.Background(), release, manifest)
+	if err != nil || !cas.SameResourceCAS(observation) {
+		t.Fatal("prepare and execute disagree about retained state", cas, err)
+	}
+	pvc.SetResourceVersion("13")
+	if _, err = client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}).Namespace("test-system").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := cluster.ObserveCAS(context.Background(), release, manifest)
+	if err != nil || changed.SameResourceCAS(observation) {
+		t.Fatal("retained PVC mutation escaped CAS", err)
+	}
+}
+
 func TestPublicRouteCanaryDialsExactEdgeWithTLSHostAndExpectedBody(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.Host != "example.com" || request.URL.Path != "/healthz" {
