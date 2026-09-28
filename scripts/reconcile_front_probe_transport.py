@@ -97,7 +97,10 @@ def mutation(current, target):
         return ["create", "-f", "-", "--field-manager=" + MANAGER], front.canonical(target)
     patch = [{"op": "test", "path": "/metadata/uid", "value": current["metadata"]["uid"]}, {"op": "test", "path": "/metadata/resourceVersion", "value": current["metadata"]["resourceVersion"]}, {"op": "test", "path": "/spec", "value": current["spec"]}, {"op": "test", "path": "/metadata/annotations", "value": current["metadata"]["annotations"]}]
     for key, value in target["spec"].items():
-        if current["spec"].get(key) != value:
+        actual = current["spec"].get(key)
+        if key == "publishNotReadyAddresses":
+            actual = bool(actual)
+        if actual != value:
             patch.append({"op": "add", "path": "/spec/" + key, "value": value})
     for key, value in target["metadata"]["annotations"].items():
         if current["metadata"]["annotations"].get(key) != value:

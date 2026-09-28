@@ -35,6 +35,11 @@ class FrontProbeTransportTests(unittest.TestCase):
         live = copy.deepcopy(target)
         live["metadata"].update(uid="uid-one", resourceVersion="7")
         self.assertEqual(transport.mutation(live, target), (None, None))
+        # Kubernetes omits false values from its JSON response. Reading that
+        # default must not make an already-converged listener look unapplied.
+        omitted_default = copy.deepcopy(live)
+        omitted_default["spec"].pop("publishNotReadyAddresses")
+        self.assertEqual(transport.mutation(omitted_default, target), (None, None))
         next_target = transport.desired(dict(value, generation=2), value["listeners"][0], profile())
         command, body = transport.mutation(live, next_target)
         self.assertIn("--type=json", command)
