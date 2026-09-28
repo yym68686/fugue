@@ -266,6 +266,46 @@ jobs:
           python3 scripts/reconcile_agent_edge_trust.py "$config" --validator "$RUNNER_TEMP/fugue-agent-edge-keyring"
           python3 scripts/reconcile_agent_edge_trust.py "$config" --validator "$RUNNER_TEMP/fugue-agent-edge-keyring" --check
 
+  front_observation:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-front-observation, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select current read-only Front observation
+        id: observation
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/front-observation/public-a.json
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/observe_front_candidate.py scripts/test_observe_front_candidate.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/observe_front_candidate.py; then
+              python3 -m unittest scripts.test_observe_front_candidate
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Observe actual Front route and activation equivalence
+        if: steps.observation.outputs.selected == 'true'
+        run: python3 scripts/observe_front_candidate.py deploy/environments/production/front-observation/public-a.json --evidence "$RUNNER_TEMP/front-observation.json"
+      - name: Retain independent Front observations
+        if: steps.observation.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-observation.json
+          if-no-files-found: error
+          retention-days: 30
+
   dns_transport:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
