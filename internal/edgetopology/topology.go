@@ -12,6 +12,11 @@ import (
 
 const SchemaVersion = "edge-topology/v1"
 
+// AuthorityIDPattern accepts explicit neutral cell identities and the legacy
+// group namespace during migration. Neither form encodes placement or country
+// semantics; callers must verify exact signed scope and current authority.
+const AuthorityIDPattern = `^(?:edge-group-|cell-)[a-z0-9]+(?:-[a-z0-9]+)*$`
+
 var identityPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 
 // Intent describes placement and shared risk. Endpoints, health, loaded

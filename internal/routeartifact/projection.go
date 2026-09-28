@@ -2,12 +2,13 @@
 package routeartifact
 
 import (
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"regexp"
 )
 
-var platformRouteArtifactGroupID = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var platformRouteArtifactGroupID = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 
 func Project(artifact model.PlatformArtifact) (model.EdgeRouteIntentSnapshot, error) {
 	return platformconfig.ProjectRouteArtifact(artifact)

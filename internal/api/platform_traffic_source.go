@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -12,7 +13,7 @@ import (
 	"fugue/internal/trafficbinding"
 )
 
-var trafficSourceGroup = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var trafficSourceGroup = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 
 // A release selection is authoritative even when it cannot yet be consumed.
 // Returning an error preserves the consumer's serving artifact instead of

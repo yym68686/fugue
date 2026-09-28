@@ -731,7 +731,7 @@ paths:
           schema:
             type: string
             maxLength: 128
-            pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'
+            pattern: '^(?:edge-group-|cell-)[a-z0-9]+(?:-[a-z0-9]+)*$'
       responses:
         '200':
           description: Successful response
@@ -13750,7 +13750,7 @@ components:
       schema:
         type: string
         maxLength: 128
-        pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'
+        pattern: '^(?:edge-group-|cell-)[a-z0-9]+(?:-[a-z0-9]+)*$'
     IdPathParam:
       in: path
       name: id
@@ -17212,7 +17212,7 @@ components:
           type: array
           maxItems: 64
           uniqueItems: true
-          items: {type: string, pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'}
+          items: {type: string, pattern: '^(?:edge-group-|cell-)[a-z0-9]+(?:-[a-z0-9]+)*$'}
     EdgeRouteBundle:
       type: object
       additionalProperties: false
@@ -33195,7 +33195,7 @@ components:
           minItems: 1
           maxItems: 64
           uniqueItems: true
-          items: {type: string, pattern: '^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$'}
+          items: {type: string, pattern: '^(?:edge-group-|cell-)[a-z0-9]+(?:-[a-z0-9]+)*$'}
     PlatformConfigPolicySnapshot:
       type: object
       additionalProperties: false

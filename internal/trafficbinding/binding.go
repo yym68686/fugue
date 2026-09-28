@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"regexp"
 	"strings"
@@ -15,7 +16,7 @@ import (
 const Schema = "fugue.traffic-release-binding/v1"
 
 var digest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-var group = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var group = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 var cohort = regexp.MustCompile(`^cohort=[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 func Clone(in *model.TrafficReleaseBinding) *model.TrafficReleaseBinding {

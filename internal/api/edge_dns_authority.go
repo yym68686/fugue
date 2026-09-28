@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"fugue/internal/edgetopology"
 )
 
 const (
@@ -20,7 +22,7 @@ const (
 
 var (
 	edgeDNSAuthorityServicePattern = regexp.MustCompile(`^edge-control-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-	edgeDNSAuthorityGroupPattern   = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	edgeDNSAuthorityGroupPattern   = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 )
 
 func parseEdgeAuthorityServices(raw string) (map[string]string, error) {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"fugue/internal/edgetopology"
@@ -11,6 +12,48 @@ import (
 	"fugue/internal/routebinding"
 	"fugue/internal/routeproof"
 )
+
+func TestNeutralCellCompilationRequiresExactSignedScope(t *testing.T) {
+	r := edgeSelectionFixture()
+	for i := range r.Intent.EdgeTopology.Cells {
+		r.Intent.EdgeTopology.Cells[i].LegacyGroupID = ""
+	}
+	raw, _ := json.Marshal(r)
+	text := strings.ReplaceAll(strings.ReplaceAll(string(raw), "edge-group-a", "cell-a"), "edge-group-b", "cell-b")
+	if err := json.Unmarshal([]byte(text), &r); err != nil {
+		t.Fatal(err)
+	}
+	r.Policy.TrafficRolloutCohorts = []TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{"cell-a"}}}
+	rebindPlacement(&r)
+	result, err := Compile(r)
+	if err != nil {
+		t.Fatal("neutral authority was rejected by traffic compiler", err)
+	}
+	groups, err := ResolveTrafficCanary(result.ReleaseArtifact, "cohort=first")
+	if err != nil || !slices.Equal(groups, []string{"cell-a"}) {
+		t.Fatal("neutral cohort lost exact authority", groups, err)
+	}
+	projected, err := ProjectRouteArtifact(result.RouteArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Routes []CompiledRoute `json:"routes"`
+		Policy PolicySnapshot  `json:"policy"`
+	}
+	raw, _ = json.Marshal(result.RouteArtifact.Content)
+	json.Unmarshal(raw, &payload)
+	grants, err := CompileEdgeSelectionGrants(r.Intent, payload.Policy, payload.Routes, projected)
+	if err != nil || len(grants) != 1 || len(grants[0].RequiredRouteDigestsByCell["cell-a"]) != 2 {
+		t.Fatal("neutral cell lost route proof requirements", grants, err)
+	}
+	for _, route := range projected.Routes {
+		d, e := routeproof.Digest(routebinding.FromIntent(route, "cell-a"))
+		if e != nil || !slices.Contains(grants[0].RequiredRouteDigestsByCell["cell-a"], d) {
+			t.Fatal("neutral compiler differs from exact serving proof", e)
+		}
+	}
+}
 
 func TestAgentControlAvailabilityDoesNotRewritePublicDNSQuorum(t *testing.T) {
 	r := edgeSelectionFixture()

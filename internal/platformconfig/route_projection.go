@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"net/url"
 	"regexp"
@@ -16,7 +17,7 @@ import (
 	"strings"
 )
 
-var platformRouteArtifactGroupID = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var platformRouteArtifactGroupID = regexp.MustCompile(edgetopology.AuthorityIDPattern)
 
 // ProjectRouteArtifact preserves the established RouteIntent wire semantics for a verified
 // artifact. It never reads business state or grants serving authorization.

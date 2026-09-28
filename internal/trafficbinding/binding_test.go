@@ -10,10 +10,18 @@ import (
 func TestTrafficBindingRejectsMalformedAndAmbiguousScope(t *testing.T) {
 	d := "sha256:" + strings.Repeat("a", 64)
 	valid := model.TrafficReleaseBinding{Schema: Schema, ReleaseSetID: "parent", ReleaseSetDigest: d, ReleaseSetGeneration: "parent-gen", RouteArtifactID: "child", RouteArtifactDigest: d, RouteArtifactGeneration: "child-gen", RouteArtifactSequence: 1, ReleaseID: "release", ReleaseChannel: "gray", FencingToken: 1, ScopeKey: "global", IntentDigest: d, PolicyDigest: d, InputSnapshotDigest: d, CompilerVersion: "compiler", ProjectionDigest: d, CanaryRuleRef: "cohort=first", EdgeGroupIDs: []string{"edge-group-a", "edge-group-b"}}
-	for _, mode := range []string{"valid", "unknown-schema", "zero-fence", "bad-digest", "noncanonical", "duplicate", "invalid-group", "missing-groups", "free-selector", "shadow-with-canary", "full-with-canary"} {
+	for _, mode := range []string{"valid", "neutral-cell", "unknown-schema", "zero-fence", "bad-digest", "noncanonical", "duplicate", "invalid-group", "missing-groups", "free-selector", "shadow-with-canary", "full-with-canary"} {
 		t.Run(mode, func(t *testing.T) {
 			b := Clone(&valid)
 			switch mode {
+			case "neutral-cell":
+				b.EdgeGroupIDs = []string{"cell-a", "cell-b"}
+				if err := ValidateGroup(b, "cell-a", true); err != nil {
+					t.Fatal("exact neutral cell rejected", err)
+				}
+				if err := ValidateGroup(b, "cell-foreign", true); err == nil {
+					t.Fatal("neutral namespace bypassed signed cohort")
+				}
 			case "unknown-schema":
 				b.Schema = "future"
 			case "zero-fence":
@@ -35,7 +43,7 @@ func TestTrafficBindingRejectsMalformedAndAmbiguousScope(t *testing.T) {
 			case "full-with-canary":
 				b.ReleaseChannel = "full"
 			}
-			if err := Validate(b); (err == nil) != (mode == "valid") {
+			if err := Validate(b); (err == nil) != (mode == "valid" || mode == "neutral-cell") {
 				t.Fatalf("unexpected validation: %v", err)
 			}
 		})

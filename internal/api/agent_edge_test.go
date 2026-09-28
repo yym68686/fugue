@@ -511,3 +511,20 @@ func TestInitialAgentShadowPolicyCannotAuthorizeActiveTraffic(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthorityServiceMappingAcceptsNeutralIDsWithoutImplicitCountry(t *testing.T) {
+	services, err := parseEdgeAuthorityServices(`{"cell-public-a":"edge-control-public-a","edge-group-country-us":"edge-control-us"}`)
+	if err != nil || len(services) != 2 || services["cell-public-a"] != "edge-control-public-a" {
+		t.Fatal("neutral authority service mapping rejected", services, err)
+	}
+	for _, id := range []string{"cell-public-a", "cell-public-b", "edge-group-country-de"} {
+		if !trafficSourceGroup.MatchString(id) {
+			t.Fatal("neutral traffic selector rejected", id)
+		}
+	}
+	for _, id := range []string{"cell-", "cell-A", "cell-a/../../other", "country-us"} {
+		if trafficSourceGroup.MatchString(id) {
+			t.Fatal("malformed or implicit country authority accepted", id)
+		}
+	}
+}
