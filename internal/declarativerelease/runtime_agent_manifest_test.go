@@ -39,6 +39,13 @@ func TestRuntimeAgentCanaryCannotExecuteExistingBusinessWorkloads(t *testing.T) 
 	if spec["automountServiceAccountToken"] != false {
 		t.Fatal("canary gained Kubernetes execution authority")
 	}
+	if spec["securityContext"].(map[string]any)["fsGroup"] != nil {
+		t.Fatal("fsGroup must not make protected checkpoints group-writable on remount")
+	}
+	init := spec["initContainers"].([]any)[0].(map[string]any)
+	if init["name"] != "state-permissions" || len(init["volumeMounts"].([]any)) != 1 || init["volumeMounts"].([]any)[0].(map[string]any)["name"] != "state" {
+		t.Fatal("state permission repair must be confined to the canary volume")
+	}
 	container := spec["containers"].([]any)[0].(map[string]any)
 	env := map[string]any{}
 	for _, r := range container["env"].([]any) {
