@@ -288,6 +288,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		}
 		return nil
 	}
+	if err := s.reconcilePublicIngressEgress(ctx, client, namespace, managed, app); err != nil {
+		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile public ingress egress: %w", err))
+	}
 	var credentialErr error
 	app, credentialErr = s.reconcileManagedPostgresCredentials(ctx, client, namespace, app)
 	if credentialErr != nil {
