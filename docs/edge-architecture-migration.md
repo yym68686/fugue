@@ -250,6 +250,21 @@ repeated nonce proofs and matches its exact client tuple to the Front's active
 connection ID. It cannot reconnect after a closed socket. This establishes the
 observation needed to test existing connection preservation during handoff.
 
+The public Front handoff is a separate declaration with expected, selected and
+compensation generations. It changes only the staged Service's external address
+and traffic policy through a UID/resourceVersion/spec compare-and-swap. It keeps
+one original verified TLS socket alive across the change and attributes new
+connections to the candidate's exact runtime connection ID. For node-originated
+Service traffic that is source-NATed, a bounded read-only kernel CT_GET must bind
+the original socket tuple to the exact candidate Pod. An explicitly pinned,
+existing node observer can execute that reader when the CI identity lacks kernel
+observation rights; this installs nothing and never flushes or modifies a flow.
+Both Fronts remain present. Failed local verification compensates only the
+exact write made by this handoff. A separate hosted runner then verifies external
+public ingress; failure invokes the same retained prewrite witness and monotonic
+compensation generation. Neither passing these gates nor an empty old Front
+alone retires a worker authority or country alias.
+
 Before each cutover, verify the exact previous positive LKG, route and TLS
 proof for the target hostname, DNS ownership, cell health, and the other cell's
 unchanged state. A rejected or incomplete candidate preserves the current

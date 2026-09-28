@@ -1,0 +1,11 @@
+{
+  "schema": "fugue.front-serving-handoff/v1",
+  "namespace": "fugue-system",
+  "service": "fugue-front-serving-public-a",
+  "address": "51.38.126.103",
+  "observation": "deploy/environments/production/front-observation/public-a.json",
+  "expectedGeneration": 1,
+  "generation": 2,
+  "rollbackGeneration": 3,
+  "verificationSeconds": 60
+}
