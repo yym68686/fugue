@@ -112,3 +112,49 @@ func TestDNSReleaseBridgeSeparatesRankingFactsFromRecordAuthority(t *testing.T) 
 		})
 	}
 }
+
+func TestDNSBridgeScopesApplicationRolloutConstraintsToOwnedRecords(t *testing.T) {
+	for _, scenario := range []string{"unrelated application", "same application", "legacy application scope", "foreign tenant", "missing constraint", "changed route proof", "changed common policy"} {
+		t.Run(scenario, func(t *testing.T) {
+			view, plan, readiness, _, now := queryExecutionFixture()
+			view.Records[0].TenantID, view.Records[0].AppID = "tenant-a", "app-a"
+			constraint := platformconfig.TrafficPolicyConstraint{ID: "policy-a", TenantID: "tenant-a", AppID: "app-a", Mode: "single", StableReleaseID: "release-one", StableWeight: 100}
+			switch scenario {
+			case "unrelated application":
+				constraint.AppID = "app-b"
+			case "legacy application scope":
+				constraint.TenantID = ""
+			case "foreign tenant":
+				constraint.TenantID = "tenant-b"
+			}
+			previous := dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}, Policy: platformconfig.PolicySnapshot{MaxStaleSeconds: 3600, DNSReadiness: &readiness, TrafficConstraints: []platformconfig.TrafficPolicyConstraint{constraint}}}
+			raw, _ := json.Marshal(previous)
+			var next dnsServingPayload
+			if err := json.Unmarshal(raw, &next); err != nil {
+				t.Fatal(err)
+			}
+			next.Policy.TrafficConstraints[0].StableReleaseID = "release-two"
+			if scenario == "missing constraint" {
+				next.Policy.TrafficConstraints = nil
+			}
+			if scenario == "changed route proof" {
+				next.Plan.Probes[0].RouteDigest = "sha256:" + strings.Repeat("f", 64)
+			}
+			if scenario == "changed common policy" {
+				next.Policy.MaxStaleSeconds++
+			}
+			old := &dnsServingState{payload: previous, record: dnsServingCheckpoint{Candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "old", ReleasedAt: now.Add(-time.Minute)}}}}
+			bridge := &dnsReleaseBridge{payload: next, candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "new", ReleasedAt: now}}}
+			allowed := compatibleDNSReleaseProbes(old, bridge)
+			want := scenario == "unrelated application"
+			for _, requirement := range plan.Probes {
+				if allowed[requirement.ID] != want {
+					t.Fatal("application rollout crossed record ownership or lost a hard check", scenario, allowed)
+				}
+			}
+			if after, _ := json.Marshal(previous); string(after) != string(raw) {
+				t.Fatal("compatibility projection mutated retained authority")
+			}
+		})
+	}
+}

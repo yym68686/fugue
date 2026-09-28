@@ -22,12 +22,14 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 	previous, next := old.payload, bridge.payload
 	oldRules, newRules := dnsBridgeRules(previous.Policy.DNSAnswerRules), dnsBridgeRules(next.Policy.DNSAnswerRules)
 	oldQueries, newQueries := dnsBridgeQueries(previous.Queries), dnsBridgeQueries(next.Queries)
+	oldTraffic, newTraffic := dnsBridgeTrafficConstraints(previous), dnsBridgeTrafficConstraints(next)
 	oldPlan, newPlan := previous.Plan, next.Plan
 	previous.Plan, next.Plan = nil, nil
 	previous.Generation, next.Generation = "", ""
 	previous.Lineage, next.Lineage = platformconfig.Lineage{}, platformconfig.Lineage{}
 	previous.Policy.Generation, next.Policy.Generation = "", ""
 	previous.Policy.DNSAnswerRules, next.Policy.DNSAnswerRules = nil, nil
+	previous.Policy.TrafficConstraints, next.Policy.TrafficConstraints = nil, nil
 	previous.Queries, next.Queries = nil, nil
 	if !reflect.DeepEqual(previous, next) {
 		return nil
@@ -50,7 +52,8 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 		if next, exists := nextRecords[record.Hostname]; exists && reflect.DeepEqual(record, next) &&
 			len(oldQueries[record.Hostname]) > 0 &&
 			reflect.DeepEqual(oldQueries[record.Hostname], newQueries[record.Hostname]) &&
-			reflect.DeepEqual(oldRules[record.Hostname], newRules[record.Hostname]) {
+			reflect.DeepEqual(oldRules[record.Hostname], newRules[record.Hostname]) &&
+			reflect.DeepEqual(oldTraffic[record.Hostname], newTraffic[record.Hostname]) {
 			continue
 		}
 		// A probe shared by records cannot silently carry a changed record
@@ -62,6 +65,42 @@ func compatibleDNSReleaseProbes(old *dnsServingState, bridge *dnsReleaseBridge) 
 		}
 	}
 	return allowed
+}
+
+// Application rollout constraints authorize only that application's records.
+// A changed stable/candidate release must not invalidate an unrelated hostname's
+// otherwise identical proof plan. Preserve exact tenant and application scope;
+// shared policy fields and each record's route digests remain mandatory checks.
+func dnsBridgeTrafficConstraints(payload dnsServingPayload) map[string][]platformconfig.TrafficPolicyConstraint {
+	// App IDs are globally unique, including for legacy constraints without a
+	// tenant field. Compare the entire constraint so tenant drift also rejects.
+	byApp := map[string][]platformconfig.TrafficPolicyConstraint{}
+	for _, constraint := range payload.Policy.TrafficConstraints {
+		byApp[constraint.AppID] = append(byApp[constraint.AppID], constraint)
+	}
+	byHost := map[string][]platformconfig.TrafficPolicyConstraint{}
+	seen := map[string]map[string]bool{}
+	add := func(host, app string) {
+		if app == "" {
+			return
+		}
+		if seen[host] == nil {
+			seen[host] = map[string]bool{}
+		}
+		if !seen[host][app] {
+			seen[host][app] = true
+			byHost[host] = append(byHost[host], byApp[app]...)
+		}
+	}
+	for _, record := range payload.Records {
+		add(record.Hostname, record.AppID)
+	}
+	for _, view := range payload.Queries {
+		for _, record := range view.Records {
+			add(record.Name, record.AppID)
+		}
+	}
+	return byHost
 }
 
 func dnsBridgeRules(rules []platformconfig.DNSAnswerRule) map[string][]platformconfig.DNSAnswerRule {

@@ -245,6 +245,13 @@ extended. Cross-release observations are not reported as successful application
 of the new release. These mitigations must pass isolated DNS observation before
 public DNS rollout; they do not complete the architecture migration.
 
+Application traffic constraints are compared only for records owned by that
+application. Their complete values, including tenant identity and release
+weights, still have to agree. An unrelated application's stable release change
+must not discard the unchanged platform hostname's proof bridge. Common policy,
+record ownership, endpoint sets and route proof requirements remain independent
+mandatory checks; changed application routes cannot borrow unchanged proofs.
+
 The producer's source digest excludes raw runtime scores, so a score change
 alone does not immediately trigger publication. Periodic refresh still embeds
 those observations in the DNS query view; a derived selection-mode change also
