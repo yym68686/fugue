@@ -530,6 +530,46 @@ jobs:
       - name: Restore the exact previous ingress after failed independent public acceptance
         run: python3 scripts/handoff_front_serving_transport.py recover deploy/environments/production/front-serving-handoff/public-a.json --evidence "$RUNNER_TEMP/front-handoff-recovery/front-public-handoff.json"
 
+  front_drain_observation:
+    needs: [front_external_observation]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_external_observation.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-front-drain-observation, cancel-in-progress: false}
+    timeout-minutes: 5
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select current read-only Front drain observation
+        id: observation
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- scripts/observe_front_drain.py scripts/test_observe_front_drain.py; then
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- scripts/observe_front_drain.py scripts/handoff_front_serving_transport.py scripts/front_connection_witness.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-serving-handoff deploy/environments/production/front-observation; then
+              python3 -m unittest scripts.test_observe_front_drain
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Observe exact public Front selection and retained connections
+        if: steps.observation.outputs.selected == 'true'
+        run: python3 scripts/observe_front_drain.py deploy/environments/production/front-serving-handoff/public-a.json --evidence "$RUNNER_TEMP/front-drain-observation.json"
+      - name: Retain Front drain observation without deleting any executor
+        if: steps.observation.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-drain-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-drain-observation.json
+          if-no-files-found: error
+          retention-days: 30
+
   dns_transport:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
