@@ -434,6 +434,7 @@ jobs:
   front_serving_handoff:
     outputs:
       selected: ${{ steps.handoff.outputs.selected }}
+      recoverable: ${{ steps.handoff_witness.outcome == 'success' }}
     needs: [front_probe_transport, front_external_observation]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_external_observation.result == 'success' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
@@ -455,7 +456,7 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/handoff_front_serving_transport.py scripts/test_handoff_front_serving_transport.py; then
+          if ! git diff --quiet "$base" HEAD -- "$config" scripts/handoff_front_serving_transport.py scripts/test_handoff_front_serving_transport.py scripts/reconcile_front_probe_transport.py; then
             git fetch origin main
             if git diff --quiet HEAD origin/main -- "$config" scripts/handoff_front_serving_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py deploy/environments/production/front-probe-transport deploy/environments/production/front-serving-stage scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
               python3 -m unittest scripts.test_handoff_front_serving_transport scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
@@ -472,6 +473,7 @@ jobs:
         if: steps.handoff.outputs.selected == 'true'
         run: python3 scripts/handoff_front_serving_transport.py prepare deploy/environments/production/front-serving-handoff/public-a.json --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json"
       - name: Retain Front handoff witness before public address CAS
+        id: handoff_witness
         if: steps.handoff.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -512,7 +514,7 @@ jobs:
 
   front_public_recovery:
     needs: [front_serving_handoff, front_public_verification]
-    if: ${{ always() && needs.front_serving_handoff.outputs.selected == 'true' && needs.front_public_verification.result != 'success' }}
+    if: ${{ always() && needs.front_serving_handoff.outputs.recoverable == 'true' && needs.front_public_verification.result != 'success' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-front-serving-handoff, cancel-in-progress: false}

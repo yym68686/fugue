@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 
 try:
@@ -25,6 +26,19 @@ def digest(value):
 
 
 def kubectl(*args, body=None):
+    # Unlike create/apply -f -, kubectl patch --patch-file does not accept
+    # stdin. Keep the full CAS document in a private, short-lived file.
+    if "--patch-file" in args:
+        index = args.index("--patch-file")+1
+        if index < len(args) and args[index] == "-":
+            if body is None:
+                raise ValueError("Front patch document is missing")
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", prefix="fugue-front-cas-") as patch:
+                patch.write(body)
+                patch.flush()
+                actual = list(args)
+                actual[index] = patch.name
+                return kubectl(*actual)
     result = subprocess.run(["kubectl", *args], input=body, capture_output=True, text=True, timeout=20)
     if result.returncode:
         raise ValueError("Front probe transport operation failed: " + result.stderr.strip())

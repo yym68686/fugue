@@ -1,5 +1,9 @@
 import copy
 import datetime
+import json
+from pathlib import Path
+import shutil
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +19,26 @@ def profile():
 
 
 class FrontProbeTransportTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("kubectl"), "kubectl required for local patch contract")
+    def test_real_kubectl_local_cas_reads_private_patch_file_and_rejects_wrong_version(self):
+        value = config()
+        original = transport.desired(value, value["listeners"][0], profile())
+        original["metadata"].update(uid="uid-one", resourceVersion="7")
+        with tempfile.TemporaryDirectory() as directory:
+            resource = Path(directory)/"service.json"
+            resource.write_text(json.dumps(original))
+            for version in ["7", "stale"]:
+                operations = [{"op":"test","path":"/metadata/resourceVersion","value":version},{"op":"replace","path":"/spec/externalIPs","value":["9.9.9.9"]}]
+                args = ("patch", "--local", "-f", str(resource), "--type=json", "--patch-file", "-", "-o", "json")
+                with self.subTest(version=version):
+                    if version == "stale":
+                        with self.assertRaises(ValueError):transport.kubectl(*args, body=json.dumps(operations))
+                    else:
+                        patched = transport.kubectl(*args, body=json.dumps(operations))
+                        self.assertEqual(patched["spec"]["externalIPs"], ["9.9.9.9"])
+                        self.assertEqual(patched["spec"]["selector"], original["spec"]["selector"])
+            self.assertEqual(json.loads(resource.read_text()), original)
+
     def test_only_non_serving_ports_and_explicit_profiles_are_allowed(self):
         value = config()
         transport.validate(value)
