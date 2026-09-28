@@ -93,7 +93,7 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 	for _, component := range registry.Components {
 		got = append(got, component.ID)
 	}
-	want := []string{"api", "controller", "edge-client-dns-de-a", "edge-client-dns-de-b", "edge-client-dns-us-a", "edge-client-dns-us-b", "edge-client-front-public-a", "edge-client-front-public-b"}
+	want := []string{"api", "controller", "edge-client-dns-de-a", "edge-client-dns-de-b", "edge-client-dns-us-a", "edge-client-dns-us-b", "edge-client-front-public-a", "edge-client-front-public-b", "edge-client-front-public-b-primary", "edge-client-front-public-b-secondary"}
 	for _, group := range edgeRegistry.Groups {
 		want = append(want, group.Client.ID, group.Control.ID, group.Worker.ID)
 	}
@@ -295,7 +295,7 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 }
 
 func TestIndependentFrontBootstrapCannotAcquirePublicPortsOrWriteActivation(t *testing.T) {
-	for _, cell := range []string{"a", "b"} {
+	for _, cell := range []string{"a", "b", "b-primary", "b-secondary"} {
 		t.Run(cell, func(t *testing.T) {
 			raw, err := os.ReadFile("../../deploy/releases/edge-client-front-public-" + cell + "/resources.json")
 			if err != nil {
@@ -318,6 +318,15 @@ func TestIndependentFrontBootstrapCannotAcquirePublicPortsOrWriteActivation(t *t
 				t.Fatal("shadow Front acquired node network or API mutation credentials")
 			}
 			selector, _ := objectField(pod, "nodeSelector")
+			metadata, _ := objectField(template, "metadata")
+			labels, _ := objectField(metadata, "labels")
+			if node, ok := labels["fugue.io/edge-node"].(string); ok {
+				workloadSelector, _ := objectField(spec, "selector")
+				matchLabels, _ := objectField(workloadSelector, "matchLabels")
+				if node == "" || selector["kubernetes.io/hostname"] != node || matchLabels["fugue.io/edge-node"] != node {
+					t.Fatal("address-specific Front selector must be bound to its exact scheduling node")
+				}
+			}
 			if selector["fugue.io/location-country-code"] != nil {
 				t.Fatal("shadow Front placement still infers identity from country")
 			}

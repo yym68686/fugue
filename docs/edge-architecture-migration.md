@@ -350,3 +350,12 @@ with an observed count of zero. Missing, malformed or unavailable observations
 block deletion, as do retained connections. This is a deletion guard, not proof
 that ingress is isolated: retiring a Front still requires the independent
 transport handoff and drain acceptance before any worker maintenance.
+
+An address-specific Front Service must select a single declared Edge node. A
+shared DaemonSet selector across nodes was insufficient even with Local traffic
+policies: in-cluster access to an externalIP selected another node while public
+external probes still passed. Each multi-node cell therefore stages distinct
+per-node Front executors with disjoint selectors and exact hostname placement.
+They keep reading the existing authority without acquiring public ports. Probe
+and serving Services bind only to that node's executor; country is not a
+placement or selection input.
