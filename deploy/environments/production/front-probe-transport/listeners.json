@@ -8,6 +8,12 @@
       "address": "51.38.126.103",
       "port": 15443,
       "observation": "deploy/environments/production/front-observation/public-a.json"
+    },
+    {
+      "name": "fugue-front-probe-public-b-primary",
+      "address": "15.204.94.71",
+      "port": 15443,
+      "observation": "deploy/environments/production/front-observation/public-b-primary.json"
     }
   ]
 }

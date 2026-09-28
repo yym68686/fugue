@@ -68,6 +68,16 @@ def validate(config):
     return config
 
 
+def select_named(config, collection, name):
+    """Limit one transition to an explicitly declared member without pruning peers."""
+    if name is None:
+        return config
+    matches = [item for item in config[collection] if item["name"] == name]
+    if len(matches) != 1:
+        raise ValueError("transition must select exactly one declared " + collection + " member")
+    return dict(config, **{collection: matches})
+
+
 def profile(config, listener):
     value = front.validate(json.loads(Path(listener["observation"]).read_text()))
     if value["namespace"] != config["namespace"]:
@@ -240,8 +250,9 @@ def main():
     parser.add_argument("operation", choices=["prepare", "apply"])
     parser.add_argument("config")
     parser.add_argument("--evidence", required=True)
+    parser.add_argument("--listener")
     args = parser.parse_args()
-    config = validate(json.loads(Path(args.config).read_text()))
+    config = select_named(validate(json.loads(Path(args.config).read_text())), "listeners", args.listener)
     if args.operation == "prepare":
         Path(args.evidence).write_text(front.canonical(prepare(config)) + "\n")
     else:

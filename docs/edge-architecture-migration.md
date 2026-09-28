@@ -338,3 +338,15 @@ Cutover prerequisites remain:
 - Neutral authority-cell identities must replace country-derived identities in
   release authority, inventory, leases and LKG before removing compatibility
   aliases. Country labels remain optional locality or residency inputs.
+
+Public Front transitions select one declared probe listener and one internal
+Service at a time. Completed handoffs remain in the declaration inventory, but
+they are not restaged and their old-public connection assumptions are not
+replayed. Only an explicit handoff declaration change selects a public address
+CAS; changing executor code alone does not repeat a traffic mutation.
+
+Legacy Front replacement now requires a complete live connection inventory
+with an observed count of zero. Missing, malformed or unavailable observations
+block deletion, as do retained connections. This is a deletion guard, not proof
+that ingress is isolated: retiring a Front still requires the independent
+transport handoff and drain acceptance before any worker maintenance.

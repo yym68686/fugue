@@ -205,8 +205,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument("--evidence", required=True)
+    parser.add_argument("--listener")
     args = parser.parse_args()
-    config = transport.validate(json.loads(Path(args.config).read_text()))
+    config = transport.select_named(transport.validate(json.loads(Path(args.config).read_text())), "listeners", args.listener)
     observations = []
     for listener in config["listeners"]:
         profile = front.validate(json.loads(Path(listener["observation"]).read_text()))

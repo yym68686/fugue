@@ -169,8 +169,9 @@ def main():
     parser.add_argument("operation", choices=["prepare", "apply"])
     parser.add_argument("config")
     parser.add_argument("--evidence", required=True)
+    parser.add_argument("--service")
     args = parser.parse_args()
-    config = validate(json.loads(Path(args.config).read_text()))
+    config = probe.select_named(validate(json.loads(Path(args.config).read_text())), "services", args.service)
     if args.operation == "prepare":
         Path(args.evidence).write_text(front.canonical(prepare(config)) + "\n")
     else:

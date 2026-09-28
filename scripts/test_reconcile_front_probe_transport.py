@@ -19,6 +19,17 @@ def profile():
 
 
 class FrontProbeTransportTests(unittest.TestCase):
+    def test_explicit_selection_retains_peer_declarations_and_rejects_unknown_members(self):
+        for collection in ["listeners", "services"]:
+            original = {collection: [{"name": "front-a"}, {"name": "front-b"}], "generation": 7}
+            selected = transport.select_named(original, collection, "front-b")
+            self.assertEqual(selected, {collection: [{"name": "front-b"}], "generation": 7})
+            self.assertEqual(len(original[collection]), 2)
+            self.assertIs(transport.select_named(original, collection, None), original)
+            with self.assertRaises(ValueError): transport.select_named(original, collection, "missing")
+            duplicate = {collection: [{"name": "front-b"}, {"name": "front-b"}]}
+            with self.assertRaises(ValueError): transport.select_named(duplicate, collection, "front-b")
+
     @unittest.skipUnless(shutil.which("kubectl"), "kubectl required for local patch contract")
     def test_real_kubectl_local_cas_reads_private_patch_file_and_rejects_wrong_version(self):
         value = config()
