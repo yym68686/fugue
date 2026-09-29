@@ -16,7 +16,8 @@ func validateTrafficCanary(parent model.PlatformArtifact, ref string, artifacts 
 	}
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	kinds, kindOK := parent.Content["artifact_kinds"].([]any)
-	if !ok || !kindOK || len(ids) != 3 || len(kinds) != 3 {
+	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
+	if !ok || !kindOK || compositionErr != nil {
 		return fmt.Errorf("%w: traffic canary members missing", ErrConflict)
 	}
 	seen := map[string]bool{}
@@ -41,15 +42,13 @@ func validateTrafficCanary(parent model.PlatformArtifact, ref string, artifacts 
 			return fmt.Errorf("%w: %v", ErrConflict, err)
 		}
 	}
-	if !seen[model.PlatformArtifactKindEdgeRouteBundle] || !seen[model.PlatformArtifactKindDNSAnswerBundle] || !seen[model.PlatformArtifactKindCaddyRouteConfig] {
-		return ErrConflict
-	}
 	return nil
 }
 
 func (s *Store) pgValidateTrafficCanary(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, ref string) error {
 	ids, ok := parent.Content["artifact_ids"].([]any)
-	if !ok || len(ids) != 3 {
+	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
+	if !ok || compositionErr != nil {
 		return ErrConflict
 	}
 	children := make([]model.PlatformArtifact, 0, len(ids))

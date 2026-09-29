@@ -84,6 +84,9 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		return platformConfigCompileResponse{}, err
 	}
 	artifacts := []*model.PlatformArtifact{&compiled.RouteArtifact, &compiled.DNSArtifact, &compiled.TLSArtifact}
+	if compiled.ReleaseSet.PublicationRole == platformconfig.PublicationRoleCellRoutes {
+		artifacts = []*model.PlatformArtifact{&compiled.RouteArtifact, &compiled.TLSArtifact}
+	}
 	validation := model.PlatformArtifactValidationResult{
 		Name: "platform_config.compiler", Pass: true,
 		Severity: model.RobustnessSeverityBlockPublish,
@@ -128,6 +131,9 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		return platformConfigCompileResponse{}, err
 	}
 	compiled.ReleaseSet.ArtifactIDs = []string{compiled.RouteArtifact.ID, compiled.DNSArtifact.ID, compiled.TLSArtifact.ID}
+	if compiled.ReleaseSet.PublicationRole == platformconfig.PublicationRoleCellRoutes {
+		compiled.ReleaseSet.ArtifactIDs = []string{compiled.RouteArtifact.ID, compiled.TLSArtifact.ID}
+	}
 	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, compiled.ReleaseSet.ArtifactIDs, time.Now().UTC())
 	if len(sources) == 1 {
 		parent.Metadata[platformproducer.PolicyReleaseMetadata] = sources[0].PolicyReleaseID

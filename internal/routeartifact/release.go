@@ -40,7 +40,8 @@ func ProjectRelease(parent, child model.PlatformArtifact, a model.PlatformConsum
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&set) != nil || decoder.Decode(&struct{}{}) != io.EOF || set.SchemaVersion != platformconfig.SchemaVersion || set.Generation != parent.Generation || set.Scope != parent.ScopeKey || len(set.ArtifactIDs) != 3 || len(set.ArtifactKinds) != 3 {
+	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
+	if decoder.Decode(&set) != nil || decoder.Decode(&struct{}{}) != io.EOF || set.SchemaVersion != platformconfig.SchemaVersion || set.Generation != parent.Generation || set.Scope != parent.ScopeKey || compositionErr != nil {
 		return fail()
 	}
 	seenID, seenKind := map[string]bool{}, map[string]bool{}
@@ -54,7 +55,7 @@ func ProjectRelease(parent, child model.PlatformArtifact, a model.PlatformConsum
 			return fail()
 		}
 	}
-	if !seenID[child.ID] || !seenKind[model.PlatformArtifactKindEdgeRouteBundle] || !seenKind[model.PlatformArtifactKindDNSAnswerBundle] || !seenKind[model.PlatformArtifactKindCaddyRouteConfig] {
+	if !seenID[child.ID] || !seenKind[model.PlatformArtifactKindEdgeRouteBundle] || !seenKind[model.PlatformArtifactKindCaddyRouteConfig] {
 		return fail()
 	}
 	lineage := platformconfig.LineageFromArtifact(child)

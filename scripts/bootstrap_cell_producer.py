@@ -39,24 +39,32 @@ def validate(config):
         raise ValueError("canonical HTTPS API origin required")
     scope = "authority-cell:" + cell
     intent, policy, producer = config["static_intent"], config["projection_policy"], config["producer"]
+    role = producer.get("publication_role")
+    if role not in [None, "cell-routes"] or intent.get("publication_role") != role or policy.get("publication_role") != role:
+        raise ValueError("explicit publication role must match all inputs")
     for value in [intent, policy]:
         if value.get("schema_version") != "fugue.platform.config/v1" or value.get("scope") != scope or value.get("authority_cell_id") != cell or not IDENTITY.fullmatch(value.get("generation", "")):
             raise ValueError("input scope or authority differs")
     topology = intent.get("edge_topology", {})
     edges, dns = topology.get("edges", []), intent.get("dns_consumers", [])
-    if topology.get("authority_cells") != [{"id": cell}] or not edges or not dns or len(edges) > 10000 or len(dns) > 4096 or any(e.get("authority_cell_id") != cell for e in edges) or any(d.get("edge_group_id") != cell for d in dns):
+    if topology.get("authority_cells") != [{"id": cell}] or not edges or (not dns if role is None else bool(dns)) or len(edges) > 10000 or len(dns) > 4096 or any(e.get("authority_cell_id") != cell for e in edges) or any(d.get("edge_group_id") != cell for d in dns):
         raise ValueError("complete neutral cell membership required")
     edge_ids, dns_ids = sorted(e["id"] for e in edges), sorted(d["node_id"] for d in dns)
     if len(set(edge_ids)) != len(edge_ids) or len(set(dns_ids)) != len(dns_ids):
         raise ValueError("duplicate declared member")
     # Match the typed TrafficConsumerTopology encoding, whose field order is
     # part of its digest contract. The API independently validates this pin.
-    membership = {"schema_version": "fugue.traffic-consumer-topology/v1", "authority_cell_id": cell, "edge_node_ids": edge_ids, "dns_node_ids": dns_ids}
+    membership = {} if role is None else {"publication_role": role}
+    membership.update(schema_version="fugue.traffic-consumer-topology/v1", authority_cell_id=cell, edge_node_ids=edge_ids, dns_node_ids=dns_ids)
     membership_digest = "sha256:" + hashlib.sha256(json.dumps(membership, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    if policy.get("consumer_topology_digest") != membership_digest or policy.get("dns_placement_mode") != "consumer_readiness":
+    if policy.get("consumer_topology_digest") != membership_digest or role is None and policy.get("dns_placement_mode") != "consumer_readiness":
         raise ValueError("projection policy membership or placement differs")
+    if role == "cell-routes" and (any(intent.get(k) for k in ["dns", "dns_consumers", "acme_challenges"]) or any(policy.get(k) for k in ["dns_placement_mode", "dns_query_policy", "dns_readiness", "dns_authorities", "dns_client_policies", "dns_answer_rules", "edge_selection_constraints"]) or not policy.get("tls_readiness") or producer.get("hosted_zone_templates")):
+        raise ValueError("cell route producer cannot own DNS configuration")
     required = {"schema_version", "generation", "authority_cell_id", "mode", "input_source", "target_scope", "interval_seconds", "refresh_seconds", "require_application_domains", "require_route_defaults", "require_dns_query_policy", "hosted_zone_templates"}
-    if set(producer) != required or producer["schema_version"] != "fugue.platform.producer/v1" or producer["mode"] != "shadow" or producer["input_source"] != "business-static-intent" or producer["target_scope"] != scope or producer["authority_cell_id"] != cell or not IDENTITY.fullmatch(producer["generation"]) or any(producer[k] is not True for k in ["require_application_domains", "require_route_defaults", "require_dns_query_policy"]):
+    if role is not None:
+        required.add("publication_role")
+    if set(producer) != required or producer["schema_version"] != "fugue.platform.producer/v1" or producer["mode"] != "shadow" or producer["input_source"] != "business-static-intent" or producer["target_scope"] != scope or producer["authority_cell_id"] != cell or not IDENTITY.fullmatch(producer["generation"]) or any(producer[k] is not True for k in ["require_application_domains", "require_route_defaults"]) or producer["require_dns_query_policy"] is not (role is None):
         raise ValueError("only explicit shadow producer enrollment is allowed")
     previous = config["expected_previous_policy"]
     if previous is not None:
@@ -135,7 +143,7 @@ def publish(config, api):
     producer.update(static_intent_artifact_id=intent["id"], static_intent_digest=intent["content_hash"], dns_policy_artifact_id=policy["id"], dns_policy_digest=policy["content_hash"])
     artifact = ensure_input(api, "policy_snapshot", owner, producer)
     preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"])
-    if preview.get("intent", {}).get("scope") != target or preview["intent"].get("authority_cell_id") != config["authority_cell_id"] or preview.get("policy", {}).get("consumer_topology_digest") != policy["content"]["consumer_topology_digest"] or not preview.get("business_snapshot_revision"):
+    if preview.get("intent", {}).get("scope") != target or preview["intent"].get("authority_cell_id") != config["authority_cell_id"] or preview["intent"].get("publication_role") != producer.get("publication_role") or preview.get("policy", {}).get("publication_role") != producer.get("publication_role") or preview.get("policy", {}).get("consumer_topology_digest") != policy["content"]["consumer_topology_digest"] or not preview.get("business_snapshot_revision"):
         raise ValueError("current business projection does not match declared cell")
     reject_serving(api, target, owner)
     latest = selected(api, owner, "shadow")

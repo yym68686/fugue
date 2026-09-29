@@ -3,19 +3,26 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/platformproducer"
 )
 
 func cellProducerFixture(t *testing.T, s *Server, cell string) platformproducer.Policy {
+	return cellProducerRoleFixture(t, s, cell, "")
+}
+
+func cellProducerRoleFixture(t *testing.T, s *Server, cell, role string) platformproducer.Policy {
 	t.Helper()
 	scope := platformconfig.AuthorityCellScope(cell)
 	intent := platformconfig.PlatformIntent{SchemaVersion: platformconfig.SchemaVersion, Scope: scope, AuthorityCellID: cell, Generation: "base-" + cell,
@@ -23,6 +30,10 @@ func cellProducerFixture(t *testing.T, s *Server, cell string) platformproducer.
 		DNSConsumers:       []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: cell, Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}},
 		ApplicationDomains: &platformconfig.ApplicationDomainsIntent{AppBaseDomain: "example.test", CustomDomainBaseDomain: "dns.example.test", ReservedHostnames: []string{"api.example.test"}, DefaultDNSTTL: 60},
 		Routes:             []platformconfig.RouteIntent{{Hostname: "api.example.test", Kind: model.EdgeRouteKindControlPlaneAPI, UpstreamKind: "url", UpstreamURL: "http://api:8080", Enabled: true}}}
+	intent.PublicationRole = role
+	if role == platformconfig.PublicationRoleCellRoutes {
+		intent.DNSConsumers = nil
+	}
 	topology, err := platformconfig.TrafficConsumerTopologyFromIntent(intent)
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +56,7 @@ func cellProducerFixture(t *testing.T, s *Server, cell string) platformproducer.
 	base := save(model.PlatformArtifactKindPlatformIntent, scope, intent.Generation, intent)
 	dns, _, _ := pinnedDNSFixture()
 	dns.Scope = scope
+	dns.PublicationRole = role
 	dns.AuthorityCellID = cell
 	dns.ConsumerTopologyDigest = digest
 	dns.Generation = "dns-" + cell
@@ -55,8 +67,17 @@ func cellProducerFixture(t *testing.T, s *Server, cell string) platformproducer.
 	rules := []platformconfig.RoutePolicyConstraint{}
 	states := []platformconfig.DNSRouteStateConstraint{}
 	dns.MinimumHealthyEdges, dns.MaxStaleSeconds, dns.RouteConstraints, dns.DNSRouteStateConstraints = &minimum, &stale, &rules, &states
+	if role == platformconfig.PublicationRoleCellRoutes {
+		dns.Authorities, dns.Clients, dns.DNSReadiness, dns.DNSQueryPolicy = nil, nil, nil, nil
+		dns.DNSPlacementMode = ""
+		rules = []platformconfig.RoutePolicyConstraint{{ID: "cross-cell-availability", Hostname: "api.example.test", EdgeGroupID: "cell-other", MinHealthyEdgeNodes: 2, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true}}
+	}
 	pa := save(model.PlatformArtifactKindPolicySnapshot, scope, dns.Generation, dns)
 	p := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "producer-" + cell, AuthorityCellID: cell, Mode: "shadow", InputSource: "business-static-intent", TargetScope: scope, IntervalSeconds: 30, RefreshSeconds: 120, StaticIntentArtifactID: base.ID, StaticIntentDigest: base.ContentHash, DNSPolicyArtifactID: pa.ID, DNSPolicyDigest: pa.ContentHash, RequireApplicationDomains: true, RequireRouteDefaults: true, RequireDNSQueryPolicy: true}
+	p.PublicationRole = role
+	if role == platformconfig.PublicationRoleCellRoutes {
+		p.RequireDNSQueryPolicy = false
+	}
 	ownerScope, err := platformproducer.PolicyScopeForTarget(scope)
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +90,179 @@ func cellProducerFixture(t *testing.T, s *Server, cell string) platformproducer.
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestCellRouteProducerPublishesAndPreparesOnlyItsRouteTLSAuthority(t *testing.T) {
+	st, s, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	p := cellProducerRoleFixture(t, s, "cell-a", platformconfig.PublicationRoleCellRoutes)
+	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || strings.HasPrefix(r.URL.Path, "/api/v1/nodes/") {
+			t.Error("route-only publication read DNS endpoint candidates or mutated inventory")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+	}))
+	defer kube.Close()
+	s.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{client: kube.Client(), baseURL: kube.URL, bearerToken: "reader"}, nil
+	}
+	scope, _ := platformproducer.PolicyScopeForTarget(p.TargetScope)
+	if _, err := s.reconcilePlatformConfigurationScope(context.Background(), scope, nil); err != nil {
+		t.Fatal(err)
+	}
+	parent, shadow, found, err := st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "shadow")
+	if err != nil || !found {
+		t.Fatal("cell output absent", err)
+	}
+	sets, err := st.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: parent.ID, ArtifactReleaseID: shadow.ID})
+	if err != nil || len(sets) != 2 {
+		t.Fatal("route/TLS expectations incomplete", sets, err)
+	}
+	route, err := s.consumerAssignmentChild(parent, model.PlatformArtifactKindEdgeRouteBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, err := platformconfig.ProjectRouteArtifact(route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundApp, foundConstraint := false, false
+	for _, r := range projected.Routes {
+		foundApp = foundApp || r.AppID == app.ID
+		foundConstraint = foundConstraint || r.Hostname == "api.example.test" && r.MinHealthyEdgeNodes == 2
+	}
+	if !foundApp || !foundConstraint {
+		t.Fatal("live business or cross-cell DNS constraint lost")
+	}
+	var payload struct {
+		Routes []platformconfig.CompiledRoute `json:"routes"`
+	}
+	raw, _ := json.Marshal(route.Content)
+	if json.Unmarshal(raw, &payload) != nil {
+		t.Fatal("route artifact unreadable")
+	}
+	foundConstraint = false
+	for _, r := range payload.Routes {
+		foundConstraint = foundConstraint || r.Hostname == "api.example.test" && r.DNSPlacementEdgeGroupID == "cell-other"
+	}
+	if !foundConstraint {
+		t.Fatal("DNS constraint lost from signed artifact")
+	}
+	dns, err := st.ListPlatformArtifacts(model.PlatformArtifactFilter{ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ScopeKey: p.TargetScope})
+	if err != nil || len(dns) != 0 {
+		t.Fatal("route producer created DNS authority", err)
+	}
+	request := model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=complete", Reason: "isolated route publication test"}
+	if _, _, _, _, err := st.ReleasePlatformArtifact(parent.ID, request, platformProducerPrincipal()); err == nil {
+		t.Fatal("old executor capability admitted new role")
+	}
+	sequence := int64(0)
+	report := func(release model.PlatformArtifactRelease, capabilities []string, serving bool) {
+		t.Helper()
+		prepared, err := s.preparePlatformReleaseSetConsumers(context.Background(), platformProducerPrincipal(), parent, release)
+		if err != nil || len(prepared) != 2 {
+			t.Fatal("role preparation", err)
+		}
+		sequence++
+		for _, set := range prepared {
+			if set.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle || len(set.Consumers) != 1 {
+				t.Fatal("unexpected consumer", set)
+			}
+			member := set.Consumers[0]
+			child, err := s.consumerAssignmentChild(parent, set.ArtifactKind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: "kubernetes:test-system:worker:pod-a", Component: member.Component, NodeID: member.NodeID, AuthorityID: member.AuthorityID, ScopeKey: p.TargetScope, ArtifactKinds: []string{set.ArtifactKind}}
+			token, err := platformcontrol.IssuePlatformComponentIdentity(edgeRouteIntentTestKeyring(), claims, now, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err = platformcontrol.ParsePlatformComponentIdentity(edgeRouteIntentTestKeyring(), token, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: member.ConsumerID, Component: member.Component, NodeID: member.NodeID, ArtifactKind: set.ArtifactKind, ScopeKey: p.TargetScope, ReleaseSetID: parent.ID, ExpectedConsumerSetID: set.ID, FencingToken: release.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", CompatibilityCapabilities: capabilities, Sequence: sequence, IssuedAt: now, Nonce: fmt.Sprintf("%032x", now.UnixNano()), GenerationSequence: child.GenerationSequence, DesiredGeneration: child.Generation, CandidateGeneration: child.Generation, ApplyStatus: "staged", ProbeStatus: "shadow_validated"}
+			if serving {
+				h.ActualGeneration, h.LKGGeneration, h.ApplyStatus, h.ProbeStatus = child.Generation, child.Generation, "applied", "passed"
+			}
+			h.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.AcceptTrustedPlatformConsumerHeartbeat(claims, set.ID, h, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	report(shadow, []string{platformcontrol.TrafficReleaseCapabilityV1}, false)
+	if _, _, _, _, err := st.ReleasePlatformArtifact(parent.ID, request, platformProducerPrincipal()); err == nil {
+		t.Fatal("legacy traffic capability admitted route-only role")
+	}
+	caps := []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellRoutesCapabilityV1}
+	report(shadow, caps, false)
+	_, gray, _, _, err := st.ReleasePlatformArtifact(parent.ID, request, platformProducerPrincipal())
+	if err != nil {
+		t.Fatal("compatible gray publication", err)
+	}
+	if _, _, err := s.edgeRouteIntentSnapshotFromTrafficRelease("cell-a"); err == nil {
+		t.Fatal("unprepared gray authority became readable")
+	}
+	report(gray, caps, true)
+	projection, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease("cell-a")
+	if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseID != gray.ID {
+		t.Fatal("prepared role route source unavailable", err)
+	}
+	verify := model.PlatformArtifactVerifyLKGRequest{FencingToken: gray.FencingToken, Reason: "verified route and TLS fixture", AllowInitialLKG: true, Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true, EvidenceRefs: []string{"fixture:route-tls"}}}
+	if _, _, _, _, err := st.VerifyPlatformArtifactReleaseLKG(gray.ID, verify, platformProducerPrincipal()); err != nil {
+		t.Fatal("route/TLS verification", err)
+	}
+	if lkg, err := st.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, p.TargetScope); err != nil || lkg != nil {
+		t.Fatal("route LKG created DNS recovery authority", err)
+	}
+	_, full, _, _, err := st.ReleasePlatformArtifact(parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full"}, platformProducerPrincipal())
+	if err != nil {
+		t.Fatal("full role publication", err)
+	}
+	verify.FencingToken, verify.AllowInitialLKG = full.FencingToken, false
+	if _, _, _, _, err := st.VerifyPlatformArtifactReleaseLKG(full.ID, verify, platformProducerPrincipal()); err == nil {
+		t.Fatal("full reused gray facts")
+	}
+	report(full, caps, true)
+	if _, _, _, _, err := st.VerifyPlatformArtifactReleaseLKG(full.ID, verify, platformProducerPrincipal()); err != nil {
+		t.Fatal("fresh full verification", err)
+	}
+	baseline, err := st.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, p.TargetScope)
+	if err != nil || baseline == nil {
+		t.Fatal("full LKG absent", err)
+	}
+	_, err = st.CreateAppWithRoute(app.TenantID, app.ProjectID, "next", "", model.AppSpec{Image: "registry.example.test/app:next", Ports: []int{8080}, Replicas: 1, RuntimeID: app.Spec.RuntimeID}, model.AppRoute{Hostname: "next.example.test", BaseDomain: "example.test", PublicURL: "https://next.example.test", ServicePort: 8080})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.reconcilePlatformConfigurationScope(context.Background(), scope, nil); err != nil {
+		t.Fatal(err)
+	}
+	previousParent := parent
+	parent, shadow, found, err = st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "shadow")
+	if err != nil || !found || parent.ID == previousParent.ID {
+		t.Fatal("live route update did not create candidate", err)
+	}
+	report(shadow, caps, false)
+	_, candidateGray, _, _, err := st.ReleasePlatformArtifact(parent.ID, request, platformProducerPrincipal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report(candidateGray, caps, false)
+	if _, _, _, _, err := st.ReleasePlatformArtifact(parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full"}, platformProducerPrincipal()); err == nil {
+		t.Fatal("unprobed next candidate became full")
+	}
+	retained, err := st.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, p.TargetScope)
+	if err != nil || !reflect.DeepEqual(retained, baseline) {
+		t.Fatal("failed next rollout changed positive LKG", err)
+	}
 }
 
 func TestCellProducerUsesDeclaredMembershipAndCurrentBusinessWithoutLegacyReceipts(t *testing.T) {

@@ -19,6 +19,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/config"
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -30,21 +31,35 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-cell", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
-			if mode == "valid-cell" {
+			if strings.HasPrefix(mode, "valid-cell") {
 				group = "cell-a"
 			}
 			host := "app.example.test"
-			compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: host, UpstreamURL: "http://origin:8080", Enabled: true, TLSPolicy: model.EdgeRouteTLSPolicyPlatform}}, TLS: []platformconfig.TLSIntent{{Hostname: host, Policy: model.EdgeRouteTLSPolicyPlatform}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global", TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, TLSReadiness: &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 10, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}}})
+			scope := "global"
+			request := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: host, UpstreamURL: "http://origin:8080", Enabled: true, TLSPolicy: model.EdgeRouteTLSPolicyPlatform}}, TLS: []platformconfig.TLSIntent{{Hostname: host, Policy: model.EdgeRouteTLSPolicyPlatform}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global", TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, TLSReadiness: &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 10, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}}}
+			if mode == "valid-cell-routes" {
+				scope = platformconfig.AuthorityCellScope(group)
+				request.Intent.Scope, request.Policy.Scope = scope, scope
+				request.Intent.AuthorityCellID, request.Policy.AuthorityCellID = group, group
+				request.Intent.PublicationRole, request.Policy.PublicationRole = platformconfig.PublicationRoleCellRoutes, platformconfig.PublicationRoleCellRoutes
+				request.Intent.EdgeTopology = &edgetopology.Intent{SchemaVersion: edgetopology.SchemaVersion, Cells: []edgetopology.AuthorityCell{{ID: group}}, Pools: []edgetopology.ServingPool{{ID: "pool-public"}}, Edges: []edgetopology.Edge{{ID: "edge", AuthorityCellID: group, ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "edge"}}}}
+				topology, err := platformconfig.TrafficConsumerTopologyFromIntent(request.Intent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Policy.ConsumerTopologyDigest, _ = platformconfig.Digest(topology)
+			}
+			compiled, err := platformconfig.Compile(request)
 			if err != nil {
 				t.Fatal(err)
 			}
 			keys := bundleauth.NewKeyring("synthetic-serving-key", "key", "", "", nil)
 			sign := func(a model.PlatformArtifact, id string) model.PlatformArtifact {
-				a.ID, a.ScopeKey, a.Status, a.GenerationSequence = id, "global", model.PlatformArtifactStatusValidated, 1
+				a.ID, a.ScopeKey, a.Status, a.GenerationSequence = id, scope, model.PlatformArtifactStatusValidated, 1
 				a.ContentHash, _ = platformconfig.Digest(a.Content)
 				a, err = platformsafety.SignPlatformArtifact(a, keys)
 				if err != nil {
@@ -54,10 +69,14 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			}
 			route := sign(compiled.RouteArtifact, "route")
 			tlsArtifact := sign(compiled.TLSArtifact, "tls")
-			parent := sign(platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, []string{"route", "dns", "tls"}, now), "parent")
-			release := model.PlatformArtifactRelease{ID: "release", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, ScopeKey: "global", Generation: parent.Generation, ReleaseChannel: "gray", CanaryRuleRef: "cohort=first", FencingToken: 2, Status: model.PlatformArtifactReleaseStatusActive}
+			ids := []string{"route", "dns", "tls"}
+			if mode == "valid-cell-routes" {
+				ids = []string{"route", "tls"}
+			}
+			parent := sign(platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, ids, now), "parent")
+			release := model.PlatformArtifactRelease{ID: "release", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, ScopeKey: scope, Generation: parent.Generation, ReleaseChannel: "gray", CanaryRuleRef: "cohort=first", FencingToken: 2, Status: model.PlatformArtifactReleaseStatusActive}
 			assignment := func(a model.PlatformArtifact) model.PlatformConsumerAssignment {
-				return model.PlatformConsumerAssignment{ExpectedConsumerSetID: "set-" + a.ID, ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactID: a.ID, ArtifactKind: a.ArtifactKind, ScopeKey: "global", Revision: 1, ExpectedGeneration: a.Generation, ContentHash: a.ContentHash, GenerationSequence: 1, FencingToken: 2, ReleaseChannel: release.ReleaseChannel}
+				return model.PlatformConsumerAssignment{ExpectedConsumerSetID: "set-" + a.ID, ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactID: a.ID, ArtifactKind: a.ArtifactKind, ScopeKey: scope, Revision: 1, ExpectedGeneration: a.Generation, ContentHash: a.ContentHash, GenerationSequence: 1, FencingToken: 2, ReleaseChannel: release.ReleaseChannel}
 			}
 			ra, ta := assignment(route), assignment(tlsArtifact)
 			projection, err := routeartifact.ProjectRelease(parent, route, ra, release, keys)
@@ -79,8 +98,8 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/platform-state/consumers/identity":
-					identity := map[string]any{"token": "token", "component": "edge-worker", "node_id": "edge", "scope_key": "global", "artifact_kinds": []string{route.ArtifactKind, tlsArtifact.ArtifactKind}, "expires_at": time.Now().Add(time.Minute)}
-					if mode == "valid-cell" {
+					identity := map[string]any{"token": "token", "component": "edge-worker", "node_id": "edge", "scope_key": scope, "artifact_kinds": []string{route.ArtifactKind, tlsArtifact.ArtifactKind}, "expires_at": time.Now().Add(time.Minute)}
+					if strings.HasPrefix(mode, "valid-cell") {
 						identity["authority_id"], identity["consumer_id"] = "cell-a", "edge-worker:cell-a:edge"
 					}
 					json.NewEncoder(w).Encode(identity)
@@ -107,7 +126,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&h); err != nil {
 						t.Fatal(err)
 					}
-					if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) {
+					if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) || !slices.Contains(h.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) {
 						t.Error("executor capability missing")
 					}
 					reports = append(reports, h)
@@ -126,7 +145,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			cache := filepath.Join(dir, "routes.json")
 			token := filepath.Join(dir, "token")
 			os.WriteFile(token, []byte("pod-token"), 0600)
-			s := NewService(config.EdgeConfig{APIURL: server.URL, EdgeID: "edge", EdgeGroupID: group, CachePath: cache, CaddyEnabled: true, CaddyListenAddr: "127.0.0.1:8443", CaddyTLSMode: "internal", BundleSigningKey: "synthetic-serving-key", BundleSigningKeyID: "key"}, nil)
+			s := NewService(config.EdgeConfig{APIURL: server.URL, PlatformScopeKey: scope, EdgeID: "edge", EdgeGroupID: group, CachePath: cache, CaddyEnabled: true, CaddyListenAddr: "127.0.0.1:8443", CaddyTLSMode: "internal", BundleSigningKey: "synthetic-serving-key", BundleSigningKeyID: "key"}, nil)
 			s.PlatformTokenFile = token
 			if mode == "activation-lost" || mode == "inactive" {
 				activeSlot := model.EdgeSlotA
@@ -241,7 +260,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				}
 				return
 			}
-			if mode != "valid" && mode != "valid-cell" {
+			if mode != "valid" && !strings.HasPrefix(mode, "valid-cell") {
 				wantReports := 0
 				switch mode {
 				case "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied":
@@ -262,7 +281,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				t.Fatal("valid serving failed", err, reports, routeCalls, tlsCalls)
 			}
 			for _, h := range reports {
-				if mode == "valid-cell" && (h.ConsumerID != "edge-worker:cell-a:edge" || h.NodeID != "edge") {
+				if strings.HasPrefix(mode, "valid-cell") && (h.ConsumerID != "edge-worker:cell-a:edge" || h.NodeID != "edge") {
 					t.Fatal("neutral serving fact lost its authority", h)
 				}
 				if h.ApplyStatus != "applied" || h.ProbeStatus != "passed" || h.ActualGeneration != h.DesiredGeneration || h.LKGGeneration != bundle.Generation || h.ServingLKG {

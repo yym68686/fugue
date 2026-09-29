@@ -84,6 +84,28 @@ class ArtifactAPI:
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_explicit_route_only_inputs_have_no_dns_authority(self):
+        config = fixture()
+        for key in ["static_intent", "projection_policy", "producer"]:
+            config[key]["publication_role"] = "cell-routes"
+        config["static_intent"].pop("dns_consumers")
+        policy = config["projection_policy"]
+        policy.pop("dns_query_policy")
+        policy.pop("dns_placement_mode")
+        policy["tls_readiness"] = {"probe_interval_seconds": 30, "probe_timeout_seconds": 5, "fact_freshness_seconds": 120, "max_probes": 4096, "max_concurrency": 8}
+        membership = {"publication_role": "cell-routes", "schema_version": "fugue.traffic-consumer-topology/v1", "authority_cell_id": "cell-a", "edge_node_ids": ["edge-a"], "dns_node_ids": []}
+        policy["consumer_topology_digest"] = "sha256:" + hashlib.sha256(json.dumps(membership, separators=(",", ":")).encode()).hexdigest()
+        config["producer"]["require_dns_query_policy"] = False
+        api = ArtifactAPI(config)
+        result = bootstrap.publish(config, api)
+        self.assertEqual(result["artifact"]["content"]["publication_role"], "cell-routes")
+        self.assertEqual(set(api.authorities), {("policy_snapshot", "platform-config-producer:cell-a", "shadow")})
+        for key in ["static_intent", "projection_policy"]:
+            changed = copy.deepcopy(config)
+            changed[key].pop("publication_role")
+            with self.assertRaises(ValueError):
+                bootstrap.validate(changed)
+
     def test_validate_requires_exact_cell_scope_and_shadow_only(self):
         config = fixture()
         self.assertIs(bootstrap.validate(config), config)

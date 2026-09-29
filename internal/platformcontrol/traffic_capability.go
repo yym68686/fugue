@@ -6,3 +6,7 @@ package platformcontrol
 // Edge verifies actual Caddy/route/TLS and reports failures. It never means that
 // the reported artifact has been applied, probed or verified as an LKG.
 const TrafficReleaseCapabilityV1 = "traffic_release_v1"
+
+// CellRoutesCapabilityV1 adds the explicitly signed route/TLS-only publication
+// boundary. It never authorizes removal of DNS from a complete traffic set.
+const CellRoutesCapabilityV1 = "cell_routes_v1"

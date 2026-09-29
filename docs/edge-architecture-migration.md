@@ -640,3 +640,21 @@ route preparation must precede a verified cross-cell DNS publication mechanism;
 a single-cell shadow projection is not evidence that this global availability
 constraint is satisfied. No bootstrap step lowers that constraint to permit
 cutover.
+
+An explicit `publication_role: cell-routes` now separates a neutral cell's
+route/TLS release from DNS publication. Intent, producer policy, compiled policy,
+parent and signed membership must agree on that role. Its immutable topology
+contains every declared Edge and an empty DNS set; its release contains exactly
+route and TLS artifacts. Ordinary traffic releases retain their three required
+members. DNS configuration and runtime placement facts are rejected by the new
+role, while route-level DNS restrictions and availability minima remain in the
+signed route policy. The business projection still reads current application
+ownership and origin evidence, and never copies another release's output.
+
+Gray/full admission requires a fresh authenticated `cell_routes_v1` capability
+from every required Worker. Each role publication still needs new expectations,
+exact parent/child provenance, actual Caddy/HTTPS route and TLS evidence, and
+the existing full/LKG transaction gates. Route-only verification cannot create
+a DNS LKG; a failed candidate preserves the previous positive route/TLS LKG.
+This capability does not rewrite an existing authority or select public traffic.
+Cross-cell DNS publication remains a separate implementation and rollout step.

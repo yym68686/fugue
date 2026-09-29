@@ -79,7 +79,7 @@ func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string
 	for ctx.Err() == nil {
 		_, err := s.store.WithAdvisoryLock(ctx, lock, func() error {
 			if s.log != nil {
-				s.log.Printf("platform configuration producer leadership acquired")
+				s.log.Printf("platform configuration producer leadership acquired scope=%s", scope)
 			}
 			var nextRun time.Time
 			lastAuthority := ""
@@ -87,12 +87,12 @@ func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string
 				_, authority, _, readErr := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, scope, "shadow")
 				if readErr != nil {
 					if s.log != nil {
-						s.log.Printf("platform configuration producer policy unavailable: %v", readErr)
+						s.log.Printf("platform configuration producer policy unavailable scope=%s: %v", scope, readErr)
 					}
 				} else if authority.ID != lastAuthority || !time.Now().Before(nextRun) {
 					interval, err := s.reconcilePlatformConfigurationScope(ctx, scope, nil)
 					if err != nil && s.log != nil {
-						s.log.Printf("platform configuration producer failed; retaining release: %v", err)
+						s.log.Printf("platform configuration producer failed scope=%s; retaining release: %v", scope, err)
 					}
 					lastAuthority, nextRun = authority.ID, time.Now().Add(interval)
 				}
@@ -105,7 +105,7 @@ func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string
 			return nil
 		})
 		if err != nil && ctx.Err() == nil && s.log != nil {
-			s.log.Printf("platform configuration producer leadership unavailable: %v", err)
+			s.log.Printf("platform configuration producer leadership unavailable scope=%s: %v", scope, err)
 		}
 		if !waitPlatformProducer(ctx, 30*time.Second) {
 			return

@@ -29,6 +29,8 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 		return nil
 	}
 	ids, _ := parent.Content["artifact_ids"].([]any)
+	role, _ := parent.Content["publication_role"].(string)
+	cellRoutes := role == platformconfig.PublicationRoleCellRoutes
 	leased := false
 	for _, id := range ids {
 		value, ok := id.(string)
@@ -41,11 +43,12 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 		}
 		leased = leased || platformconfig.DNSArtifactRequiresTrafficRelease(state.PlatformArtifacts[index])
 	}
-	if !leased {
+	if !leased && !cellRoutes {
 		return nil
 	}
 	kinds, _ := parent.Content["artifact_kinds"].([]any)
-	if len(ids) != 3 || len(kinds) != 3 || parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass {
+	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
+	if compositionErr != nil || len(ids) != len(kinds) || parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass {
 		return fail("complete signed traffic parent required")
 	}
 	var groups []string
@@ -97,6 +100,9 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 		if latest == nil || !latest.RequiresConsumers || latest.ExpectedGeneration != child.Generation || latest.TopologyRevision == "" || latest.Revision <= 0 {
 			return fail("prepare target consumer topology before serving publication")
 		}
+		if platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, *latest) != nil {
+			return fail("prepared capability membership differs from signed topology")
+		}
 		count, cohorts := 0, map[string]bool{}
 		for _, expected := range platformcontrol.ProjectExpectedConsumerOwners(*latest).Consumers {
 			if !expected.Required || len(groups) > 0 && !platformconfig.TrafficCanaryContains(groups, expected.Cohort) {
@@ -111,7 +117,7 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}
-				if found || !trafficCapabilityFactFresh(expected, fact, now) {
+				if found || !trafficCapabilityFactFresh(expected, fact, now) || cellRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) {
 					return fail("fresh authenticated traffic capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
 				found = true

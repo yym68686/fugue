@@ -116,7 +116,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 					return ErrConflict
 				}
 				projectionPolicy = &input
-				if policy.Mode == "serving" && input.DNSPlacementMode != platformconfig.DNSPlacementConsumerReadiness {
+				if policy.Mode == "serving" && policy.PublicationRole != platformconfig.PublicationRoleCellRoutes && input.DNSPlacementMode != platformconfig.DNSPlacementConsumerReadiness {
 					return ErrConflict
 				}
 				if policy.RequireDNSQueryPolicy && input.DNSQueryPolicy == nil {
@@ -133,7 +133,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 			}
 			if policy.AuthorityCellID != "" {
 				topology, err := platformconfig.TrafficConsumersFromRelease(parent)
-				if err != nil || topology == nil || topology.AuthorityCellID != policy.AuthorityCellID || projectionPolicy == nil || parent.Metadata["consumer_topology_digest"] != projectionPolicy.ConsumerTopologyDigest {
+				if err != nil || topology == nil || topology.PublicationRole != policy.PublicationRole || topology.AuthorityCellID != policy.AuthorityCellID || projectionPolicy == nil || parent.Metadata["consumer_topology_digest"] != projectionPolicy.ConsumerTopologyDigest {
 					return ErrConflict
 				}
 			}
@@ -142,7 +142,8 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 		}
 		ids, idsOK := parent.Content["artifact_ids"].([]any)
 		kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
-		if !idsOK || !kindsOK || len(ids) != 3 || len(kinds) != 3 {
+		_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
+		if !idsOK || !kindsOK || compositionErr != nil {
 			return ErrConflict
 		}
 		seen := map[string]bool{}
@@ -168,9 +169,6 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 				return ErrConflict
 			}
 			seen[child.ArtifactKind] = true
-		}
-		if !seen[model.PlatformArtifactKindEdgeRouteBundle] || !seen[model.PlatformArtifactKindDNSAnswerBundle] || !seen[model.PlatformArtifactKindCaddyRouteConfig] {
-			return ErrConflict
 		}
 	}
 
@@ -278,7 +276,8 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		state.PlatformArtifacts = append(state.PlatformArtifacts, a)
 	}
 	ids, ok := parent.Content["artifact_ids"].([]any)
-	if !ok || len(ids) != 3 {
+	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
+	if !ok || compositionErr != nil {
 		return ErrConflict
 	}
 	for _, raw := range ids {
