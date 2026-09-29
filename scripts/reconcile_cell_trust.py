@@ -20,10 +20,12 @@ CONTENT = 'cell-trust.fugue.dev/content-digest'
 
 
 def validate(config):
-    if set(config) != {'schema', 'namespace', 'cell', 'generation', 'previousGeneration', 'previousDigest', 'edgeIds', 'secrets'} or config['schema'] != 'fugue.cell-trust/v1':
+    if set(config)-{'materialSecret'} != {'schema', 'namespace', 'cell', 'generation', 'previousGeneration', 'previousDigest', 'edgeIds', 'secrets'} or config['schema'] != 'fugue.cell-trust/v1':
         raise ValueError('explicit cell trust declaration required')
     if not re.fullmatch(r'cell-[a-z0-9]+(?:-[a-z0-9]+)*', config['cell']) or len(config['cell']) > 63 or not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', config['namespace']):
         raise ValueError('canonical cell and namespace required')
+    if 'materialSecret' in config and config['materialSecret'] != 'FUGUE_EDGE_CELL_TRUST_'+config['cell'].upper().replace('-', '_'):
+        raise ValueError('dedicated encrypted package must bind exactly this cell')
     generation, previous = config['generation'], config['previousGeneration']
     if type(generation) is not int or type(previous) is not int or generation != 1 or previous != 0:
         raise ValueError('this declaration provisions initial cell trust only; existing keys cannot rotate implicitly')

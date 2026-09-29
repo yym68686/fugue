@@ -241,8 +241,33 @@ jobs:
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
         run: python3 scripts/publish_agent_edge_shadow.py deploy/environments/production/agent-edge-policy/shadow.json
 
-  cell_trust:
+  cell_trust_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Admit only changed declarations to the production Cell trust queue
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/cell-trust; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  cell_trust:
+    needs: cell_trust_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_trust_plan.outputs.selected == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-cell-trust, cancel-in-progress: false}
@@ -272,6 +297,12 @@ jobs:
             git fetch origin main
             if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_cell_trust.py scripts/reconcile_agent_edge_trust.py; then
               python3 -m unittest scripts.test_reconcile_cell_trust
+              python3 - "$config" >> "$GITHUB_OUTPUT" <<'PYTHON'
+          import json, sys
+          from scripts.reconcile_cell_trust import validate
+          config = validate(json.load(open(sys.argv[1])))
+          print('material_secret=' + config.get('materialSecret', 'FUGUE_EDGE_CELL_TRUST'))
+          PYTHON
               echo "config=$config" >> "$GITHUB_OUTPUT"
               echo 'selected=true' >> "$GITHUB_OUTPUT"
             fi
@@ -279,7 +310,7 @@ jobs:
       - name: Reconcile digest-bound cell keyrings without changing traffic
         if: steps.trust.outputs.selected == 'true'
         env:
-          FUGUE_EDGE_CELL_TRUST: ${{ secrets.FUGUE_EDGE_CELL_TRUST }}
+          FUGUE_EDGE_CELL_TRUST: ${{ secrets[steps.trust.outputs.material_secret] }}
         run: |
           python3 scripts/reconcile_cell_trust.py "${{ steps.trust.outputs.config }}"
           python3 scripts/reconcile_cell_trust.py "${{ steps.trust.outputs.config }}" --check

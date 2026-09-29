@@ -1,0 +1,45 @@
+{
+  "schema": "fugue.cell-trust/v1",
+  "namespace": "fugue-system",
+  "cell": "cell-public-b",
+  "generation": 1,
+  "previousGeneration": 0,
+  "previousDigest": "",
+  "edgeIds": [
+    "bwg",
+    "vps-591f4447"
+  ],
+  "materialSecret": "FUGUE_EDGE_CELL_TRUST_CELL_PUBLIC_B",
+  "secrets": [
+    {
+      "name": "fugue-cell-public-b-bundle-readers",
+      "purpose": "bundle-readers",
+      "digest": "sha256:0d982a90faad4f18b85d8bcc44359e75c44de4eae859f9d4c226f49770b9df0d"
+    },
+    {
+      "name": "fugue-cell-public-b-bundle-signing",
+      "purpose": "bundle-signing",
+      "digest": "sha256:3198b915977b6bdf5eee097b77de419a1aea749756b20ef60d0a6f0bc94ce80c"
+    },
+    {
+      "name": "fugue-cell-public-b-inventory-writer",
+      "purpose": "inventory-writer",
+      "digest": "sha256:9a6d0b924a921fab55f84159ea7edf063efb7ca3688be63de1bc9040d39fe69e"
+    },
+    {
+      "name": "fugue-cell-public-b-reader-bwg",
+      "purpose": "reader-token/bwg",
+      "digest": "sha256:c860f4bef79030e6fde7ab74c7cd3aea62e30387016beaf926700bb9760c5c0b"
+    },
+    {
+      "name": "fugue-cell-public-b-reader-vps-591f4447",
+      "purpose": "reader-token/vps-591f4447",
+      "digest": "sha256:7c5fe01a8d422aa6c36be9601a07a74fa121602902750de2dc5b4e95efd1892c"
+    },
+    {
+      "name": "fugue-cell-public-b-recovery",
+      "purpose": "recovery",
+      "digest": "sha256:75af24021acef016de87057afeb28c3b0c6d9adbffbcd335fcedafe7199c4c95"
+    }
+  ]
+}

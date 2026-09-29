@@ -23,6 +23,16 @@ def fixture():
 
 
 class CellTrustTests(unittest.TestCase):
+    def test_dedicated_encrypted_package_cannot_select_foreign_secrets(self):
+        config, material = fixture()
+        config['materialSecret'] = 'FUGUE_EDGE_CELL_TRUST_CELL_TEST'
+        self.assertEqual(config, trust.validate(config))
+        self.assertEqual(5, len(trust.resources(config, material)))
+        for value in ['FUGUE_EDGE_CELL_TRUST_CELL_OTHER', 'FUGUE_API_KEY', '', None]:
+            config['materialSecret'] = value
+            with self.assertRaises(ValueError):
+                trust.validate(config)
+
     def test_material_and_readers_are_explicitly_bound(self):
         config,material=fixture()
         resources=trust.resources(config,material)

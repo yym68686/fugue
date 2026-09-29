@@ -722,6 +722,15 @@ Replacing a previously immutable projection uses a new declared ConfigMap name
 and the normal isolated Worker rollout; existing public workers are unaffected.
 The authorization deadline itself remains fixed within each explicit attempt.
 
+Initial Cell trust may name a dedicated production-environment encrypted package
+in `materialSecret`, restricted to `FUGUE_EDGE_CELL_TRUST_` plus that exact Cell's
+uppercase underscore identity. Existing declarations keep their original shared
+package lookup. Private keys remain outside Git; declarations pin only content
+digests, purpose and physical membership. Each Cell/purpose uses independent
+material. A read-only change selector admits trust configuration to its queue
+without depending on executable builds; unrelated pushes cannot cancel a
+pending trust initialization with an empty job.
+
 The read-only `cell_inventory_plan` job checks declaration changes before any
 production concurrency slot is requested. Unrelated commits do not enqueue an
 empty registration job that could cancel a waiting valid configuration run.

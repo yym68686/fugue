@@ -66,7 +66,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
@@ -108,12 +108,16 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatal("cell shadow enrollment must use explicit production inputs and the bounded publisher")
 	}
 	cellTrust := yamlMappingValue(t, jobs, "cell_trust")
-	for _, key := range yamlMappingKeys(t, cellTrust) {
+	cellTrustPlan := yamlMappingValue(t, jobs, "cell_trust_plan")
+	if yamlMappingValue(t, cellTrust, "needs").Value != "cell_trust_plan" || yamlMappingValue(t, cellTrustPlan, "runs-on").Value != "ubuntu-latest" || !strings.Contains(yamlMappingValue(t, cellTrust, "if").Value, "needs.cell_trust_plan.outputs.selected == 'true'") {
+		t.Fatal("only changed trust declarations may enter the shared production queue")
+	}
+	for _, key := range yamlMappingKeys(t, cellTrustPlan) {
 		if key == "needs" {
 			t.Fatal("cell trust configuration recovery cannot depend on a code release")
 		}
 	}
-	if yamlMappingValue(t, cellTrust, "environment").Value != "production" || !strings.Contains(source, "scripts/reconcile_cell_trust.py") || !strings.Contains(source, "secrets.FUGUE_EDGE_CELL_TRUST") {
+	if yamlMappingValue(t, cellTrust, "environment").Value != "production" || !strings.Contains(source, "scripts/reconcile_cell_trust.py") || !strings.Contains(source, "secrets[steps.trust.outputs.material_secret]") {
 		t.Fatal("cell trust must use the explicit encrypted production declaration")
 	}
 	staticObservation := yamlMappingValue(t, jobs, "static_edge_observability")

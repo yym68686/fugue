@@ -474,6 +474,8 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if any(name in {"scripts/reconcile_cell_trust.py", "scripts/test_reconcile_cell_trust.py"} or name.startswith("deploy/environments/production/cell-trust/") for name in paths):
+        non_go_tasks["cell-trust-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_cell_trust"]
     if packages:
         vet_task = ["go", "vet", *packages]
         if declarative_engine_changed:
