@@ -147,6 +147,28 @@ def measured_choice(logs, grant_digest, max_recovered_seconds=0):
     return result
 
 
+def verify_runtime_observation(runtime, grant_valid_until, max_age_seconds):
+    if runtime.get("connection_mode") != "agent" or runtime.get("status") != "active" or runtime.get("access_mode") != "private" or runtime.get("pool_mode") != "dedicated":
+        raise ValueError("actual Agent is no longer active and isolated")
+    heartbeat = timestamp(runtime["last_heartbeat_at"])
+    observed = timestamp(runtime.get("labels", {}).get("fugue.io/cell-observed-at", ""))
+    checked_at = now()
+    ahead = (max(heartbeat, observed) - checked_at).total_seconds()
+    # Independent server and observer clocks can differ by milliseconds. Wait
+    # once for a bounded near-future observation to become past; never clamp
+    # its original timestamp, extend its freshness or accept future evidence.
+    if 0 < ahead <= 1:
+        time.sleep(ahead + 0.001)
+        checked_at = now()
+    if heartbeat > checked_at or observed > checked_at:
+        raise ValueError("actual Agent heartbeat or cell observation is still in the future")
+    if min(heartbeat, observed) < checked_at - datetime.timedelta(seconds=max_age_seconds):
+        raise ValueError("actual Agent heartbeat or cell observation is stale")
+    if timestamp(grant_valid_until) <= checked_at + datetime.timedelta(seconds=10):
+        raise ValueError("Agent permission expired or approached expiry during observation")
+    return checked_at, heartbeat, observed
+
+
 def sample(config, api, authority, mode, public, validator, log_start_at=None):
     c, o = config["consumer"], config["observation"]
     deployment = strict_json(kubectl(["get", "deployment", c["deployment"], "-n", c["namespace"], "-o", "json"]))
@@ -176,11 +198,8 @@ def sample(config, api, authority, mode, public, validator, log_start_at=None):
     if len(cells) < o["minimumDistinctCells"]:
         raise ValueError("measured candidate diversity below activation requirement")
     runtime = api("GET", "/v1/runtimes/" + c["runtimeId"])["runtime"]
-    heartbeat = timestamp(runtime["last_heartbeat_at"])
-    observed = timestamp(runtime.get("labels", {}).get("fugue.io/cell-observed-at", ""))
-    if runtime.get("connection_mode") != "agent" or runtime.get("status") != "active" or runtime.get("access_mode") != "private" or runtime.get("pool_mode") != "dedicated" or heartbeat > now() or observed > now() or min(heartbeat, observed) < now() - datetime.timedelta(seconds=o["maxHeartbeatAgeSeconds"]):
-        raise ValueError("actual Agent heartbeat is stale or no longer isolated")
-    return {"at": now().isoformat(), "log_start_at": log_start_at, "pod_uid": pod["metadata"]["uid"], "image_id": status["imageID"], "grant_digest": verified["digest"], "grant_valid_until": grant["valid_until"], "policy_release_id": authority["release"]["id"], "primary": choice["primary"], "cells": sorted(cells), "heartbeat": heartbeat.isoformat(), "mode": mode, "publication_ids": sorted({candidate["publication"]["release_id"] for candidate in grant["candidates"]}), "recovery": choice.get("recovery", {})}
+    checked_at, heartbeat, observed = verify_runtime_observation(runtime, grant["valid_until"], o["maxHeartbeatAgeSeconds"])
+    return {"at": checked_at.isoformat(), "log_start_at": log_start_at, "pod_uid": pod["metadata"]["uid"], "image_id": status["imageID"], "grant_digest": verified["digest"], "grant_valid_until": grant["valid_until"], "policy_release_id": authority["release"]["id"], "primary": choice["primary"], "cells": sorted(cells), "heartbeat": heartbeat.isoformat(), "cell_observed_at": observed.isoformat(), "mode": mode, "publication_ids": sorted({candidate["publication"]["release_id"] for candidate in grant["candidates"]}), "recovery": choice.get("recovery", {})}
 
 
 def prepare_window(config, api, public, validator):

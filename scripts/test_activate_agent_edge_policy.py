@@ -18,6 +18,34 @@ def fixture():
 
 
 class ActivationTests(unittest.TestCase):
+    def test_clock_wait_preserves_original_runtime_and_permission_deadlines(self):
+        base = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        heartbeat = base + datetime.timedelta(milliseconds=27)
+        observed = base - datetime.timedelta(seconds=5)
+        runtime = {"connection_mode": "agent", "status": "active", "access_mode": "private", "pool_mode": "dedicated", "last_heartbeat_at": heartbeat.isoformat(), "labels": {"fugue.io/cell-observed-at": observed.isoformat()}}
+        unchanged = copy.deepcopy(runtime)
+        after = base + datetime.timedelta(milliseconds=28)
+        with patch.object(active, "now", side_effect=[base, after]), patch.object(active.time, "sleep") as sleep:
+            self.assertEqual(active.verify_runtime_observation(runtime, (base + datetime.timedelta(seconds=60)).isoformat(), 45), (after, heartbeat, observed))
+            sleep.assert_called_once()
+            self.assertAlmostEqual(sleep.call_args.args[0], 0.028)
+        self.assertEqual(runtime, unchanged)
+        for mode in ["far future", "clock did not advance", "clock moved backward", "stale after wait", "permission expires during wait", "not isolated"]:
+            with self.subTest(mode=mode):
+                value = copy.deepcopy(runtime)
+                clocks = [base, after]
+                deadline = base + datetime.timedelta(seconds=60)
+                if mode == "far future": value["last_heartbeat_at"] = (base + datetime.timedelta(seconds=2)).isoformat()
+                if mode == "clock did not advance": clocks[1] = base
+                if mode == "clock moved backward": clocks[1] = base - datetime.timedelta(seconds=1)
+                if mode == "stale after wait": value["labels"]["fugue.io/cell-observed-at"] = (base - datetime.timedelta(seconds=44.99)).isoformat()
+                if mode == "permission expires during wait": deadline = base + datetime.timedelta(seconds=10.01)
+                if mode == "not isolated": value["access_mode"] = "public"
+                with patch.object(active, "now", side_effect=clocks), patch.object(active.time, "sleep") as sleep:
+                    with self.assertRaises(ValueError):
+                        active.verify_runtime_observation(value, deadline.isoformat(), 45)
+                    self.assertEqual(sleep.call_count, 0 if mode in ["far future", "not isolated"] else 1)
+
     def test_observation_requires_stable_consumer_and_actual_renewal(self):
         config, authority, public = fixture()
         active.validate(config)

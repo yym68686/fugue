@@ -256,6 +256,17 @@ still reject the window. Every acceptance sample requires restored cell
 diversity. The Agent accelerates candidate refresh to the signed probe cadence
 while degraded; it never extends the old lease to make this check pass.
 
+The control loop wakes at the signed probe/refresh deadlines instead of
+rounding each one to a fixed five-second tick. Slow network work does not add
+another full polling interval to the next degraded renewal. Trust checks and
+overdue retries remain bounded; expired permissions cannot resume requests.
+The independent acceptance observer can wait once for a server observation
+at most one second ahead of its own clock to become past. It retains the
+original heartbeat and cell timestamps, then rechecks freshness and the grant's
+remaining lifetime. Clock rollback, a larger future timestamp, expired facts
+or an expired grant still reject the window. This does not change signed policy
+or extend any evidence lease.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh
