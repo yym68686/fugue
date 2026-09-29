@@ -125,3 +125,12 @@ HTTP/3 preservation, authenticated multi-hop joins, disk failure/recovery and
 queue saturation. Local overhead measurements are synthetic and do not prove
 zero production impact. Production activation requires separate immutable
 artifact checks, candidate health, natural draining and rollback evidence.
+
+The subprocess test `TestFiniteGraceDoesNotProveSafeBinaryHandoff` exercises
+the actual Caddy command exit while synthetic HTTP/2 and HTTP/3 streams are
+still active. Its fast default uses a 200 ms grace; an exact production-budget
+check can run with `FUGUE_HANDOFF_TEST_GRACE=120s` and a test timeout above 140s.
+This test demonstrates a finite-grace termination boundary, not an assurance
+that all requests will fit inside it. A green candidate health check or an
+empty recent access-log window does not prove the old process is drained.
+Do not replace its binary or stop it based on those signals alone.
