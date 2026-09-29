@@ -142,6 +142,10 @@ func (store *PersistentGroupStore) ReadGroupInventory(ctx context.Context, group
 			return ErrGroupInventoryNotFound
 		}
 		inventory = cloneGroupInventorySnapshot(*state.Inventory)
+		if state.InventoryProducer != nil {
+			producer := cloneGroupInventoryProducerState(*state.InventoryProducer)
+			inventory.verifiedProducer = &producer
+		}
 		return nil
 	})
 	return inventory, err
@@ -1462,5 +1466,21 @@ func clonePersistentGroupState(state persistentGroupState) persistentGroupState 
 
 func cloneGroupInventorySnapshot(snapshot GroupInventorySnapshot) GroupInventorySnapshot {
 	snapshot.Instances = append([]GroupInstance(nil), snapshot.Instances...)
+	for i := range snapshot.Instances {
+		snapshot.Instances[i] = cloneInventoryInstance(snapshot.Instances[i])
+	}
+	if snapshot.verifiedProducer != nil {
+		producer := cloneGroupInventoryProducerState(*snapshot.verifiedProducer)
+		snapshot.verifiedProducer = &producer
+	}
 	return snapshot
+}
+
+func cloneInventoryInstance(instance GroupInstance) GroupInstance {
+	instance.BootstrapEligibility = cloneBootstrapEligibility(instance.BootstrapEligibility)
+	if instance.ServingHealthy != nil {
+		value := *instance.ServingHealthy
+		instance.ServingHealthy = &value
+	}
+	return instance
 }

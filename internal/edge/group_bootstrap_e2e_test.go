@@ -72,7 +72,10 @@ func TestEmptyGroupBootstrapsSignedBundleThenServesRealRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StoreGroupInventoryCAS(context.Background(), groupID, 0, heartbeat.Inventory); err != nil {
+	_, err = store.StoreGroupInventoryProducerHeartbeat(context.Background(), edgecontrol.GroupInventoryProducerIdentity{
+		CredentialID: "bootstrap-inventory", TokenID: "bootstrap-token", NodeID: edgeID, GroupID: groupID,
+	}, heartbeat, time.Now().UTC())
+	if err != nil {
 		t.Fatal(err)
 	}
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

@@ -67,6 +67,10 @@ type GroupInventorySnapshot struct {
 	ActiveEpoch   GroupActiveEpoch `json:"active_epoch"`
 	Instances     []GroupInstance  `json:"instances"`
 	ObservedAt    time.Time        `json:"observed_at"`
+	// Populated only by the local authenticated producer store, never decoded
+	// from a heartbeat. Aggregation uses a content digest instead of the
+	// individual producer envelope generation.
+	verifiedProducer *GroupInventoryProducerState
 }
 
 type GroupActiveEpoch struct {
@@ -431,7 +435,7 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot, all
 		eligibility := instance.BootstrapEligibility
 		if !allowBootstrap || !baseHealthy || eligibility == nil || instance.ServingHealthy == nil || *instance.ServingHealthy ||
 			eligibility.GroupID != groupID || eligibility.ReleaseEpoch != releaseEpoch || eligibility.ProducerGeneration == 0 ||
-			inventoryProducerGeneration(eligibility.ProducerGeneration) != strings.TrimSpace(snapshot.Generation) ||
+			!bootstrapProducerBound(snapshot, instance) ||
 			eligibility.ValidUntil.IsZero() || !eligibility.ValidUntil.After(now) || eligibility.ValidUntil.After(snapshot.ObservedAt.Add(time.Minute)) {
 			continue
 		}

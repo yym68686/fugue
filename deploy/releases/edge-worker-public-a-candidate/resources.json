@@ -193,6 +193,10 @@
                   {
                     "name": "FUGUE_PLATFORM_ARTIFACT_SCOPE",
                     "value": "authority-cell:cell-public-a"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_INVENTORY_BOOTSTRAP_FILE",
+                    "value": "/var/run/fugue-cell-bootstrap/authorization.json"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
@@ -289,6 +293,11 @@
                   {
                     "mountPath": "/var/run/secrets/fugue-platform-consumer",
                     "name": "platform-consumer-identity",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "cell-bootstrap",
+                    "mountPath": "/var/run/fugue-cell-bootstrap",
                     "readOnly": true
                   }
                 ]
@@ -567,6 +576,14 @@
                 "name": "cell-state",
                 "persistentVolumeClaim": {
                   "claimName": "fugue-edge-worker-public-a-candidate-state"
+                }
+              },
+              {
+                "name": "cell-bootstrap",
+                "configMap": {
+                  "name": "fugue-cell-public-a-inventory-bootstrap",
+                  "optional": true,
+                  "defaultMode": 292
                 }
               }
             ]

@@ -66,12 +66,21 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_producer_shadow", "cell_trust", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_producer_shadow", "cell_trust", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	cellInventory := yamlMappingValue(t, jobs, "cell_inventory_enrollment")
+	for _, key := range yamlMappingKeys(t, cellInventory) {
+		if key == "needs" {
+			t.Fatal("initial cell inventory configuration cannot depend on code-release jobs")
+		}
+	}
+	if yamlMappingValue(t, cellInventory, "environment").Value != "production" || !strings.Contains(source, "python3 -m scripts.bootstrap_cell_inventory") || !strings.Contains(source, "deploy/environments/production/cell-inventory") {
+		t.Fatal("initial cell inventory requires explicit production inputs and the bounded verifier")
+	}
 	cellProducer := yamlMappingValue(t, jobs, "cell_producer_shadow")
 	for _, key := range yamlMappingKeys(t, cellProducer) {
 		if key == "needs" {

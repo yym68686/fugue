@@ -658,3 +658,64 @@ the existing full/LKG transaction gates. Route-only verification cannot create
 a DNS LKG; a failed candidate preserves the previous positive route/TLS LKG.
 This capability does not rewrite an existing authority or select public traffic.
 Cross-cell DNS publication remains a separate implementation and rollout step.
+
+`FUGUE_EDGE_INVENTORY_BOOTSTRAP_FILE` optionally points to an independently
+projected, non-secret initial inventory permission. It is used only when the
+actual activation file is absent; malformed or unreadable activation never
+falls back. The permission names the exact cell, physical Edge, Pod instance,
+slot, executable source and signed prepared gray route-only parent. Its absolute
+lease is at most fifteen minutes and is never renewed by a read or heartbeat.
+The Worker verifies current scoped assignment and signed membership twice around
+inventory preparation, and caps its signed heartbeat to the original deadline.
+Bootstrap eligibility remains distinct from applied serving health.
+
+This permission writes no Front activation, bundle, serving cache or LKG. The
+first observed and verified group bundle is still required before the existing
+activation CAS initializes a real serving record. Once a valid activation exists,
+the producer uses that record independently of the bootstrap file, so missing or
+expired bootstrap configuration cannot invalidate positive serving recovery.
+The optional projection alone grants nothing; enrollment and private probes
+remain separate configuration steps.
+
+The independent `cell_inventory_enrollment` CI lane selects one explicit
+`deploy/environments/production/cell-inventory` declaration. It binds the
+already-deployed private Worker UID, source, image, cell, node, state PVC and
+validated route-only ReleaseSet. The lane admits only an empty gray lane or the
+same declared gray parent, prepares both required consumer sets, and creates a
+fifteen-minute permission in a mutable Kubernetes projection. Retries reuse its original deadline.
+No full publication, artifact LKG attestation or public transport is changed.
+
+Initialization requires repeated actual Worker observations and authenticated
+route/TLS convergence for that exact Pod and gray publication. A bounded Job
+using the observed Worker image mounts only its isolated activation directory
+and executes the existing create-only activation CAS with the real bundle
+generation. The Worker retains its read-only activation mount. Three subsequent
+observations require fresh inventory after initialization. Missing proofs,
+replaced executors, expired permission, existing foreign activation or serving
+transport stop this initial lane; an expired permission is never renewed by a
+retry. Later full/LKG promotion and public handoff remain separate operations.
+
+Initial inventory eligibility survives authenticated inventory aggregation:
+the stored snapshot has a content digest, while each signed heartbeat has its
+own producer generation. The local store supplies verified producer observations
+in memory; compilation checks the aggregate digest and exact instance against
+those observations. This provenance is never serialized into a heartbeat.
+Restart reads preserve the original eligibility deadline, and eligibility still
+stops after the first publication. Neither aggregated identity nor bootstrap
+eligibility is serving health.
+
+An operator can declare a new initial attempt after an expired permission by
+pinning its ConfigMap UID, prior declaration digest, authorization digest and
+generation in `previous_permission`. This applies only while activation remains
+absent and the exact Worker and gray parent are unchanged. The lane replaces
+only that expired authorization with Kubernetes UID/resourceVersion and exact
+data preconditions, preserving the watched projection object. Ordinary retries never rotate it,
+and an unexpired permission, replaced object or established activation stops
+the operation. This configuration recovery does not rebuild either executable.
+
+Bootstrap ConfigMaps must remain mutable so kubelet continues watching projected
+authorization updates. An immutable Kubernetes object cannot be reused for this
+configuration channel, even after deletion and recreation under the same name.
+Replacing a previously immutable projection uses a new declared ConfigMap name
+and the normal isolated Worker rollout; existing public workers are unaffected.
+The authorization deadline itself remains fixed within each explicit attempt.
