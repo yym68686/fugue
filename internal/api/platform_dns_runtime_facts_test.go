@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/dnsfacts"
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -24,8 +25,9 @@ import (
 )
 
 func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.T) {
-	for _, selectedGroup := range []string{"edge-group-old", "cell-a", "cell-b"} {
-		t.Run(selectedGroup, func(t *testing.T) {
+	for _, tc := range []struct{ group, scope string }{{"edge-group-old", "global"}, {"cell-a", "global"}, {"cell-b", "global"}, {"cell-a", "authority-cell:cell-a"}} {
+		t.Run(tc.group+"/"+tc.scope, func(t *testing.T) {
+			selectedGroup := tc.group
 			path := t.TempDir() + "/state.json"
 			st := store.New(path)
 			if err := st.Init(); err != nil {
@@ -34,11 +36,17 @@ func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.
 			s := NewServer(st, auth.New(st, "facts-admin"), nil, ServerConfig{BundleSigningKey: "synthetic-facts-key", BundleSigningKeyID: "key"})
 			f := newDNSBackendFixture(t)
 			f.setAuthority(platformcontrol.ConsumerAuthorityID(selectedGroup))
+			f.claims.ScopeKey = tc.scope
+			f.pod.Annotations[platformConsumerIdentityAnnotation] = strings.ReplaceAll(f.pod.Annotations[platformConsumerIdentityAnnotation], `"scope_key":"global"`, `"scope_key":"`+tc.scope+`"`)
 			if _, err := st.UpdateDNSHeartbeat(model.DNSNode{ID: f.claims.NodeID, EdgeGroupID: selectedGroup, Zone: "example.test", PublicIPv4: "8.8.8.8"}); err != nil {
 				t.Fatal(err)
 			}
-			seedVerifiedDNSDelegationFixture(t, s, "example.test")
-			parent, release, found, err := st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", "gray")
+			if tc.scope == "global" {
+				seedVerifiedDNSDelegationFixture(t, s, "example.test")
+			} else {
+				seedScopedDNSFactsFixture(t, s, f.claims.NodeID, selectedGroup)
+			}
+			parent, release, found, err := st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, tc.scope, "gray")
 			if err != nil || !found {
 				t.Fatal("missing publication", err)
 			}
@@ -77,18 +85,25 @@ func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.
 				}
 			}
 			accept(f.claims, selectedSet, 20, child.GenerationSequence, release.FencingToken)
-			for _, group := range []string{"edge-group-old", "cell-a", "cell-b"} {
-				if group == selectedGroup {
+			for _, retained := range []struct{ group, scope string }{{"edge-group-old", "global"}, {"cell-a", "global"}, {"cell-a", "authority-cell:cell-a"}, {"cell-b", "global"}, {"cell-b", "authority-cell:cell-b"}} {
+				group := retained.group
+				if group == selectedGroup && retained.scope == tc.scope {
 					continue
 				}
 				candidate := newDNSBackendFixture(t)
 				candidate.setAuthority(platformcontrol.ConsumerAuthorityID(group))
-				candidate.pod.Name = "candidate-" + group
+				candidate.claims.ScopeKey = retained.scope
+				candidate.pod.Annotations[platformConsumerIdentityAnnotation] = strings.ReplaceAll(candidate.pod.Annotations[platformConsumerIdentityAnnotation], `"scope_key":"global"`, `"scope_key":"`+retained.scope+`"`)
+				suffix := "-global"
+				if retained.scope != "global" {
+					suffix = "-scoped"
+				}
+				candidate.pod.Name = "candidate-" + group + suffix
 				candidate.pod.UID = types.UID(candidate.pod.Name)
 				candidate.pod.Labels["app"] = "candidate"
 				candidate.claims.CredentialID = "kubernetes:" + candidate.pod.Namespace + ":" + candidate.pod.Spec.ServiceAccountName + ":" + string(candidate.pod.UID)
 				f.extraPods = append(f.extraPods, candidate.pod)
-				set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: "retained-" + group, ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, Generation: "retained-generation", ScopeKey: "global", PreparedAt: now, Topology: platformcontrol.ExpectedConsumerTopology{DNSNodes: []model.DNSNode{{ID: f.claims.NodeID, EdgeGroupID: group}}}})
+				set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: "retained-" + group + suffix, ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, Generation: "retained-generation", ScopeKey: candidate.claims.ScopeKey, PreparedAt: now, Topology: platformcontrol.ExpectedConsumerTopology{DNSNodes: []model.DNSNode{{ID: f.claims.NodeID, EdgeGroupID: group}}}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -122,6 +137,11 @@ func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.
 			if err != nil || !response.Ready || response.Backend.PodUID != string(f.pod.UID) || reads != 1 {
 				t.Fatal("selected backend facts unavailable", response.Backend, err, reads)
 			}
+			inventory := []model.DNSNode{{ID: f.claims.NodeID, EdgeGroupID: selectedGroup, Healthy: true, ServingGeneration: "legacy"}}
+			projected, err := s.dnsInventoryServingFacts(context.Background(), inventory)
+			if err != nil || len(projected) != 1 || !projected[0].Healthy || projected[0].ServingObservation == nil || projected[0].ServingObservation.BackendPodUID != string(f.pod.UID) || reads != 2 {
+				t.Fatal("inventory missed the selected scoped consumer", projected, err)
+			}
 			f.pod.Labels["app"] = "unselected"
 			if status := s.evaluateLiveConsumerConvergence(context.Background(), selectedSet, consumers, binding); status.Pass || status.RequiredPassing != 0 {
 				t.Fatal("unselected authority retained convergence", status)
@@ -129,7 +149,11 @@ func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.
 			if _, err := s.readPlatformDNSRuntimeFacts(context.Background(), f.claims.NodeID); err == nil {
 				t.Fatal("no selected backend reused retained receipt")
 			}
-			if reads != 1 {
+			projected, err = s.dnsInventoryServingFacts(context.Background(), inventory)
+			if err != nil || len(projected) != 1 || projected[0].Healthy || projected[0].ServingGeneration != "" || projected[0].ServingObservation == nil || projected[0].ServingObservation.State != "unknown" {
+				t.Fatal("unavailable scoped consumer fell back to legacy health", projected, err)
+			}
+			if reads != 2 {
 				t.Fatal("unselected Pod was proxied")
 			}
 			after, _ := os.ReadFile(path)
@@ -137,6 +161,41 @@ func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.
 				t.Fatal("read changed persistent facts or cursors")
 			}
 		})
+	}
+}
+
+func seedScopedDNSFactsFixture(t *testing.T, s *Server, node, cell string) {
+	t.Helper()
+	now := time.Now().UTC()
+	scope := platformconfig.AuthorityCellScope(cell)
+	intent := platformconfig.PlatformIntent{Scope: scope, AuthorityCellID: cell, Generation: "cell-facts-intent",
+		EdgeTopology: &edgetopology.Intent{SchemaVersion: edgetopology.SchemaVersion, Cells: []edgetopology.AuthorityCell{{ID: cell}}, Pools: []edgetopology.ServingPool{{ID: "pool-public"}}, Edges: []edgetopology.Edge{{ID: "edge-a", AuthorityCellID: cell, ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "node-a"}}}},
+		DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: node, EdgeGroupID: cell, Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}},
+		Routes:       []platformconfig.RouteIntent{{Hostname: "disabled.example.test", UpstreamURL: "http://origin:8080", Enabled: false}}}
+	topology, err := platformconfig.TrafficConsumerTopologyFromIntent(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, _ := platformconfig.Digest(topology)
+	policy := platformconfig.PolicySnapshot{Scope: scope, AuthorityCellID: cell, ConsumerTopologyDigest: digest, Generation: "cell-facts-policy",
+		TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "complete", EdgeGroupIDs: []string{cell}}},
+		DNSReadiness:          &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 8, MaxProbes: 4096},
+		DNSAuthorities:        []platformconfig.DNSAuthorityPolicy{{NodeID: node, Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}},
+		DNSClientPolicies:     []platformconfig.DNSClientPolicy{{NodeID: node}}}
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: node, EdgeGroupID: cell, A: []string{"8.8.8.8"}, ObservedAt: now}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.materializePlatformCompilation(context.Background(), compiled, platformProducerPrincipal(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, gray, _, _, err := s.store.ReleasePlatformArtifact(c.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=complete"}, platformProducerPrincipal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.preparePlatformReleaseSetConsumers(context.Background(), model.Principal{}, c.ReleaseArtifact, gray); err != nil {
+		t.Fatal(err)
 	}
 }
 

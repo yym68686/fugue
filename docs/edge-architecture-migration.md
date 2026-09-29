@@ -597,3 +597,12 @@ Changing this setting cannot make a global checkpoint belong to a new cell.
 The isolated public-a candidates enroll in their independent cell scope while
 the Agent canary receives scoped-grant compatibility. This enrollment alone
 creates no serving assignment, positive LKG or public transport selection.
+
+DNS authority observations enumerate retained global and cell-scoped receipts.
+The storage read is bounded to 64 receipts for one physical node and 4096 for
+inventory; overflow rejects the observation instead of choosing from truncated
+results. Scope and consumer ID jointly identify a receipt. Freshness and signed
+membership remain mandatory, and the exact selected public Service backend
+decides between old and new authorities. Missing cell observations cannot fall
+back to historical inventory health. Reading facts does not modify receipts,
+advance their cursors or transfer positive evidence between scopes.

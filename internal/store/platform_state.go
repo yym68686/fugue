@@ -1003,6 +1003,43 @@ func (s *Store) ListPlatformConsumers(kind, scopeKey string) ([]model.PlatformCo
 	return consumers, nil
 }
 
+// ListPlatformAuthorityConsumers reads retained global/cell identities for
+// transport-authority selection. A node read is capped at 64 receipts and an
+// inventory read at 4096. Overflow fails instead of silently selecting from a
+// truncated set. The result grants no authority without exact member and
+// selected-backend verification by the caller.
+func (s *Store) ListPlatformAuthorityConsumers(kind, nodeID string) ([]model.PlatformConsumerInstance, error) {
+	kind = NormalizePlatformArtifactKind(kind)
+	if kind == "" || strings.TrimSpace(nodeID) != nodeID || len(nodeID) > 253 {
+		return nil, ErrInvalidInput
+	}
+	limit := 4096
+	if nodeID != "" {
+		limit = 64
+	}
+	if s.usingDatabase() {
+		return s.pgListPlatformAuthorityConsumers(kind, nodeID, limit)
+	}
+	consumers := []model.PlatformConsumerInstance{}
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, consumer := range state.PlatformConsumerInstances {
+			if consumer.ArtifactKind != kind || (nodeID != "" && consumer.NodeID != nodeID) || (consumer.ScopeKey != "global" && !strings.HasPrefix(consumer.ScopeKey, "authority-cell:cell-")) {
+				continue
+			}
+			if len(consumers) == limit {
+				return ErrConflict
+			}
+			consumers = append(consumers, consumer)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortPlatformConsumers(consumers)
+	return consumers, nil
+}
+
 func (s *Store) CreatePlatformExpectedConsumerSet(in model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
 	set, err := normalizePlatformExpectedConsumerSetForStore(in)
 	if err != nil {

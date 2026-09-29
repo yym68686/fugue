@@ -55,7 +55,7 @@
     "deployment": "fugue-runtime-agent-canary",
     "container": "agent",
     "runtimeId": "runtime_1790554359_f435e3d2f868",
-    "sourceSha": "d49a8bb2c05bb4410686bdc3b11817faf950a5dc",
+    "sourceSha": "c38b320cd23cc44df39e5bf256ee3f1268657655",
     "checkpointPath": "/var/lib/fugue-agent/edge-checkpoint.json"
   },
   "observation": {

@@ -16,7 +16,7 @@ func (s *Server) dnsInventoryServingFacts(ctx context.Context, nodes []model.DNS
 	if len(nodes) == 0 {
 		return nodes, nil
 	}
-	consumers, err := s.store.ListPlatformConsumers(model.PlatformArtifactKindDNSAnswerBundle, "global")
+	consumers, err := s.store.ListPlatformAuthorityConsumers(model.PlatformArtifactKindDNSAnswerBundle, "")
 	if err != nil {
 		return nil, err
 	}

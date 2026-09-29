@@ -1963,6 +1963,42 @@ ORDER BY updated_at DESC, consumer_id ASC`, kind, scopeKey)
 	return consumers, nil
 }
 
+func (s *Store) pgListPlatformAuthorityConsumers(kind, nodeID string, limit int) ([]model.PlatformConsumerInstance, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, consumer_id, credential_id, token_id, component, node_id, artifact_kind, scope_key,
+	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
+	protocol_version, schema_version, compatibility_capabilities_json,
+	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
+	desired_generation, actual_generation, candidate_generation, lkg_generation, apply_status, probe_status,
+	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at
+FROM fugue_platform_consumer_instances
+WHERE artifact_kind = $1 AND ($2 = '' OR node_id = $2)
+  AND (scope_key = 'global' OR scope_key LIKE 'authority-cell:cell-%')
+ORDER BY updated_at DESC, consumer_id ASC
+LIMIT $3`, kind, nodeID, limit+1)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	consumers := []model.PlatformConsumerInstance{}
+	for rows.Next() {
+		consumer, err := scanPlatformConsumerInstance(rows)
+		if err != nil {
+			return nil, err
+		}
+		if len(consumers) == limit {
+			return nil, ErrConflict
+		}
+		consumers = append(consumers, consumer)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapDBErr(err)
+	}
+	return consumers, nil
+}
+
 func (s *Store) pgGetPlatformLKG(kind, scopeKey string) (*model.PlatformLKGSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -77,7 +77,7 @@ func (s *Server) handleGetPlatformDNSRuntimeFacts(w http.ResponseWriter, r *http
 
 func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFactSource, error) {
 	fail := func() (dnsFactSource, error) { return dnsFactSource{}, errDNSRuntimeFacts }
-	consumers, err := s.store.ListPlatformConsumers(model.PlatformArtifactKindDNSAnswerBundle, "global")
+	consumers, err := s.store.ListPlatformAuthorityConsumers(model.PlatformArtifactKindDNSAnswerBundle, node)
 	if err != nil {
 		return fail()
 	}
@@ -116,10 +116,11 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 		if c.LastHeartbeatAt.IsZero() || !c.LastHeartbeatAt.Add(time.Duration(member.HeartbeatFreshnessSeconds)*time.Second).After(time.Now().UTC()) {
 			continue
 		}
-		if seen[c.ConsumerID] {
+		identityKey := c.ScopeKey + "/" + c.ConsumerID
+		if seen[identityKey] {
 			return fail()
 		}
-		seen[c.ConsumerID] = true
+		seen[identityKey] = true
 		candidates = append(candidates, candidate{fact: *c, claims: claims})
 	}
 	var selected *dnsFactSource
