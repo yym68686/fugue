@@ -241,6 +241,49 @@ jobs:
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
         run: python3 scripts/publish_agent_edge_shadow.py deploy/environments/production/agent-edge-policy/shadow.json
 
+  cell_trust:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-cell-trust, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one explicit initial cell trust declaration
+        id: trust
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-trust)
+          if (( ${#declarations[@]} > 1 )); then
+            echo 'one cell trust declaration per configuration atom is required' >&2
+            exit 1
+          fi
+          if (( ${#declarations[@]} == 1 )); then
+            config="${declarations[0]}"
+            [[ "$config" =~ ^deploy/environments/production/cell-trust/cell-[a-z0-9-]+\.json$ ]]
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_cell_trust.py scripts/reconcile_agent_edge_trust.py; then
+              python3 -m unittest scripts.test_reconcile_cell_trust
+              echo "config=$config" >> "$GITHUB_OUTPUT"
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Reconcile digest-bound cell keyrings without changing traffic
+        if: steps.trust.outputs.selected == 'true'
+        env:
+          FUGUE_EDGE_CELL_TRUST: ${{ secrets.FUGUE_EDGE_CELL_TRUST }}
+        run: |
+          python3 scripts/reconcile_cell_trust.py "${{ steps.trust.outputs.config }}"
+          python3 scripts/reconcile_cell_trust.py "${{ steps.trust.outputs.config }}" --check
+
   agent_edge_trust:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

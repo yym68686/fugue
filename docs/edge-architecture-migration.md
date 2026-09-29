@@ -48,6 +48,20 @@ the candidate must report no serving publication and cannot replace either
 legacy Control's positive LKG. Staging does not remove a country alias or
 change any Front, DNS listener, Agent policy or existing Worker.
 
+Initial cell keyrings are independent configuration in
+`deploy/environments/production/cell-trust`. Git records exact Secret names,
+stable Edge membership and digests only; private material remains in the
+encrypted production `FUGUE_EDGE_CELL_TRUST` configuration. The generic
+`cell_trust` CI lane selects one changed declaration without a code-release
+dependency, checks all material and existing resources before any create, then
+verifies the result. It neither generates replacement keys nor adopts or
+overwrites an existing Secret. Replaying the same generation restores missing
+projections or resumes a partial initial installation using the same keys.
+The bootstrap schema rejects key rotation; later rotation needs an explicit
+overlap declaration that preserves the serving artifact's verification keys.
+Installing trust does not seed inventory, publish a bundle or authorize public
+transport.
+
 The topology file contains no endpoints, health, traffic weights, loaded bundle
 digests, or code revision. Those are runtime facts or signed artifacts. A pool
 membership is not route authorization. In particular, the current public

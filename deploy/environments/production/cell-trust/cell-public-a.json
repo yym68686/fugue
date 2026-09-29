@@ -1,0 +1,38 @@
+{
+  "schema": "fugue.cell-trust/v1",
+  "namespace": "fugue-system",
+  "cell": "cell-public-a",
+  "generation": 1,
+  "previousGeneration": 0,
+  "previousDigest": "",
+  "edgeIds": [
+    "vps-84c8f0a9"
+  ],
+  "secrets": [
+    {
+      "name": "fugue-cell-public-a-bundle-readers",
+      "purpose": "bundle-readers",
+      "digest": "sha256:4b9924e76773e6f444d0c19b0ad468cdc006fd3872e5a37454c30fce95ce33c6"
+    },
+    {
+      "name": "fugue-cell-public-a-bundle-signing",
+      "purpose": "bundle-signing",
+      "digest": "sha256:7c0d0e3a49e217bcca6725fcd3184f4379bb51edfe0d6c9a29102af0a99a8907"
+    },
+    {
+      "name": "fugue-cell-public-a-inventory-writer",
+      "purpose": "inventory-writer",
+      "digest": "sha256:7a858f9637c1a9a03bd6797e0f032bc6f3a464772e765cdc32af84c2dbd49aa6"
+    },
+    {
+      "name": "fugue-cell-public-a-reader-vps-84c8f0a9",
+      "purpose": "reader-token/vps-84c8f0a9",
+      "digest": "sha256:87db8ca07778804c3f5308f9166004878ca686ff7c566ecd92f1884b052a30b2"
+    },
+    {
+      "name": "fugue-cell-public-a-recovery",
+      "purpose": "recovery",
+      "digest": "sha256:86075c66ebacff489c048cc7279c75e879d32592164aca7b4163da3f8c5f3b11"
+    }
+  ]
+}

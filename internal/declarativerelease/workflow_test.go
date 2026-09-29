@@ -66,12 +66,21 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_trust", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	cellTrust := yamlMappingValue(t, jobs, "cell_trust")
+	for _, key := range yamlMappingKeys(t, cellTrust) {
+		if key == "needs" {
+			t.Fatal("cell trust configuration recovery cannot depend on a code release")
+		}
+	}
+	if yamlMappingValue(t, cellTrust, "environment").Value != "production" || !strings.Contains(source, "scripts/reconcile_cell_trust.py") || !strings.Contains(source, "secrets.FUGUE_EDGE_CELL_TRUST") {
+		t.Fatal("cell trust must use the explicit encrypted production declaration")
+	}
 	staticObservation := yamlMappingValue(t, jobs, "static_edge_observability")
 	if yamlMappingValue(t, staticObservation, "needs").Value != "prepush" || yamlMappingValue(t, staticObservation, "runs-on").Value != "ubuntu-latest" || !strings.Contains(source, "make test-static-edge-observability") || !strings.Contains(source, "scripts/package_static_edge_observability.sh") {
 		t.Fatal("independent static edge artifacts require isolated verification and the normal prepush gate")
