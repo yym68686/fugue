@@ -3,6 +3,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 export GOTOOLCHAIN=go1.26.3
+python3 -m unittest scripts.test_static_generation_installer
 python3 scripts/prepare_static_caddy.py
 go test -race ./internal/staticedgeobserve ./internal/staticedgecontract ./internal/staticedgemanager ./pkg/staticedgeclient -timeout 120s
 (cd static-caddy && go test -race -tags nobadger,nomysql,nopgx ./... -timeout 120s)

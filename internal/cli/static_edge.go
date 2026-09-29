@@ -54,6 +54,7 @@ func (cli *CLI) newStaticEdgeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "static-edge", Short: "Manage standalone edges directly or record account metadata", Long: "Manage independent edge/origin managers. Direct contexts, signing keys and manager identities are separate from Fugue API credentials; the registry subcommand is an optional Fugue API metadata view and never becomes the runtime or DNS authority. No automatic SSH fallback. Every direct write requires an expected revision and returns a durable receipt."}
 	cmd.AddCommand(cli.newStaticEdgeContextCommand(), cli.newStaticEdgeCloudflareCommand(), cli.newStaticEdgeCutoverCommand(), cli.newStaticEdgeBootstrapCommand(), cli.newStaticEdgeRegistryCommand(), cli.staticEdgeLocalBundle("validate"), cli.staticEdgeLocalBundle("plan"), cli.staticEdgeKeys(), cli.staticEdgeSign())
 	cmd.AddCommand(cli.staticEdgeObservabilityCommands()...)
+	cmd.AddCommand(cli.newStaticGenerationCommand())
 	bundle := &cobra.Command{Use: "bundle", Short: "Validate and sign configuration bundles"}
 	bundle.AddCommand(cli.staticEdgeLocalBundle("validate"), cli.staticEdgeSign())
 	cmd.AddCommand(bundle)
