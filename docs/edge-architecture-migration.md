@@ -267,6 +267,15 @@ remaining lifetime. Clock rollback, a larger future timestamp, expired facts
 or an expired grant still reject the window. This does not change signed policy
 or extend any evidence lease.
 
+The first sample anchors its window to an actual healthy measurement of the
+independently verified current grant. The entire history from that timestamp
+is retained for all subsequent samples; a moving log tail cannot discard the
+baseline or hide an in-window failure. If a read catches an unfinished permitted
+recovery, the observer rereads the same Pod, image and complete log interval
+only until the original recovery deadline. A fresh signed grant, measured
+diversity and current heartbeat must still be observed before returning a
+positive sample. Neither a new grant nor another poll can reset that deadline.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh

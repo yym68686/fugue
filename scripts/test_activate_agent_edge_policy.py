@@ -18,6 +18,69 @@ def fixture():
 
 
 class ActivationTests(unittest.TestCase):
+    def test_initial_window_starts_at_verified_current_grant_health(self):
+        clock = active.now()
+        def line(seconds, grant, degraded=False):
+            at = clock + datetime.timedelta(seconds=seconds)
+            value = {"grant_digest": grant, "primary": "edge-a", "standbys": ["edge-b"], "degraded": degraded, "valid_until": (clock + datetime.timedelta(seconds=60)).isoformat()}
+            return at.isoformat() + " agent_edge_selection " + json.dumps(value)
+        missing_history = line(-110, "previous", True)
+        baseline = line(-20, "current")
+        degraded = line(-10, "current", True)
+        with patch.object(active, "now", return_value=clock):
+            anchor, logs = active.healthy_window_start("\n".join([missing_history, baseline, degraded]), "current")
+            self.assertEqual(anchor, baseline.split()[0])
+            self.assertEqual(logs, baseline + "\n" + degraded)
+            with self.assertRaises(active.RecoveryPending) as caught:
+                active.measured_choice(logs, "current", 30)
+            self.assertEqual(caught.exception.deadline, clock + datetime.timedelta(seconds=20))
+            recovered = active.measured_choice(logs + "\n" + line(-5, "current"), "current", 30)
+            self.assertEqual(recovered["recovery"]["max_degraded_seconds"], 5)
+            for invalid in [missing_history, line(-5, "foreign"), line(1, "current")]:
+                with self.assertRaises(ValueError):
+                    active.healthy_window_start(invalid, "current")
+
+    def test_pending_recovery_rereads_same_consumer_and_complete_history(self):
+        config, authority, public = fixture()
+        config["observation"]["maxRecoveredDegradationSeconds"] = 30
+        clock = active.now()
+        pending = active.RecoveryPending(clock + datetime.timedelta(seconds=10))
+        pending.pod_uid, pending.image_id, pending.log_start_at = "pod-a", "image-a", (clock - datetime.timedelta(seconds=20)).isoformat()
+        observed = {"pod_uid": "pod-a", "image_id": "image-a", "log_start_at": pending.log_start_at}
+        with patch.object(active, "now", return_value=clock), patch.object(active.time, "sleep") as sleep, patch.object(active, "_sample_once", side_effect=[pending, observed]) as read:
+            self.assertEqual(active.sample(config, None, authority, "active", public, "validator"), observed)
+            self.assertEqual(read.call_args_list[1].args[6], pending.log_start_at)
+            sleep.assert_called_once_with(2)
+        for field in ["pod_uid", "image_id", "log_start_at"]:
+            with self.subTest(field=field), patch.object(active, "now", return_value=clock), patch.object(active.time, "sleep"), patch.object(active, "_sample_once", side_effect=[pending, dict(observed, **{field: "changed"})]):
+                with self.assertRaises(ValueError):
+                    active.sample(config, None, authority, "active", public, "validator")
+
+    def test_pending_recovery_cannot_reset_original_deadline_or_hide_errors(self):
+        config, authority, public = fixture()
+        config["observation"]["maxRecoveredDegradationSeconds"] = 30
+        start = active.now()
+        clock = [start]
+        pending = active.RecoveryPending(start + datetime.timedelta(seconds=6))
+        pending.pod_uid, pending.image_id, pending.log_start_at = "pod-a", "image-a", start.isoformat()
+        later = active.RecoveryPending(start + datetime.timedelta(seconds=60))
+        later.pod_uid, later.image_id, later.log_start_at = pending.pod_uid, pending.image_id, pending.log_start_at
+        calls = []
+        def read(*args):
+            calls.append(args)
+            raise pending if len(calls) == 1 else later
+        def sleep(seconds): clock[0] += datetime.timedelta(seconds=seconds)
+        with patch.object(active, "now", side_effect=lambda: clock[0]), patch.object(active.time, "sleep", side_effect=sleep), patch.object(active, "_sample_once", side_effect=read):
+            with self.assertRaisesRegex(ValueError, "original deadline"):
+                active.sample(config, None, authority, "active", public, "validator")
+        self.assertEqual(clock[0], start + datetime.timedelta(seconds=6))
+        self.assertEqual([args[6] for args in calls[1:]], [pending.log_start_at] * (len(calls) - 1))
+        with patch.object(active, "_sample_once", side_effect=ValueError("permission expired")) as read, patch.object(active.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "permission expired"):
+                active.sample(config, None, authority, "active", public, "validator")
+            read.assert_called_once()
+            sleep.assert_not_called()
+
     def test_clock_wait_preserves_original_runtime_and_permission_deadlines(self):
         base = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
         heartbeat = base + datetime.timedelta(milliseconds=27)

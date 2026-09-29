@@ -84,6 +84,32 @@ def verify_grant(validator, public, signed, runtime_id, origin):
         return strict_json(result.stdout)
 
 
+class RecoveryPending(ValueError):
+    def __init__(self, deadline):
+        super().__init__("canary recovery is not yet observed")
+        self.deadline = deadline
+
+
+def healthy_window_start(logs, grant_digest):
+    lines = logs.splitlines()
+    anchor = None
+    for index, line in enumerate(lines):
+        if "agent_edge_selection " not in line:
+            continue
+        raw = line.split("agent_edge_selection ", 1)[1]
+        value, end = json.JSONDecoder().raw_decode(raw)
+        if value.get("grant_digest") == grant_digest and value.get("primary") and not value.get("degraded") and not raw[end:].strip():
+            at = timestamp(line.split()[0])
+            if at > now() or timestamp(value["valid_until"]) <= now():
+                raise ValueError("healthy baseline has no live ordered permission")
+            anchor = (index, line.split()[0])
+    if anchor is None:
+        raise ValueError("current signed grant has no measured healthy baseline")
+    # A new window begins at this positive observation. Subsequent reads keep
+    # this exact boundary, including every failure/recovery after it.
+    return anchor[1], "\n".join(lines[anchor[0]:])
+
+
 def measured_choice(logs, grant_digest, max_recovered_seconds=0):
     observations = []
     degraded_since = None
@@ -138,7 +164,11 @@ def measured_choice(logs, grant_digest, max_recovered_seconds=0):
             if value.get("grant_digest") == grant_digest:
                 observations.append(value)
     if degraded_since is not None or acquisition_failure is not None:
-        raise ValueError("canary recovery is not yet observed")
+        starts = ([degraded_since] if degraded_since is not None else []) + ([acquisition_failure[0]] if acquisition_failure else [])
+        deadline = min(starts) + datetime.timedelta(seconds=max_recovered_seconds)
+        if now() >= deadline:
+            raise ValueError("pending canary recovery exceeded its declared bound")
+        raise RecoveryPending(deadline)
     if not observations or observations[-1].get("degraded"):
         raise ValueError("consumer lacks current measured primary and independent standby")
     result = dict(observations[-1])
@@ -169,7 +199,7 @@ def verify_runtime_observation(runtime, grant_valid_until, max_age_seconds):
     return checked_at, heartbeat, observed
 
 
-def sample(config, api, authority, mode, public, validator, log_start_at=None):
+def _sample_once(config, api, authority, mode, public, validator, log_start_at=None):
     c, o = config["consumer"], config["observation"]
     deployment = strict_json(kubectl(["get", "deployment", c["deployment"], "-n", c["namespace"], "-o", "json"]))
     template = deployment["spec"]["template"]
@@ -190,9 +220,17 @@ def sample(config, api, authority, mode, public, validator, log_start_at=None):
     grant = verified["grant"]
     if verified.get("verified") is not True or checkpoint.get("activated") != (mode == "active") or grant["mode"] != mode or grant["policy_reference"]["artifact_id"] != authority["artifact"]["id"] or grant["policy_reference"]["release_id"] != authority["release"]["id"] or timestamp(grant["valid_until"]) <= now() + datetime.timedelta(seconds=10):
         raise ValueError("consumer has not accepted the exact live policy publication")
-    log_start_at = log_start_at or (now() - datetime.timedelta(seconds=120)).isoformat()
-    logs = kubectl(["-n", c["namespace"], "logs", pod["metadata"]["name"], "-c", c["container"], "--since-time=" + log_start_at, "--timestamps=true"])
-    choice = measured_choice(logs, verified["digest"], o["maxRecoveredDegradationSeconds"])
+    search_start = log_start_at or (now() - datetime.timedelta(seconds=120)).isoformat()
+    logs = kubectl(["-n", c["namespace"], "logs", pod["metadata"]["name"], "-c", c["container"], "--since-time=" + search_start, "--timestamps=true"])
+    if log_start_at is None:
+        log_start_at, logs = healthy_window_start(logs, verified["digest"])
+    try:
+        choice = measured_choice(logs, verified["digest"], o["maxRecoveredDegradationSeconds"])
+    except RecoveryPending as pending:
+        pending.log_start_at = log_start_at
+        pending.pod_uid = pod["metadata"]["uid"]
+        pending.image_id = status["imageID"]
+        raise
     selected = set([choice["primary"], *choice.get("standbys", [])])
     cells = {candidate["authority_cell_id"] for candidate in grant["candidates"] if candidate["edge_id"] in selected}
     if len(cells) < o["minimumDistinctCells"]:
@@ -200,6 +238,27 @@ def sample(config, api, authority, mode, public, validator, log_start_at=None):
     runtime = api("GET", "/v1/runtimes/" + c["runtimeId"])["runtime"]
     checked_at, heartbeat, observed = verify_runtime_observation(runtime, grant["valid_until"], o["maxHeartbeatAgeSeconds"])
     return {"at": checked_at.isoformat(), "log_start_at": log_start_at, "pod_uid": pod["metadata"]["uid"], "image_id": status["imageID"], "grant_digest": verified["digest"], "grant_valid_until": grant["valid_until"], "policy_release_id": authority["release"]["id"], "primary": choice["primary"], "cells": sorted(cells), "heartbeat": heartbeat.isoformat(), "cell_observed_at": observed.isoformat(), "mode": mode, "publication_ids": sorted({candidate["publication"]["release_id"] for candidate in grant["candidates"]}), "recovery": choice.get("recovery", {})}
+
+
+def sample(config, api, authority, mode, public, validator, log_start_at=None):
+    deadline, identity = None, None
+    for _ in range(2 + config["observation"]["maxRecoveredDegradationSeconds"] // 2):
+        try:
+            observed = _sample_once(config, api, authority, mode, public, validator, log_start_at)
+            if identity is not None and identity != (observed["pod_uid"], observed["image_id"], observed["log_start_at"]):
+                raise ValueError("consumer or baseline changed during recovery observation")
+            return observed
+        except RecoveryPending as pending:
+            current = (pending.pod_uid, pending.image_id, pending.log_start_at)
+            if identity is not None and identity != current:
+                raise ValueError("consumer or baseline changed during recovery observation")
+            identity, log_start_at = current, pending.log_start_at
+            deadline = min(deadline, pending.deadline) if deadline is not None else pending.deadline
+            remaining = (deadline - now()).total_seconds()
+            if remaining <= 0:
+                raise ValueError("canary recovery was not proved before its original deadline")
+            time.sleep(min(2, remaining))
+    raise ValueError("bounded canary recovery observation exhausted")
 
 
 def prepare_window(config, api, public, validator):
