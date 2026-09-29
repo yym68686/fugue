@@ -581,7 +581,7 @@
               {
                 "name": "cell-bootstrap",
                 "configMap": {
-                  "name": "fugue-cell-public-a-bootstrap",
+                  "name": "fugue-cell-public-a-inventory-bootstrap",
                   "optional": true,
                   "defaultMode": 292
                 }

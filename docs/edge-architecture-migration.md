@@ -681,8 +681,8 @@ The independent `cell_inventory_enrollment` CI lane selects one explicit
 `deploy/environments/production/cell-inventory` declaration. It binds the
 already-deployed private Worker UID, source, image, cell, node, state PVC and
 validated route-only ReleaseSet. The lane admits only an empty gray lane or the
-same declared gray parent, prepares both required consumer sets, and creates an
-immutable fifteen-minute permission. Retries reuse its original deadline.
+same declared gray parent, prepares both required consumer sets, and creates a
+fifteen-minute permission in a mutable Kubernetes projection. Retries reuse its original deadline.
 No full publication, artifact LKG attestation or public transport is changed.
 
 Initialization requires repeated actual Worker observations and authenticated
@@ -707,8 +707,15 @@ eligibility is serving health.
 An operator can declare a new initial attempt after an expired permission by
 pinning its ConfigMap UID, prior declaration digest, authorization digest and
 generation in `previous_permission`. This applies only while activation remains
-absent and the exact Worker and gray parent are unchanged. The lane deletes
-only that expired object with Kubernetes UID/resourceVersion preconditions,
-then creates a new immutable permission. Ordinary retries never rotate it,
+absent and the exact Worker and gray parent are unchanged. The lane replaces
+only that expired authorization with Kubernetes UID/resourceVersion and exact
+data preconditions, preserving the watched projection object. Ordinary retries never rotate it,
 and an unexpired permission, replaced object or established activation stops
 the operation. This configuration recovery does not rebuild either executable.
+
+Bootstrap ConfigMaps must remain mutable so kubelet continues watching projected
+authorization updates. An immutable Kubernetes object cannot be reused for this
+configuration channel, even after deletion and recreation under the same name.
+Replacing a previously immutable projection uses a new declared ConfigMap name
+and the normal isolated Worker rollout; existing public workers are unaffected.
+The authorization deadline itself remains fixed within each explicit attempt.

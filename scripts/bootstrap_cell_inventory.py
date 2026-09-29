@@ -10,15 +10,13 @@ import json
 import os
 from pathlib import Path
 import re
-import select
 import subprocess
 import time
 import urllib.parse
-import urllib.request
 
 from scripts.bootstrap_cell_producer import digest, selected
 from scripts.observe_front_candidate import now, timestamp
-from scripts.publish_agent_edge_shadow import API, NoRedirect, canonical
+from scripts.publish_agent_edge_shadow import API, canonical
 from scripts.reconcile_front_probe_transport import kubectl
 
 MANAGER = "fugue-cell-inventory-bootstrap"
@@ -103,7 +101,7 @@ def isolated_worker(c):
         if s.get("selector") and all(labels.get(k) == v for k, v in s["selector"].items()):
             if s.get("type", "ClusterIP") != "ClusterIP" or s.get("externalIPs") or any(p.get("port") != 7832 or p.get("targetPort") not in [7832, "health"] for p in s.get("ports", [])):
                 raise ValueError("initial executor is already selected by serving transport")
-    return {"pod": pod, "image": container["image"], "mount": mount}
+    return {"pod": pod, "image": container["image"], "mount": mount, "bootstrap_path": permission_path}
 
 
 def activation(c):
@@ -146,7 +144,7 @@ def permission(c, release, existing=None):
     fields = {"schema": "fugue.cell-inventory-bootstrap/v1", "authority_cell_id": c["authority_cell_id"], "edge_id": w["node"], "instance_uid": w["instance_uid"], "slot": w["slot"], "source_sha": w["source_sha"], "release_set_id": c["release_set"]["id"], "release_set_digest": c["release_set"]["digest"], "release_id": release["id"]}
     if existing is not None:
         meta = existing.get("metadata", {})
-        if existing.get("immutable") is not True or meta.get("labels", {}).get("app.kubernetes.io/managed-by") != MANAGER or meta.get("annotations", {}).get(DECLARATION) != digest(c) or meta.get("deletionTimestamp") or set(existing.get("data", {})) != {"authorization.json"}:
+        if existing.get("immutable") is True or meta.get("labels", {}).get("app.kubernetes.io/managed-by") != MANAGER or meta.get("annotations", {}).get(DECLARATION) != digest(c) or meta.get("deletionTimestamp") or set(existing.get("data", {})) != {"authorization.json"}:
             raise ValueError("bootstrap permission is foreign or changed")
         a = json.loads(existing["data"]["authorization.json"])
         if set(a) != set(fields) | {"issued_at", "expires_at"} or any(a.get(k) != v for k, v in fields.items()) or not timestamp(a["issued_at"]) <= now() < timestamp(a["expires_at"]) or not datetime.timedelta(0) < timestamp(a["expires_at"]) - timestamp(a["issued_at"]) <= datetime.timedelta(minutes=15):
@@ -154,47 +152,34 @@ def permission(c, release, existing=None):
         return existing, a
     issued = now().replace(microsecond=0)
     fields.update(issued_at=issued.isoformat(), expires_at=(issued + datetime.timedelta(minutes=15)).isoformat())
-    return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": c["bootstrap_config_map"], "namespace": c["namespace"], "labels": {"app.kubernetes.io/managed-by": MANAGER}, "annotations": {DECLARATION: digest(c)}}, "immutable": True, "data": {"authorization.json": canonical(fields)}}, fields
+    return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": c["bootstrap_config_map"], "namespace": c["namespace"], "labels": {"app.kubernetes.io/managed-by": MANAGER}, "annotations": {DECLARATION: digest(c)}}, "data": {"authorization.json": canonical(fields)}}, fields
 
 
 def expired_predecessor(c, release, existing):
     """Only a new explicit declaration may replace its exact expired permission."""
     previous, meta = c.get("previous_permission"), existing.get("metadata", {})
-    if not previous or meta.get("uid") != previous["uid"] or not meta.get("resourceVersion") or meta.get("annotations", {}).get(DECLARATION) != previous["declaration_digest"] or meta.get("labels", {}).get("app.kubernetes.io/managed-by") != MANAGER or meta.get("deletionTimestamp") or existing.get("immutable") is not True or set(existing.get("data", {})) != {"authorization.json"}:
+    if not previous or meta.get("uid") != previous["uid"] or not meta.get("resourceVersion") or meta.get("annotations", {}).get(DECLARATION) != previous["declaration_digest"] or meta.get("labels", {}).get("app.kubernetes.io/managed-by") != MANAGER or meta.get("deletionTimestamp") or existing.get("immutable") is True or set(existing.get("data", {})) != {"authorization.json"}:
         raise ValueError("expired permission predecessor differs from explicit retry")
     a = json.loads(existing["data"]["authorization.json"])
     _, target = permission(c, release)
     fixed = set(target) - {"issued_at", "expires_at"}
     if digest(a) != previous["authorization_digest"] or set(a) != set(target) or any(a.get(k) != target[k] for k in fixed) or timestamp(a["expires_at"]) > now() or not datetime.timedelta(0) < timestamp(a["expires_at"]) - timestamp(a["issued_at"]) <= datetime.timedelta(minutes=15):
         raise ValueError("only an expired exact permission for this executor and publication can be replaced")
-    return {"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": meta["uid"], "resourceVersion": meta["resourceVersion"]}}
+    return {"uid": meta["uid"], "resourceVersion": meta["resourceVersion"]}
 
 
-def delete_permission(c, options):
-    # kubectl delete --raw does not send a DeleteOptions body. A bounded local
-    # proxy preserves Kubernetes UID/resourceVersion preconditions without
-    # reading, exporting or logging the runner's client credentials.
-    process = subprocess.Popen(["kubectl", "proxy", "--address=127.0.0.1", "--port=0", "--accept-hosts=^127\\.0\\.0\\.1$"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    try:
-        if not select.select([process.stdout], [], [], 10)[0]:
-            raise ValueError("permission CAS transport did not start")
-        line = process.stdout.readline().strip()
-        match = re.fullmatch(r"Starting to serve on 127\.0\.0\.1:([0-9]+)", line)
-        if not match or process.poll() is not None:
-            raise ValueError("permission CAS transport is invalid")
-        path = "/api/v1/namespaces/" + c["namespace"] + "/configmaps/" + c["bootstrap_config_map"]
-        request = urllib.request.Request("http://127.0.0.1:" + match[1] + path, method="DELETE", data=canonical(options).encode(), headers={"Content-Type": "application/json"})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-        with opener.open(request, timeout=10) as response:
-            if response.status not in [200, 202]:
-                raise ValueError("expired permission CAS was not accepted")
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+def replace_permission(c, options, existing, target):
+    # Patch the same mutable projection object. Immutable ConfigMaps stop
+    # kubelet watches and cannot provide independently recoverable configuration.
+    patch = [{"op": "test", "path": "/metadata/uid", "value": options["uid"]}, {"op": "test", "path": "/metadata/resourceVersion", "value": options["resourceVersion"]}, {"op": "test", "path": "/data", "value": existing["data"]}, {"op": "test", "path": "/metadata/annotations", "value": existing["metadata"]["annotations"]}, {"op": "replace", "path": "/data", "value": target["data"]}, {"op": "replace", "path": "/metadata/annotations/" + DECLARATION.replace("/", "~1"), "value": target["metadata"]["annotations"][DECLARATION]}]
+    return kubectl("patch", "configmap", c["bootstrap_config_map"], "-n", c["namespace"], "--type=json", "--patch-file", "-", "-o", "json", "--field-manager=" + MANAGER, body=canonical(patch))
+
+
+def check_projection(c, worker, authorization):
+    w = c["worker"]
+    projected = kubectl("-n", c["namespace"], "exec", w["pod"], "-c", w["container"], "--", "cat", worker["bootstrap_path"])
+    if projected != authorization:
+        raise ValueError("Worker still observes a different bootstrap projection")
 
 
 def health(c, release):
@@ -261,11 +246,12 @@ def enroll(c, api, evidence):
             isolated_worker(c)
             if activation(c) is not None or gray(c, api)["id"] != release["id"]:
                 raise ValueError("authority changed before explicit expired permission replacement")
-            delete_permission(c, options)
-            evidence["replaced_expired_permission_uid"] = options["preconditions"]["uid"]
-            if resource(c, "configmap", c["bootstrap_config_map"]) is not None:
-                raise ValueError("expired permission deletion has not completed")
-            existing = None
+            target, _ = permission(c, release)
+            replace_permission(c, options, existing, target)
+            evidence["replaced_expired_permission_uid"] = options["uid"]
+            existing = resource(c, "configmap", c["bootstrap_config_map"])
+            if existing is None or existing["metadata"]["uid"] != options["uid"]:
+                raise ValueError("permission projection object changed during explicit retry")
         cm, authorization = permission(c, release, existing)
         if existing is None:
             kubectl("create", "-f", "-", "-o", "json", "--field-manager=" + MANAGER, body=canonical(cm))
@@ -278,11 +264,14 @@ def enroll(c, api, evidence):
         if gray(c, api)["id"] != release["id"]:
             raise ValueError("initial gray authority changed during observation")
         try:
+            if previous is None:
+                check_projection(c, initial, authorization)
             observed = health(c, release)
             convergence(c, api, release)
             observations.append({"at": now().isoformat(), "bundle_version": observed["bundle_version"], "route_probes": observed["platform_serving"]["route_probes"], "tls_probes": observed["platform_serving"]["tls_probes"]})
         except ValueError as error:
             observations, last_error = [], str(error)
+            evidence["last_observation_error"] = last_error
         evidence["observations"] = observations
         if len(observations) >= c["observation"]["samples"]:
             break
@@ -320,6 +309,7 @@ def enroll(c, api, evidence):
             raise ValueError("inventory has not advanced after real activation")
     evidence["activation"] = actual
     evidence["completed_at"] = now().isoformat()
+    evidence.pop("last_observation_error", None)
     return evidence
 
 
@@ -339,6 +329,10 @@ def main():
     evidence = {"schema": "fugue.cell-inventory-enrollment-result/v1", "declaration_digest": digest(c), "public_transport_changed": False, "full_published": False, "artifact_lkg_attested": False}
     try:
         enroll(c, API(c["origin"], token), evidence)
+    except Exception as error:
+        evidence["failure"] = str(error)
+        evidence["failed_at"] = now().isoformat()
+        raise
     finally:
         Path(args.evidence).write_text(canonical(evidence) + "\n")
     print(canonical(evidence))

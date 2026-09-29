@@ -1,11 +1,8 @@
 import copy
 import datetime
-import http.server
-import io
 import json
-import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from scripts import bootstrap_cell_inventory as b
 
@@ -52,7 +49,7 @@ class EnrollmentTests(unittest.TestCase):
             with patch.object(b, "resource", side_effect=lambda _, kind, name: resources[kind, name]), patch.object(b, "kubectl", return_value={"items": [{"spec": spec}]}), self.assertRaises(ValueError):
                 b.isolated_worker(c)
 
-    def test_immutable_permission_reuse_does_not_extend_lease(self):
+    def test_permission_reuse_does_not_extend_lease(self):
         c, release = config(), {"id": "gray-one"}
         fixed = b.now()
         with patch.object(b, "now", return_value=fixed):
@@ -65,7 +62,7 @@ class EnrollmentTests(unittest.TestCase):
     def test_expired_foreign_or_mutated_permission_is_never_renewed(self):
         c, release = config(), {"id": "gray-one"}
         cm, _ = b.permission(c, release)
-        for mutation in [lambda x: x.update(immutable=False), lambda x: x["metadata"]["annotations"].update({b.DECLARATION: "foreign"}), lambda x: x["data"].update({"other": "value"})]:
+        for mutation in [lambda x: x.update(immutable=True), lambda x: x["metadata"]["annotations"].update({b.DECLARATION: "foreign"}), lambda x: x["data"].update({"other": "value"})]:
             bad = copy.deepcopy(cm)
             mutation(bad)
             with self.assertRaises(ValueError):
@@ -94,8 +91,8 @@ class EnrollmentTests(unittest.TestCase):
         c["previous_permission"] = {"uid": old["metadata"]["uid"], "declaration_digest": old["metadata"]["annotations"][b.DECLARATION], "authorization_digest": b.digest(authorization), "generation": 1}
         b.validate(c)
         options = b.expired_predecessor(c, release, old)
-        self.assertEqual({"uid": old["metadata"]["uid"], "resourceVersion": "123"}, options["preconditions"])
-        for mutate in [lambda x: x["metadata"].update(uid="replacement"), lambda x: x["metadata"].update(resourceVersion=""), lambda x: x.update(immutable=False)]:
+        self.assertEqual({"uid": old["metadata"]["uid"], "resourceVersion": "123"}, options)
+        for mutate in [lambda x: x["metadata"].update(uid="replacement"), lambda x: x["metadata"].update(resourceVersion=""), lambda x: x.update(immutable=True)]:
             changed = copy.deepcopy(old)
             mutate(changed)
             with self.assertRaises(ValueError):
@@ -107,29 +104,21 @@ class EnrollmentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.expired_predecessor(config(), release, old)
 
-    def test_permission_delete_sends_kubernetes_cas_preconditions(self):
-        received = []
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_DELETE(self):
-                received.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
-                self.send_response(200)
-                self.end_headers()
-            def log_message(self, *args):
-                pass
-        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        process = Mock(stdout=io.StringIO("Starting to serve on 127.0.0.1:" + str(server.server_port) + "\n"))
-        process.poll.return_value = None
-        options = {"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": "exact", "resourceVersion": "1"}}
-        try:
-            with patch.object(b.subprocess, "Popen", return_value=process), patch.object(b.select, "select", return_value=([process.stdout], [], [])):
-                b.delete_permission(config(), options)
-        finally:
-            server.shutdown()
-            server.server_close()
-        self.assertEqual([("/api/v1/namespaces/test-system/configmaps/cell-one-bootstrap", options)], received)
-        process.terminate.assert_called_once()
+    def test_permission_replacement_preserves_projection_and_binds_cas(self):
+        c, release = config(), {"id": "gray-one"}
+        old, _ = b.permission(c, release)
+        old["metadata"].update(uid="old-uid", resourceVersion="1")
+        target, _ = b.permission(c, release)
+        options = {"uid": "old-uid", "resourceVersion": "1"}
+        with patch.object(b, "kubectl", return_value=target) as kube:
+            b.replace_permission(c, options, old, target)
+        args, kwargs = kube.call_args
+        self.assertEqual("patch", args[0])
+        self.assertEqual("json", args[args.index("-o")+1])
+        operations = json.loads(kwargs["body"])
+        self.assertEqual(["test"] * 4 + ["replace"] * 2, [x["op"] for x in operations])
+        self.assertEqual(["old-uid", "1", old["data"], old["metadata"]["annotations"]], [x["value"] for x in operations[:4]])
+        self.assertNotIn("immutable", target)
 
     def test_gray_publication_cannot_replace_foreign_or_full_authority(self):
         c = config()
@@ -185,10 +174,20 @@ class EnrollmentTests(unittest.TestCase):
         def kube(*args, body=None):
             self.assertEqual("json", args[args.index("-o") + 1])
             writes.append(json.loads(body))
-        with patch.object(b, "isolated_worker", return_value={}), patch.object(b, "activation", return_value=None), patch.object(b, "parent"), patch.object(b, "gray", return_value=release), patch.object(b, "resource", return_value=None), patch.object(b, "kubectl", side_effect=kube), patch.object(b, "health", side_effect=ValueError("no verified TLS")), patch.object(b.time, "monotonic", side_effect=[0, 1, 181]), patch.object(b.time, "sleep"):
+        with patch.object(b, "isolated_worker", return_value={}), patch.object(b, "activation", return_value=None), patch.object(b, "parent"), patch.object(b, "gray", return_value=release), patch.object(b, "resource", return_value=None), patch.object(b, "kubectl", side_effect=kube), patch.object(b, "check_projection"), patch.object(b, "health", side_effect=ValueError("no verified TLS")), patch.object(b.time, "monotonic", side_effect=[0, 1, 181]), patch.object(b.time, "sleep"):
             with self.assertRaisesRegex(ValueError, "no verified TLS"):
                 b.enroll(c, lambda *a: {}, {})
         self.assertEqual(["ConfigMap"], [w["kind"] for w in writes])
+
+    def test_old_projected_permission_cannot_satisfy_new_attempt(self):
+        c = config()
+        _, permission = b.permission(c, {"id": "gray-one"})
+        old = dict(permission, expires_at=(b.now() - datetime.timedelta(seconds=1)).isoformat())
+        worker = {"bootstrap_path": "/bootstrap/authorization.json"}
+        with patch.object(b, "kubectl", return_value=old), self.assertRaisesRegex(ValueError, "different bootstrap projection"):
+            b.check_projection(c, worker, permission)
+        with patch.object(b, "kubectl", return_value=permission):
+            b.check_projection(c, worker, permission)
 
     def test_changed_executor_stops_before_any_mutation(self):
         with patch.object(b, "isolated_worker", side_effect=ValueError("changed")), patch.object(b, "kubectl") as kube, patch.object(b, "API") as api:
