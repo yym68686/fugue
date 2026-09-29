@@ -30,10 +30,13 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-cell", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
+			if mode == "valid-cell" {
+				group = "cell-a"
+			}
 			host := "app.example.test"
 			compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: host, UpstreamURL: "http://origin:8080", Enabled: true, TLSPolicy: model.EdgeRouteTLSPolicyPlatform}}, TLS: []platformconfig.TLSIntent{{Hostname: host, Policy: model.EdgeRouteTLSPolicyPlatform}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global", TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, TLSReadiness: &platformconfig.ReadinessProbePolicy{ProbeIntervalSeconds: 10, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}}})
 			if err != nil {
@@ -76,7 +79,11 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/platform-state/consumers/identity":
-					json.NewEncoder(w).Encode(map[string]any{"token": "token", "component": "edge-worker", "node_id": "edge", "scope_key": "global", "artifact_kinds": []string{route.ArtifactKind, tlsArtifact.ArtifactKind}, "expires_at": time.Now().Add(time.Minute)})
+					identity := map[string]any{"token": "token", "component": "edge-worker", "node_id": "edge", "scope_key": "global", "artifact_kinds": []string{route.ArtifactKind, tlsArtifact.ArtifactKind}, "expires_at": time.Now().Add(time.Minute)}
+					if mode == "valid-cell" {
+						identity["authority_id"], identity["consumer_id"] = "cell-a", "edge-worker:cell-a:edge"
+					}
+					json.NewEncoder(w).Encode(identity)
 				case "/v1/platform-state/consumers/assignment":
 					if r.URL.Query().Get("serving_only") != "true" {
 						t.Error("serving observation used an unselected release lane")
@@ -234,7 +241,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				}
 				return
 			}
-			if mode != "valid" {
+			if mode != "valid" && mode != "valid-cell" {
 				wantReports := 0
 				switch mode {
 				case "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied":
@@ -255,6 +262,9 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				t.Fatal("valid serving failed", err, reports, routeCalls, tlsCalls)
 			}
 			for _, h := range reports {
+				if mode == "valid-cell" && (h.ConsumerID != "edge-worker:cell-a:edge" || h.NodeID != "edge") {
+					t.Fatal("neutral serving fact lost its authority", h)
+				}
 				if h.ApplyStatus != "applied" || h.ProbeStatus != "passed" || h.ActualGeneration != h.DesiredGeneration || h.LKGGeneration != bundle.Generation || h.ServingLKG {
 					t.Fatal("incorrect serving or LKG claim", h)
 				}

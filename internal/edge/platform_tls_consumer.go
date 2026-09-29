@@ -153,7 +153,7 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 	if strings.TrimSpace(s.Config.CachePath) == "" {
 		return errors.New("TLS candidate cache path is required")
 	}
-	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
+	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
 	id, a, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindCaddyRouteConfig)
 	if err != nil {
 		return err
@@ -203,7 +203,7 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 		return err
 	}
 	// No independent TLS serving/LKG generation has been established yet.
-	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.Component + ":" + id.NodeID, Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1, Sequence: c.Sequence, IssuedAt: c.VerifiedAt, Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, CandidateGeneration: a.ExpectedGeneration, ApplyStatus: "staged", ProbeStatus: "shadow_validated"}
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1, Sequence: c.Sequence, IssuedAt: c.VerifiedAt, Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, CandidateGeneration: a.ExpectedGeneration, ApplyStatus: "staged", ProbeStatus: "shadow_validated"}
 	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1}
 	h.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	if err != nil {

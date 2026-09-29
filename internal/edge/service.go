@@ -34,6 +34,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/routeproof"
 	"fugue/internal/tcpdiag"
 	"fugue/internal/weightedselector"
@@ -3705,7 +3706,7 @@ func (s *Service) validateConfig() error {
 	if strings.TrimSpace(s.Config.APIURL) == "" {
 		return fmt.Errorf("FUGUE_API_URL is required")
 	}
-	if strings.TrimSpace(s.Config.EdgeToken) == "" {
+	if strings.TrimSpace(s.Config.EdgeToken) == "" && !s.hasIndependentCellIdentity() {
 		return fmt.Errorf("FUGUE_EDGE_TOKEN is required")
 	}
 	if err := validateEdgeControlRouteSourceConfig(s.edgeRouteSourceConfig()); err != nil {
@@ -3757,6 +3758,18 @@ func (s *Service) validateConfig() error {
 		return fmt.Errorf("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE requires FUGUE_EDGE_CADDY_ENABLED=true")
 	}
 	return nil
+}
+
+// An explicitly fenced neutral worker reports through its cell inventory and
+// Pod-bound platform consumer identity. It must not acquire the legacy Edge's
+// token or overwrite that physical Edge's current serving projection.
+func (s *Service) hasIndependentCellIdentity() bool {
+	return s.Config.EdgeHeartbeatFenced &&
+		platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID) == s.Config.EdgeGroupID && s.Config.EdgeGroupID != "" &&
+		s.edgeControlRouteSourceEnabled() && s.InventoryProducer.enabled() &&
+		filepath.IsAbs(s.PlatformTokenFile) && filepath.Clean(s.PlatformTokenFile) == s.PlatformTokenFile &&
+		strings.TrimSpace(s.Config.EdgeDesiredStateURL) == "" &&
+		!strings.EqualFold(strings.TrimSpace(s.Config.WorkloadMode), model.EdgeWorkloadModeDynamic)
 }
 
 func edgeProxyListenAddrIsLoopback(raw string) bool {

@@ -62,6 +62,20 @@ overlap declaration that preserves the serving artifact's verification keys.
 Installing trust does not seed inventory, publish a bundle or authorize public
 transport.
 
+The first neutral Worker is an isolated Deployment with a distinct retained
+PVC and stable physical Edge identity. Its projected heartbeat fence is true,
+and it mounts no legacy Edge token or host identity file. A missing legacy
+token is accepted only with a canonical cell identity, complete Control bundle
+and inventory sources, a Pod credential path and no dynamic/legacy desired-state
+reader. Route/TLS consumer credentials and reports bind the cell explicitly.
+It cannot write the compatibility heartbeat or inherit a legacy consumer's
+receipt. The management-only Service and NetworkPolicy expose no public route
+or host port. The staging readiness check is process liveness; `/readyz` still
+reports unavailable while the independently authorized publication is absent.
+The retained activation directory starts empty. Staging neither invents an
+activation epoch nor seeds inventory, serving health, current or positive LKG.
+No retained Front or existing Worker participates in this code release.
+
 The topology file contains no endpoints, health, traffic weights, loaded bundle
 digests, or code revision. Those are runtime facts or signed artifacts. A pool
 membership is not route authorization. In particular, the current public

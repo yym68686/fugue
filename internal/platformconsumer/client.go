@@ -16,14 +16,16 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 )
 
 // Client provides assignment reads and runtime fact submission for consumers. It
 // deliberately has no serving or business-database behavior.
 type Client struct {
-	BaseURL    string
-	TokenFile  string
-	HTTPClient *http.Client
+	BaseURL     string
+	TokenFile   string
+	HTTPClient  *http.Client
+	AuthorityID string
 }
 
 var ErrNoServingAssignment = errors.New("no serving traffic assignment")
@@ -41,8 +43,15 @@ type Identity struct {
 	ExpiresAt     time.Time `json:"expires_at"`
 	Component     string    `json:"component"`
 	NodeID        string    `json:"node_id"`
+	AuthorityID   string    `json:"authority_id,omitempty"`
+	ConsumerID    string    `json:"consumer_id,omitempty"`
 	ScopeKey      string    `json:"scope_key"`
 	ArtifactKinds []string  `json:"artifact_kinds"`
+}
+
+func (id Identity) BoundConsumerID() string {
+	value, _ := platformcontrol.PlatformConsumerID(id.Component, id.NodeID, id.AuthorityID)
+	return value
 }
 
 func (c Client) Sync(ctx context.Context, component, nodeID, scope, kind string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
@@ -74,7 +83,8 @@ func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind,
 	if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/identity", strings.TrimSpace(string(raw)), http.MethodPost, nil, &id); err != nil {
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
-	if id.Token == "" || id.Component != component || id.NodeID != nodeID || id.ScopeKey != scope || !slices.Contains(id.ArtifactKinds, kind) || !id.ExpiresAt.After(time.Now().Add(10*time.Second)) {
+	wantedID, identityErr := platformcontrol.PlatformConsumerID(component, nodeID, c.AuthorityID)
+	if identityErr != nil || id.AuthorityID != c.AuthorityID || (id.ConsumerID != "" && id.ConsumerID != wantedID) || (c.AuthorityID != "" && id.ConsumerID != wantedID) || id.Token == "" || id.Component != component || id.NodeID != nodeID || id.ScopeKey != scope || !slices.Contains(id.ArtifactKinds, kind) || !id.ExpiresAt.After(time.Now().Add(10*time.Second)) {
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, errors.New("platform credential identity mismatch")
 	}
 	var assignments model.PlatformConsumerAssignmentResponse

@@ -153,7 +153,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if strings.TrimSpace(s.Config.CachePath) == "" {
 		return errors.New("edge platform candidate cache path is required")
 	}
-	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
+	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
 	id, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
@@ -206,7 +206,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
-	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.Component + ":" + id.NodeID, Component: id.Component, NodeID: id.NodeID, ArtifactKind: assignment.ArtifactKind, ScopeKey: assignment.ScopeKey, ReleaseSetID: assignment.ReleaseSetID, ExpectedConsumerSetID: assignment.ExpectedConsumerSetID, FencingToken: assignment.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1, Sequence: c.Sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assignment.GenerationSequence, DesiredGeneration: assignment.ExpectedGeneration, ActualGeneration: status.ServingGeneration, CandidateGeneration: assignment.ExpectedGeneration, LKGGeneration: status.LKGGeneration, ApplyStatus: "staged", ProbeStatus: "shadow_validated", ServingLKG: status.StaleCache, LKGExpired: status.MaxStaleExceeded}
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: assignment.ArtifactKind, ScopeKey: assignment.ScopeKey, ReleaseSetID: assignment.ReleaseSetID, ExpectedConsumerSetID: assignment.ExpectedConsumerSetID, FencingToken: assignment.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1, Sequence: c.Sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assignment.GenerationSequence, DesiredGeneration: assignment.ExpectedGeneration, ActualGeneration: status.ServingGeneration, CandidateGeneration: assignment.ExpectedGeneration, LKGGeneration: status.LKGGeneration, ApplyStatus: "staged", ProbeStatus: "shadow_validated", ServingLKG: status.StaleCache, LKGExpired: status.MaxStaleExceeded}
 	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1}
 	if strings.TrimSpace(status.CaddyAppliedVersion) == strings.TrimSpace(status.BundleVersion) && strings.TrimSpace(status.CaddyLastError) == "" && s.metricSnapshot().Metrics.CaddyRouteCount > 0 {
 		h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, "caddy_apply_probe")

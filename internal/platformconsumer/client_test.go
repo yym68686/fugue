@@ -18,7 +18,7 @@ func TestShadowTransportRejectsRedirectAndUnboundResponse(t *testing.T) {
 	var credentialLeak bool
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { credentialLeak = true }))
 	defer other.Close()
-	for _, mode := range []string{"redirect", "wrong-node", "wrong-scope", "missing-capability", "ambiguous", "changed-assignment", "oversized", "trailing-json", "valid"} {
+	for _, mode := range []string{"redirect", "wrong-node", "wrong-scope", "missing-capability", "ambiguous", "changed-assignment", "oversized", "trailing-json", "valid", "valid-cell", "foreign-cell", "missing-cell-id", "legacy-id-in-cell"} {
 		t.Run(mode, func(t *testing.T) {
 			assignment := model.PlatformConsumerAssignment{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ArtifactID: "candidate", ScopeKey: "global", ReleaseChannel: "shadow", ExpectedConsumerSetID: "set"}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +37,18 @@ func TestShadowTransportRejectsRedirectAndUnboundResponse(t *testing.T) {
 					}
 					if mode == "missing-capability" {
 						id.ArtifactKinds = nil
+					}
+					if strings.Contains(mode, "cell") {
+						id.AuthorityID, id.ConsumerID = "cell-a", "edge-worker:cell-a:node"
+						if mode == "foreign-cell" {
+							id.AuthorityID, id.ConsumerID = "cell-b", "edge-worker:cell-b:node"
+						}
+						if mode == "missing-cell-id" {
+							id.ConsumerID = ""
+						}
+						if mode == "legacy-id-in-cell" {
+							id.ConsumerID = "edge-worker:node"
+						}
 					}
 					json.NewEncoder(w).Encode(id)
 				case "/v1/platform-state/consumers/assignment":
@@ -70,8 +82,11 @@ func TestShadowTransportRejectsRedirectAndUnboundResponse(t *testing.T) {
 				t.Fatal(err)
 			}
 			client := Client{BaseURL: server.URL + "?authority_service=test", TokenFile: path}
+			if strings.Contains(mode, "cell") {
+				client.AuthorityID = "cell-a"
+			}
 			_, _, artifact, _, err := client.Sync(context.Background(), "edge-worker", "node", "global", assignment.ArtifactKind)
-			if mode == "valid" {
+			if mode == "valid" || mode == "valid-cell" {
 				if err != nil || artifact.ID != "candidate" {
 					t.Fatalf("valid download failed: %v", err)
 				}

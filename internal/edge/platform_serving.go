@@ -89,7 +89,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	if err = trafficbinding.ValidateGroup(b, s.Config.EdgeGroupID, true); err != nil {
 		return err
 	}
-	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
+	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
 	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
@@ -322,7 +322,7 @@ func (s *Service) reportPlatformServingFact(ctx context.Context, client platform
 	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
-	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.Component + ":" + id.NodeID, Component: id.Component, NodeID: id.NodeID, ArtifactKind: assigned.ArtifactKind, ScopeKey: assigned.ScopeKey, ReleaseSetID: assigned.ReleaseSetID, ExpectedConsumerSetID: assigned.ExpectedConsumerSetID, FencingToken: assigned.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", CompatibilityCapabilities: []string{platformcontrol.TrafficReleaseCapabilityV1, "caddy_apply_probe"}, Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assigned.GenerationSequence, DesiredGeneration: assigned.ExpectedGeneration, ApplyStatus: "failed", ProbeStatus: "failed", LastError: "traffic serving apply, cache or readiness verification failed"}
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: assigned.ArtifactKind, ScopeKey: assigned.ScopeKey, ReleaseSetID: assigned.ReleaseSetID, ExpectedConsumerSetID: assigned.ExpectedConsumerSetID, FencingToken: assigned.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", CompatibilityCapabilities: []string{platformcontrol.TrafficReleaseCapabilityV1, "caddy_apply_probe"}, Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assigned.GenerationSequence, DesiredGeneration: assigned.ExpectedGeneration, ApplyStatus: "failed", ProbeStatus: "failed", LastError: "traffic serving apply, cache or readiness verification failed"}
 	if positive {
 		h.ActualGeneration, h.LKGGeneration = assigned.ExpectedGeneration, s.Status().LKGGeneration
 		h.ApplyStatus, h.ProbeStatus, h.LastError = "applied", "passed", ""
