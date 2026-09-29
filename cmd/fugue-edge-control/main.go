@@ -40,6 +40,7 @@ type config struct {
 	ShutdownTimeout         time.Duration
 	RouteIntentURL          string
 	RouteIntentIssuerFile   string
+	RouteIntentPodTokenFile string
 	RouteIntentIdentityNode string
 	RouteIntentCAFile       string
 	RouteIntentServerName   string
@@ -167,6 +168,7 @@ func configFromEnv(getenv func(string) string) (config, error) {
 	if authorityRuntimeEnabled {
 		cfg.RouteIntentURL = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL"))
 		cfg.RouteIntentIssuerFile = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE"))
+		cfg.RouteIntentPodTokenFile = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_POD_TOKEN_FILE"))
 		cfg.RouteIntentIdentityNode = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_IDENTITY_NODE_ID"))
 		cfg.RouteIntentCAFile = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE"))
 		cfg.RouteIntentServerName = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME"))
@@ -272,7 +274,7 @@ func (cfg config) validate() error {
 		}
 	}
 	if err := edgecontrol.ValidateRouteIntentClientConfig(edgecontrol.RouteIntentClientConfig{
-		Endpoint: cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
+		EdgeGroupID: cfg.AuthorityGroupIDs[0], Endpoint: cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, PodTokenFile: cfg.RouteIntentPodTokenFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
 	}); err != nil {
 		return err
 	}
@@ -292,7 +294,7 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	}
 	client, err := edgecontrol.NewRouteIntentClient(edgecontrol.RouteIntentClientConfig{
 		EdgeGroupID: cfg.AuthorityGroupIDs[0],
-		Endpoint:    cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
+		Endpoint:    cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, PodTokenFile: cfg.RouteIntentPodTokenFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
 	})
 	if err != nil {
 		return nil, nil, err

@@ -34,6 +34,20 @@ group, while legacy issuers cannot read neutral cells. This identity is not
 permission to publish: the requested cell still needs a prepared signed traffic
 release with its own complete route/DNS/TLS cohort.
 
+The isolated `edge-control-public-a` candidate uses an explicitly declared
+physical node and its own retained PVC. It has no host ports, external Service
+address, legacy activation directory or Core issuer-key mount. Projected Pod
+credentials are exchanged over the same pinned private TLS origin for every
+RouteIntent read; invalid exchanges cannot fall back to a local issuer.
+Its four cell-specific keyring projections are optional during staging so
+configuration absence does not prevent installing or recovering the process.
+Missing signing, reader, inventory or recovery keys still fail closed at their
+respective operations. Process readiness is not publication readiness: until
+independent trust and a complete signed cell traffic release are provisioned,
+the candidate must report no serving publication and cannot replace either
+legacy Control's positive LKG. Staging does not remove a country alias or
+change any Front, DNS listener, Agent policy or existing Worker.
+
 The topology file contains no endpoints, health, traffic weights, loaded bundle
 digests, or code revision. Those are runtime facts or signed artifacts. A pool
 membership is not route authorization. In particular, the current public

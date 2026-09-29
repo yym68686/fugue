@@ -53,6 +53,7 @@ type RouteIntentClientConfig struct {
 	EdgeGroupID    string
 	Endpoint       string
 	IssuerFile     string
+	PodTokenFile   string
 	IdentityNodeID string
 	CAFile         string
 	ServerName     string
@@ -65,12 +66,13 @@ type RouteIntentClientConfig struct {
 // binds the response body to the exact v1 path, schema, generation header,
 // and strong ETag.
 type RouteIntentClient struct {
-	groupID    string
-	endpoint   *url.URL
-	issuerFile string
-	nodeID     string
-	client     *http.Client
-	now        func() time.Time
+	groupID      string
+	endpoint     *url.URL
+	issuerFile   string
+	podTokenFile string
+	nodeID       string
+	client       *http.Client
+	now          func() time.Time
 }
 
 func NewRouteIntentClient(config RouteIntentClientConfig) (*RouteIntentClient, error) {
@@ -113,7 +115,7 @@ func NewRouteIntentClient(config RouteIntentClientConfig) (*RouteIntentClient, e
 	if config.Now != nil {
 		now = func() time.Time { return config.Now().UTC() }
 	}
-	return &RouteIntentClient{endpoint: endpoint, groupID: config.EdgeGroupID, issuerFile: issuerFile, nodeID: strings.TrimSpace(config.IdentityNodeID), client: client, now: now}, nil
+	return &RouteIntentClient{endpoint: endpoint, groupID: config.EdgeGroupID, issuerFile: issuerFile, podTokenFile: config.PodTokenFile, nodeID: strings.TrimSpace(config.IdentityNodeID), client: client, now: now}, nil
 }
 
 // ValidateRouteIntentClientConfig validates immutable names and paths without
@@ -137,11 +139,18 @@ func ValidateRouteIntentClientConfig(config RouteIntentClientConfig) error {
 		}
 	}
 	issuerFile := strings.TrimSpace(config.IssuerFile)
-	if issuerFile == "" || !filepath.IsAbs(issuerFile) || filepath.Clean(issuerFile) != issuerFile {
-		return errors.New("edge-control RouteIntent issuer file must be an absolute normalized path")
+	credentialFile := issuerFile
+	if config.PodTokenFile != "" {
+		if issuerFile != "" || platformcontrol.ConsumerAuthorityID(config.EdgeGroupID) != config.EdgeGroupID || config.EdgeGroupID == "" {
+			return errors.New("bound Pod exchange requires one explicit neutral authority and no issuer key")
+		}
+		credentialFile = config.PodTokenFile
+	}
+	if credentialFile == "" || !filepath.IsAbs(credentialFile) || filepath.Clean(credentialFile) != credentialFile {
+		return errors.New("edge-control RouteIntent credential file must be an absolute normalized path")
 	}
 	caFile := strings.TrimSpace(config.CAFile)
-	if caFile == "" || !filepath.IsAbs(caFile) || filepath.Clean(caFile) != caFile || caFile == issuerFile {
+	if caFile == "" || !filepath.IsAbs(caFile) || filepath.Clean(caFile) != caFile || caFile == credentialFile {
 		return errors.New("edge-control RouteIntent CA file must be a distinct absolute normalized path")
 	}
 	nodeID := strings.TrimSpace(config.IdentityNodeID)
@@ -195,7 +204,13 @@ func (client *RouteIntentClient) FetchRouteIntents(ctx context.Context) (model.E
 	if ctx == nil {
 		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("%w: context is nil", ErrRouteIntentFetch)
 	}
-	token, err := client.readBoundCredential(client.now())
+	var token string
+	var err error
+	if client.podTokenFile != "" {
+		token, err = client.exchangePodCredential(ctx)
+	} else {
+		token, err = client.readBoundCredential(client.now())
+	}
 	if err != nil {
 		return model.EdgeRouteIntentSnapshot{}, err
 	}
@@ -248,6 +263,9 @@ func (client *RouteIntentClient) FetchRouteIntents(ctx context.Context) (model.E
 	}
 	if err := validateRouteIntentSnapshot(snapshot); err != nil {
 		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("%w: schema", ErrRouteIntentVersionBinding)
+	}
+	if client.podTokenFile != "" && snapshot.TrafficRelease == nil {
+		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("%w: neutral authority requires a traffic release", ErrRouteIntentVersionBinding)
 	}
 	if snapshot.TrafficRelease != nil {
 		if err := trafficbinding.ValidateGroup(snapshot.TrafficRelease, client.groupID, true); err != nil {
