@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Independent Static Edge Observations
-  version: 1.0.0
+  version: 1.0.1
   description: Payload-free local observations. Unix sockets require filesystem authorization; remote queries use the separate manager mTLS contract. Missing or dropped observations never prove absence of delays or an external root cause. No business mutation operations.
 paths:
   /status:
@@ -207,6 +207,9 @@ components:
         memory_evictions: {type: integer}
         retention_seconds: {type: integer}
         max_disk_bytes: {type: integer}
+        disk_index_records: {type: integer, minimum: 0, maximum: 32768, description: 'Retained scalar index entries, excluding request bodies and event arrays.'}
+        disk_index_limit: {type: integer, enum: [32768]}
+        disk_index_complete: {type: boolean, description: All tracked segments currently have a validated index. A query still verifies file identity and may report incomplete coverage during concurrent rotation.}
         ready: {type: boolean}
         external_root_cause_guarantee: {type: boolean, enum: [false]}
         remote:

@@ -54,22 +54,25 @@ func (c *StoreConfig) Validate() error {
 }
 
 type Store struct {
-	cfg        StoreConfig
-	mu         sync.RWMutex
-	latest     map[string]Record
-	queue      chan Record
-	dropped    atomic.Uint64
-	diskErrors atomic.Uint64
-	evicted    atomic.Uint64
-	loaded     atomic.Bool
-	file       *os.File
-	size       int64
-	segment    int
-	closed     atomic.Bool
-	lock       *os.File
-	opened     time.Time
-	queryMu    sync.Mutex
-	Remote     *RemoteSink // Set before Run; optional and independent.
+	cfg          StoreConfig
+	mu           sync.RWMutex
+	latest       map[string]Record
+	queue        chan Record
+	dropped      atomic.Uint64
+	diskErrors   atomic.Uint64
+	evicted      atomic.Uint64
+	loaded       atomic.Bool
+	file         *os.File
+	size         int64
+	segment      int
+	closed       atomic.Bool
+	lock         *os.File
+	opened       time.Time
+	queryMu      sync.Mutex
+	indexMu      sync.Mutex
+	diskIndex    map[string]*diskSegmentIndex
+	indexRecords int
+	Remote       *RemoteSink // Set before Run; optional and independent.
 }
 
 func NewStore(cfg StoreConfig) (*Store, error) {
@@ -83,7 +86,7 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("evidence directory must be private and not a symlink")
 	}
-	s := &Store{cfg: cfg, latest: make(map[string]Record), queue: make(chan Record, cfg.QueueSize)}
+	s := &Store{cfg: cfg, latest: make(map[string]Record), queue: make(chan Record, cfg.QueueSize), diskIndex: make(map[string]*diskSegmentIndex)}
 	lockPath := filepath.Join(cfg.Directory, ".collector.lock")
 	if info, err := os.Lstat(lockPath); err == nil && !info.Mode().IsRegular() {
 		return nil, errors.New("invalid evidence lock")
@@ -136,18 +139,29 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 		if e != nil {
 			return nil, e
 		}
+		s.resetDiskIndex(p, info)
+		var offset int64
 		scanner := bufio.NewScanner(io.LimitReader(f, cfg.SegmentBytes))
 		scanner.Buffer(make([]byte, 4096), MaxRecordBytes)
 		for scanner.Scan() {
+			length := len(scanner.Bytes())
+			position := offset
+			offset += int64(length) + 1
 			var r Record
 			if json.Unmarshal(scanner.Bytes(), &r) != nil || r.Validate() != nil || r.NodeID != cfg.NodeID {
 				s.dropped.Add(1)
+				s.invalidateDiskIndex(p)
 				continue
 			}
 			s.insert(r)
+			s.indexRecord(p, r, position, length, nil)
 		}
 		if scanner.Err() != nil {
 			s.dropped.Add(1)
+			s.invalidateDiskIndex(p)
+		}
+		if offset != info.Size() {
+			s.invalidateDiskIndex(p)
 		}
 		f.Close()
 	}
@@ -248,6 +262,7 @@ func (s *Store) write(r Record) {
 			s.diskErrors.Add(1)
 			return
 		}
+		s.forgetDiskIndex(p)
 		s.file, e = os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if e != nil {
 			s.diskErrors.Add(1)
@@ -255,14 +270,35 @@ func (s *Store) write(r Record) {
 		}
 		s.size = 0
 		s.opened = time.Now()
+		info, err := s.file.Stat()
+		if err == nil {
+			s.resetDiskIndex(p, info)
+		}
 	}
+	// Detect writes outside this collector before refreshing the index's file
+	// facts. A later legitimate append must not make a corrupted prefix trusted.
+	before, statErr := s.file.Stat()
+	s.indexMu.Lock()
+	if seg := s.diskIndex[s.file.Name()]; seg != nil && (statErr != nil || !sameIndexedFile(seg.info, before)) {
+		seg.clean = false
+	}
+	s.indexMu.Unlock()
+	position := s.size
 	n, e := s.file.Write(raw)
 	s.size += int64(n)
 	if e != nil || n != len(raw) {
 		s.diskErrors.Add(1)
+		s.invalidateDiskIndex(s.file.Name())
 		s.file.Close()
 		s.file = nil
 		s.segment++ // Preserve the failed segment; never truncate it on retry.
+	} else {
+		info, err := s.file.Stat()
+		if err != nil {
+			s.invalidateDiskIndex(s.file.Name())
+		} else {
+			s.indexRecord(s.file.Name(), r, position, len(raw)-1, info)
+		}
 	}
 }
 
@@ -290,6 +326,7 @@ func (s *Store) Run(ctx context.Context) {
 					continue
 				}
 				if info, e := os.Lstat(p); e == nil && info.Mode().IsRegular() && time.Since(info.ModTime()) > time.Duration(s.cfg.RetentionSeconds)*time.Second {
+					s.forgetDiskIndex(p)
 					if os.Remove(p) != nil {
 						s.diskErrors.Add(1)
 					}
@@ -328,6 +365,7 @@ func (s *Store) Query(q Query) (Result, error) {
 	}
 	defer s.queryMu.Unlock()
 	matched := make(map[string]Record)
+	sequences := make(map[string]uint64)
 	consider := func(r Record) {
 		if time.Since(r.ObservedAt) > time.Duration(s.cfg.RetentionSeconds)*time.Second || r.ObservedAt.Before(q.Since) || r.ObservedAt.After(q.Until) {
 			return
@@ -336,7 +374,16 @@ func (s *Store) Query(q Query) (Result, error) {
 			return
 		}
 		key := recordKey(r)
-		if prev, ok := matched[key]; ok && prev.Sequence >= r.Sequence {
+		if prev, ok := sequences[key]; ok && prev >= r.Sequence {
+			return
+		}
+		if _, ok := sequences[key]; ok || len(sequences) < maxDiskIndexRecords {
+			sequences[key] = r.Sequence
+		} else {
+			out.Truncated = true
+		}
+		if readWaitMS(r) < q.MinReadMS {
+			delete(matched, key)
 			return
 		}
 		// Bound memory independently of disk size. Retain newest matching
@@ -365,42 +412,45 @@ func (s *Store) Query(q Query) (Result, error) {
 		files = files[:s.cfg.Segments]
 		out.DiskScanComplete = false
 	}
-	for _, p := range files {
-		if time.Now().After(deadline) {
-			out.DiskScanComplete = false
-			break
-		}
-		info, e := os.Lstat(p)
-		if e != nil || !info.Mode().IsRegular() || info.Size() > s.cfg.SegmentBytes {
-			out.DiskScanComplete = false
-			continue
-		}
-		f, e := os.Open(p)
-		if e != nil {
-			out.DiskScanComplete = false
-			continue
-		}
-		scan := bufio.NewScanner(io.LimitReader(f, s.cfg.SegmentBytes))
-		scan.Buffer(make([]byte, 4096), MaxRecordBytes)
-		for scan.Scan() {
+	indexed := s.indexedDiskQuery(q, files, deadline, consider, &out)
+	if !indexed {
+		for _, p := range files {
 			if time.Now().After(deadline) {
 				out.DiskScanComplete = false
 				break
 			}
-			var r Record
-			if json.Unmarshal(scan.Bytes(), &r) != nil || r.Validate() != nil || r.NodeID != s.cfg.NodeID {
+			info, e := os.Lstat(p)
+			if e != nil || !info.Mode().IsRegular() || info.Size() > s.cfg.SegmentBytes {
 				out.DiskScanComplete = false
 				continue
 			}
-			consider(r)
-		}
-		if scan.Err() != nil {
-			out.DiskScanComplete = false
-		}
-		f.Close()
-		// Rotation/truncation during a read invalidates completeness.
-		if after, e := os.Stat(p); e != nil || !os.SameFile(info, after) || after.Size() < info.Size() {
-			out.DiskScanComplete = false
+			f, e := os.Open(p)
+			if e != nil {
+				out.DiskScanComplete = false
+				continue
+			}
+			scan := bufio.NewScanner(io.LimitReader(f, s.cfg.SegmentBytes))
+			scan.Buffer(make([]byte, 4096), MaxRecordBytes)
+			for scan.Scan() {
+				if time.Now().After(deadline) {
+					out.DiskScanComplete = false
+					break
+				}
+				var r Record
+				if json.Unmarshal(scan.Bytes(), &r) != nil || r.Validate() != nil || r.NodeID != s.cfg.NodeID {
+					out.DiskScanComplete = false
+					continue
+				}
+				consider(r)
+			}
+			if scan.Err() != nil {
+				out.DiskScanComplete = false
+			}
+			f.Close()
+			// Rotation/truncation during a read invalidates completeness.
+			if after, e := os.Stat(p); e != nil || !os.SameFile(info, after) || after.Size() < info.Size() {
+				out.DiskScanComplete = false
+			}
 		}
 	}
 	s.mu.RLock()
@@ -416,13 +466,6 @@ func (s *Store) Query(q Query) (Result, error) {
 	}
 	s.mu.RUnlock()
 	for _, r := range matched {
-		wait := r.Body.ReadBlockMS
-		if r.Body.ReadPendingSinceMS != nil {
-			wait += r.ElapsedMS - *r.Body.ReadPendingSinceMS
-		}
-		if wait < q.MinReadMS {
-			continue
-		}
 		copy := r
 		copy.Events = append([]Event(nil), r.Events...)
 		out.Records = append(out.Records, copy)
@@ -461,6 +504,15 @@ func (s *Store) Status() map[string]any {
 	n := len(s.latest)
 	s.mu.RUnlock()
 	out := map[string]any{"schema": Schema, "node_id": s.cfg.NodeID, "records": n, "max_records": s.cfg.MaxRecords, "queue_depth": len(s.queue), "queue_capacity": cap(s.queue), "records_dropped": s.dropped.Load(), "disk_errors": s.diskErrors.Load(), "memory_evictions": s.evicted.Load(), "retention_seconds": s.cfg.RetentionSeconds, "max_disk_bytes": s.cfg.SegmentBytes * int64(s.cfg.Segments), "ready": s.loaded.Load() && !s.closed.Load(), "external_root_cause_guarantee": false}
+	s.indexMu.Lock()
+	complete := true
+	for _, seg := range s.diskIndex {
+		if !seg.clean {
+			complete = false
+		}
+	}
+	out["disk_index_records"], out["disk_index_limit"], out["disk_index_complete"] = s.indexRecords, maxDiskIndexRecords, complete
+	s.indexMu.Unlock()
 	if s.Remote != nil {
 		out["remote"] = s.Remote.Status()
 	}

@@ -110,8 +110,22 @@ from per-span loss. A lost terminal remains incomplete.
 The collector alone performs disk I/O. Record queries apply the configured
 retention (default 24h); physical segments rotate hourly and expire within
 retention plus one hour and one cleanup minute. Disk capacity can shorten that
-window. Searches inspect bounded disk segments for 1.5s, retain at most 200
-matching spans, and cap replies at 2 MiB. Eviction, concurrent rotation, timeout,
+window. The collector builds a volatile index of at most 32,768 validated
+record locations and scalar identity/time/wait metadata. It rebuilds the index
+from retained JSONL at startup; no new disk format or sidecar is required. Queries
+scan this bounded metadata, choose the latest sequence per span, then apply the
+slow threshold before retaining at most 200 matching spans. Only those candidates
+are decoded from disk. Exact request/application ID lookups no longer decode
+unrelated event arrays. Indexed queries describe the captured segment snapshot;
+submissions arriving later are visible to the next query.
+
+The 1.5s query deadline, single disk-query slot, 64 MiB default disk limit and
+2 MiB reply cap remain unchanged. File identity/size/mtime changes, malformed
+records or index overflow disable the index for affected segments and use the
+existing bounded validated scan. The scan also filters slow records before its
+200-span cap, retaining bounded sequence metadata to avoid reviving superseded
+snapshots. Index count/limit/coverage are visible in collector status. A file
+rotation during indexed reading invalidates completeness. Eviction, timeout,
 partial writes, unsupported protocols and unavailable collectors are exposed;
 `not_observed` is never equivalent to "no delay". A process-level file lock
 prevents competing collectors, and restart appends to the newest segment.
