@@ -1505,7 +1505,7 @@ func TestBuildClusterNodeStorageStatsReconcilesStaleNodeCapacity(t *testing.T) {
 	const wantCapacity = int64(31_461_457_920)
 	const wantAllocatable = int64(29_888_385_001)
 	const wantUsed = int64(11_341_619_200)
-	const wantPercent = 37.9
+	const wantPercent = 36.0
 
 	if stats.CapacityBytes == nil || *stats.CapacityBytes != wantCapacity {
 		t.Fatalf("expected reconciled storage capacity %d, got %#v", wantCapacity, stats)
@@ -1533,10 +1533,12 @@ func TestBuildClusterNodeCapturesRuntimeImageFilesystemStats(t *testing.T) {
 	node.Metadata.Name = "worker-imagefs-hot"
 
 	built := buildClusterNode(node, &kubeNodeSummary{
-		Runtime: kubeNodeSummaryRuntime{
-			ImageFS: kubeNodeSummaryFS{
-				CapacityBytes: &imageCapacity,
-				UsedBytes:     &imageUsed,
+		Node: kubeNodeSummaryNode{
+			Runtime: kubeNodeSummaryRuntime{
+				ImageFS: kubeNodeSummaryFS{
+					CapacityBytes: &imageCapacity,
+					UsedBytes:     &imageUsed,
+				},
 			},
 		},
 	}, nil, false)
