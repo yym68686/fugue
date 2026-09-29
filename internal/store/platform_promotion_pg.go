@@ -119,6 +119,9 @@ func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent
 		return nil, err
 	}
 	rows.Close()
+	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
+		return nil, err
+	}
 	return state, nil
 }
 

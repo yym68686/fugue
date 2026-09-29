@@ -11,14 +11,16 @@ import (
 // Decode the exact typed consumer view after its caller verifies artifact
 // integrity and publication. No business state or legacy compiler is consulted.
 type platformDNSArtifactPayload struct {
-	Schema        string                           `json:"schema_version"`
-	Generation    string                           `json:"generation"`
-	Records       []platformconfig.DNSIntent       `json:"records"`
-	ConsumerViews []platformconfig.DNSConsumerView `json:"consumer_views,omitempty"`
-	ReadinessPlan *platformconfig.DNSReadinessPlan `json:"readiness_plan,omitempty"`
-	QueryViews    []platformconfig.DNSQueryView    `json:"query_views,omitempty"`
-	Policy        platformconfig.PolicySnapshot    `json:"policy"`
-	Lineage       platformconfig.Lineage           `json:"lineage"`
+	CellRoutePublications []platformconfig.CellRoutePublicationInput `json:"cell_route_publications,omitempty"`
+	CellDNSSource         *platformconfig.CellDNSPlanSource          `json:"cell_dns_source,omitempty"`
+	Schema                string                                     `json:"schema_version"`
+	Generation            string                                     `json:"generation"`
+	Records               []platformconfig.DNSIntent                 `json:"records"`
+	ConsumerViews         []platformconfig.DNSConsumerView           `json:"consumer_views,omitempty"`
+	ReadinessPlan         *platformconfig.DNSReadinessPlan           `json:"readiness_plan,omitempty"`
+	QueryViews            []platformconfig.DNSQueryView              `json:"query_views,omitempty"`
+	Policy                platformconfig.PolicySnapshot              `json:"policy"`
+	Lineage               platformconfig.Lineage                     `json:"lineage"`
 }
 
 func decodePlatformDNSArtifact(artifact model.PlatformArtifact) (platformDNSArtifactPayload, error) {
@@ -40,6 +42,9 @@ func decodePlatformDNSArtifact(artifact model.PlatformArtifact) (platformDNSArti
 		if value == "" || artifact.Metadata[key] != value {
 			return payload, fmt.Errorf("invalid DNS lineage")
 		}
+	}
+	if err := platformconfig.ValidateDNSCellPlan(artifact); err != nil {
+		return payload, err
 	}
 	if err := platformconfig.ValidateDNSIntents(payload.Records); err != nil {
 		return payload, err

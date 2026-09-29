@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/cellpublication"
 	"fugue/internal/dnsfacts"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -45,6 +46,7 @@ type platformDNSRuntimeFactsResponse struct {
 }
 
 type dnsFactSource struct {
+	cellBindings        map[string]*model.TrafficReleaseBinding
 	heartbeatValidUntil time.Time
 	consumer            model.PlatformConsumerInstance
 	claims              platformcontrol.PlatformComponentIdentityClaims
@@ -199,11 +201,29 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 		if !viewFound {
 			return fail()
 		}
-		projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, newConsumerArtifactReader(s.store.GetPlatformArtifact))
-		if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
-			return fail()
+		candidateSource := &dnsFactSource{consumer: fact, claims: claims, parent: parent, lookup: item, payload: payload, group: group, heartbeatValidUntil: fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second)}
+		if payload.Policy.PublicationRole == platformconfig.PublicationRoleCellDNS {
+			pubs, err := cellpublication.VerifyDNSArtifact(item.Artifact, s.bundleKeyring())
+			if err != nil {
+				return fail()
+			}
+			candidateSource.cellBindings = map[string]*model.TrafficReleaseBinding{}
+			for _, input := range pubs {
+				b, err := platformconfig.CellRoutePublicationBinding(input)
+				if err != nil {
+					return fail()
+				}
+				digest, _ := platformconfig.Digest(input.Reference)
+				candidateSource.cellBindings[digest] = b
+			}
+		} else {
+			projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, newConsumerArtifactReader(s.store.GetPlatformArtifact))
+			if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
+				return fail()
+			}
+			candidateSource.routeID, candidateSource.trafficBinding = projection.TrafficRelease.RouteArtifactID, projection.TrafficRelease
 		}
-		source = &dnsFactSource{consumer: fact, claims: claims, parent: parent, lookup: item, payload: payload, group: group, routeID: projection.TrafficRelease.RouteArtifactID, trafficBinding: projection.TrafficRelease, heartbeatValidUntil: fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second)}
+		source = candidateSource
 	}
 	if source == nil {
 		return fail()
@@ -355,30 +375,28 @@ func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource
 			continue
 		}
 		p, b := fact.Proof, fact.Proof.TrafficRelease
-		if p.Digest != req.RouteDigest || p.EdgeID != req.EdgeID || p.GroupID != req.EdgeGroupID || p.State != req.State || p.Version == "" || p.CheckedAt.IsZero() || p.CheckedAt.After(snapshot.EvaluatedAt) || p.ValidUntil.After(p.CheckedAt.Add(time.Duration(policy.FactFreshnessSeconds)*time.Second)) || b == nil || source.trafficBinding == nil || !reflect.DeepEqual(b, source.trafficBinding) {
+		expectedBinding := source.trafficBinding
+		if source.payload.Policy.PublicationRole == platformconfig.PublicationRoleCellDNS {
+			expectedBinding = source.cellBindings[req.CellPublicationDigest]
+		}
+		if p.Digest != req.RouteDigest || p.EdgeID != req.EdgeID || p.GroupID != req.EdgeGroupID || p.State != req.State || p.Version == "" || p.CheckedAt.IsZero() || p.CheckedAt.After(snapshot.EvaluatedAt) || p.ValidUntil.After(p.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(req, policy))*time.Second)) || b == nil || expectedBinding == nil || !reflect.DeepEqual(b, expectedBinding) {
 			return fail()
 		}
 		valid[fact.ProbeID] = p.ValidUntil.After(now) && snapshot.CheckpointValidUntil.After(now)
 	}
 	ready := snapshot.Ready && snapshot.CheckpointValidUntil.After(now)
 	for _, record := range plan.Records {
-		edges, v4, v6 := map[string]bool{}, map[string]bool{}, map[string]bool{}
-		for _, target := range record.Targets {
-			pass := len(target.ProbeIDs) > 0
+		ready = ready && platformconfig.DNSReadinessQuorum(record, func(target platformconfig.DNSReadinessTarget) bool {
+			if len(target.ProbeIDs) == 0 {
+				return false
+			}
 			for _, id := range target.ProbeIDs {
-				pass = pass && valid[id]
+				if !valid[id] {
+					return false
+				}
 			}
-			if !pass {
-				continue
-			}
-			edges[target.EdgeID] = true
-			if target.Family == "A" {
-				v4[target.EdgeID] = true
-			} else if target.Family == "AAAA" {
-				v6[target.EdgeID] = true
-			}
-		}
-		ready = ready && len(edges) >= record.MinimumHealthyEdges && (!record.RequireDualStack || len(v4) >= record.MinimumHealthyEdges && len(v6) >= record.MinimumHealthyEdges)
+			return true
+		})
 	}
 	ids := []string{}
 	for id, pass := range valid {

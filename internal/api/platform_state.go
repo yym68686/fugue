@@ -792,7 +792,7 @@ func (s *Server) preparePlatformReleaseSetConsumers(ctx context.Context, princip
 			for _, n := range topology.DNSNodes {
 				dns = dns || n.EdgeGroupID == group
 			}
-			if !edge || !dns && releaseSet.Content["publication_role"] != platformconfig.PublicationRoleCellRoutes {
+			if (!edge && releaseSet.Content["publication_role"] != platformconfig.PublicationRoleCellDNS) || (!dns && releaseSet.Content["publication_role"] != platformconfig.PublicationRoleCellRoutes) {
 				return nil, &platformConfigReferenceError{"traffic canary group lacks complete declared topology for its publication role"}
 			}
 		}

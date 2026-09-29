@@ -43,7 +43,7 @@ func (topology TrafficConsumerTopology) Validate(scope string) error {
 	for _, list := range []struct {
 		ids      []string
 		min, max int
-	}{{topology.EdgeNodeIDs, 1, 10000}, {topology.DNSNodeIDs, 0, 4096}} {
+	}{{topology.EdgeNodeIDs, 0, 10000}, {topology.DNSNodeIDs, 0, 4096}} {
 		if len(list.ids) < list.min || len(list.ids) > list.max {
 			return fmt.Errorf("traffic consumer membership must be nonempty and bounded")
 		}
@@ -53,7 +53,7 @@ func (topology TrafficConsumerTopology) Validate(scope string) error {
 			}
 		}
 	}
-	if topology.PublicationRole == PublicationRoleCellRoutes && len(topology.DNSNodeIDs) != 0 || topology.PublicationRole == "" && len(topology.DNSNodeIDs) == 0 {
+	if topology.PublicationRole == PublicationRoleCellDNS && (len(topology.EdgeNodeIDs) != 0 || len(topology.DNSNodeIDs) == 0) || topology.PublicationRole != PublicationRoleCellDNS && len(topology.EdgeNodeIDs) == 0 || topology.PublicationRole == PublicationRoleCellRoutes && len(topology.DNSNodeIDs) != 0 || topology.PublicationRole == "" && len(topology.DNSNodeIDs) == 0 {
 		return fmt.Errorf("DNS membership differs from publication role")
 	}
 	return nil
@@ -70,6 +70,17 @@ func TrafficConsumerTopologyFromIntent(intent PlatformIntent) (*TrafficConsumerT
 			return nil, fmt.Errorf("cell scope requires explicit consumer authority")
 		}
 		return nil, nil
+	}
+	if intent.PublicationRole == PublicationRoleCellDNS {
+		t := &TrafficConsumerTopology{PublicationRole: intent.PublicationRole, SchemaVersion: TrafficConsumerTopologySchema, AuthorityCellID: intent.AuthorityCellID, EdgeNodeIDs: []string{}, DNSNodeIDs: []string{}}
+		for _, c := range intent.DNSConsumers {
+			if c.EdgeGroupID != intent.AuthorityCellID {
+				return nil, fmt.Errorf("foreign DNS authority")
+			}
+			t.DNSNodeIDs = append(t.DNSNodeIDs, c.NodeID)
+		}
+		sort.Strings(t.DNSNodeIDs)
+		return t, t.Validate(intent.Scope)
 	}
 	cell := intent.AuthorityCellID
 	if !validTrafficConsumerCell(cell) || intent.Scope != AuthorityCellScope(cell) || intent.EdgeTopology == nil || intent.EdgeTopology.Validate() != nil || len(intent.EdgeTopology.Cells) != 1 || intent.EdgeTopology.Cells[0].ID != cell || intent.EdgeTopology.Cells[0].LegacyGroupID != "" || ValidateDNSConsumers(intent.DNSConsumers) != nil {

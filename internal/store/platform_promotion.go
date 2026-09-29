@@ -77,6 +77,11 @@ func validateFullReleaseSetInState(state *model.State, parent model.PlatformArti
 		if child.ID != id || child.ArtifactKind != kind || child.ScopeKey != parent.ScopeKey || child.Status != model.PlatformArtifactStatusValidated || child.GenerationSequence <= 0 || !platformsafety.EvaluateArtifactIntegrity(child, keyring).Pass || child.Metadata["release_set_generation"] != parent.Generation {
 			return fail("child integrity or ownership invalid")
 		}
+		if child.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+			if err := validateCellDNSReferencesInState(state, child, keyring); err != nil {
+				return err
+			}
+		}
 		for _, key := range []string{"intent_digest", "policy_digest", "compiler_version", "input_snapshot_digest", "intent_generation", "policy_generation"} {
 			if parent.Metadata[key] == "" || child.Metadata[key] != parent.Metadata[key] {
 				return fail("child lineage differs")

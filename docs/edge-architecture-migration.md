@@ -785,3 +785,38 @@ membership, unfrozen lane, fence and cohort under the same transaction. The
 global sequence, timestamp and nonce checks remain unchanged. This does not
 authorize serving-to-serving generation regression without the existing explicit
 rollback proof, and it cannot synthesize a positive heartbeat or verified LKG.
+
+
+Independent DNS publications use the explicit `cell-dns` role in their own
+neutral authority scope. That role owns exactly one DNS artifact and immutable
+DNS process membership; it cannot enroll Workers, publish routes/TLS or write
+another authority's LKG. The original complete traffic role and `cell-routes`
+retain their composition. The business producer does not infer this new role.
+
+DNS intent pins each routing Cell's parent and route/TLS member IDs and digests,
+serving release ID/channel/fence and exact canary selection. The compiler accepts
+these signed immutable inputs separately from runtime observations, retains them
+inside the DNS artifact, and uses each Cell's existing route projection. It does
+not recreate routes under DNS policy. Compilation verifies current selected
+Cell authority, and serving publication/rollback/LKG transactions recheck it.
+PostgreSQL acquires nonblocking shared dependency locks before reading routing
+lanes; a concurrent routing mutation causes a bounded conflict and leaves the
+previous positive DNS publication intact.
+
+Every proof requirement binds a reference digest, physical Edge, Cell, address,
+route digest, hostname/path and state. Original route ownership, exclusions,
+pinning and default/per-route health floors remain constraints. DNS additionally
+intersects pool/capability/residency requirements and enforces distinct Cells and
+failure domains. IPv4/IPv6 addresses never count as separate physical Edges.
+Readiness, answer generation and API observations share the same quorum and
+freshness checks. Signed retained inputs let a restarted DNS process verify
+configuration offline, but it must collect fresh HTTPS/TLS facts before answering.
+
+The `cell_dns_v1` capability is required for every declared DNS member before a
+serving publication. A shadow reference cannot authorize an answer. A proof for
+the DNS parent cannot substitute for its referenced routing Cell. Old listeners,
+public selectors and Agent grants remain governed by their separate transport
+and configuration transitions. This protocol support alone does not complete
+public migration: capability enrollment, independent DNS deployment, coordinated
+route-reference/public handoff, Agent rebinding and connection draining still
+require explicit declarations and observed production acceptance.

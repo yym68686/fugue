@@ -9,6 +9,7 @@ import (
 )
 
 const PublicationRoleCellRoutes = "cell-routes"
+const PublicationRoleCellDNS = "cell-dns"
 
 // An explicit role changes the signed publication boundary, never the meaning
 // of an existing release. Empty retains the original complete traffic set.
@@ -16,13 +17,16 @@ func ValidatePublicationRole(role, cell, scope string) error {
 	if role == "" {
 		return nil
 	}
-	if role != PublicationRoleCellRoutes || !validTrafficConsumerCell(cell) || scope != AuthorityCellScope(cell) {
+	if (role != PublicationRoleCellRoutes && role != PublicationRoleCellDNS) || !validTrafficConsumerCell(cell) || scope != AuthorityCellScope(cell) {
 		return fmt.Errorf("publication role requires an explicit neutral cell")
 	}
 	return nil
 }
 
 func PublicationArtifactKinds(role string) []string {
+	if role == PublicationRoleCellDNS {
+		return []string{model.PlatformArtifactKindDNSAnswerBundle}
+	}
 	if role == PublicationRoleCellRoutes {
 		return []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig}
 	}
@@ -70,10 +74,19 @@ func validateRouteOnlyIntent(in PlatformIntent) error {
 	if in.PublicationRole == PublicationRoleCellRoutes && (len(in.DNS) != 0 || len(in.DNSConsumers) != 0 || len(in.ACMEChallenges) != 0) {
 		return fmt.Errorf("cell route intent cannot own DNS configuration")
 	}
+	if in.PublicationRole == PublicationRoleCellDNS {
+		return validateCellDNSIntent(in)
+	}
+	if len(in.CellRoutePublications) != 0 {
+		return fmt.Errorf("Cell references require DNS-only intent")
+	}
 	return nil
 }
 
 func validateRouteOnlyPolicy(in PolicySnapshot) error {
+	if in.PublicationRole == PublicationRoleCellDNS && (in.TLSReadiness != nil || len(in.RouteConstraints) != 0 || len(in.TrafficConstraints) != 0 || in.DNSPlacementMode != DNSPlacementConsumerReadiness) {
+		return fmt.Errorf("DNS authority cannot own route/TLS configuration and requires consumer readiness")
+	}
 	if err := ValidatePublicationRole(in.PublicationRole, in.AuthorityCellID, in.Scope); err != nil {
 		return err
 	}

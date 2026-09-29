@@ -22,20 +22,21 @@ const (
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
-	PublicationRole    string                    `json:"publication_role,omitempty"`
-	AuthorityCellID    string                    `json:"authority_cell_id,omitempty"`
-	ApplicationDomains *ApplicationDomainsIntent `json:"application_domains,omitempty"`
-	EdgeTopology       *edgetopology.Intent      `json:"edge_topology,omitempty"`
-	DNSConsumers       []DNSConsumerIntent       `json:"dns_consumers,omitempty"`
-	ACMEChallenges     []ACMEChallengeIntent     `json:"acme_challenges,omitempty"`
-	SchemaVersion      string                    `json:"schema_version"`
-	Generation         string                    `json:"generation"`
-	Scope              string                    `json:"scope"`
-	Routes             []RouteIntent             `json:"routes,omitempty"`
-	DNS                []DNSIntent               `json:"dns,omitempty"`
-	TLS                []TLSIntent               `json:"tls,omitempty"`
-	CachePolicies      []model.CachePolicy       `json:"cache_policies,omitempty"`
-	CreatedAt          time.Time                 `json:"created_at,omitempty"`
+	CellRoutePublications []CellRoutePublicationReference `json:"cell_route_publications,omitempty"`
+	PublicationRole       string                          `json:"publication_role,omitempty"`
+	AuthorityCellID       string                          `json:"authority_cell_id,omitempty"`
+	ApplicationDomains    *ApplicationDomainsIntent       `json:"application_domains,omitempty"`
+	EdgeTopology          *edgetopology.Intent            `json:"edge_topology,omitempty"`
+	DNSConsumers          []DNSConsumerIntent             `json:"dns_consumers,omitempty"`
+	ACMEChallenges        []ACMEChallengeIntent           `json:"acme_challenges,omitempty"`
+	SchemaVersion         string                          `json:"schema_version"`
+	Generation            string                          `json:"generation"`
+	Scope                 string                          `json:"scope"`
+	Routes                []RouteIntent                   `json:"routes,omitempty"`
+	DNS                   []DNSIntent                     `json:"dns,omitempty"`
+	TLS                   []TLSIntent                     `json:"tls,omitempty"`
+	CachePolicies         []model.CachePolicy             `json:"cache_policies,omitempty"`
+	CreatedAt             time.Time                       `json:"created_at,omitempty"`
 }
 
 type RouteIntent struct {
@@ -199,9 +200,10 @@ type ArtifactDependency struct {
 }
 
 type CompileRequest struct {
-	Intent          PlatformIntent
-	Policy          PolicySnapshot
-	RuntimeSnapshot RuntimeSnapshot
+	CellRoutePublications []CellRoutePublicationInput
+	Intent                PlatformIntent
+	Policy                PolicySnapshot
+	RuntimeSnapshot       RuntimeSnapshot
 	// InputSnapshot is retained as a wire compatibility fallback. New callers
 	// should use RuntimeSnapshot so generation binding is explicit.
 	InputSnapshot map[string]any
@@ -289,6 +291,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
+	if err := validateCellDNSInputs(intent, req.CellRoutePublications, runtimeSnapshot); err != nil {
+		return CompileResult{}, err
+	}
 	if intent.PublicationRole == PublicationRoleCellRoutes && (len(runtimeSnapshot.DNSSelections) != 0 || len(runtimeSnapshot.DNSEdgeEndpoints) != 0 || len(runtimeSnapshot.DNSConsumers) != 0 || len(runtimeSnapshot.DNSPlacements) != 0 || len(runtimeSnapshot.DNSFlatten) != 0) {
 		return CompileResult{}, fmt.Errorf("cell route publication cannot contain DNS runtime facts")
 	}
@@ -304,6 +309,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if runtimeSnapshot.IntentGeneration != intent.Generation || runtimeSnapshot.PolicyGeneration != policy.Generation {
 		return CompileResult{}, fmt.Errorf("runtime snapshot generations must match intent and policy")
 	}
+	publications := append([]CellRoutePublicationInput(nil), req.CellRoutePublications...)
+	sort.Slice(publications, func(i, j int) bool {
+		return publications[i].Reference.AuthorityCellID < publications[j].Reference.AuthorityCellID
+	})
 	runtimeSnapshot.Origins = append([]OriginObservation(nil), runtimeSnapshot.Origins...)
 	runtimeSnapshot.Releases = append([]ReleaseObservation(nil), runtimeSnapshot.Releases...)
 	sort.Slice(runtimeSnapshot.Origins, func(i, j int) bool { return runtimeSnapshot.Origins[i].Ref < runtimeSnapshot.Origins[j].Ref })
@@ -334,7 +343,17 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if err != nil {
 		return CompileResult{}, err
 	}
-	compiledDNS, err := ResolveDNSPlacements(intent, compiledRoutes, runtimeSnapshot, policy)
+	var readiness *DNSReadinessPlan
+	var compiledDNS []DNSIntent
+	if intent.PublicationRole == PublicationRoleCellDNS {
+		readiness, err = compileCellDNSReadiness(intent, publications, runtimeSnapshot, policy)
+		if err != nil {
+			return CompileResult{}, err
+		}
+		compiledDNS, err = planDNSPlacementsFromRequirements(intent, readiness)
+	} else {
+		compiledDNS, err = ResolveDNSPlacements(intent, compiledRoutes, runtimeSnapshot, policy)
+	}
 	if err != nil {
 		return CompileResult{}, err
 	}
@@ -356,7 +375,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if err != nil {
 		return CompileResult{}, err
 	}
-	readiness, err := CompileDNSReadiness(intent, compiledRoutes, runtimeSnapshot, policy)
+	if intent.PublicationRole != PublicationRoleCellDNS {
+		readiness, err = CompileDNSReadiness(intent, compiledRoutes, runtimeSnapshot, policy)
+	}
 	if err != nil {
 		return CompileResult{}, err
 	}
@@ -408,7 +429,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if len(tlsAllowlist) > 0 {
 		routePayload["tls_allowlist"] = tlsAllowlist
 	}
-	if len(policy.EdgeSelectionConstraints) > 0 {
+	if len(policy.EdgeSelectionConstraints) > 0 && intent.PublicationRole != PublicationRoleCellDNS {
 		projected, err := ProjectRouteArtifact(model.PlatformArtifact{Generation: intent.Generation, Content: routePayload})
 		if err != nil {
 			return CompileResult{}, err
@@ -425,6 +446,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		"records":        compiledDNS,
 		"policy":         policy,
 		"lineage":        lineage,
+	}
+	if intent.PublicationRole == PublicationRoleCellDNS {
+		dnsPayload["cell_route_publications"] = publications
+		dnsPayload["cell_dns_source"] = CellDNSPlanSource{Intent: intent, Endpoints: runtimeSnapshot.DNSEdgeEndpoints, CapturedAt: runtimeSnapshot.CapturedAt}
 	}
 	if len(queryViews) > 0 {
 		dnsPayload["query_views"] = queryViews
@@ -483,6 +508,13 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		releaseSet.ArtifactKinds = PublicationArtifactKinds(intent.PublicationRole)
 		releaseSet.Dependencies = []ArtifactDependency{{From: model.PlatformArtifactKindCaddyRouteConfig, To: model.PlatformArtifactKindEdgeRouteBundle, Relation: "requires"}}
 	}
+	if intent.PublicationRole == PublicationRoleCellDNS {
+		routeArtifact, tlsArtifact = model.PlatformArtifact{}, model.PlatformArtifact{}
+		releaseSet.ArtifactIDs = []string{dnsArtifact.ID}
+		releaseSet.ArtifactKinds = PublicationArtifactKinds(intent.PublicationRole)
+		releaseSet.Dependencies = []ArtifactDependency{}
+	}
+
 	releaseArtifact := buildArtifact(model.PlatformArtifactKindReleaseSet, intent.Scope, releaseSet.Generation, releaseSet, metadata, now)
 	return CompileResult{
 		InputSnapshot:   runtimeSnapshot,
@@ -499,6 +531,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 
 func normalizeIntent(in PlatformIntent) PlatformIntent {
 	out := in
+	out.CellRoutePublications = append([]CellRoutePublicationReference(nil), in.CellRoutePublications...)
+	sort.Slice(out.CellRoutePublications, func(i, j int) bool {
+		return out.CellRoutePublications[i].AuthorityCellID < out.CellRoutePublications[j].AuthorityCellID
+	})
 	out.ApplicationDomains = CloneApplicationDomains(in.ApplicationDomains)
 	if in.EdgeTopology != nil {
 		clone := in.EdgeTopology.Clone()
@@ -656,7 +692,7 @@ func validateIntent(in PlatformIntent) error {
 	if err := validateDNSConfiguration(in.DNS); err != nil {
 		return err
 	}
-	if err := validateDNSApplicationOwners(in.DNS, in.Routes); err != nil {
+	if err := validateDNSApplicationOwners(in.DNS, in.Routes); err != nil && in.PublicationRole != PublicationRoleCellDNS {
 		return err
 	}
 	if err := ValidateACMEChallenges(in.ACMEChallenges); err != nil {

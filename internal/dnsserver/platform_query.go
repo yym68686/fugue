@@ -217,7 +217,6 @@ func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfi
 		}
 		targets := map[string]platformconfig.DNSReadinessTarget{}
 		deadlines := map[string]time.Time{}
-		edges, v4, v6 := map[string]bool{}, map[string]bool{}, map[string]bool{}
 		for _, target := range requirement.Targets {
 			ready := len(target.ProbeIDs) > 0
 			until := time.Time{}
@@ -236,19 +235,13 @@ func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfi
 			}
 			targets[target.Address] = target
 			deadlines[target.Address] = until
-			edges[target.EdgeID] = true
-			if target.Family == "A" {
-				v4[target.EdgeID] = true
-			} else if target.Family == "AAAA" {
-				v6[target.EdgeID] = true
-			}
 		}
 		// Cached answers must expire before the proof quorum can disappear,
 		// including a different node whose evidence expires before this answer.
 		for _, until := range deadlines {
 			r.TTL = min(r.TTL, int(until.Sub(now).Seconds()))
 		}
-		quorum := len(edges) >= requirement.MinimumHealthyEdges && (!requirement.RequireDualStack || (len(v4) >= requirement.MinimumHealthyEdges && len(v6) >= requirement.MinimumHealthyEdges))
+		quorum := platformconfig.DNSReadinessQuorum(requirement, func(target platformconfig.DNSReadinessTarget) bool { _, ok := targets[target.Address]; return ok })
 		filter := func(in []model.EdgeDNSAnswerCandidate) []model.EdgeDNSAnswerCandidate {
 			out := []model.EdgeDNSAnswerCandidate{}
 			for _, c := range in {

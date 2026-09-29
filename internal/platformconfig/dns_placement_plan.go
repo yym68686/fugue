@@ -15,7 +15,7 @@ func ValidateDNSPlacementMode(p PolicySnapshot) error {
 	case "", "captured_readiness":
 		return nil
 	case DNSPlacementConsumerReadiness:
-		if p.DNSQueryPolicy == nil || p.DNSReadiness == nil || p.TLSReadiness == nil || len(p.DNSAuthorities) == 0 || len(p.DNSClientPolicies) == 0 || len(p.TrafficRolloutCohorts) == 0 {
+		if p.DNSQueryPolicy == nil || p.DNSReadiness == nil || (p.PublicationRole != PublicationRoleCellDNS && p.TLSReadiness == nil) || len(p.DNSAuthorities) == 0 || len(p.DNSClientPolicies) == 0 || len(p.TrafficRolloutCohorts) == 0 {
 			return fmt.Errorf("consumer DNS placement requires complete query, authority, client, cohort and route/TLS readiness policy")
 		}
 		return nil
@@ -39,6 +39,10 @@ func planDNSPlacements(intent PlatformIntent, routes []CompiledRoute, snapshot R
 	if err != nil {
 		return nil, err
 	}
+	return planDNSPlacementsFromRequirements(intent, plan)
+}
+
+func planDNSPlacementsFromRequirements(intent PlatformIntent, plan *DNSReadinessPlan) ([]DNSIntent, error) {
 	byHost := make(map[string]DNSReadinessRecord, len(plan.Records))
 	for _, record := range plan.Records {
 		byHost[record.Hostname] = record

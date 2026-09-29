@@ -231,7 +231,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		facts = retainValidDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, old.facts, facts, now)
 	}
 	for i := range facts {
-		if !dnsProofMatchesRelease(facts[i].Proof, parent, candidate, routeID) {
+		if !dnsProofMatchesRelease(facts[i].Proof, parent, candidate, routeID, p) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
 		}
@@ -334,8 +334,8 @@ func (s *Service) refreshDNSServingFacts(ctx context.Context, old *dnsServingSta
 	facts = retainValidDNSReadinessFacts(old.payload.Plan, old.payload.Policy.DNSReadiness, old.facts, facts, now)
 	bridgeAllowed := compatibleDNSReleaseProbes(old, bridge)
 	for i := range facts {
-		if !dnsProofMatchesRelease(facts[i].Proof, old.record.Parent, old.record.Candidate, old.routeID) &&
-			!(bridgeAllowed[facts[i].ProbeID] && facts[i].Ready && dnsProofMatchesRelease(facts[i].Proof, bridge.parent, bridge.candidate, bridge.routeID)) {
+		if !dnsProofMatchesRelease(facts[i].Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) &&
+			!(bridgeAllowed[facts[i].ProbeID] && facts[i].Ready && dnsProofMatchesRelease(facts[i].Proof, bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)) {
 			facts[i].Ready = false
 			facts[i].Reason = "traffic_release_mismatch"
 		}
@@ -373,10 +373,10 @@ func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState,
 	facts := make([]dnsReadinessFact, len(old.payload.Plan.Probes))
 	for i, requirement := range old.payload.Plan.Probes {
 		fact, found := byID[requirement.ID]
-		usable := !fact.Ready || dnsProofMatchesRelease(fact.Proof, old.record.Parent, old.record.Candidate, old.routeID) ||
-			bridgeAllowed[requirement.ID] && dnsProofMatchesRelease(fact.Proof, bridge.parent, bridge.candidate, bridge.routeID)
+		usable := !fact.Ready || dnsProofMatchesRelease(fact.Proof, old.record.Parent, old.record.Candidate, old.routeID, old.payload) ||
+			bridgeAllowed[requirement.ID] && dnsProofMatchesRelease(fact.Proof, bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)
 		if observedRequirements[requirement.ID] == requirement && found && !duplicates[requirement.ID] && usable {
-			limit := fact.Proof.CheckedAt.Add(time.Duration(old.payload.Policy.DNSReadiness.FactFreshnessSeconds) * time.Second)
+			limit := fact.Proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, old.payload.Policy.DNSReadiness)) * time.Second)
 			if limit.Before(fact.Proof.ValidUntil) {
 				fact.Proof.ValidUntil = limit
 			}
@@ -494,7 +494,7 @@ func (s *Service) reportDNSServingState(ctx context.Context, client platformcons
 		return err
 	}
 	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
-	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1}
+	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1}
 	if !positive {
 		h.ProbeStatus = "failed"
 		h.LastError = "DNS serving readiness or listener probe failed"

@@ -19,10 +19,11 @@ import (
 )
 
 type platformConfigCompileRequest struct {
-	Intent          platformconfig.PlatformIntent  `json:"intent"`
-	Policy          platformconfig.PolicySnapshot  `json:"policy"`
-	RuntimeSnapshot platformconfig.RuntimeSnapshot `json:"runtime_snapshot,omitempty"`
-	InputSnapshot   map[string]any                 `json:"input_snapshot,omitempty"`
+	CellRoutePublications []platformconfig.CellRoutePublicationInput `json:"cell_route_publications,omitempty"`
+	Intent                platformconfig.PlatformIntent              `json:"intent"`
+	Policy                platformconfig.PolicySnapshot              `json:"policy"`
+	RuntimeSnapshot       platformconfig.RuntimeSnapshot             `json:"runtime_snapshot,omitempty"`
+	InputSnapshot         map[string]any                             `json:"input_snapshot,omitempty"`
 }
 
 type platformConfigCompileResponse struct {
@@ -30,9 +31,9 @@ type platformConfigCompileResponse struct {
 	ReleaseSet      platformconfig.ReleaseSet `json:"release_set"`
 	IntentArtifact  model.PlatformArtifact    `json:"intent_artifact"`
 	PolicyArtifact  model.PlatformArtifact    `json:"policy_artifact"`
-	RouteArtifact   model.PlatformArtifact    `json:"route_artifact"`
+	RouteArtifact   model.PlatformArtifact    `json:"route_artifact,omitzero"`
 	DNSArtifact     model.PlatformArtifact    `json:"dns_artifact,omitzero"`
-	TLSArtifact     model.PlatformArtifact    `json:"tls_artifact"`
+	TLSArtifact     model.PlatformArtifact    `json:"tls_artifact,omitzero"`
 	ReleaseArtifact model.PlatformArtifact    `json:"release_artifact"`
 }
 
@@ -61,11 +62,12 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{
-		Intent:          request.Intent,
-		Policy:          request.Policy,
-		RuntimeSnapshot: request.RuntimeSnapshot,
-		InputSnapshot:   request.InputSnapshot,
-		CreatedAt:       time.Now().UTC(),
+		CellRoutePublications: request.CellRoutePublications,
+		Intent:                request.Intent,
+		Policy:                request.Policy,
+		RuntimeSnapshot:       request.RuntimeSnapshot,
+		InputSnapshot:         request.InputSnapshot,
+		CreatedAt:             time.Now().UTC(),
 	})
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -80,9 +82,10 @@ func (s *Server) handleCompilePlatformConfig(w http.ResponseWriter, r *http.Requ
 }
 
 type platformConfigCompileArtifactsRequest struct {
-	IntentArtifactID string                         `json:"intent_artifact_id"`
-	PolicyArtifactID string                         `json:"policy_artifact_id"`
-	RuntimeSnapshot  platformconfig.RuntimeSnapshot `json:"runtime_snapshot,omitempty"`
+	CellRoutePublications []platformconfig.CellRoutePublicationInput `json:"cell_route_publications,omitempty"`
+	IntentArtifactID      string                                     `json:"intent_artifact_id"`
+	PolicyArtifactID      string                                     `json:"policy_artifact_id"`
+	RuntimeSnapshot       platformconfig.RuntimeSnapshot             `json:"runtime_snapshot,omitempty"`
 }
 
 // handleCompilePlatformConfigFromArtifacts compiles only immutable validated
@@ -170,7 +173,7 @@ func (s *Server) handleCompilePlatformConfigFromArtifacts(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusConflict, "artifact scope does not match typed content")
 		return
 	}
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: intent, Policy: policy, RuntimeSnapshot: request.RuntimeSnapshot, CreatedAt: time.Now().UTC()})
+	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{CellRoutePublications: request.CellRoutePublications, Intent: intent, Policy: policy, RuntimeSnapshot: request.RuntimeSnapshot, CreatedAt: time.Now().UTC()})
 	if err != nil {
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 		return

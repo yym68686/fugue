@@ -93,7 +93,7 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	if p.TargetScope == "global" && p.AuthorityCellID != "" || p.TargetScope != "global" && (p.AuthorityCellID == "" || p.TargetScope != platformconfig.AuthorityCellScope(p.AuthorityCellID) || p.DNSPolicyArtifactID == "") {
 		return p, fmt.Errorf("producer cell authority or pinned policy missing")
 	}
-	if platformconfig.ValidatePublicationRole(p.PublicationRole, p.AuthorityCellID, p.TargetScope) != nil || p.PublicationRole == platformconfig.PublicationRoleCellRoutes && (p.RequireDNSQueryPolicy || len(p.HostedZoneTemplates) != 0) {
+	if p.PublicationRole == platformconfig.PublicationRoleCellDNS || platformconfig.ValidatePublicationRole(p.PublicationRole, p.AuthorityCellID, p.TargetScope) != nil || p.PublicationRole == platformconfig.PublicationRoleCellRoutes && (p.RequireDNSQueryPolicy || len(p.HostedZoneTemplates) != 0) {
 		return p, fmt.Errorf("producer publication role invalid")
 	}
 	if p.AuthorityCellID != "" && (!p.RequireApplicationDomains || !p.RequireRouteDefaults || p.PublicationRole == "" && !p.RequireDNSQueryPolicy) {

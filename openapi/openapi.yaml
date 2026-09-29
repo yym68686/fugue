@@ -2817,6 +2817,10 @@ paths:
               required: [intent_artifact_id, policy_artifact_id]
               additionalProperties: false
               properties:
+                cell_route_publications:
+                  type: array
+                  maxItems: 16
+                  items: {$ref: "#/components/schemas/PlatformCellRoutePublicationInput"}
                 intent_artifact_id:
                   type: string
                   minLength: 1
@@ -33111,19 +33115,33 @@ components:
             required: [publication_role]
         - required: [publication_role, authority_cell_id, edge_topology]
           properties:
+            publication_role: {type: string, enum: [cell-routes]}
             dns: {type: array, maxItems: 0, items: {}}
             dns_consumers: {type: array, maxItems: 0, items: {}}
             acme_challenges: {type: array, maxItems: 0, items: {}}
+        - required: [publication_role, authority_cell_id, edge_topology, dns_consumers, cell_route_publications]
+          properties:
+            publication_role: {type: string, enum: [cell-dns]}
+            routes: {type: array, maxItems: 0, items: {}}
+            tls: {type: array, maxItems: 0, items: {}}
+            cache_policies: {type: array, maxItems: 0, items: {}}
+            dns_consumers: {type: array, minItems: 1, items: {}}
       properties:
+        cell_route_publications:
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: Exact route/TLS publication references for cell-dns only. Each neutral routing cell appears once. References never enroll a Worker in the DNS authority.
+          items: {$ref: "#/components/schemas/PlatformCellRoutePublicationReference"}
         publication_role:
           type: string
-          enum: [cell-routes]
-          description: Explicit route/TLS-only authority for one neutral cell. Must match intent, policy, producer and consumer topology. It contains exactly edge_route_bundle and caddy_route_config; DNS input, membership and publication are forbidden. Omission retains the complete route/DNS/TLS publication contract. No existing serving authority is converted implicitly.
+          enum: [cell-routes, cell-dns]
+          description: Explicit publication boundary; cell-routes owns exactly route/TLS artifacts and Worker membership; cell-dns owns exactly a DNS artifact and DNS process membership, with exact independent Cell route/TLS references. Omission retains the complete route/DNS/TLS publication contract. Existing authority is never converted implicitly.
         authority_cell_id:
           type: string
           pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'
           maxLength: 128
-          description: Explicit neutral publication authority. Requires scope authority-cell:<id> and exactly that neutral cell with no legacy alias in edge_topology. Complete traffic publications require DNS consumers belonging to it; cell-routes publications prohibit DNS consumers. Worker and DNS membership is compiled from this signed intent, independently of flat inventory or heartbeat freshness. The paired policy must pin the exact compiled consumer topology digest. This declaration does not select public transport or copy a serving artifact or LKG.
+          description: Explicit neutral publication authority. Requires scope authority-cell:<id>. Complete and cell-routes publications declare exactly that routing cell without a legacy alias. cell-dns declares independently referenced routing cells in edge_topology and enrolls only its own DNS consumers. Complete traffic publications require DNS consumers belonging to their authority; cell-routes publications prohibit DNS consumers. Worker and DNS membership is compiled from this signed intent, independently of flat inventory or heartbeat freshness. The paired policy must pin the exact compiled consumer topology digest. This declaration does not select public transport or copy a serving artifact or LKG.
         schema_version:
           type: string
         generation:
@@ -33347,6 +33365,7 @@ components:
             required: [publication_role]
         - required: [publication_role, authority_cell_id, consumer_topology_digest, tls_readiness]
           properties:
+            publication_role: {type: string, enum: [cell-routes]}
             dns_authorities: {type: array, maxItems: 0, items: {}}
             dns_client_policies: {type: array, maxItems: 0, items: {}}
             dns_answer_rules: {type: array, maxItems: 0, items: {}}
@@ -33356,11 +33375,18 @@ components:
               - required: [dns_query_policy]
               - required: [dns_readiness]
               - required: [dns_placement_mode]
+        - required: [publication_role, authority_cell_id, consumer_topology_digest, dns_readiness, dns_query_policy, dns_placement_mode, dns_authorities, dns_client_policies, traffic_rollout_cohorts]
+          properties:
+            publication_role: {type: string, enum: [cell-dns]}
+            dns_placement_mode: {type: string, enum: [consumer_readiness]}
+            route_constraints: {type: array, maxItems: 0, items: {}}
+            traffic_constraints: {type: array, maxItems: 0, items: {}}
+          not: {required: [tls_readiness]}
       properties:
         publication_role:
           type: string
-          enum: [cell-routes]
-          description: Explicit route/TLS-only authority for one neutral cell. Must match intent, policy, producer and consumer topology. It contains exactly edge_route_bundle and caddy_route_config; DNS input, membership and publication are forbidden. Omission retains the complete route/DNS/TLS publication contract. No existing serving authority is converted implicitly.
+          enum: [cell-routes, cell-dns]
+          description: Explicit publication boundary; cell-routes owns exactly route/TLS artifacts and Worker membership; cell-dns owns exactly a DNS artifact and DNS process membership, with exact independent Cell route/TLS references. Omission retains the complete route/DNS/TLS publication contract. Existing authority is never converted implicitly.
         authority_cell_id:
           type: string
           pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'
@@ -33576,23 +33602,31 @@ components:
       type: object
       additionalProperties: false
       required: [schema_version, authority_cell_id, edge_node_ids, dns_node_ids]
-      description: Immutable execution membership for one neutral cell. Arrays contain sorted unique physical Kubernetes node IDs. Each Edge requires its own route and TLS receipt; each DNS process requires its own DNS receipt. DNS membership must be empty for cell-routes and nonempty otherwise. Every member remains required while silent, unready or absent from legacy inventory. All child artifacts bind the topology digest in signed metadata and their policy.
+      description: Immutable execution membership for one neutral cell. Arrays contain sorted unique physical Kubernetes node IDs. Each Edge requires its own route and TLS receipt; each DNS process requires its own DNS receipt. DNS membership must be empty for cell-routes and nonempty otherwise; Edge membership must be empty for cell-dns and nonempty otherwise. Every member remains required while silent, unready or absent from legacy inventory. All child artifacts bind the topology digest in signed metadata and their policy.
       oneOf:
         - not:
             required: [publication_role]
           properties:
             dns_node_ids: {type: array, minItems: 1, items: {}}
+            edge_node_ids: {type: array, minItems: 1, items: {}}
         - required: [publication_role]
           properties:
+            publication_role: {type: string, enum: [cell-routes]}
             dns_node_ids: {type: array, maxItems: 0, items: {}}
+            edge_node_ids: {type: array, minItems: 1, items: {}}
+        - required: [publication_role]
+          properties:
+            publication_role: {type: string, enum: [cell-dns]}
+            edge_node_ids: {type: array, maxItems: 0, items: {}}
+            dns_node_ids: {type: array, minItems: 1, items: {}}
       properties:
         publication_role:
           type: string
-          enum: [cell-routes]
-          description: Explicit route/TLS-only authority for one neutral cell. Must match intent, policy, producer and consumer topology. It contains exactly edge_route_bundle and caddy_route_config; DNS input, membership and publication are forbidden. Omission retains the complete route/DNS/TLS publication contract. No existing serving authority is converted implicitly.
+          enum: [cell-routes, cell-dns]
+          description: Explicit publication boundary; cell-routes owns exactly route/TLS artifacts and Worker membership; cell-dns owns exactly a DNS artifact and DNS process membership, with exact independent Cell route/TLS references. Omission retains the complete route/DNS/TLS publication contract. Existing authority is never converted implicitly.
         schema_version: {type: string, enum: [fugue.traffic-consumer-topology/v1]}
         authority_cell_id: {type: string, maxLength: 128, pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'}
-        edge_node_ids: {type: array, minItems: 1, maxItems: 10000, uniqueItems: true, items: {type: string, maxLength: 253, pattern: '^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$'}}
+        edge_node_ids: {type: array, maxItems: 10000, uniqueItems: true, items: {type: string, maxLength: 253, pattern: '^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$'}}
         dns_node_ids: {type: array, maxItems: 4096, uniqueItems: true, items: {type: string, maxLength: 253, pattern: '^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$'}}
     PlatformConfigReleaseSet:
       type: object
@@ -33603,6 +33637,7 @@ components:
             required: [publication_role]
         - required: [publication_role, consumer_topology]
           properties:
+            publication_role: {type: string, enum: [cell-routes]}
             artifact_ids: {type: array, minItems: 2, maxItems: 2, uniqueItems: true, items: {type: string}}
             artifact_kinds:
               type: array
@@ -33610,11 +33645,16 @@ components:
               maxItems: 2
               uniqueItems: true
               items: {type: string, enum: [edge_route_bundle, caddy_route_config]}
+        - required: [publication_role, consumer_topology]
+          properties:
+            publication_role: {type: string, enum: [cell-dns]}
+            artifact_ids: {type: array, minItems: 1, maxItems: 1, items: {type: string}}
+            artifact_kinds: {type: array, minItems: 1, maxItems: 1, items: {type: string, enum: [dns_answer_bundle]}}
       properties:
         publication_role:
           type: string
-          enum: [cell-routes]
-          description: Explicit route/TLS-only authority for one neutral cell. Must match intent, policy, producer and consumer topology. It contains exactly edge_route_bundle and caddy_route_config; DNS input, membership and publication are forbidden. Omission retains the complete route/DNS/TLS publication contract. No existing serving authority is converted implicitly.
+          enum: [cell-routes, cell-dns]
+          description: Explicit publication boundary; cell-routes owns exactly route/TLS artifacts and Worker membership; cell-dns owns exactly a DNS artifact and DNS process membership, with exact independent Cell route/TLS references. Omission retains the complete route/DNS/TLS publication contract. Existing authority is never converted implicitly.
         consumer_topology:
           $ref: "#/components/schemas/PlatformTrafficConsumerTopology"
         traffic_rollout_cohorts:
@@ -33797,6 +33837,32 @@ components:
           type: array
           items:
             type: string
+    PlatformCellRoutePublicationReference:
+      type: object
+      additionalProperties: false
+      required: [authority_cell_id, release_set_id, release_set_digest, release_id, release_channel, fencing_token, route_artifact_id, route_artifact_digest, tls_artifact_id, tls_artifact_digest]
+      properties:
+        authority_cell_id: {type: string, pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 128}
+        release_set_id: {type: string, minLength: 1, maxLength: 256}
+        release_set_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        release_id: {type: string, minLength: 1, maxLength: 256}
+        release_channel: {type: string, enum: [gray, full]}
+        fencing_token: {type: integer, format: int64, minimum: 1}
+        canary_rule_ref: {type: string, maxLength: 135}
+        route_artifact_id: {type: string, minLength: 1, maxLength: 256}
+        route_artifact_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        tls_artifact_id: {type: string, minLength: 1, maxLength: 256}
+        tls_artifact_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+    PlatformCellRoutePublicationInput:
+      type: object
+      additionalProperties: false
+      required: [reference, parent, route, tls]
+      description: Retained immutable compiler inputs, embedded in the signed DNS artifact for offline recovery. All artifact signatures, exact membership and reference pins are checked. Compilation and serving publication also require the exact currently selected Cell publication; a shadow or stale release cannot authorize DNS.
+      properties:
+        reference: {$ref: "#/components/schemas/PlatformCellRoutePublicationReference"}
+        parent: {$ref: "#/components/schemas/PlatformArtifact"}
+        route: {$ref: "#/components/schemas/PlatformArtifact"}
+        tls: {$ref: "#/components/schemas/PlatformArtifact"}
     PlatformRuntimeSnapshot:
       type: object
       additionalProperties: false
@@ -33929,6 +33995,10 @@ components:
       additionalProperties: false
       required: [intent, policy]
       properties:
+        cell_route_publications:
+          type: array
+          maxItems: 16
+          items: {$ref: "#/components/schemas/PlatformCellRoutePublicationInput"}
         intent:
           $ref: "#/components/schemas/PlatformConfigIntent"
         policy:
@@ -34038,8 +34108,25 @@ components:
     PlatformConfigCompileResponse:
       type: object
       additionalProperties: false
-      required: [lineage, release_set, intent_artifact, policy_artifact, route_artifact, tls_artifact, release_artifact]
-      description: A complete traffic compilation includes dns_artifact. Explicit cell-routes compilation omits DNS and binds only route/TLS artifacts.
+      required: [lineage, release_set, intent_artifact, policy_artifact, release_artifact]
+      description: Child artifacts match the exact publication role. A complete traffic compilation includes route, DNS and TLS; cell-routes includes route/TLS; cell-dns includes only DNS with independent Cell route/TLS references.
+      oneOf:
+        - required: [route_artifact, dns_artifact, tls_artifact]
+          properties:
+            release_set:
+              not: {required: [publication_role]}
+        - required: [route_artifact, tls_artifact]
+          properties:
+            release_set:
+              required: [publication_role]
+              properties:
+                publication_role: {type: string, enum: [cell-routes]}
+        - required: [dns_artifact]
+          properties:
+            release_set:
+              required: [publication_role]
+              properties:
+                publication_role: {type: string, enum: [cell-dns]}
       properties:
         lineage:
           $ref: "#/components/schemas/PlatformConfigLineage"
@@ -34667,7 +34754,7 @@ components:
         assignment:
           $ref: "#/components/schemas/PlatformConsumerAssignment"
         parent_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
-        route_artifact_id: {type: string}
+        route_artifact_id: {type: string, description: "Route member for complete traffic publications; empty for cell-dns, where each fact binds an independently referenced Cell route artifact."}
         plan_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
         observed_at: {type: string, format: date-time}
         evaluated_at: {type: string, format: date-time}

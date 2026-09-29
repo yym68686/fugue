@@ -10,3 +10,6 @@ const TrafficReleaseCapabilityV1 = "traffic_release_v1"
 // CellRoutesCapabilityV1 adds the explicitly signed route/TLS-only publication
 // boundary. It never authorizes removal of DNS from a complete traffic set.
 const CellRoutesCapabilityV1 = "cell_routes_v1"
+
+// CellDNSCapabilityV1 verifies independent DNS membership and exact embedded Cell route/TLS references.
+const CellDNSCapabilityV1 = "cell_dns_v1"

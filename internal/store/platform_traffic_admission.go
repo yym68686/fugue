@@ -31,6 +31,7 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 	ids, _ := parent.Content["artifact_ids"].([]any)
 	role, _ := parent.Content["publication_role"].(string)
 	cellRoutes := role == platformconfig.PublicationRoleCellRoutes
+	cellDNS := role == platformconfig.PublicationRoleCellDNS
 	leased := false
 	for _, id := range ids {
 		value, ok := id.(string)
@@ -43,7 +44,7 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 		}
 		leased = leased || platformconfig.DNSArtifactRequiresTrafficRelease(state.PlatformArtifacts[index])
 	}
-	if !leased && !cellRoutes {
+	if !leased && !cellRoutes && !cellDNS {
 		return nil
 	}
 	kinds, _ := parent.Content["artifact_kinds"].([]any)
@@ -69,6 +70,9 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 		case model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig:
 		case model.PlatformArtifactKindDNSAnswerBundle:
 			component = model.PlatformConsumerComponentDNSServer
+			if err := validateCellDNSReferencesInState(state, child, keys); err != nil {
+				return err
+			}
 		default:
 			return fail("unsupported member")
 		}
@@ -117,7 +121,7 @@ func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArt
 				if fact.ConsumerID != expected.ConsumerID || fact.ArtifactKind != child.ArtifactKind || fact.ScopeKey != parent.ScopeKey {
 					continue
 				}
-				if found || !trafficCapabilityFactFresh(expected, fact, now) || cellRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) {
+				if found || !trafficCapabilityFactFresh(expected, fact, now) || cellRoutes && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellRoutesCapabilityV1) || cellDNS && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.CellDNSCapabilityV1) {
 					return fail("fresh authenticated traffic capability required for " + expected.ConsumerID + "/" + child.ArtifactKind)
 				}
 				found = true

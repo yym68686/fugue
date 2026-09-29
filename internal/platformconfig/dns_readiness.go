@@ -35,25 +35,30 @@ type DNSEdgeEndpoint struct {
 }
 
 type DNSReadinessProbe struct {
-	ID          string `json:"id"`
-	EdgeID      string `json:"edge_id"`
-	EdgeGroupID string `json:"edge_group_id"`
-	Address     string `json:"address"`
-	Hostname    string `json:"hostname"`
-	Path        string `json:"path"`
-	RouteDigest string `json:"route_digest"`
-	State       string `json:"state,omitempty"`
+	CellPublicationDigest string `json:"cell_publication_digest,omitempty"`
+	FactMaxAgeSeconds     int    `json:"fact_max_age_seconds,omitempty"`
+	ID                    string `json:"id"`
+	EdgeID                string `json:"edge_id"`
+	EdgeGroupID           string `json:"edge_group_id"`
+	Address               string `json:"address"`
+	Hostname              string `json:"hostname"`
+	Path                  string `json:"path"`
+	RouteDigest           string `json:"route_digest"`
+	State                 string `json:"state,omitempty"`
 }
 
 type DNSReadinessTarget struct {
-	EdgeID      string   `json:"edge_id"`
-	EdgeGroupID string   `json:"edge_group_id"`
-	Address     string   `json:"address"`
-	Family      string   `json:"family"`
-	ProbeIDs    []string `json:"probe_ids"`
+	FailureDomains map[string]string `json:"failure_domains,omitempty"`
+	EdgeID         string            `json:"edge_id"`
+	EdgeGroupID    string            `json:"edge_group_id"`
+	Address        string            `json:"address"`
+	Family         string            `json:"family"`
+	ProbeIDs       []string          `json:"probe_ids"`
 }
 
 type DNSReadinessRecord struct {
+	MinDistinctCells    int                  `json:"min_distinct_cells,omitempty"`
+	MinDistinctDomains  map[string]int       `json:"min_distinct_domains,omitempty"`
 	Hostname            string               `json:"hostname"`
 	MinimumHealthyEdges int                  `json:"minimum_healthy_edges"`
 	RequireDualStack    bool                 `json:"require_dual_stack"`
@@ -122,6 +127,9 @@ func validateDNSEdgeEndpoints(endpoints []DNSEdgeEndpoint, captured *time.Time) 
 // stable when heartbeat/probe leases lapse. Only separately collected runtime
 // facts can establish current readiness, and no fact changes content expiry.
 func CompileDNSReadiness(intent PlatformIntent, routes []CompiledRoute, snapshot RuntimeSnapshot, policy PolicySnapshot) (*DNSReadinessPlan, error) {
+	if intent.PublicationRole == PublicationRoleCellDNS {
+		return nil, fmt.Errorf("independent DNS compilation requires immutable Cell publication inputs")
+	}
 	if policy.DNSReadiness == nil {
 		if len(snapshot.DNSEdgeEndpoints) > 0 {
 			return nil, fmt.Errorf("DNS edge observations require an explicit readiness policy")
@@ -138,6 +146,10 @@ func CompileDNSReadiness(intent PlatformIntent, routes []CompiledRoute, snapshot
 	if err != nil {
 		return nil, err
 	}
+	return compileDNSReadinessProjection(intent, routes, snapshot, policy, projection)
+}
+
+func compileDNSReadinessProjection(intent PlatformIntent, routes []CompiledRoute, snapshot RuntimeSnapshot, policy PolicySnapshot, projection model.EdgeRouteIntentSnapshot) (*DNSReadinessPlan, error) {
 	byHost := map[string][]CompiledRoute{}
 	projected := map[string][]model.EdgeRouteIntent{}
 	for _, r := range routes {
@@ -254,6 +266,9 @@ func ValidateDNSReadinessPlan(plan *DNSReadinessPlan, policy *DNSReadinessPolicy
 	probes := map[string]DNSReadinessProbe{}
 	owners := map[string]string{}
 	for _, p := range plan.Probes {
+		if p.CellPublicationDigest != "" && !trafficConsumerDigest.MatchString(p.CellPublicationDigest) || p.FactMaxAgeSeconds < 0 || p.FactMaxAgeSeconds > policy.FactFreshnessSeconds {
+			return fmt.Errorf("invalid DNS Cell proof reference or freshness bound")
+		}
 		id, err := DNSReadinessProbeID(p)
 		digestBytes, digestErr := hex.DecodeString(strings.TrimPrefix(p.RouteDigest, "sha256:"))
 		ip, ipErr := netip.ParseAddr(p.Address)
@@ -271,6 +286,14 @@ func ValidateDNSReadinessPlan(plan *DNSReadinessPlan, policy *DNSReadinessPolicy
 		if !validDNSConsumerZone(r.Hostname) || seen[r.Hostname] || r.MinimumHealthyEdges < 1 || r.MinimumHealthyEdges > 4096 || len(r.Targets) > 8192 {
 			return fmt.Errorf("invalid DNS readiness record")
 		}
+		if r.MinDistinctCells < 0 || r.MinDistinctCells > 100 || len(r.MinDistinctDomains) > 100 {
+			return fmt.Errorf("invalid DNS diversity bounds")
+		}
+		for dimension, minimum := range r.MinDistinctDomains {
+			if !edgeSelectionID.MatchString(dimension) || dimension == "country" || dimension == "region" || minimum < 1 || minimum > 100 {
+				return fmt.Errorf("invalid DNS failure domain constraint")
+			}
+		}
 		seen[r.Hostname] = true
 		targets := map[string]bool{}
 		for _, target := range r.Targets {
@@ -278,6 +301,14 @@ func ValidateDNSReadinessPlan(plan *DNSReadinessPlan, policy *DNSReadinessPolicy
 			ip, err := netip.ParseAddr(target.Address)
 			if targets[key] || err != nil || (target.Family != "A" && target.Family != "AAAA") || ip.Is4() != (target.Family == "A") || len(target.ProbeIDs) == 0 || len(target.ProbeIDs) > 4096 {
 				return fmt.Errorf("invalid DNS readiness target")
+			}
+			if len(target.FailureDomains) > 100 {
+				return fmt.Errorf("too many DNS failure domains")
+			}
+			for dimension, value := range target.FailureDomains {
+				if !edgeSelectionID.MatchString(dimension) || value == "" || len(value) > 256 {
+					return fmt.Errorf("invalid DNS failure domain")
+				}
 			}
 			targets[key] = true
 			refs := map[string]bool{}

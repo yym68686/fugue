@@ -131,7 +131,7 @@ func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadi
 				case proof.Version == "" || proof.CheckedAt.IsZero() || proof.CheckedAt.After(now) || !proof.ValidUntil.After(now):
 					fact.Reason = "proof_not_fresh"
 				default:
-					expiry := proof.CheckedAt.Add(time.Duration(policy.FactFreshnessSeconds) * time.Second)
+					expiry := proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy)) * time.Second)
 					if expiry.Before(fact.Proof.ValidUntil) {
 						fact.Proof.ValidUntil = expiry
 					}
@@ -204,23 +204,17 @@ func summarizeDNSReadiness(plan *platformconfig.DNSReadinessPlan, policy *platfo
 	status.ReadyProbes = len(valid)
 	status.FailedProbes = status.Probes - status.ReadyProbes
 	for _, record := range plan.Records {
-		edges, v4, v6 := map[string]bool{}, map[string]bool{}, map[string]bool{}
-		for _, target := range record.Targets {
-			ready := len(target.ProbeIDs) > 0
+		if platformconfig.DNSReadinessQuorum(record, func(target platformconfig.DNSReadinessTarget) bool {
+			if len(target.ProbeIDs) == 0 {
+				return false
+			}
 			for _, id := range target.ProbeIDs {
-				ready = ready && valid[id]
+				if !valid[id] {
+					return false
+				}
 			}
-			if !ready {
-				continue
-			}
-			edges[target.EdgeID] = true
-			if target.Family == "A" {
-				v4[target.EdgeID] = true
-			} else if target.Family == "AAAA" {
-				v6[target.EdgeID] = true
-			}
-		}
-		if len(edges) >= record.MinimumHealthyEdges && (!record.RequireDualStack || (len(v4) >= record.MinimumHealthyEdges && len(v6) >= record.MinimumHealthyEdges)) {
+			return true
+		}) {
 			status.ReadyRecords++
 		}
 	}
@@ -249,7 +243,7 @@ func validDNSReadinessFacts(plan *platformconfig.DNSReadinessPlan, policy *platf
 	}
 	for _, fact := range facts {
 		requirement, exists := requirements[fact.ProbeID]
-		if !exists || duplicate[fact.ProbeID] || fact.Proof.Digest != requirement.RouteDigest || fact.Proof.EdgeID != requirement.EdgeID || fact.Proof.GroupID != requirement.EdgeGroupID || fact.Proof.State != requirement.State || fact.Proof.Version == "" || fact.Proof.ValidUntil.After(fact.Proof.CheckedAt.Add(time.Duration(policy.FactFreshnessSeconds)*time.Second)) {
+		if !exists || duplicate[fact.ProbeID] || fact.Proof.Digest != requirement.RouteDigest || fact.Proof.EdgeID != requirement.EdgeID || fact.Proof.GroupID != requirement.EdgeGroupID || fact.Proof.State != requirement.State || fact.Proof.Version == "" || fact.Proof.ValidUntil.After(fact.Proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)) {
 			continue
 		}
 		if !fact.Ready || fact.Proof.CheckedAt.IsZero() || fact.Proof.CheckedAt.After(now) || !fact.Proof.ValidUntil.After(now) {

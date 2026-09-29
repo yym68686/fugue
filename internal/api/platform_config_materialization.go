@@ -80,12 +80,18 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	if err := ctx.Err(); err != nil {
 		return platformConfigCompileResponse{}, err
 	}
+	if err := s.validateCellDNSCompilation(compiled); err != nil {
+		return platformConfigCompileResponse{}, err
+	}
 	if err := s.store.EnsurePlatformCompilerInput(compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
 		return platformConfigCompileResponse{}, err
 	}
 	artifacts := []*model.PlatformArtifact{&compiled.RouteArtifact, &compiled.DNSArtifact, &compiled.TLSArtifact}
 	if compiled.ReleaseSet.PublicationRole == platformconfig.PublicationRoleCellRoutes {
 		artifacts = []*model.PlatformArtifact{&compiled.RouteArtifact, &compiled.TLSArtifact}
+	}
+	if compiled.ReleaseSet.PublicationRole == platformconfig.PublicationRoleCellDNS {
+		artifacts = []*model.PlatformArtifact{&compiled.DNSArtifact}
 	}
 	validation := model.PlatformArtifactValidationResult{
 		Name: "platform_config.compiler", Pass: true,
@@ -133,6 +139,9 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	compiled.ReleaseSet.ArtifactIDs = []string{compiled.RouteArtifact.ID, compiled.DNSArtifact.ID, compiled.TLSArtifact.ID}
 	if compiled.ReleaseSet.PublicationRole == platformconfig.PublicationRoleCellRoutes {
 		compiled.ReleaseSet.ArtifactIDs = []string{compiled.RouteArtifact.ID, compiled.TLSArtifact.ID}
+	}
+	if compiled.ReleaseSet.PublicationRole == platformconfig.PublicationRoleCellDNS {
+		compiled.ReleaseSet.ArtifactIDs = []string{compiled.DNSArtifact.ID}
 	}
 	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, compiled.ReleaseSet.ArtifactIDs, time.Now().UTC())
 	if len(sources) == 1 {
