@@ -16,6 +16,19 @@ SUMS = {"caddy": "h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0=", "net": "h1:b
 def run(*args, **kw):
     return subprocess.check_output(args, text=True, **kw)
 
+def apply_patches(target, patchdir):
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    # A ceiling at cwd itself does not stop Git's upward discovery. Its parent
+    # does, and copied Go dependency trees contain no local .git directory.
+    env["GIT_CEILING_DIRECTORIES"] = str(target.resolve().parent)
+    for patch in sorted(patchdir.glob("*.patch")):
+        # Dependencies live inside this Git worktree. Repository-aware apply
+        # can silently skip Git-format paths outside the current subdirectory.
+        # Treat each copied dependency as a standalone tree and reject escapes.
+        subprocess.run(["git", "apply", "--no-index", str(patch.resolve())],
+                       cwd=target, env=env, check=True)
+
 def dependency(module, version, name):
     # Ignore the local module replacements while downloading canonical inputs.
     env = dict(os.environ, GOTOOLCHAIN="go1.26.3", GO111MODULE="on")
@@ -38,8 +51,7 @@ def main():
                   dependency("golang.org/x/net", "v0.55.0", "net")]
     for name in ("caddy", "net"):
         patchdir = ROOT / "static-caddy" / "patches" / name
-        for patch in sorted(patchdir.glob("*.patch")):
-            subprocess.run(["git", "apply", "--unsafe-paths", str(patch)], cwd=DEST/name, check=True)
+        apply_patches(DEST/name, patchdir)
     (DEST / "provenance.json").write_text(json.dumps(provenance, indent=2)+"\n")
     print(json.dumps(provenance))
 

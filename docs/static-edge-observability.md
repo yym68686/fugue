@@ -143,3 +143,22 @@ This test demonstrates a finite-grace termination boundary, not an assurance
 that all requests will fit inside it. A green candidate health check or an
 empty recent access-log window does not prove the old process is drained.
 Do not replace its binary or stop it based on those signals alone.
+
+The pinned Caddy 2.11.4 dependency also canceled a finite shutdown context when
+`App.Stop` returned from a configuration reload, while the old HTTP/3 server was
+still draining asynchronously. Isolated active streams ended immediately rather
+than receiving their configured grace. `003-preserve-reload-grace.patch` keeps
+that context alive until both Stop callbacks and server shutdown finish. It
+preserves the configured deadline: changing the new configuration to unlimited
+grace does not extend the previous generation's finite grace.
+
+Real subprocess regressions cover H2/H3 completion inside a finite grace, active
+H2/H3 survival under unlimited grace, and H3 termination at the previous finite
+deadline. The original finite-grace process-exit regression remains in place.
+This fixes future reload behavior in the patched binary; it does not alter an
+already-running older binary or establish cross-process TCP/QUIC handoff.
+
+Dependency patches are applied with enclosing Git-worktree discovery disabled.
+The packaging tests verify a Git-format patch actually changes its copied
+dependency and cannot escape into its parent. A skipped or failed patch must not
+be advertised as an applied build input.

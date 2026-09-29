@@ -1,0 +1,37 @@
+diff --git a/modules/caddyhttp/app.go b/modules/caddyhttp/app.go
+--- a/modules/caddyhttp/app.go
++++ b/modules/caddyhttp/app.go
+@@ -654,6 +654,7 @@
+ // Stop gracefully shuts down the HTTP server.
+ func (app *App) Stop() error {
+ 	ctx := context.Background()
++	var finishedShutdown sync.WaitGroup
+ 
+ 	// see if any listeners in our config will be closing or if they are continuing
+ 	// through a reload; because if any are closing, we will enforce shutdown delay
+@@ -688,7 +689,15 @@
+ 		var cancel context.CancelFunc
+ 		timeout := time.Duration(app.GracePeriod)
+ 		ctx, cancel = context.WithTimeoutCause(ctx, timeout, fmt.Errorf("server graceful shutdown %ds timeout", int(timeout.Seconds())))
+-		defer cancel()
++		// A reload returns before asynchronous server shutdown completes. Keep
++		// the old generation's grace context alive until both its shutdown work
++		// and this Stop call (including callbacks) have completed.
++		defer func() {
++			go func() {
++				finishedShutdown.Wait()
++				cancel()
++			}()
++		}()
+ 		app.logger.Info("servers shutting down; grace period initiated", zap.Duration("duration", timeout))
+ 	} else {
+ 		app.logger.Info("servers shutting down with eternal grace period")
+@@ -702,7 +711,7 @@
+ 	// old servers are no longer accepting new connections
+ 	// (* the scheduler might still pause them right before
+ 	// calling Shutdown(), but it's unlikely)
+-	var startedShutdown, finishedShutdown sync.WaitGroup
++	var startedShutdown sync.WaitGroup
+ 
+ 	// these will run in goroutines
+ 	stopServer := func(server *Server) {
