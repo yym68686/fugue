@@ -335,8 +335,33 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  cell_inventory_enrollment:
+  cell_inventory_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Admit only changed declarations to the production inventory queue
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/cell-inventory; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  cell_inventory_enrollment:
+    needs: cell_inventory_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_inventory_plan.outputs.selected == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-cell-inventory, cancel-in-progress: false}

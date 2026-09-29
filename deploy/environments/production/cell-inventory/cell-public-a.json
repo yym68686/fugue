@@ -1,6 +1,6 @@
 {
   "schema": "fugue.cell-inventory-enrollment/v1",
-  "generation": 3,
+  "generation": 4,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-a",
   "namespace": "fugue-system",

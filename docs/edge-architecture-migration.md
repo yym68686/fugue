@@ -719,3 +719,9 @@ configuration channel, even after deletion and recreation under the same name.
 Replacing a previously immutable projection uses a new declared ConfigMap name
 and the normal isolated Worker rollout; existing public workers are unaffected.
 The authorization deadline itself remains fixed within each explicit attempt.
+
+The read-only `cell_inventory_plan` job checks declaration changes before any
+production concurrency slot is requested. Unrelated commits do not enqueue an
+empty registration job that could cancel a waiting valid configuration run.
+The writer rechecks the current declaration and script contents before mutation;
+neither selection nor enrollment depends on a code build or deployment job.
