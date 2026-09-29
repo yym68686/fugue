@@ -27,7 +27,7 @@ func PlatformConsumerID(component, node, authority string) (string, error) {
 		return component + ":" + node, nil
 	}
 	if ConsumerAuthorityID(authority) != authority || !consumerNodeIDPattern.MatchString(node) ||
-		(component != model.PlatformConsumerComponentEdgeWorker && component != model.PlatformConsumerComponentCaddyEdgeFront) {
+		(component != model.PlatformConsumerComponentEdgeWorker && component != model.PlatformConsumerComponentCaddyEdgeFront && component != model.PlatformConsumerComponentEdgeControl) {
 		return "", ErrPlatformComponentIdentityInvalid
 	}
 	return component + ":" + authority + ":" + node, nil

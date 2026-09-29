@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"fugue/internal/httpx"
+	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 )
 
@@ -38,7 +39,10 @@ func decodePlatformConsumerIdentityPolicy(raw string) (platformConsumerIdentityP
 	valid := len(raw) <= 4096 && decoder.Decode(&policy) == nil && decoder.Decode(&struct{}{}) == io.EOF && policy.Version == "v1" && policy.Component != "" && policy.ScopeKey != "" && policy.ScopeKey == strings.ToLower(strings.TrimSpace(policy.ScopeKey)) && len(policy.ArtifactKinds) > 0
 	if policy.AuthorityID != "" {
 		_, err := platformcontrol.PlatformConsumerID(policy.Component, "validation-node", policy.AuthorityID)
-		valid = valid && err == nil && policy.Component == "edge-worker"
+		valid = valid && err == nil && (policy.Component == model.PlatformConsumerComponentEdgeWorker || policy.Component == model.PlatformConsumerComponentEdgeControl)
+	}
+	if policy.Component == model.PlatformConsumerComponentEdgeControl {
+		valid = valid && policy.AuthorityID != "" && policy.ScopeKey == "global" && len(policy.ArtifactKinds) == 1 && policy.ArtifactKinds[0] == model.PlatformArtifactKindEdgeRouteIntent
 	}
 	return policy, valid
 }
@@ -97,12 +101,16 @@ func (s *Server) handleExchangePlatformConsumerIdentity(w http.ResponseWriter, r
 		Component:    policy.Component, NodeID: pod.Spec.NodeName, ScopeKey: policy.ScopeKey, ArtifactKinds: policy.ArtifactKinds, AuthorityID: policy.AuthorityID,
 	}
 	// Issuance and parsing also enforce the kernel's finite component/kind schema.
-	token, err := platformcontrol.IssuePlatformComponentIdentity(s.auth.PlatformComponentIdentityKeyring, claims, now, platformConsumerIdentityTTL)
+	keyring := s.auth.PlatformComponentIdentityKeyring
+	if policy.Component == model.PlatformConsumerComponentEdgeControl {
+		keyring = s.auth.EdgeRouteIntentIdentityKeyring
+	}
+	token, err := platformcontrol.IssuePlatformComponentIdentity(keyring, claims, now, platformConsumerIdentityTTL)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "consumer identity could not be issued")
 		return
 	}
-	verified, err := platformcontrol.ParsePlatformComponentIdentity(s.auth.PlatformComponentIdentityKeyring, token, now)
+	verified, err := platformcontrol.ParsePlatformComponentIdentity(keyring, token, now)
 	if err != nil || len(verified.ArtifactKinds) != len(policy.ArtifactKinds) || verified.Component != policy.Component {
 		httpx.WriteError(w, http.StatusForbidden, "Pod consumer capabilities are invalid")
 		return

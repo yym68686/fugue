@@ -123,3 +123,43 @@ func TestEdgeControlRouteIntentTLSConfigDefaultsOffAndRequiresExactContract(t *t
 		}
 	}
 }
+
+func TestEdgeControlTLSExposesOnlyCanonicalIdentityExchange(t *testing.T) {
+	const host = "fugue-api-tls.platform-system.svc"
+	var calls int
+	handler, err := edgeControlRouteIntentTLSHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("Authorization") != "Bearer bound-pod-token" || r.Header.Get("X-Forwarded-For") != "" {
+			t.Fatal("identity exchange changed authentication boundary")
+		}
+		w.WriteHeader(204)
+	}), host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		method, path, sni string
+		want              int
+	}{
+		{"POST", "/v1/platform-state/consumers/identity", host, 204},
+		{"GET", "/v1/platform-state/consumers/identity", host, 404},
+		{"POST", "/v1/platform-state/consumers/identity?", host, 404},
+		{"POST", "/v1/platform-state/consumers/identity?scope=global", host, 404},
+		{"POST", "/v1/platform-state/consumers/%69dentity", host, 404},
+		{"POST", "/v1/platform-state/consumers/trusted-heartbeat", host, 404},
+		{"POST", "/v1/platform-state/consumers/identity", "foreign.platform-system.svc", 404},
+	} {
+		r := httptest.NewRequest(tc.method, "https://"+host+":8443"+tc.path, nil)
+		r.TLS = &tls.ConnectionState{ServerName: tc.sni}
+		r.Header.Set("Authorization", "Bearer bound-pod-token")
+		r.Header.Set("X-Forwarded-For", "203.0.113.1")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Fatalf("%s %s got=%d want=%d", tc.method, tc.path, w.Code, tc.want)
+		}
+	}
+	if calls != 1 {
+		t.Fatal("unexpected private API surface", calls)
+	}
+}

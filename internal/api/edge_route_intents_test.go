@@ -53,6 +53,30 @@ func TestEdgeRouteIntentsRequireExactEdgeControlIdentity(t *testing.T) {
 	}
 }
 
+func TestNeutralRouteIntentsRequireExactSignedAuthority(t *testing.T) {
+	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	keyring := edgeRouteIntentTestKeyring()
+	server.auth.EdgeRouteIntentIdentityKeyring = keyring
+	for _, tc := range []struct {
+		authority, group string
+		want             int
+	}{
+		{"", "edge-group-old", 503}, {"", "cell-a", 403},
+		{"cell-a", "cell-a", 503}, {"cell-a", "cell-b", 403}, {"cell-a", "edge-group-old", 403},
+	} {
+		claims := edgeRouteIntentTestClaims(model.PlatformConsumerComponentEdgeControl, "global", []string{model.PlatformArtifactKindEdgeRouteIntent})
+		claims.AuthorityID, claims.NodeID = tc.authority, "node-a"
+		token, err := platformcontrol.IssuePlatformComponentIdentity(keyring, *claims, time.Now().UTC(), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents?edge_group_id="+tc.group, token, nil)
+		if r.Code != tc.want {
+			t.Fatalf("authority=%q group=%q got=%d want=%d", tc.authority, tc.group, r.Code, tc.want)
+		}
+	}
+}
+
 func TestEdgeRouteIntentUsesVerifiedRouteArtifactLKG(t *testing.T) {
 	t.Parallel()
 	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")

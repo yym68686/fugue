@@ -46,6 +46,13 @@ func (s *Server) handleEdgeRouteIntents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	group := groups[0]
+	// Authority scope is an explicit signed claim, never inferred from a
+	// physical node, country label or the caller's requested query.
+	if (claims.AuthorityID != "" && claims.AuthorityID != group) ||
+		(platformcontrol.ConsumerAuthorityID(group) != "" && claims.AuthorityID != group) {
+		httpx.WriteError(w, http.StatusForbidden, "Control identity cannot read another authority")
+		return
+	}
 	if snapshot, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease(group); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "traffic release recovery state is unavailable; retain the current serving bundle")
 		return

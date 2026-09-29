@@ -23,6 +23,17 @@ reader does not enroll a Pod, change inventory, prepare a new expected set,
 or authorize a neutral publication. DNS retains its independently fenced
 physical public-backend identity.
 
+Neutral Controls obtain their RouteIntent identity through a live Pod-bound
+ServiceAccount exchange. The operator-managed annotation must name the exact
+cell, global scope and only `edge_route_intent`; its authority must match the
+Pod label. The API signs a two-minute credential with its independent
+RouteIntent keyring without exporting the issuer key. The private TLS listener
+admits only canonical GET RouteIntent and POST credential-exchange paths with
+the exact Host and SNI. The scoped identity cannot read another cell or a legacy
+group, while legacy issuers cannot read neutral cells. This identity is not
+permission to publish: the requested cell still needs a prepared signed traffic
+release with its own complete route/DNS/TLS cohort.
+
 The topology file contains no endpoints, health, traffic weights, loaded bundle
 digests, or code revision. Those are runtime facts or signed artifacts. A pool
 membership is not route authorization. In particular, the current public

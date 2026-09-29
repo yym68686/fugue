@@ -27,6 +27,21 @@ func TestPlatformConsumerIdentityExchangesOnlyLiveBoundPods(t *testing.T) {
 			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-worker","scope_key":"global","artifact_kinds":["edge_route_bundle"],"authority_id":"cell-a"}`
 			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-a"}
 		}},
+		{"authorized control", 200, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-control","scope_key":"global","artifact_kinds":["edge_route_intent"],"authority_id":"cell-a"}`
+			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-a"}
+		}},
+		{"unscoped control", 403, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-control","scope_key":"global","artifact_kinds":["edge_route_intent"]}`
+		}},
+		{"control extra capability", 403, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-control","scope_key":"global","artifact_kinds":["edge_route_intent","edge_route_bundle"],"authority_id":"cell-a"}`
+			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-a"}
+		}},
+		{"control non-global scope", 403, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-control","scope_key":"tenant-scope","artifact_kinds":["edge_route_intent"],"authority_id":"cell-a"}`
+			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-a"}
+		}},
 		{"cell label mismatch", 403, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
 			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-worker","scope_key":"global","artifact_kinds":["edge_route_bundle"],"authority_id":"cell-a"}`
 			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-b"}
@@ -65,6 +80,8 @@ func TestPlatformConsumerIdentityExchangesOnlyLiveBoundPods(t *testing.T) {
 			server.controlPlaneNamespace = ns
 			ring := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "component-test-key", Keys: map[string]string{"component-test-key": "component-test-secret"}}
 			server.auth.PlatformComponentIdentityKeyring = ring
+			controlRing := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "control-test-key", Keys: map[string]string{"control-test-key": "independent-control-test-secret"}}
+			server.auth.EdgeRouteIntentIdentityKeyring = controlRing
 			review := authenticationv1.SelfSubjectReview{Status: authenticationv1.SelfSubjectReviewStatus{UserInfo: authenticationv1.UserInfo{Username: "system:serviceaccount:" + ns + ":dns-consumer", UID: "account-uid", Extra: map[string]authenticationv1.ExtraValue{"authentication.kubernetes.io/pod-name": {"dns-pod"}, "authentication.kubernetes.io/pod-uid": {"pod-uid"}}}}}
 			pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dns-pod", Namespace: ns, UID: "pod-uid", Annotations: map[string]string{platformConsumerIdentityAnnotation: `{"version":"v1","component":"dns-server","scope_key":"global","artifact_kinds":["dns_answer_bundle"]}`}}, Spec: corev1.PodSpec{NodeName: "physical-node", ServiceAccountName: "dns-consumer"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 			if tc.mutate != nil {
@@ -109,10 +126,32 @@ func TestPlatformConsumerIdentityExchangesOnlyLiveBoundPods(t *testing.T) {
 					ConsumerID  string    `json:"consumer_id"`
 				}
 				mustDecodeJSON(t, response, &body)
-				claims, err := platformcontrol.ParsePlatformComponentIdentity(ring, body.Token, time.Now().UTC())
+				verificationRing := ring
+				if tc.name == "authorized control" {
+					verificationRing = controlRing
+				}
+				claims, err := platformcontrol.ParsePlatformComponentIdentity(verificationRing, body.Token, time.Now().UTC())
 				wantComponent, wantKind, wantAuthority, wantConsumer := "dns-server", "dns_answer_bundle", "", "dns-server:physical-node"
 				if tc.name == "authorized cell" {
 					wantComponent, wantKind, wantAuthority, wantConsumer = "edge-worker", "edge_route_bundle", "cell-a", "edge-worker:cell-a:physical-node"
+				}
+				if tc.name == "authorized control" {
+					wantComponent, wantKind, wantAuthority, wantConsumer = "edge-control", "edge_route_intent", "cell-a", "edge-control:cell-a:physical-node"
+					if _, err := platformcontrol.ParsePlatformComponentIdentity(ring, body.Token, time.Now().UTC()); err == nil {
+						t.Fatal("Control credential used the ordinary consumer signing key")
+					}
+					for _, query := range []struct {
+						group  string
+						status int
+					}{{"cell-a", 503}, {"cell-b", 403}, {"edge-group-old", 403}} {
+						route := performJSONRequest(t, server, http.MethodGet, "/v1/edge/route-intents?edge_group_id="+query.group, body.Token, nil)
+						if route.Code != query.status {
+							t.Fatalf("Control scope=%s wanted=%d got=%d body=%s", query.group, query.status, route.Code, route.Body.String())
+						}
+					}
+					if strings.Contains(response.Body.String(), "independent-control-test-secret") {
+						t.Fatal("issuer secret was exported")
+					}
 				}
 				if err != nil || body.NodeID != "physical-node" || claims.NodeID != body.NodeID || claims.Component != wantComponent || claims.ScopeKey != "global" || claims.CredentialID != "kubernetes:"+ns+":dns-consumer:pod-uid" || len(claims.ArtifactKinds) != 1 || claims.ArtifactKinds[0] != wantKind || claims.ExpiresAtUnix-claims.IssuedAtUnix != 120 || claims.AuthorityID != wantAuthority || body.AuthorityID != wantAuthority || body.ConsumerID != wantConsumer {
 					t.Fatalf("claims not derived from live Pod: %+v %v", claims, err)
