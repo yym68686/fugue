@@ -731,6 +731,16 @@ material. A read-only change selector admits trust configuration to its queue
 without depending on executable builds; unrelated pushes cannot cancel a
 pending trust initialization with an empty job.
 
+The second declared authority `cell-public-b` starts with a private Control and
+one isolated Worker on physical Edge `vps-591f4447`, with its own state PVCs,
+reader/inventory/signing/recovery credentials and `authority-cell:cell-public-b`
+consumer scope. Its shadow route/TLS producer names only that initial executor;
+provisioning an additional reader credential does not make another node required
+or eligible until a signed membership update enrolls it. Country remains endpoint
+metadata. Internal health Services and isolated NetworkPolicies grant no public
+transport or legacy serving authority. The currently selected public frontends
+and DNS listeners retain their existing service until explicit later handoff.
+
 The read-only `cell_inventory_plan` job checks declaration changes before any
 production concurrency slot is requested. Unrelated commits do not enqueue an
 empty registration job that could cancel a waiting valid configuration run.

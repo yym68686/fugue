@@ -1,0 +1,756 @@
+{
+  "apiVersion": "release.fugue.dev/v2",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "annotations": {
+          "fugue.pro/edge-control-manifest-state": "materialization-ready",
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/authority-transition-role": "isolated-candidate"
+        },
+        "labels": {
+          "app.kubernetes.io/component": "edge-control",
+          "app.kubernetes.io/instance": "edge-control-public-b",
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "fugue.io/edge-group-id": "cell-public-b",
+          "fugue.io/authority-cell-id": "cell-public-b"
+        },
+        "name": "edge-control-public-b",
+        "namespace": "fugue-system"
+      },
+      "spec": {
+        "replicas": 1,
+        "revisionHistoryLimit": 2,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "edge-control",
+            "app.kubernetes.io/instance": "edge-control-public-b",
+            "app.kubernetes.io/name": "fugue-edge-control",
+            "fugue.io/edge-group-id": "cell-public-b"
+          }
+        },
+        "strategy": {
+          "type": "Recreate"
+        },
+        "template": {
+          "metadata": {
+            "annotations": {
+              "fugue.pro/edge-control-authority": "group-scoped",
+              "fugue.pro/edge-control-manifest-state": "materialization-ready",
+              "fugue.pro/edge-control-mode": "group-authority",
+              "fugue.pro/edge-control-publication": "group-cas",
+              "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+              "fugue.pro/consumer-identity": "{\"artifact_kinds\":[\"edge_route_intent\"],\"authority_id\":\"cell-public-b\",\"component\":\"edge-control\",\"scope_key\":\"authority-cell:cell-public-b\",\"version\":\"v1\"}"
+            },
+            "labels": {
+              "app.kubernetes.io/component": "edge-control",
+              "app.kubernetes.io/instance": "edge-control-public-b",
+              "app.kubernetes.io/name": "fugue-edge-control",
+              "fugue.io/edge-group-id": "cell-public-b",
+              "fugue.io/authority-cell-id": "cell-public-b"
+            }
+          },
+          "spec": {
+            "automountServiceAccountToken": false,
+            "containers": [
+              {
+                "env": [
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_BIND_ADDR",
+                    "value": "0.0.0.0:8092"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_SHUTDOWN_TIMEOUT",
+                    "value": "10s"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_AUTHORITY_RUNTIME_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR",
+                    "value": "/var/lib/fugue-edge-control"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL",
+                    "value": "https://fugue-api-tls.fugue-system.svc:8443/v1/edge/route-intents"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_IDENTITY_NODE_ID",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "spec.nodeName"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE",
+                    "value": "/var/run/secrets/fugue-edge-control/route-intent-ca/ca.crt"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME",
+                    "value": "fugue-api-tls.fugue-system.svc"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_DIR",
+                    "value": "/var/run/secrets/fugue-edge-control/inventory-writer"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_AUTHORITY_GROUP_IDS",
+                    "value": "cell-public-b"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_AUTHORITY_RECONCILE_INTERVAL",
+                    "value": "30s"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_GROUP_SIGNING_KEYRING_DIR",
+                    "value": "/var/run/secrets/fugue-edge-control/group-signing"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_GROUP_READER_KEYRING_DIR",
+                    "value": "/var/run/secrets/fugue-edge-control/group-readers"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_GROUP_RECOVERY_KEYRING_DIR",
+                    "value": "/var/run/secrets/fugue-edge-control/group-recovery"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_GROUP_BUNDLE_VALIDITY",
+                    "value": "30m"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_WORKER_CANDIDATE_STAGING_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_SOURCE_SHA",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.annotations['fugue.pro/source-commit']"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_SELF_IMAGE_REF",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.annotations['fugue.pro/artifact-image']"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_MANIFEST_DIGEST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.annotations['fugue.pro/release-plan-digest']"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_RELEASE_RECORD_DIGEST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.annotations['fugue.pro/artifact-receipt-digest']"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_HEALTH_CONTRACT_DIGEST",
+                    "value": "sha256:2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_POD_TOKEN_FILE",
+                    "value": "/var/run/fugue-control-identity/token"
+                  },
+                  {
+                    "name": "FUGUE_PLATFORM_ARTIFACT_SCOPE",
+                    "value": "authority-cell:cell-public-b"
+                  }
+                ],
+                "image": "fugue-artifact://edge-control-public-b",
+                "imagePullPolicy": "IfNotPresent",
+                "livenessProbe": {
+                  "failureThreshold": 3,
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 10,
+                  "timeoutSeconds": 2
+                },
+                "name": "edge-control",
+                "ports": [
+                  {
+                    "containerPort": 8092,
+                    "name": "health",
+                    "protocol": "TCP"
+                  }
+                ],
+                "readinessProbe": {
+                  "failureThreshold": 2,
+                  "httpGet": {
+                    "path": "/readyz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 5,
+                  "timeoutSeconds": 2
+                },
+                "resources": {
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "1Gi"
+                  },
+                  "requests": {
+                    "cpu": "250m",
+                    "memory": "256Mi"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "privileged": false,
+                  "readOnlyRootFilesystem": true,
+                  "runAsGroup": 65532,
+                  "runAsNonRoot": true,
+                  "runAsUser": 65532
+                },
+                "startupProbe": {
+                  "failureThreshold": 15,
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 2
+                },
+                "volumeMounts": [
+                  {
+                    "mountPath": "/var/lib/fugue-edge-control",
+                    "name": "authority-state"
+                  },
+                  {
+                    "mountPath": "/var/run/secrets/fugue-edge-control/route-intent-ca",
+                    "name": "route-intent-ca",
+                    "readOnly": true
+                  },
+                  {
+                    "mountPath": "/var/run/secrets/fugue-edge-control/inventory-writer",
+                    "name": "inventory-writer-keyring",
+                    "readOnly": true
+                  },
+                  {
+                    "mountPath": "/var/run/secrets/fugue-edge-control/group-signing",
+                    "name": "group-signing-keyring",
+                    "readOnly": true
+                  },
+                  {
+                    "mountPath": "/var/run/secrets/fugue-edge-control/group-readers",
+                    "name": "group-reader-keyring",
+                    "readOnly": true
+                  },
+                  {
+                    "mountPath": "/var/run/secrets/fugue-edge-control/group-recovery",
+                    "name": "group-recovery-keyring",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "control-pod-identity",
+                    "mountPath": "/var/run/fugue-control-identity",
+                    "readOnly": true
+                  }
+                ]
+              }
+            ],
+            "enableServiceLinks": false,
+            "initContainers": [
+              {
+                "command": [
+                  "/bin/sh",
+                  "-ceu",
+                  "chmod 0770 /var/lib/fugue-edge-control && chown 65532:65532 /var/lib/fugue-edge-control"
+                ],
+                "image": "fugue-artifact://edge-control-public-b",
+                "imagePullPolicy": "IfNotPresent",
+                "name": "state-permissions",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "add": [
+                      "CHOWN",
+                      "FOWNER"
+                    ],
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "runAsGroup": 0,
+                  "runAsNonRoot": false,
+                  "runAsUser": 0,
+                  "seccompProfile": {
+                    "type": "RuntimeDefault"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "mountPath": "/var/lib/fugue-edge-control",
+                    "name": "authority-state"
+                  }
+                ]
+              }
+            ],
+            "nodeSelector": {
+              "kubernetes.io/hostname": "vps-591f4447"
+            },
+            "securityContext": {
+              "fsGroup": 65532,
+              "fsGroupChangePolicy": "OnRootMismatch",
+              "runAsGroup": 65532,
+              "runAsNonRoot": true,
+              "runAsUser": 65532,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "serviceAccountName": "edge-control-public-b",
+            "terminationGracePeriodSeconds": 20,
+            "tolerations": [
+              {
+                "effect": "NoSchedule",
+                "key": "fugue.io/tenant",
+                "operator": "Exists"
+              }
+            ],
+            "volumes": [
+              {
+                "name": "authority-state",
+                "persistentVolumeClaim": {
+                  "claimName": "edge-control-public-b-state"
+                }
+              },
+              {
+                "name": "route-intent-ca",
+                "secret": {
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "ca.crt",
+                      "path": "ca.crt"
+                    }
+                  ],
+                  "secretName": "fugue-api-route-intent-ca-de"
+                }
+              },
+              {
+                "name": "inventory-writer-keyring",
+                "secret": {
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "keyring.json",
+                      "path": "cell-public-b.json"
+                    }
+                  ],
+                  "secretName": "fugue-cell-public-b-inventory-writer",
+                  "optional": true
+                }
+              },
+              {
+                "name": "group-signing-keyring",
+                "secret": {
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "keyring.json",
+                      "path": "cell-public-b.json"
+                    }
+                  ],
+                  "secretName": "fugue-cell-public-b-bundle-signing",
+                  "optional": true
+                }
+              },
+              {
+                "name": "group-reader-keyring",
+                "secret": {
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "keyring.json",
+                      "path": "cell-public-b.json"
+                    }
+                  ],
+                  "secretName": "fugue-cell-public-b-bundle-readers",
+                  "optional": true
+                }
+              },
+              {
+                "name": "group-recovery-keyring",
+                "secret": {
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "keyring.json",
+                      "path": "cell-public-b.json"
+                    }
+                  ],
+                  "secretName": "fugue-cell-public-b-recovery",
+                  "optional": true
+                }
+              },
+              {
+                "name": "control-pod-identity",
+                "projected": {
+                  "defaultMode": 384,
+                  "sources": [
+                    {
+                      "serviceAccountToken": {
+                        "path": "token",
+                        "expirationSeconds": 600
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "metadata": {
+        "annotations": {
+          "fugue.pro/edge-control-manifest-state": "materialization-ready",
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/authority-transition-role": "isolated-candidate"
+        },
+        "labels": {
+          "app.kubernetes.io/component": "edge-control",
+          "app.kubernetes.io/instance": "edge-control-public-b",
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "fugue.io/edge-group-id": "cell-public-b",
+          "fugue.io/authority-cell-id": "cell-public-b"
+        },
+        "name": "edge-control-public-b",
+        "namespace": "fugue-system"
+      },
+      "spec": {
+        "egress": [
+          {
+            "ports": [
+              {
+                "port": 8443,
+                "protocol": "TCP"
+              }
+            ],
+            "to": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-route-intent-tls": "true"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "ports": [
+              {
+                "port": 53,
+                "protocol": "UDP"
+              },
+              {
+                "port": 53,
+                "protocol": "TCP"
+              }
+            ],
+            "to": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "kube-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "k8s-app": "kube-dns"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "ingress": [
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-inventory-writer": "true",
+                    "fugue.io/edge-group-id": "cell-public-b"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "port": 8092,
+                "protocol": "TCP"
+              }
+            ]
+          },
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-client": "true",
+                    "fugue.io/edge-group-id": "cell-public-b"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "port": 8092,
+                "protocol": "TCP"
+              }
+            ]
+          },
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-recovery-client": "true",
+                    "fugue.io/edge-group-id": "cell-public-b"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "port": 8092,
+                "protocol": "TCP"
+              }
+            ]
+          },
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-authority-importer": "true"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "port": 8092,
+                "protocol": "TCP"
+              }
+            ]
+          },
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-route-intent-tls": "true"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "port": 8092,
+                "protocol": "TCP"
+              }
+            ]
+          }
+        ],
+        "podSelector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "edge-control",
+            "app.kubernetes.io/instance": "edge-control-public-b",
+            "app.kubernetes.io/name": "fugue-edge-control",
+            "fugue.io/edge-group-id": "cell-public-b"
+          }
+        },
+        "policyTypes": [
+          "Ingress",
+          "Egress"
+        ]
+      }
+    },
+    {
+      "apiVersion": "policy/v1",
+      "kind": "PodDisruptionBudget",
+      "metadata": {
+        "annotations": {
+          "fugue.pro/edge-control-manifest-state": "materialization-ready",
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/authority-transition-role": "isolated-candidate"
+        },
+        "labels": {
+          "app.kubernetes.io/component": "edge-control",
+          "app.kubernetes.io/instance": "edge-control-public-b",
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "fugue.io/edge-group-id": "cell-public-b",
+          "fugue.io/authority-cell-id": "cell-public-b"
+        },
+        "name": "edge-control-public-b",
+        "namespace": "fugue-system"
+      },
+      "spec": {
+        "minAvailable": 1,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "edge-control",
+            "app.kubernetes.io/instance": "edge-control-public-b",
+            "app.kubernetes.io/name": "fugue-edge-control",
+            "fugue.io/edge-group-id": "cell-public-b"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "annotations": {
+          "fugue.pro/edge-control-manifest-state": "materialization-ready",
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/edge-control-state-policy": "preserve",
+          "fugue.pro/release-retain-on-rollback": "true",
+          "fugue.pro/authority-transition-role": "isolated-candidate"
+        },
+        "labels": {
+          "app.kubernetes.io/component": "edge-control",
+          "app.kubernetes.io/instance": "edge-control-public-b",
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "fugue.io/edge-group-id": "cell-public-b",
+          "fugue.io/authority-cell-id": "cell-public-b"
+        },
+        "name": "edge-control-public-b-state",
+        "namespace": "fugue-system"
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "1Gi"
+          }
+        },
+        "storageClassName": "local-path"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "annotations": {
+          "fugue.pro/edge-control-manifest-state": "materialization-ready",
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/authority-transition-role": "isolated-candidate"
+        },
+        "labels": {
+          "app.kubernetes.io/component": "edge-control",
+          "app.kubernetes.io/instance": "edge-control-public-b",
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "fugue.io/edge-group-id": "cell-public-b",
+          "fugue.io/authority-cell-id": "cell-public-b"
+        },
+        "name": "edge-control-public-b",
+        "namespace": "fugue-system"
+      },
+      "spec": {
+        "ports": [
+          {
+            "name": "http",
+            "port": 8092,
+            "protocol": "TCP",
+            "targetPort": "health"
+          }
+        ],
+        "selector": {
+          "app.kubernetes.io/component": "edge-control",
+          "app.kubernetes.io/instance": "edge-control-public-b",
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "fugue.io/edge-group-id": "cell-public-b"
+        },
+        "type": "ClusterIP"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "automountServiceAccountToken": false,
+      "kind": "ServiceAccount",
+      "metadata": {
+        "annotations": {
+          "fugue.pro/edge-control-manifest-state": "materialization-ready",
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/authority-transition-role": "isolated-candidate"
+        },
+        "labels": {
+          "app.kubernetes.io/component": "edge-control",
+          "app.kubernetes.io/instance": "edge-control-public-b",
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "fugue.io/edge-group-id": "cell-public-b",
+          "fugue.io/authority-cell-id": "cell-public-b"
+        },
+        "name": "edge-control-public-b",
+        "namespace": "fugue-system"
+      }
+    }
+  ],
+  "kind": "ComponentResourceSet"
+}
