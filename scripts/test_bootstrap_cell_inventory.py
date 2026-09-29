@@ -1,8 +1,11 @@
 import copy
 import datetime
+import http.server
+import io
 import json
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import bootstrap_cell_inventory as b
 
@@ -81,6 +84,52 @@ class EnrollmentTests(unittest.TestCase):
         content["consumer_topology"]["dns_node_ids"] = ["dns-one"]
         with self.assertRaises(ValueError):
             b.parent(c, lambda *args: {"artifact": a})
+
+    def test_explicit_retry_can_only_replace_exact_expired_permission(self):
+        c, release = config(), {"id": "gray-one"}
+        with patch.object(b, "now", return_value=b.now() - datetime.timedelta(minutes=16)):
+            old, authorization = b.permission(c, release)
+        old["metadata"].update(uid="33333333-3333-3333-3333-333333333333", resourceVersion="123")
+        c["generation"] = 2
+        c["previous_permission"] = {"uid": old["metadata"]["uid"], "declaration_digest": old["metadata"]["annotations"][b.DECLARATION], "authorization_digest": b.digest(authorization), "generation": 1}
+        b.validate(c)
+        options = b.expired_predecessor(c, release, old)
+        self.assertEqual({"uid": old["metadata"]["uid"], "resourceVersion": "123"}, options["preconditions"])
+        for mutate in [lambda x: x["metadata"].update(uid="replacement"), lambda x: x["metadata"].update(resourceVersion=""), lambda x: x.update(immutable=False)]:
+            changed = copy.deepcopy(old)
+            mutate(changed)
+            with self.assertRaises(ValueError):
+                b.expired_predecessor(c, release, changed)
+        with patch.object(b, "now", return_value=b.timestamp(authorization["issued_at"]) + datetime.timedelta(minutes=1)), self.assertRaises(ValueError):
+            b.expired_predecessor(c, release, old)
+        with self.assertRaises(ValueError):
+            b.expired_predecessor(c, {"id": "different-gray"}, old)
+        with self.assertRaises(ValueError):
+            b.expired_predecessor(config(), release, old)
+
+    def test_permission_delete_sends_kubernetes_cas_preconditions(self):
+        received = []
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_DELETE(self):
+                received.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                self.send_response(200)
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        process = Mock(stdout=io.StringIO("Starting to serve on 127.0.0.1:" + str(server.server_port) + "\n"))
+        process.poll.return_value = None
+        options = {"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": "exact", "resourceVersion": "1"}}
+        try:
+            with patch.object(b.subprocess, "Popen", return_value=process), patch.object(b.select, "select", return_value=([process.stdout], [], [])):
+                b.delete_permission(config(), options)
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual([("/api/v1/namespaces/test-system/configmaps/cell-one-bootstrap", options)], received)
+        process.terminate.assert_called_once()
 
     def test_gray_publication_cannot_replace_foreign_or_full_authority(self):
         c = config()

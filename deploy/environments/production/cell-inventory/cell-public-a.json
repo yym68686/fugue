@@ -1,6 +1,6 @@
 {
   "schema": "fugue.cell-inventory-enrollment/v1",
-  "generation": 1,
+  "generation": 2,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-a",
   "namespace": "fugue-system",
@@ -28,5 +28,11 @@
     "samples": 3,
     "interval_seconds": 15,
     "timeout_seconds": 600
+  },
+  "previous_permission": {
+    "uid": "4b383005-c505-4fb9-aec8-3a3411608768",
+    "declaration_digest": "sha256:b8705c257a43ec2cdfdf24dba5b6548209a7dc885b45017d0aa2bee4b5b0d225",
+    "authorization_digest": "sha256:d2a033ca783a0755ac0911d88e47ffe101d804c28f9b3be7445958fbf4691b69",
+    "generation": 1
   }
 }

@@ -703,3 +703,12 @@ those observations. This provenance is never serialized into a heartbeat.
 Restart reads preserve the original eligibility deadline, and eligibility still
 stops after the first publication. Neither aggregated identity nor bootstrap
 eligibility is serving health.
+
+An operator can declare a new initial attempt after an expired permission by
+pinning its ConfigMap UID, prior declaration digest, authorization digest and
+generation in `previous_permission`. This applies only while activation remains
+absent and the exact Worker and gray parent are unchanged. The lane deletes
+only that expired object with Kubernetes UID/resourceVersion preconditions,
+then creates a new immutable permission. Ordinary retries never rotate it,
+and an unexpired permission, replaced object or established activation stops
+the operation. This configuration recovery does not rebuild either executable.
