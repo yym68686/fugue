@@ -14,6 +14,10 @@ import (
 // Only inventory and ranking observations enter this collector. No legacy DNS
 // publication, business route table or workload environment is consulted.
 func (s *Server) captureDirectDNSQueries(ctx context.Context, result *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy) error {
+	return s.captureDirectDNSQueriesWithNodes(ctx, result, policy, nil)
+}
+
+func (s *Server) captureDirectDNSQueriesWithNodes(ctx context.Context, result *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy, declaredNodes []model.EdgeNode) error {
 	if err := platformconfig.ValidateDNSQueryPolicy(&policy); err != nil {
 		return err
 	}
@@ -22,9 +26,13 @@ func (s *Server) captureDirectDNSQueries(ctx context.Context, result *platformIn
 	if result.Policy.DNSPlacementMode == platformconfig.DNSPlacementConsumerReadiness {
 		list = s.store.ListEdgeNodes
 	}
-	nodes, _, err := list("")
-	if err != nil {
-		return err
+	nodes := declaredNodes
+	if nodes == nil {
+		var err error
+		nodes, _, err = list("")
+		if err != nil {
+			return err
+		}
 	}
 	eligible := make([]model.EdgeNode, 0, len(nodes))
 	if result.Policy.DNSPlacementMode == platformconfig.DNSPlacementConsumerReadiness {

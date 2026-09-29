@@ -35,7 +35,7 @@ func TestPinnedApplicationDomainsIgnoreAmbientConfiguration(t *testing.T) {
 	if response.Code != 200 {
 		t.Fatal(response.Body.String())
 	}
-	p := platformproducer.Policy{InputSource: "business-static-intent", StaticIntentArtifactID: base.ID, StaticIntentDigest: base.ContentHash, RequireApplicationDomains: true}
+	p := platformproducer.Policy{TargetScope: "global", InputSource: "business-static-intent", StaticIntentArtifactID: base.ID, StaticIntentDigest: base.ContentHash, RequireApplicationDomains: true}
 	s.appBaseDomain, s.customDomainBaseDomain, s.dnsBundleTTL = "changed.test", "changed-dns.test", 1
 	s.reservedAppHosts = map[string]struct{}{"alias.customer.test": {}}
 	pinned, err := s.capturePlatformIntentForProducer(context.Background(), platformProducerPrincipal(), p)

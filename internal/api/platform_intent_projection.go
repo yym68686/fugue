@@ -145,6 +145,10 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	if static.EdgeTopology != nil {
 		clone := static.EdgeTopology.Clone()
 		projection.Intent.EdgeTopology = &clone
+		if static.AuthorityCellID != "" {
+			projection.Intent.Scope, projection.Intent.AuthorityCellID = static.Scope, static.AuthorityCellID
+			projection.Intent.DNSConsumers = static.Consumers
+		}
 		projection.Intent.Generation, err = platformconfig.PlatformIntentGeneration(projection.Intent)
 		if err != nil {
 			return platformIntentProjectionResponse{}, err
@@ -177,11 +181,17 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 	if err := projectACMEChallengeIntents(&projection, business.ACMEChallenges); err != nil {
 		return platformIntentProjectionResponse{}, errors.New("ACME migration configuration invalid")
 	}
-	dnsNodes, err := s.store.ListDNSNodes("")
+	var dnsNodes []model.DNSNode
+	var cellEdges []model.EdgeNode
+	if static.AuthorityCellID != "" {
+		cellEdges, dnsNodes, err = s.captureCellEndpoints(ctx, static)
+	} else {
+		dnsNodes, err = s.store.ListDNSNodes("")
+	}
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("DNS consumer declarations unavailable")
 	}
-	if len(dnsNodes) > 0 {
+	if len(dnsNodes) > 0 && static.AuthorityCellID == "" {
 		nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal)
 		if policyErr != nil || len(nodePolicies) == 0 {
 			return platformIntentProjectionResponse{}, errors.New("authoritative DNS consumer topology unavailable")
@@ -216,21 +226,25 @@ func (s *Server) capturePlatformIntentWithInputs(ctx context.Context, principal 
 		}
 	}
 	if len(dnsNodes) > 0 {
-		edges, _, edgeErr := s.store.ListEdgeNodes("")
-		if edgeErr != nil {
-			return platformIntentProjectionResponse{}, errors.New("DNS readiness edge topology unavailable")
+		edges := cellEdges
+		if static.AuthorityCellID == "" {
+			var edgeErr error
+			edges, _, edgeErr = s.store.ListEdgeNodes("")
+			if edgeErr != nil {
+				return platformIntentProjectionResponse{}, errors.New("DNS readiness edge topology unavailable")
+			}
+			nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal)
+			if policyErr != nil || len(nodePolicies) == 0 {
+				return platformIntentProjectionResponse{}, errors.New("DNS readiness authoritative topology unavailable")
+			}
+			edges = activeEdgeNodesForPolicy(edges, nodePolicies)
 		}
-		nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal)
-		if policyErr != nil || len(nodePolicies) == 0 {
-			return platformIntentProjectionResponse{}, errors.New("DNS readiness authoritative topology unavailable")
-		}
-		edges = activeEdgeNodesForPolicy(edges, nodePolicies)
 		if err := projectDNSReadinessWithPolicy(&projection, edges, time.Now().UTC(), dnsPolicy); err != nil {
 			return platformIntentProjectionResponse{}, errors.New("DNS readiness topology invalid")
 		}
 	}
 	if len(dnsNodes) > 0 && dnsPolicy != nil && dnsPolicy.DNSQueryPolicy != nil {
-		if err := s.captureDirectDNSQueries(ctx, &projection, *dnsPolicy.DNSQueryPolicy); err != nil {
+		if err := s.captureDirectDNSQueriesWithNodes(ctx, &projection, *dnsPolicy.DNSQueryPolicy, cellEdges); err != nil {
 			return platformIntentProjectionResponse{}, err
 		}
 	} else if len(dnsNodes) > 0 {

@@ -12,6 +12,8 @@ import (
 // ProjectionPolicyInput is the supported producer subset of PolicySnapshot.
 // Unused fields are rejected rather than silently ignored.
 type ProjectionPolicyInput struct {
+	AuthorityCellID          string                                    `json:"authority_cell_id,omitempty"`
+	ConsumerTopologyDigest   string                                    `json:"consumer_topology_digest,omitempty"`
 	DNSPlacementMode         string                                    `json:"dns_placement_mode,omitempty"`
 	DNSQueryPolicy           *platformconfig.DNSQueryPolicy            `json:"dns_query_policy,omitempty"`
 	MinimumHealthyEdges      *int                                      `json:"minimum_healthy_edges,omitempty"`
@@ -62,7 +64,13 @@ func DecodeProjectionPolicy(a model.PlatformArtifact, consumers []platformconfig
 	if _, _, err := p.RouteDefaults(); err != nil {
 		return fail()
 	}
-	if a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || a.ScopeKey != "global" || p.Scope != "global" || p.Generation != a.Generation || p.SchemaVersion != platformconfig.SchemaVersion || len(consumers) == 0 || platformconfig.ValidateDNSConsumers(consumers) != nil || len(p.Authorities) == 0 || len(p.Clients) != len(consumers) || p.DNSReadiness == nil || p.TLSReadiness == nil || len(p.Cohorts) == 0 {
+	if _, err := PolicyScopeForTarget(p.Scope); err != nil {
+		return fail()
+	}
+	if platformconfig.ValidatePolicySnapshot(platformconfig.PolicySnapshot{SchemaVersion: p.SchemaVersion, Generation: p.Generation, Scope: p.Scope, AuthorityCellID: p.AuthorityCellID, ConsumerTopologyDigest: p.ConsumerTopologyDigest, TrafficRolloutCohorts: p.Cohorts}) != nil {
+		return fail()
+	}
+	if a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || a.ScopeKey != p.Scope || p.Generation != a.Generation || p.SchemaVersion != platformconfig.SchemaVersion || len(consumers) == 0 || platformconfig.ValidateDNSConsumers(consumers) != nil || len(p.Authorities) == 0 || len(p.Clients) != len(consumers) || p.DNSReadiness == nil || p.TLSReadiness == nil || len(p.Cohorts) == 0 {
 		return fail()
 	}
 	if platformconfig.ValidateDNSAuthorityOwnership(p.Authorities, consumers) != nil || platformconfig.ValidateDNSClientPolicyOwnership(p.Clients, consumers) != nil || platformconfig.ValidateReadinessProbePolicy(p.DNSReadiness) != nil || platformconfig.ValidateReadinessProbePolicy(p.TLSReadiness) != nil || platformconfig.ValidateTrafficRolloutCohorts(p.Cohorts) != nil {
@@ -99,7 +107,11 @@ func (p ProjectionPolicyInput) RouteDefaults() (platformconfig.PolicySnapshot, b
 	if p.MinimumHealthyEdges == nil || p.MaxStaleSeconds == nil || p.RouteConstraints == nil || p.DNSRouteStateConstraints == nil || *p.MinimumHealthyEdges < 1 || *p.MinimumHealthyEdges > 10000 || *p.MaxStaleSeconds < 1 || *p.MaxStaleSeconds > 604800 {
 		return fail()
 	}
-	out := platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", Generation: p.Generation, MinimumHealthyEdges: *p.MinimumHealthyEdges, MaxStaleSeconds: *p.MaxStaleSeconds, RouteConstraints: *p.RouteConstraints, DNSRouteStateConstraints: *p.DNSRouteStateConstraints}
+	scope := p.Scope
+	if scope == "" {
+		scope = "global"
+	}
+	out := platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: scope, AuthorityCellID: p.AuthorityCellID, ConsumerTopologyDigest: p.ConsumerTopologyDigest, Generation: p.Generation, MinimumHealthyEdges: *p.MinimumHealthyEdges, MaxStaleSeconds: *p.MaxStaleSeconds, RouteConstraints: *p.RouteConstraints, DNSRouteStateConstraints: *p.DNSRouteStateConstraints}
 	if p.EdgeSelectionConstraints != nil {
 		out.EdgeSelectionConstraints = *p.EdgeSelectionConstraints
 	}

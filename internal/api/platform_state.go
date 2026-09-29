@@ -160,7 +160,7 @@ func validatePlatformPolicyArtifact(artifact model.PlatformArtifact) error {
 		_, err := agentedge.DecodeAuthorityPolicy(artifact)
 		return err
 	}
-	if artifact.ScopeKey == platformproducer.Scope {
+	if platformproducer.IsPolicyScope(artifact.ScopeKey) {
 		_, err := platformproducer.Decode(artifact)
 		return err
 	}

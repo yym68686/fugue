@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"fugue/internal/model"
@@ -23,21 +24,73 @@ func (s *Server) StartBackgroundPlatformConfiguration(ctx context.Context) {
 	if s == nil || s.store == nil {
 		return
 	}
+	// Each authority has its own scheduling and lock. A cell's unavailable
+	// dependencies cannot stall legacy publication or another cell's recovery.
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	started := map[string]context.CancelFunc{}
+	defer func() {
+		for _, cancel := range started {
+			cancel()
+		}
+	}()
+	start := func(scope string) {
+		workerCtx, cancel := context.WithCancel(ctx)
+		started[scope] = cancel
+		workers.Add(1)
+		go func() { defer workers.Done(); s.runPlatformConfigurationScope(workerCtx, scope) }()
+	}
+	start(platformproducer.Scope)
 	for ctx.Err() == nil {
-		_, err := s.store.WithAdvisoryLock(ctx, platformproducer.Actor, func() error {
+		scopes, err := s.store.ListPlatformProducerScopes()
+		if err != nil {
+			if s.log != nil {
+				s.log.Printf("platform producer discovery unavailable; retaining existing workers: %v", err)
+			}
+		} else {
+			wanted := map[string]bool{platformproducer.Scope: true}
+			for _, scope := range scopes {
+				wanted[scope] = true
+			}
+			for scope, cancel := range started {
+				if !wanted[scope] {
+					cancel()
+					delete(started, scope)
+				}
+			}
+			for _, scope := range scopes {
+				if _, exists := started[scope]; exists {
+					continue
+				}
+				start(scope)
+			}
+		}
+		if !waitPlatformProducer(ctx, 30*time.Second) {
+			return
+		}
+	}
+}
+
+func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string) {
+	lock := platformproducer.Actor
+	if scope != platformproducer.Scope {
+		lock += "|" + scope
+	}
+	for ctx.Err() == nil {
+		_, err := s.store.WithAdvisoryLock(ctx, lock, func() error {
 			if s.log != nil {
 				s.log.Printf("platform configuration producer leadership acquired")
 			}
 			var nextRun time.Time
 			lastAuthority := ""
 			for ctx.Err() == nil {
-				_, authority, _, readErr := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow")
+				_, authority, _, readErr := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, scope, "shadow")
 				if readErr != nil {
 					if s.log != nil {
 						s.log.Printf("platform configuration producer policy unavailable: %v", readErr)
 					}
 				} else if authority.ID != lastAuthority || !time.Now().Before(nextRun) {
-					interval, err := s.reconcilePlatformConfiguration(ctx)
+					interval, err := s.reconcilePlatformConfigurationScope(ctx, scope, nil)
 					if err != nil && s.log != nil {
 						s.log.Printf("platform configuration producer failed; retaining release: %v", err)
 					}
@@ -79,11 +132,15 @@ func (s *Server) reconcilePlatformConfiguration(ctx context.Context) (time.Durat
 }
 
 func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, capture func(context.Context, model.Principal) (platformIntentProjectionResponse, error)) (time.Duration, error) {
+	return s.reconcilePlatformConfigurationScope(ctx, platformproducer.Scope, capture)
+}
+
+func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope string, capture func(context.Context, model.Principal) (platformIntentProjectionResponse, error)) (time.Duration, error) {
 	interval := 30 * time.Second
 	if err := ctx.Err(); err != nil {
 		return interval, err
 	}
-	policyArtifact, authority, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow")
+	policyArtifact, authority, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, scope, "shadow")
 	if err != nil || !found {
 		return interval, err
 	}

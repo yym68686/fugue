@@ -325,7 +325,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	}
 	defer tx.Rollback()
 	if guard != nil {
-		if err := pgLockPromotionScope(ctx, tx, platformproducer.Scope, true); err != nil {
+		if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
 	}
@@ -510,7 +510,7 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	}
 	defer tx.Rollback()
 	if guard != nil {
-		if err := pgLockPromotionScope(ctx, tx, platformproducer.Scope, true); err != nil {
+		if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
 	}
@@ -701,7 +701,7 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 	}
 	defer tx.Rollback()
 	if guard != nil {
-		if err := pgLockPromotionScope(ctx, tx, platformproducer.Scope, true); err != nil {
+		if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
 	}

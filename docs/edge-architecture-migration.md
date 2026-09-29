@@ -55,7 +55,7 @@ selection require separate configuration and evidence.
 
 Neutral Controls obtain their RouteIntent identity through a live Pod-bound
 ServiceAccount exchange. The operator-managed annotation must name the exact
-cell, global scope and only `edge_route_intent`; its authority must match the
+cell, configured artifact scope and only `edge_route_intent`; its authority must match the
 Pod label. The API signs a two-minute credential with its independent
 RouteIntent keyring without exporting the issuer key. The private TLS listener
 admits only canonical GET RouteIntent and POST credential-exchange paths with
@@ -606,3 +606,17 @@ membership remain mandatory, and the exact selected public Service backend
 decides between old and new authorities. Missing cell observations cannot fall
 back to historical inventory health. Reading facts does not modify receipts,
 advance their cursors or transfer positive evidence between scopes.
+
+Independent configuration producers use `platform-config-producer:<cell-id>`
+policy lanes and `authority-cell:<cell-id>` output lanes. Their signed policy
+pins a static intent and projection policy in that same authority, including
+the complete consumer topology digest, application domains, route defaults,
+query strategy and consumer readiness mode. Each producer captures a current
+business snapshot; a cell never copies the current global traffic artifact.
+Physical endpoint reads use exact declared Kubernetes node names and public
+addresses only. Country inventory, historical health and loaded releases cannot
+change declared membership or supply serving evidence. Missing endpoints keep
+the previous publication. Scheduling and transactional policy locks are scoped
+independently, with bounded discovery and cancellation on shutdown. First full
+LKG and public handoff remain explicit verified steps; enrolling a shadow
+producer authorizes neither.

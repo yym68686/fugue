@@ -120,7 +120,16 @@ x-fugue-platform-producer:
   policy_schema: '#/components/schemas/PlatformProducerPolicy'
   semantics: >-
     A validated signed policy_snapshot in scope platform-config-producer controls
-    the built-in configuration producer through its current shadow release.
+    the global configuration producer through its current shadow release.
+    An independent cell uses platform-config-producer:<cell-id>, explicitly
+    declares authority_cell_id, and targets authority-cell:<cell-id>. Its pinned
+    static intent and projection policy must use that same target scope and
+    authority; the policy pins the complete declared consumer topology digest.
+    Cell producers require explicit application domains, complete route defaults,
+    DNS query policy and consumer_readiness placement even in shadow mode.
+    Physical endpoint addresses are observed independently from Kubernetes node
+    metadata; old inventory ownership and serving health are never rebound.
+    Cell authority does not authorize publication in global or another cell.
     The legacy business-migration producer source is retired and rejected, including
     for shadow mode. Historical artifacts remain readable. Every producer pins
     a signed intent by exact ID and digest. Modes are paused, shadow and serving; serving additionally requires bounded
@@ -143,7 +152,7 @@ x-fugue-platform-producer:
     complete ownership are rechecked at publication. Other migration inputs
     remain unchanged in this phase. The producer captures the existing business and
     migration inputs, compiles immutable intent/policy/route/DNS/TLS artifacts and
-    first publishes the global shadow ReleaseSet. The exact normalized runtime
+    first publishes the target scope's shadow ReleaseSet. The exact normalized runtime
     snapshot is retained in the existing digest-addressed content store and is
     readable through its signed artifact reference for deterministic replay.
     Shadow mode never promotes serving or LKG. Serving mode uses the same
@@ -33967,8 +33976,13 @@ components:
       type: object
       additionalProperties: false
       required: [schema_version, generation, mode, input_source, static_intent_artifact_id, static_intent_digest, target_scope, interval_seconds, refresh_seconds]
-      description: Signed operational policy stored as policy_snapshot in the platform-config-producer scope. Activate or pause through the existing artifact shadow release API; a draft has no effect.
+      description: Signed operational policy stored as policy_snapshot in platform-config-producer for global, or platform-config-producer:<cell-id> for an independent cell. Activate or pause through the existing artifact shadow release API; a draft has no effect. A cell producer explicitly declares authority_cell_id and pins static intent and projection policy in its exact target scope.
       properties:
+        authority_cell_id:
+          type: string
+          pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'
+          maxLength: 128
+          description: Required for an independent cell producer and absent for global. Binds producer policy scope, target_scope and both pinned input authorities.
         schema_version:
           type: string
           enum: [fugue.platform.producer/v1]
@@ -33994,7 +34008,7 @@ components:
         static_intent_artifact_id:
           type: string
           minLength: 1
-          description: Required exact immutable platform_intent ID in global scope.
+          description: Required exact immutable platform_intent ID in target_scope. An independent cell input carries the same authority_cell_id and complete declared Edge and DNS topology.
         static_intent_digest:
           type: string
           pattern: '^sha256:[a-f0-9]{64}$'
@@ -34002,7 +34016,7 @@ components:
         dns_policy_artifact_id:
           type: string
           minLength: 1
-          description: Optional exact validated global PolicySnapshot holding DNS declarations and optional route defaults. Supported fields are schema_version, generation, scope, dns_authorities, dns_client_policies, dns_readiness, tls_readiness, traffic_rollout_cohorts, dns_query_policy, dns_placement_mode; the optional route defaults group must include all four of minimum_healthy_edges (1..10000), max_stale_seconds (1..604800), route_constraints and dns_route_state_constraints. Explicit empty arrays are allowed; null, partial groups and unknown fields are rejected. Base route_constraints are defaults by hostname; an explicit business route policy takes precedence. Requires business-static-intent and DNS consumers in the pinned intent.
+          description: Optional exact validated PolicySnapshot in target_scope holding DNS declarations and optional route defaults. Required for a cell producer, where authority_cell_id and consumer_topology_digest bind the same declared cell membership. Supported fields are schema_version, generation, scope, authority_cell_id, consumer_topology_digest, dns_authorities, dns_client_policies, dns_readiness, tls_readiness, traffic_rollout_cohorts, dns_query_policy, dns_placement_mode; the optional route defaults group must include all four of minimum_healthy_edges (1..10000), max_stale_seconds (1..604800), route_constraints and dns_route_state_constraints. Explicit empty arrays are allowed; null, partial groups and unknown fields are rejected. Base route_constraints are defaults by hostname; an explicit business route policy takes precedence. Requires business-static-intent and DNS consumers in the pinned intent.
         dns_policy_digest:
           type: string
           pattern: '^sha256:[a-f0-9]{64}$'
@@ -34031,7 +34045,9 @@ components:
               template_zone: {type: string, minLength: 1}
         target_scope:
           type: string
-          enum: [global]
+          pattern: '^(global|authority-cell:cell-[a-z0-9]+(?:-[a-z0-9]+)*)$'
+          maxLength: 143
+          description: Exact output scope. A cell suffix must equal authority_cell_id; no fallback or publication across scopes.
         interval_seconds:
           type: integer
           minimum: 30

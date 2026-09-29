@@ -39,6 +39,9 @@ func (s *Server) capturePlatformIntentForProducer(ctx context.Context, principal
 		}
 		dns = &p
 	}
+	if err := platformproducer.ValidatePinnedSources(policy, static, dns); err != nil {
+		return platformIntentProjectionResponse{}, err
+	}
 	if policy.RequireDNSQueryPolicy && (dns == nil || dns.DNSQueryPolicy == nil) {
 		return platformIntentProjectionResponse{}, fmt.Errorf("pinned DNS query policy required")
 	}

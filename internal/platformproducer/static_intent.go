@@ -14,6 +14,8 @@ import (
 // environment, workload, or business table. Unsupported fields reject the input
 // instead of silently dropping executable intent during migration.
 type StaticIntentInput struct {
+	Scope              string
+	AuthorityCellID    string
 	ApplicationDomains *platformconfig.ApplicationDomainsIntent
 	EdgeTopology       *edgetopology.Intent
 	Routes             []model.PlatformRoute
@@ -25,7 +27,7 @@ func DecodeStaticIntent(a model.PlatformArtifact) (StaticIntentInput, error) {
 	fail := func() (StaticIntentInput, error) {
 		return StaticIntentInput{}, fmt.Errorf("static intent identity, scope or supported fields invalid")
 	}
-	if a.ArtifactKind != model.PlatformArtifactKindPlatformIntent || a.ScopeKey != "global" {
+	if _, err := PolicyScopeForTarget(a.ScopeKey); err != nil || a.ArtifactKind != model.PlatformArtifactKindPlatformIntent {
 		return fail()
 	}
 	raw, err := json.Marshal(a.Content)
@@ -41,7 +43,7 @@ func DecodeStaticIntent(a model.PlatformArtifact) (StaticIntentInput, error) {
 	if intent.SchemaVersion != platformconfig.SchemaVersion || intent.Scope != a.ScopeKey || intent.Generation != a.Generation || platformconfig.ValidatePlatformIntent(intent) != nil || len(intent.ACMEChallenges) > 0 || len(intent.TLS) > 0 || len(intent.CachePolicies) > 0 {
 		return fail()
 	}
-	out := StaticIntentInput{ApplicationDomains: platformconfig.CloneApplicationDomains(intent.ApplicationDomains), Consumers: platformconfig.NormalizePlatformIntent(intent).DNSConsumers}
+	out := StaticIntentInput{Scope: intent.Scope, AuthorityCellID: intent.AuthorityCellID, ApplicationDomains: platformconfig.CloneApplicationDomains(intent.ApplicationDomains), Consumers: platformconfig.NormalizePlatformIntent(intent).DNSConsumers}
 	if intent.EdgeTopology != nil {
 		clone := intent.EdgeTopology.Clone()
 		out.EdgeTopology = &clone

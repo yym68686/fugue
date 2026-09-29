@@ -8,7 +8,9 @@ import (
 	"regexp"
 	"strings"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 )
 
 const (
@@ -24,6 +26,7 @@ const (
 )
 
 type Policy struct {
+	AuthorityCellID           string               `json:"authority_cell_id,omitempty"`
 	Serving                   *ServingPolicy       `json:"serving,omitempty"`
 	RequireDNSQueryPolicy     bool                 `json:"require_dns_query_policy,omitempty"`
 	RequireRouteDefaults      bool                 `json:"require_route_defaults,omitempty"`
@@ -51,6 +54,21 @@ type ServingPolicy struct {
 
 var servingCohortRef = regexp.MustCompile(`^cohort=[a-z0-9][a-z0-9_-]{0,63}$`)
 
+func PolicyScopeForTarget(target string) (string, error) {
+	if target == "global" {
+		return Scope, nil
+	}
+	cell := strings.TrimPrefix(target, "authority-cell:")
+	if !strings.HasPrefix(cell, "cell-") || !edgetopology.ValidAuthorityID(cell) || target != platformconfig.AuthorityCellScope(cell) {
+		return "", fmt.Errorf("producer target scope invalid")
+	}
+	return Scope + ":" + cell, nil
+}
+
+// The whole prefix is reserved so malformed producer scopes cannot be decoded
+// as ordinary traffic policy snapshots.
+func IsPolicyScope(scope string) bool { return scope == Scope || strings.HasPrefix(scope, Scope+":") }
+
 type HostedZoneTemplate struct {
 	NodeID       string `json:"node_id"`
 	TemplateZone string `json:"template_zone"`
@@ -67,10 +85,17 @@ func Decode(artifact model.PlatformArtifact) (Policy, error) {
 	if err := d.Decode(&p); err != nil {
 		return p, fmt.Errorf("producer policy schema: %w", err)
 	}
-	if artifact.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || artifact.ScopeKey != Scope || p.SchemaVersion != Schema || strings.TrimSpace(p.Generation) == "" || p.Generation != artifact.Generation {
+	policyScope, scopeErr := PolicyScopeForTarget(p.TargetScope)
+	if scopeErr != nil || artifact.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || artifact.ScopeKey != policyScope || p.SchemaVersion != Schema || strings.TrimSpace(p.Generation) == "" || p.Generation != artifact.Generation {
 		return p, fmt.Errorf("producer policy identity or scope invalid")
 	}
-	if p.Mode != "paused" && p.Mode != "shadow" && p.Mode != "serving" || p.TargetScope != "global" || p.IntervalSeconds < 30 || p.IntervalSeconds > 900 || p.RefreshSeconds < 120 || p.RefreshSeconds > 3600 || p.RefreshSeconds < p.IntervalSeconds {
+	if p.TargetScope == "global" && p.AuthorityCellID != "" || p.TargetScope != "global" && (p.AuthorityCellID == "" || p.TargetScope != platformconfig.AuthorityCellScope(p.AuthorityCellID) || p.DNSPolicyArtifactID == "") {
+		return p, fmt.Errorf("producer cell authority or pinned policy missing")
+	}
+	if p.AuthorityCellID != "" && (!p.RequireApplicationDomains || !p.RequireRouteDefaults || !p.RequireDNSQueryPolicy) {
+		return p, fmt.Errorf("cell producer requires complete explicit configuration inputs")
+	}
+	if p.Mode != "paused" && p.Mode != "shadow" && p.Mode != "serving" || p.IntervalSeconds < 30 || p.IntervalSeconds > 900 || p.RefreshSeconds < 120 || p.RefreshSeconds > 3600 || p.RefreshSeconds < p.IntervalSeconds {
 		return p, fmt.Errorf("producer policy mode, source or schedule invalid")
 	}
 	if p.Mode == "serving" && (p.Serving == nil || p.InputSource != "business-static-intent" || !p.RequireApplicationDomains || !p.RequireRouteDefaults || !p.RequireDNSQueryPolicy) {

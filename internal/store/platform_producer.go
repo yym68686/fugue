@@ -34,7 +34,7 @@ func (s *Store) ReleaseProducedTrafficArtifact(id, policyReleaseID, channel, pre
 }
 
 func validateProducerPolicyPublication(a model.PlatformArtifact, channel string) error {
-	if a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || a.ScopeKey != platformproducer.Scope {
+	if a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || !platformproducer.IsPolicyScope(a.ScopeKey) {
 		return nil
 	}
 	if _, err := platformproducer.Decode(a); err != nil || channel != model.PlatformArtifactReleaseChannelShadow {
@@ -54,10 +54,14 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 		}
 		req.ReleaseChannel = state.PlatformArtifactReleases[i].ReleaseChannel
 	}
-	if (guard.Phase == "" && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow) || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || parent.ScopeKey != "global" || principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor || guard.PolicyReleaseID == "" || (guard.Phase != "rollback" && parent.Metadata[platformproducer.PolicyReleaseMetadata] != guard.PolicyReleaseID) || parent.Metadata[platformproducer.SourceDigestMetadata] == "" || (guard.Phase != "rollback" && (parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass)) {
+	if (guard.Phase == "" && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow) || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor || guard.PolicyReleaseID == "" || (guard.Phase != "rollback" && parent.Metadata[platformproducer.PolicyReleaseMetadata] != guard.PolicyReleaseID) || parent.Metadata[platformproducer.SourceDigestMetadata] == "" || (guard.Phase != "rollback" && (parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass)) {
 		return ErrConflict
 	}
-	policyLaneKey := platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, model.PlatformArtifactReleaseChannelShadow)
+	policyScope, err := platformproducer.PolicyScopeForTarget(parent.ScopeKey)
+	if err != nil {
+		return ErrConflict
+	}
+	policyLaneKey := platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, policyScope, model.PlatformArtifactReleaseChannelShadow)
 	policyLane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, policyLaneKey)
 	if !ok || policyLane.Frozen || policyLane.ActiveReleaseID != guard.PolicyReleaseID {
 		return ErrConflict
@@ -70,12 +74,12 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 		}
 	}
 	index := platformArtifactIndex(state.PlatformArtifacts, policyRelease.ArtifactID)
-	if index < 0 || policyRelease.Status != model.PlatformArtifactReleaseStatusActive || policyRelease.LaneKey != policyLaneKey || policyRelease.FencingToken != policyLane.FencingToken || policyRelease.FencingToken <= 0 || policyRelease.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || policyRelease.ScopeKey != platformproducer.Scope || policyRelease.ReleaseChannel != "shadow" {
+	if index < 0 || policyRelease.Status != model.PlatformArtifactReleaseStatusActive || policyRelease.LaneKey != policyLaneKey || policyRelease.FencingToken != policyLane.FencingToken || policyRelease.FencingToken <= 0 || policyRelease.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || policyRelease.ScopeKey != policyScope || policyRelease.ReleaseChannel != "shadow" {
 		return ErrConflict
 	}
 	artifact := state.PlatformArtifacts[index]
 	policy, err := platformproducer.Decode(artifact)
-	if err != nil || (policy.Mode != "shadow" && policy.Mode != "serving") || policyRelease.Generation != artifact.Generation || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
+	if err != nil || policy.TargetScope != parent.ScopeKey || (policy.Mode != "shadow" && policy.Mode != "serving") || policyRelease.Generation != artifact.Generation || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, keys).Pass {
 		return ErrConflict
 	}
 	// Recovery authorizes only the separately verified baseline. A broken
@@ -97,6 +101,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 			if policy.RequireApplicationDomains && static.ApplicationDomains == nil {
 				return ErrConflict
 			}
+			var projectionPolicy *platformproducer.ProjectionPolicyInput
 			if policy.DNSPolicyArtifactID != "" {
 				index := platformArtifactIndex(state.PlatformArtifacts, policy.DNSPolicyArtifactID)
 				if index < 0 {
@@ -110,6 +115,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 				if err != nil {
 					return ErrConflict
 				}
+				projectionPolicy = &input
 				if policy.Mode == "serving" && input.DNSPlacementMode != platformconfig.DNSPlacementConsumerReadiness {
 					return ErrConflict
 				}
@@ -121,6 +127,15 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 				}
 			} else if len(static.Consumers) > 0 || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
 				return ErrConflict
+			}
+			if err := platformproducer.ValidatePinnedSources(policy, static, projectionPolicy); err != nil {
+				return ErrConflict
+			}
+			if policy.AuthorityCellID != "" {
+				topology, err := platformconfig.TrafficConsumersFromRelease(parent)
+				if err != nil || topology == nil || topology.AuthorityCellID != policy.AuthorityCellID || projectionPolicy == nil || parent.Metadata["consumer_topology_digest"] != projectionPolicy.ConsumerTopologyDigest {
+					return ErrConflict
+				}
 			}
 		} else if parent.Metadata[platformproducer.StaticIntentIDMetadata] != "" || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
 			return ErrConflict
@@ -185,9 +200,13 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 	if guard == nil {
 		return nil
 	}
+	policyScope, err := platformproducer.PolicyScopeForTarget(parent.ScopeKey)
+	if err != nil {
+		return ErrConflict
+	}
 	state := &model.State{}
 	for _, key := range []string{
-		platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, model.PlatformArtifactReleaseChannelShadow),
+		platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, policyScope, model.PlatformArtifactReleaseChannelShadow),
 		platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, model.PlatformArtifactReleaseChannelShadow),
 		platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, model.PlatformArtifactReleaseChannelGray),
 		platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, model.PlatformArtifactReleaseChannelFull),
@@ -274,4 +293,18 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		state.PlatformArtifacts = append(state.PlatformArtifacts, child)
 	}
 	return validateProducerReleaseGuard(state, parent, req, principal, s.platformArtifactSigningKeyring(), guard)
+}
+
+// The policy release is immutable. Read its scope before taking the scope
+// lock; guard validation later requires this exact current lane and authority.
+// This preserves policy-before-output lock ordering for every independent cell.
+func pgLockProducerPolicy(ctx context.Context, tx *sql.Tx, guard *platformProducerReleaseGuard) error {
+	r, err := pgGetPlatformArtifactRelease(ctx, tx, guard.PolicyReleaseID, false)
+	if err != nil {
+		return err
+	}
+	if r.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || !platformproducer.IsPolicyScope(r.ScopeKey) {
+		return ErrConflict
+	}
+	return pgLockPromotionScope(ctx, tx, r.ScopeKey, true)
 }
