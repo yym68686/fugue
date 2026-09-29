@@ -283,6 +283,11 @@ x-fugue-tls-shadow-consumer:
     shadow ReleaseSet, including scope, release, fence, lineage, policy, hostname
     ownership and matching TLS allowlists. Its independent durable TLS cursor
     and local platform_tls_candidate status report staged/shadow_validated only.
+    An explicit cell-routes shadow publication verifies the exact signed parent
+    and both child memberships before reporting executable capability without
+    a serving bundle. It records no TLS readiness proof, applied generation or
+    LKG. Gray/full observations retain mandatory live certificate probes after
+    the independently authorized bundle has been applied by Caddy.
     Historical domain lifecycle events do not prove fresh certificate readiness.
     Optional signed tls_readiness policy controls bounded TLS handshakes to the
     local Caddy listener for hostnames in its group route projection also

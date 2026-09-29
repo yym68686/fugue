@@ -22,6 +22,7 @@ import (
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
+	"fugue/internal/routeartifact"
 )
 
 // TLS shadow evidence never attests artifact apply or changes serving authority.
@@ -179,9 +180,38 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 	if prev.Assignment.FencingToken > a.FencingToken || prev.Assignment.GenerationSequence > a.GenerationSequence {
 		return errors.New("TLS candidate replay rejected")
 	}
-	readiness, err := s.observePlatformTLSReadiness(ctx, c, route, payload)
-	if err != nil {
-		return err
+	var readiness *platformTLSReadinessReceipt
+	if payload.Policy.PublicationRole == platformconfig.PublicationRoleCellRoutes && a.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
+		// Capability enrollment must precede the first serving publication. The
+		// verified pair proves supported configuration, never live certificates.
+		parent, err := client.ReleaseSet(ctx, id, ra, rr)
+		if err != nil {
+			return err
+		}
+		projection, err := routeartifact.ProjectRelease(parent, route, ra, rr, bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs))
+		if err != nil {
+			return err
+		}
+		var set platformconfig.ReleaseSet
+		raw, _ := json.Marshal(parent.Content)
+		if json.Unmarshal(raw, &set) != nil || set.PublicationRole != platformconfig.PublicationRoleCellRoutes || platformconfig.ValidateTrafficCohortProjection(parent, artifact) != nil {
+			return errors.New("TLS shadow parent membership invalid")
+		}
+		member := false
+		for i, kind := range set.ArtifactKinds {
+			if kind == artifact.ArtifactKind {
+				member = set.ArtifactIDs[i] == artifact.ID
+			}
+		}
+		if !member {
+			return errors.New("TLS shadow is not a declared parent member")
+		}
+		c.ReleaseSet, c.TrafficRelease = &parent, projection.TrafficRelease
+	} else {
+		readiness, err = s.observePlatformTLSReadiness(ctx, c, route, payload)
+		if err != nil {
+			return err
+		}
 	}
 	c.TLSReadiness = readiness
 	if err := client.CheckAssignment(ctx, id, a); err != nil {
