@@ -42,6 +42,7 @@ type Observation struct {
 	sink               *o.AsyncSink
 	registry           *o.Registry
 	cancel             context.CancelFunc
+	slots              chan struct{}
 }
 
 func (Observation) CaddyModule() caddy.ModuleInfo {
@@ -78,6 +79,11 @@ func (h *Observation) Provision(ctx caddy.Context) error {
 		return e
 	}
 	h.registry = o.NewRegistry(h.Capacity)
+	capacity := h.Capacity
+	if capacity == 0 {
+		capacity = 256
+	}
+	h.slots = make(chan struct{}, capacity)
 	if server, ok := ctx.Value(caddyhttp.ServerCtxKey).(*caddyhttp.Server); ok {
 		server.RegisterConnContext(func(ctx context.Context, conn net.Conn) context.Context {
 			return context.WithValue(ctx, ingressConnectionKey{}, conn)
@@ -116,6 +122,17 @@ func (h *Observation) authorized(r *http.Request) bool {
 }
 
 func (h *Observation) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// Bound request observation memory before allocating event buffers. The
+	// telemetry capacity is not a business concurrency or admission limit.
+	select {
+	case h.slots <- struct{}{}:
+		defer func() { <-h.slots }()
+	default:
+		h.sink.Drop()
+		clone := r.Clone(r.Context())
+		clone.Header.Del(o.CorrelationHeader)
+		return next.ServeHTTP(w, clone)
+	}
 	rec := o.Record{NodeID: h.NodeID, ProcessID: processID, RequestID: o.ID(), Hop: h.Hop, Protocol: r.Proto, Build: h.Build, ConfigDigest: h.ConfigDigest, Correlation: "entry"}
 	if !h.Entry {
 		p, e := o.VerifyParent(r.Header.Get(o.CorrelationHeader), h.key, h.authorized(r), time.Now())

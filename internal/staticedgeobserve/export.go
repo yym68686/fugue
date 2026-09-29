@@ -45,6 +45,9 @@ func (s *AsyncSink) Submit(r Record) bool {
 		return false
 	}
 }
+
+// Drop records capacity loss when no per-request observer was allocated.
+func (s *AsyncSink) Drop() { s.dropped.Add(1) }
 func (s *AsyncSink) Run(ctx context.Context) {
 	defer s.closed.Store(true)
 	defer s.client.CloseIdleConnections()
