@@ -413,6 +413,34 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  front_restricted_egress_observation:
+    needs: [front_probe_transport, front_external_observation]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_external_observation.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-front-restricted-egress-observation, cancel-in-progress: false}
+    timeout-minutes: 15
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}'}
+      - name: Verify public Fronts from actual restricted application networks
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts.test_observe_front_restricted_egress
+          mkdir -p "$RUNNER_TEMP/front-restricted-egress"
+          while IFS= read -r listener; do
+            python3 scripts/observe_front_restricted_egress.py deploy/environments/production/front-egress-observation/consumers.json --listener "$listener" --evidence "$RUNNER_TEMP/front-restricted-egress/$listener.json"
+          done < <(python3 -c 'import json; print("\n".join(x["name"] for x in json.load(open("deploy/environments/production/front-probe-transport/listeners.json"))["listeners"]))')
+      - name: Retain tenant-network acceptance before any public handoff
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-restricted-egress-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-restricted-egress/*.json
+          if-no-files-found: error
+          retention-days: 30
+
   front_serving_stage:
     needs: [front_probe_transport]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' }}
@@ -461,8 +489,8 @@ jobs:
     outputs:
       selected: ${{ steps.handoff.outputs.selected }}
       recoverable: ${{ steps.handoff_witness.outcome == 'success' }}
-    needs: [front_probe_transport, front_external_observation, front_serving_stage]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_external_observation.result == 'success' && needs.front_serving_stage.result == 'success' }}
+    needs: [front_probe_transport, front_external_observation, front_serving_stage, front_restricted_egress_observation]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_external_observation.result == 'success' && needs.front_serving_stage.result == 'success' && needs.front_restricted_egress_observation.result == 'success' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-front-serving-handoff, cancel-in-progress: false}
@@ -484,7 +512,7 @@ jobs:
           fi
           if ! git diff --quiet "$base" HEAD -- "$config"; then
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/handoff_front_serving_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py deploy/environments/production/front-probe-transport deploy/environments/production/front-serving-stage scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
+            if git diff --quiet HEAD origin/main -- "$config" scripts/handoff_front_serving_transport.py scripts/observe_front_restricted_egress.py deploy/environments/production/front-egress-observation scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py deploy/environments/production/front-probe-transport deploy/environments/production/front-serving-stage scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
               python3 -m unittest scripts.test_handoff_front_serving_transport scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
               echo 'selected=true' >> "$GITHUB_OUTPUT"
             fi

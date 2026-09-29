@@ -392,3 +392,30 @@ legacy group activation. The target authority needs independently scoped keys,
 leases, inventory, current/LKG artifacts and equivalent route proofs before
 its transport can be selected. Source authority remains recoverable through
 the overlap and retained connections.
+
+Front externalIP handoff exposed a real restricted-egress regression: kube-proxy
+can DNAT a public address to a Front Pod IP on the source application node
+before kube-router evaluates its public-IP rule. Restricted applications then
+reject the private destination despite allowing public internet. Host and
+external-runner probes did not cover this path.
+
+The Controller now reconciles a separate, ManagedApp-owned NetworkPolicy only
+for applications explicitly using restricted egress with public internet
+enabled. It reads public Front serving/probe Service declarations from the
+configured control-plane namespace and verifies ownership, generation and
+spec digest. Each peer contains both that namespace and the exact Service
+pod selector, with only its published HTTP/TLS backend ports. Private CIDRs
+and management ports remain excluded. Staged internal-only Services grant
+nothing. Incomplete reads preserve the previous rule; revoking the application's
+permission deletes only its exact owned policy with UID/resourceVersion
+preconditions. Policy reconciliation is independent from application image
+and storage rollout, and does not restart application Pods.
+
+Every future Front handoff requires a read-only test from existing Ready
+restricted application containers. A pinned existing host observer verifies
+the exact CRI container/Pod identity, enters only its network namespace and
+uses normal TLS verification with the configured hostname. Public and probe
+paths must serve identical proofs; a host-reachable Front management port
+must remain inaccessible from the application namespace. Source and observer
+identities are rechecked before evidence retention. These gates complement
+external ingress and held-connection tests; none can substitute for another.

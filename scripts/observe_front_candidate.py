@@ -145,6 +145,28 @@ def parse_proof(response, nonce, certificate_until):
     return {"digest": digest, "version": exact("X-Fugue-Route-Bundle-Version"), "edge": exact("X-Fugue-Route-Edge-Id"), "group": exact("X-Fugue-Route-Edge-Group"), "traffic": binding, "app_traffic": response.getheader("X-Fugue-App-Traffic-Proof", "")}
 
 
+def stable_proof_pair(address, probe_port, host, path, node, group):
+    """Accept only an exact stable pair, retrying an observed publication race."""
+    for attempt in range(3):
+        current = proof(address, host, path)
+        candidate = proof(address, host, path, probe_port)
+        after = proof(address, host, path)
+        values = [current, candidate, after]
+        if any(value.get("edge") != node or value.get("group") != group for value in values):
+            raise ValueError("public/probe route proof has a different Edge or authority")
+        if current == candidate == after:
+            return {"proof": current, "publication_retries": attempt}
+        # Both samples of the same public endpoint must prove that publication
+        # advanced around the candidate read. A stable but different candidate,
+        # bad TLS, missing/negative evidence or wrong identity never retries.
+        if current != after and candidate in [current, after]:
+            continue
+        details = {"host": host, "differences": sorted(k for k in set(current) | set(candidate) | set(after) if current.get(k) != candidate.get(k) or after.get(k) != candidate.get(k)),
+                   "versions": [v.get("version") for v in values], "releases": [v.get("traffic", {}).get("release_id") for v in values]}
+        raise ValueError("public/probe route proofs differ: " + canonical(details))
+    raise ValueError("public/probe publication did not stabilize within the bounded observation")
+
+
 def observe(config):
     observations = []
     for index in range(config["samples"]):
