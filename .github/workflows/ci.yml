@@ -10,6 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  static_edge_observability:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version: '1.26.3', cache-dependency-path: 'static-caddy/go.sum'}
+      - name: Verify independent serving and bounded observations
+        run: make test-static-edge-observability
+      - name: Build immutable standalone artifacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: bash scripts/package_static_edge_observability.sh "$RUNNER_TEMP/static-edge-observability"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: static-edge-observability-${{ github.sha }}
+          path: ${{ runner.temp }}/static-edge-observability/*
+          if-no-files-found: error
+          retention-days: 30
+
   prepush:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest

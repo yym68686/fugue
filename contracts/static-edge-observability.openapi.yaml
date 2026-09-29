@@ -1,0 +1,220 @@
+openapi: 3.0.3
+info:
+  title: Independent Static Edge Observations
+  version: 1.0.0
+  description: Payload-free local observations. Unix sockets require filesystem authorization; remote queries use the separate manager mTLS contract. Missing or dropped observations never prove absence of delays or an external root cause. No business mutation operations.
+paths:
+  /status:
+    get:
+      operationId: localObservationStatus
+      responses:
+        '200':
+          description: Local collection capacity and loss counters.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Status'}
+  /records:
+    post:
+      operationId: localObservationSubmit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Record'}
+      responses:
+        '202': {description: Enqueued; not a durable-write guarantee.}
+        '400': {description: Invalid bounded metadata.}
+        '503': {description: Queue full; serving must continue.}
+  /query:
+    post:
+      operationId: localObservationQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Query'}
+      responses:
+        '200':
+          description: Bounded evidence with explicit coverage.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Result'}
+        '400': {description: Invalid bounded query.}
+components:
+  schemas:
+    Query:
+      type: object
+      additionalProperties: false
+      required: [since, until, limit]
+      properties:
+        request_id: {type: string, maxLength: 128}
+        since: {type: string, format: date-time}
+        until: {type: string, format: date-time}
+        min_read_ms: {type: number, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 200}
+    Coverage:
+      type: object
+      additionalProperties: false
+      required: [body, http_trace, http2_frames, http2_send_wait, http3_frames, peer, client]
+      properties:
+        body: {type: boolean}
+        http_trace: {type: boolean}
+        http2_frames: {type: boolean}
+        http2_send_wait: {type: boolean}
+        http3_frames: {type: boolean}
+        peer: {type: boolean}
+        client: {type: boolean}
+    Body:
+      type: object
+      additionalProperties: false
+      required: [bytes, read_calls, read_block_ms, max_read_block_ms, eof, error]
+      properties:
+        bytes: {type: integer, minimum: 0}
+        read_calls: {type: integer, minimum: 0}
+        read_block_ms: {type: number, minimum: 0}
+        max_read_block_ms: {type: number, minimum: 0}
+        first_byte_ms: {type: number, minimum: 0}
+        last_byte_ms: {type: number, minimum: 0}
+        read_end_ms: {type: number, minimum: 0}
+        read_pending_since_ms: {type: number, minimum: 0}
+        eof: {type: boolean}
+        error: {type: boolean}
+    Event:
+      type: object
+      additionalProperties: false
+      required: [kind, at_ms]
+      properties:
+        kind:
+          type: string
+          enum: [handler_enter, body_read_begin, body_read_end, body_close, response_write_begin, response_write_end, get_connection, got_connection, dns_begin, dns_end, connect_begin, connect_end, tls_begin, tls_end, request_headers_written, request_written, response_first_byte, h2_headers, h2_data_received, h2_body_consumed, h2_stream_window, h2_connection_window, h2_window_wait_begin, h2_window_wait_end, h2_data_sent, h2_reset, h2_goaway, client_body_produce_begin, client_body_produce_end, request_finished]
+        at_ms: {type: number, minimum: 0}
+        bytes: {type: integer, minimum: 0}
+        value: {type: integer}
+    HTTP2:
+      type: object
+      additionalProperties: false
+      required: [started_at, elapsed_ms, data_bytes, consumed_bytes, data_frames, max_unread_bytes, stream_credit, connection_credit, window_updates_queued, dropped]
+      properties:
+        started_at: {type: string, format: date-time}
+        elapsed_ms: {type: number, minimum: 0}
+        data_bytes: {type: integer, minimum: 0}
+        consumed_bytes: {type: integer, minimum: 0}
+        data_frames: {type: integer, minimum: 0}
+        first_data_ms: {type: number, minimum: 0}
+        last_data_ms: {type: number, minimum: 0}
+        max_unread_bytes: {type: integer, minimum: 0}
+        stream_credit: {type: integer}
+        connection_credit: {type: integer}
+        window_updates_queued: {type: integer, minimum: 0}
+        dropped: {type: integer, minimum: 0}
+    Record:
+      type: object
+      additionalProperties: false
+      required: [schema, node_id, process_id, request_id, span_id, attempt_id, hop, protocol, build, config_digest, started_at, observed_at, elapsed_ms, sequence, finished, canceled, correlation, coverage, body, response_bytes, response_write_ms, events, events_dropped, snapshots_dropped]
+      properties:
+        schema: {type: string, enum: [fugue.static-edge.observation/v1]}
+        node_id: {type: string, maxLength: 128}
+        process_id: {type: string, maxLength: 128}
+        request_id: {type: string, maxLength: 128}
+        span_id: {type: string, maxLength: 128}
+        parent_span_id: {type: string, maxLength: 128}
+        application_request_id: {type: string, maxLength: 128}
+        attempt_id: {type: string, maxLength: 128}
+        hop: {type: string, maxLength: 128}
+        protocol: {type: string, enum: [HTTP/1.0, HTTP/1.1, HTTP/2.0, HTTP/3.0]}
+        connection_id: {type: string, maxLength: 128}
+        stream_id: {type: integer, minimum: 0}
+        build: {type: string, maxLength: 128}
+        config_digest: {type: string, maxLength: 128}
+        started_at: {type: string, format: date-time}
+        observed_at: {type: string, format: date-time}
+        elapsed_ms: {type: number, minimum: 0}
+        sequence: {type: integer, minimum: 0}
+        finished: {type: boolean}
+        canceled: {type: boolean}
+        status: {type: integer, minimum: 0, maximum: 599}
+        correlation: {type: string, enum: [entry, authenticated_parent, local_parent, untrusted_client, missing_parent]}
+        coverage: {$ref: '#/components/schemas/Coverage'}
+        http2: {$ref: '#/components/schemas/HTTP2'}
+        body: {$ref: '#/components/schemas/Body'}
+        response_bytes: {type: integer, minimum: 0}
+        response_write_ms: {type: number, minimum: 0}
+        response_copy_ms: {type: number, minimum: 0}
+        tcp:
+          type: array
+          maxItems: 2
+          items: {$ref: '#/components/schemas/TCP'}
+        events: {type: array, maxItems: 128, items: {$ref: '#/components/schemas/Event'}}
+        events_dropped: {type: integer, minimum: 0}
+        snapshots_dropped: {type: integer, minimum: 0}
+        exporter_dropped_total: {type: integer, minimum: 0, description: Cumulative exporter loss across all requests in this process; not attributed to this request.}
+    Finding:
+      type: object
+      additionalProperties: false
+      required: [span_id, state, mechanism, evidence]
+      properties:
+        span_id: {type: string}
+        state: {type: string, enum: [confirmed, bounded, unknown]}
+        mechanism: {type: string, enum: [application_body_read_wait, body_not_observed, http2_sender_waited_for_credit]}
+        duration_ms: {type: number, minimum: 0}
+        evidence: {type: array, items: {type: string}}
+        missing: {type: array, items: {type: string}}
+    TCP:
+      type: object
+      additionalProperties: false
+      required: [at_ms, available, scope, rtt_us, rto_us, unacked, total_retrans, bytes_received, bytes_acked, bytes_sent]
+      properties:
+        at_ms: {type: number, minimum: 0}
+        available: {type: boolean}
+        scope: {type: string, enum: [connection_only]}
+        rtt_us: {type: integer, minimum: 0}
+        rto_us: {type: integer, minimum: 0}
+        unacked: {type: integer, minimum: 0}
+        total_retrans: {type: integer, minimum: 0}
+        bytes_received: {type: integer, minimum: 0}
+        bytes_acked: {type: integer, minimum: 0}
+        bytes_sent: {type: integer, minimum: 0}
+    Result:
+      type: object
+      additionalProperties: false
+      required: [schema, node_id, records, findings, truncated, records_dropped, retention_seconds, status, memory_evictions, disk_errors, disk_scan_complete]
+      properties:
+        schema: {type: string}
+        node_id: {type: string}
+        records: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/Record'}}
+        findings: {type: array, items: {$ref: '#/components/schemas/Finding'}}
+        truncated: {type: boolean}
+        records_dropped: {type: integer}
+        memory_evictions: {type: integer}
+        disk_errors: {type: integer}
+        disk_scan_complete: {type: boolean}
+        retention_seconds: {type: integer}
+        oldest_retained: {type: string, format: date-time}
+        status: {type: string, enum: [available, not_observed, storage_degraded]}
+    Status:
+      type: object
+      additionalProperties: false
+      required: [schema, node_id, records, max_records, queue_depth, queue_capacity, records_dropped, disk_errors, memory_evictions, retention_seconds, max_disk_bytes, ready, external_root_cause_guarantee]
+      properties:
+        schema: {type: string}
+        node_id: {type: string}
+        records: {type: integer}
+        max_records: {type: integer}
+        queue_depth: {type: integer}
+        queue_capacity: {type: integer}
+        records_dropped: {type: integer}
+        disk_errors: {type: integer}
+        memory_evictions: {type: integer}
+        retention_seconds: {type: integer}
+        max_disk_bytes: {type: integer}
+        ready: {type: boolean}
+        external_root_cause_guarantee: {type: boolean, enum: [false]}
+        remote:
+          type: object
+          additionalProperties: false
+          required: [sent, failed, dropped, queue_depth]
+          properties:
+            sent: {type: integer, minimum: 0}
+            failed: {type: integer, minimum: 0}
+            dropped: {type: integer, minimum: 0}
+            queue_depth: {type: integer, minimum: 0}

@@ -1,0 +1,828 @@
+--- a/modules/caddyhttp/reverseproxy/healthchecks.go
++++ b/modules/caddyhttp/reverseproxy/healthchecks.go
+@@ -389,6 +389,17 @@
+ // returned only if the health check fails to occur or if marking
+ // the host's health status fails.
+ func (h *Handler) doActiveHealthCheck(dialInfo DialInfo, hostAddr string, networkAddr string, upstream *Upstream) error {
++	// Never let a slow, older check overwrite a newer result or build a queue.
++	if !upstream.activeCheckMu.TryLock() {
++		h.HealthChecks.Active.logger.Info("active health check skipped", zap.String("handler", h.healthHandlerID), zap.String("host", upstream.Dial), zap.String("reason", "previous check still running"))
++		return nil
++	}
++	defer upstream.activeCheckMu.Unlock()
++	if err := h.ctx.Err(); err != nil {
++		return err
++	}
++	observation := newActiveProbeObservation(h.healthHandlerID, upstream.Dial)
++	defer observation.finish(h.HealthChecks.Active.logger, upstream)
+ 	// create the URL for the request that acts as a health check
+ 	u := &url.URL{
+ 		Scheme: "http",
+@@ -447,6 +458,8 @@
+ 	}
+ 	ctx = context.WithValue(ctx, caddyhttp.OriginalRequestCtxKey, *req)
+ 	req = req.WithContext(ctx)
++	req = req.WithContext(observation.context(req.Context()))
++	req.Header.Set("X-Fugue-Health-Check-ID", observation.id)
+ 
+ 	// set headers, using replacer
+ 	repl.Set("http.reverse_proxy.active.target_upstream", networkAddr)
+@@ -462,52 +475,34 @@
+ 	}
+ 
+ 	markUnhealthy := func() {
+-		// increment failures and then check if it has reached the threshold to mark unhealthy
+-		err := upstream.Host.countHealthFail(1)
+-		if err != nil {
+-			if c := h.HealthChecks.Active.logger.Check(zapcore.ErrorLevel, "could not count active health failure"); c != nil {
+-				c.Write(
+-					zap.String("host", upstream.Dial),
+-					zap.Error(err),
+-				)
+-			}
++		if h.ctx.Err() != nil {
++			observation.setOutcome("canceled")
+ 			return
+ 		}
+-		if upstream.Host.activeHealthFails() >= h.HealthChecks.Active.Fails {
+-			// dispatch an event that the host newly became unhealthy
+-			if upstream.setHealthy(false) {
+-				h.events.Emit(h.ctx, "unhealthy", map[string]any{"host": hostAddr})
+-				upstream.Host.resetHealth()
+-			}
++		observation.setOutcome("failed")
++		if upstream.recordActiveHealth(false, h.HealthChecks.Active.Passes, h.HealthChecks.Active.Fails) {
++			h.events.Emit(h.ctx, "unhealthy", map[string]any{"host": hostAddr, "handler": h.healthHandlerID, "check_id": observation.id})
+ 		}
+ 	}
+ 
+ 	markHealthy := func() {
+-		// increment passes and then check if it has reached the threshold to be healthy
+-		err := upstream.countHealthPass(1)
+-		if err != nil {
+-			if c := h.HealthChecks.Active.logger.Check(zapcore.ErrorLevel, "could not count active health pass"); c != nil {
+-				c.Write(
+-					zap.String("host", upstream.Dial),
+-					zap.Error(err),
+-				)
+-			}
++		if h.ctx.Err() != nil {
++			observation.setOutcome("canceled")
+ 			return
+ 		}
+-		if upstream.Host.activeHealthPasses() >= h.HealthChecks.Active.Passes {
+-			if upstream.setHealthy(true) {
+-				if c := h.HealthChecks.Active.logger.Check(zapcore.InfoLevel, "host is up"); c != nil {
+-					c.Write(zap.String("host", hostAddr))
+-				}
+-				h.events.Emit(h.ctx, "healthy", map[string]any{"host": hostAddr})
+-				upstream.Host.resetHealth()
+-			}
++		observation.setOutcome("passed")
++		if upstream.recordActiveHealth(true, h.HealthChecks.Active.Passes, h.HealthChecks.Active.Fails) {
++			if c := h.HealthChecks.Active.logger.Check(zapcore.InfoLevel, "host is up"); c != nil {
++				c.Write(zap.String("host", hostAddr), zap.String("handler", h.healthHandlerID))
++			}
++			h.events.Emit(h.ctx, "healthy", map[string]any{"host": hostAddr, "handler": h.healthHandlerID, "check_id": observation.id})
+ 		}
+ 	}
+ 
+ 	// do the request, being careful to tame the response body
+ 	resp, err := h.HealthChecks.Active.httpClient.Do(req) //nolint:gosec // no SSRF
+ 	if err != nil {
++		observation.setError(err)
+ 		if c := h.HealthChecks.Active.logger.Check(zapcore.InfoLevel, "HTTP request failed"); c != nil {
+ 			c.Write(
+ 				zap.String("host", hostAddr),
+@@ -517,6 +512,7 @@
+ 		markUnhealthy()
+ 		return nil
+ 	}
++	observation.setStatus(resp.StatusCode)
+ 	var body io.Reader = resp.Body
+ 	if h.HealthChecks.Active.MaxSize > 0 {
+ 		body = io.LimitReader(body, h.HealthChecks.Active.MaxSize)
+@@ -530,6 +526,7 @@
+ 	// if status code is outside criteria, mark down
+ 	if h.HealthChecks.Active.ExpectStatus > 0 {
+ 		if !caddyhttp.StatusCodeMatches(resp.StatusCode, h.HealthChecks.Active.ExpectStatus) {
++			observation.setPhase("unexpected_status")
+ 			if c := h.HealthChecks.Active.logger.Check(zapcore.InfoLevel, "unexpected status code"); c != nil {
+ 				c.Write(
+ 					zap.Int("status_code", resp.StatusCode),
+@@ -540,6 +537,7 @@
+ 			return nil
+ 		}
+ 	} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		observation.setPhase("unexpected_status")
+ 		if c := h.HealthChecks.Active.logger.Check(zapcore.InfoLevel, "status code out of tolerances"); c != nil {
+ 			c.Write(
+ 				zap.Int("status_code", resp.StatusCode),
+@@ -552,8 +550,10 @@
+ 
+ 	// if body does not match regex, mark down
+ 	if h.HealthChecks.Active.bodyRegexp != nil {
++		observation.setPhase("read_body")
+ 		bodyBytes, err := io.ReadAll(body)
+ 		if err != nil {
++			observation.setError(err)
+ 			if c := h.HealthChecks.Active.logger.Check(zapcore.InfoLevel, "failed to read response body"); c != nil {
+ 				c.Write(
+ 					zap.String("host", hostAddr),
+@@ -564,6 +564,7 @@
+ 			return nil
+ 		}
+ 		if !h.HealthChecks.Active.bodyRegexp.Match(bodyBytes) {
++			observation.setPhase("body_mismatch")
+ 			if c := h.HealthChecks.Active.logger.Check(zapcore.InfoLevel, "response body failed expectations"); c != nil {
+ 				c.Write(
+ 					zap.String("host", hostAddr),
+--- a/modules/caddyhttp/reverseproxy/hosts.go
++++ b/modules/caddyhttp/reverseproxy/hosts.go
+@@ -63,6 +63,10 @@
+ 	healthCheckPolicy         *PassiveHealthChecks
+ 	cb                        CircuitBreaker
+ 	unhealthy                 atomic.Int32 // status from active health checker
++	activeCheckMu             sync.Mutex   // at most one active probe per handler/upstream
++	activeHealthMu            sync.Mutex
++	activePasses              int
++	activeFails               int
+ }
+ 
+ // (pointer receiver necessary to avoid a race condition, since
+@@ -174,10 +178,8 @@
+ // Host is the basic, in-memory representation of the state of a remote host.
+ // Its fields are accessed atomically and Host values must not be copied.
+ type Host struct {
+-	numRequests  atomic.Int64
+-	fails        atomic.Int64
+-	activePasses atomic.Int64
+-	activeFails  atomic.Int64
++	numRequests atomic.Int64
++	fails       atomic.Int64
+ }
+ 
+ // NumRequests returns the number of active requests to the upstream.
+@@ -188,16 +190,6 @@
+ // Fails returns the number of recent failures with the upstream.
+ func (h *Host) Fails() int {
+ 	return int(h.fails.Load())
+-}
+-
+-// activeHealthPasses returns the number of consecutive active health check passes with the upstream.
+-func (h *Host) activeHealthPasses() int {
+-	return int(h.activePasses.Load())
+-}
+-
+-// activeHealthFails returns the number of consecutive active health check failures with the upstream.
+-func (h *Host) activeHealthFails() int {
+-	return int(h.activeFails.Load())
+ }
+ 
+ // countRequest mutates the active request count by
+@@ -220,30 +212,29 @@
+ 	return nil
+ }
+ 
+-// countHealthPass mutates the recent passes count by
+-// delta. It returns an error if the adjustment fails.
+-func (h *Host) countHealthPass(delta int) error {
+-	result := h.activePasses.Add(int64(delta))
+-	if result < 0 {
+-		return fmt.Errorf("count below 0: %d", result)
+-	}
+-	return nil
+-}
+-
+-// countHealthFail mutates the recent failures count by
+-// delta. It returns an error if the adjustment fails.
+-func (h *Host) countHealthFail(delta int) error {
+-	result := h.activeFails.Add(int64(delta))
+-	if result < 0 {
+-		return fmt.Errorf("count below 0: %d", result)
+-	}
+-	return nil
+-}
+-
+-// resetHealth resets the health check counters.
+-func (h *Host) resetHealth() {
+-	h.activePasses.Store(0)
+-	h.activeFails.Store(0)
++// recordActiveHealth atomically applies a consecutive result in this
++// handler's scope. Passive health and request counts remain shared by Host.
++func (u *Upstream) recordActiveHealth(passed bool, passes, fails int) bool {
++	u.activeHealthMu.Lock()
++	defer u.activeHealthMu.Unlock()
++	if passed {
++		u.activeFails = 0
++		if u.activePasses < passes {
++			u.activePasses++
++		}
++		return u.activePasses >= passes && u.setHealthy(true)
++	}
++	u.activePasses = 0
++	if u.activeFails < fails {
++		u.activeFails++
++	}
++	return u.activeFails >= fails && u.setHealthy(false)
++}
++
++func (u *Upstream) activeHealthStreaks() (passes, fails int) {
++	u.activeHealthMu.Lock()
++	defer u.activeHealthMu.Unlock()
++	return u.activePasses, u.activeFails
+ }
+ 
+ // healthy returns true if the upstream is not actively marked as unhealthy.
+--- a/modules/caddyhttp/reverseproxy/metrics.go
++++ b/modules/caddyhttp/reverseproxy/metrics.go
+@@ -1,99 +1,65 @@
+ package reverseproxy
+ 
+ import (
+-	"errors"
+-	"runtime/debug"
+-	"sync"
++	"fmt"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/prometheus/client_golang/prometheus"
+-	"go.uber.org/zap"
+-	"go.uber.org/zap/zapcore"
+-
+-	"github.com/caddyserver/caddy/v2"
+ )
+ 
+-var reverseProxyMetrics = struct {
+-	once             sync.Once
+-	upstreamsHealthy *prometheus.GaugeVec
+-	logger           *zap.Logger
+-}{}
++var healthHandlerSequence atomic.Uint64
++var healthProcessEpoch = time.Now().UnixNano()
+ 
+-func initReverseProxyMetrics(handler *Handler, registry *prometheus.Registry) {
+-	const ns, sub = "caddy", "reverse_proxy"
+-
+-	upstreamsLabels := []string{"upstream"}
+-	reverseProxyMetrics.once.Do(func() {
+-		reverseProxyMetrics.upstreamsHealthy = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+-			Namespace: ns,
+-			Subsystem: sub,
+-			Name:      "upstreams_healthy",
+-			Help:      "Health status of reverse proxy upstreams.",
+-		}, upstreamsLabels)
+-	})
+-
+-	// duplicate registration could happen if multiple sites with reverse proxy are configured; so ignore the error because
+-	// there's no good way to capture having multiple sites with reverse proxy. If this happens, the metrics will be
+-	// registered twice, but the second registration will be ignored.
+-	if err := registry.Register(reverseProxyMetrics.upstreamsHealthy); err != nil &&
+-		!errors.Is(err, prometheus.AlreadyRegisteredError{
+-			ExistingCollector: reverseProxyMetrics.upstreamsHealthy,
+-			NewCollector:      reverseProxyMetrics.upstreamsHealthy,
+-		}) {
+-		panic(err)
+-	}
+-
+-	reverseProxyMetrics.logger = handler.logger.Named("reverse_proxy.metrics")
++// IDs are unique across config reloads and processes. They are emitted with
++// probe events too; request/probe IDs are deliberately not metric labels.
++func nextHealthHandlerID() string {
++	return fmt.Sprintf("%x-%d", healthProcessEpoch, healthHandlerSequence.Add(1))
+ }
+ 
+-type metricsUpstreamsHealthyUpdater struct {
+-	handler *Handler
++type upstreamHealthCollector struct {
++	handler                        *Handler
++	healthy, active, passes, fails *prometheus.Desc
+ }
+ 
+-func newMetricsUpstreamsHealthyUpdater(handler *Handler, ctx caddy.Context) *metricsUpstreamsHealthyUpdater {
+-	initReverseProxyMetrics(handler, ctx.GetMetricsRegistry())
+-	reverseProxyMetrics.upstreamsHealthy.Reset()
+-
+-	return &metricsUpstreamsHealthyUpdater{handler}
++func newUpstreamHealthCollector(h *Handler) *upstreamHealthCollector {
++	desc := func(name, help string) *prometheus.Desc {
++		return prometheus.NewDesc("caddy_reverse_proxy_"+name, help,
++			[]string{"upstream"}, prometheus.Labels{"handler": h.healthHandlerID})
++	}
++	return &upstreamHealthCollector{handler: h,
++		healthy: desc("upstreams_healthy", "Combined upstream health in this handler at scrape time."),
++		active:  desc("upstreams_active_healthy", "Active health in this handler at scrape time, excluding passive failures."),
++		passes:  desc("active_health_consecutive_passes", "Consecutive active passes, saturated at the configured threshold."),
++		fails:   desc("active_health_consecutive_fails", "Consecutive active failures, saturated at the configured threshold."),
++	}
+ }
+ 
+-func (m *metricsUpstreamsHealthyUpdater) init() {
+-	go func() {
+-		defer func() {
+-			if err := recover(); err != nil {
+-				if c := reverseProxyMetrics.logger.Check(zapcore.ErrorLevel, "upstreams healthy metrics updater panicked"); c != nil {
+-					c.Write(
+-						zap.Any("error", err),
+-						zap.ByteString("stack", debug.Stack()),
+-					)
+-				}
+-			}
+-		}()
+-
+-		m.update()
+-
+-		ticker := time.NewTicker(10 * time.Second)
+-		for {
+-			select {
+-			case <-ticker.C:
+-				m.update()
+-			case <-m.handler.ctx.Done():
+-				ticker.Stop()
+-				return
+-			}
+-		}
+-	}()
++func (m *upstreamHealthCollector) Describe(out chan<- *prometheus.Desc) {
++	for _, d := range []*prometheus.Desc{m.healthy, m.active, m.passes, m.fails} {
++		out <- d
++	}
+ }
+ 
+-func (m *metricsUpstreamsHealthyUpdater) update() {
+-	for _, upstream := range m.handler.Upstreams {
+-		labels := prometheus.Labels{"upstream": upstream.Dial}
+-
+-		gaugeValue := 0.0
+-		if upstream.Healthy() {
+-			gaugeValue = 1.0
++// Collect reads each handler directly. There is no process-global GaugeVec,
++// periodic last-writer overwrite, or reset that clears another handler.
++func (m *upstreamHealthCollector) Collect(out chan<- prometheus.Metric) {
++	seen := make(map[string]bool)
++	for _, u := range m.handler.Upstreams {
++		if seen[u.Dial] {
++			continue
+ 		}
+-
+-		reverseProxyMetrics.upstreamsHealthy.With(labels).Set(gaugeValue)
++		seen[u.Dial] = true
++		passes, fails := u.activeHealthStreaks()
++		value := func(b bool) float64 {
++			if b {
++				return 1
++			}
++			return 0
++		}
++		out <- prometheus.MustNewConstMetric(m.healthy, prometheus.GaugeValue, value(u.Healthy()), u.Dial)
++		out <- prometheus.MustNewConstMetric(m.active, prometheus.GaugeValue, value(u.healthy()), u.Dial)
++		out <- prometheus.MustNewConstMetric(m.passes, prometheus.GaugeValue, float64(passes), u.Dial)
++		out <- prometheus.MustNewConstMetric(m.fails, prometheus.GaugeValue, float64(fails), u.Dial)
+ 	}
+ }
+--- a/modules/caddyhttp/reverseproxy/reverseproxy.go
++++ b/modules/caddyhttp/reverseproxy/reverseproxy.go
+@@ -245,9 +245,11 @@
+ 	connectionsCloseTimer *time.Timer
+ 	connectionsMu         *sync.Mutex
+ 
+-	ctx    caddy.Context
+-	logger *zap.Logger
+-	events *caddyevents.App
++	ctx             caddy.Context
++	logger          *zap.Logger
++	events          *caddyevents.App
++	healthHandlerID string
++	healthMetrics   *upstreamHealthCollector
+ }
+ 
+ // CaddyModule returns the Caddy module information.
+@@ -267,6 +269,7 @@
+ 	h.events = eventAppIface.(*caddyevents.App)
+ 	h.ctx = ctx
+ 	h.logger = ctx.Logger()
++	h.healthHandlerID = nextHealthHandlerID()
+ 	h.connections = make(map[io.ReadWriteCloser]openConnection)
+ 	h.connectionsMu = new(sync.Mutex)
+ 
+@@ -431,8 +434,10 @@
+ 		}
+ 	}
+ 
+-	upstreamHealthyUpdater := newMetricsUpstreamsHealthyUpdater(h, ctx)
+-	upstreamHealthyUpdater.init()
++	h.healthMetrics = newUpstreamHealthCollector(h)
++	if err := ctx.GetMetricsRegistry().Register(h.healthMetrics); err != nil {
++		return fmt.Errorf("registering upstream health metrics: %w", err)
++	}
+ 
+ 	return nil
+ }
+@@ -440,6 +445,9 @@
+ // Cleanup cleans up the resources made by h.
+ func (h *Handler) Cleanup() error {
+ 	err := h.cleanupConnections()
++	if h.healthMetrics != nil {
++		h.ctx.GetMetricsRegistry().Unregister(h.healthMetrics)
++	}
+ 
+ 	// remove hosts from our config from the pool
+ 	for _, upstream := range h.Upstreams {
+@@ -449,9 +457,15 @@
+ 	return err
+ }
+ 
+-// bodyNopCloserIfNotRead wraps a request body to prevent closing if not read, i.e., when
+-// dialing to upstream fails.
+-// It will close the body as normal if the body is read.
++// downstreamRequestBodyError preserves the origin of a request body read
++// failure through net/http's transport wrappers. A client upload failure
++// must not eject a healthy upstream or be replayed against another one.
++type downstreamRequestBodyError struct{ error }
++
++func (e downstreamRequestBodyError) Unwrap() error { return e.error }
++
++// bodyNopCloserIfNotRead wraps a request body to prevent closing if not read,
++// such as when dialing an upstream fails. It closes a body once read.
+ type bodyNopCloserIfNotRead struct {
+ 	io.ReadCloser
+ 	read int // tracks the number of bytes read, -1 when first Read returns 0, io.EOF
+@@ -467,6 +481,9 @@
+ 		b.read = -1
+ 	} else {
+ 		b.read += n
++	}
++	if err != nil && err != io.EOF {
++		err = downstreamRequestBodyError{err}
+ 	}
+ 	return n, err
+ }
+@@ -699,10 +716,17 @@
+ 
+ 	// proxy the request to that upstream
+ 	proxyErr = h.reverseProxy(w, r, origReq, repl, dialInfo, next)
+-	if proxyErr == nil || errors.Is(proxyErr, context.Canceled) {
+-		// context.Canceled happens when the downstream client
+-		// cancels the request, which is not our failure
++	if proxyErr == nil || errors.Is(proxyErr, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
++		// A canceled downstream request may retain a protocol-specific
++		// context cause (e.g. a QUIC remote error) instead of context.Canceled.
++		// Neither is an upstream failure and neither can be retried.
+ 		return true, nil
++	}
++
++	// Preserve the failed request's error without poisoning shared host health.
++	var downstreamBodyErr downstreamRequestBodyError
++	if errors.As(proxyErr, &downstreamBodyErr) {
++		return true, proxyErr
+ 	}
+ 
+ 	// if the roundtrip was successful, don't retry the request or
+--- /dev/null
++++ b/modules/caddyhttp/reverseproxy/activeprobe.go
+@@ -0,0 +1,115 @@
++package reverseproxy
++
++import (
++	"context"
++	"crypto/tls"
++	"errors"
++	"fmt"
++	"net"
++	"net/http/httptrace"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"go.uber.org/zap"
++)
++
++var activeProbeSequence atomic.Uint64
++
++// Only control metadata is retained: never URLs, headers, bodies or credentials.
++type activeProbeObservation struct {
++	mu                                            sync.Mutex
++	id, handler, host, phase, outcome, errorClass string
++	local, remote                                 string
++	started                                       time.Time
++	timings                                       map[string]float64
++	status                                        int
++	reused                                        bool
++}
++
++func newActiveProbeObservation(handler, host string) *activeProbeObservation {
++	return &activeProbeObservation{id: fmt.Sprintf("%x-%d", healthProcessEpoch, activeProbeSequence.Add(1)),
++		handler: handler, host: host, started: time.Now(), phase: "get_connection", outcome: "internal_error", timings: make(map[string]float64)}
++}
++
++func (o *activeProbeObservation) setPhase(phase string) {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	o.phase = phase
++}
++func (o *activeProbeObservation) setOutcome(outcome string) {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	o.outcome = outcome
++}
++func (o *activeProbeObservation) setStatus(status int) {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	o.status = status
++}
++func (o *activeProbeObservation) setError(err error) {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	var ne net.Error
++	switch {
++	case errors.Is(err, context.Canceled):
++		o.errorClass = "canceled"
++	case errors.As(err, &ne) && ne.Timeout():
++		o.errorClass = "timeout"
++	default:
++		o.errorClass = fmt.Sprintf("%T", err)
++	}
++}
++
++func (o *activeProbeObservation) mark(name, phase string) {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	o.timings[name] = float64(time.Since(o.started)) / float64(time.Millisecond)
++	o.phase = phase
++}
++
++func (o *activeProbeObservation) context(ctx context.Context) context.Context {
++	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
++		DNSStart:     func(httptrace.DNSStartInfo) { o.setPhase("dns") },
++		ConnectStart: func(string, string) { o.setPhase("tcp_connect") },
++		ConnectDone: func(_, _ string, err error) {
++			if err == nil {
++				o.mark("connect_ms", "get_connection")
++			}
++		},
++		TLSHandshakeStart: func() { o.setPhase("tls_handshake") },
++		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
++			if err == nil {
++				o.mark("tls_ms", "get_connection")
++			}
++		},
++		GotConn: func(info httptrace.GotConnInfo) {
++			o.mu.Lock()
++			defer o.mu.Unlock()
++			o.local, o.remote, o.reused = info.Conn.LocalAddr().String(), info.Conn.RemoteAddr().String(), info.Reused
++			o.timings["got_connection_ms"] = float64(time.Since(o.started)) / float64(time.Millisecond)
++			o.phase = "write_request"
++		},
++		WroteRequest: func(info httptrace.WroteRequestInfo) {
++			if info.Err == nil {
++				o.mark("write_completed_ms", "read_headers")
++			} else {
++				o.setError(info.Err)
++			}
++		},
++		GotFirstResponseByte: func() { o.mark("first_byte_ms", "read_headers") },
++	})
++}
++
++func (o *activeProbeObservation) finish(logger *zap.Logger, upstream *Upstream) {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	passes, fails := upstream.activeHealthStreaks()
++	logger.Info("active health probe completed",
++		zap.String("handler", o.handler), zap.String("check_id", o.id), zap.String("host", o.host),
++		zap.Int64("started_at_unix_ms", o.started.UnixMilli()), zap.Float64("duration_ms", float64(time.Since(o.started))/float64(time.Millisecond)),
++		zap.String("outcome", o.outcome), zap.String("phase", o.phase), zap.String("error_class", o.errorClass),
++		zap.String("local", o.local), zap.String("remote", o.remote), zap.Bool("connection_reused", o.reused),
++		zap.Int("status", o.status), zap.Any("timings_ms", o.timings), zap.Int("consecutive_passes", passes), zap.Int("consecutive_fails", fails),
++		zap.Bool("active_healthy", upstream.healthy()))
++}
+--- /dev/null
++++ b/modules/caddyhttp/reverseproxy/active_health_scope_test.go
+@@ -0,0 +1,185 @@
++package reverseproxy
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/caddyserver/caddy/v2"
++	"github.com/caddyserver/caddy/v2/modules/caddyevents"
++	"github.com/prometheus/client_golang/prometheus"
++	"go.uber.org/zap"
++	"go.uber.org/zap/zaptest/observer"
++)
++
++func scopeLab(t *testing.T, serve http.Handler) (*Handler, *Upstream, func()) {
++	t.Helper()
++	s := httptest.NewServer(serve)
++	t.Cleanup(s.Close)
++	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
++	t.Cleanup(cancel)
++	events := &caddyevents.App{}
++	if err := events.Provision(ctx); err != nil {
++		t.Fatal(err)
++	}
++	h := &Handler{ctx: ctx, events: events, logger: zap.NewNop(), healthHandlerID: nextHealthHandlerID(), HealthChecks: &HealthChecks{Active: &ActiveHealthChecks{
++		Method: "GET", Path: "/health", ExpectStatus: 403, Fails: 2, Passes: 2, logger: zap.NewNop(), httpClient: &http.Client{Timeout: time.Second},
++	}}}
++	u := &Upstream{Dial: strings.TrimPrefix(s.URL, "http://"), Host: new(Host)}
++	h.Upstreams = UpstreamPool{u}
++	return h, u, func() {
++		if err := h.doActiveHealthCheck(DialInfo{Upstream: u, Address: u.Dial, Network: "tcp"}, u.Dial, u.Dial, u); err != nil {
++			t.Error(err)
++		}
++	}
++}
++
++func TestActiveConsecutiveResults(t *testing.T) {
++	for _, tc := range []struct {
++		name    string
++		initial bool
++		codes   []int
++		want    []bool
++	}{
++		{"failures", true, []int{500, 403, 500, 500, 403, 500, 403, 403}, []bool{true, true, true, false, false, false, false, true}},
++		{"passes", false, []int{403, 500, 403, 403}, []bool{false, false, false, true}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var code atomic.Int32
++			_, u, check := scopeLab(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(int(code.Load())) }))
++			u.setHealthy(tc.initial)
++			for i, status := range tc.codes {
++				code.Store(int32(status))
++				check()
++				if u.healthy() != tc.want[i] {
++					t.Fatalf("step %d: healthy=%v want=%v", i, u.healthy(), tc.want[i])
++				}
++			}
++		})
++	}
++}
++
++func TestActiveHandlersIndependentPassiveShared(t *testing.T) {
++	bad := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
++	_, a, checkA := scopeLab(t, bad)
++	_, b, checkB := scopeLab(t, bad)
++	b.Host = a.Host
++	checkA()
++	checkB()
++	if !a.healthy() || !b.healthy() {
++		t.Fatal("one failure per handler ejected an upstream")
++	}
++	checkA()
++	if a.healthy() || !b.healthy() {
++		t.Fatal("active health leaked across handlers")
++	}
++	if err := a.Host.countFail(1); err != nil {
++		t.Fatal(err)
++	}
++	if b.Host.Fails() != 1 {
++		t.Fatal("passive sharing changed")
++	}
++}
++
++func TestActiveOverlapAndCanceledCheck(t *testing.T) {
++	started, release := make(chan struct{}), make(chan struct{})
++	var calls atomic.Int32
++	h, u, check := scopeLab(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls.Add(1)
++		close(started)
++		<-release
++		w.WriteHeader(500)
++	}))
++	var wg sync.WaitGroup
++	wg.Add(1)
++	go func() { defer wg.Done(); check() }()
++	<-started
++	check()
++	if calls.Load() != 1 {
++		t.Fatal("overlapping check reached backend")
++	}
++	close(release)
++	wg.Wait()
++	if !u.healthy() {
++		t.Fatal("overlap counted twice")
++	}
++	ctx, cancel := context.WithCancel(h.ctx.Context)
++	cancel()
++	h.ctx.Context = ctx
++	if err := h.doActiveHealthCheck(DialInfo{}, u.Dial, u.Dial, u); err == nil {
++		t.Fatal("canceled check started")
++	}
++	if calls.Load() != 1 || !u.healthy() {
++		t.Fatal("canceled check changed health")
++	}
++}
++
++func TestHealthMetricsHandlerAndCleanup(t *testing.T) {
++	serve := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
++	hA, a, _ := scopeLab(t, serve)
++	hB, b, _ := scopeLab(t, serve)
++	b.Dial = a.Dial
++	b.Host = a.Host
++	a.setHealthy(false)
++	registry := prometheus.NewPedanticRegistry()
++	ca, cb := newUpstreamHealthCollector(hA), newUpstreamHealthCollector(hB)
++	registry.MustRegister(ca, cb)
++	read := func() map[string]float64 {
++		families, err := registry.Gather()
++		if err != nil {
++			t.Fatal(err)
++		}
++		values := map[string]float64{}
++		for _, f := range families {
++			if f.GetName() == "caddy_reverse_proxy_upstreams_healthy" {
++				for _, m := range f.Metric {
++					for _, l := range m.Label {
++						if l.GetName() == "handler" {
++							values[l.GetValue()] = m.Gauge.GetValue()
++						}
++					}
++				}
++			}
++		}
++		return values
++	}
++	for i := 0; i < 2; i++ {
++		v := read()
++		if len(v) != 2 || v[hA.healthHandlerID] != 0 || v[hB.healthHandlerID] != 1 {
++			t.Fatalf("handler metrics: %v", v)
++		}
++	}
++	registry.Unregister(ca)
++	if v := read(); len(v) != 1 || v[hB.healthHandlerID] != 1 {
++		t.Fatalf("cleanup changed another handler: %v", v)
++	}
++	a.setHealthy(true)
++	registry.MustRegister(ca)
++	if v := read(); len(v) != 2 || v[hA.healthHandlerID] != 1 {
++		t.Fatalf("replacement: %v", v)
++	}
++}
++
++func TestActualProbeEvidence(t *testing.T) {
++	var checkID string
++	h, u, check := scopeLab(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		checkID = r.Header.Get("X-Fugue-Health-Check-ID")
++		w.WriteHeader(403)
++	}))
++	core, logs := observer.New(zap.InfoLevel)
++	h.HealthChecks.Active.logger = zap.New(core)
++	check()
++	entries := logs.FilterMessage("active health probe completed").All()
++	if len(entries) != 1 {
++		t.Fatalf("got %d completion records", len(entries))
++	}
++	f := entries[0].ContextMap()
++	if f["check_id"] != checkID || checkID == "" || f["outcome"] != "passed" || f["handler"] != h.healthHandlerID || f["host"] != u.Dial || f["local"] == "" || f["remote"] == "" {
++		t.Fatalf("incomplete evidence: %v", f)
++	}
++}
+--- /dev/null
++++ b/modules/caddyhttp/reverseproxy/downstream_body_errors_test.go
+@@ -0,0 +1,38 @@
++package reverseproxy
++
++import (
++	"errors"
++	"io"
++	"strings"
++	"testing"
++)
++
++type clientReadFailure struct{ cause error }
++
++func (b clientReadFailure) Read([]byte) (int, error) { return 0, b.cause }
++func (b clientReadFailure) Close() error             { return nil }
++
++func TestDownstreamBodyFailureProvenance(t *testing.T) {
++	cause := errors.New("client reset during upload")
++	b := &bodyNopCloserIfNotRead{ReadCloser: clientReadFailure{cause: cause}}
++	_, err := io.Copy(io.Discard, b)
++	var downstream downstreamRequestBodyError
++	if !errors.As(err, &downstream) || !errors.Is(err, cause) {
++		t.Fatalf("lost client error provenance: %v", err)
++	}
++	if err.Error() != cause.Error() {
++		t.Fatalf("changed original log message: %v", err)
++	}
++}
++
++func TestDownstreamBodyNormalEOF(t *testing.T) {
++	b := &bodyNopCloserIfNotRead{ReadCloser: io.NopCloser(strings.NewReader("complete upload"))}
++	data, err := io.ReadAll(b)
++	if err != nil || string(data) != "complete upload" {
++		t.Fatalf("normal body changed: %q %v", data, err)
++	}
++	n, err := b.Read(make([]byte, 1))
++	if n != 0 || err != io.EOF {
++		t.Fatalf("EOF contract changed: %d %v", n, err)
++	}
++}

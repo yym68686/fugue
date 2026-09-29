@@ -1,0 +1,21 @@
+--- a/modules/caddyhttp/app.go
++++ b/modules/caddyhttp/app.go
+@@ -497,6 +497,7 @@
+ 			// the handshake will never succeed with h2
+ 			// http2.ConfigureServer will enable the server to handle both h2 and h2c
+ 			h2server := new(http2.Server)
++			h2server.FugueObserveRequests = srv.FugueObservations
+ 			//nolint:errcheck
+ 			http2.ConfigureServer(srv.server, h2server)
+ 		}
+--- a/modules/caddyhttp/server.go
++++ b/modules/caddyhttp/server.go
+@@ -45,6 +45,8 @@
+ 
+ // Server describes an HTTP server.
+ type Server struct {
++	// FugueObservations enables metadata-only protocol hooks. Default off.
++	FugueObservations bool `json:"fugue_observations,omitempty"`
+ 	// Socket addresses to which to bind listeners. Accepts
+ 	// [network addresses](/docs/conventions#network-addresses)
+ 	// that may include port ranges. Listener addresses must

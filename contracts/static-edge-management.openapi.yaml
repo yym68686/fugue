@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Autonomous Static Edge Management
-  version: 1.0.0
+  version: 1.1.0
   description: Independent of the Fugue API. mTLS and restricted SSH stdio use identical typed RPC envelopes. Local Unix sockets are permission restricted. Configuration changes require signed bundles and an exact state revision. An uncertain result must be queried by its request_id; never silently replay a mutation.
 paths:
   /v1/static-edge/manager:
@@ -33,12 +33,13 @@ components:
         schema: {type: string, enum: [fugue.static-edge.rpc/v1]}
         edge_id: {type: string}
         request_id: {type: string, minLength: 1, maxLength: 96}
-        operation: {type: string, enum: [status, health, evidence, operation, plan, stage, adopt, activate, drain, undrain, rollback, recover, cert-status, cert-rotate]}
+        operation: {type: string, enum: [status, health, evidence, operation, plan, stage, adopt, activate, drain, undrain, rollback, recover, cert-status, cert-rotate, observability-status, request-query]}
         expected_revision: {type: integer, minimum: 0}
         target_digest: {type: string}
         lookup_request_id: {type: string}
         credential_slot: {type: string}
         bundle: {$ref: '#/components/schemas/Bundle'}
+        observation_query: {$ref: './static-edge-observability.openapi.yaml#/components/schemas/Query'}
     Bundle:
       type: object
       additionalProperties: false
@@ -71,6 +72,8 @@ components:
         result: {$ref: '#/components/schemas/Observed'}
         receipt: {$ref: '#/components/schemas/Receipt'}
         receipts: {type: array, items: {$ref: '#/components/schemas/Receipt'}}
+        observations: {$ref: './static-edge-observability.openapi.yaml#/components/schemas/Result'}
+        observation_status: {$ref: './static-edge-observability.openapi.yaml#/components/schemas/Status'}
     Observed:
       type: object
       additionalProperties: false

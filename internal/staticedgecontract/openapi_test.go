@@ -9,6 +9,7 @@ import (
 
 func TestStaticEdgeOpenAPIContract(t *testing.T) {
 	l := openapi3.NewLoader()
+	l.IsExternalRefsAllowed = true
 	doc, e := l.LoadFromFile("../../contracts/static-edge-management.openapi.yaml")
 	if e != nil {
 		t.Fatal(e)

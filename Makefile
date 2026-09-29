@@ -108,3 +108,7 @@ run-telemetry-agent: build-telemetry-agent
 build-static-edge-manager:
 	mkdir -p $(BIN_DIR)
 	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-static-edge-manager ./cmd/fugue-static-edge-manager
+
+.PHONY: test-static-edge-observability
+test-static-edge-observability:
+	bash scripts/test_static_edge_observability.sh

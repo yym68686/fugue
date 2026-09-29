@@ -15,6 +15,8 @@ import (
 	"io"
 	"regexp"
 	"strings"
+
+	"fugue/internal/staticedgeobserve"
 )
 
 const SchemaV1 = "fugue.static-edge/v1"
@@ -38,26 +40,29 @@ type Bundle struct {
 	SigningKeyID string          `json:"signing_key_id" yaml:"signing_key_id"`
 }
 type Request struct {
-	Schema           string  `json:"schema"`
-	EdgeID           string  `json:"edge_id"`
-	RequestID        string  `json:"request_id"`
-	Operation        string  `json:"operation"`
-	ExpectedRevision *uint64 `json:"expected_revision,omitempty"`
-	TargetDigest     string  `json:"target_digest,omitempty"`
-	LookupRequestID  string  `json:"lookup_request_id,omitempty"`
-	CredentialSlot   string  `json:"credential_slot,omitempty"`
-	Bundle           *Bundle `json:"bundle,omitempty"`
+	Schema           string                   `json:"schema"`
+	EdgeID           string                   `json:"edge_id"`
+	RequestID        string                   `json:"request_id"`
+	Operation        string                   `json:"operation"`
+	ExpectedRevision *uint64                  `json:"expected_revision,omitempty"`
+	TargetDigest     string                   `json:"target_digest,omitempty"`
+	LookupRequestID  string                   `json:"lookup_request_id,omitempty"`
+	CredentialSlot   string                   `json:"credential_slot,omitempty"`
+	Bundle           *Bundle                  `json:"bundle,omitempty"`
+	ObservationQuery *staticedgeobserve.Query `json:"observation_query,omitempty"`
 }
 type Response struct {
-	Schema    string    `json:"schema"`
-	RequestID string    `json:"request_id"`
-	EdgeID    string    `json:"edge_id"`
-	OK        bool      `json:"ok"`
-	Status    int       `json:"status"`
-	Error     string    `json:"error,omitempty"`
-	Result    *Observed `json:"result,omitempty"`
-	Receipt   *Receipt  `json:"receipt,omitempty"`
-	Receipts  []Receipt `json:"receipts,omitempty"`
+	Schema            string                    `json:"schema"`
+	RequestID         string                    `json:"request_id"`
+	EdgeID            string                    `json:"edge_id"`
+	OK                bool                      `json:"ok"`
+	Status            int                       `json:"status"`
+	Error             string                    `json:"error,omitempty"`
+	Result            *Observed                 `json:"result,omitempty"`
+	Receipt           *Receipt                  `json:"receipt,omitempty"`
+	Receipts          []Receipt                 `json:"receipts,omitempty"`
+	Observations      *staticedgeobserve.Result `json:"observations,omitempty"`
+	ObservationStatus map[string]any            `json:"observation_status,omitempty"`
 }
 type Observed struct {
 	EdgeID              string `json:"edge_id"`
@@ -93,7 +98,7 @@ type Receipt struct {
 
 func ReadOnly(op string) bool {
 	switch op {
-	case "status", "health", "evidence", "operation", "plan", "cert-status":
+	case "status", "health", "evidence", "operation", "plan", "cert-status", "observability-status", "request-query":
 		return true
 	}
 	return false

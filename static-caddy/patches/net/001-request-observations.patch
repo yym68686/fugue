@@ -1,0 +1,241 @@
+--- /dev/null
++++ b/http2/fugue_observation.go
+@@ -0,0 +1,121 @@
++// Copyright 2026 The Fugue Authors.
++// SPDX-License-Identifier: BSD-3-Clause
++// Optional metadata observations do not change HTTP/2 flow control.
++package http2
++
++import (
++	"context"
++	"sync/atomic"
++	"time"
++)
++
++type fugueObservationKey struct{}
++type fugueSendKey struct{}
++
++var fugueConnectionSequence atomic.Uint64
++
++type FugueSnapshot struct {
++	ConnectionID        uint64
++	StreamID            uint32
++	StartedAt           time.Time
++	ElapsedMS           float64
++	DataBytes           int64
++	ConsumedBytes       int64
++	DataFrames          uint64
++	FirstDataMS         *float64
++	LastDataMS          *float64
++	MaxUnreadBytes      int64
++	StreamCredit        int32
++	ConnectionCredit    int32
++	WindowUpdatesQueued uint64
++	Dropped             uint64
++}
++type FugueObservation struct {
++	start                                                        time.Time
++	v                                                            FugueSnapshot // immutable identity, initialized before publication
++	connectionCredit                                             *atomic.Int32
++	dataBytes, consumedBytes, firstDataNS, lastDataNS, maxUnread atomic.Int64
++	frames, windows                                              atomic.Uint64
++	streamCredit                                                 atomic.Int32
++}
++
++func FugueRequestObservation(ctx context.Context) *FugueObservation {
++	v, _ := ctx.Value(fugueObservationKey{}).(*FugueObservation)
++	return v
++}
++
++// Independent atomic counters are deliberately not an atomic network snapshot.
++// They cannot prove credit reached the peer. No observation lock touches the
++// HTTP/2 serve loop or the application reader.
++func (o *FugueObservation) Snapshot() (FugueSnapshot, bool) {
++	if o == nil {
++		return FugueSnapshot{}, false
++	}
++	v := o.v
++	v.ElapsedMS = float64(time.Since(o.start)) / float64(time.Millisecond)
++	v.DataBytes = o.dataBytes.Load()
++	v.ConsumedBytes = o.consumedBytes.Load()
++	v.DataFrames = o.frames.Load()
++	v.MaxUnreadBytes = o.maxUnread.Load()
++	v.StreamCredit = o.streamCredit.Load()
++	v.ConnectionCredit = o.connectionCredit.Load()
++	v.WindowUpdatesQueued = o.windows.Load()
++	if ns := o.firstDataNS.Load(); ns > 0 {
++		ms := float64(ns) / float64(time.Millisecond)
++		v.FirstDataMS = &ms
++	}
++	if ns := o.lastDataNS.Load(); ns > 0 {
++		ms := float64(ns) / float64(time.Millisecond)
++		v.LastDataMS = &ms
++	}
++	return v, true
++}
++func (o *FugueObservation) data(n int, credit int32) {
++	if o == nil {
++		return
++	}
++	total := o.dataBytes.Add(int64(n))
++	o.frames.Add(1)
++	o.streamCredit.Store(credit)
++	if n > 0 {
++		at := time.Since(o.start).Nanoseconds()
++		if at < 1 {
++			at = 1
++		}
++		o.firstDataNS.CompareAndSwap(0, at)
++		o.lastDataNS.Store(at)
++	}
++	unread := total - o.consumedBytes.Load()
++	for old := o.maxUnread.Load(); unread > old; old = o.maxUnread.Load() {
++		if o.maxUnread.CompareAndSwap(old, unread) {
++			break
++		}
++	}
++}
++func (o *FugueObservation) consumed(n int) {
++	if o != nil && n > 0 {
++		o.consumedBytes.Add(int64(n))
++	}
++}
++func (o *FugueObservation) window(credit int32, sent bool) {
++	if o != nil {
++		o.streamCredit.Store(credit)
++		if sent {
++			o.windows.Add(1)
++		}
++	}
++}
++
++// FugueSendObserver must be bounded and non-blocking. A cancelled wait is not
++// recorded as receiving credit. Hooks never inspect payload or headers.
++type FugueSendObserver interface {
++	HTTP2SendWait(begin bool, granted bool, stream uint32, streamCredit, connectionCredit int32)
++}
++
++func WithFugueSendObserver(ctx context.Context, o FugueSendObserver) context.Context {
++	return context.WithValue(ctx, fugueSendKey{}, o)
++}
++func fugueSendObserver(ctx context.Context) FugueSendObserver {
++	o, _ := ctx.Value(fugueSendKey{}).(FugueSendObserver)
++	return o
++}
+--- a/http2/server_common.go
++++ b/http2/server_common.go
+@@ -44,6 +44,8 @@
+ 
+ // Server is an HTTP/2 server.
+ type Server struct {
++	// FugueObserveRequests enables payload-free protocol accounting.
++	FugueObserveRequests bool
+ 	// MaxHandlers limits the number of http.Handler ServeHTTP goroutines
+ 	// which may run at a time over all connections.
+ 	// Negative or zero no limit.
+--- a/http2/server.go
++++ b/http2/server.go
+@@ -48,6 +48,7 @@
+ 	"strconv"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"golang.org/x/net/http/httpguts"
+@@ -413,6 +414,8 @@
+ }
+ 
+ type serverConn struct {
++	fugueID     uint64
++	fugueCredit atomic.Int32
+ 	// Immutable:
+ 	srv              *Server
+ 	hs               *http.Server
+@@ -518,6 +521,7 @@
+ // *responseWriter{,State} itself, as the Handler ending nils out the
+ // responseWriter's state field.
+ type stream struct {
++	fugueObservation *FugueObservation
+ 	// immutable:
+ 	sc        *serverConn
+ 	id        uint32
+@@ -1764,6 +1768,10 @@
+ 		if !takeInflows(&sc.inflow, &st.inflow, f.Length) {
+ 			return sc.countError("flow_on_data_length", streamError(id, ErrCodeFlowControl))
+ 		}
++		if sc.srv.FugueObserveRequests {
++			sc.fugueCredit.Store(sc.inflow.avail)
++			st.fugueObservation.data(len(data), st.inflow.avail)
++		}
+ 
+ 		if len(data) > 0 {
+ 			st.bodyBytes += int64(len(data))
+@@ -2223,6 +2231,16 @@
+ 		Body:       body,
+ 		Trailer:    res.Trailer,
+ 	}).WithContext(st.ctx)
++	if sc.srv.FugueObserveRequests {
++		if sc.fugueID == 0 {
++			sc.fugueID = fugueConnectionSequence.Add(1)
++		}
++		now := time.Now()
++		sc.fugueCredit.Store(sc.inflow.avail)
++		st.fugueObservation = &FugueObservation{start: now, connectionCredit: &sc.fugueCredit, v: FugueSnapshot{ConnectionID: sc.fugueID, StreamID: st.id, StartedAt: now.UTC(), StreamCredit: st.inflow.avail}}
++		st.fugueObservation.streamCredit.Store(st.inflow.avail)
++		req = req.WithContext(context.WithValue(req.Context(), fugueObservationKey{}, st.fugueObservation))
++	}
+ 	rw := sc.newResponseWriter(st, req)
+ 	return rw, req, nil
+ }
+@@ -2384,6 +2402,7 @@
+ // Notes that the handler for the given stream ID read n bytes of its body
+ // and schedules flow control tokens to be sent.
+ func (sc *serverConn) noteBodyReadFromHandler(st *stream, n int, err error) {
++	st.fugueObservation.consumed(n)
+ 	sc.serveG.checkNotOn() // NOT on
+ 	if n > 0 {
+ 		select {
+@@ -2415,9 +2434,13 @@
+ 	var send int32
+ 	if st == nil {
+ 		send = sc.inflow.add(n)
++		if sc.srv.FugueObserveRequests {
++			sc.fugueCredit.Store(sc.inflow.avail)
++		}
+ 	} else {
+ 		streamID = st.id
+ 		send = st.inflow.add(n)
++		st.fugueObservation.window(st.inflow.avail, send != 0)
+ 	}
+ 	if send == 0 {
+ 		return
+--- a/http2/transport.go
++++ b/http2/transport.go
+@@ -1628,8 +1628,15 @@
+ func (cs *clientStream) awaitFlowControl(maxBytes int) (taken int32, err error) {
+ 	cc := cs.cc
+ 	ctx := cs.ctx
++	observer := fugueSendObserver(ctx)
++	waiting := false
+ 	cc.mu.Lock()
+ 	defer cc.mu.Unlock()
++	defer func() {
++		if waiting && observer != nil {
++			observer.HTTP2SendWait(false, taken > 0 && err == nil, cs.ID, cs.flow.n, cc.flow.n)
++		}
++	}()
+ 	for {
+ 		if cc.closed {
+ 			return 0, errClientConnClosed
+@@ -1657,6 +1664,10 @@
+ 			}
+ 			cs.flow.take(take)
+ 			return take, nil
++		}
++		if observer != nil && !waiting {
++			waiting = true
++			observer.HTTP2SendWait(true, false, cs.ID, cs.flow.n, cc.flow.n)
+ 		}
+ 		cc.cond.Wait()
+ 	}

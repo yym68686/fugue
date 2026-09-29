@@ -31,6 +31,7 @@ type settings struct {
 	CredentialSlots       map[string]m.CredentialSlot `json:"credential_slots"`
 	InitialCredentialSlot string                      `json:"initial_credential_slot"`
 	Caddy                 m.CaddyConfig               `json:"caddy"`
+	ObservationSocket     string                      `json:"observation_socket,omitempty"`
 }
 
 func main() {
@@ -78,7 +79,7 @@ func run(args []string) error {
 	if e != nil {
 		return e
 	}
-	manager, e := m.New(m.Config{EdgeID: cfg.EdgeID, Role: cfg.Role, StateDir: cfg.StateDir, VerificationKeys: keys, Runtime: runtime, Credentials: credentials})
+	manager, e := m.New(m.Config{EdgeID: cfg.EdgeID, Role: cfg.Role, StateDir: cfg.StateDir, VerificationKeys: keys, Runtime: runtime, Credentials: credentials, ObservationSocket: cfg.ObservationSocket})
 	if e != nil {
 		return e
 	}

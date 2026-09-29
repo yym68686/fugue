@@ -15,12 +15,13 @@ import (
 )
 
 type Config struct {
-	Role             string
-	EdgeID           string
-	StateDir         string
-	VerificationKeys map[string]ed25519.PublicKey
-	Runtime          Runtime
-	Credentials      Credentials
+	Role              string
+	EdgeID            string
+	StateDir          string
+	VerificationKeys  map[string]ed25519.PublicKey
+	Runtime           Runtime
+	Credentials       Credentials
+	ObservationSocket string
 }
 type Credentials interface {
 	Validate(string) error
@@ -57,6 +58,9 @@ type Manager struct {
 }
 
 func New(cfg Config) (*Manager, error) {
+	if cfg.ObservationSocket != "" && !filepath.IsAbs(cfg.ObservationSocket) {
+		return nil, errors.New("observation socket must be absolute")
+	}
 	if !c.ValidID(cfg.EdgeID) || (cfg.Role != "edge" && cfg.Role != "origin") || !filepath.IsAbs(cfg.StateDir) || cfg.Runtime == nil || len(cfg.VerificationKeys) == 0 {
 		return nil, errors.New("manager requires identity, role, absolute state_dir, runtime and verification keys")
 	}
@@ -231,6 +235,8 @@ func (m *Manager) Execute(req c.Request, actor, grant string) c.Response {
 		}
 	}
 	switch req.Operation {
+	case "observability-status", "request-query":
+		return m.observationQuery(ctx, req)
 	case "status", "health", "cert-status":
 		out := m.base(req)
 		obs := m.observed(ctx)
