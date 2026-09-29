@@ -18,6 +18,37 @@ def fixture():
 
 
 class ActivationTests(unittest.TestCase):
+    def test_checkpoint_log_race_retries_without_assessing_mixed_snapshots(self):
+        config, authority, public = fixture()
+        clock = active.now()
+        checkpoint = {"activated": True, "last_grant": {"signed": "old"}}
+        changed = {"activated": True, "last_grant": {"signed": "new"}}
+        deployment = {"spec": {"replicas": 1, "selector": {"matchLabels": {"app": "agent"}}, "template": {"metadata": {"annotations": {"fugue.pro/source-commit": config["consumer"]["sourceSha"]}}}}, "status": {"readyReplicas": 1}}
+        pod = {"metadata": {"name": "agent-pod", "uid": "pod-a"}, "status": {"containerStatuses": [{"name": "agent", "ready": True, "restartCount": 0, "imageID": "ghcr.io/example/agent@sha256:" + "b" * 64}]}}
+        grant = {"mode": "active", "valid_until": (clock + datetime.timedelta(seconds=60)).isoformat(), "policy_reference": {"artifact_id": authority["artifact"]["id"], "release_id": authority["release"]["id"]}}
+        baseline = (clock - datetime.timedelta(seconds=20)).isoformat()
+        replies = [json.dumps(deployment), json.dumps({"items": [pod]}), json.dumps(checkpoint), "fixed complete history", json.dumps(changed)]
+        with patch.object(active, "now", return_value=clock), patch.object(active, "kubectl", side_effect=replies) as read, patch.object(active, "verify_grant", return_value={"verified": True, "digest": "old", "grant": grant}), patch.object(active, "measured_choice") as assess:
+            with self.assertRaises(active.ObservationChanged) as caught:
+                active._sample_once(config, None, authority, "active", public, "validator", baseline)
+            assess.assert_not_called()
+            self.assertEqual(caught.exception.deadline, clock + datetime.timedelta(seconds=10))
+            self.assertEqual(caught.exception.log_start_at, baseline)
+            self.assertEqual(caught.exception.pod_uid, "pod-a")
+            self.assertEqual(read.call_args_list[2], read.call_args_list[4])
+        observed = {"pod_uid": "pod-a", "image_id": pod["status"]["containerStatuses"][0]["imageID"], "log_start_at": baseline}
+        with patch.object(active, "now", return_value=clock), patch.object(active.time, "sleep"), patch.object(active, "_sample_once", side_effect=[caught.exception, observed]) as read:
+            self.assertEqual(active.sample(config, None, authority, "active", public, "validator", baseline)["snapshot_retries"], 1)
+            self.assertEqual(read.call_args_list[1].args[6], baseline)
+        # A genuine control failure in the retained interval is not retried or
+        # hidden by the earlier permission renewal race.
+        with patch.object(active, "now", return_value=clock), patch.object(active.time, "sleep"), patch.object(active, "_sample_once", side_effect=[caught.exception, ValueError("recent canary control or permission gap observed")]):
+            with self.assertRaisesRegex(ValueError, "permission gap"):
+                active.sample(config, None, authority, "active", public, "validator", baseline)
+        with patch.object(active, "now", side_effect=[clock, clock + datetime.timedelta(seconds=11)]), patch.object(active.time, "sleep"), patch.object(active, "_sample_once", side_effect=[caught.exception, observed]):
+            with self.assertRaisesRegex(ValueError, "original deadline"):
+                active.sample(config, None, authority, "active", public, "validator", baseline)
+
     def test_initial_window_starts_at_verified_current_grant_health(self):
         clock = active.now()
         def line(seconds, grant, degraded=False):

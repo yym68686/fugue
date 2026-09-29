@@ -306,6 +306,15 @@ only until the original recovery deadline. A fresh signed grant, measured
 diversity and current heartbeat must still be observed before returning a
 positive sample. Neither a new grant nor another poll can reset that deadline.
 
+Checkpoint and log reads are also aligned around renewal. If the durable
+checkpoint changes while reading the fixed log interval, the observer rereads
+the same Pod and image without moving the interval's start. The first race
+sets a ten-second read deadline bounded by the original grant's expiry margin;
+later renewals cannot extend it. A successful reread still validates the full
+history, original recovery bounds and the independently signed current grant.
+Its witness records snapshot retries. A successor's healthy log cannot make
+an old checkpoint pass, and a retained control failure still rejects the window.
+
 For a read-only consistency check against the currently visible Edge nodes:
 
 ```sh

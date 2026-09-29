@@ -90,6 +90,10 @@ class RecoveryPending(ValueError):
         self.deadline = deadline
 
 
+class ObservationChanged(RecoveryPending):
+    """Checkpoint renewal raced with the independently read log snapshot."""
+
+
 def healthy_window_start(logs, grant_digest):
     lines = logs.splitlines()
     anchor = None
@@ -224,6 +228,17 @@ def _sample_once(config, api, authority, mode, public, validator, log_start_at=N
     logs = kubectl(["-n", c["namespace"], "logs", pod["metadata"]["name"], "-c", c["container"], "--since-time=" + search_start, "--timestamps=true"])
     if log_start_at is None:
         log_start_at, logs = healthy_window_start(logs, verified["digest"])
+    # Checkpoint persistence and selection logging are separate observations.
+    # Never assess an old grant using the tail of its successor's log history.
+    # Retry the exact consumer and fixed history; the original grant's lifetime
+    # and an independent ten-second read bound cannot be extended by renewal.
+    current_checkpoint = strict_json(kubectl([*prefix, "cat", c["checkpointPath"]]))
+    if current_checkpoint != checkpoint:
+        changed = ObservationChanged(min(now() + datetime.timedelta(seconds=10), timestamp(grant["valid_until"]) - datetime.timedelta(seconds=10)))
+        changed.log_start_at = log_start_at
+        changed.pod_uid = pod["metadata"]["uid"]
+        changed.image_id = status["imageID"]
+        raise changed
     try:
         choice = measured_choice(logs, verified["digest"], o["maxRecoveredDegradationSeconds"])
     except RecoveryPending as pending:
@@ -242,13 +257,20 @@ def _sample_once(config, api, authority, mode, public, validator, log_start_at=N
 
 def sample(config, api, authority, mode, public, validator, log_start_at=None):
     deadline, identity = None, None
-    for _ in range(2 + config["observation"]["maxRecoveredDegradationSeconds"] // 2):
+    snapshot_retries = 0
+    for _ in range(3 + config["observation"]["maxRecoveredDegradationSeconds"] // 2):
         try:
             observed = _sample_once(config, api, authority, mode, public, validator, log_start_at)
+            if snapshot_retries and deadline is not None and now() >= deadline:
+                raise ValueError("consumer snapshot was not observed before its original deadline")
             if identity is not None and identity != (observed["pod_uid"], observed["image_id"], observed["log_start_at"]):
                 raise ValueError("consumer or baseline changed during recovery observation")
+            if snapshot_retries:
+                observed["snapshot_retries"] = snapshot_retries
             return observed
         except RecoveryPending as pending:
+            if isinstance(pending, ObservationChanged):
+                snapshot_retries += 1
             current = (pending.pod_uid, pending.image_id, pending.log_start_at)
             if identity is not None and identity != current:
                 raise ValueError("consumer or baseline changed during recovery observation")
@@ -257,7 +279,7 @@ def sample(config, api, authority, mode, public, validator, log_start_at=None):
             remaining = (deadline - now()).total_seconds()
             if remaining <= 0:
                 raise ValueError("canary recovery was not proved before its original deadline")
-            time.sleep(min(2, remaining))
+            time.sleep(min(0.1 if isinstance(pending, ObservationChanged) else 2, remaining))
     raise ValueError("bounded canary recovery observation exhausted")
 
 
