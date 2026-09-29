@@ -21,6 +21,7 @@ test:
 	bash ./scripts/test_traffic_safety_stage0.sh
 	python3 ./scripts/test_validate_managed_app_crd_transition.py
 	env GOCACHE=$(GOCACHE) go test ./...
+	$(MAKE) test-static-edge-observability
 
 test-scripts:
 	python3 -m unittest scripts.test_activate_agent_edge_policy

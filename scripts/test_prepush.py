@@ -38,6 +38,16 @@ class LocalPVGenerationTest(unittest.TestCase):
 
 
 class CanonicalReceiptTest(unittest.TestCase):
+    def test_nested_modules_use_their_own_go_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/"tools/isolated").mkdir(parents=True)
+            (root/"tools/isolated/go.mod").write_text("module isolated\n")
+            with mock.patch.object(prepush,"ROOT",root):
+                files=["internal/sample/main.go","tools/isolated/main.go"]
+                self.assertEqual(prepush.affected_packages(files),["./internal/sample"])
+                self.assertEqual(prepush.affected_test_commands("base",files),[["go","test","./internal/sample"]])
+
     def test_ci_always_runs_the_single_repository_prepush_entrypoint(self) -> None:
         source = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertEqual(source.count("run: make prepush"), 1)

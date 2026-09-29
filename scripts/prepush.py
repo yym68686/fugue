@@ -157,10 +157,27 @@ def changed_files(base: str) -> list[str]:
     return sorted(paths)
 
 
+def root_module_go_file(name: str) -> bool:
+    """Match the same module boundary as the root `go build ./...`.
+
+    Nested modules have their own toolchain/dependencies and isolated CI gate;
+    passing their directories to the root Go command is not a valid Go check.
+    The full `make test` also runs the independent-module verification target.
+    """
+    if not name.endswith(".go"):
+        return False
+    for parent in (ROOT / name).parents:
+        if parent == ROOT:
+            return True
+        if (parent / "go.mod").is_file():
+            return False
+    return False
+
+
 def affected_packages(paths: list[str]) -> list[str]:
     packages = set()
     for name in paths:
-        if not name.endswith(".go"):
+        if not root_module_go_file(name):
             continue
         parent = Path(name).parent.as_posix()
         packages.add("." if parent == "." else f"./{parent}")
@@ -191,7 +208,7 @@ def exact_test_names_from_diff(diff: bytes) -> set[str] | None:
 def affected_test_commands(base: str, paths: list[str]) -> list[list[str]]:
     package_files: dict[str, list[str]] = {}
     for name in paths:
-        if not name.endswith(".go"):
+        if not root_module_go_file(name):
             continue
         parent = Path(name).parent.as_posix()
         package = "." if parent == "." else f"./{parent}"
