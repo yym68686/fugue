@@ -587,3 +587,13 @@ mixed legacy/new-cell grants remain possible during an explicit transition.
 This code support does not change any deployment's credential scope or activate
 a new cell publication. Agent binaries must support scoped grants before the
 Agent topology policy selects a neutral publication.
+
+Executors select their publication scope with `FUGUE_PLATFORM_ARTIFACT_SCOPE`.
+An omitted value preserves `global`; a cell scope must name the executor's
+configured authority. The Pod identity annotation must declare the same scope.
+Control checks both exchanged credentials and route-source provenance; Worker
+and DNS check assignments and persisted positive state before using them.
+Changing this setting cannot make a global checkpoint belong to a new cell.
+The isolated public-a candidates enroll in their independent cell scope while
+the Agent canary receives scoped-grant compatibility. This enrollment alone
+creates no serving assignment, positive LKG or public transport selection.

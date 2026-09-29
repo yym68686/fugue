@@ -3703,6 +3703,9 @@ func (s *Service) currentETag() string {
 }
 
 func (s *Service) validateConfig() error {
+	if err := platformcontrol.ValidateConsumerScope(s.Config.PlatformScopeKey, s.Config.EdgeGroupID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(s.Config.APIURL) == "" {
 		return fmt.Errorf("FUGUE_API_URL is required")
 	}
@@ -3905,6 +3908,12 @@ func previousCachePath(path string) string {
 }
 
 func (s *Service) verifyBundle(bundle model.EdgeRouteBundle, now time.Time) error {
+	scope := platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey)
+	if platformcontrol.ValidateConsumerScope(scope, s.Config.EdgeGroupID) != nil ||
+		(bundle.TrafficRelease != nil && bundle.TrafficRelease.ScopeKey != scope) ||
+		(scope != "global" && bundle.TrafficRelease == nil) {
+		return fmt.Errorf("edge route bundle belongs to another configured scope")
+	}
 	keyring := bundleauth.NewKeyring(
 		s.Config.BundleSigningKey,
 		s.Config.BundleSigningKeyID,

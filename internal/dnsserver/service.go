@@ -1760,6 +1760,9 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (s *Service) validateConfig() error {
+	if err := platformcontrol.ValidateConsumerScope(s.Config.PlatformScopeKey, s.Config.EdgeGroupID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(s.Config.APIURL) == "" {
 		return fmt.Errorf("FUGUE_API_URL is required")
 	}

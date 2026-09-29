@@ -89,7 +89,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
 	client := s.platformConsumerClient()
-	identity, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, "global", model.PlatformArtifactKindDNSAnswerBundle)
+	identity, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindDNSAnswerBundle)
 	if err != nil {
 		return err
 	}
@@ -196,6 +196,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 type dnsCandidateCounts struct{ records, views, probes int }
 
 func (s *Service) verifyPlatformDNSCandidate(c dnsPlatformCandidate, a model.PlatformConsumerAssignment) (dnsCandidateCounts, error) {
+	if platformcontrol.ValidateConsumerScope(s.Config.PlatformScopeKey, s.Config.EdgeGroupID) != nil || a.ScopeKey != platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey) {
+		return dnsCandidateCounts{}, errors.New("DNS candidate belongs to another configured scope")
+	}
 	if !reflect.DeepEqual(a, c.Assignment) || a.ExpectedConsumerSetID == "" ||
 		a.FencingToken <= 0 || a.GenerationSequence <= 0 || !slices.Contains([]string{"shadow", "gray", "full"}, a.ReleaseChannel) {
 		return dnsCandidateCounts{}, errors.New("DNS candidate assignment mismatch")

@@ -50,6 +50,7 @@ type RouteIntentSource interface {
 }
 
 type RouteIntentClientConfig struct {
+	ScopeKey       string
 	EdgeGroupID    string
 	Endpoint       string
 	IssuerFile     string
@@ -66,6 +67,7 @@ type RouteIntentClientConfig struct {
 // binds the response body to the exact v1 path, schema, generation header,
 // and strong ETag.
 type RouteIntentClient struct {
+	scopeKey     string
 	groupID      string
 	endpoint     *url.URL
 	issuerFile   string
@@ -115,13 +117,19 @@ func NewRouteIntentClient(config RouteIntentClientConfig) (*RouteIntentClient, e
 	if config.Now != nil {
 		now = func() time.Time { return config.Now().UTC() }
 	}
-	return &RouteIntentClient{endpoint: endpoint, groupID: config.EdgeGroupID, issuerFile: issuerFile, podTokenFile: config.PodTokenFile, nodeID: strings.TrimSpace(config.IdentityNodeID), client: client, now: now}, nil
+	return &RouteIntentClient{scopeKey: platformcontrol.ConfiguredConsumerScope(config.ScopeKey), endpoint: endpoint, groupID: config.EdgeGroupID, issuerFile: issuerFile, podTokenFile: config.PodTokenFile, nodeID: strings.TrimSpace(config.IdentityNodeID), client: client, now: now}, nil
 }
 
 // ValidateRouteIntentClientConfig validates immutable names and paths without
 // reading credentials. NewRouteIntentClient additionally loads and validates
 // the explicit private CA at process startup.
 func ValidateRouteIntentClientConfig(config RouteIntentClientConfig) error {
+	if err := platformcontrol.ValidateConsumerScope(config.ScopeKey, config.EdgeGroupID); err != nil {
+		return err
+	}
+	if platformcontrol.ConfiguredConsumerScope(config.ScopeKey) != "global" && config.PodTokenFile == "" {
+		return errors.New("independent publication requires Pod-bound identity")
+	}
 	if config.EdgeGroupID != "" && (len(config.EdgeGroupID) > 128 || !edgeGroupIDPattern.MatchString(config.EdgeGroupID)) {
 		return errors.New("edge-control route source requires a canonical group")
 	}
@@ -268,6 +276,9 @@ func (client *RouteIntentClient) FetchRouteIntents(ctx context.Context) (model.E
 		return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("%w: neutral authority requires a traffic release", ErrRouteIntentVersionBinding)
 	}
 	if snapshot.TrafficRelease != nil {
+		if snapshot.TrafficRelease.ScopeKey != client.scopeKey {
+			return model.EdgeRouteIntentSnapshot{}, ErrRouteIntentVersionBinding
+		}
 		if err := trafficbinding.ValidateGroup(snapshot.TrafficRelease, client.groupID, true); err != nil {
 			return model.EdgeRouteIntentSnapshot{}, fmt.Errorf("%w: traffic release group", ErrRouteIntentVersionBinding)
 		}

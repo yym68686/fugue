@@ -154,7 +154,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return errors.New("edge platform candidate cache path is required")
 	}
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
-	id, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindEdgeRouteBundle)
+	id, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
 	}
@@ -245,6 +245,9 @@ type platformRouteCandidatePayload struct {
 }
 
 func (s *Service) verifyPlatformRouteCandidate(artifact model.PlatformArtifact, assignment model.PlatformConsumerAssignment, release model.PlatformArtifactRelease) (payload platformRouteCandidatePayload, err error) {
+	if platformcontrol.ValidateConsumerScope(s.Config.PlatformScopeKey, s.Config.EdgeGroupID) != nil || assignment.ScopeKey != platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey) {
+		return payload, errors.New("edge platform candidate belongs to another configured scope")
+	}
 	if !slices.Contains([]string{"shadow", "gray", "full"}, assignment.ReleaseChannel) || assignment.ExpectedConsumerSetID == "" || assignment.ReleaseSetID == "" || assignment.ArtifactReleaseID == "" || assignment.GenerationSequence <= 0 || assignment.FencingToken <= 0 || artifact.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || artifact.ScopeKey != assignment.ScopeKey || artifact.GenerationSequence != assignment.GenerationSequence || artifact.ID != assignment.ArtifactID || artifact.Status != model.PlatformArtifactStatusValidated || artifact.ContentHash != assignment.ContentHash || artifact.Generation != assignment.ExpectedGeneration || release.ID != assignment.ArtifactReleaseID || release.ArtifactID != assignment.ReleaseSetID || release.ArtifactKind != model.PlatformArtifactKindReleaseSet || release.ReleaseChannel != assignment.ReleaseChannel || release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken != assignment.FencingToken || release.Generation == "" || artifact.Metadata["release_set_generation"] != release.Generation {
 		return payload, errors.New("edge platform candidate binding mismatch")
 	}
@@ -264,7 +267,7 @@ func (s *Service) verifyPlatformRouteCandidate(artifact model.PlatformArtifact, 
 	for _, route := range payload.Routes {
 		routeIntents = append(routeIntents, route.RouteIntent)
 	}
-	if platformconfig.ValidatePlatformIntent(platformconfig.PlatformIntent{SchemaVersion: payload.Schema, Generation: payload.Generation, Scope: assignment.ScopeKey, Routes: routeIntents, CachePolicies: payload.CachePolicies}) != nil {
+	if platformconfig.ValidateRouteIntents(routeIntents, payload.CachePolicies) != nil {
 		return payload, errors.New("edge platform candidate routes invalid")
 	}
 	policyDigest, err := platformconfig.Digest(payload.Policy)

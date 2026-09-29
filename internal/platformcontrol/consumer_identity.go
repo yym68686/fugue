@@ -20,6 +20,31 @@ func ConsumerAuthorityID(group string) string {
 	return ""
 }
 
+// ConsumerScopeKey is the artifact scope selected by an explicit authority.
+// Legacy groups retain the global compatibility scope until their credentials
+// are deliberately enrolled in a cell.
+func ConsumerScopeKey(group string) string {
+	if authority := ConsumerAuthorityID(group); authority != "" {
+		return "authority-cell:" + authority
+	}
+	return "global"
+}
+
+func ConfiguredConsumerScope(scope string) string {
+	if scope == "" {
+		return "global"
+	}
+	return scope
+}
+
+func ValidateConsumerScope(scope, group string) error {
+	scope = ConfiguredConsumerScope(scope)
+	if scope == "global" || ConsumerAuthorityID(group) != "" && scope == ConsumerScopeKey(group) {
+		return nil
+	}
+	return ErrPlatformComponentIdentityInvalid
+}
+
 // PlatformConsumerID keeps the physical Edge identity independent from the
 // authority whose artifact it observes. It grants no assignment or traffic.
 func PlatformConsumerID(component, node, authority string) (string, error) {

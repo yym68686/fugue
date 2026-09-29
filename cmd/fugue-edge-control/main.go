@@ -39,6 +39,7 @@ type config struct {
 	BindAddr                string
 	ShutdownTimeout         time.Duration
 	RouteIntentURL          string
+	PlatformScopeKey        string
 	RouteIntentIssuerFile   string
 	RouteIntentPodTokenFile string
 	RouteIntentIdentityNode string
@@ -167,6 +168,7 @@ func configFromEnv(getenv func(string) string) (config, error) {
 	cfg := config{Enabled: enabled, BindAddr: bindAddr, ShutdownTimeout: shutdownTimeout, AuthorityRuntimeEnabled: authorityRuntimeEnabled}
 	if authorityRuntimeEnabled {
 		cfg.RouteIntentURL = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL"))
+		cfg.PlatformScopeKey = strings.TrimSpace(getenv("FUGUE_PLATFORM_ARTIFACT_SCOPE"))
 		cfg.RouteIntentIssuerFile = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE"))
 		cfg.RouteIntentPodTokenFile = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_POD_TOKEN_FILE"))
 		cfg.RouteIntentIdentityNode = strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_ROUTE_INTENT_IDENTITY_NODE_ID"))
@@ -274,6 +276,7 @@ func (cfg config) validate() error {
 		}
 	}
 	if err := edgecontrol.ValidateRouteIntentClientConfig(edgecontrol.RouteIntentClientConfig{
+		ScopeKey:    cfg.PlatformScopeKey,
 		EdgeGroupID: cfg.AuthorityGroupIDs[0], Endpoint: cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, PodTokenFile: cfg.RouteIntentPodTokenFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
 	}); err != nil {
 		return err
@@ -293,6 +296,7 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 		return nil, nil, err
 	}
 	client, err := edgecontrol.NewRouteIntentClient(edgecontrol.RouteIntentClientConfig{
+		ScopeKey:    cfg.PlatformScopeKey,
 		EdgeGroupID: cfg.AuthorityGroupIDs[0],
 		Endpoint:    cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, PodTokenFile: cfg.RouteIntentPodTokenFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
 	})

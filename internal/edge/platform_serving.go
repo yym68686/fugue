@@ -90,7 +90,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		return err
 	}
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
-	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindEdgeRouteBundle)
+	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	if _, err = s.verifyPlatformRouteCandidate(artifact, a, release); err != nil {
 		return err
 	}
-	_, ta, tlsArtifact, tr, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindCaddyRouteConfig)
+	_, ta, tlsArtifact, tr, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindCaddyRouteConfig)
 	if err != nil {
 		return err
 	}

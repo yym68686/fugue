@@ -179,7 +179,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 	}()
 	client := s.platformConsumerClient()
-	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, "global", model.PlatformArtifactKindDNSAnswerBundle)
+	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindDNSAnswerBundle)
 	wasBound := s.platformServingBound.Load()
 	if err != nil {
 		fallbackReason = "control_plane_unavailable"

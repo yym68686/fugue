@@ -17,7 +17,7 @@ import (
 )
 
 func TestNeutralControlUsesOnlyBoundPodExchange(t *testing.T) {
-	for _, mode := range []string{"valid", "foreign-cell", "foreign-node", "wrong-kind", "long-lived", "expired", "unknown-field", "duplicate-field", "redirect", "no-store-missing", "trailing-json", "no-release"} {
+	for _, mode := range []string{"valid", "scoped-valid", "scoped-global-identity", "scoped-global-release", "scoped-foreign-identity", "foreign-cell", "foreign-node", "wrong-kind", "long-lived", "expired", "unknown-field", "duplicate-field", "redirect", "no-store-missing", "trailing-json", "no-release"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			snapshot := routeIntentFixture()
@@ -25,6 +25,13 @@ func TestNeutralControlUsesOnlyBoundPodExchange(t *testing.T) {
 			snapshot.TrafficRelease = &model.TrafficReleaseBinding{Schema: trafficbinding.Schema, ReleaseSetID: "parent", ReleaseSetDigest: d, ReleaseSetGeneration: "parent-gen", RouteArtifactID: "route", RouteArtifactDigest: d, RouteArtifactGeneration: snapshot.Generation, RouteArtifactSequence: 1, ReleaseID: "release", ReleaseChannel: "gray", FencingToken: 1, ScopeKey: "global", IntentDigest: d, PolicyDigest: d, InputSnapshotDigest: d, CompilerVersion: "compiler", ProjectionDigest: trafficbinding.ProjectionDigest(snapshot), CanaryRuleRef: "cohort=first", EdgeGroupIDs: []string{"cell-a"}}
 			if mode == "no-release" {
 				snapshot.TrafficRelease = nil
+			}
+			scope := "global"
+			if strings.HasPrefix(mode, "scoped-") {
+				scope = "authority-cell:cell-a"
+				if mode != "scoped-global-release" {
+					snapshot.TrafficRelease.ScopeKey = scope
+				}
 			}
 			var exchangeCalls, routeCalls atomic.Int32
 			server, ca, name, address := newRouteIntentTLSServer(t, now, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +47,12 @@ func TestNeutralControlUsesOnlyBoundPodExchange(t *testing.T) {
 					}
 					w.Header().Set("Cache-Control", "no-store")
 					id := map[string]any{"token": "cell-component-token", "component": "edge-control", "node_id": "node-a", "authority_id": "cell-a", "consumer_id": "edge-control:cell-a:node-a", "scope_key": "global", "artifact_kinds": []string{"edge_route_intent"}, "expires_at": now.Add(2 * time.Minute)}
+					id["scope_key"] = scope
 					switch mode {
+					case "scoped-global-identity":
+						id["scope_key"] = "global"
+					case "scoped-foreign-identity":
+						id["scope_key"] = "authority-cell:cell-b"
 					case "foreign-cell":
 						id["authority_id"] = "cell-b"
 					case "foreign-node":
@@ -86,17 +98,18 @@ func TestNeutralControlUsesOnlyBoundPodExchange(t *testing.T) {
 				t.Fatal(err)
 			}
 			config := RouteIntentClientConfig{Endpoint: server.URL + RouteIntentPathV1, EdgeGroupID: "cell-a", PodTokenFile: file, IdentityNodeID: "node-a", CAFile: ca, ServerName: name, Now: func() time.Time { return now }}
+			config.ScopeKey = scope
 			client, err := NewRouteIntentClient(config)
 			if err != nil {
 				t.Fatal(err)
 			}
 			bindRouteIntentTestDialer(t, client, address)
 			_, err = client.FetchRouteIntents(context.Background())
-			if (err == nil) != (mode == "valid") {
+			if (err == nil) != (mode == "valid" || mode == "scoped-valid") {
 				t.Fatalf("mode=%s err=%v", mode, err)
 			}
 			wantRoutes := int32(0)
-			if mode == "valid" || mode == "no-release" {
+			if mode == "valid" || mode == "no-release" || mode == "scoped-valid" || mode == "scoped-global-release" {
 				wantRoutes = 1
 			}
 			if exchangeCalls.Load() != 1 || routeCalls.Load() != wantRoutes {

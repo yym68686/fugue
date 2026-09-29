@@ -19,6 +19,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/config"
+	"fugue/internal/edgetopology"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -183,11 +184,32 @@ func dnsServingFixture(t *testing.T, consumerMode ...bool) (model.PlatformArtifa
 }
 
 func dnsServingFixtureForGroup(t *testing.T, group string, consumerMode ...bool) (model.PlatformArtifact, dnsPlatformCandidate) {
+	return dnsServingFixtureForScope(t, group, "global", consumerMode...)
+}
+
+func dnsServingFixtureForScope(t *testing.T, group, scope string, consumerMode ...bool) (model.PlatformArtifact, dnsPlatformCandidate) {
 	t.Helper()
 	now := time.Now().UTC()
 	zone := "example.test"
 	node := "dns-a"
-	r := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", RoutePolicy: model.EdgeRoutePolicyEnabled, UpstreamURL: "http://origin:8080", Enabled: true}}, DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", Type: "FUGUE_APP", Values: []string{"app"}, TTL: 60, Application: &platformconfig.DNSApplicationIntent{IPv4Policy: "ipv4_only", IPv6Policy: "ipv4_only", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}, {Hostname: "_acme-challenge.example.test", Type: "TXT", Values: []string{"expires"}, TTL: 60, ValueExpirations: map[string]time.Time{"expires": now.Add(30 * time.Second)}}}, DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: node, EdgeGroupID: group, Zones: []string{zone}, ProbeLabel: "probe", ProbeTTL: 60}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 3600, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, DNSReadiness: &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}, DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: node}}, DNSAuthorities: []platformconfig.DNSAuthorityPolicy{{NodeID: node, Zone: zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, DNSAnswerRules: []platformconfig.DNSAnswerRule{{NodeID: node, Hostname: "app.example.test", Type: "A", SelectionMode: "global", TTLSeconds: 60}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: node, EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSEdgeEndpoints: []platformconfig.DNSEdgeEndpoint{{EdgeID: "edge-a", EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: node, Hostname: "app.example.test", Type: "A", SourceGeneration: "source", SourceDigest: "sha256:" + strings.Repeat("a", 64), ObservedAt: now, Candidates: []platformconfig.DNSSelectionCandidate{{IP: "8.8.8.8", EdgeID: "edge-a", EdgeGroupID: group, Weight: 100}}}}}}
+	r := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", RoutePolicy: model.EdgeRoutePolicyEnabled, UpstreamURL: "http://origin:8080", Enabled: true}}, DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", Type: "FUGUE_APP", Values: []string{"app"}, TTL: 60, Application: &platformconfig.DNSApplicationIntent{IPv4Policy: "ipv4_only", IPv6Policy: "ipv4_only", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}, {Hostname: "_acme-challenge.example.test", Type: "TXT", Values: []string{"expires"}, TTL: 60, ValueExpirations: map[string]time.Time{"expires": now.Add(30 * time.Second)}}}, DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: node, EdgeGroupID: group, Zones: []string{zone}, ProbeLabel: "probe", ProbeTTL: 60}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, MinimumHealthyEdges: 1, MaxStaleSeconds: 3600, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, DNSReadiness: &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}, DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: node}}, DNSAuthorities: []platformconfig.DNSAuthorityPolicy{{NodeID: node, Zone: zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, DNSAnswerRules: []platformconfig.DNSAnswerRule{{NodeID: node, Hostname: "app.example.test", Type: "A", SelectionMode: "global", TTLSeconds: 60}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: node, EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSEdgeEndpoints: []platformconfig.DNSEdgeEndpoint{{EdgeID: "edge-a", EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: node, Hostname: "app.example.test", Type: "A", SourceGeneration: "source", SourceDigest: "sha256:" + strings.Repeat("a", 64), ObservedAt: now, Candidates: []platformconfig.DNSSelectionCandidate{{IP: "8.8.8.8", EdgeID: "edge-a", EdgeGroupID: group, Weight: 100}}}}}}
+	if scope != "global" {
+		r.Intent.AuthorityCellID, r.Policy.AuthorityCellID = group, group
+		r.Intent.EdgeTopology = &edgetopology.Intent{
+			SchemaVersion: edgetopology.SchemaVersion,
+			Cells:         []edgetopology.AuthorityCell{{ID: group}},
+			Pools:         []edgetopology.ServingPool{{ID: "pool-public"}},
+			Edges:         []edgetopology.Edge{{ID: "edge-a", AuthorityCellID: group, ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "node-a"}}},
+		}
+		topology, err := platformconfig.TrafficConsumerTopologyFromIntent(r.Intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Policy.ConsumerTopologyDigest, err = platformconfig.Digest(topology)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	routes, err := platformconfig.ResolveRouteOrigins(r.Intent.Routes, r.RuntimeSnapshot, r.Policy)
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +230,7 @@ func dnsServingFixtureForGroup(t *testing.T, group string, consumerMode ...bool)
 		t.Fatal(err)
 	}
 	sign := func(a model.PlatformArtifact, id string) model.PlatformArtifact {
-		a.ID, a.ScopeKey, a.Status, a.GenerationSequence = id, "global", model.PlatformArtifactStatusValidated, 7
+		a.ID, a.ScopeKey, a.Status, a.GenerationSequence = id, scope, model.PlatformArtifactStatusValidated, 7
 		a.ContentHash, _ = platformconfig.Digest(a.Content)
 		a, err = platformsafety.SignPlatformArtifact(a, bundleauth.NewKeyring("synthetic-dns-serving-secret", "key", "", "", nil))
 		if err != nil {
@@ -218,8 +240,8 @@ func dnsServingFixtureForGroup(t *testing.T, group string, consumerMode ...bool)
 	}
 	child := sign(compiled.DNSArtifact, "dns")
 	parent := sign(platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, []string{"route", "dns", "tls"}, now), "parent")
-	a := model.PlatformConsumerAssignment{ArtifactID: child.ID, ArtifactKind: child.ArtifactKind, ScopeKey: "global", ReleaseSetID: parent.ID, ArtifactReleaseID: "release", ExpectedConsumerSetID: "expected", ExpectedGeneration: child.Generation, ContentHash: child.ContentHash, GenerationSequence: 7, FencingToken: 2, Revision: 1, ReleaseChannel: "gray"}
-	release := model.PlatformArtifactRelease{ID: "release", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, ScopeKey: "global", Generation: parent.Generation, ReleaseChannel: "gray", CanaryRuleRef: "cohort=first", FencingToken: 2, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now}
+	a := model.PlatformConsumerAssignment{ArtifactID: child.ID, ArtifactKind: child.ArtifactKind, ScopeKey: scope, ReleaseSetID: parent.ID, ArtifactReleaseID: "release", ExpectedConsumerSetID: "expected", ExpectedGeneration: child.Generation, ContentHash: child.ContentHash, GenerationSequence: 7, FencingToken: 2, Revision: 1, ReleaseChannel: "gray"}
+	release := model.PlatformArtifactRelease{ID: "release", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, ScopeKey: scope, Generation: parent.Generation, ReleaseChannel: "gray", CanaryRuleRef: "cohort=first", FencingToken: 2, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now}
 	return parent, dnsPlatformCandidate{Artifact: child, Assignment: a, Release: release}
 }
 
@@ -229,16 +251,16 @@ func TestDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T) 
 		if consumerMode {
 			name = "consumer_readiness"
 		}
-		for _, group := range []string{"edge-group-a", "cell-a"} {
-			t.Run(name+"/"+group, func(t *testing.T) {
-				testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t, consumerMode, group)
+		for _, tc := range []struct{ group, scope string }{{"edge-group-a", "global"}, {"cell-a", "global"}, {"cell-a", platformconfig.AuthorityCellScope("cell-a")}} {
+			t.Run(name+"/"+tc.group+"/"+tc.scope, func(t *testing.T) {
+				testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t, consumerMode, tc.group, tc.scope)
 			})
 		}
 	}
 }
 
-func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, consumerMode bool, group string) {
-	parent, candidate := dnsServingFixtureForGroup(t, group, consumerMode)
+func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, consumerMode bool, group, scope string) {
+	parent, candidate := dnsServingFixtureForScope(t, group, scope, consumerMode)
 	authority := platformcontrol.ConsumerAuthorityID(group)
 	consumerID, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", authority)
 	var reports int
@@ -252,7 +274,7 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 		}
 		switch r.URL.Path {
 		case "/v1/platform-state/consumers/identity":
-			json.NewEncoder(w).Encode(map[string]any{"token": "token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "authority_id": authority, "consumer_id": consumerID, "scope_key": "global", "artifact_kinds": []string{candidate.Artifact.ArtifactKind}})
+			json.NewEncoder(w).Encode(map[string]any{"token": "token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "authority_id": authority, "consumer_id": consumerID, "scope_key": scope, "artifact_kinds": []string{candidate.Artifact.ArtifactKind}})
 		case "/v1/platform-state/consumers/assignment":
 			if r.URL.Query().Get("serving_only") != "true" {
 				t.Error("serving selection omitted")
@@ -288,7 +310,7 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	}))
 	defer server.Close()
 	dir := t.TempDir()
-	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: group, Zone: "example.test", CachePath: filepath.Join(dir, "cache"), BundleSigningKey: "synthetic-dns-serving-secret", BundleSigningKeyID: "key"}
+	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: group, PlatformScopeKey: scope, Zone: "example.test", CachePath: filepath.Join(dir, "cache"), BundleSigningKey: "synthetic-dns-serving-secret", BundleSigningKeyID: "key"}
 	token := filepath.Join(dir, "token")
 	os.WriteFile(token, []byte("pod-token"), 0600)
 	s := NewService(cfg, nil)
@@ -304,7 +326,7 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 		for _, req := range p.Plan.Probes {
 			if req.Address == address && req.Hostname == host && req.Path == path {
 				now := time.Now().UTC()
-				return routeprobe.Proof{Digest: req.RouteDigest, Version: "serving", EdgeID: req.EdgeID, GroupID: req.EdgeGroupID, CheckedAt: now, ValidUntil: now.Add(time.Minute), TrafficRelease: &model.TrafficReleaseBinding{ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: routeID, PolicyDigest: p.Lineage.PolicyDigest, IntentDigest: p.Lineage.IntentDigest, InputSnapshotDigest: p.Lineage.InputSnapshotDigest, ReleaseID: candidate.Release.ID, ReleaseChannel: candidate.Release.ReleaseChannel, FencingToken: candidate.Release.FencingToken, ScopeKey: "global"}}, nil
+				return routeprobe.Proof{Digest: req.RouteDigest, Version: "serving", EdgeID: req.EdgeID, GroupID: req.EdgeGroupID, CheckedAt: now, ValidUntil: now.Add(time.Minute), TrafficRelease: &model.TrafficReleaseBinding{ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: routeID, PolicyDigest: p.Lineage.PolicyDigest, IntentDigest: p.Lineage.IntentDigest, InputSnapshotDigest: p.Lineage.InputSnapshotDigest, ReleaseID: candidate.Release.ID, ReleaseChannel: candidate.Release.ReleaseChannel, FencingToken: candidate.Release.FencingToken, ScopeKey: scope}}, nil
 			}
 		}
 		return routeprobe.Proof{}, errors.New("unexpected")
@@ -371,6 +393,16 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	checkpoint, err := s.decodeDNSCheckpoint(saved)
 	if err != nil || !checkpoint.Positive {
 		t.Fatal(err)
+	}
+	for _, foreign := range []string{"global", "authority-cell:cell-b"} {
+		if foreign == scope {
+			continue
+		}
+		foreignCfg := cfg
+		foreignCfg.PlatformScopeKey = foreign
+		if _, err := NewService(foreignCfg, nil).decodeDNSCheckpoint(saved); err == nil {
+			t.Fatal("foreign scope positive checkpoint accepted")
+		}
 	}
 	stale := *old
 	stale.checkedAt = time.Now().Add(-time.Hour)

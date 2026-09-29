@@ -42,7 +42,7 @@
               "fugue.pro/edge-control-mode": "group-authority",
               "fugue.pro/edge-control-publication": "group-cas",
               "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
-              "fugue.pro/consumer-identity": "{\"artifact_kinds\":[\"edge_route_intent\"],\"authority_id\":\"cell-public-a\",\"component\":\"edge-control\",\"scope_key\":\"global\",\"version\":\"v1\"}"
+              "fugue.pro/consumer-identity": "{\"artifact_kinds\":[\"edge_route_intent\"],\"authority_id\":\"cell-public-a\",\"component\":\"edge-control\",\"scope_key\":\"authority-cell:cell-public-a\",\"version\":\"v1\"}"
             },
             "labels": {
               "app.kubernetes.io/component": "edge-control",
@@ -172,6 +172,10 @@
                   {
                     "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_POD_TOKEN_FILE",
                     "value": "/var/run/fugue-control-identity/token"
+                  },
+                  {
+                    "name": "FUGUE_PLATFORM_ARTIFACT_SCOPE",
+                    "value": "authority-cell:cell-public-a"
                   }
                 ],
                 "image": "fugue-artifact://edge-control-public-a",

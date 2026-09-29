@@ -154,11 +154,11 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 		return errors.New("TLS candidate cache path is required")
 	}
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
-	id, a, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindCaddyRouteConfig)
+	id, a, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindCaddyRouteConfig)
 	if err != nil {
 		return err
 	}
-	_, ra, route, rr, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, "global", model.PlatformArtifactKindEdgeRouteBundle)
+	_, ra, route, rr, err := client.Sync(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
 	}

@@ -68,7 +68,7 @@ func (client *RouteIntentClient) exchangePodCredential(ctx context.Context) (str
 	now := client.now()
 	if err != nil || identity.Token == "" || len(identity.Token) > 16384 || strings.ContainsAny(identity.Token, " \t\r\n") ||
 		identity.Component != model.PlatformConsumerComponentEdgeControl || identity.NodeID != client.nodeID || identity.AuthorityID != client.groupID || identity.ConsumerID != wantID ||
-		identity.ScopeKey != "global" || len(identity.ArtifactKinds) != 1 || identity.ArtifactKinds[0] != model.PlatformArtifactKindEdgeRouteIntent ||
+		identity.ScopeKey != client.scopeKey || len(identity.ArtifactKinds) != 1 || identity.ArtifactKinds[0] != model.PlatformArtifactKindEdgeRouteIntent ||
 		!identity.ExpiresAt.After(now.Add(10*time.Second)) || identity.ExpiresAt.After(now.Add(2*time.Minute+platformcontrol.PlatformComponentIdentityFutureSkew)) {
 		return "", ErrRouteIntentCredential
 	}

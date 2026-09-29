@@ -634,8 +634,30 @@ func validateIntent(in PlatformIntent) error {
 	if in.SchemaVersion != SchemaVersion || strings.TrimSpace(in.Generation) == "" {
 		return fmt.Errorf("platform intent requires schema_version %q and generation", SchemaVersion)
 	}
+	if err := ValidateRouteIntents(in.Routes, in.CachePolicies); err != nil {
+		return err
+	}
+	if err := validateDNSConfiguration(in.DNS); err != nil {
+		return err
+	}
+	if err := validateDNSApplicationOwners(in.DNS, in.Routes); err != nil {
+		return err
+	}
+	if err := ValidateACMEChallenges(in.ACMEChallenges); err != nil {
+		return err
+	}
+	if err := ValidateTLSIntents(in.TLS, in.Routes); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateRouteIntents checks compiled route content without pretending it is
+// a complete publication intent. Scope and membership are verified separately
+// against the signed parent, child policy and consumer assignment.
+func ValidateRouteIntents(routes []RouteIntent, cachePolicies []model.CachePolicy) error {
 	seen := map[string]struct{}{}
-	for _, route := range in.Routes {
+	for _, route := range routes {
 		if strings.TrimSpace(route.Hostname) == "" || strings.TrimSpace(route.UpstreamURL) == "" {
 			return fmt.Errorf("route intent requires hostname and upstream_url")
 		}
@@ -658,19 +680,7 @@ func validateIntent(in PlatformIntent) error {
 			return err
 		}
 	}
-	if err := validateDNSConfiguration(in.DNS); err != nil {
-		return err
-	}
-	if err := validateDNSApplicationOwners(in.DNS, in.Routes); err != nil {
-		return err
-	}
-	if err := ValidateACMEChallenges(in.ACMEChallenges); err != nil {
-		return err
-	}
-	if err := ValidateTLSIntents(in.TLS, in.Routes); err != nil {
-		return err
-	}
-	return ValidateRouteBehavior(in.Routes, in.CachePolicies)
+	return ValidateRouteBehavior(routes, cachePolicies)
 }
 
 // ValidatePlatformIntent validates a normalized, strongly typed platform

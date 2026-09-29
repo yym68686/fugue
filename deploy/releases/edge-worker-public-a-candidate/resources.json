@@ -36,7 +36,7 @@
             "annotations": {
               "fugue.io/edge-heartbeat-fenced": "true",
               "fugue.pro/authority-transition-role": "isolated-candidate",
-              "fugue.pro/consumer-identity": "{\"version\":\"v1\",\"component\":\"edge-worker\",\"authority_id\":\"cell-public-a\",\"scope_key\":\"global\",\"artifact_kinds\":[\"edge_route_bundle\",\"caddy_route_config\"]}"
+              "fugue.pro/consumer-identity": "{\"artifact_kinds\":[\"edge_route_bundle\",\"caddy_route_config\"],\"authority_id\":\"cell-public-a\",\"component\":\"edge-worker\",\"scope_key\":\"authority-cell:cell-public-a\",\"version\":\"v1\"}"
             },
             "labels": {
               "app.kubernetes.io/component": "edge-worker",
@@ -189,6 +189,10 @@
                   {
                     "name": "FUGUE_EDGE_CACHE_WARMUP_ENABLED",
                     "value": "false"
+                  },
+                  {
+                    "name": "FUGUE_PLATFORM_ARTIFACT_SCOPE",
+                    "value": "authority-cell:cell-public-a"
                   }
                 ],
                 "image": "fugue-artifact://edge-worker",
