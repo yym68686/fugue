@@ -27,7 +27,7 @@ func PlatformConsumerID(component, node, authority string) (string, error) {
 		return component + ":" + node, nil
 	}
 	if ConsumerAuthorityID(authority) != authority || !consumerNodeIDPattern.MatchString(node) ||
-		(component != model.PlatformConsumerComponentEdgeWorker && component != model.PlatformConsumerComponentCaddyEdgeFront && component != model.PlatformConsumerComponentEdgeControl) {
+		(component != model.PlatformConsumerComponentEdgeWorker && component != model.PlatformConsumerComponentCaddyEdgeFront && component != model.PlatformConsumerComponentEdgeControl && component != model.PlatformConsumerComponentDNSServer) {
 		return "", ErrPlatformComponentIdentityInvalid
 	}
 	return component + ":" + authority + ":" + node, nil
@@ -42,9 +42,9 @@ func (claims PlatformComponentIdentityClaims) ConsumerID() string {
 // encoded ID. A familiar node name alone never carries evidence into a cell.
 func ExpectedConsumerIdentityMatches(expected model.PlatformExpectedConsumer, claims PlatformComponentIdentityClaims) bool {
 	id := claims.ConsumerID()
-	edgeOwner := claims.Component == model.PlatformConsumerComponentEdgeWorker || claims.Component == model.PlatformConsumerComponentCaddyEdgeFront
+	scopedOwner := claims.Component == model.PlatformConsumerComponentEdgeWorker || claims.Component == model.PlatformConsumerComponentCaddyEdgeFront || claims.Component == model.PlatformConsumerComponentDNSServer
 	return id != "" && expected.ConsumerID == id && expected.Component == claims.Component &&
 		expected.NodeID == claims.NodeID && expected.AuthorityID == claims.AuthorityID &&
-		(!edgeOwner || ConsumerAuthorityID(expected.Cohort) == "" || expected.AuthorityID == expected.Cohort) &&
+		(!scopedOwner || ConsumerAuthorityID(expected.Cohort) == "" || expected.AuthorityID == expected.Cohort) &&
 		(claims.AuthorityID == "" || expected.Cohort == claims.AuthorityID)
 }

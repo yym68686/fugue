@@ -29,6 +29,7 @@ type dnsBackendFixture struct {
 	extraService bool
 	podListDelay time.Duration
 	proxyHandler http.HandlerFunc
+	extraPods    []corev1.Pod
 }
 
 func newDNSBackendFixture(t *testing.T) *dnsBackendFixture {
@@ -70,7 +71,7 @@ func (f *dnsBackendFixture) install(t *testing.T, server *Server) {
 			if r.URL.Query().Get("fieldSelector") != "spec.nodeName="+f.claims.NodeID {
 				t.Error("node selector missing")
 			}
-			json.NewEncoder(w).Encode(corev1.PodList{Items: []corev1.Pod{f.pod}})
+			json.NewEncoder(w).Encode(corev1.PodList{Items: append([]corev1.Pod{f.pod}, f.extraPods...)})
 		case base + "/pods/" + f.pod.Name:
 			pod := *f.pod.DeepCopy()
 			if f.changePath == "pod" {
@@ -121,6 +122,68 @@ func (f *dnsBackendFixture) install(t *testing.T, server *Server) {
 	t.Cleanup(kube.Close)
 	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
 		return &clusterNodeClient{client: kube.Client(), baseURL: kube.URL, bearerToken: "metadata-only-reader"}, nil
+	}
+}
+
+func (f *dnsBackendFixture) setAuthority(authority string) {
+	f.claims.AuthorityID = authority
+	policy := platformConsumerIdentityPolicy{Version: "v1", Component: f.claims.Component, ScopeKey: f.claims.ScopeKey, ArtifactKinds: f.claims.ArtifactKinds, AuthorityID: authority}
+	raw, _ := json.Marshal(policy)
+	f.pod.Annotations[platformConsumerIdentityAnnotation] = string(raw)
+	if authority != "" {
+		f.pod.Labels["fugue.io/edge-group-id"] = authority
+	}
+}
+
+func TestScopedDNSHeartbeatRequiresCurrentPodAuthorityAndPublicSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		mutate func(*dnsBackendFixture, *platformcontrol.PlatformConsumerHeartbeatEnvelope)
+	}{
+		{"selected cell", 200, nil},
+		{"foreign cell claim", 403, func(f *dnsBackendFixture, _ *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			f.claims.AuthorityID = "cell-b"
+		}},
+		{"legacy claim on cell Pod", 403, func(f *dnsBackendFixture, _ *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			f.claims.AuthorityID = ""
+		}},
+		{"foreign cell label", 403, func(f *dnsBackendFixture, _ *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			f.pod.Labels["fugue.io/edge-group-id"] = "cell-b"
+		}},
+		{"missing cell label", 403, func(f *dnsBackendFixture, _ *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			delete(f.pod.Labels, "fugue.io/edge-group-id")
+		}},
+		{"non-Pod credential", 403, func(f *dnsBackendFixture, _ *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			f.claims.CredentialID = "shared-secret"
+		}},
+		{"changed Pod policy", 403, func(f *dnsBackendFixture, _ *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			f.pod.Annotations[platformConsumerIdentityAnnotation] = strings.ReplaceAll(f.pod.Annotations[platformConsumerIdentityAnnotation], "cell-a", "cell-b")
+		}},
+		{"unselected positive", 409, func(f *dnsBackendFixture, _ *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			f.pod.Labels["app"] = "candidate"
+		}},
+		{"unselected negative", 409, func(f *dnsBackendFixture, h *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			f.pod.Labels["app"] = "candidate"
+			h.ProbeStatus = "failed"
+		}},
+		{"selected negative", 200, func(f *dnsBackendFixture, h *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+			h.ProbeStatus = "failed"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDNSBackendFixture(t)
+			f.setAuthority("cell-a")
+			h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: "applied", ProbeStatus: "passed"}
+			if tc.mutate != nil {
+				tc.mutate(f, &h)
+			}
+			s := &Server{}
+			f.install(t, s)
+			if status := s.validateDNSHeartbeatBackend(context.Background(), f.claims, h); status != tc.status {
+				t.Fatalf("want %d got %d", tc.status, status)
+			}
+		})
 	}
 }
 

@@ -24,7 +24,8 @@ import (
 
 const dnsTransportManager = "fugue-dns-transport"
 
-// The logical consumer remains node-scoped. Only the uniquely selected public
+// The physical process owner remains node-scoped; neutral consumer receipts
+// additionally bind their explicit cell. Only the uniquely selected public
 // backend may write its projection; a candidate can load/probe locally before
 // selection without overwriting the serving instance's receipt. This is an
 // observation of Kubernetes transport, never a source of DNS serving config.
@@ -35,7 +36,13 @@ func (s *Server) validateDNSHeartbeatBackend(ctx context.Context, claims platfor
 // A reader runs only after transport identity validation and before the final
 // metadata recheck. It must not retain the client or use Pod data as configuration.
 func (s *Server) inspectDNSBackend(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int) int {
-	if claims.Component != model.PlatformConsumerComponentDNSServer || !strings.HasPrefix(claims.CredentialID, "kubernetes:") {
+	if claims.Component != model.PlatformConsumerComponentDNSServer {
+		return http.StatusOK
+	}
+	if !strings.HasPrefix(claims.CredentialID, "kubernetes:") {
+		if claims.AuthorityID != "" {
+			return http.StatusForbidden
+		}
 		return http.StatusOK
 	}
 	identity := strings.Split(claims.CredentialID, ":")
@@ -68,7 +75,8 @@ func (s *Server) inspectDNSBackend(ctx context.Context, claims platformcontrol.P
 		return http.StatusForbidden
 	}
 	policy, valid := decodePlatformConsumerIdentityPolicy(pod.Annotations[platformConsumerIdentityAnnotation])
-	if !valid || policy.Component != claims.Component || policy.ScopeKey != claims.ScopeKey || len(policy.ArtifactKinds) != len(claims.ArtifactKinds) {
+	if !valid || policy.Component != claims.Component || policy.ScopeKey != claims.ScopeKey || policy.AuthorityID != claims.AuthorityID ||
+		(claims.AuthorityID != "" && pod.Labels["fugue.io/edge-group-id"] != claims.AuthorityID) || len(policy.ArtifactKinds) != len(claims.ArtifactKinds) {
 		return http.StatusForbidden
 	}
 	for _, kind := range claims.ArtifactKinds {

@@ -39,7 +39,7 @@ func decodePlatformConsumerIdentityPolicy(raw string) (platformConsumerIdentityP
 	valid := len(raw) <= 4096 && decoder.Decode(&policy) == nil && decoder.Decode(&struct{}{}) == io.EOF && policy.Version == "v1" && policy.Component != "" && policy.ScopeKey != "" && policy.ScopeKey == strings.ToLower(strings.TrimSpace(policy.ScopeKey)) && len(policy.ArtifactKinds) > 0
 	if policy.AuthorityID != "" {
 		_, err := platformcontrol.PlatformConsumerID(policy.Component, "validation-node", policy.AuthorityID)
-		valid = valid && err == nil && (policy.Component == model.PlatformConsumerComponentEdgeWorker || policy.Component == model.PlatformConsumerComponentEdgeControl)
+		valid = valid && err == nil && (policy.Component == model.PlatformConsumerComponentEdgeWorker || policy.Component == model.PlatformConsumerComponentEdgeControl || policy.Component == model.PlatformConsumerComponentDNSServer)
 	}
 	if policy.Component == model.PlatformConsumerComponentEdgeControl {
 		valid = valid && policy.AuthorityID != "" && policy.ScopeKey == "global" && len(policy.ArtifactKinds) == 1 && policy.ArtifactKinds[0] == model.PlatformArtifactKindEdgeRouteIntent

@@ -2074,7 +2074,7 @@ func normalizePlatformExpectedConsumerSetForStore(in model.PlatformExpectedConsu
 		consumer.ScopeKey = strings.TrimSpace(strings.ToLower(consumer.ScopeKey))
 		consumer.FailureDomain = strings.TrimSpace(consumer.FailureDomain)
 		consumer.Cohort = strings.TrimSpace(consumer.Cohort)
-		if platformcontrol.ConsumerAuthorityID(consumer.Cohort) != "" && consumer.Component == model.PlatformConsumerComponentEdgeWorker && consumer.AuthorityID != consumer.Cohort {
+		if platformcontrol.ConsumerAuthorityID(consumer.Cohort) != "" && (consumer.Component == model.PlatformConsumerComponentEdgeWorker || consumer.Component == model.PlatformConsumerComponentDNSServer) && consumer.AuthorityID != consumer.Cohort {
 			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
 		}
 		if consumer.AuthorityID != "" {

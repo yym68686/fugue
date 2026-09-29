@@ -271,7 +271,10 @@ func reportServingProducerAPI(t *testing.T, s *Server, parent model.PlatformArti
 			}
 			now := time.Now().UTC()
 			keys := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "key", Keys: map[string]string{"key": "synthetic-producer-identity"}}
-			claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: "test", Component: member.Component, NodeID: member.NodeID, ScopeKey: "global", ArtifactKinds: []string{child.ArtifactKind}}
+			claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: "test", Component: member.Component, NodeID: member.NodeID, AuthorityID: member.AuthorityID, ScopeKey: "global", ArtifactKinds: []string{child.ArtifactKind}}
+			if member.Component == model.PlatformConsumerComponentDNSServer && member.AuthorityID != "" {
+				claims.CredentialID = "kubernetes:test-system:dns-account:fixture-pod"
+			}
 			token, err := platformcontrol.IssuePlatformComponentIdentity(keys, claims, now, time.Minute)
 			if err != nil {
 				t.Fatal(err)

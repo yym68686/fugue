@@ -98,3 +98,122 @@ func TestDNSConsumerTopologyRejectsAmbiguousOwnership(t *testing.T) {
 		}
 	}
 }
+
+func TestDNSAuthoritiesSharePhysicalNodeWithoutSharingReceipts(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	var nodes []model.DNSNode
+	for _, group := range []string{"edge-group-old", "cell-a", "cell-b"} {
+		nodes = append(nodes, model.DNSNode{ID: "node-a", EdgeGroupID: group}, model.DNSNode{ID: "zone-alias", PhysicalNodeID: "node-a", EdgeGroupID: group})
+	}
+	req := ExpectedConsumerSetBuildRequest{ReleaseSetID: "parent", ArtifactReleaseID: "shadow", ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ScopeKey: "global", Generation: "generation", PreparedAt: now, Topology: ExpectedConsumerTopology{DNSNodes: nodes}}
+	set := mustBuildExpectedConsumerSet(t, req)
+	if len(set.Consumers) != 3 || set.RequiredCardinality != 3 {
+		t.Fatal("authorities or aliases changed physical process cardinality", set)
+	}
+	before, _ := json.Marshal(set)
+	for _, authority := range []string{"", "cell-a", "cell-b"} {
+		claims := platformComponentTestClaims()
+		claims.Component, claims.NodeID, claims.AuthorityID = model.PlatformConsumerComponentDNSServer, "node-a", authority
+		claims.CredentialID, claims.ArtifactKinds = "kubernetes:test-system:dns-account:pod-a", []string{set.ArtifactKind}
+		token, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), claims, now, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims, err = ParsePlatformComponentIdentity(platformComponentTestKeyring(), token, now)
+		if err != nil || claims.AuthorityID != authority {
+			t.Fatal(claims, err)
+		}
+		h, err := BindPlatformConsumerHeartbeatToExpectedSet(claims, set, PlatformConsumerHeartbeatEnvelope{})
+		if err != nil || h.ConsumerID != claims.ConsumerID() || h.NodeID != "node-a" {
+			t.Fatal(h, err)
+		}
+		for _, expected := range set.Consumers {
+			if expected.ConsumerID == claims.ConsumerID() {
+				if !ExpectedConsumerIdentityMatches(expected, claims) || expected.NodeID != "node-a" || (authority != "" && expected.FailureDomain != "node:node-a") {
+					t.Fatal("physical ownership changed", expected)
+				}
+				continue
+			}
+			if ExpectedConsumerIdentityMatches(expected, claims) {
+				t.Fatal("identity crossed authority")
+			}
+			if _, err := BindPlatformConsumerHeartbeatToExpectedSet(claims, set, PlatformConsumerHeartbeatEnvelope{ConsumerID: expected.ConsumerID}); err == nil {
+				t.Fatal("foreign authority receipt accepted")
+			}
+		}
+	}
+	projected := ProjectExpectedConsumerSetToTopology(set, ExpectedConsumerTopology{DNSNodes: nodes[2:4]})
+	if projected.RequiredCardinality != 1 || len(projected.Consumers) != 1 || projected.Consumers[0].ConsumerID != "dns-server:cell-a:node-a" {
+		t.Fatal("projection moved an authority", projected)
+	}
+	binding := &ConsumerReleaseBinding{ReleaseSetID: set.ReleaseSetID, ArtifactReleaseID: set.ArtifactReleaseID, ArtifactKind: set.ArtifactKind, ScopeKey: set.ScopeKey, Generation: set.ExpectedGeneration, FencingToken: 4, GenerationSequence: 7}
+	for _, expected := range set.Consumers {
+		status := EvaluateConsumerConvergence(projected, []model.PlatformConsumerInstance{boundPassingConsumer(set, expected, now)}, now, binding)
+		if expected.AuthorityID == "cell-a" {
+			if !status.Pass || status.RequiredPassing != 1 {
+				t.Fatal(status)
+			}
+		} else if status.Pass || status.RequiredObserved != 0 {
+			t.Fatal("other authority supplied current health", status)
+		}
+	}
+	after, _ := json.Marshal(set)
+	if string(before) != string(after) {
+		t.Fatal("projection mutated immutable set")
+	}
+	for i, j := 0, len(nodes)-1; i < j; i, j = i+1, j-1 {
+		nodes[i], nodes[j] = nodes[j], nodes[i]
+	}
+	if reversed := mustBuildExpectedConsumerSet(t, req); !reflect.DeepEqual(set, reversed) {
+		t.Fatal("input order changed authority identity")
+	}
+}
+
+func TestDNSAuthorityAliasesCannotMoveBetweenCells(t *testing.T) {
+	topology := ExpectedConsumerTopology{DNSNodes: []model.DNSNode{
+		{ID: "shared-zone-alias", PhysicalNodeID: "node-a", EdgeGroupID: "cell-a"},
+		{ID: "shared-zone-alias", PhysicalNodeID: "node-b", EdgeGroupID: "cell-b"},
+	}}
+	req := ExpectedConsumerSetBuildRequest{ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, Generation: "generation", PreparedAt: time.Now().UTC(), Topology: topology}
+	set := mustBuildExpectedConsumerSet(t, req)
+	for i := range set.Consumers {
+		set.Consumers[i].NodeID = "shared-zone-alias"
+		set.Consumers[i].ConsumerID, _ = PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "shared-zone-alias", set.Consumers[i].AuthorityID)
+	}
+	before, _ := json.Marshal(set)
+	projected := ProjectExpectedConsumerSetToTopology(set, topology)
+	if len(projected.Consumers) != 2 || projected.Consumers[0].ConsumerID != "dns-server:cell-a:node-a" || projected.Consumers[1].ConsumerID != "dns-server:cell-b:node-b" {
+		t.Fatal("alias crossed cell boundary", projected)
+	}
+	after, _ := json.Marshal(set)
+	if string(before) != string(after) {
+		t.Fatal("alias projection changed immutable set")
+	}
+	set.Consumers[0].ConsumerID = "dns-server:cell-b:shared-zone-alias"
+	projected = ProjectExpectedConsumerSetToTopology(set, topology)
+	if len(projected.Consumers) != 1 || projected.Consumers[0].AuthorityID != "cell-b" {
+		t.Fatal("alias projection repaired a forged authority identity", projected)
+	}
+	for _, nodes := range [][]model.DNSNode{
+		{{ID: "node-a", EdgeGroupID: "cell-A"}},
+		{{ID: "other:node", EdgeGroupID: "cell-a"}},
+		{{ID: "alias", PhysicalNodeID: "node-a", EdgeGroupID: "cell-a"}, {ID: "alias", PhysicalNodeID: "node-b", EdgeGroupID: "cell-a"}},
+	} {
+		req.Topology.DNSNodes = nodes
+		if _, err := BuildExpectedConsumerSet(req); err == nil {
+			t.Fatal("invalid scoped ownership accepted", nodes)
+		}
+	}
+}
+
+func TestScopedDNSIdentityRequiresPodCredential(t *testing.T) {
+	claims := platformComponentTestClaims()
+	claims.Component, claims.NodeID, claims.AuthorityID = model.PlatformConsumerComponentDNSServer, "node-a", "cell-a"
+	claims.ArtifactKinds = []string{model.PlatformArtifactKindDNSAnswerBundle}
+	for _, credential := range []string{"shared-secret", "kubernetes:namespace:account", "kubernetes::account:pod", "kubernetes:namespace::pod", "kubernetes:namespace:account:", "kubernetes:namespace:account:pod:other"} {
+		claims.CredentialID = credential
+		if _, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), claims, time.Now(), time.Minute); err == nil {
+			t.Fatal("non-Pod-bound scoped DNS identity issued", credential)
+		}
+	}
+}

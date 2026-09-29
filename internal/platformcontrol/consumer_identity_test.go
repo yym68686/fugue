@@ -75,9 +75,9 @@ func TestScopedConsumerRejectsInvalidOrUnboundAuthority(t *testing.T) {
 		}
 	}
 	claims := platformComponentTestClaims()
-	claims.AuthorityID, claims.Component = "cell-a", model.PlatformConsumerComponentDNSServer
+	claims.AuthorityID, claims.Component = "cell-a", model.PlatformConsumerComponentNodeUpdater
 	if _, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), claims, now, time.Minute); err == nil {
-		t.Fatal("DNS public backend identity was implicitly rescaled")
+		t.Fatal("unrelated node component acquired cell authority")
 	}
 	claims.Component, claims.NodeID = model.PlatformConsumerComponentEdgeWorker, "other:node"
 	if _, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), claims, now, time.Minute); err == nil {
@@ -88,8 +88,8 @@ func TestScopedConsumerRejectsInvalidOrUnboundAuthority(t *testing.T) {
 		t.Fatal("legacy representation authorized a neutral cohort")
 	}
 	dns := PlatformComponentIdentityClaims{Component: "dns-server", NodeID: "node-a"}
-	if !ExpectedConsumerIdentityMatches(model.PlatformExpectedConsumer{ConsumerID: "dns-server:node-a", Component: "dns-server", NodeID: "node-a", Cohort: "cell-a"}, dns) {
-		t.Fatal("neutral cohort changed independent DNS backend identity")
+	if ExpectedConsumerIdentityMatches(model.PlatformExpectedConsumer{ConsumerID: "dns-server:node-a", Component: "dns-server", NodeID: "node-a", Cohort: "cell-a"}, dns) {
+		t.Fatal("legacy DNS identity acquired a neutral receipt")
 	}
 }
 

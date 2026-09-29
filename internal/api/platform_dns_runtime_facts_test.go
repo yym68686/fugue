@@ -19,8 +19,126 @@ import (
 	"fugue/internal/routeprobe"
 	"fugue/internal/store"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
+
+func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.T) {
+	for _, selectedGroup := range []string{"edge-group-old", "cell-a", "cell-b"} {
+		t.Run(selectedGroup, func(t *testing.T) {
+			path := t.TempDir() + "/state.json"
+			st := store.New(path)
+			if err := st.Init(); err != nil {
+				t.Fatal(err)
+			}
+			s := NewServer(st, auth.New(st, "facts-admin"), nil, ServerConfig{BundleSigningKey: "synthetic-facts-key", BundleSigningKeyID: "key"})
+			f := newDNSBackendFixture(t)
+			f.setAuthority(platformcontrol.ConsumerAuthorityID(selectedGroup))
+			if _, err := st.UpdateDNSHeartbeat(model.DNSNode{ID: f.claims.NodeID, EdgeGroupID: selectedGroup, Zone: "example.test", PublicIPv4: "8.8.8.8"}); err != nil {
+				t.Fatal(err)
+			}
+			seedVerifiedDNSDelegationFixture(t, s, "example.test")
+			parent, release, found, err := st.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", "gray")
+			if err != nil || !found {
+				t.Fatal("missing publication", err)
+			}
+			sets, err := s.currentReleaseSetExpectations(parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var selectedSet model.PlatformExpectedConsumerSet
+			for _, set := range sets {
+				if set.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+					selectedSet = set
+				}
+			}
+			child, err := s.consumerAssignmentChild(parent, selectedSet.ArtifactKind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			ring := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "test", Keys: map[string]string{"test": "synthetic-identity"}}
+			accept := func(claims platformcontrol.PlatformComponentIdentityClaims, set model.PlatformExpectedConsumerSet, sequence, generation, fence int64) {
+				t.Helper()
+				token, err := platformcontrol.IssuePlatformComponentIdentity(ring, claims, now, time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				claims, err = platformcontrol.ParsePlatformComponentIdentity(ring, token, now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := trustedPlatformHeartbeatRequest(t, claims, set, now, sequence, generation, fence, "independent-authority-receipt")
+				h.LKGGeneration = set.ExpectedGeneration
+				h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1}
+				h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
+				if _, err := st.AcceptTrustedPlatformConsumerHeartbeat(claims, set.ID, h, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			accept(f.claims, selectedSet, 20, child.GenerationSequence, release.FencingToken)
+			for _, group := range []string{"edge-group-old", "cell-a", "cell-b"} {
+				if group == selectedGroup {
+					continue
+				}
+				candidate := newDNSBackendFixture(t)
+				candidate.setAuthority(platformcontrol.ConsumerAuthorityID(group))
+				candidate.pod.Name = "candidate-" + group
+				candidate.pod.UID = types.UID(candidate.pod.Name)
+				candidate.pod.Labels["app"] = "candidate"
+				candidate.claims.CredentialID = "kubernetes:" + candidate.pod.Namespace + ":" + candidate.pod.Spec.ServiceAccountName + ":" + string(candidate.pod.UID)
+				f.extraPods = append(f.extraPods, candidate.pod)
+				set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: "retained-" + group, ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, Generation: "retained-generation", ScopeKey: "global", PreparedAt: now, Topology: platformcontrol.ExpectedConsumerTopology{DNSNodes: []model.DNSNode{{ID: f.claims.NodeID, EdgeGroupID: group}}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = st.CreatePlatformExpectedConsumerSet(set); err != nil {
+					t.Fatal(err)
+				}
+				// A larger independent cursor never supersedes the selected Pod.
+				accept(candidate.claims, set, 100, 100, 100)
+			}
+			f.pod.Spec.Containers = []corev1.Container{{Name: "resolver", Ports: []corev1.ContainerPort{{ContainerPort: 53, Protocol: corev1.ProtocolTCP}, {ContainerPort: 53, Protocol: corev1.ProtocolUDP}, {Name: "observation", ContainerPort: 8081, Protocol: corev1.ProtocolTCP}}, ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Port: intstr.FromString("observation")}}}}}
+			var snapshot dnsfacts.Snapshot
+			reads := 0
+			f.proxyHandler = func(w http.ResponseWriter, r *http.Request) { reads++; json.NewEncoder(w).Encode(snapshot) }
+			f.install(t, s)
+			source, err := s.currentDNSFactSource(context.Background(), f.claims.NodeID)
+			if err != nil || source.claims.AuthorityID != f.claims.AuthorityID || source.group != selectedGroup {
+				t.Fatal("wrong authority selected", source.group, err)
+			}
+			digest, _ := platformconfig.Digest(source.payload.ReadinessPlan)
+			snapshot = dnsfacts.Snapshot{Schema: dnsfacts.Schema, NodeID: f.claims.NodeID, EdgeGroupID: selectedGroup, Assignment: source.lookup.Assignment, ParentDigest: source.parent.ContentHash, RouteArtifactID: source.routeID, PlanDigest: digest, ObservedAt: now, EvaluatedAt: now, CheckpointValidUntil: now.Add(time.Hour), Ready: true, Facts: []dnsfacts.Probe{}}
+			before, _ := os.ReadFile(path)
+			consumers, err := st.ListPlatformConsumers(selectedSet.ArtifactKind, selectedSet.ScopeKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding := s.platformConvergenceBinding(selectedSet)
+			if status := s.evaluateLiveConsumerConvergence(context.Background(), selectedSet, consumers, binding); !status.Pass || status.RequiredPassing != 1 {
+				t.Fatal("selected authority did not converge", status)
+			}
+			response, err := s.readPlatformDNSRuntimeFacts(context.Background(), f.claims.NodeID)
+			if err != nil || !response.Ready || response.Backend.PodUID != string(f.pod.UID) || reads != 1 {
+				t.Fatal("selected backend facts unavailable", response.Backend, err, reads)
+			}
+			f.pod.Labels["app"] = "unselected"
+			if status := s.evaluateLiveConsumerConvergence(context.Background(), selectedSet, consumers, binding); status.Pass || status.RequiredPassing != 0 {
+				t.Fatal("unselected authority retained convergence", status)
+			}
+			if _, err := s.readPlatformDNSRuntimeFacts(context.Background(), f.claims.NodeID); err == nil {
+				t.Fatal("no selected backend reused retained receipt")
+			}
+			if reads != 1 {
+				t.Fatal("unselected Pod was proxied")
+			}
+			after, _ := os.ReadFile(path)
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("read changed persistent facts or cursors")
+			}
+		})
+	}
+}
 
 func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 	path := t.TempDir() + "/state.json"
@@ -73,7 +191,7 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 	reads := 0
 	f.proxyHandler = func(w http.ResponseWriter, r *http.Request) { reads++; json.NewEncoder(w).Encode(snapshot) }
 	f.install(t, s)
-	source, err := s.currentDNSFactSource(f.claims.NodeID)
+	source, err := s.currentDNSFactSource(context.Background(), f.claims.NodeID)
 	if err != nil {
 		t.Fatal(err)
 	}

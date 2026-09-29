@@ -20,8 +20,20 @@ Expected sets for neutral Edge inventory use that cell namespace; legacy
 sets and their topology digests retain their original representation. The
 new identity never copies an old observation or promotes LKG. Deploying the
 reader does not enroll a Pod, change inventory, prepare a new expected set,
-or authorize a neutral publication. DNS retains its independently fenced
-physical public-backend identity.
+or authorize a neutral publication.
+
+DNS consumers use `dns-server:<cell-id>:<physical-node-id>` for an explicitly
+declared neutral authority. Zone telemetry aliases collapse only within that
+authority; legacy and neutral receipts on the same physical node keep separate
+monotonic cursors. The original encoded identity must agree before projection
+can fold an alias. Neutral DNS credentials require a Kubernetes Pod binding,
+and the live Pod policy and authority label must still match when reporting
+facts. Neither identity issuance nor a larger heartbeat sequence selects a
+backend. Runtime-fact reads resolve each retained receipt's authority from its
+immutable expected member, then require the uniquely selected public Service
+and EndpointSlice Pod. They recheck publication and transport around the read
+without copying observations or renewing deadlines. This API capability does
+not enroll neutral DNS executors or prepare their traffic cohorts.
 
 Neutral Controls obtain their RouteIntent identity through a live Pod-bound
 ServiceAccount exchange. The operator-managed annotation must name the exact

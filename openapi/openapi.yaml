@@ -3257,7 +3257,7 @@ paths:
     get:
       operationId: listPlatformConsumerConvergence
       summary: List Platform Consumer Convergence
-      description: Projects immutable expected sets onto current authoritative node policy topology. Heartbeat freshness is assessed after membership, so a silent or stale Edge or DNS process remains required. ReleaseSet assessments require verified consumer identity and exact expected-set, ReleaseSet, active release fence and child artifact generation sequence; missing binding context is unknown and old or unverified receipts cannot pass. DNS zone aliases belong to one physical process. Full promotion selects the newest active release publication for the target ReleaseSet, requires the latest expected set for every referenced traffic artifact, and applies the same assessment. Historical expected sets remain available without granting current promotion authority. CLI state queries use these server assessments.
+      description: Projects immutable expected sets onto current authoritative node policy topology. Heartbeat freshness is assessed after membership, so a silent or stale Edge or DNS process remains required. ReleaseSet assessments require verified consumer identity and exact expected-set, ReleaseSet, active release fence and child artifact generation sequence; missing binding context is unknown and old or unverified receipts cannot pass. DNS zone aliases belong to one physical process within an authority. Live DNS backend checks bind the immutable member's authority to its exact Pod credential, current Pod policy and selected public backend. Full promotion selects the newest active release publication for the target ReleaseSet, requires the latest expected set for every referenced traffic artifact, and applies the same assessment. Historical expected sets remain available without granting current promotion authority. CLI state queries use these server assessments.
       tags: [Admin]
       x-fugue-handler: handleListPlatformConsumerConvergence
       security:
@@ -3338,6 +3338,11 @@ paths:
         port, with redirects disabled and an 8 MiB response limit. Pod UID,
         Service and EndpointSlice observations are checked around the read;
         current publication and expectation are checked again afterwards.
+        During explicit cell coexistence, the physical node may have retained
+        receipts in several authority namespaces. The immutable expected member
+        supplies each receipt's authority; the uniquely selected public backend
+        determines which namespace is observed. A newer receipt alone never
+        selects an authority, and observations are not copied across namespaces.
         Proof IDs, plan digest, node/group and release bindings are validated
         against signed artifacts. ready_probe_ids and ready are evaluated at
         evaluated_at; expired or negative proofs cannot pass. The snapshot keeps
@@ -3604,13 +3609,19 @@ paths:
         Kubernetes SelfSubjectReview and a live Pod lookup determine the node identity.
         Only Pods in the configured control-plane namespace with an operator-managed
         typed fugue.pro/consumer-identity annotation may exchange credentials.
-        Edge Worker and Edge Control identities may explicitly declare a canonical cell-* authority_id
+        Edge Worker, DNS Server and Edge Control identities may explicitly declare a canonical cell-* authority_id
         in that annotation, matching the Pod's fugue.io/edge-group-id label. The
-        server then binds consumer_id to component:authority_id:node_id. A Worker
+        server then binds consumer_id to component:authority_id:node_id. A Worker or DNS Server
         identity can read and report only an exact authority-bound expected member;
         it cannot overwrite the legacy component:node_id consumer or another cell.
         An absent authority_id retains the legacy identity. Neither form grants
         a new assignment or copies observations, fences, or LKG across authorities.
+        DNS node_id remains the physical process owner; zone aliases are collapsed
+        only within the same authority. Neutral DNS identities require a live
+        Pod binding, and their current Pod policy and authority label must match
+        the signed claim. Heartbeats and runtime-fact reads remain fenced by the
+        exact selected public DNS Service and EndpointSlice backend. Issuing a
+        candidate identity never selects that backend or permits public serving.
         Edge Control exchange requires an explicit authority_id, global scope,
         and exactly the edge_route_intent capability; it uses the independent
         RouteIntent signing keyring. The private RouteIntent TLS listener admits
@@ -32608,7 +32619,7 @@ components:
           type: string
           pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'
           maxLength: 128
-          description: Explicit neutral Edge Worker authority. When present, cohort must equal this value and consumer_id must be component:authority_id:node_id. Absent for legacy members; adding it never reuses legacy runtime evidence.
+          description: Explicit neutral Edge Worker or DNS Server authority. When present, cohort must equal this value and consumer_id must be component:authority_id:node_id. The physical node ID is unchanged. Absent for legacy members; adding it never reuses legacy runtime evidence or aliases from another authority.
         artifact_kind:
           type: string
         scope_key:
@@ -34438,7 +34449,7 @@ components:
           type: string
           pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'
           maxLength: 128
-          description: Server-derived neutral Edge Worker or Edge Control authority; omitted for legacy identities.
+          description: Server-derived neutral Edge Worker, DNS Server or Edge Control authority; omitted for legacy identities.
         consumer_id:
           type: string
           description: Exact consumer identity derived from the signed component, node and optional authority scope. Legacy responses may omit this field.

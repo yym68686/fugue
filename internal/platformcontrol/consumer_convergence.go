@@ -61,7 +61,8 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 		}
 	}
 	for _, node := range dnsNodes {
-		active[model.PlatformConsumerComponentDNSServer+":"+strings.TrimSpace(node.ID)] = true
+		consumer := expectedDNSConsumer(node, set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
+		active[consumer.ConsumerID] = true
 	}
 	for _, updater := range topology.NodeUpdaters {
 		id := firstNonEmptyExpected(strings.TrimSpace(updater.ClusterNodeName), strings.TrimSpace(updater.MachineID), strings.TrimSpace(updater.ID))
@@ -91,9 +92,16 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 	out.Consumers = make([]model.PlatformExpectedConsumer, 0, len(set.Consumers))
 	for _, consumer := range set.Consumers {
 		if consumer.Component == model.PlatformConsumerComponentDNSServer {
-			if physical, exists := aliases[consumer.NodeID]; exists {
+			if (ConsumerAuthorityID(consumer.Cohort) != "" || consumer.AuthorityID != "") && consumer.AuthorityID != consumer.Cohort {
+				continue
+			}
+			declaredID, err := PlatformConsumerID(consumer.Component, consumer.NodeID, consumer.AuthorityID)
+			if err != nil || consumer.ConsumerID != declaredID {
+				continue
+			}
+			if physical, exists := aliases[dnsAliasKey(consumer.NodeID, consumer.AuthorityID)]; exists {
 				consumer.NodeID = physical
-				consumer.ConsumerID = model.PlatformConsumerComponentDNSServer + ":" + physical
+				consumer.ConsumerID, _ = PlatformConsumerID(model.PlatformConsumerComponentDNSServer, physical, consumer.AuthorityID)
 			}
 		}
 		if !active[consumer.ConsumerID] {
@@ -178,7 +186,11 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 				if !expectedDNSNodeMatchesScope(node, req.Scope) {
 					continue
 				}
-				consumers = append(consumers, expectedDNSConsumer(node, kind, scopeKey, generation, now))
+				consumer := expectedDNSConsumer(node, kind, scopeKey, generation, now)
+				if consumer.ConsumerID == "" {
+					return model.PlatformExpectedConsumerSet{}, ErrPlatformComponentIdentityInvalid
+				}
+				consumers = append(consumers, consumer)
 			}
 		case model.PlatformConsumerComponentNodeUpdater, model.PlatformConsumerComponentNodeGuardian:
 			for _, updater := range req.Topology.NodeUpdaters {
@@ -458,7 +470,13 @@ func expectedDNSConsumer(node model.DNSNode, artifactKind, scopeKey, generation 
 	nodeID := strings.TrimSpace(node.ID)
 	failureDomain := firstNonEmptyExpected("edge-group:"+strings.TrimSpace(node.EdgeGroupID), "node:"+firstNonEmptyExpected(strings.TrimSpace(node.PhysicalNodeID), nodeID))
 	cohort := firstNonEmptyExpected(strings.TrimSpace(node.EdgeGroupID), "dns")
-	return expectedConsumer(model.PlatformConsumerComponentDNSServer, nodeID, artifactKind, scopeKey, generation, failureDomain, cohort, true, 90*time.Second, now)
+	consumer := expectedConsumer(model.PlatformConsumerComponentDNSServer, nodeID, artifactKind, scopeKey, generation, failureDomain, cohort, true, 90*time.Second, now)
+	consumer.AuthorityID = ConsumerAuthorityID(node.EdgeGroupID)
+	if consumer.AuthorityID != "" {
+		consumer.ConsumerID, _ = PlatformConsumerID(model.PlatformConsumerComponentDNSServer, nodeID, consumer.AuthorityID)
+		consumer.FailureDomain = "node:" + nodeID
+	}
+	return consumer
 }
 
 func expectedNodeConsumer(component string, updater model.NodeUpdater, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {

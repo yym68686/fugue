@@ -46,9 +46,13 @@ func TestPlatformConsumerIdentityExchangesOnlyLiveBoundPods(t *testing.T) {
 			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-worker","scope_key":"global","artifact_kinds":["edge_route_bundle"],"authority_id":"cell-a"}`
 			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-b"}
 		}},
-		{"implicit DNS authority", 403, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+		{"authorized DNS cell", 200, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
 			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"dns-server","scope_key":"global","artifact_kinds":["dns_answer_bundle"],"authority_id":"cell-a"}`
 			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-a"}
+		}},
+		{"DNS cell label mismatch", 403, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"dns-server","scope_key":"global","artifact_kinds":["dns_answer_bundle"],"authority_id":"cell-a"}`
+			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-b"}
 		}},
 		{"anonymous subject", 401, func(r *authenticationv1.SelfSubjectReview, _ *corev1.Pod) {
 			r.Status.UserInfo = authenticationv1.UserInfo{}
@@ -134,6 +138,9 @@ func TestPlatformConsumerIdentityExchangesOnlyLiveBoundPods(t *testing.T) {
 				wantComponent, wantKind, wantAuthority, wantConsumer := "dns-server", "dns_answer_bundle", "", "dns-server:physical-node"
 				if tc.name == "authorized cell" {
 					wantComponent, wantKind, wantAuthority, wantConsumer = "edge-worker", "edge_route_bundle", "cell-a", "edge-worker:cell-a:physical-node"
+				}
+				if tc.name == "authorized DNS cell" {
+					wantAuthority, wantConsumer = "cell-a", "dns-server:cell-a:physical-node"
 				}
 				if tc.name == "authorized control" {
 					wantComponent, wantKind, wantAuthority, wantConsumer = "edge-control", "edge_route_intent", "cell-a", "edge-control:cell-a:physical-node"

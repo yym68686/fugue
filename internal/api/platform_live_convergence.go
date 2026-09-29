@@ -25,7 +25,11 @@ func (s *Server) evaluateLiveConsumerConvergence(ctx context.Context, set model.
 		if assessment.State != model.InvariantEvidenceStatePass || fact == nil || fact.Component != model.PlatformConsumerComponentDNSServer || !strings.HasPrefix(fact.CredentialID, "kubernetes:") {
 			continue
 		}
-		claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: fact.CredentialID, Component: fact.Component, NodeID: fact.NodeID, ScopeKey: fact.ScopeKey, ArtifactKinds: fact.SupportedKinds}
+		claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: fact.CredentialID, Component: fact.Component, NodeID: fact.NodeID, AuthorityID: assessment.Expected.AuthorityID, ScopeKey: fact.ScopeKey, ArtifactKinds: fact.SupportedKinds}
+		if !platformcontrol.ExpectedConsumerIdentityMatches(assessment.Expected, claims) {
+			backend[assessment.ConsumerID] = http.StatusForbidden
+			continue
+		}
 		backend[assessment.ConsumerID] = s.validateDNSHeartbeatBackend(ctx, claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: fact.ApplyStatus, ProbeStatus: fact.ProbeStatus})
 	}
 	// Metadata reads take time. Do not return a pass whose source heartbeat

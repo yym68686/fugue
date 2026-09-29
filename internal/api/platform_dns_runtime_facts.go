@@ -75,26 +75,80 @@ func (s *Server) handleGetPlatformDNSRuntimeFacts(w http.ResponseWriter, r *http
 	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) currentDNSFactSource(node string) (dnsFactSource, error) {
+func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFactSource, error) {
 	fail := func() (dnsFactSource, error) { return dnsFactSource{}, errDNSRuntimeFacts }
 	consumers, err := s.store.ListPlatformConsumers(model.PlatformArtifactKindDNSAnswerBundle, "global")
 	if err != nil {
 		return fail()
 	}
-	var fact *model.PlatformConsumerInstance
+	type candidate struct {
+		fact   model.PlatformConsumerInstance
+		claims platformcontrol.PlatformComponentIdentityClaims
+	}
+	var candidates []candidate
+	seen := map[string]bool{}
 	for i := range consumers {
 		c := &consumers[i]
-		if c.ConsumerID == model.PlatformConsumerComponentDNSServer+":"+node {
-			if fact != nil {
+		if !c.IdentityVerified || c.NodeID != node || c.Component != model.PlatformConsumerComponentDNSServer || !strings.HasPrefix(c.CredentialID, "kubernetes:") {
+			continue
+		}
+		set, err := s.store.GetPlatformExpectedConsumerSet(c.ExpectedConsumerSetID)
+		if err != nil {
+			return fail()
+		}
+		var member *model.PlatformExpectedConsumer
+		for _, expected := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
+			if expected.ConsumerID == c.ConsumerID {
+				if member != nil {
+					return fail()
+				}
+				copy := expected
+				member = &copy
+			}
+		}
+		if member == nil || member.HeartbeatFreshnessSeconds <= 0 {
+			return fail()
+		}
+		claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: c.CredentialID, Component: c.Component, NodeID: node, ScopeKey: c.ScopeKey, ArtifactKinds: c.SupportedKinds, AuthorityID: member.AuthorityID}
+		if !platformcontrol.ExpectedConsumerIdentityMatches(*member, claims) {
+			return fail()
+		}
+		if c.LastHeartbeatAt.IsZero() || !c.LastHeartbeatAt.Add(time.Duration(member.HeartbeatFreshnessSeconds)*time.Second).After(time.Now().UTC()) {
+			continue
+		}
+		if seen[c.ConsumerID] {
+			return fail()
+		}
+		seen[c.ConsumerID] = true
+		candidates = append(candidates, candidate{fact: *c, claims: claims})
+	}
+	var selected *dnsFactSource
+	for _, candidate := range candidates {
+		if len(candidates) > 1 {
+			// Only transport can choose among retained authority receipts. Do
+			// not prefer the most recent heartbeat or invent a physical node.
+			status := s.inspectDNSBackend(ctx, candidate.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil)
+			if status == http.StatusForbidden || status == http.StatusConflict {
+				continue
+			}
+			if status != http.StatusOK {
 				return fail()
 			}
-			fact = c
 		}
+		source, err := s.dnsFactSourceForConsumer(node, candidate.fact, candidate.claims)
+		if err != nil || selected != nil {
+			return fail()
+		}
+		selected = &source
 	}
-	if fact == nil || !fact.IdentityVerified || fact.NodeID != node || fact.Component != model.PlatformConsumerComponentDNSServer || !strings.HasPrefix(fact.CredentialID, "kubernetes:") {
+	if selected == nil {
 		return fail()
 	}
-	claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: fact.CredentialID, Component: fact.Component, NodeID: node, ScopeKey: fact.ScopeKey, ArtifactKinds: fact.SupportedKinds}
+	return *selected, nil
+}
+
+func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsumerInstance, claims platformcontrol.PlatformComponentIdentityClaims) (dnsFactSource, error) {
+	fail := func() (dnsFactSource, error) { return dnsFactSource{}, errDNSRuntimeFacts }
 	resolved, err := s.resolvePlatformConsumerAssignments(claims)
 	if err != nil {
 		return fail()
@@ -110,7 +164,7 @@ func (s *Server) currentDNSFactSource(node string) (dnsFactSource, error) {
 		}
 		group, freshness := "", 0
 		for _, expected := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
-			if expected.ConsumerID == fact.ConsumerID {
+			if platformcontrol.ExpectedConsumerIdentityMatches(expected, claims) {
 				group, freshness = expected.Cohort, expected.HeartbeatFreshnessSeconds
 			}
 		}
@@ -148,7 +202,7 @@ func (s *Server) currentDNSFactSource(node string) (dnsFactSource, error) {
 		if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
 			return fail()
 		}
-		source = &dnsFactSource{consumer: *fact, claims: claims, parent: parent, lookup: item, payload: payload, group: group, routeID: projection.TrafficRelease.RouteArtifactID, trafficBinding: projection.TrafficRelease, heartbeatValidUntil: fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second)}
+		source = &dnsFactSource{consumer: fact, claims: claims, parent: parent, lookup: item, payload: payload, group: group, routeID: projection.TrafficRelease.RouteArtifactID, trafficBinding: projection.TrafficRelease, heartbeatValidUntil: fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second)}
 	}
 	if source == nil {
 		return fail()
@@ -159,7 +213,7 @@ func (s *Server) currentDNSFactSource(node string) (dnsFactSource, error) {
 func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (platformDNSRuntimeFactsResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	source, err := s.currentDNSFactSource(node)
+	source, err := s.currentDNSFactSource(ctx, node)
 	if err != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
@@ -185,7 +239,7 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	}
 	// Re-resolve immutable inputs and current publication; do not reuse an
 	// artifact-reader cache across the network request or renew heartbeat time.
-	current, err := s.currentDNSFactSource(node)
+	current, err := s.currentDNSFactSource(ctx, node)
 	if err != nil || current.consumer.CredentialID != source.consumer.CredentialID || current.parent.ContentHash != source.parent.ContentHash || !reflect.DeepEqual(current.lookup.Assignment, source.lookup.Assignment) || current.group != source.group || ctx.Err() != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}

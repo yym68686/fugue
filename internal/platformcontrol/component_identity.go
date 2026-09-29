@@ -604,6 +604,12 @@ func normalizePlatformComponentIdentityClaims(claims PlatformComponentIdentityCl
 	if _, err := PlatformConsumerID(claims.Component, claims.NodeID, claims.AuthorityID); err != nil {
 		return PlatformComponentIdentityClaims{}, err
 	}
+	if claims.Component == model.PlatformConsumerComponentDNSServer && claims.AuthorityID != "" {
+		binding := strings.Split(claims.CredentialID, ":")
+		if len(binding) != 4 || binding[0] != "kubernetes" || binding[1] == "" || binding[2] == "" || binding[3] == "" {
+			return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
+		}
+	}
 	if claims.Version != platformComponentIdentityVersion ||
 		claims.CredentialID == "" ||
 		claims.TokenID == "" ||
