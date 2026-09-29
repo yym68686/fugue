@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 )
 
@@ -19,6 +20,12 @@ func (s *Server) evaluateLiveConsumerConvergence(ctx context.Context, set model.
 	status := platformcontrol.EvaluateConsumerConvergence(set, consumers, time.Now().UTC(), binding)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	backendReasonPrefix := "dns_public_backend_"
+	if set.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && strings.HasPrefix(set.ScopeKey, "authority-cell:") {
+		if parent, err := s.store.GetPlatformArtifact(set.ReleaseSetID); err == nil && parent.Content["publication_role"] == platformconfig.PublicationRoleCellDNS {
+			backendReasonPrefix = "dns_declared_backend_"
+		}
+	}
 	backend := map[string]int{}
 	for _, assessment := range status.Assessments {
 		fact := assessment.Observed
@@ -30,7 +37,7 @@ func (s *Server) evaluateLiveConsumerConvergence(ctx context.Context, set model.
 			backend[assessment.ConsumerID] = http.StatusForbidden
 			continue
 		}
-		backend[assessment.ConsumerID] = s.validateDNSHeartbeatBackend(ctx, claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: fact.ApplyStatus, ProbeStatus: fact.ProbeStatus})
+		backend[assessment.ConsumerID] = s.validateDNSHeartbeatBackend(ctx, claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: fact.ApplyStatus, ProbeStatus: fact.ProbeStatus, ReleaseSetID: fact.ReleaseSetID, ExpectedConsumerSetID: fact.ExpectedConsumerSetID, FencingToken: fact.FencingToken, GenerationSequence: fact.GenerationSequence}, set)
 	}
 	// Metadata reads take time. Do not return a pass whose source heartbeat
 	// expired while we were observing Kubernetes. Never renew its timestamps.
@@ -42,10 +49,10 @@ func (s *Server) evaluateLiveConsumerConvergence(ctx context.Context, set model.
 			continue
 		}
 		assessment.State = model.InvariantEvidenceStateFail
-		reason := "dns_public_backend_mismatch"
+		reason := backendReasonPrefix + "mismatch"
 		if code == http.StatusServiceUnavailable {
 			assessment.State = model.InvariantEvidenceStateUnknown
-			reason = "dns_public_backend_unavailable"
+			reason = backendReasonPrefix + "unavailable"
 		}
 		assessment.Reasons = append(assessment.Reasons, reason)
 		if assessment.Required {

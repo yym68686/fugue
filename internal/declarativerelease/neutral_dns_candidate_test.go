@@ -41,6 +41,7 @@ func TestNeutralDNSCandidateIsPrivateAndKeepsIndependentState(t *testing.T) {
 		}
 		var selector map[string]any
 		stateClaim := ""
+		validationPorts := map[string]bool{}
 		for _, item := range items {
 			if item["kind"] != "Deployment" {
 				continue
@@ -66,9 +67,30 @@ func TestNeutralDNSCandidateIsPrivateAndKeepsIndependentState(t *testing.T) {
 			}
 			pod := template["spec"].(map[string]any)
 			placement := pod["nodeSelector"].(map[string]any)
+			independentDNS := false
+			for _, resource := range items {
+				if resource["kind"] != "Service" {
+					continue
+				}
+				metadata := resource["metadata"].(map[string]any)
+				serviceLabels, _ := metadata["labels"].(map[string]any)
+				if serviceLabels["app.kubernetes.io/managed-by"] != "fugue-dns-validation" {
+					continue
+				}
+				annotations, _ := metadata["annotations"].(map[string]any)
+				service := resource["spec"].(map[string]any)
+				if independentDNS || annotations["transport.fugue.dev/authority-id"] != cell || annotations["transport.fugue.dev/node-id"] != placement["kubernetes.io/hostname"] || !reflect.DeepEqual(service["selector"], selector) {
+					t.Fatal("private DNS validation member is ambiguous or mismatched")
+				}
+				independentDNS = true
+				for _, raw := range service["ports"].([]any) {
+					port := raw.(map[string]any)
+					validationPorts[fmt.Sprint(port["protocol"])+"/"+fmt.Sprint(port["targetPort"])] = true
+				}
+			}
 			member := false
 			for _, edge := range topology.Edges {
-				member = member || edge.ID == placement["kubernetes.io/hostname"] && edge.AuthorityCellID == cell
+				member = member || edge.ID == placement["kubernetes.io/hostname"] && (independentDNS || edge.AuthorityCellID == cell)
 			}
 			if len(placement) != 1 || !member || pod["hostNetwork"] == true || pod["automountServiceAccountToken"] != false {
 				t.Fatal("DNS placement or credential boundary is implicit")
@@ -123,7 +145,15 @@ func TestNeutralDNSCandidateIsPrivateAndKeepsIndependentState(t *testing.T) {
 			case "Service":
 				s := item["spec"].(map[string]any)
 				ports := s["ports"].([]any)
-				privateService = s["type"] == "ClusterIP" && s["externalIPs"] == nil && s["loadBalancerIP"] == nil && len(ports) == 1 && ports[0].(map[string]any)["name"] == "health" && reflect.DeepEqual(s["selector"], selector)
+				if s["type"] != "ClusterIP" || s["externalIPs"] != nil || s["loadBalancerIP"] != nil || !reflect.DeepEqual(s["selector"], selector) {
+					t.Fatal("candidate owns public or foreign Service transport")
+				}
+				for _, raw := range ports {
+					if raw.(map[string]any)["nodePort"] != nil {
+						t.Fatal("candidate owns node port")
+					}
+				}
+				privateService = privateService || len(ports) == 1 && ports[0].(map[string]any)["name"] == "health"
 			case "NetworkPolicy":
 				s := item["spec"].(map[string]any)
 				ingress := s["ingress"].([]any)
@@ -133,8 +163,17 @@ func TestNeutralDNSCandidateIsPrivateAndKeepsIndependentState(t *testing.T) {
 				i := ingress[0].(map[string]any)
 				ports := i["ports"].([]any)
 				from := i["from"].([]any)
-				if len(ports) != 1 || fmt.Sprint(ports[0].(map[string]any)["port"]) != "7834" || len(from) != 1 {
-					t.Fatal("candidate exposes DNS transport")
+				if len(ports) != 1+len(validationPorts) || len(from) != 1 {
+					t.Fatal("candidate exposes undeclared transport")
+				}
+				seenPorts := map[string]bool{}
+				for _, raw := range ports {
+					port := raw.(map[string]any)
+					key := fmt.Sprint(port["protocol"]) + "/" + fmt.Sprint(port["port"])
+					if seenPorts[key] || key != "TCP/7834" && !validationPorts[key] {
+						t.Fatal("candidate permits undeclared ingress port")
+					}
+					seenPorts[key] = true
 				}
 				peer := from[0].(map[string]any)
 				privatePolicy = reflect.DeepEqual(s["podSelector"].(map[string]any)["matchLabels"], selector) && peer["namespaceSelector"] != nil && peer["podSelector"].(map[string]any)["matchLabels"].(map[string]any)["app.kubernetes.io/component"] == "api"

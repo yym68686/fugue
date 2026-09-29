@@ -3294,7 +3294,7 @@ paths:
     get:
       operationId: listPlatformConsumerConvergence
       summary: List Platform Consumer Convergence
-      description: For authority-cell releases, verifies expected membership against the signed consumer_topology and keeps every declared member required. Other scopes project immutable expected sets onto current authoritative node policy topology. Heartbeat freshness is assessed after membership, so a silent or stale Edge or DNS process remains required. ReleaseSet assessments require verified consumer identity and exact expected-set, ReleaseSet, active release fence and child artifact generation sequence; missing binding context is unknown and old or unverified receipts cannot pass. DNS zone aliases belong to one physical process within an authority. Live DNS backend checks bind the immutable member's authority to its exact Pod credential, current Pod policy and selected public backend. Full promotion selects the newest active release publication for the target ReleaseSet, requires the latest expected set for every referenced traffic artifact, and applies the same assessment. Historical expected sets remain available without granting current promotion authority. CLI state queries use these server assessments.
+      description: For authority-cell releases, verifies expected membership against the signed consumer_topology and keeps every declared member required. Other scopes project immutable expected sets onto current authoritative node policy topology. Heartbeat freshness is assessed after membership, so a silent or stale Edge or DNS process remains required. ReleaseSet assessments require verified consumer identity and exact expected-set, ReleaseSet, active release fence and child artifact generation sequence; missing binding context is unknown and old or unverified receipts cannot pass. DNS zone aliases belong to one physical process within an authority. Live DNS backend checks bind the immutable member's authority to its exact Pod credential and declared transport. Explicit cell-dns members may prove local configuration through a private validation Service until a public backend owns that authority; public runtime-facts remain independently bound to the selected public backend. Full promotion selects the newest active release publication for the target ReleaseSet, requires the latest expected set for every referenced traffic artifact, and applies the same assessment. Historical expected sets remain available without granting current promotion authority. CLI state queries use these server assessments.
       tags: [Admin]
       x-fugue-handler: handleListPlatformConsumerConvergence
       security:
@@ -3598,8 +3598,15 @@ paths:
         EndpointSlice ownership, Pod UID and endpoint addresses are rechecked.
         Positive applied/passed reports require both Pod and endpoint readiness;
         negative reports from the selected live backend remain accepted. An
-        unselected, terminating or ambiguous backend cannot overwrite current
-        consumer facts. Kubernetes lookup failure returns 503; binding mismatch
+        unselected, terminating or ambiguous public backend cannot overwrite current
+        consumer facts. An explicitly signed cell-dns publication in its own neutral
+        scope may instead use a uniquely declared private validation Service, with
+        no external IP, NodePort or host networking. Its exact required member,
+        Pod identity, Service digest and EndpointSlices remain mandatory. A selected
+        public backend in that same authority takes precedence over private candidates.
+        These scoped local receipts can establish capability and local recovery;
+        public runtime-facts and public selection still require the public transport.
+        Kubernetes lookup failure returns 503; binding mismatch
         returns 403 or 409 without advancing the heartbeat cursor or audit log.
         This check does not change artifacts, serving configuration or local
         readiness. Independently provisioned non-Kubernetes component identities

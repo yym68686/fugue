@@ -1169,8 +1169,8 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 			}
 		}
 	}
-	if status := s.validateDNSHeartbeatBackend(r.Context(), claims, heartbeat); status != http.StatusOK {
-		httpx.WriteError(w, status, "DNS heartbeat public backend identity could not be verified")
+	if status := s.validateDNSHeartbeatBackend(r.Context(), claims, heartbeat, set); status != http.StatusOK {
+		httpx.WriteError(w, status, "DNS heartbeat declared backend identity could not be verified")
 		return
 	}
 	consumer, err := s.store.AcceptTrustedPlatformConsumerHeartbeatWithAudit(

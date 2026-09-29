@@ -820,3 +820,27 @@ and configuration transitions. This protocol support alone does not complete
 public migration: capability enrollment, independent DNS deployment, coordinated
 route-reference/public handoff, Agent rebinding and connection draining still
 require explicit declarations and observed production acceptance.
+
+
+An explicit `cell-dns` member may establish local configuration receipts through
+an independently declared private validation Service. The Service is unique for
+its authority and physical node, has only ClusterIP transport and binds its
+selector and UDP/TCP ports with `transport.fugue.dev/digest`. The digest covers
+canonical JSON `{authority_id,node_id,spec}`, where spec contains type,
+internalTrafficPolicy, publishNotReadyAddresses, selector and ports. The
+`fugue-dns-validation` manager label, generation, authority-id and node-id
+annotations are mandatory. The API verifies the signed parent/current publication,
+exact expected member, isolated Pod identity, declared DNS socket owner and actual
+EndpointSlices, then rechecks private/public selection and node/Pod resource
+versions. Same-authority public selection takes precedence: a private standby
+cannot overwrite a selected public instance. Public runtime-facts continue to use
+only the selected public backend. A private receipt proves local configuration and
+recovery, never public traffic selection.
+
+Two independent DNS executors are declared for `cell-dns-public`, each with its
+own state PVC, projected Pod identity, health Service and private validation
+Service. They initially have no selected DNS configuration or public listener.
+Their egress permits the API, cluster resolver and public HTTPS route probes;
+observer ingress is limited to API Pods. Routing Cells keep their own scopes and
+state. Initial DNS intent, immutable references, capability enrollment and public
+handoff are later configuration steps, independent of these executable lanes.

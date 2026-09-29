@@ -29,13 +29,21 @@ const dnsTransportManager = "fugue-dns-transport"
 // backend may write its projection; a candidate can load/probe locally before
 // selection without overwriting the serving instance's receipt. This is an
 // observation of Kubernetes transport, never a source of DNS serving config.
-func (s *Server) validateDNSHeartbeatBackend(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope) int {
-	return s.inspectDNSBackend(ctx, claims, h, nil)
+func (s *Server) validateDNSHeartbeatBackend(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, sets ...model.PlatformExpectedConsumerSet) int {
+	private, status := s.privateDNSReceiptMember(claims, h, sets)
+	if status != http.StatusOK {
+		return status
+	}
+	return s.inspectDNSBackendTransport(ctx, claims, h, nil, private)
 }
 
 // A reader runs only after transport identity validation and before the final
 // metadata recheck. It must not retain the client or use Pod data as configuration.
 func (s *Server) inspectDNSBackend(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int) int {
+	return s.inspectDNSBackendTransport(ctx, claims, h, read, false)
+}
+
+func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int, allowPrivate bool) int {
 	if claims.Component != model.PlatformConsumerComponentDNSServer {
 		return http.StatusOK
 	}
@@ -100,31 +108,19 @@ func (s *Server) inspectDNSBackend(ctx context.Context, claims platformcontrol.P
 	if client.doJSON(ctx, http.MethodGet, base+"/services?"+query.Encode(), &services) != nil || services.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
-	var selected *corev1.Service
-	for i := range services.Items {
-		svc := &services.Items[i]
-		public := false
-		for _, port := range svc.Spec.Ports {
-			public = public || port.Port == 53
-		}
-		local := false
-		for _, address := range node.Status.Addresses {
-			local = local || slices.Contains(svc.Spec.ExternalIPs, address.Address)
-		}
-		if !public || !local {
-			continue
-		}
-		if selected != nil || !validDNSPublicTransport(*svc, identity[1]) {
+	selected, transportStatus := publicDNSTransportForNode(services.Items, node, identity[1])
+	if transportStatus != http.StatusOK {
+		return transportStatus
+	}
+	var privateGuard *dnsPrivatePublicGuard
+	if selected == nil || !dnsServiceSelectsPod(*selected, *pod) {
+		if !allowPrivate {
 			return http.StatusConflict
 		}
-		selected = svc
-	}
-	if selected == nil {
-		return http.StatusConflict
-	}
-	for key, value := range selected.Spec.Selector {
-		if pod.Labels[key] != value {
-			return http.StatusConflict
+		var status int
+		selected, privateGuard, status = selectPrivateDNSValidationService(ctx, client, claims, *pod, node, pods.Items, selected)
+		if status != http.StatusOK {
+			return status
 		}
 	}
 	slicePath := "/apis/discovery.k8s.io/v1/namespaces/" + url.PathEscape(identity[1]) + "/endpointslices?" + url.Values{"labelSelector": {discoveryv1.LabelServiceName + "=" + selected.Name}, "limit": {"256"}}.Encode()
@@ -153,6 +149,9 @@ func (s *Server) inspectDNSBackend(ctx context.Context, claims platformcontrol.P
 	}
 	if currentPod.UID != pod.UID || currentPod.ResourceVersion != pod.ResourceVersion || currentService.UID != selected.UID || currentService.ResourceVersion != selected.ResourceVersion || !reflect.DeepEqual(endpoints.Items, currentEndpoints.Items) {
 		return http.StatusConflict
+	}
+	if privateGuard != nil {
+		return privateGuard.recheck(ctx, client)
 	}
 	return http.StatusOK
 }
