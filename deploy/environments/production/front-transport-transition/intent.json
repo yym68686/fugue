@@ -1,0 +1,6 @@
+{
+  "schema": "fugue.front-transport-transition/v1",
+  "generation": 1,
+  "phase": "observe",
+  "target": ""
+}

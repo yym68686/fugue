@@ -351,21 +351,30 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          config=deploy/environments/production/front-probe-transport/listeners.json
+          config=deploy/environments/production/front-transport-transition/intent.json
           base="$BASE_SHA"
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
           if ! git diff --quiet "$base" HEAD -- "$config"; then
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
+            if git diff --quiet HEAD origin/main -- "$config" scripts/select_front_transport_transition.py deploy/environments/production/front-probe-transport deploy/environments/production/front-serving-stage deploy/environments/production/front-serving-handoff scripts/reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
               python3 -m unittest scripts.test_observe_front_candidate scripts.test_reconcile_front_probe_transport scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
-              echo 'selected=true' >> "$GITHUB_OUTPUT"
+              previous="$RUNNER_TEMP/front-probe-transition-before.json"
+              if ! git show "$base:$config" > "$previous"; then
+                printf 'null\n' > "$previous"
+              fi
+              python3 -m unittest scripts.test_select_front_transport_transition
+              target="$(python3 scripts/select_front_transport_transition.py "$config" --phase probe --previous "$previous")"
+              if [[ -n "$target" ]]; then
+                echo "target=$target" >> "$GITHUB_OUTPUT"
+                echo 'selected=true' >> "$GITHUB_OUTPUT"
+              fi
             fi
           fi
       - name: Prepare observed Front probe transport
         if: steps.transport.outputs.selected == 'true'
-        run: python3 scripts/reconcile_front_probe_transport.py prepare deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-secondary --evidence "$RUNNER_TEMP/front-probe-transport.json"
+        run: python3 scripts/reconcile_front_probe_transport.py prepare deploy/environments/production/front-probe-transport/listeners.json --listener "${{ steps.transport.outputs.target }}" --evidence "$RUNNER_TEMP/front-probe-transport.json"
       - name: Retain Front probe witness before network changes
         if: steps.transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -376,12 +385,12 @@ jobs:
           retention-days: 30
       - name: Apply and verify isolated Front probe listener
         if: steps.transport.outputs.selected == 'true'
-        run: python3 scripts/reconcile_front_probe_transport.py apply deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-secondary --evidence "$RUNNER_TEMP/front-probe-transport.json"
+        run: python3 scripts/reconcile_front_probe_transport.py apply deploy/environments/production/front-probe-transport/listeners.json --listener "${{ steps.transport.outputs.target }}" --evidence "$RUNNER_TEMP/front-probe-transport.json"
       - name: Attribute held connections to the original and candidate Front
         if: steps.transport.outputs.selected == 'true'
         run: |
           python3 -m unittest scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
-          python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --listener fugue-front-probe-public-b-secondary --evidence "$RUNNER_TEMP/front-held-connections.json"
+          python3 scripts/front_connection_witness.py deploy/environments/production/front-probe-transport/listeners.json --listener "${{ steps.transport.outputs.target }}" --evidence "$RUNNER_TEMP/front-held-connections.json"
       - name: Retain held Front connection evidence
         if: steps.transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -458,21 +467,30 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          config=deploy/environments/production/front-serving-stage/services.json
+          config=deploy/environments/production/front-transport-transition/intent.json
           base="$BASE_SHA"
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
           if ! git diff --quiet "$base" HEAD -- "$config"; then
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
+            if git diff --quiet HEAD origin/main -- "$config" scripts/select_front_transport_transition.py deploy/environments/production/front-probe-transport deploy/environments/production/front-serving-stage deploy/environments/production/front-serving-handoff scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
               python3 -m unittest scripts.test_observe_front_candidate scripts.test_stage_front_serving_transport
-              echo 'selected=true' >> "$GITHUB_OUTPUT"
+              previous="$RUNNER_TEMP/front-stage-transition-before.json"
+              if ! git show "$base:$config" > "$previous"; then
+                printf 'null\n' > "$previous"
+              fi
+              python3 -m unittest scripts.test_select_front_transport_transition
+              target="$(python3 scripts/select_front_transport_transition.py "$config" --phase stage --previous "$previous")"
+              if [[ -n "$target" ]]; then
+                echo "target=$target" >> "$GITHUB_OUTPUT"
+                echo 'selected=true' >> "$GITHUB_OUTPUT"
+              fi
             fi
           fi
       - name: Prepare observed internal Front transport
         if: steps.transport.outputs.selected == 'true'
-        run: python3 scripts/stage_front_serving_transport.py prepare deploy/environments/production/front-serving-stage/services.json --service fugue-front-serving-public-b-secondary --evidence "$RUNNER_TEMP/front-serving-stage.json"
+        run: python3 scripts/stage_front_serving_transport.py prepare deploy/environments/production/front-serving-stage/services.json --service "${{ steps.transport.outputs.target }}" --evidence "$RUNNER_TEMP/front-serving-stage.json"
       - name: Retain Front stage witness before internal Service creation
         if: steps.transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -483,11 +501,12 @@ jobs:
           retention-days: 30
       - name: Create and verify internal Front Service endpoints
         if: steps.transport.outputs.selected == 'true'
-        run: python3 scripts/stage_front_serving_transport.py apply deploy/environments/production/front-serving-stage/services.json --service fugue-front-serving-public-b-secondary --evidence "$RUNNER_TEMP/front-serving-stage.json"
+        run: python3 scripts/stage_front_serving_transport.py apply deploy/environments/production/front-serving-stage/services.json --service "${{ steps.transport.outputs.target }}" --evidence "$RUNNER_TEMP/front-serving-stage.json"
 
   front_serving_handoff:
     outputs:
       selected: ${{ steps.handoff.outputs.selected }}
+      target: ${{ steps.handoff.outputs.target }}
       recoverable: ${{ steps.handoff_witness.outcome == 'success' }}
     needs: [front_probe_transport, front_external_observation, front_serving_stage, front_restricted_egress_observation]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_external_observation.result == 'success' && needs.front_serving_stage.result == 'success' && needs.front_restricted_egress_observation.result == 'success' }}
@@ -505,16 +524,25 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          config=deploy/environments/production/front-serving-handoff/public-b-secondary.json
+          config=deploy/environments/production/front-transport-transition/intent.json
           base="$BASE_SHA"
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
           if ! git diff --quiet "$base" HEAD -- "$config"; then
             git fetch origin main
-            if git diff --quiet HEAD origin/main -- "$config" scripts/handoff_front_serving_transport.py scripts/observe_front_restricted_egress.py deploy/environments/production/front-egress-observation scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py deploy/environments/production/front-probe-transport deploy/environments/production/front-serving-stage scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
+            if git diff --quiet HEAD origin/main -- "$config" scripts/select_front_transport_transition.py deploy/environments/production/front-probe-transport deploy/environments/production/front-serving-stage deploy/environments/production/front-serving-handoff scripts/handoff_front_serving_transport.py scripts/observe_front_restricted_egress.py deploy/environments/production/front-egress-observation scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py deploy/environments/production/front-connection-observation scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py deploy/environments/production/front-probe-transport deploy/environments/production/front-serving-stage scripts/observe_front_candidate.py deploy/environments/production/front-observation; then
               python3 -m unittest scripts.test_handoff_front_serving_transport scripts.test_front_connection_witness scripts.test_read_front_conntrack scripts.test_observe_front_node_conntrack
-              echo 'selected=true' >> "$GITHUB_OUTPUT"
+              previous="$RUNNER_TEMP/front-handoff-transition-before.json"
+              if ! git show "$base:$config" > "$previous"; then
+                printf 'null\n' > "$previous"
+              fi
+              python3 -m unittest scripts.test_select_front_transport_transition
+              target="$(python3 scripts/select_front_transport_transition.py "$config" --phase handoff --previous "$previous")"
+              if [[ -n "$target" ]]; then
+                echo "target=$target" >> "$GITHUB_OUTPUT"
+                echo 'selected=true' >> "$GITHUB_OUTPUT"
+              fi
             fi
           fi
       - name: Read this run's independent external ingress witness
@@ -525,7 +553,7 @@ jobs:
           path: ${{ runner.temp }}/front-handoff-external
       - name: Prepare exact public Front handoff and compensation
         if: steps.handoff.outputs.selected == 'true'
-        run: python3 scripts/handoff_front_serving_transport.py prepare deploy/environments/production/front-serving-handoff/public-b-secondary.json --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json"
+        run: python3 scripts/handoff_front_serving_transport.py prepare "${{ steps.handoff.outputs.target }}" --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json"
       - name: Retain Front handoff witness before public address CAS
         id: handoff_witness
         if: steps.handoff.outputs.selected == 'true'
@@ -537,7 +565,7 @@ jobs:
           retention-days: 30
       - name: Handoff public address while preserving the existing Front connection
         if: steps.handoff.outputs.selected == 'true'
-        run: python3 scripts/handoff_front_serving_transport.py apply deploy/environments/production/front-serving-handoff/public-b-secondary.json --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json" --result "$RUNNER_TEMP/front-public-handoff-result.json"
+        run: python3 scripts/handoff_front_serving_transport.py apply "${{ steps.handoff.outputs.target }}" --external-evidence "$RUNNER_TEMP/front-handoff-external/front-external-observation.json" --evidence "$RUNNER_TEMP/front-public-handoff.json" --result "$RUNNER_TEMP/front-public-handoff-result.json"
       - name: Retain verified public Front connection continuity
         if: steps.handoff.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -583,7 +611,7 @@ jobs:
           name: fugue-front-public-handoff-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/front-handoff-recovery
       - name: Restore the exact previous ingress after failed independent public acceptance
-        run: python3 scripts/handoff_front_serving_transport.py recover deploy/environments/production/front-serving-handoff/public-b-secondary.json --evidence "$RUNNER_TEMP/front-handoff-recovery/front-public-handoff.json"
+        run: python3 scripts/handoff_front_serving_transport.py recover "${{ needs.front_serving_handoff.outputs.target }}" --evidence "$RUNNER_TEMP/front-handoff-recovery/front-public-handoff.json"
 
   front_drain_observation:
     needs: [front_external_observation, front_public_verification]

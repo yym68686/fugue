@@ -419,3 +419,14 @@ paths must serve identical proofs; a host-reachable Front management port
 must remain inaccessible from the application namespace. Source and observer
 identities are rechecked before evidence retention. These gates complement
 external ingress and held-connection tests; none can substitute for another.
+
+The Front workflow now reads its one mutation target from
+`deploy/environments/production/front-transport-transition/intent.json`. An
+initial `observe` generation is inert. Each next generation selects exactly
+one probe, internal stage or explicit public-handoff declaration. The resolver
+checks namespace, resource membership, observation profile, address and stage
+generation before exposing the target to CI. Changing an executor script or
+adding an unrelated declaration cannot replay a completed handoff. New Edge
+transition targets require configuration changes, not new workflow jobs or
+hardcoded workflow arguments. Existing per-Service CAS and evidence checks
+remain mandatory.
