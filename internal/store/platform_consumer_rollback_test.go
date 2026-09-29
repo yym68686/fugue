@@ -30,8 +30,10 @@ func TestTrafficConsumerRollbackPostgres(t *testing.T) {
 }
 
 func testTrafficConsumerRollback(t *testing.T, address string) {
-	for _, scenario := range []string{"same lane", "cross lane", "dns member", "tls member", "newer other channel", "replayed sequence", "replayed nonce", "older time", "wrong fence", "wrong generation", "ordinary message", "tampered child", "frozen", "superseded", "new topology", "removed cohort", "queued revocation"} {
+	for _, scenario := range []string{"same lane", "cross lane", "dns member", "tls member", "newer other channel", "replayed sequence", "replayed nonce", "older time", "wrong fence", "wrong generation", "ordinary message", "tampered child", "frozen", "superseded", "new topology", "removed cohort", "queued revocation", "shadow transition", "shadow replayed sequence", "shadow replayed nonce", "shadow older time", "shadow tampered child", "shadow frozen", "shadow new topology", "shadow removed cohort", "shadow superseded"} {
 		t.Run(scenario, func(t *testing.T) {
+			fromShadow := strings.HasPrefix(scenario, "shadow ")
+			scenario = strings.TrimPrefix(scenario, "shadow ")
 			if scenario == "queued revocation" && address == "" {
 				t.Skip("Postgres concurrency")
 			}
@@ -70,7 +72,11 @@ func testTrafficConsumerRollback(t *testing.T, address string) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, release, _, _, err := s.ReleasePlatformArtifact(parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=test"}, testPlatformPrincipal())
+			candidateChannel := "gray"
+			if fromShadow {
+				candidateChannel = "shadow"
+			}
+			_, release, _, _, err := s.ReleasePlatformArtifact(parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: candidateChannel, CanaryRuleRef: "cohort=test"}, testPlatformPrincipal())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -89,17 +95,35 @@ func testTrafficConsumerRollback(t *testing.T, address string) {
 				consumer.ActualGeneration = child.Generation
 				newer.consumers = append(newer.consumers, consumer)
 			}
+			if fromShadow {
+				// Model a newly enrolled consumer that has only observed shadow;
+				// the fixture's established serving publication remains selected.
+				if address != "" {
+					_, err = s.db.Exec(`DELETE FROM fugue_platform_consumer_instances WHERE scope_key=$1`, scope)
+				} else {
+					err = s.withLockedState(true, func(state *model.State) error {
+						state.PlatformConsumerInstances = nil
+						return nil
+					})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			reportTrafficLKGFixture(t, s, newer)
 			channel := "gray"
 			if scenario == "cross lane" {
 				channel = "full"
 			}
-			_, rollback, message, _, err := s.RollbackPlatformArtifact(parent.ID, model.PlatformArtifactRollbackRequest{ReleaseChannel: channel, ToGeneration: old.parent.Generation, CanaryRuleRef: "cohort=test", Reason: "recover previous verified artifact"}, testPlatformPrincipal())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if message.MessageType != model.PlatformReleaseMessageTypeRollback {
-				t.Fatal("fixture lacks explicit rollback")
+			rollback := old.release
+			if !fromShadow {
+				var message model.PlatformReleaseMessage
+				_, rollback, message, _, err = s.RollbackPlatformArtifact(parent.ID, model.PlatformArtifactRollbackRequest{ReleaseChannel: channel, ToGeneration: old.parent.Generation, CanaryRuleRef: "cohort=test", Reason: "recover previous verified artifact"}, testPlatformPrincipal())
+				if err != nil || message.MessageType != model.PlatformReleaseMessageTypeRollback {
+					t.Fatal("fixture lacks explicit rollback", err)
+				}
+			} else if !release.ReleasedAt.After(rollback.ReleasedAt) {
+				t.Fatal("shadow observation must be newer than the selected serving publication")
 			}
 			memberIndex := 0
 			if scenario == "dns member" {
@@ -259,7 +283,7 @@ func testTrafficConsumerRollback(t *testing.T, address string) {
 			if readErr != nil {
 				t.Fatal(readErr)
 			}
-			if scenario != "same lane" && scenario != "cross lane" && scenario != "dns member" && scenario != "tls member" {
+			if scenario != "same lane" && scenario != "cross lane" && scenario != "dns member" && scenario != "tls member" && scenario != "transition" {
 				if err == nil || !reflect.DeepEqual(facts, after) {
 					t.Fatal("rejected rollback mutated consumer fact", err)
 				}

@@ -162,9 +162,13 @@ def expired_predecessor(c, release, existing):
         raise ValueError("expired permission predecessor differs from explicit retry")
     a = json.loads(existing["data"]["authorization.json"])
     _, target = permission(c, release)
-    fixed = set(target) - {"issued_at", "expires_at"}
+    # A new explicitly pinned executor may recover this still-unactivated
+    # cell after a code rollout. Its Pod/source are rechecked independently;
+    # the exact old permission digest, cell, node, slot and publication stay
+    # bound, and only an already expired permission is replaceable.
+    fixed = set(target) - {"issued_at", "expires_at", "instance_uid", "source_sha"}
     if digest(a) != previous["authorization_digest"] or set(a) != set(target) or any(a.get(k) != target[k] for k in fixed) or timestamp(a["expires_at"]) > now() or not datetime.timedelta(0) < timestamp(a["expires_at"]) - timestamp(a["issued_at"]) <= datetime.timedelta(minutes=15):
-        raise ValueError("only an expired exact permission for this executor and publication can be replaced")
+        raise ValueError("only an expired exact permission for this cell and publication can be replaced")
     return {"uid": meta["uid"], "resourceVersion": meta["resourceVersion"]}
 
 

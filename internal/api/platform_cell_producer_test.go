@@ -94,6 +94,14 @@ func cellProducerRoleFixture(t *testing.T, s *Server, cell, role string) platfor
 
 func TestCellRouteProducerPublishesAndPreparesOnlyItsRouteTLSAuthority(t *testing.T) {
 	st, s, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	verified := time.Now().UTC().Add(-time.Minute)
+	_, err := st.PutAppDomain(model.AppDomain{Hostname: "private.example.net", AppID: app.ID, TenantID: app.TenantID, Status: model.AppDomainStatusVerified, TLSStatus: model.AppDomainTLSStatusReady, VerifiedAt: &verified, TLSReadyAt: &verified})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutEdgeTLSCertificate(model.EdgeTLSCertificate{Hostname: "private.example.net", AppID: app.ID, TenantID: app.TenantID, CertificatePEM: "synthetic-certificate", PrivateKeyPEM: "synthetic-private-key"}); err != nil {
+		t.Fatal(err)
+	}
 	p := cellProducerRoleFixture(t, s, "cell-a", platformconfig.PublicationRoleCellRoutes)
 	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || strings.HasPrefix(r.URL.Path, "/api/v1/nodes/") {
@@ -119,6 +127,7 @@ func TestCellRouteProducerPublishesAndPreparesOnlyItsRouteTLSAuthority(t *testin
 	if err != nil || len(sets) != 2 {
 		t.Fatal("route/TLS expectations incomplete", sets, err)
 	}
+	assertCellCertificateAccess(t, s, app, parent, shadow, false)
 	route, err := s.consumerAssignmentChild(parent, model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		t.Fatal(err)
@@ -211,6 +220,7 @@ func TestCellRouteProducerPublishesAndPreparesOnlyItsRouteTLSAuthority(t *testin
 		t.Fatal("unprepared gray authority became readable")
 	}
 	report(gray, caps, true)
+	assertCellCertificateAccess(t, s, app, parent, gray, true)
 	projection, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease("cell-a")
 	if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseID != gray.ID {
 		t.Fatal("prepared role route source unavailable", err)
@@ -231,6 +241,7 @@ func TestCellRouteProducerPublishesAndPreparesOnlyItsRouteTLSAuthority(t *testin
 		t.Fatal("full reused gray facts")
 	}
 	report(full, caps, true)
+	assertCellCertificateAccess(t, s, app, parent, full, true)
 	if _, _, _, _, err := st.VerifyPlatformArtifactReleaseLKG(full.ID, verify, platformProducerPrincipal()); err != nil {
 		t.Fatal("fresh full verification", err)
 	}

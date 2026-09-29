@@ -81,10 +81,12 @@ func records(t *testing.T, s *o.Store, id string) []o.Record {
 func TestHTTP2DelayedBodyHasProtocolEvidenceWithoutPayload(t *testing.T) {
 	s, socket := collector(t)
 	h := observation(t, socket, true)
+	readingBody := make(chan struct{})
 	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
 		if r.ProtoMajor != 2 {
 			t.Error("protocol changed")
 		}
+		close(readingBody)
 		b, e := io.ReadAll(r.Body)
 		if e != nil {
 			return e
@@ -106,7 +108,7 @@ func TestHTTP2DelayedBodyHasProtocolEvidenceWithoutPayload(t *testing.T) {
 	defer server.Close()
 	pr, pw := io.Pipe()
 	payload := bytes.Repeat([]byte("payload-not-telemetry"), 4096)
-	go func() { time.Sleep(45 * time.Millisecond); pw.Write(payload); pw.Close() }()
+	go func() { <-readingBody; time.Sleep(45 * time.Millisecond); pw.Write(payload); pw.Close() }()
 	req, _ := http.NewRequest(http.MethodPost, server.URL, pr)
 	req.Header.Set(o.CorrelationHeader, "forged-untrusted-value")
 	resp, e := server.Client().Do(req)

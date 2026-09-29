@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
@@ -31,10 +32,13 @@ func (s *Store) pgConsumerTrafficRollbackCursor(ctx context.Context, tx *sql.Tx,
 	}
 	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, old)
 	message, err := scanPlatformReleaseMessage(tx.QueryRowContext(ctx, `SELECT id, release_id, artifact_id, artifact_kind, scope_key, scope_json, generation, release_channel, message_type, created_at, expires_at, ack_count FROM fugue_platform_release_messages WHERE release_id=$1 AND message_type=$2 ORDER BY created_at ASC LIMIT 1`, set.ArtifactReleaseID, model.PlatformReleaseMessageTypeRollback))
-	if err != nil {
+	fromShadow := old.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow && previous.ApplyStatus == "staged" && previous.ProbeStatus == "shadow_validated"
+	if err != nil && !(fromShadow && errors.Is(err, ErrNotFound)) {
 		return nil, platformcontrol.ErrPlatformConsumerHeartbeatGenerationBack
 	}
-	state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
+	if err == nil {
+		state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
+	}
 	for _, r := range state.PlatformArtifactReleases {
 		if r.Status != model.PlatformArtifactReleaseStatusActive || r.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow || platformArtifactIndex(state.PlatformArtifacts, r.ArtifactID) >= 0 {
 			continue

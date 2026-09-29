@@ -92,6 +92,13 @@ class EnrollmentTests(unittest.TestCase):
         b.validate(c)
         options = b.expired_predecessor(c, release, old)
         self.assertEqual({"uid": old["metadata"]["uid"], "resourceVersion": "123"}, options)
+        replacement = copy.deepcopy(c)
+        replacement["worker"]["instance_uid"] = "44444444-4444-4444-4444-444444444444"
+        replacement["worker"]["source_sha"] = "f" * 40
+        self.assertEqual(options, b.expired_predecessor(replacement, release, old))
+        replacement["worker"]["node"] = "foreign-node"
+        with self.assertRaises(ValueError):
+            b.expired_predecessor(replacement, release, old)
         for mutate in [lambda x: x["metadata"].update(uid="replacement"), lambda x: x["metadata"].update(resourceVersion=""), lambda x: x.update(immutable=True)]:
             changed = copy.deepcopy(old)
             mutate(changed)

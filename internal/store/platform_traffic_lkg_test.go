@@ -262,6 +262,10 @@ func reportTrafficLKGFixture(t *testing.T, s *Store, f promotionFixture) {
 				t.Fatal(err)
 			}
 			heartbeat := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: consumer.ConsumerID, Component: consumer.Component, NodeID: consumer.NodeID, ArtifactKind: consumer.ArtifactKind, ScopeKey: consumer.ScopeKey, ReleaseSetID: f.parent.ID, ExpectedConsumerSetID: set.ID, FencingToken: f.release.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: consumer.Sequence + 1, IssuedAt: now, Nonce: fmt.Sprintf("%032d", now.UnixNano()), GenerationSequence: consumer.GenerationSequence, DesiredGeneration: consumer.DesiredGeneration, ActualGeneration: consumer.ActualGeneration, LKGGeneration: consumer.LKGGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
+			if f.release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
+				heartbeat.ApplyStatus, heartbeat.ProbeStatus = "staged", "shadow_validated"
+				heartbeat.CandidateGeneration, heartbeat.ActualGeneration, heartbeat.LKGGeneration = heartbeat.DesiredGeneration, "", ""
+			}
 			heartbeat.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat)
 			if err != nil {
 				t.Fatal(err)

@@ -891,6 +891,9 @@ func (s *Service) fetchSharedCaddyTLSCertificate(ctx context.Context, hostname s
 	if hostname == "" {
 		return nil, nil
 	}
+	if s.cellCertificateIdentityConfigured() {
+		return s.fetchCellTLSCertificate(ctx, hostname)
+	}
 	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/"))
 	if err != nil || base.Scheme == "" || base.Host == "" {
 		return nil, fmt.Errorf("invalid FUGUE_API_URL")

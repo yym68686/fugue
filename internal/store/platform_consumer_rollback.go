@@ -8,7 +8,8 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-// A rollback changes the desired artifact, not the authenticated replay stream.
+// A rollback, or a move from observation into current serving authority, changes
+// the desired artifact without resetting the authenticated replay stream.
 // The caller holds the configuration scope transaction through fact persistence.
 func consumerCursorForTrafficRollback(state *model.State, previous model.PlatformConsumerInstance, cursor *platformcontrol.PlatformConsumerHeartbeatCursor, set model.PlatformExpectedConsumerSet, heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope, keys bundleauth.Keyring) (*platformcontrol.PlatformConsumerHeartbeatCursor, error) {
 	fail := func() (*platformcontrol.PlatformConsumerHeartbeatCursor, error) {
@@ -32,7 +33,8 @@ func consumerCursorForTrafficRollback(state *model.State, previous model.Platfor
 			next = r
 		}
 	}
-	if old.ID == "" || next.ID == "" || old.ID == next.ID || old.ArtifactID != previous.ReleaseSetID || oldSet.ReleaseSetID != previous.ReleaseSetID || old.ArtifactKind != model.PlatformArtifactKindReleaseSet || old.ScopeKey != set.ScopeKey || old.FencingToken != previous.FencingToken || old.ReleasedAt.IsZero() || !next.ReleasedAt.After(old.ReleasedAt) || next.Status != model.PlatformArtifactReleaseStatusActive || next.ArtifactKind != model.PlatformArtifactKindReleaseSet || next.ArtifactID != set.ReleaseSetID || next.ScopeKey != set.ScopeKey || next.FencingToken != heartbeat.FencingToken || next.FencingToken <= 0 || next.LaneKey != platformsafety.ReleaseLaneKey(next.ArtifactKind, next.ScopeKey, next.ReleaseChannel) {
+	fromShadow := old.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow && previous.ApplyStatus == "staged" && previous.ProbeStatus == "shadow_validated"
+	if old.ID == "" || next.ID == "" || old.ID == next.ID || old.ArtifactID != previous.ReleaseSetID || oldSet.ReleaseSetID != previous.ReleaseSetID || old.ArtifactKind != model.PlatformArtifactKindReleaseSet || old.ScopeKey != set.ScopeKey || old.FencingToken != previous.FencingToken || old.ReleasedAt.IsZero() || next.ReleasedAt.IsZero() || !fromShadow && !next.ReleasedAt.After(old.ReleasedAt) || next.Status != model.PlatformArtifactReleaseStatusActive || next.ArtifactKind != model.PlatformArtifactKindReleaseSet || next.ArtifactID != set.ReleaseSetID || next.ScopeKey != set.ScopeKey || next.FencingToken != heartbeat.FencingToken || next.FencingToken <= 0 || next.LaneKey != platformsafety.ReleaseLaneKey(next.ArtifactKind, next.ScopeKey, next.ReleaseChannel) {
 		return fail()
 	}
 	if next.ReleaseChannel != model.PlatformArtifactReleaseChannelGray && next.ReleaseChannel != model.PlatformArtifactReleaseChannelFull {
@@ -51,7 +53,7 @@ func consumerCursorForTrafficRollback(state *model.State, previous model.Platfor
 			explicit = true
 		}
 	}
-	if !explicit {
+	if !explicit && !fromShadow {
 		return fail()
 	}
 	index := platformArtifactIndex(state.PlatformArtifacts, next.ArtifactID)
@@ -60,6 +62,9 @@ func consumerCursorForTrafficRollback(state *model.State, previous model.Platfor
 	}
 	parent := state.PlatformArtifacts[index]
 	if parent.Generation != next.Generation || parent.ScopeKey != next.ScopeKey || parent.ArtifactKind != next.ArtifactKind || parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass {
+		return fail()
+	}
+	if platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, set) != nil {
 		return fail()
 	}
 	ids, ok := parent.Content["artifact_ids"].([]any)

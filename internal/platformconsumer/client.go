@@ -166,6 +166,10 @@ func (c Client) PostJSON(ctx context.Context, path, token string, in, out any) e
 	return c.requestJSON(ctx, path, token, http.MethodPost, in, out)
 }
 
+func (c Client) GetJSON(ctx context.Context, path, token string, out any) error {
+	return c.requestJSON(ctx, path, token, http.MethodGet, nil, out)
+}
+
 func (c Client) requestJSON(ctx context.Context, path, token, method string, in, out any) error {
 	base, err := url.Parse(strings.TrimSpace(c.BaseURL))
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil {

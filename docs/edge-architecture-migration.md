@@ -707,7 +707,9 @@ eligibility is serving health.
 An operator can declare a new initial attempt after an expired permission by
 pinning its ConfigMap UID, prior declaration digest, authorization digest and
 generation in `previous_permission`. This applies only while activation remains
-absent and the exact Worker and gray parent are unchanged. The lane replaces
+absent and the cell, physical node, slot and gray parent are unchanged. An
+explicit new Worker Pod/source pin may recover initial enrollment after a code
+rollout; every new identity/image check still applies. The lane replaces
 only that expired authorization with Kubernetes UID/resourceVersion and exact
 data preconditions, preserving the watched projection object. Ordinary retries never rotate it,
 and an unexpired permission, replaced object or established activation stops
@@ -725,3 +727,23 @@ production concurrency slot is requested. Unrelated commits do not enqueue an
 empty registration job that could cancel a waiting valid configuration run.
 The writer rechecks the current declaration and script contents before mutation;
 neither selection nor enrollment depends on a code build or deployment job.
+
+Cell Workers fetch existing custom-domain certificates through their scoped
+component identity and exact current TLS assignment. The certificate endpoint
+checks the signed route/TLS parent, serving gray/full fence, declared local route,
+verified domain and matching tenant/app ownership before disclosure, then
+rechecks current authorization. Shadow, other cells and historical assignments
+cannot read private certificate material. The Worker verifies signed inputs and
+the response owner, rechecks assignment, and uses the existing certificate
+validator and private-file installer. Missing scoped credentials cannot fall
+back to a legacy Edge token. Certificate distribution writes no readiness,
+domain status, serving authorization or artifact LKG; live Caddy proofs remain
+required. The existing legacy certificate path retains its prior behavior.
+
+A staged shadow observation can have a newer artifact sequence than the actual
+selected serving publication. Transitioning its runtime cursor into the exact
+current gray/full assignment checks the complete signed parent, immutable
+membership, unfrozen lane, fence and cohort under the same transaction. The
+global sequence, timestamp and nonce checks remain unchanged. This does not
+authorize serving-to-serving generation regression without the existing explicit
+rollback proof, and it cannot synthesize a positive heartbeat or verified LKG.

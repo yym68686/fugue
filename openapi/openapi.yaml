@@ -104,6 +104,17 @@ x-fugue-traffic-serving-evidence:
     Positive and negative reports share a durable monotonic cursor, while
     negative reports preserve the last positive receipt and serving bundle.
     Failed observation discards volatile positive evidence before any retry.
+x-fugue-shadow-serving-transition:
+  semantics: >-
+    A newer shadow observation is not serving authority and cannot prevent
+    reporting an older artifact selected by the current gray or full publication.
+    The store validates the signed complete parent and children, active unfrozen
+    lane, exact fence, latest expected membership and selected cohort under its
+    scope transaction before moving a staged shadow cursor into that serving
+    publication. Sequence, nonce, timestamp and identity replay checks remain
+    monotonic. Movement between serving publications to an older artifact still
+    requires the existing explicit verified rollback proof. This transition
+    neither publishes traffic nor creates positive serving evidence or LKG.
 x-fugue-traffic-verified-recovery:
   semantics: >-
     A TrafficReleaseSet can establish its first verified LKG from an explicit
@@ -3738,6 +3749,34 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         '503':
           $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/consumers/artifacts/{artifact_id}/tls/{hostname}:
+    get:
+      operationId: getPlatformConsumerTLSCertificate
+      summary: Read a custom-domain certificate authorized by a serving cell publication
+      description: A verified Edge Worker identity can read one existing certificate only when its exact current gray or full cell assignment includes the signed TLS reference and locally owned route for that hostname. The expected set, authority, route/TLS parent, publication fence, tenant and app ownership are rechecked before disclosure. Shadow, foreign cells, stale assignments, unverified domains and missing certificates are denied. This read never issues certificates, modifies domain status, reports readiness or changes LKG. Responses are private and no-store.
+      tags: [Edge]
+      x-fugue-handler: handleGetPlatformConsumerTLSCertificate
+      security:
+        - PlatformComponentBearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema: {type: string, minLength: 1}
+        - $ref: "#/components/parameters/HostnamePathParam"
+        - in: query
+          name: expected_consumer_set_id
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Existing certificate belonging to the signed custom-domain owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeTLSCertificateBundleResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/failure-contracts:
