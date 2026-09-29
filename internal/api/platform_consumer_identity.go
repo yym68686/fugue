@@ -16,6 +16,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 )
 
@@ -41,8 +42,11 @@ func decodePlatformConsumerIdentityPolicy(raw string) (platformConsumerIdentityP
 		_, err := platformcontrol.PlatformConsumerID(policy.Component, "validation-node", policy.AuthorityID)
 		valid = valid && err == nil && (policy.Component == model.PlatformConsumerComponentEdgeWorker || policy.Component == model.PlatformConsumerComponentEdgeControl || policy.Component == model.PlatformConsumerComponentDNSServer)
 	}
+	if strings.HasPrefix(policy.ScopeKey, "authority-cell:") {
+		valid = valid && policy.AuthorityID != "" && policy.ScopeKey == platformconfig.AuthorityCellScope(policy.AuthorityID)
+	}
 	if policy.Component == model.PlatformConsumerComponentEdgeControl {
-		valid = valid && policy.AuthorityID != "" && policy.ScopeKey == "global" && len(policy.ArtifactKinds) == 1 && policy.ArtifactKinds[0] == model.PlatformArtifactKindEdgeRouteIntent
+		valid = valid && policy.AuthorityID != "" && (policy.ScopeKey == "global" || policy.ScopeKey == platformconfig.AuthorityCellScope(policy.AuthorityID)) && len(policy.ArtifactKinds) == 1 && policy.ArtifactKinds[0] == model.PlatformArtifactKindEdgeRouteIntent
 	}
 	return policy, valid
 }

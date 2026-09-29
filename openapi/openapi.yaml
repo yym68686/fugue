@@ -715,13 +715,17 @@ paths:
       summary: Edge Route Intents
       description: >-
         Returns Core's inventory-independent desired-route projection. Only the
-        edge-control component identity with global edge_route_intent capability
+        edge-control component identity with edge_route_intent capability
         is accepted; tenant and platform-admin API keys are not accepted.
         A canonical cell-* query additionally requires a signed authority_id
         equal to that cell. A scoped Control identity cannot read another cell
         or a legacy group. Legacy unscoped identities retain only legacy group
         access. Neutral identities are exchanged from a live, operator-authorized
         Pod token; Core signing keys are never returned to Control processes.
+        A neutral Control may use its explicit authority-cell:<authority_id>
+        publication scope; a global credential stays confined to the legacy
+        global publication scope. Selection and the final authority recheck use
+        only the signed credential's scope, with no fallback between scopes.
         Returns only the newest applicable published gray/full TrafficReleaseSet
         projection for the required edge_group_id. Gray applies only to its
         signed cohort; a newer full supersedes an older gray lane. The selected
@@ -3622,7 +3626,9 @@ paths:
         the signed claim. Heartbeats and runtime-fact reads remain fenced by the
         exact selected public DNS Service and EndpointSlice backend. Issuing a
         candidate identity never selects that backend or permits public serving.
-        Edge Control exchange requires an explicit authority_id, global scope,
+        An authority-cell:<id> scope requires authority_id equal to that cell.
+        Edge Control exchange requires an explicit authority_id and either its
+        exact authority-cell scope or the retained global compatibility scope,
         and exactly the edge_route_intent capability; it uses the independent
         RouteIntent signing keyring. The private RouteIntent TLS listener admits
         this exact POST identity-exchange path without query parameters as well
@@ -14220,7 +14226,8 @@ components:
           pattern: "^sha256:[0-9a-f]{64}$"
         scope_key:
           type: "string"
-          enum: ["global"]
+          pattern: '^(?:global|authority-cell:cell-[a-z0-9]+(?:-[a-z0-9]+)*)$'
+          description: Exact source publication scope. A cell scope must match serving_group_id and the candidate authority_cell_id. Legacy global publications remain supported without scope substitution. Changing a previously observed cell's scope requires a new signed Agent policy publication and a strictly newer traffic publication; fencing tokens are ordered only within the same scope and channel.
         release_id:
           type: "string"
           minLength: 1

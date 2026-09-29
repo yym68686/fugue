@@ -162,6 +162,9 @@ func (g Grant) Validate() error {
 		if err := c.Publication.validate(g.IssuedAt); err != nil {
 			return err
 		}
+		if c.Publication.ScopeKey != "global" && c.Publication.ServingGroupID != c.AuthorityCellID {
+			return errors.New("Agent Edge cell publication belongs to another authority")
+		}
 		if previous, exists := cellPublications[c.AuthorityCellID]; exists && previous != c.Publication {
 			return errors.New("Agent Edge cell contains mixed publication evidence")
 		}
@@ -205,9 +208,10 @@ func (g Grant) Validate() error {
 }
 
 func (source Publication) validate(issuedAt time.Time) error {
+	validScope := source.ScopeKey == "global" || strings.HasPrefix(source.ServingGroupID, "cell-") && source.ScopeKey == platformconfig.AuthorityCellScope(source.ServingGroupID)
 	if !identifier.MatchString(source.ReleaseSetID) || !identifier.MatchString(source.RouteArtifactID) || !identifier.MatchString(source.ReleaseID) ||
 		len(source.ServingGroupID) > 128 || !topologyIdentifier.MatchString(source.ServingGroupID) ||
-		(source.Channel != "gray" && source.Channel != "full") || source.ScopeKey != "global" || source.FencingToken <= 0 ||
+		(source.Channel != "gray" && source.Channel != "full") || !validScope || source.FencingToken <= 0 ||
 		source.PublishedAt.IsZero() || source.PublishedAt.After(issuedAt) {
 		return errors.New("Agent Edge grant publication is invalid")
 	}
@@ -301,7 +305,8 @@ func Verify(raw []byte, keys map[string]TrustKey, audience, origin string, previ
 	for _, c := range s.Grant.Candidates {
 		if old, exists := watermarks[c.AuthorityCellID]; exists && (c.Publication.PublishedAt.Before(old.PublishedAt) ||
 			c.Publication.PublishedAt.Equal(old.PublishedAt) && c.Publication != old ||
-			c.Publication.PublishedAt.After(old.PublishedAt) && c.Publication.Channel == old.Channel && c.Publication.FencingToken <= old.FencingToken) {
+			c.Publication.ScopeKey != old.ScopeKey && previous != nil && s.Grant.PolicyReference == previous.signed.Grant.PolicyReference ||
+			c.Publication.PublishedAt.After(old.PublishedAt) && c.Publication.ScopeKey == old.ScopeKey && c.Publication.Channel == old.Channel && c.Publication.FencingToken <= old.FencingToken) {
 			return VerifiedGrant{}, errors.New("Agent Edge cell publication replay or equivocation rejected")
 		}
 		watermarks[c.AuthorityCellID] = c.Publication

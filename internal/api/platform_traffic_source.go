@@ -24,7 +24,11 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficRelease(group string) (model.
 }
 
 func (s *Server) edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
-	parent, release, found, err := s.selectTrafficRouteRelease(group)
+	return s.edgeRouteIntentSnapshotFromTrafficScope(group, trafficRouteScope(group), readArtifact)
+}
+
+func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
+	parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
 	if err != nil || !found {
 		return model.EdgeRouteIntentSnapshot{}, found, err
 	}
@@ -84,7 +88,7 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group strin
 	}
 	// Publication/rollback can supersede an assignment while its artifacts
 	// are read. Never return a mixed release snapshot to the executor.
-	current, active, found, err := s.selectTrafficRouteRelease(group)
+	current, active, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
 	if err != nil || !found || current.ID != parent.ID || current.ContentHash != parent.ContentHash || active.ID != release.ID || active.FencingToken != release.FencingToken || active.CanaryRuleRef != release.CanaryRuleRef || active.Status != model.PlatformArtifactReleaseStatusActive {
 		return fail()
 	}
@@ -95,6 +99,17 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group strin
 // override full only in their signed cohort; timestamps order cross-lane
 // publication, whereas each lane retains its own independent fencing token.
 func (s *Server) selectTrafficRouteRelease(group string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
+	return s.selectTrafficRouteReleaseInScope(group, trafficRouteScope(group))
+}
+
+func trafficRouteScope(group string) string {
+	if cell := platformcontrol.ConsumerAuthorityID(group); cell != "" {
+		return platformconfig.AuthorityCellScope(cell)
+	}
+	return "global"
+}
+
+func (s *Server) selectTrafficRouteReleaseInScope(group, scope string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
 	type candidate struct {
 		parent  model.PlatformArtifact
 		release model.PlatformArtifactRelease
@@ -103,8 +118,11 @@ func (s *Server) selectTrafficRouteRelease(group string) (model.PlatformArtifact
 	fail := func() (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, true, errors.New("traffic route release selection invalid")
 	}
+	if group == "" || len(group) > 128 || !trafficSourceGroup.MatchString(group) || (scope != "global" && scope != trafficRouteScope(group)) {
+		return fail()
+	}
 	for _, channel := range []string{model.PlatformArtifactReleaseChannelFull, model.PlatformArtifactReleaseChannelGray} {
-		parent, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", channel)
+		parent, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, scope, channel)
 		if err != nil {
 			return fail()
 		}
@@ -115,8 +133,14 @@ func (s *Server) selectTrafficRouteRelease(group string) (model.PlatformArtifact
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].release.ReleasedAt.After(candidates[j].release.ReleasedAt) })
 	for _, c := range candidates {
 		parent, release := c.parent, c.release
-		if group == "" || len(group) > 128 || !trafficSourceGroup.MatchString(group) || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || release.ReleasedAt.IsZero() {
+		if parent.ScopeKey != scope || release.ScopeKey != scope || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || release.ReleasedAt.IsZero() {
 			return fail()
+		}
+		if scope != "global" {
+			topology, err := platformconfig.TrafficConsumersFromRelease(parent)
+			if err != nil || topology == nil || topology.AuthorityCellID != group {
+				return fail()
+			}
 		}
 		if release.ReleaseChannel == model.PlatformArtifactReleaseChannelGray {
 			groups, err := platformconfig.ResolveTrafficCanary(parent, release.CanaryRuleRef)

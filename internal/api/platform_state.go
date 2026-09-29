@@ -1327,7 +1327,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 						break
 					}
 				}
-				projection, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease(group)
+				projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, newConsumerArtifactReader(s.store.GetPlatformArtifact))
 				if err != nil {
 					httpx.WriteError(w, http.StatusServiceUnavailable, "serving release unavailable")
 					return

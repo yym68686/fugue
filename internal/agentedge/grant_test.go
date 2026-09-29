@@ -86,6 +86,74 @@ func TestGrantVerificationBindsAudienceOriginAndAbsoluteEvidenceExpiry(t *testin
 	}
 }
 
+func TestGrantBindsIndependentPublicationScopeToCandidateCell(t *testing.T) {
+	for _, scenario := range []string{"mixed transition", "two independent cells", "foreign scope", "foreign serving authority", "legacy alias in cell scope"} {
+		t.Run(scenario, func(t *testing.T) {
+			g, private, keys, now := grantFixture(t)
+			g.Candidates[0].Publication.ServingGroupID = "cell-a"
+			g.Candidates[0].Publication.ScopeKey = "authority-cell:cell-a"
+			switch scenario {
+			case "two independent cells":
+				g.Candidates[1].Publication.ServingGroupID = "cell-b"
+				g.Candidates[1].Publication.ScopeKey = "authority-cell:cell-b"
+			case "foreign scope":
+				g.Candidates[0].Publication.ScopeKey = "authority-cell:cell-b"
+			case "foreign serving authority":
+				g.Candidates[0].Publication.ServingGroupID = "cell-b"
+				g.Candidates[0].Publication.ScopeKey = "authority-cell:cell-b"
+				g.Candidates[0].AuthorityCellID = "cell-a"
+			case "legacy alias in cell scope":
+				g.Candidates[0].Publication.ServingGroupID = "edge-group-a"
+			}
+			if scenario != "mixed transition" && scenario != "two independent cells" {
+				if g.Validate() == nil {
+					t.Fatal("foreign publication authority accepted")
+				}
+				return
+			}
+			if _, err := Verify(encodeGrant(t, g, private), keys, g.Audience, g.Origin, nil, now); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPublicationScopeTransitionRequiresNewPolicyAndIndependentFence(t *testing.T) {
+	for _, scenario := range []string{"new scope and policy", "same policy", "old publication", "same lane lower fence"} {
+		t.Run(scenario, func(t *testing.T) {
+			g, private, keys, now := grantFixture(t)
+			before, err := Verify(encodeGrant(t, g, private), keys, g.Audience, g.Origin, nil, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := g
+			next.Candidates = append([]Candidate(nil), g.Candidates...)
+			next.IssuedAt = now
+			next.PolicyReference.ReleaseID = "policy-scope-transition"
+			next.PolicyReference.FencingToken++
+			next.PolicyReference.PublishedAt = now.Add(-time.Second)
+			next.Candidates[0].Publication.ServingGroupID = "cell-a"
+			next.Candidates[0].Publication.ScopeKey = "authority-cell:cell-a"
+			next.Candidates[0].Publication.ReleaseID = "independent-first"
+			next.Candidates[0].Publication.FencingToken = 1
+			next.Candidates[0].Publication.PublishedAt = now.Add(-time.Second)
+			switch scenario {
+			case "same policy":
+				next.PolicyReference = g.PolicyReference
+			case "old publication":
+				next.Candidates[0].Publication.PublishedAt = g.Candidates[0].Publication.PublishedAt.Add(-time.Second)
+			case "same lane lower fence":
+				next.Candidates[0].Publication.ServingGroupID = g.Candidates[0].Publication.ServingGroupID
+				next.Candidates[0].Publication.ScopeKey = "global"
+			}
+			_, err = Verify(encodeGrant(t, next, private), keys, g.Audience, g.Origin, &before, now)
+			if (err == nil) != (scenario == "new scope and policy") {
+				t.Fatal(scenario, err)
+			}
+		})
+	}
+}
+
 func TestGrantRejectsTamperingAmbiguousJSONAndUntrustedKeys(t *testing.T) {
 	g, private, keys, now := grantFixture(t)
 	raw := encodeGrant(t, g, private)

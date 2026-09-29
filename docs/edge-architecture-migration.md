@@ -575,3 +575,15 @@ freshness cannot promote a release. Preparing the topology does not copy old
 facts, select public transport or establish positive LKG. Consumer deployment
 scope, independent per-cell release selection, bootstrap activation, fresh
 proofs and explicit transport cutover still need separate rollout steps.
+
+Route source selection resolves neutral serving authorities only within their
+`authority-cell:<id>` publication lanes. Control requests and consumer serving
+assignment/fact reads instead use the exact signed credential scope, allowing
+existing global credentials to finish their compatibility lifecycle without
+silently changing authority. Neither path searches another scope after an
+absent, invalid or unprepared publication. Agent grants retain the actual source
+scope and verify that a cell publication matches the candidate authority;
+mixed legacy/new-cell grants remain possible during an explicit transition.
+This code support does not change any deployment's credential scope or activate
+a new cell publication. Agent binaries must support scoped grants before the
+Agent topology policy selects a neutral publication.

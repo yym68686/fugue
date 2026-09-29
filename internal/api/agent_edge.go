@@ -188,7 +188,7 @@ func (s *Server) agentCellAuthorization(p agentedge.AuthorityPolicy, topology ed
 		return agentCellSource{}, errAgentEdgeUnavailable
 	}
 	lineage := platformconfig.LineageFromArtifact(route)
-	input, err := s.store.GetPlatformArtifactByIdentity(model.PlatformArtifactKindPlatformIntent, "global", lineage.IntentGeneration)
+	input, err := s.store.GetPlatformArtifactByIdentity(model.PlatformArtifactKindPlatformIntent, parent.ScopeKey, lineage.IntentGeneration)
 	if err != nil || input.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(input) != nil {
 		return agentCellSource{}, errAgentEdgeUnavailable
 	}
@@ -222,7 +222,7 @@ func (s *Server) agentCellAuthorization(p agentedge.AuthorityPolicy, topology ed
 	topologyDigest, _ := platformconfig.Digest(topology)
 	result := agentCellSource{cell: cell, parent: parent, release: release, route: route, grant: grants[0], paths: map[string]string{}, publication: agentedge.Publication{
 		ServingGroupID: group, ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: route.ID, RouteArtifactDigest: route.ContentHash,
-		PolicyDigest: b.PolicyDigest, IntentDigest: b.IntentDigest, InputSnapshotDigest: b.InputSnapshotDigest, TopologyDigest: topologyDigest, ScopeKey: "global",
+		PolicyDigest: b.PolicyDigest, IntentDigest: b.IntentDigest, InputSnapshotDigest: b.InputSnapshotDigest, TopologyDigest: topologyDigest, ScopeKey: parent.ScopeKey,
 		ReleaseID: release.ID, Channel: release.ReleaseChannel, FencingToken: release.FencingToken, PublishedAt: release.ReleasedAt}}
 	result.probeTimeout = time.Duration(payload.Policy.DNSReadiness.ProbeTimeoutSeconds) * time.Second
 	for _, r := range snapshot.Routes {
@@ -541,7 +541,7 @@ func captureAgentEdgeObservation(ctx context.Context, client *clusterNodeClient,
 			b := proof.TrafficRelease
 			if err != nil || proof.Version == "" || proof.Digest != digest || proof.EdgeID != edge.ID || proof.GroupID != source.cell.ServingGroupID() || proof.State != "" || proof.CheckedAt.IsZero() || proof.CheckedAt.After(time.Now()) || b == nil ||
 				b.ReleaseSetID != source.parent.ID || b.ReleaseSetDigest != source.parent.ContentHash || b.RouteArtifactID != source.route.ID || b.RouteArtifactDigest != source.route.ContentHash ||
-				b.ReleaseID != source.release.ID || b.ReleaseChannel != source.release.ReleaseChannel || b.FencingToken != source.release.FencingToken || b.ScopeKey != "global" ||
+				b.ReleaseID != source.release.ID || b.ReleaseChannel != source.release.ReleaseChannel || b.FencingToken != source.release.FencingToken || b.ScopeKey != source.publication.ScopeKey ||
 				b.PolicyDigest != source.publication.PolicyDigest || b.IntentDigest != source.publication.IntentDigest || b.InputSnapshotDigest != source.publication.InputSnapshotDigest {
 				valid = false
 				break

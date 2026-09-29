@@ -171,7 +171,7 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 		if group == "" || freshness <= 0 {
 			return fail()
 		}
-		parent, release, found, err := s.selectTrafficRouteRelease(group)
+		parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, claims.ScopeKey)
 		if err != nil {
 			return fail()
 		}
@@ -198,7 +198,7 @@ func (s *Server) dnsFactSourceForConsumer(node string, fact model.PlatformConsum
 		if !viewFound {
 			return fail()
 		}
-		projection, found, err := s.edgeRouteIntentSnapshotFromTrafficRelease(group)
+		projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, newConsumerArtifactReader(s.store.GetPlatformArtifact))
 		if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
 			return fail()
 		}
