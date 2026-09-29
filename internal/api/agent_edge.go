@@ -512,7 +512,7 @@ func captureAgentEdgeObservation(ctx context.Context, client *clusterNodeClient,
 		if err != nil || !platformconfig.PublicDNSFlattenIP(ip) {
 			continue
 		}
-		capacity, err := readAgentCapacity(ctx, client, node.ID, address, p.Capacity, time.Now().UTC())
+		capacity, err := readAgentCapacity(ctx, client, node.ID, address, p.Capacity, time.Now)
 		if err != nil {
 			continue
 		}

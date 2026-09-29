@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,10 +34,19 @@ func agentCapacityFixture(id, address string, now time.Time) (corev1.Node, kubeN
 
 func TestAgentCapacityUsesOriginalAuthenticatedFactsAndRejectsUnknowns(t *testing.T) {
 	now := time.Now().UTC()
-	for _, scenario := range []string{"fresh", "missing cpu", "missing memory", "old cpu", "future memory", "previous node metrics", "cpu saturated", "memory saturated", "foreign address", "draining", "pressure", "unknown readiness", "unknown networking", "duplicate condition", "changed uid", "changed allocatable", "drained during observation", "foreign summary", "unauthenticated"} {
+	for _, scenario := range []string{"fresh", "collected during read", "expired during recheck", "clock moved backwards", "missing cpu", "missing memory", "old cpu", "future memory", "previous node metrics", "cpu saturated", "memory saturated", "foreign address", "draining", "pressure", "unknown readiness", "unknown networking", "duplicate condition", "changed uid", "changed allocatable", "drained during observation", "foreign summary", "unauthenticated"} {
 		t.Run(scenario, func(t *testing.T) {
 			node, summary := agentCapacityFixture("edge-a", "8.8.8.8", now)
+			var clock atomic.Int64
+			clock.Store(now.UnixNano())
+			clockNow := func() time.Time { return time.Unix(0, clock.Load()).UTC() }
 			switch scenario {
+			case "collected during read":
+				summary.Node.CPU.Time = now.Add(time.Second).Format(time.RFC3339Nano)
+				summary.Node.Memory.Time = summary.Node.CPU.Time
+			case "expired during recheck":
+				summary.Node.CPU.Time = now.Add(-119 * time.Second).Format(time.RFC3339Nano)
+				summary.Node.Memory.Time = summary.Node.CPU.Time
 			case "missing cpu":
 				summary.Node.CPU.UsageNanoCores = nil
 			case "missing memory":
@@ -80,6 +90,8 @@ func TestAgentCapacityUsesOriginalAuthenticatedFactsAndRejectsUnknowns(t *testin
 					reads++
 					if reads == 2 {
 						switch scenario {
+						case "expired during recheck":
+							clock.Store(now.Add(2 * time.Second).UnixNano())
 						case "changed uid":
 							node.UID = "replacement-node"
 						case "changed allocatable":
@@ -90,6 +102,12 @@ func TestAgentCapacityUsesOriginalAuthenticatedFactsAndRejectsUnknowns(t *testin
 					}
 					json.NewEncoder(w).Encode(node)
 				case "/api/v1/nodes/edge-a/proxy/stats/summary":
+					if scenario == "collected during read" {
+						clock.Store(now.Add(2 * time.Second).UnixNano())
+					}
+					if scenario == "clock moved backwards" {
+						clock.Store(now.Add(-time.Second).UnixNano())
+					}
 					json.NewEncoder(w).Encode(summary)
 				default:
 					http.NotFound(w, r)
@@ -97,14 +115,18 @@ func TestAgentCapacityUsesOriginalAuthenticatedFactsAndRejectsUnknowns(t *testin
 			}))
 			defer server.Close()
 			client := &clusterNodeClient{baseURL: server.URL, client: server.Client(), bearerToken: "synthetic-capacity-token"}
-			e, err := readAgentCapacity(context.Background(), client, "edge-a", "8.8.8.8", agentedge.CapacityPolicy{MaxNodeCPUPercent: 85, MaxNodeMemoryPercent: 85, FactMaxAgeSeconds: 120}, now)
-			if scenario != "fresh" {
+			e, err := readAgentCapacity(context.Background(), client, "edge-a", "8.8.8.8", agentedge.CapacityPolicy{MaxNodeCPUPercent: 85, MaxNodeMemoryPercent: 85, FactMaxAgeSeconds: 120}, clockNow)
+			if scenario != "fresh" && scenario != "collected during read" {
 				if err == nil {
 					t.Fatal("invalid capacity authorized an Edge")
 				}
 				return
 			}
-			if err != nil || !e.ObservedAt.Equal(now.Add(-5*time.Second)) || !e.ValidUntil.Equal(now.Add(115*time.Second)) || e.NodeUID != "edge-a-uid" || reads != 2 {
+			wantObserved := now.Add(-5 * time.Second)
+			if scenario == "collected during read" {
+				wantObserved = now.Add(time.Second)
+			}
+			if err != nil || !e.ObservedAt.Equal(wantObserved) || !e.ValidUntil.Equal(wantObserved.Add(120*time.Second)) || e.NodeUID != "edge-a-uid" || reads != 2 {
 				t.Fatalf("original capacity identity/lifetime was lost: %+v %v", e, err)
 			}
 		})

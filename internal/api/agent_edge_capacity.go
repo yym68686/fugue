@@ -44,10 +44,11 @@ func agentCapacityNodeReady(node corev1.Node, address string) bool {
 		conditions[corev1.NodePIDPressure] == corev1.ConditionFalse && (!hasNetwork || network == corev1.ConditionFalse)
 }
 
-func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, address string, p agentedge.CapacityPolicy, now time.Time) (agentCapacityEvidence, error) {
+func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, address string, p agentedge.CapacityPolicy, clockNow func() time.Time) (agentCapacityEvidence, error) {
 	fail := func() (agentCapacityEvidence, error) {
 		return agentCapacityEvidence{}, errors.New("fresh authenticated node capacity unavailable")
 	}
+	started := clockNow().UTC()
 	var node corev1.Node
 	path := "/api/v1/nodes/" + url.PathEscape(nodeID)
 	if c.doJSON(ctx, http.MethodGet, path, &node) != nil || node.Name != nodeID || !agentCapacityNodeReady(node, address) {
@@ -62,6 +63,13 @@ func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, addres
 		used = summary.Node.Memory.UsageBytes
 	}
 	if used == nil {
+		return fail()
+	}
+	// Kubelet may collect a sample while this authenticated request is in
+	// flight. Compare it with read completion, never with request start. The
+	// observation and expiry below remain the original metric timestamps.
+	now := clockNow().UTC()
+	if now.Before(started) {
 		return fail()
 	}
 	cpuAt, e1 := time.Parse(time.RFC3339Nano, summary.Node.CPU.Time)
@@ -86,6 +94,10 @@ func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, addres
 	var current corev1.Node
 	if c.doJSON(ctx, http.MethodGet, path, &current) != nil || current.UID != node.UID || !agentCapacityNodeReady(current, address) ||
 		current.Status.Allocatable.Cpu().MilliValue() != cpu || current.Status.Allocatable.Memory().Value() != memory {
+		return fail()
+	}
+	finished := clockNow().UTC()
+	if finished.Before(now) || !until.After(finished) {
 		return fail()
 	}
 	return agentCapacityEvidence{NodeID: nodeID, NodeUID: string(node.UID), Address: address, ObservedAt: observed, ValidUntil: until,
