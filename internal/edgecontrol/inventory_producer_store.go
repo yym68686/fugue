@@ -215,14 +215,22 @@ func bootstrapProducerBound(snapshot GroupInventorySnapshot, instance GroupInsta
 	if snapshot.verifiedProducer == nil {
 		return inventoryProducerGeneration(eligibility.ProducerGeneration) == strings.TrimSpace(snapshot.Generation)
 	}
+	observation, ok := inventoryInstanceProducerBound(snapshot, instance)
+	return ok && observation.ProducerGeneration == eligibility.ProducerGeneration
+}
+
+// An aggregate's top-level topology describes its latest envelope. Each
+// physical producer retains its own authenticated fault domain and pool; a
+// shared authority is not evidence that its machines share a failure domain.
+func inventoryInstanceProducerBound(snapshot GroupInventorySnapshot, instance GroupInstance) (GroupInventoryProducerObservation, bool) {
 	producer := snapshot.verifiedProducer
-	if validateGroupInventoryProducerState(*producer, snapshot.GroupID) != nil || snapshot.Generation != groupInventoryProducerGeneration(producer.Generation, snapshot) {
-		return false
+	if producer == nil || validateGroupInventoryProducerState(*producer, snapshot.GroupID) != nil || snapshot.Generation != groupInventoryProducerGeneration(producer.Generation, snapshot) {
+		return GroupInventoryProducerObservation{}, false
 	}
 	for _, observation := range producer.Observations {
-		if observation.NodeID == instance.EdgeID && observation.Slot == instance.Slot && observation.ProducerGeneration == eligibility.ProducerGeneration && reflect.DeepEqual(observation.Instance, instance) {
-			return !observation.ObservedAt.After(snapshot.ObservedAt) && snapshot.ObservedAt.Sub(observation.ObservedAt) <= maxInventoryHeartbeatTTL
+		if observation.NodeID == instance.EdgeID && observation.Slot == instance.Slot && reflect.DeepEqual(observation.Instance, instance) {
+			return observation, !observation.ObservedAt.After(snapshot.ObservedAt) && snapshot.ObservedAt.Sub(observation.ObservedAt) <= maxInventoryHeartbeatTTL
 		}
 	}
-	return false
+	return GroupInventoryProducerObservation{}, false
 }

@@ -106,6 +106,26 @@ func TestResourceDesiredSubsetComparesKubernetesMapListsBySchemaKey(t *testing.T
 	}
 }
 
+func TestResourceDesiredSubsetComparesServicePortsByName(t *testing.T) {
+	desired := map[string]any{
+		"apiVersion": "v1", "kind": "Service",
+		"spec": map[string]any{"ports": []any{
+			map[string]any{"name": "dns-udp", "port": json.Number("5353"), "protocol": "UDP", "targetPort": json.Number("5353")},
+			map[string]any{"name": "dns-tcp", "port": json.Number("5353"), "protocol": "TCP", "targetPort": json.Number("5353")},
+		}},
+	}
+	live := deepCopyMap(desired)
+	ports := live["spec"].(map[string]any)["ports"].([]any)
+	ports[0], ports[1] = ports[1], ports[0]
+	if !ResourceDesiredSubset(desired, live) {
+		t.Fatal("Service port reordering was treated as resource drift")
+	}
+	live["spec"].(map[string]any)["ports"].([]any)[0].(map[string]any)["protocol"] = "SCTP"
+	if ResourceDesiredSubset(desired, live) {
+		t.Fatal("Service port protocol drift was accepted")
+	}
+}
+
 func TestBindManifestCASBindsPresentResourcesAndAllowsDeclaredCreate(t *testing.T) {
 	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"template":{"metadata":{},"spec":{"containers":[]}}}},{"apiVersion":"v1","kind":"Service","metadata":{"name":"fugue-api-tls","namespace":"fugue-system"}}],"kind":"ComponentResourceSet"}`)
 	observation := stableObservation("api-uid", "50", "ghcr.io/example/fugue-api@"+testDigest, testSHA1)

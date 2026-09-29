@@ -407,9 +407,13 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot, all
 			// active epoch for this group.
 			continue
 		}
-		if instanceGroup != groupID || edgeID == "" || strings.TrimSpace(instance.InstanceUID) == "" ||
-			instance.FaultDomainID != snapshot.FaultDomainID || instance.EdgePoolID != snapshot.EdgePoolID {
+		if instanceGroup != groupID || edgeID == "" || strings.TrimSpace(instance.InstanceUID) == "" || validateInventoryTopology(instance.FaultDomainID, instance.EdgePoolID) != nil {
 			return groupInventoryView{}, errGroupInventoryInvalid
+		}
+		if instance.FaultDomainID != snapshot.FaultDomainID || instance.EdgePoolID != snapshot.EdgePoolID {
+			if _, bound := inventoryInstanceProducerBound(snapshot, instance); !bound {
+				return groupInventoryView{}, errGroupInventoryInvalid
+			}
 		}
 		if _, duplicate := activeSeen[edgeID]; duplicate {
 			return groupInventoryView{}, errGroupInventoryInvalid

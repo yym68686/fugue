@@ -676,7 +676,7 @@ func desiredSubset(desired, live any, path string) bool {
 		if !ok || len(candidate) != len(typed) {
 			return false
 		}
-		if key := kubernetesMapListKey(path); key != "" {
+		if key := kubernetesMapListKey(path); key != "" && mapListHasNonEmptyKey(typed, candidate, key) {
 			return desiredMapListSubset(typed, candidate, path, key)
 		}
 		for index := range typed {
@@ -693,8 +693,27 @@ func desiredSubset(desired, live any, path string) bool {
 	}
 }
 
+func mapListHasNonEmptyKey(desired, live []any, key string) bool {
+	if len(desired) == 0 || len(live) == 0 {
+		return false
+	}
+	for _, raw := range append(append([]any(nil), desired...), live...) {
+		item, ok := raw.(map[string]any)
+		value, valueOK := item[key].(string)
+		if !ok || !valueOK || strings.TrimSpace(value) == "" {
+			return false
+		}
+	}
+	return true
+}
+
 func kubernetesMapListKey(path string) string {
 	switch {
+	case path == "spec.ports" || strings.HasSuffix(path, ".spec.ports"):
+		// Kubernetes treats Service ports as a keyed list.  The API server can
+		// reorder UDP/TCP entries that share a numeric port, so convergence
+		// must compare the declared port identities instead of positions.
+		return "name"
 	case strings.HasSuffix(path, ".volumes"):
 		return "name"
 	case strings.HasSuffix(path, ".volumeMounts"):

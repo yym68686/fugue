@@ -81,6 +81,74 @@ func TestAggregatedBootstrapBindsAuthenticatedProducerObservations(t *testing.T)
 	}
 }
 
+func TestAuthenticatedCellInventoryPreservesIndependentPhysicalDomains(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	group := "cell-shared-authority"
+	root := privateStateDir(t)
+	store, err := OpenPersistentGroupStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, node := range []string{"node-one", "node-two"} {
+		h := authorityInventoryHeartbeatFixture(group, node, uint64(i), uint64(i+1), now, "independent-domain-"+node)
+		h.FaultDomainID, h.EdgePoolID = "host-"+node, "pool-"+node
+		h.Inventory.FaultDomainID, h.Inventory.EdgePoolID = h.FaultDomainID, h.EdgePoolID
+		h.Inventory.ActiveEpoch.FaultDomainID, h.Inventory.ActiveEpoch.EdgePoolID = h.FaultDomainID, h.EdgePoolID
+		h.Inventory.ActiveEpoch.MinHealthyInstances = 2
+		h.Inventory.Instances[0].FaultDomainID, h.Inventory.Instances[0].EdgePoolID = h.FaultDomainID, h.EdgePoolID
+		id := GroupInventoryProducerIdentity{CredentialID: "credential-" + node, TokenID: "token-" + node, NodeID: node, GroupID: group}
+		if _, err := store.StoreGroupInventoryProducerHeartbeat(ctx, id, h, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restarted, err := OpenPersistentGroupStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := restarted.ReadGroupInventory(ctx, group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := validateGroupInventory(group, snapshot, false, now)
+	if err != nil || len(view.servingEdgeIDs) != 2 {
+		t.Fatal("one authority cannot combine independent domains", view, err)
+	}
+	if snapshot.Instances[0].FaultDomainID == snapshot.Instances[1].FaultDomainID || snapshot.Instances[0].EdgePoolID == snapshot.Instances[1].EdgePoolID {
+		t.Fatal("aggregate rewrote physical topology")
+	}
+	raw, _ := json.Marshal(snapshot)
+	var unbound GroupInventorySnapshot
+	if err := json.Unmarshal(raw, &unbound); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateGroupInventory(group, unbound, false, now); err == nil {
+		t.Fatal("untrusted mixed topology bypassed producer authentication")
+	}
+	for _, change := range []string{"domain", "pool", "identity", "observation", "generation", "stale producer"} {
+		t.Run(change, func(t *testing.T) {
+			copy := cloneGroupInventorySnapshot(snapshot)
+			switch change {
+			case "domain":
+				copy.Instances[0].FaultDomainID = "host-forged"
+			case "pool":
+				copy.Instances[0].EdgePoolID = "pool-forged"
+			case "identity":
+				copy.Instances[0].InstanceUID = "replacement"
+			case "observation":
+				copy.verifiedProducer.Observations[0].Instance.FaultDomainID = "host-forged"
+			case "generation":
+				copy.Generation = "inventory-forged"
+			case "stale producer":
+				copy.verifiedProducer.Observations[0].ObservedAt = now.Add(-maxInventoryHeartbeatTTL - time.Second)
+			}
+			if _, err := validateGroupInventory(group, copy, false, now); err == nil {
+				t.Fatal("changed producer evidence authorized mixed topology")
+			}
+		})
+	}
+}
+
 func TestInventoryProducerAcceptsReleaseAuditChangeAtSameServingEpoch(t *testing.T) {
 	t.Parallel()
 
