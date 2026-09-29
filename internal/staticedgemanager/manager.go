@@ -50,11 +50,12 @@ type state struct {
 	Records        []recorded `json:"records,omitempty"`
 }
 type Manager struct {
-	cfg      Config
-	mu       sync.Mutex
-	st       state
-	lock     *os.File
-	poisoned bool
+	cfg          Config
+	mu           sync.Mutex
+	st           state
+	lock         *os.File
+	poisoned     bool
+	observations chan struct{}
 }
 
 func New(cfg Config) (*Manager, error) {
@@ -76,7 +77,7 @@ func New(cfg Config) (*Manager, error) {
 	if e != nil {
 		return nil, e
 	}
-	m := &Manager{cfg: cfg, lock: lock}
+	m := &Manager{cfg: cfg, lock: lock, observations: make(chan struct{}, 2)}
 	raw, e := os.ReadFile(m.path())
 	if e != nil && !os.IsNotExist(e) {
 		m.Close()
@@ -195,10 +196,6 @@ func (m *Manager) observed(ctx context.Context) c.Observed {
 // Execute uses its own bounded transaction context after acceptance. Dropping an
 // SSH/mTLS client does not cancel a half-applied configuration transaction.
 func (m *Manager) Execute(req c.Request, actor, grant string) c.Response {
-	if !m.mu.TryLock() {
-		return m.fail(req, 409, errors.New("manager transaction in progress; query operation after it completes"))
-	}
-	defer m.mu.Unlock()
 	if req.Schema != c.RPCSchema || req.EdgeID != m.cfg.EdgeID || !c.ValidID(req.RequestID) || !c.OperationAllowed(req.Operation) {
 		return m.fail(req, 400, errors.New("invalid protocol, identity, request id or operation"))
 	}
@@ -211,6 +208,24 @@ func (m *Manager) Execute(req c.Request, actor, grant string) c.Response {
 	if (req.Operation == "adopt" || req.Operation == "cert-rotate" || req.Operation == "recover") && grant != "admin" {
 		return m.fail(req, 403, errors.New("admin grant required"))
 	}
+	// Collector reads use only immutable manager configuration. A slow or failed
+	// collector must not hold the lock needed to inspect/recover serving state.
+	// Keep query concurrency and memory bounded independently of transactions.
+	if req.Operation == "observability-status" || req.Operation == "request-query" {
+		select {
+		case m.observations <- struct{}{}:
+			defer func() { <-m.observations }()
+		default:
+			return m.fail(req, 429, errors.New("observation query capacity reached; serving management remains available"))
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return m.observationQuery(ctx, req)
+	}
+	if !m.mu.TryLock() {
+		return m.fail(req, 409, errors.New("manager transaction in progress; query operation after it completes"))
+	}
+	defer m.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	hashraw, _ := json.Marshal(req)
@@ -235,8 +250,6 @@ func (m *Manager) Execute(req c.Request, actor, grant string) c.Response {
 		}
 	}
 	switch req.Operation {
-	case "observability-status", "request-query":
-		return m.observationQuery(ctx, req)
 	case "status", "health", "cert-status":
 		out := m.base(req)
 		obs := m.observed(ctx)

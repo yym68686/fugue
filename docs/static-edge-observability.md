@@ -63,6 +63,15 @@ own span, including a repeated Caddy attempt. Multiple connections inside Go's
 transparent transport retry remain visible as repeated trace events; they are
 not falsely advertised as separately authenticated wire attempts.
 
+An explicit `--transport` override applies to the primary context and every
+`--peer` for that invocation; it never rewrites saved contexts or silently falls
+back to another transport. Collector reads do not acquire the manager's serving
+transaction lock. At most two collector calls run per manager at once, with a
+three-second deadline; excess observation calls return HTTP 429 while signed
+configuration staging/recovery and serving-status operations remain available.
+The collector's own disk-query limit can still return incomplete evidence under
+concurrent queries; management concurrency is not a guarantee of completeness.
+
 The Caddy handler is `fugue_observation`, the transport is
 `fugue_observed_http` (the existing HTTP transport options are embedded without
 changes). A server's `fugue_observations: true` enables optional HTTP/2 hooks.

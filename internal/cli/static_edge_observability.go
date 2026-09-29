@@ -78,6 +78,9 @@ func (cli *CLI) staticEdgeObservationCommand(op string) *cobra.Command {
 			if e != nil {
 				return e
 			}
+			if transport != "" {
+				pc.Transport = transport
+			}
 			pr := req
 			pr.EdgeID = pc.EdgeID
 			pr.RequestID = newStaticRequestID()
@@ -119,7 +122,7 @@ func (cli *CLI) staticEdgeObservationCommand(op string) *cobra.Command {
 		return cli.renderResourceResult(output)
 	}}
 	f := cmd.Flags()
-	f.StringVar(&transport, "transport", "", "Explicit mtls or ssh; no automatic fallback")
+	f.StringVar(&transport, "transport", "", "Explicit mtls or ssh for this context and all peers; no automatic fallback")
 	f.StringVar(&source, "source", "direct", "Evidence source: direct independent manager")
 	f.StringVar(&stage, "stage", "request-body", "Observed stage")
 	if op != "status" {
