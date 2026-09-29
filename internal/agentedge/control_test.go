@@ -450,3 +450,53 @@ func TestControlLocalProofRequiresExactAuthorityAndOriginalLease(t *testing.T) {
 		})
 	}
 }
+
+func TestControlWakeupUsesSignedDeadlinesWithoutExtendingPermission(t *testing.T) {
+	m, g, _, _, now := controlFixture(t)
+	if err := m.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	original := m.Status()
+	// A probe which began off the host polling tick must still run at its
+	// signed interval, instead of being rounded to the following five seconds.
+	m.lastProbe = now.Add(-time.Duration(g.Policy.ProbeIntervalSeconds)*time.Second + 1700*time.Millisecond)
+	m.refreshAt = now.Add(time.Minute)
+	if got := m.NextStepDelay(); got != 1700*time.Millisecond {
+		t.Fatal("probe deadline was rounded upwards", got)
+	}
+	m.refreshAt = now.Add(900 * time.Millisecond)
+	if got := m.NextStepDelay(); got != 900*time.Millisecond {
+		t.Fatal("earlier grant refresh was delayed", got)
+	}
+	if m.Status().GrantDigest != original.GrantDigest || m.Status().ValidUntil != original.ValidUntil {
+		t.Fatal("scheduling altered signed authority")
+	}
+	// After a failed/overdue observation, the helper cannot create an
+	// unbounded immediate-retry loop. Revocation checks still run within 5s.
+	m.lastProbe, m.refreshAt = now.Add(-time.Hour), now.Add(-time.Second)
+	if got := m.NextStepDelay(); got != 5*time.Second {
+		t.Fatal("overdue schedule changed bounded retry cadence", got)
+	}
+	*now = original.ValidUntil.Add(time.Second)
+	if got := m.NextStepDelay(); got != 5*time.Second || m.Status().Primary != "" {
+		t.Fatal("expired permission resumed or scheduled an immediate loop", got, m.Status())
+	}
+}
+
+func TestControlDegradedRefreshMeasuresCadenceFromObservation(t *testing.T) {
+	m, g, private, _, now := controlFixture(t)
+	g.Candidates = g.Candidates[:1]
+	g.MinimumCandidates = 1
+	m.fetch = func(context.Context, string) ([]byte, error) { return encodeGrant(t, g, private), nil }
+	if err := m.Step(context.Background()); err != nil || !m.Status().Degraded {
+		t.Fatal("expected a permitted single-cell observation", err)
+	}
+	observed := *now
+	*now = now.Add(1700 * time.Millisecond)
+	m.refreshAt = now.Add(time.Minute)
+	m.refreshDegradedSooner(g, m.currentKeys())
+	want := observed.Add(time.Duration(g.Policy.ProbeIntervalSeconds) * time.Second)
+	if m.refreshAt != want {
+		t.Fatal("network time was added to every degraded renewal", m.refreshAt, want)
+	}
+}

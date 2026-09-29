@@ -43,14 +43,15 @@ func (s *AgentService) startEdgeControl(ctx context.Context) error {
 	}
 	observe()
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
+		timer := time.NewTimer(control.NextStepDelay())
+		defer timer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-timer.C:
 				observe()
+				timer.Reset(control.NextStepDelay())
 			}
 		}
 	}()

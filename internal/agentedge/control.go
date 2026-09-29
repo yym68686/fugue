@@ -305,6 +305,31 @@ func (m *Control) Step(ctx context.Context) error {
 	return errors.Join(trustErr, fetchErr, permissionErr, probeErr)
 }
 
+// NextStepDelay keeps trust checks bounded while waking at a verified grant's
+// actual probe/refresh deadline. A fixed polling tick can round every renewal
+// upwards and add another full tick to each degraded recovery round. Overdue
+// deadlines retain the ordinary retry bound instead of creating a busy loop.
+func (m *Control) NextStepDelay() time.Duration {
+	m.stepMu.Lock()
+	defer m.stepMu.Unlock()
+	now := m.now()
+	next := now.Add(5 * time.Second)
+	consider := func(deadline time.Time) {
+		if deadline.After(now) && deadline.Before(next) {
+			next = deadline
+		}
+	}
+	consider(m.refreshAt)
+	if permission, err := m.selector.permission(m.currentKeys(), now); err == nil {
+		grant := permission.View()
+		if !m.lastProbe.IsZero() {
+			consider(m.lastProbe.Add(time.Duration(grant.Policy.ProbeIntervalSeconds) * time.Second))
+		}
+		consider(grant.ValidUntil)
+	}
+	return max(10*time.Millisecond, next.Sub(now))
+}
+
 // A temporarily missing independent standby must not wait half the grant lease
 // before it can rejoin. Retry on the signed probe cadence while preserving the
 // current grant's absolute expiry and measured primary. Do not postpone an
@@ -312,7 +337,11 @@ func (m *Control) Step(ctx context.Context) error {
 func (m *Control) refreshDegradedSooner(g Grant, keys map[string]TrustKey) {
 	choice, err := m.selector.Current(keys, m.now())
 	if err == nil && choice.Degraded {
-		next := m.now().Add(time.Duration(g.Policy.ProbeIntervalSeconds) * time.Second)
+		observed := m.lastProbe
+		if observed.IsZero() {
+			observed = m.now()
+		}
+		next := observed.Add(time.Duration(g.Policy.ProbeIntervalSeconds) * time.Second)
 		if next.Before(m.refreshAt) {
 			m.refreshAt = next
 		}
