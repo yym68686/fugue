@@ -130,6 +130,64 @@ func TestPublicIngressEgressRequiresOptIn(t *testing.T) {
 	}
 }
 
+func TestPublicIngressRawAPIListItemsMayOmitTypeMeta(t *testing.T) {
+	service := publicIngressTestService()
+	delete(service, "apiVersion")
+	delete(service, "kind")
+	if _, err := publicIngressServiceRule(service, "platform-system"); err != nil {
+		t.Fatalf("raw v1 ServiceList item rejected: %v", err)
+	}
+	service["kind"] = "Pod"
+	if _, err := publicIngressServiceRule(service, "platform-system"); err == nil {
+		t.Fatal("contradictory item kind accepted")
+	}
+}
+
+func TestPublicIngressReconcileReadsRawServiceListAndOnlyCreatesNetworkPolicy(t *testing.T) {
+	app, managed := publicIngressTestApp()
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	service := publicIngressTestService()
+	delete(service, "kind")
+	delete(service, "apiVersion")
+	writes := 0
+	var created map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/networkpolicies/"):
+			if created == nil {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(created)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/platform-system/services":
+			_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "ServiceList", "metadata": map[string]any{}, "items": []any{service}})
+		case r.Method == http.MethodPost && r.URL.Path == "/apis/networking.k8s.io/v1/namespaces/"+namespace+"/networkpolicies":
+			writes++
+			_ = json.NewDecoder(r.Body).Decode(&created)
+			meta := objectMapField(created, "metadata")
+			meta["uid"] = "policy-one"
+			meta["resourceVersion"] = "1"
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(created)
+		default:
+			t.Errorf("unexpected Kubernetes operation %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer server.Close()
+	client := &kubeClient{client: server.Client(), baseURL: server.URL}
+	s := &Service{Config: config.ControllerConfig{ControlPlaneNamespace: "platform-system"}}
+	for i := 0; i < 2; i++ {
+		if err := s.reconcilePublicIngressEgress(context.Background(), client, namespace, managed, app); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if writes != 1 || created["kind"] != "NetworkPolicy" {
+		t.Fatalf("reconcile did not converge without workload writes: writes=%d object=%+v", writes, created)
+	}
+}
+
 func TestPublicProbeEgressAllowsOnlyItsPublishedTLSBackend(t *testing.T) {
 	service := publicIngressTestService()
 	meta, spec := objectMapField(service, "metadata"), objectMapField(service, "spec")

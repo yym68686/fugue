@@ -57,7 +57,9 @@ func (s *Service) reconcilePublicIngressEgress(ctx context.Context, client *kube
 		return nil
 	}
 	var services struct {
-		Metadata struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Metadata   struct {
 			Continue string `json:"continue"`
 		} `json:"metadata"`
 		Items []map[string]any `json:"items"`
@@ -66,7 +68,7 @@ func (s *Service) reconcilePublicIngressEgress(ctx context.Context, client *kube
 	if _, err := client.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(controlNamespace)+"/services?labelSelector="+selector, nil, &services); err != nil {
 		return fmt.Errorf("read declared public ingress transport: %w", err)
 	}
-	if services.Metadata.Continue != "" || services.Items == nil || len(services.Items) > 32 {
+	if services.APIVersion != "v1" || services.Kind != "ServiceList" || services.Metadata.Continue != "" || services.Items == nil || len(services.Items) > 32 {
 		return errors.New("public ingress Service observation is incomplete")
 	}
 	policy, err := publicIngressEgressPolicy(namespace, controlNamespace, managed, app, services.Items)
@@ -161,7 +163,7 @@ func publicIngressEgressPolicy(namespace, controlNamespace string, managed runti
 func publicIngressServiceRule(service map[string]any, namespace string) (map[string]any, error) {
 	meta, spec := objectMapField(service, "metadata"), objectMapField(service, "spec")
 	labels, annotations := normalizeKubeStringMap(meta["labels"]), normalizeKubeStringMap(meta["annotations"])
-	if service["apiVersion"] != "v1" || service["kind"] != "Service" || meta["namespace"] != namespace || (labels["app.kubernetes.io/managed-by"] != publicIngressTransportManager && labels["app.kubernetes.io/managed-by"] != publicIngressProbeManager) || meta["deletionTimestamp"] != nil || objectStringField(meta, "uid") == "" || objectStringField(meta, "resourceVersion") == "" {
+	if (service["apiVersion"] != nil && service["apiVersion"] != "v1") || (service["kind"] != nil && service["kind"] != "Service") || meta["namespace"] != namespace || (labels["app.kubernetes.io/managed-by"] != publicIngressTransportManager && labels["app.kubernetes.io/managed-by"] != publicIngressProbeManager) || meta["deletionTimestamp"] != nil || objectStringField(meta, "uid") == "" || objectStringField(meta, "resourceVersion") == "" {
 		return nil, errors.New("public ingress Service identity is invalid")
 	}
 	probe := labels["app.kubernetes.io/managed-by"] == publicIngressProbeManager
