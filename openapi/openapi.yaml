@@ -3229,7 +3229,7 @@ paths:
     post:
       operationId: preparePlatformReleaseSetConsumers
       summary: Prepare ReleaseSet Consumer Expectations
-      description: Builds immutable expectations for an active ReleaseSet release from authoritative node policy topology. Same release and topology is idempotent; a new release authority or changed topology creates increasing revisions without overwriting historical sets. Edge and DNS membership is independent of heartbeat freshness; missing or stale heartbeats cannot remove an existing required consumer. DNS zone rows belong to one physical process. Incomplete preparation never satisfies full promotion.
+      description: Builds immutable expectations for an active ReleaseSet release. An authority-cell scope requires signed consumer_topology bound by every child artifact and the pinned policy digest; all declared members remain required regardless of legacy inventory or heartbeat absence. Other scopes retain authoritative node policy topology. Same release and topology is idempotent; a new release authority or changed topology creates increasing revisions without overwriting historical sets. Edge and DNS membership is independent of heartbeat freshness; missing or stale heartbeats cannot remove an existing required consumer. DNS zone rows belong to one physical process. Incomplete preparation never satisfies full promotion.
       tags: [Admin]
       x-fugue-handler: handlePreparePlatformReleaseSetConsumers
       security:
@@ -3257,7 +3257,7 @@ paths:
     get:
       operationId: listPlatformConsumerConvergence
       summary: List Platform Consumer Convergence
-      description: Projects immutable expected sets onto current authoritative node policy topology. Heartbeat freshness is assessed after membership, so a silent or stale Edge or DNS process remains required. ReleaseSet assessments require verified consumer identity and exact expected-set, ReleaseSet, active release fence and child artifact generation sequence; missing binding context is unknown and old or unverified receipts cannot pass. DNS zone aliases belong to one physical process within an authority. Live DNS backend checks bind the immutable member's authority to its exact Pod credential, current Pod policy and selected public backend. Full promotion selects the newest active release publication for the target ReleaseSet, requires the latest expected set for every referenced traffic artifact, and applies the same assessment. Historical expected sets remain available without granting current promotion authority. CLI state queries use these server assessments.
+      description: For authority-cell releases, verifies expected membership against the signed consumer_topology and keeps every declared member required. Other scopes project immutable expected sets onto current authoritative node policy topology. Heartbeat freshness is assessed after membership, so a silent or stale Edge or DNS process remains required. ReleaseSet assessments require verified consumer identity and exact expected-set, ReleaseSet, active release fence and child artifact generation sequence; missing binding context is unknown and old or unverified receipts cannot pass. DNS zone aliases belong to one physical process within an authority. Live DNS backend checks bind the immutable member's authority to its exact Pod credential, current Pod policy and selected public backend. Full promotion selects the newest active release publication for the target ReleaseSet, requires the latest expected set for every referenced traffic artifact, and applies the same assessment. Historical expected sets remain available without granting current promotion authority. CLI state queries use these server assessments.
       tags: [Admin]
       x-fugue-handler: handleListPlatformConsumerConvergence
       security:
@@ -33039,6 +33039,11 @@ components:
       additionalProperties: false
       required: [generation]
       properties:
+        authority_cell_id:
+          type: string
+          pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'
+          maxLength: 128
+          description: Explicit neutral publication authority. Requires scope authority-cell:<id>, exactly that neutral cell with no legacy alias in edge_topology, and DNS consumers belonging to it. Worker and DNS membership is compiled from this signed intent, independently of flat inventory or heartbeat freshness. The paired policy must pin the exact compiled consumer topology digest. This declaration does not select public transport or copy a serving artifact or LKG.
         schema_version:
           type: string
         generation:
@@ -33258,6 +33263,15 @@ components:
       additionalProperties: false
       required: [generation]
       properties:
+        authority_cell_id:
+          type: string
+          pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'
+          maxLength: 128
+          description: Must match the intent's neutral cell and authority-cell:<id> scope; requires consumer_topology_digest. Absent for legacy global publications.
+        consumer_topology_digest:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+          description: Pins the canonical PlatformTrafficConsumerTopology derived from signed intent. Requires authority_cell_id. Changing execution membership requires new explicit intent and policy; runtime facts never expand or shrink this set.
         traffic_rollout_cohorts:
           type: array
           maxItems: 65
@@ -33460,11 +33474,23 @@ components:
           type: string
         compiler_version:
           type: string
+    PlatformTrafficConsumerTopology:
+      type: object
+      additionalProperties: false
+      required: [schema_version, authority_cell_id, edge_node_ids, dns_node_ids]
+      description: Immutable execution membership for one neutral cell. Arrays contain sorted unique physical Kubernetes node IDs. Each Edge requires its own route and TLS receipt; each DNS process requires its own DNS receipt. Every member remains required while silent, unready or absent from legacy inventory. All child artifacts bind the topology digest in signed metadata and their policy.
+      properties:
+        schema_version: {type: string, enum: [fugue.traffic-consumer-topology/v1]}
+        authority_cell_id: {type: string, maxLength: 128, pattern: '^cell-[a-z0-9]+(?:-[a-z0-9]+)*$'}
+        edge_node_ids: {type: array, minItems: 1, maxItems: 10000, uniqueItems: true, items: {type: string, maxLength: 253, pattern: '^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$'}}
+        dns_node_ids: {type: array, minItems: 1, maxItems: 4096, uniqueItems: true, items: {type: string, maxLength: 253, pattern: '^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$'}}
     PlatformConfigReleaseSet:
       type: object
       additionalProperties: false
       required: [schema_version, generation, scope, artifact_ids, artifact_kinds, lineage]
       properties:
+        consumer_topology:
+          $ref: "#/components/schemas/PlatformTrafficConsumerTopology"
         traffic_rollout_cohorts:
           type: array
           maxItems: 65

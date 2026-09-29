@@ -440,6 +440,17 @@ func (s *Server) platformConsumerTopology(ctx context.Context, principal model.P
 	return platformcontrol.ExpectedConsumerTopology{EdgeNodes: edges, DNSNodes: dns, NodeUpdaters: updaters, Runtimes: runtimes}, nil
 }
 
+func (s *Server) releaseConsumerTopology(ctx context.Context, principal model.Principal, parent model.PlatformArtifact) (platformcontrol.ExpectedConsumerTopology, error) {
+	if parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || !s.validateReleaseSetReferences(parent).Pass {
+		return platformcontrol.ExpectedConsumerTopology{}, fmt.Errorf("consumer membership release integrity unavailable")
+	}
+	topology, declared, err := platformcontrol.DeclaredTrafficConsumerTopology(parent)
+	if err != nil || declared {
+		return topology, err
+	}
+	return s.platformConsumerTopology(ctx, principal)
+}
+
 func (s *Server) validateReleaseSetConvergence(ctx context.Context, artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {
 	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: artifact.ID, Limit: 200})
 	if err != nil {
@@ -452,11 +463,14 @@ func (s *Server) validateReleaseSetConvergence(ctx context.Context, artifact mod
 	if err != nil {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "required release set consumers have not converged: " + err.Error()}
 	}
-	topology, topologyErr := s.platformConsumerTopology(ctx, model.Principal{})
+	topology, topologyErr := s.releaseConsumerTopology(ctx, model.Principal{}, artifact)
 	if topologyErr != nil {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer topology could not be evaluated"}
 	}
 	for _, set := range sets {
+		if err := platformcontrol.ValidateDeclaredTrafficConsumerSet(artifact, set); err != nil {
+			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: err.Error()}
+		}
 		declared := platformcontrol.ProjectExpectedConsumerOwners(set)
 		projected := platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
 		if !reflect.DeepEqual(declared.Consumers, projected.Consumers) || declared.RequiredCardinality != projected.RequiredCardinality {
@@ -756,7 +770,7 @@ func (s *Server) preparePlatformReleaseSetConsumers(ctx context.Context, princip
 	if activeErr != nil || !found || activeParent.ID != releaseSet.ID || activeRelease.ID != release.ID || activeRelease.FencingToken != release.FencingToken {
 		return nil, &platformConfigReferenceError{"consumer expectations require the active release authority"}
 	}
-	topology, err := s.platformConsumerTopology(ctx, principal)
+	topology, err := s.releaseConsumerTopology(ctx, principal, releaseSet)
 	if err != nil {
 		return nil, err
 	}
@@ -819,6 +833,9 @@ func (s *Server) preparePlatformReleaseSetConsumers(ctx context.Context, princip
 			return nil, &platformConfigReferenceError{buildErr.Error()}
 		}
 		if prior, ok := latest[kind]; ok && prior.TopologyRevision == set.TopologyRevision && prior.ExpectedGeneration == set.ExpectedGeneration && prior.ScopeKey == set.ScopeKey {
+			if err := platformcontrol.ValidateDeclaredTrafficConsumerSet(releaseSet, prior); err != nil {
+				return nil, &platformConfigReferenceError{err.Error()}
+			}
 			sets = append(sets, prior)
 			continue
 		}
@@ -866,12 +883,37 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 		return
 	}
 	statuses := make([]model.PlatformConsumerConvergenceStatus, 0, len(sets))
-	topology, topologyErr := s.platformConsumerTopology(r.Context(), principal)
-	if topologyErr != nil {
-		s.writeStoreError(w, topologyErr)
-		return
-	}
+	var legacyTopology *platformcontrol.ExpectedConsumerTopology
+	declaredTopologies := map[string]platformcontrol.ExpectedConsumerTopology{}
+	declaredParents := map[string]model.PlatformArtifact{}
 	for _, set := range sets {
+		topology, known := declaredTopologies[set.ReleaseSetID]
+		if !known && strings.HasPrefix(set.ScopeKey, "authority-cell:") {
+			parent, err := s.store.GetPlatformArtifact(set.ReleaseSetID)
+			if err == nil {
+				topology, err = s.releaseConsumerTopology(r.Context(), principal, parent)
+			}
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			declaredTopologies[set.ReleaseSetID] = topology
+			declaredParents[set.ReleaseSetID] = parent
+		} else if !known {
+			if legacyTopology == nil {
+				observed, err := s.platformConsumerTopology(r.Context(), principal)
+				if err != nil {
+					s.writeStoreError(w, err)
+					return
+				}
+				legacyTopology = &observed
+			}
+			topology = *legacyTopology
+		}
+		if parent, declared := declaredParents[set.ReleaseSetID]; declared && platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, set) != nil {
+			httpx.WriteError(w, http.StatusConflict, "consumer expectation differs from declared release")
+			return
+		}
 		set = platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
 		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
 		if consumerErr != nil {
@@ -1217,6 +1259,9 @@ func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcon
 			}
 			if latest == nil {
 				continue
+			}
+			if platformcontrol.ValidateDeclaredTrafficConsumerSet(releaseSet, *latest) != nil {
+				return nil, errors.New("consumer expectation differs from signed release membership")
 			}
 			// A newer topology may remove the consumer. Never resurrect its old
 			// assignment by filtering consumer membership before revision selection.

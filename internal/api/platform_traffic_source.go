@@ -56,6 +56,9 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficReleaseWithReader(group strin
 		if set.ID == "" || set.ExpectedGeneration != artifact.Generation {
 			return fail()
 		}
+		if platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, set) != nil {
+			return fail()
+		}
 		component := model.PlatformConsumerComponentEdgeWorker
 		if kind == model.PlatformArtifactKindDNSAnswerBundle {
 			component = model.PlatformConsumerComponentDNSServer

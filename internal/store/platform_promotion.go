@@ -98,6 +98,9 @@ func validateFullReleaseSetInState(state *model.State, parent model.PlatformArti
 		if latestSet == nil || !latestSet.RequiresConsumers || latestSet.ExpectedGeneration != child.Generation {
 			return fail("latest member expectation missing")
 		}
+		if err := platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, *latestSet); err != nil {
+			return fail("expectation differs from signed consumer topology")
+		}
 		consumers := []model.PlatformConsumerInstance{}
 		for _, consumer := range state.PlatformConsumerInstances {
 			if consumer.ArtifactKind == kind && consumer.ScopeKey == parent.ScopeKey {

@@ -22,6 +22,7 @@ const (
 // PlatformIntent is the versioned description of what Fugue should serve.
 // It intentionally contains no runtime health, ACK, or observed state.
 type PlatformIntent struct {
+	AuthorityCellID    string                    `json:"authority_cell_id,omitempty"`
 	ApplicationDomains *ApplicationDomainsIntent `json:"application_domains,omitempty"`
 	EdgeTopology       *edgetopology.Intent      `json:"edge_topology,omitempty"`
 	DNSConsumers       []DNSConsumerIntent       `json:"dns_consumers,omitempty"`
@@ -129,6 +130,8 @@ type TLSIntent struct {
 // PolicySnapshot contains changeable release constraints. It is deliberately
 // typed and bounded; it is not an arbitrary executable policy language.
 type PolicySnapshot struct {
+	AuthorityCellID          string                    `json:"authority_cell_id,omitempty"`
+	ConsumerTopologyDigest   string                    `json:"consumer_topology_digest,omitempty"`
 	DNSPlacementMode         string                    `json:"dns_placement_mode,omitempty"`
 	DNSQueryPolicy           *DNSQueryPolicy           `json:"dns_query_policy,omitempty"`
 	DNSAuthorities           []DNSAuthorityPolicy      `json:"dns_authorities,omitempty"`
@@ -175,14 +178,15 @@ type Lineage struct {
 }
 
 type ReleaseSet struct {
-	TrafficRolloutCohorts []TrafficRolloutCohort `json:"traffic_rollout_cohorts,omitempty"`
-	SchemaVersion         string                 `json:"schema_version"`
-	Generation            string                 `json:"generation"`
-	Scope                 string                 `json:"scope"`
-	ArtifactIDs           []string               `json:"artifact_ids"`
-	ArtifactKinds         []string               `json:"artifact_kinds"`
-	Dependencies          []ArtifactDependency   `json:"dependencies"`
-	Lineage               Lineage                `json:"lineage"`
+	ConsumerTopology      *TrafficConsumerTopology `json:"consumer_topology,omitempty"`
+	TrafficRolloutCohorts []TrafficRolloutCohort   `json:"traffic_rollout_cohorts,omitempty"`
+	SchemaVersion         string                   `json:"schema_version"`
+	Generation            string                   `json:"generation"`
+	Scope                 string                   `json:"scope"`
+	ArtifactIDs           []string                 `json:"artifact_ids"`
+	ArtifactKinds         []string                 `json:"artifact_kinds"`
+	Dependencies          []ArtifactDependency     `json:"dependencies"`
+	Lineage               Lineage                  `json:"lineage"`
 }
 
 type ArtifactDependency struct {
@@ -250,7 +254,11 @@ func BuildReleaseSetArtifact(set ReleaseSet, artifactIDs []string, now time.Time
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	return buildArtifact(model.PlatformArtifactKindReleaseSet, set.Scope, set.Generation, set, lineageMetadata(set.Lineage), now)
+	metadata := lineageMetadata(set.Lineage)
+	if set.ConsumerTopology != nil {
+		metadata["consumer_topology_digest"], _ = Digest(set.ConsumerTopology)
+	}
+	return buildArtifact(model.PlatformArtifactKindReleaseSet, set.Scope, set.Generation, set, metadata, now)
 }
 
 func Compile(req CompileRequest) (CompileResult, error) {
@@ -260,6 +268,10 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, err
 	}
 	if err := validatePolicy(policy); err != nil {
+		return CompileResult{}, err
+	}
+	consumerTopology, err := CompileTrafficConsumerTopology(intent, policy)
+	if err != nil {
 		return CompileResult{}, err
 	}
 	intentDigest, err := Digest(intent)
@@ -426,6 +438,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		tlsPayload["tls_allowlist"] = tlsAllowlist
 	}
 	metadata := lineageMetadata(lineage)
+	if consumerTopology != nil {
+		metadata["consumer_topology_digest"], _ = Digest(consumerTopology)
+	}
 	releaseSetGeneration := "release-" + configurationGeneration
 	metadata["release_set_generation"] = releaseSetGeneration
 	intentArtifact := buildArtifact(model.PlatformArtifactKindPlatformIntent, intent.Scope, intent.Generation, intent, map[string]string{"intent_digest": intentDigest}, now)
@@ -435,6 +450,7 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	tlsArtifact := buildArtifact(model.PlatformArtifactKindCaddyRouteConfig, intent.Scope, "tls-"+configurationGeneration, tlsPayload, metadata, now)
 
 	releaseSet := ReleaseSet{
+		ConsumerTopology:      consumerTopology,
 		TrafficRolloutCohorts: NormalizeTrafficRolloutCohorts(policy.TrafficRolloutCohorts),
 		SchemaVersion:         SchemaVersion,
 		Generation:            releaseSetGeneration,
@@ -601,6 +617,9 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 }
 
 func validateIntent(in PlatformIntent) error {
+	if _, err := TrafficConsumerTopologyFromIntent(in); err != nil {
+		return err
+	}
 	if in.EdgeTopology != nil {
 		if err := in.EdgeTopology.Validate(); err != nil {
 			return fmt.Errorf("edge topology: %w", err)
@@ -692,6 +711,9 @@ func PolicySnapshotGeneration(in PolicySnapshot) (string, error) {
 }
 
 func validatePolicy(in PolicySnapshot) error {
+	if err := validateConsumerTopologyPolicy(in); err != nil {
+		return err
+	}
 	if err := ValidateDNSPlacementMode(in); err != nil {
 		return err
 	}

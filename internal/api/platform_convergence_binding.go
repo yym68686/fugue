@@ -20,6 +20,9 @@ func (s *Server) platformConvergenceBindingWithReader(set model.PlatformExpected
 	if err != nil || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || !validateReleaseSetReferences(parent, readArtifact).Pass {
 		return nil
 	}
+	if platformcontrol.ValidateDeclaredTrafficConsumerSet(parent, set) != nil {
+		return nil
+	}
 	release, err := s.store.GetPlatformArtifactRelease(set.ArtifactReleaseID)
 	if err != nil || release.ArtifactID != parent.ID || release.ArtifactKind != parent.ArtifactKind || release.Generation != parent.Generation || release.ScopeKey != parent.ScopeKey || release.ScopeKey != set.ScopeKey || release.Status != model.PlatformArtifactReleaseStatusActive || release.FencingToken <= 0 {
 		return nil

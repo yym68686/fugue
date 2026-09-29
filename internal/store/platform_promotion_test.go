@@ -1,12 +1,15 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -17,6 +20,94 @@ type promotionFixture struct {
 	release   model.PlatformArtifactRelease
 	sets      []model.PlatformExpectedConsumerSet
 	consumers []model.PlatformConsumerInstance
+}
+
+func TestCellFullPublicationCannotShrinkSignedMembership(t *testing.T) {
+	for _, scenario := range []string{"complete", "missing receipt", "dropped silent member", "optional member", "foreign authority", "freshness widened"} {
+		t.Run(scenario, func(t *testing.T) {
+			s := New(t.TempDir() + "/state.json")
+			configureTestPlatformArtifactSigning(s)
+			if err := s.Init(); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			scope := platformconfig.AuthorityCellScope("cell-a")
+			intent := platformconfig.PlatformIntent{AuthorityCellID: "cell-a", SchemaVersion: platformconfig.SchemaVersion, Generation: "intent", Scope: scope, EdgeTopology: &edgetopology.Intent{SchemaVersion: edgetopology.SchemaVersion, Cells: []edgetopology.AuthorityCell{{ID: "cell-a"}}, Pools: []edgetopology.ServingPool{{ID: "pool-public"}}, Edges: []edgetopology.Edge{{ID: "edge-a", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "edge-a"}}, {ID: "edge-b", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "edge-b"}}}}, DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "cell-a", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}}, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: false}}}
+			declared, err := platformconfig.TrafficConsumerTopologyFromIntent(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest, _ := platformconfig.Digest(declared)
+			req := platformconfig.CompileRequest{Intent: intent, Policy: platformconfig.PolicySnapshot{AuthorityCellID: "cell-a", ConsumerTopologyDigest: digest, Scope: scope, Generation: "policy", TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "test", EdgeGroupIDs: []string{"cell-a"}}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: "dns-a", EdgeGroupID: "cell-a", ObservedAt: now, A: []string{"8.8.8.8"}}}}}
+			f := prepareTrafficLKGFixture(t, s, scope, "gray", true, req)
+			if err := s.withLockedState(true, func(state *model.State) error {
+				if scenario == "missing receipt" {
+					state.PlatformConsumerInstances = state.PlatformConsumerInstances[1:]
+				}
+				if scenario != "complete" && scenario != "missing receipt" {
+					for i := range state.ExpectedConsumerSets {
+						set := &state.ExpectedConsumerSets[i]
+						if set.ReleaseSetID != f.parent.ID || set.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle {
+							continue
+						}
+						switch scenario {
+						case "dropped silent member":
+							set.Consumers = set.Consumers[:1]
+							set.RequiredCardinality = 1
+						case "optional member":
+							set.Consumers[1].Required = false
+							set.RequiredCardinality--
+							set.OptionalCardinality++
+						case "foreign authority":
+							set.Consumers[1].AuthorityID = "cell-b"
+							set.Consumers[1].Cohort = "cell-b"
+							set.Consumers[1].ConsumerID = "edge-worker:cell-b:edge-b"
+						case "freshness widened":
+							set.Consumers[1].HeartbeatFreshnessSeconds = 86400
+						}
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			var before []byte
+			if err := s.withLockedState(false, func(state *model.State) error { before, _ = json.Marshal(state); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			_, _, _, _, err = s.ReleasePlatformArtifact(f.parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full", IdempotencyKey: "full", Reason: "all declared members required"}, testPlatformPrincipal())
+			if scenario == "complete" {
+				if err != nil {
+					t.Fatal("complete independently scoped publication rejected", err)
+				}
+			} else {
+				if !errors.Is(err, ErrConflict) {
+					t.Fatal("changed expectation bypassed signed membership", err)
+				}
+				if err := s.withLockedState(false, func(state *model.State) error {
+					after, _ := json.Marshal(state)
+					var a, b map[string]any
+					json.Unmarshal(before, &a)
+					json.Unmarshal(after, &b)
+					// The file store refreshes unrelated backup defaults on read.
+					// Configuration, facts, authority, LKG and audit must not change.
+					for key, value := range a {
+						if (strings.HasPrefix(key, "platform_") || strings.Contains(key, "consumer") || strings.Contains(key, "audit")) && !reflect.DeepEqual(value, b[key]) {
+							t.Fatal("rejected publication changed durable authority", key)
+						}
+					}
+					for key := range b {
+						if _, exists := a[key]; !exists && (strings.HasPrefix(key, "platform_") || strings.Contains(key, "consumer") || strings.Contains(key, "audit")) {
+							t.Fatal("rejected publication created durable authority", key)
+						}
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
 }
 
 func preparePromotionFixture(t *testing.T, s *Store, scope string) promotionFixture {
@@ -73,6 +164,11 @@ func prepareTrafficLKGFixture(t *testing.T, s *Store, scope, channel string, see
 	}
 	fixture := promotionFixture{parent: parent, release: release}
 	topology := platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "edge-a", EdgeGroupID: "edge-group-a"}}, DNSNodes: []model.DNSNode{{ID: "dns-a", PhysicalNodeID: "dns-a", EdgeGroupID: "edge-group-a", Zone: "example.test"}}}
+	if declared, present, err := platformcontrol.DeclaredTrafficConsumerTopology(parent); err != nil {
+		t.Fatal(err)
+	} else if present {
+		topology = declared
+	}
 	for childIndex, child := range children {
 		set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactKind: child.ArtifactKind, Scope: child.Scope, ScopeKey: child.ScopeKey, Generation: child.Generation, Revision: int64(childIndex + 1), PreparedAt: now, Topology: topology})
 		if err != nil {
@@ -84,7 +180,10 @@ func prepareTrafficLKGFixture(t *testing.T, s *Store, scope, channel string, see
 		}
 		fixture.sets = append(fixture.sets, set)
 		for _, consumer := range set.Consumers {
-			claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: "credential", TokenID: "token", Component: consumer.Component, NodeID: consumer.NodeID, ScopeKey: scope, ArtifactKinds: []string{child.ArtifactKind}}
+			claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: "credential", TokenID: "token", Component: consumer.Component, NodeID: consumer.NodeID, AuthorityID: consumer.AuthorityID, ScopeKey: scope, ArtifactKinds: []string{child.ArtifactKind}}
+			if consumer.Component == model.PlatformConsumerComponentDNSServer && consumer.AuthorityID != "" {
+				claims.CredentialID = "kubernetes:test-system:dns-account:pod-a"
+			}
 			identityKeys := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "key", Keys: map[string]string{"key": "synthetic-component-signing-secret"}}
 			token, err := platformcontrol.IssuePlatformComponentIdentity(identityKeys, claims, now.Add(-time.Second), 5*time.Minute)
 			if err != nil {

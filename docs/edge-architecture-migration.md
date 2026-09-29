@@ -556,3 +556,22 @@ adding an unrelated declaration cannot replay a completed handoff. New Edge
 transition targets require configuration changes, not new workflow jobs or
 hardcoded workflow arguments. Existing per-Service CAS and evidence checks
 remain mandatory.
+
+Neutral publication uses the explicit `authority-cell:<cell-id>` artifact scope
+so preparation cannot displace the global producer's release lanes. The signed
+PlatformIntent names `authority_cell_id`, one neutral topology without a legacy
+alias, and its DNS process declarations. Compilation derives sorted physical
+Edge and DNS membership; the paired policy must pin its exact
+`consumer_topology_digest`. ReleaseSet carries `consumer_topology`, and every
+child binds that digest through signed metadata and policy. Legacy global
+artifacts retain their original representation.
+
+Expected route, TLS and DNS consumers are prepared from this declaration.
+Missing inventory, stale heartbeat, quarantine or a failed Pod cannot erase a
+required member. API assignment and convergence readers check the exact scoped
+identities, and the store repeats membership validation in the full-publication
+transaction. Dropping a member, making it optional, moving authority or widening
+freshness cannot promote a release. Preparing the topology does not copy old
+facts, select public transport or establish positive LKG. Consumer deployment
+scope, independent per-cell release selection, bootstrap activation, fresh
+proofs and explicit transport cutover still need separate rollout steps.
