@@ -178,7 +178,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			s.refreshDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations)
 		}
 	}()
-	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
+	client := s.platformConsumerClient()
 	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, "global", model.PlatformArtifactKindDNSAnswerBundle)
 	wasBound := s.platformServingBound.Load()
 	if err != nil {
@@ -493,7 +493,7 @@ func (s *Service) reportDNSServingState(ctx context.Context, client platformcons
 	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
-	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.Component + ":" + id.NodeID, Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, ReleaseSetID: a.ReleaseSetID, ExpectedConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: a.GenerationSequence, DesiredGeneration: a.ExpectedGeneration, ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
 	h.CompatibilityCapabilities = []string{platformcontrol.TrafficReleaseCapabilityV1}
 	if !positive {
 		h.ProbeStatus = "failed"

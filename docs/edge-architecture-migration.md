@@ -35,6 +35,24 @@ and EndpointSlice Pod. They recheck publication and transport around the read
 without copying observations or renewing deadlines. This API capability does
 not enroll neutral DNS executors or prepare their traffic cohorts.
 
+The neutral DNS client now asserts its configured cell during both shadow and
+serving credential exchange, and uses the returned scoped consumer identity
+for positive and negative receipts. Missing or foreign authority fails before
+artifact download or durable cursor/checkpoint writes. A neutral DNS executor
+cannot carry a legacy inventory token or send the flat inventory heartbeat;
+its node ID remains the physical Kubernetes node. Existing positive checkpoints
+remain bound to their original node and authority and are never relabeled.
+
+The first neutral DNS candidate is an independent Deployment with explicit node
+placement, a retained PVC and a dedicated Pod ServiceAccount. It exposes only
+private process health to the API observer; it has no public Service address,
+host port, host cache, legacy inventory credential or DNS ingress permission.
+Both process probes use liveness while missing signed configuration leaves
+serving health unavailable. Its initial Recreate lifecycle is for isolated
+staging only and must be replaced by an independently verified serving lifecycle
+before public transport can select it. New cohorts, proof egress and listener
+selection require separate configuration and evidence.
+
 Neutral Controls obtain their RouteIntent identity through a live Pod-bound
 ServiceAccount exchange. The operator-managed annotation must name the exact
 cell, global scope and only `edge_route_intent`; its authority must match the

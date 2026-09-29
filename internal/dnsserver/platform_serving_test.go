@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -178,11 +179,14 @@ func TestCompatibleDNSReleaseProofRequiresEquivalentPublication(t *testing.T) {
 }
 
 func dnsServingFixture(t *testing.T, consumerMode ...bool) (model.PlatformArtifact, dnsPlatformCandidate) {
+	return dnsServingFixtureForGroup(t, "edge-group-a", consumerMode...)
+}
+
+func dnsServingFixtureForGroup(t *testing.T, group string, consumerMode ...bool) (model.PlatformArtifact, dnsPlatformCandidate) {
 	t.Helper()
 	now := time.Now().UTC()
 	zone := "example.test"
 	node := "dns-a"
-	group := "edge-group-a"
 	r := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", RoutePolicy: model.EdgeRoutePolicyEnabled, UpstreamURL: "http://origin:8080", Enabled: true}}, DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", AppID: "app", TenantID: "tenant", Type: "FUGUE_APP", Values: []string{"app"}, TTL: 60, Application: &platformconfig.DNSApplicationIntent{IPv4Policy: "ipv4_only", IPv6Policy: "ipv4_only", TTLPolicy: "record", FallbackPolicy: "fail_closed"}}, {Hostname: "_acme-challenge.example.test", Type: "TXT", Values: []string{"expires"}, TTL: 60, ValueExpirations: map[string]time.Time{"expires": now.Add(30 * time.Second)}}}, DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: node, EdgeGroupID: group, Zones: []string{zone}, ProbeLabel: "probe", ProbeTTL: 60}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 3600, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "first", EdgeGroupIDs: []string{group}}}, DNSReadiness: &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 1, FactFreshnessSeconds: 60, MaxConcurrency: 2, MaxProbes: 10}, DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: node}}, DNSAuthorities: []platformconfig.DNSAuthorityPolicy{{NodeID: node, Zone: zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}, DNSAnswerRules: []platformconfig.DNSAnswerRule{{NodeID: node, Hostname: "app.example.test", Type: "A", SelectionMode: "global", TTLSeconds: 60}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: node, EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSEdgeEndpoints: []platformconfig.DNSEdgeEndpoint{{EdgeID: "edge-a", EdgeGroupID: group, ObservedAt: now, A: []string{"8.8.8.8"}}}, DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: node, Hostname: "app.example.test", Type: "A", SourceGeneration: "source", SourceDigest: "sha256:" + strings.Repeat("a", 64), ObservedAt: now, Candidates: []platformconfig.DNSSelectionCandidate{{IP: "8.8.8.8", EdgeID: "edge-a", EdgeGroupID: group, Weight: 100}}}}}}
 	routes, err := platformconfig.ResolveRouteOrigins(r.Intent.Routes, r.RuntimeSnapshot, r.Policy)
 	if err != nil {
@@ -225,12 +229,18 @@ func TestDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T) 
 		if consumerMode {
 			name = "consumer_readiness"
 		}
-		t.Run(name, func(t *testing.T) { testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t, consumerMode) })
+		for _, group := range []string{"edge-group-a", "cell-a"} {
+			t.Run(name+"/"+group, func(t *testing.T) {
+				testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t, consumerMode, group)
+			})
+		}
 	}
 }
 
-func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, consumerMode bool) {
-	parent, candidate := dnsServingFixture(t, consumerMode)
+func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, consumerMode bool, group string) {
+	parent, candidate := dnsServingFixtureForGroup(t, group, consumerMode)
+	authority := platformcontrol.ConsumerAuthorityID(group)
+	consumerID, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", authority)
 	var reports int
 	offline, changed := false, false
 	allowFailed := false
@@ -242,7 +252,7 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 		}
 		switch r.URL.Path {
 		case "/v1/platform-state/consumers/identity":
-			json.NewEncoder(w).Encode(map[string]any{"token": "token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "scope_key": "global", "artifact_kinds": []string{candidate.Artifact.ArtifactKind}})
+			json.NewEncoder(w).Encode(map[string]any{"token": "token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "authority_id": authority, "consumer_id": consumerID, "scope_key": "global", "artifact_kinds": []string{candidate.Artifact.ArtifactKind}})
 		case "/v1/platform-state/consumers/assignment":
 			if r.URL.Query().Get("serving_only") != "true" {
 				t.Error("serving selection omitted")
@@ -259,6 +269,9 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 		case "/v1/platform-state/consumers/trusted-heartbeat":
 			var h platformcontrol.PlatformConsumerHeartbeatEnvelope
 			json.NewDecoder(r.Body).Decode(&h)
+			if h.ConsumerID != consumerID || h.NodeID != "dns-a" {
+				t.Error("DNS receipt lost authority or physical node")
+			}
 			if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) {
 				t.Error("executor capability missing")
 			}
@@ -275,7 +288,7 @@ func testDNSArtifactApplyProbeCheckpointRestartAndFailedCandidate(t *testing.T, 
 	}))
 	defer server.Close()
 	dir := t.TempDir()
-	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "edge-group-a", Zone: "example.test", CachePath: filepath.Join(dir, "cache"), BundleSigningKey: "synthetic-dns-serving-secret", BundleSigningKeyID: "key"}
+	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: group, Zone: "example.test", CachePath: filepath.Join(dir, "cache"), BundleSigningKey: "synthetic-dns-serving-secret", BundleSigningKeyID: "key"}
 	token := filepath.Join(dir, "token")
 	os.WriteFile(token, []byte("pod-token"), 0600)
 	s := NewService(cfg, nil)
@@ -574,6 +587,77 @@ func TestEnrolledDNSStartupDoesNotRequireAmbientServingConfiguration(t *testing.
 	s.Config.EdgeToken = "inventory-token"
 	if err := s.validateConfig(); err == nil {
 		t.Fatal("legacy bootstrap accepted missing answer configuration")
+	}
+}
+
+func TestNeutralDNSCannotWriteLegacyInventoryOrRenamePhysicalNode(t *testing.T) {
+	cfg := config.DNSConfig{APIURL: "https://control.example.test", DNSNodeID: "dns-a", PhysicalNodeID: "dns-a", EdgeGroupID: "cell-a", Zone: "example.test", CachePath: filepath.Join(t.TempDir(), "cache"), PublicIPv4: "192.0.2.8", ListenAddr: ":7834", UDPAddr: ":5353", TCPAddr: ":5353"}
+	for _, scenario := range []string{"valid", "legacy token", "missing Pod credential", "invalid cell", "noncanonical cell", "zone alias", "invalid node"} {
+		t.Run(scenario, func(t *testing.T) {
+			s := NewService(cfg, nil)
+			s.PlatformTokenFile = "/var/run/pod/token"
+			switch scenario {
+			case "legacy token":
+				s.Config.EdgeToken = "legacy-inventory-token"
+			case "missing Pod credential":
+				s.PlatformTokenFile = ""
+			case "invalid cell":
+				s.Config.EdgeGroupID = "cell-A"
+			case "noncanonical cell":
+				s.Config.EdgeGroupID = " cell-a"
+			case "zone alias":
+				s.Config.DNSNodeID = "zone-alias"
+			case "invalid node":
+				s.Config.DNSNodeID, s.Config.PhysicalNodeID = "other:node", "other:node"
+			}
+			if err := s.validateConfig(); (err == nil) != (scenario == "valid") {
+				t.Fatal("unexpected neutral startup result", err)
+			}
+			if s.heartbeatEnabled() {
+				t.Fatal("neutral DNS may overwrite legacy inventory")
+			}
+		})
+	}
+}
+
+func TestNeutralDNSRejectsForeignIdentityBeforeFetchingOrChangingState(t *testing.T) {
+	for _, authority := range []string{"", "cell-b"} {
+		for _, serving := range []bool{false, true} {
+			t.Run(authority+fmt.Sprint(serving), func(t *testing.T) {
+				requests := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					if r.URL.Path != "/v1/platform-state/consumers/identity" {
+						t.Error("foreign identity used to fetch configuration")
+						w.WriteHeader(403)
+						return
+					}
+					id, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", authority)
+					json.NewEncoder(w).Encode(map[string]any{"token": "foreign-token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "dns-a", "authority_id": authority, "consumer_id": id, "scope_key": "global", "artifact_kinds": []string{model.PlatformArtifactKindDNSAnswerBundle}})
+				}))
+				defer server.Close()
+				dir := t.TempDir()
+				tokenPath := filepath.Join(dir, "token")
+				if err := os.WriteFile(tokenPath, []byte("pod-credential"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				s := NewService(config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "cell-a", CachePath: filepath.Join(dir, "cache")}, nil)
+				s.PlatformTokenFile = tokenPath
+				var err error
+				if serving {
+					err = s.SyncPlatformDNSServingOnce(context.Background())
+				} else {
+					err = s.SyncPlatformShadowOnce(context.Background())
+				}
+				if err == nil || requests != 1 || s.platformServing.Load() != nil {
+					t.Fatal("foreign exchange reached serving state", err, requests)
+				}
+				files, err := os.ReadDir(dir)
+				if err != nil || len(files) != 1 || files[0].Name() != "token" {
+					t.Fatal("foreign exchange rewrote checkpoint or cursor", files, err)
+				}
+			})
+		}
 	}
 }
 func mustDNSJSON(t *testing.T, v any) []byte {

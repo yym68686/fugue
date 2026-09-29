@@ -31,6 +31,7 @@ import (
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/weightedselector"
 )
 
@@ -1672,7 +1673,8 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 }
 
 func (s *Service) heartbeatEnabled() bool {
-	return strings.TrimSpace(s.Config.APIURL) != "" &&
+	return !strings.HasPrefix(strings.TrimSpace(s.Config.EdgeGroupID), "cell-") &&
+		strings.TrimSpace(s.Config.APIURL) != "" &&
 		strings.TrimSpace(s.Config.EdgeToken) != "" &&
 		strings.TrimSpace(s.Config.DNSNodeID) != "" &&
 		strings.TrimSpace(s.Config.EdgeGroupID) != "" &&
@@ -1760,6 +1762,14 @@ func firstNonEmpty(values ...string) string {
 func (s *Service) validateConfig() error {
 	if strings.TrimSpace(s.Config.APIURL) == "" {
 		return fmt.Errorf("FUGUE_API_URL is required")
+	}
+	if strings.HasPrefix(strings.TrimSpace(s.Config.EdgeGroupID), "cell-") {
+		if platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID) == "" || strings.TrimSpace(s.PlatformTokenFile) == "" || strings.TrimSpace(s.Config.EdgeToken) != "" {
+			return errors.New("neutral DNS requires a canonical cell, Pod credential and no legacy inventory token")
+		}
+		if _, err := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, s.Config.EdgeGroupID); err != nil || (s.Config.PhysicalNodeID != "" && s.Config.PhysicalNodeID != s.Config.DNSNodeID) {
+			return errors.New("neutral DNS requires its stable physical node identity")
+		}
 	}
 	// An explicitly enrolled artifact consumer authenticates with its bound
 	// Pod credential. Inventory registration is optional and must not force a

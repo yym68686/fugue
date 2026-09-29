@@ -31,12 +31,16 @@ func TestDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T) {
 		if versioned {
 			name = "versioned exclusion and query policy"
 		}
-		t.Run(name, func(t *testing.T) { testDNSPlatformShadowPreservesServingAndDurableCursor(t, versioned) })
+		for _, group := range []string{"group-a", "cell-a"} {
+			t.Run(name+"/"+group, func(t *testing.T) { testDNSPlatformShadowPreservesServingAndDurableCursor(t, versioned, group) })
+		}
 	}
 }
 
-func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, versioned bool) {
+func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, versioned bool, group string) {
 	const key = "synthetic-dns-platform-signing-key"
+	authority := platformcontrol.ConsumerAuthorityID(group)
+	consumerID, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "physical-dns-node", authority)
 	request := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent-1", Scope: "global", DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", Type: "A", Values: []string{"192.0.2.99"}, TTL: 60, Status: "active"}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 86400}}
 	if versioned {
 		request.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", ECSEnabled: true, ExplorationPercent: 5, SwitchCooldownSeconds: 1800, MinimumTTLSeconds: 60, MaximumTTLSeconds: 120}
@@ -51,11 +55,11 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	}
 	if versioned {
 		request.Intent.DNSConsumers = []platformconfig.DNSConsumerIntent{
-			{NodeID: "physical-dns-node", EdgeGroupID: "group-a", Zones: []string{"example.test", "second.test"}, ProbeLabel: "probe", ProbeTTL: 60},
+			{NodeID: "physical-dns-node", EdgeGroupID: group, Zones: []string{"example.test", "second.test"}, ProbeLabel: "probe", ProbeTTL: 60},
 			{NodeID: "other-dns-node", EdgeGroupID: "group-b", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60},
 		}
 		request.RuntimeSnapshot.DNSConsumers = []platformconfig.DNSConsumerObservation{
-			{NodeID: "physical-dns-node", EdgeGroupID: "group-a", ObservedAt: *request.RuntimeSnapshot.CapturedAt, A: []string{"8.8.8.8"}},
+			{NodeID: "physical-dns-node", EdgeGroupID: group, ObservedAt: *request.RuntimeSnapshot.CapturedAt, A: []string{"8.8.8.8"}},
 			{NodeID: "other-dns-node", EdgeGroupID: "group-b", ObservedAt: *request.RuntimeSnapshot.CapturedAt, A: []string{"9.9.9.9"}},
 		}
 	}
@@ -88,7 +92,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 			if r.Header.Get("Authorization") != "Bearer pod-credential" {
 				t.Error("identity did not use Pod token")
 			}
-			json.NewEncoder(w).Encode(map[string]any{"token": "short-component-token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "physical-dns-node", "scope_key": "global", "artifact_kinds": []string{a.ArtifactKind}})
+			json.NewEncoder(w).Encode(map[string]any{"token": "short-component-token", "expires_at": time.Now().Add(time.Minute), "component": "dns-server", "node_id": "physical-dns-node", "authority_id": authority, "consumer_id": consumerID, "scope_key": "global", "artifact_kinds": []string{a.ArtifactKind}})
 			return
 		}
 		if r.Header.Get("Authorization") != "Bearer short-component-token" {
@@ -113,6 +117,9 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 				t.Fatal("heartbeat decode")
 			}
 			digest, _ := platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
+			if h.ConsumerID != consumerID || h.NodeID != "physical-dns-node" {
+				t.Error("shadow receipt lost authority or physical node")
+			}
 			if !slices.Contains(h.CompatibilityCapabilities, platformcontrol.TrafficReleaseCapabilityV1) || h.Sequence <= lastSequence || h.EvidenceHash != digest || h.ApplyStatus != "staged" || h.ProbeStatus == "passed" || h.ActualGeneration != "legacy-generation" || h.DesiredGeneration != assignment.ExpectedGeneration {
 				t.Errorf("shadow produced false serving evidence: %+v", h)
 			}
@@ -134,7 +141,7 @@ func testDNSPlatformShadowPreservesServingAndDurableCursor(t *testing.T, version
 	if err := os.WriteFile(tokenPath, []byte("pod-credential"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "physical-dns-node", EdgeGroupID: "group-a", Zone: "example.test", AnswerIPs: []string{"192.0.2.1"}, TTL: 60, CachePath: filepath.Join(dir, "serving.json"), BundleSigningKey: key, BundleSigningKeyID: "signer", MaxStale: time.Hour}
+	cfg := config.DNSConfig{APIURL: server.URL, DNSNodeID: "physical-dns-node", EdgeGroupID: group, Zone: "example.test", AnswerIPs: []string{"192.0.2.1"}, TTL: 60, CachePath: filepath.Join(dir, "serving.json"), BundleSigningKey: key, BundleSigningKeyID: "signer", MaxStale: time.Hour}
 	create := func() *Service {
 		s := NewService(cfg, log.New(io.Discard, "", 0))
 		s.PlatformTokenFile = tokenPath

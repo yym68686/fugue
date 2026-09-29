@@ -49,6 +49,10 @@ type dnsPlatformCandidate struct {
 	VerifiedAt time.Time                        `json:"verified_at"`
 }
 
+func (s *Service) platformConsumerClient() platformconsumer.Client {
+	return platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
+}
+
 func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 	if s.PlatformTokenFile == "" {
 		return
@@ -84,7 +88,7 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	s.platformConsumerMu.Lock()
 	defer s.platformConsumerMu.Unlock()
-	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient}
+	client := s.platformConsumerClient()
 	identity, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, "global", model.PlatformArtifactKindDNSAnswerBundle)
 	if err != nil {
 		return err
@@ -154,7 +158,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 		return errors.New("platform heartbeat nonce unavailable")
 	}
 	heartbeat := platformcontrol.PlatformConsumerHeartbeatEnvelope{
-		ConsumerID: identity.Component + ":" + identity.NodeID, Component: identity.Component, NodeID: identity.NodeID,
+		ConsumerID: identity.BoundConsumerID(), Component: identity.Component, NodeID: identity.NodeID,
 		ArtifactKind: chosen.ArtifactKind, ScopeKey: chosen.ScopeKey, ReleaseSetID: chosen.ReleaseSetID, ExpectedConsumerSetID: chosen.ExpectedConsumerSetID,
 		FencingToken: chosen.FencingToken, ProtocolVersion: model.PlatformConsumerProtocolVersionV1, SchemaVersion: model.PlatformConsumerSchemaVersionV1,
 		Sequence: candidate.Sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: chosen.GenerationSequence,
