@@ -620,3 +620,23 @@ the previous publication. Scheduling and transactional policy locks are scoped
 independently, with bounded discovery and cancellation on shutdown. First full
 LKG and public handoff remain explicit verified steps; enrolling a shadow
 producer authorizes neither.
+
+Initial cell producer inputs are declared in
+`deploy/environments/production/cell-producers`. The independent
+`cell_producer_shadow` CI lane accepts one changed declaration, reuses only
+exact immutable generations, validates all three signed inputs through the API
+and previews the current business snapshot before publishing a shadow policy.
+Preparation checks the declared predecessor and repeats authority checks before
+publication. Retries reuse identical artifacts and the publication idempotency
+key. Any existing gray/full authority blocks this bootstrap lane. It cannot
+publish a traffic channel, verify LKG or select a public listener. The CI lane
+is serialized; its predecessor reads are not a transactional compare-and-swap
+against unrelated external writers. The generic artifact store still provides
+transactional lane fencing and immutable generation checks.
+
+The first cell retains the original API DNS minimum of two healthy Edges even
+though its local executor membership contains one Edge. Independent per-cell
+route preparation must precede a verified cross-cell DNS publication mechanism;
+a single-cell shadow projection is not evidence that this global availability
+constraint is satisfied. No bootstrap step lowers that constraint to permit
+cutover.

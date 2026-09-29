@@ -482,6 +482,8 @@ def main() -> int:
             go_dependent_tasks["affected-vet"] = vet_task
     if any(name in {"scripts/reconcile_dns_transport.py", "scripts/test_reconcile_dns_transport.py"} or name.startswith("deploy/environments/production/dns-transport/") for name in paths):
         non_go_tasks["dns-transport-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_dns_transport"]
+    if any(name in {"scripts/bootstrap_cell_producer.py", "scripts/test_bootstrap_cell_producer.py"} or name.startswith("deploy/environments/production/cell-producers/") for name in paths):
+        non_go_tasks["cell-producer-bootstrap-tests"] = ["python3", "-m", "unittest", "scripts.test_bootstrap_cell_producer"]
     if any(name in {"scripts/prepush.py", "scripts/test_prepush.py"} for name in paths):
         non_go_tasks["prepush-receipt-tests"] = ["python3", "-m", "unittest", "scripts.test_prepush"]
     if any(name in {"scripts/test_verify_registry_image.py", "scripts/verify_registry_image.py"} for name in paths):
