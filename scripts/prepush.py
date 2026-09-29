@@ -486,6 +486,8 @@ def main() -> int:
         non_go_tasks["cell-producer-bootstrap-tests"] = ["python3", "-m", "unittest", "scripts.test_bootstrap_cell_producer"]
     if any(name in {"scripts/bootstrap_cell_inventory.py", "scripts/test_bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-inventory/") for name in paths):
         non_go_tasks["cell-inventory-bootstrap-tests"] = ["python3", "-m", "unittest", "scripts.test_bootstrap_cell_inventory"]
+    if any(name in {"scripts/promote_cell_routes.py", "scripts/test_promote_cell_routes.py", "scripts/bootstrap_cell_inventory.py"} or name.startswith("deploy/environments/production/cell-route-promotion/") for name in paths):
+        non_go_tasks["cell-route-promotion-tests"] = ["python3", "-m", "unittest", "scripts.test_promote_cell_routes"]
     if any(name in {"scripts/prepush.py", "scripts/test_prepush.py"} for name in paths):
         non_go_tasks["prepush-receipt-tests"] = ["python3", "-m", "unittest", "scripts.test_prepush"]
     if any(name in {"scripts/test_verify_registry_image.py", "scripts/verify_registry_image.py"} for name in paths):

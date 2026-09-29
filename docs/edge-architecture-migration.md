@@ -728,6 +728,17 @@ empty registration job that could cancel a waiting valid configuration run.
 The writer rechecks the current declaration and script contents before mutation;
 neither selection nor enrollment depends on a code build or deployment job.
 
+After real activation, `cell_route_promotion` accepts one independently declared
+private Cell promotion. It pins the enrollment digest and gray release, observes
+fresh advancing inventory and route/TLS proofs before initial gray LKG, publishes
+the same parent to full, prepares the full expectations, and requires another
+fresh observation window before full LKG. Observation witnesses are retained
+before verification requests; the API rechecks signed membership and facts in
+its publication transaction. Retries preserve already verified receipts and
+their evidence hashes. Foreign full authority, replaced activation, stale facts
+or failed probes stop promotion while preserving prior positive recovery state.
+This lane cannot write DNS, public transport, activation or executable images.
+
 Cell Workers fetch existing custom-domain certificates through their scoped
 component identity and exact current TLS assignment. The certificate endpoint
 checks the signed route/TLS parent, serving gray/full fence, declared local route,

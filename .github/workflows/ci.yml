@@ -411,6 +411,82 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  cell_route_promotion_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      selected: ${{ steps.plan.outputs.selected }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Admit only changed private Cell promotion declarations
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/cell-route-promotion; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  cell_route_promotion:
+    needs: cell_route_promotion_plan
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.cell_route_promotion_plan.outputs.selected == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-cell-route-promotion, cancel-in-progress: false}
+    timeout-minutes: 30
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one explicit private Cell promotion declaration
+        id: inventory
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-route-promotion)
+          if (( ${#declarations[@]} > 1 )); then
+            echo 'one private Cell promotion declaration per configuration atom is required' >&2
+            exit 1
+          fi
+          if (( ${#declarations[@]} == 1 )); then
+            config="${declarations[0]}"
+            [[ "$config" =~ ^deploy/environments/production/cell-route-promotion/cell-[a-z0-9-]+\.json$ ]]
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/promote_cell_routes.py scripts/test_promote_cell_routes.py scripts/bootstrap_cell_inventory.py scripts/test_bootstrap_cell_inventory.py deploy/environments/production/cell-inventory scripts/bootstrap_cell_producer.py scripts/reconcile_front_probe_transport.py scripts/observe_front_candidate.py scripts/publish_agent_edge_shadow.py; then
+              python3 -m unittest scripts.test_promote_cell_routes
+              python3 -m scripts.promote_cell_routes --validate-only "$config"
+              echo "config=$config" >> "$GITHUB_OUTPUT"
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Verify private gray LKG and full route publication
+        if: steps.inventory.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          python3 -m scripts.promote_cell_routes "${{ steps.inventory.outputs.config }}" --evidence "$RUNNER_TEMP/cell-route-promotion.json"
+      - name: Retain private Cell promotion evidence
+        if: always() && steps.inventory.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-cell-route-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cell-route-promotion.json
+          if-no-files-found: error
+          retention-days: 30
+
   agent_edge_trust:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

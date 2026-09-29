@@ -66,12 +66,25 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_producer_shadow", "cell_trust", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
+		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cnpg_candidate_artifact", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_transport", "drain_observation_access", "drain_observer_artifact", "external_controller_release", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "observability_configuration", "postgres_protection", "prepush", "runtime_agent_identity", "static_edge_observability", "traffic_safety_stage0", "workload_memory_policy",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	source := string(raw)
+	cellPromotion := yamlMappingValue(t, jobs, "cell_route_promotion")
+	cellPromotionPlan := yamlMappingValue(t, jobs, "cell_route_promotion_plan")
+	if yamlMappingValue(t, cellPromotion, "needs").Value != "cell_route_promotion_plan" || yamlMappingValue(t, cellPromotionPlan, "runs-on").Value != "ubuntu-latest" || !strings.Contains(yamlMappingValue(t, cellPromotion, "if").Value, "needs.cell_route_promotion_plan.outputs.selected == 'true'") {
+		t.Fatal("private Cell promotion must independently select an explicit changed declaration")
+	}
+	for _, key := range yamlMappingKeys(t, cellPromotionPlan) {
+		if key == "needs" {
+			t.Fatal("private Cell publication cannot depend on a code-release job")
+		}
+	}
+	if yamlMappingValue(t, cellPromotion, "environment").Value != "production" || !strings.Contains(source, "python3 -m scripts.promote_cell_routes") {
+		t.Fatal("private Cell promotion requires bounded production observation")
+	}
 	cellInventory := yamlMappingValue(t, jobs, "cell_inventory_enrollment")
 	cellInventoryPlan := yamlMappingValue(t, jobs, "cell_inventory_plan")
 	if yamlMappingValue(t, cellInventory, "needs").Value != "cell_inventory_plan" || yamlMappingValue(t, cellInventoryPlan, "runs-on").Value != "ubuntu-latest" || !strings.Contains(yamlMappingValue(t, cellInventory, "if").Value, "needs.cell_inventory_plan.outputs.selected == 'true'") {

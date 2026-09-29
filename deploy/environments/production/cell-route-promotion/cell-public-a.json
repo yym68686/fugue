@@ -1,0 +1,15 @@
+{
+  "schema": "fugue.private-cell-route-promotion/v1",
+  "generation": 1,
+  "enrollment": "deploy/environments/production/cell-inventory/cell-public-a.json",
+  "enrollment_digest": "sha256:e446d7aae1f48ae47d944b2ea0e24580246f1a15a72943dac155af9f6cb3f024",
+  "gray_release": {
+    "id": "artifactrel_1790693437_7e3a1e506c05",
+    "fencing_token": 1
+  },
+  "observation": {
+    "samples": 5,
+    "interval_seconds": 15,
+    "timeout_seconds": 600
+  }
+}
