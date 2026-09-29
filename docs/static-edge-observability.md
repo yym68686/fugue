@@ -130,6 +130,17 @@ partial writes, unsupported protocols and unavailable collectors are exposed;
 `not_observed` is never equivalent to "no delay". A process-level file lock
 prevents competing collectors, and restart appends to the newest segment.
 
+Observation workers are leased by active handler calls and transport response
+bodies. Caddy configuration cleanup retires the module but does not cancel those
+workers: old requests retain live snapshots and their terminal observations
+while graceful serving drain continues. After the last lease, cleanup stops the
+snapshot producer and allows up to two seconds for its bounded export queue.
+Collector failure can still lose telemetry at that deadline; it never cancels
+the business request or waits on a serving goroutine. A handler already scheduled
+when listener shutdown begins can acquire workers after module cleanup.
+At most one worker pair exists per module; late admission while that pair is
+already draining skips observation without waiting or starting more workers.
+
 An optional `remote` collector setting exports final scalar summaries to an
 authenticated HTTPS structured-telemetry receiver, with a separate 64-slot
 queue and at most five submissions per second. It requires mTLS or a private

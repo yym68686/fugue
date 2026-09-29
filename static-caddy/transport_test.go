@@ -136,8 +136,13 @@ func TestObservedTransportPreservesHTTPUpgradeDuplex(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer transport.Cleanup()
-	parent := o.New(o.Record{NodeID: "edge-a", ProcessID: processID, RequestID: o.ID(), Hop: "entry", Protocol: "HTTP/1.1", Build: "fixture", ConfigDigest: "fixture", Correlation: "entry"}, h.sink)
-	req, _ := http.NewRequestWithContext(context.WithValue(context.Background(), attemptContextKey{}, attemptContext{handler: h, parent: parent}), http.MethodGet, backend.URL, nil)
+	workers, err := h.acquireWorkers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.releaseWorkers(workers)
+	parent := o.New(o.Record{NodeID: "edge-a", ProcessID: processID, RequestID: o.ID(), Hop: "entry", Protocol: "HTTP/1.1", Build: "fixture", ConfigDigest: "fixture", Correlation: "entry"}, workers.sink)
+	req, _ := http.NewRequestWithContext(context.WithValue(context.Background(), attemptContextKey{}, attemptContext{handler: h, workers: workers, parent: parent}), http.MethodGet, backend.URL, nil)
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "fixture")
 	resp, e := transport.RoundTrip(req)

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	o "fugue/internal/staticedgeobserve"
@@ -39,9 +40,11 @@ type Observation struct {
 	Capacity           int      `json:"capacity,omitempty"`
 	ForwardCorrelation bool     `json:"forward_correlation,omitempty"`
 	key                []byte
-	sink               *o.AsyncSink
-	registry           *o.Registry
-	cancel             context.CancelFunc
+	workMu             sync.Mutex
+	workers            *observationWorkers
+	retiringWorkers    *observationWorkers
+	active             int
+	retired            bool
 	slots              chan struct{}
 }
 
@@ -74,11 +77,10 @@ func (h *Observation) Provision(ctx caddy.Context) error {
 			return errors.New("invalid authorized peer fingerprint")
 		}
 	}
-	h.sink, e = o.NewAsyncSink(h.Socket, 128)
+	h.workers, e = h.newWorkers()
 	if e != nil {
 		return e
 	}
-	h.registry = o.NewRegistry(h.Capacity)
 	capacity := h.Capacity
 	if capacity == 0 {
 		capacity = 256
@@ -89,15 +91,20 @@ func (h *Observation) Provision(ctx caddy.Context) error {
 			return context.WithValue(ctx, ingressConnectionKey{}, conn)
 		})
 	}
-	worker, cancel := context.WithCancel(ctx)
-	h.cancel = cancel
-	go h.sink.Run(worker)
-	go h.registry.Run(worker)
 	return nil
 }
 func (h *Observation) Cleanup() error {
-	if h.cancel != nil {
-		h.cancel()
+	h.workMu.Lock()
+	h.retired = true
+	w := h.workers
+	retire := h.active == 0 && w != nil
+	if retire {
+		h.workers = nil
+		h.retiringWorkers = w
+	}
+	h.workMu.Unlock()
+	if retire {
+		w.drain()
 	}
 	return nil
 }
@@ -122,13 +129,20 @@ func (h *Observation) authorized(r *http.Request) bool {
 }
 
 func (h *Observation) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	workers, err := h.acquireWorkers()
+	if err != nil {
+		clone := r.Clone(r.Context())
+		clone.Header.Del(o.CorrelationHeader)
+		return next.ServeHTTP(w, clone)
+	}
+	defer h.releaseWorkers(workers)
 	// Bound request observation memory before allocating event buffers. The
 	// telemetry capacity is not a business concurrency or admission limit.
 	select {
 	case h.slots <- struct{}{}:
 		defer func() { <-h.slots }()
 	default:
-		h.sink.Drop()
+		workers.sink.Drop()
 		clone := r.Clone(r.Context())
 		clone.Header.Del(o.CorrelationHeader)
 		return next.ServeHTTP(w, clone)
@@ -149,7 +163,7 @@ func (h *Observation) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 	if rec.RequestID == "" {
 		return next.ServeHTTP(w, r)
 	}
-	obs := o.New(rec, h.sink)
+	obs := o.New(rec, workers.sink)
 	if conn, ok := r.Context().Value(ingressConnectionKey{}).(net.Conn); ok {
 		obs.ObserveConnection(conn)
 	}
@@ -165,16 +179,16 @@ func (h *Observation) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 			return &o.HTTP2{StartedAt: p.StartedAt, ElapsedMS: p.ElapsedMS, DataBytes: p.DataBytes, ConsumedBytes: p.ConsumedBytes, DataFrames: p.DataFrames, FirstDataMS: p.FirstDataMS, LastDataMS: p.LastDataMS, MaxUnreadBytes: p.MaxUnreadBytes, StreamCredit: p.StreamCredit, ConnectionCredit: p.ConnectionCredit, WindowUpdatesQueued: p.WindowUpdatesQueued, Dropped: p.Dropped}, true
 		})
 	}
-	h.registry.Add(obs)
-	defer h.registry.Remove(obs)
+	workers.registry.Add(obs)
+	defer workers.registry.Remove(obs)
 	r = obs.CloneRequest(r)
-	r = r.WithContext(context.WithValue(r.Context(), attemptContextKey{}, attemptContext{handler: h, parent: obs}))
+	r = r.WithContext(context.WithValue(r.Context(), attemptContextKey{}, attemptContext{handler: h, workers: workers, parent: obs}))
 	r.Header.Del(o.CorrelationHeader)
 	if h.Entry {
 		w.Header().Set("X-Fugue-Observation-ID", obs.RequestID())
 	}
 	rr := caddyhttp.NewResponseRecorder(&observedWriter{ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w}, observer: obs}, nil, nil)
-	err := next.ServeHTTP(rr, r)
+	err = next.ServeHTTP(rr, r)
 	status := rr.Status()
 	if status == 0 && err == nil {
 		status = 200

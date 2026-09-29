@@ -19,6 +19,9 @@ type AsyncSink struct {
 	dropped atomic.Uint64
 	errors  atomic.Uint64
 	closed  atomic.Bool
+	drain   chan struct{}
+	done    chan struct{}
+	stop    sync.Once
 }
 
 func NewAsyncSink(socket string, capacity int) (*AsyncSink, error) {
@@ -29,7 +32,7 @@ func NewAsyncSink(socket string, capacity int) (*AsyncSink, error) {
 	if e != nil {
 		return nil, e
 	}
-	return &AsyncSink{queue: make(chan Record, capacity), client: c}, nil
+	return &AsyncSink{queue: make(chan Record, capacity), client: c, drain: make(chan struct{}), done: make(chan struct{})}, nil
 }
 func (s *AsyncSink) Submit(r Record) bool {
 	if s.closed.Load() {
@@ -48,13 +51,41 @@ func (s *AsyncSink) Submit(r Record) bool {
 
 // Drop records capacity loss when no per-request observer was allocated.
 func (s *AsyncSink) Drop() { s.dropped.Add(1) }
+
+// Done closes only after the single exporter worker has actually exited.
+func (s *AsyncSink) Done() <-chan struct{} { return s.done }
+
+// Drain stops admission and waits for queued observations. The owner must stop
+// all producers first. Its deadline bounds only telemetry, never serving work.
+// On a deadline the owner must cancel Run's context to interrupt a slow sink.
+func (s *AsyncSink) Drain(ctx context.Context) error {
+	s.closed.Store(true)
+	s.stop.Do(func() { close(s.drain) })
+	select {
+	case <-s.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *AsyncSink) Run(ctx context.Context) {
+	defer close(s.done)
 	defer s.closed.Store(true)
 	defer s.client.CloseIdleConnections()
+	var draining bool
+	drain := s.drain
 	for {
+		if draining && len(s.queue) == 0 {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case <-drain:
+			draining = true
+			// Stop selecting the already-closed signal while draining records.
+			drain = nil
 		case r := <-s.queue:
 			r.ExporterDroppedTotal = s.dropped.Load() + s.errors.Load()
 			raw, e := json.Marshal(r)

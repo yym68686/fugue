@@ -22,25 +22,31 @@ import (
 	"testing"
 	"time"
 
+	o "fugue/internal/staticedgeobserve"
+
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 )
 
 func TestReloadHonorsPreviousFiniteHTTP3Grace(t *testing.T) {
-	testReloadGrace(t, 200*time.Millisecond, false)
+	testReloadGrace(t, 200*time.Millisecond, false, false)
 }
 
 func TestReloadPreservesHTTP2AndHTTP3WithinConfiguredGrace(t *testing.T) {
-	testReloadGrace(t, 2*time.Second, true)
+	testReloadGrace(t, 2*time.Second, true, false)
 }
 
 func TestReloadPreservesHTTP2AndHTTP3WithUnlimitedGrace(t *testing.T) {
-	testReloadGrace(t, 0, true)
+	testReloadGrace(t, 0, true, false)
+}
+
+func TestReloadRetainsHTTP2AndHTTP3TerminalObservations(t *testing.T) {
+	testReloadGrace(t, 0, true, true)
 }
 
 // All traffic and Caddy child processes in this suite are isolated loopback
 // fixtures. New config grace cannot extend the previous generation's budget.
-func testReloadGrace(t *testing.T, grace time.Duration, completeWithinGrace bool) {
+func testReloadGrace(t *testing.T, grace time.Duration, completeWithinGrace, observe bool) {
 	t.Helper()
 	root, err := os.MkdirTemp("/tmp", "fugue-handoff-")
 	if err != nil {
@@ -102,6 +108,14 @@ func testReloadGrace(t *testing.T, grace time.Duration, completeWithinGrace bool
 				"routes": []any{map[string]any{"handle": []any{map[string]any{"handler": "reverse_proxy", "flush_interval": -1, "upstreams": []any{map[string]any{"dial": backend.Listener.Addr().String()}}}}}},
 			}}},
 		},
+	}
+	var store *o.Store
+	if observe {
+		var socket string
+		store, socket = collector(t)
+		h := observation(t, socket, true)
+		route := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["fixture"].(map[string]any)["routes"].([]any)[0].(map[string]any)
+		route["handle"] = append([]any{map[string]any{"handler": "fugue_observation", "node_id": h.NodeID, "hop": "entry", "build": "fixture", "config_digest": "fixture-reload", "socket": socket, "correlation_key_file": h.CorrelationKeyFile, "entry": true}}, route["handle"].([]any)...)
 	}
 	raw, _ := json.Marshal(config)
 	configFile := filepath.Join(root, "caddy.json")
@@ -220,6 +234,14 @@ func testReloadGrace(t *testing.T, grace time.Duration, completeWithinGrace bool
 				t.Logf("HTTP/%d finished naturally after reload in %s; old grace=%s", got.protocol, got.elapsed, grace)
 			case <-ctx.Done():
 				t.Fatal("stream did not finish after synthetic release")
+			}
+		}
+		if observe {
+			for _, response := range responses {
+				found := records(t, store, response.Header.Get("X-Fugue-Observation-ID"))
+				if len(found) != 1 || !found[0].Finished || found[0].Status != 200 || found[0].Protocol != response.Proto {
+					t.Fatalf("HTTP/%d terminal evidence missing across real reload: %+v", response.ProtoMajor, found)
+				}
 			}
 		}
 		return

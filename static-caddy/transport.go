@@ -24,6 +24,7 @@ func (ObservedTransport) CaddyModule() caddy.ModuleInfo {
 type attemptContextKey struct{}
 type attemptContext struct {
 	handler *Observation
+	workers *observationWorkers
 	parent  *o.Observer
 }
 
@@ -32,8 +33,13 @@ func (t *ObservedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if !ok {
 		return t.HTTPTransport.RoundTrip(r)
 	}
+	if !a.handler.retainWorkers(a.workers) {
+		clone := r.Clone(r.Context())
+		clone.Header.Del(o.CorrelationHeader)
+		return t.HTTPTransport.RoundTrip(clone)
+	}
 	obs := a.parent.ForwardAttempt()
-	a.handler.registry.Add(obs)
+	a.workers.registry.Add(obs)
 	req := r.Clone(http2.WithFugueSendObserver(obs.Trace(r.Context()), obs))
 	req.Body = obs.Body(r.Body)
 	req.Header.Del(o.CorrelationHeader)
@@ -54,7 +60,8 @@ func (t *ObservedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 				appID = resp.Header.Get("X-Request-ID")
 			}
 			obs.Finish(status, req.Context().Err() != nil, appID)
-			a.handler.registry.Remove(obs)
+			a.workers.registry.Remove(obs)
+			a.handler.releaseWorkers(a.workers)
 		})
 	}
 	if err != nil || resp == nil || resp.Body == nil {
