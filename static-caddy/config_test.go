@@ -34,6 +34,9 @@ func TestActualCaddyConfigWithObservedHTTPTransport(t *testing.T) {
 		"routes": []any{map[string]any{"handle": []any{map[string]any{"handler": "fugue_observation", "node_id": h.NodeID, "hop": "entry", "build": "fixture", "config_digest": "sha256:fixture", "socket": socket, "correlation_key_file": h.CorrelationKeyFile, "entry": true}, map[string]any{"handler": "reverse_proxy", "upstreams": []any{map[string]any{"dial": strings.TrimPrefix(backend.URL, "http://")}}, "transport": map[string]any{"protocol": "fugue_observed_http", "versions": []string{"1.1"}}, "flush_interval": -1}}}},
 	}}}}}
 	cfg["storage"] = map[string]any{"module": "file_system", "root": t.TempDir()}
+	// Automatic maintenance has no role in this HTTP-only fixture and can
+	// otherwise outlive Caddy's asynchronous Stop and race TempDir cleanup.
+	cfg["apps"].(map[string]any)["tls"] = map[string]any{"disable_storage_clean": true}
 	raw, e := json.Marshal(cfg)
 	if e != nil {
 		t.Fatal(e)
@@ -56,11 +59,19 @@ func TestActualCaddyConfigWithObservedHTTPTransport(t *testing.T) {
 	if e != nil || string(body) != "config-body" || resp.ProtoMajor != 2 {
 		t.Fatal(e, string(body), resp.Proto)
 	}
-	values := records(t, store, resp.Header.Get("X-Fugue-Observation-ID"))
 	found := false
-	for _, r := range values {
-		if r.Hop == "entry" && r.Coverage.HTTP2Frames && r.HTTP2 != nil {
-			found = true
+	deadline := time.Now().Add(3 * time.Second)
+	for !found && time.Now().Before(deadline) {
+		// A forward attempt can finish before the entry handler. Wait for
+		// the exact stage this assertion is about, not any completed span.
+		values := records(t, store, resp.Header.Get("X-Fugue-Observation-ID"))
+		for _, r := range values {
+			if r.Hop == "entry" && r.Finished && r.Coverage.HTTP2Frames && r.HTTP2 != nil {
+				found = true
+			}
+		}
+		if !found {
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 	if !found {
