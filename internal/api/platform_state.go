@@ -1106,7 +1106,7 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 	}
 	if set.ArtifactReleaseID != "" {
 		binding := s.platformConvergenceBinding(set)
-		if binding == nil || !platformcontrol.TrafficCanaryConsumerAllowed(set, claims.Component+":"+claims.NodeID, binding) || heartbeat.FencingToken != binding.FencingToken || heartbeat.GenerationSequence != binding.GenerationSequence {
+		if binding == nil || !platformcontrol.TrafficCanaryConsumerAllowed(set, claims.ConsumerID(), binding) || heartbeat.FencingToken != binding.FencingToken || heartbeat.GenerationSequence != binding.GenerationSequence {
 			httpx.WriteError(w, http.StatusConflict, "heartbeat release or artifact binding is not current")
 			return
 		}
@@ -1225,8 +1225,7 @@ func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcon
 				if channel == model.PlatformArtifactReleaseChannelGray && !platformconfig.TrafficCanaryContains(canaryGroups, expected.Cohort) {
 					continue
 				}
-				if expected.ConsumerID != claims.Component+":"+claims.NodeID || expected.Component != claims.Component ||
-					expected.NodeID != claims.NodeID || expected.ScopeKey != claims.ScopeKey || expected.ArtifactKind != kind {
+				if !platformcontrol.ExpectedConsumerIdentityMatches(expected, claims) || expected.ScopeKey != claims.ScopeKey || expected.ArtifactKind != kind {
 					continue
 				}
 				child, err := consumerAssignmentChild(releaseSet, kind, readArtifact)
@@ -1278,7 +1277,7 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 				}
 				group := ""
 				for _, c := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
-					if c.ConsumerID == claims.Component+":"+claims.NodeID {
+					if platformcontrol.ExpectedConsumerIdentityMatches(c, claims) {
 						group = c.Cohort
 						break
 					}

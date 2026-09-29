@@ -2074,6 +2074,15 @@ func normalizePlatformExpectedConsumerSetForStore(in model.PlatformExpectedConsu
 		consumer.ScopeKey = strings.TrimSpace(strings.ToLower(consumer.ScopeKey))
 		consumer.FailureDomain = strings.TrimSpace(consumer.FailureDomain)
 		consumer.Cohort = strings.TrimSpace(consumer.Cohort)
+		if platformcontrol.ConsumerAuthorityID(consumer.Cohort) != "" && consumer.Component == model.PlatformConsumerComponentEdgeWorker && consumer.AuthorityID != consumer.Cohort {
+			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+		}
+		if consumer.AuthorityID != "" {
+			identity, err := platformcontrol.PlatformConsumerID(consumer.Component, consumer.NodeID, consumer.AuthorityID)
+			if err != nil || consumer.ConsumerID != identity || consumer.Cohort != consumer.AuthorityID {
+				return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+			}
+		}
 		consumer.ExpectedProtocolVersion = strings.TrimSpace(consumer.ExpectedProtocolVersion)
 		consumer.AcceptedProtocolVersions = normalizeStringList(consumer.AcceptedProtocolVersions)
 		consumer.ExpectedSchemaVersion = strings.TrimSpace(consumer.ExpectedSchemaVersion)

@@ -9,6 +9,20 @@ The `legacy_group_id` alias is transitional. Once a cell's runtime, release
 ledger, inventory and LKG use the neutral cell ID, remove the alias in a
 separate verified configuration step.
 
+Neutral Worker convergence uses a distinct consumer identity
+`edge-worker:<cell-id>:<edge-id>`. The stable physical Edge ID is unchanged.
+The Kubernetes-bound credential exchanger requires the explicit `authority_id`
+in the operator-managed consumer annotation to match the Pod authority label;
+the signed claim, returned identity, immutable expected member and cohort must
+all agree. Route/TLS assignments and positive or negative heartbeat cursors
+cannot cross cells or overwrite the legacy `edge-worker:<edge-id>` record.
+Expected sets for neutral Edge inventory use that cell namespace; legacy
+sets and their topology digests retain their original representation. The
+new identity never copies an old observation or promotes LKG. Deploying the
+reader does not enroll a Pod, change inventory, prepare a new expected set,
+or authorize a neutral publication. DNS retains its independently fenced
+physical public-backend identity.
+
 The topology file contains no endpoints, health, traffic weights, loaded bundle
 digests, or code revision. Those are runtime facts or signed artifacts. A pool
 membership is not route authorization. In particular, the current public

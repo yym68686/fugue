@@ -28,6 +28,7 @@ type platformConsumerIdentityPolicy struct {
 	Component     string   `json:"component"`
 	ScopeKey      string   `json:"scope_key"`
 	ArtifactKinds []string `json:"artifact_kinds"`
+	AuthorityID   string   `json:"authority_id,omitempty"`
 }
 
 func decodePlatformConsumerIdentityPolicy(raw string) (platformConsumerIdentityPolicy, bool) {
@@ -35,6 +36,10 @@ func decodePlatformConsumerIdentityPolicy(raw string) (platformConsumerIdentityP
 	decoder := json.NewDecoder(bytes.NewBufferString(raw))
 	decoder.DisallowUnknownFields()
 	valid := len(raw) <= 4096 && decoder.Decode(&policy) == nil && decoder.Decode(&struct{}{}) == io.EOF && policy.Version == "v1" && policy.Component != "" && policy.ScopeKey != "" && policy.ScopeKey == strings.ToLower(strings.TrimSpace(policy.ScopeKey)) && len(policy.ArtifactKinds) > 0
+	if policy.AuthorityID != "" {
+		_, err := platformcontrol.PlatformConsumerID(policy.Component, "validation-node", policy.AuthorityID)
+		valid = valid && err == nil && policy.Component == "edge-worker"
+	}
 	return policy, valid
 }
 
@@ -82,14 +87,14 @@ func (s *Server) handleExchangePlatformConsumerIdentity(w http.ResponseWriter, r
 		return
 	}
 	policy, valid := decodePlatformConsumerIdentityPolicy(pod.Annotations[platformConsumerIdentityAnnotation])
-	if !valid {
+	if !valid || (policy.AuthorityID != "" && pod.Labels["fugue.io/edge-group-id"] != policy.AuthorityID) {
 		httpx.WriteError(w, http.StatusForbidden, "Pod has no valid consumer authorization")
 		return
 	}
 	now := time.Now().UTC()
 	claims := platformcontrol.PlatformComponentIdentityClaims{
 		CredentialID: "kubernetes:" + identity[2] + ":" + identity[3] + ":" + string(pod.UID),
-		Component:    policy.Component, NodeID: pod.Spec.NodeName, ScopeKey: policy.ScopeKey, ArtifactKinds: policy.ArtifactKinds,
+		Component:    policy.Component, NodeID: pod.Spec.NodeName, ScopeKey: policy.ScopeKey, ArtifactKinds: policy.ArtifactKinds, AuthorityID: policy.AuthorityID,
 	}
 	// Issuance and parsing also enforce the kernel's finite component/kind schema.
 	token, err := platformcontrol.IssuePlatformComponentIdentity(s.auth.PlatformComponentIdentityKeyring, claims, now, platformConsumerIdentityTTL)
@@ -109,7 +114,11 @@ func (s *Server) handleExchangePlatformConsumerIdentity(w http.ResponseWriter, r
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"token": token, "expires_at": time.Unix(verified.ExpiresAtUnix, 0).UTC(), "component": verified.Component, "node_id": verified.NodeID, "scope_key": verified.ScopeKey, "artifact_kinds": verified.ArtifactKinds})
+	body := map[string]any{"token": token, "expires_at": time.Unix(verified.ExpiresAtUnix, 0).UTC(), "component": verified.Component, "node_id": verified.NodeID, "scope_key": verified.ScopeKey, "artifact_kinds": verified.ArtifactKinds, "consumer_id": verified.ConsumerID()}
+	if verified.AuthorityID != "" {
+		body["authority_id"] = verified.AuthorityID
+	}
+	httpx.WriteJSON(w, http.StatusOK, body)
 }
 
 // SelfSubjectReview authenticates using only the submitted Pod token. The API's

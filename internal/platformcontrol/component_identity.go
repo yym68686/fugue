@@ -56,6 +56,7 @@ type PlatformComponentIdentityClaims struct {
 	TokenID       string   `json:"token_id"`
 	Component     string   `json:"component"`
 	NodeID        string   `json:"node_id"`
+	AuthorityID   string   `json:"authority_id,omitempty"`
 	ScopeKey      string   `json:"scope_key"`
 	ArtifactKinds []string `json:"artifact_kinds"`
 	IssuedAtUnix  int64    `json:"issued_at"`
@@ -250,7 +251,7 @@ func BindPlatformConsumerHeartbeat(
 	if !containsStringFold(claims.ArtifactKinds, heartbeat.ArtifactKind) {
 		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatImpersonation
 	}
-	expectedConsumerID := claims.Component + ":" + claims.NodeID
+	expectedConsumerID := claims.ConsumerID()
 	identityClaims := []struct {
 		actual   string
 		expected string
@@ -345,6 +346,7 @@ func BindPlatformConsumerHeartbeatToExpectedSet(
 		}
 		if strings.TrimSpace(strings.ToLower(expected.Component)) != bound.Component ||
 			strings.TrimSpace(expected.NodeID) != bound.NodeID ||
+			!ExpectedConsumerIdentityMatches(expected, claims) ||
 			normalizeExpectedConsumerArtifactKind(expected.ArtifactKind) != bound.ArtifactKind ||
 			strings.TrimSpace(strings.ToLower(expected.ScopeKey)) != bound.ScopeKey ||
 			strings.TrimSpace(expected.ExpectedGeneration) != expectedGeneration {
@@ -599,6 +601,9 @@ func normalizePlatformComponentIdentityClaims(claims PlatformComponentIdentityCl
 	claims.NodeID = strings.TrimSpace(claims.NodeID)
 	claims.ScopeKey = strings.TrimSpace(strings.ToLower(claims.ScopeKey))
 	claims.ArtifactKinds = normalizedPlatformIdentityArtifactKinds(claims.ArtifactKinds)
+	if _, err := PlatformConsumerID(claims.Component, claims.NodeID, claims.AuthorityID); err != nil {
+		return PlatformComponentIdentityClaims{}, err
+	}
 	if claims.Version != platformComponentIdentityVersion ||
 		claims.CredentialID == "" ||
 		claims.TokenID == "" ||

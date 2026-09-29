@@ -23,6 +23,18 @@ func TestPlatformConsumerIdentityExchangesOnlyLiveBoundPods(t *testing.T) {
 		mutate func(*authenticationv1.SelfSubjectReview, *corev1.Pod)
 	}{
 		{"authorized", 200, nil},
+		{"authorized cell", 200, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-worker","scope_key":"global","artifact_kinds":["edge_route_bundle"],"authority_id":"cell-a"}`
+			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-a"}
+		}},
+		{"cell label mismatch", 403, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"edge-worker","scope_key":"global","artifact_kinds":["edge_route_bundle"],"authority_id":"cell-a"}`
+			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-b"}
+		}},
+		{"implicit DNS authority", 403, func(_ *authenticationv1.SelfSubjectReview, p *corev1.Pod) {
+			p.Annotations[platformConsumerIdentityAnnotation] = `{"version":"v1","component":"dns-server","scope_key":"global","artifact_kinds":["dns_answer_bundle"],"authority_id":"cell-a"}`
+			p.Labels = map[string]string{"fugue.io/edge-group-id": "cell-a"}
+		}},
 		{"anonymous subject", 401, func(r *authenticationv1.SelfSubjectReview, _ *corev1.Pod) {
 			r.Status.UserInfo = authenticationv1.UserInfo{}
 		}},
@@ -90,13 +102,19 @@ func TestPlatformConsumerIdentityExchangesOnlyLiveBoundPods(t *testing.T) {
 			}
 			if tc.status == 200 {
 				var body struct {
-					Token     string    `json:"token"`
-					ExpiresAt time.Time `json:"expires_at"`
-					NodeID    string    `json:"node_id"`
+					Token       string    `json:"token"`
+					ExpiresAt   time.Time `json:"expires_at"`
+					NodeID      string    `json:"node_id"`
+					AuthorityID string    `json:"authority_id"`
+					ConsumerID  string    `json:"consumer_id"`
 				}
 				mustDecodeJSON(t, response, &body)
 				claims, err := platformcontrol.ParsePlatformComponentIdentity(ring, body.Token, time.Now().UTC())
-				if err != nil || body.NodeID != "physical-node" || claims.NodeID != body.NodeID || claims.Component != "dns-server" || claims.ScopeKey != "global" || claims.CredentialID != "kubernetes:"+ns+":dns-consumer:pod-uid" || len(claims.ArtifactKinds) != 1 || claims.ArtifactKinds[0] != "dns_answer_bundle" || claims.ExpiresAtUnix-claims.IssuedAtUnix != 120 {
+				wantComponent, wantKind, wantAuthority, wantConsumer := "dns-server", "dns_answer_bundle", "", "dns-server:physical-node"
+				if tc.name == "authorized cell" {
+					wantComponent, wantKind, wantAuthority, wantConsumer = "edge-worker", "edge_route_bundle", "cell-a", "edge-worker:cell-a:physical-node"
+				}
+				if err != nil || body.NodeID != "physical-node" || claims.NodeID != body.NodeID || claims.Component != wantComponent || claims.ScopeKey != "global" || claims.CredentialID != "kubernetes:"+ns+":dns-consumer:pod-uid" || len(claims.ArtifactKinds) != 1 || claims.ArtifactKinds[0] != wantKind || claims.ExpiresAtUnix-claims.IssuedAtUnix != 120 || claims.AuthorityID != wantAuthority || body.AuthorityID != wantAuthority || body.ConsumerID != wantConsumer {
 					t.Fatalf("claims not derived from live Pod: %+v %v", claims, err)
 				}
 				if response.Header().Get("Cache-Control") != "no-store" || body.ExpiresAt.Unix() != claims.ExpiresAtUnix {

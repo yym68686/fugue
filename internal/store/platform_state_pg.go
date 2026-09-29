@@ -1658,7 +1658,7 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 	// deadlock. If another writer advances the cursor meanwhile, reject and let
 	// the next heartbeat retry with the exclusive scope lock.
 	var rollbackScope bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_platform_consumer_instances WHERE consumer_id=$1 AND artifact_kind=$2 AND scope_key=$3 AND identity_verified AND generation_sequence>$4)`, claims.Component+":"+claims.NodeID, NormalizePlatformArtifactKind(heartbeat.ArtifactKind), strings.ToLower(strings.TrimSpace(claims.ScopeKey)), heartbeat.GenerationSequence).Scan(&rollbackScope); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_platform_consumer_instances WHERE consumer_id=$1 AND artifact_kind=$2 AND scope_key=$3 AND identity_verified AND generation_sequence>$4)`, claims.ConsumerID(), NormalizePlatformArtifactKind(heartbeat.ArtifactKind), strings.ToLower(strings.TrimSpace(claims.ScopeKey)), heartbeat.GenerationSequence).Scan(&rollbackScope); err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
 	if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, rollbackScope); err != nil {

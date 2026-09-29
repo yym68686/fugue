@@ -99,6 +99,14 @@ func TestPostgresPlatformConsumerHeartbeatPersistsShadowEnvelope(t *testing.T) {
 }
 
 func TestPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testing.T) {
+	for _, authority := range []string{"", "cell-a"} {
+		t.Run("authority="+authority, func(t *testing.T) {
+			testPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t, authority)
+		})
+	}
+}
+
+func testPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testing.T, authority string) {
 	t.Parallel()
 
 	db, mock, err := sqlmock.New()
@@ -110,6 +118,11 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testin
 	now := time.Date(2026, 7, 10, 13, 0, 0, 0, time.UTC)
 	set := trustedHeartbeatExpectedSet(t, now)
 	claims := trustedHeartbeatClaims(t, now)
+	claims.AuthorityID = authority
+	if authority != "" {
+		set.Consumers[0].AuthorityID, set.Consumers[0].Cohort = authority, authority
+		set.Consumers[0].ConsumerID = claims.ConsumerID()
+	}
 	heartbeat := trustedHeartbeatEnvelope(t, claims, set, now)
 	verified, _, err := platformcontrol.VerifyTrustedPlatformConsumerHeartbeat(
 		claims, set, heartbeat, nil, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
@@ -121,7 +134,7 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testin
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM fugue_platform_consumer_instances`).
-		WithArgs(claims.Component+":"+claims.NodeID, heartbeat.ArtifactKind, claims.ScopeKey, heartbeat.GenerationSequence).
+		WithArgs(claims.ConsumerID(), heartbeat.ArtifactKind, claims.ScopeKey, heartbeat.GenerationSequence).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).

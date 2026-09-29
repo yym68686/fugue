@@ -181,4 +181,29 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 	if rejected.Code != http.StatusConflict {
 		t.Fatalf("unrelated release binding: %d %s", rejected.Code, rejected.Body.String())
 	}
+	// One physical node may stage two explicit authorities. Each scoped
+	// credential resolves only its member; neither inherits the legacy member.
+	cellSet, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: next.ReleaseArtifact.ID, ArtifactReleaseID: nextRelease.ID, ArtifactKind: next.RouteArtifact.ArtifactKind, Scope: next.RouteArtifact.Scope, ScopeKey: "global", Generation: next.RouteArtifact.Generation, Revision: 4, Topology: platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: "assignment-node", EdgeGroupID: "cell-a"}, {ID: "assignment-node", EdgeGroupID: "cell-b"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persist(cellSet)
+	cellToken := func(authority string) string {
+		value, err := platformcontrol.IssuePlatformComponentIdentity(keyring, platformcontrol.PlatformComponentIdentityClaims{CredentialID: "cell-reader", Component: "edge-worker", NodeID: "assignment-node", AuthorityID: authority, ScopeKey: "global", ArtifactKinds: []string{next.RouteArtifact.ArtifactKind}}, time.Now().UTC(), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	for _, cell := range []string{"cell-a", "cell-b"} {
+		assigned := get(cellToken(cell), http.StatusOK)
+		if len(assigned.Assignments) != 1 || assigned.Assignments[0].ExpectedConsumerSetID != cellSet.ID {
+			t.Fatal(assigned)
+		}
+		pull(cellToken(cell), next.RouteArtifact.ID, cellSet.ID, http.StatusOK)
+	}
+	get(token, http.StatusNotFound)
+	get(cellToken("cell-c"), http.StatusNotFound)
+	pull(token, next.RouteArtifact.ID, cellSet.ID, http.StatusNotFound)
+	pull(cellToken("cell-c"), next.RouteArtifact.ID, cellSet.ID, http.StatusNotFound)
 }

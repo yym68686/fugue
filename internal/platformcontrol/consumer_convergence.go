@@ -53,9 +53,11 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 	}
 	active := map[string]bool{}
 	for _, node := range topology.EdgeNodes {
-		active[model.PlatformConsumerComponentEdgeWorker+":"+strings.TrimSpace(node.ID)] = true
+		worker := expectedEdgeConsumer(model.PlatformConsumerComponentEdgeWorker, node, set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
+		active[worker.ConsumerID] = true
 		if normalizeExpectedConsumerArtifactKind(set.ArtifactKind) != model.PlatformArtifactKindEdgeRouteBundle {
-			active[model.PlatformConsumerComponentCaddyEdgeFront+":"+strings.TrimSpace(node.ID)] = true
+			front := expectedEdgeConsumer(model.PlatformConsumerComponentCaddyEdgeFront, node, set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
+			active[front.ConsumerID] = true
 		}
 	}
 	for _, node := range dnsNodes {
@@ -155,10 +157,17 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 		switch component {
 		case model.PlatformConsumerComponentEdgeWorker, model.PlatformConsumerComponentCaddyEdgeFront:
 			for _, node := range req.Topology.EdgeNodes {
+				if strings.HasPrefix(node.EdgeGroupID, "cell-") && ConsumerAuthorityID(node.EdgeGroupID) == "" {
+					return model.PlatformExpectedConsumerSet{}, fmt.Errorf("neutral consumer authority is invalid")
+				}
 				if !expectedEdgeNodeMatchesScope(node, req.Scope) {
 					continue
 				}
-				consumers = append(consumers, expectedEdgeConsumer(component, node, kind, scopeKey, generation, now))
+				consumer := expectedEdgeConsumer(component, node, kind, scopeKey, generation, now)
+				if consumer.ConsumerID == "" {
+					return model.PlatformExpectedConsumerSet{}, ErrPlatformComponentIdentityInvalid
+				}
+				consumers = append(consumers, consumer)
 			}
 		case model.PlatformConsumerComponentDNSServer:
 			dnsNodes, _, err := physicalDNSConsumerNodes(req.Topology.DNSNodes)
@@ -432,6 +441,13 @@ func expectedEdgeConsumer(component string, node model.EdgeNode, artifactKind, s
 	nodeID := strings.TrimSpace(node.ID)
 	failureDomain := firstNonEmptyExpected("edge-group:"+strings.TrimSpace(node.EdgeGroupID), "country:"+strings.ToLower(strings.TrimSpace(node.Country)), "region:"+strings.ToLower(strings.TrimSpace(node.Region)), "node:"+nodeID)
 	consumer := expectedConsumer(component, nodeID, artifactKind, scopeKey, generation, failureDomain, firstNonEmptyExpected(strings.TrimSpace(node.EdgeGroupID), "edge"), !node.Draining, 90*time.Second, now)
+	consumer.AuthorityID = ConsumerAuthorityID(node.EdgeGroupID)
+	if consumer.AuthorityID != "" {
+		consumer.ConsumerID, _ = PlatformConsumerID(component, nodeID, consumer.AuthorityID)
+		// The physical node is a known shared risk; an authority scope is not
+		// a country or infrastructure failure-domain observation.
+		consumer.FailureDomain = "node:" + nodeID
+	}
 	if artifactKind == model.PlatformArtifactKindEdgeRouteBundle && (node.CaddyRouteCount > 0 || strings.TrimSpace(node.CaddyAppliedVersion) != "") {
 		consumer.CompatibilityCapabilities = []string{"caddy_apply_probe"}
 	}
@@ -505,6 +521,9 @@ func deduplicateAndSortExpectedConsumers(consumers []model.PlatformExpectedConsu
 func expectedConsumerTopologyRevision(kind, scopeKey string, consumers []model.PlatformExpectedConsumer) string {
 	parts := []string{kind, scopeKey}
 	for _, consumer := range consumers {
+		if consumer.AuthorityID != "" {
+			parts = append(parts, "authority:"+consumer.AuthorityID)
+		}
 		parts = append(parts, strings.Join([]string{
 			consumer.ConsumerID,
 			consumer.Component,

@@ -228,6 +228,7 @@ type PlatformExpectedConsumer struct {
 	ConsumerID                string    `json:"consumer_id"`
 	Component                 string    `json:"component"`
 	NodeID                    string    `json:"node_id"`
+	AuthorityID               string    `json:"authority_id,omitempty"`
 	ArtifactKind              string    `json:"artifact_kind"`
 	ScopeKey                  string    `json:"scope_key"`
 	FailureDomain             string    `json:"failure_domain"`
