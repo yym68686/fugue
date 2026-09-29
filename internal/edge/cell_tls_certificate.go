@@ -60,18 +60,9 @@ func (s *Service) fetchCellTLSCertificate(ctx context.Context, hostname string) 
 	if err != nil {
 		return nil, err
 	}
-	var ref *platformconfig.TLSIntent
-	for i := range payload.Certificates {
-		candidate := &payload.Certificates[i]
-		if candidate.Hostname == hostname {
-			if ref != nil {
-				return nil, errors.New("cell certificate reference is ambiguous")
-			}
-			ref = candidate
-		}
-	}
-	if ref == nil || ref.Policy != model.EdgeRouteTLSPolicyCustomDomain || ref.AppID == "" || ref.TenantID == "" || !s.tlsReadinessHostAuthorized(*ref, bundle.Routes, bundle) {
-		return nil, errors.New("cell certificate hostname is not authorized by signed local routes")
+	owner, err := routeartifact.CustomDomainCertificateOwner(payload.Certificates, bundle, hostname)
+	if err != nil {
+		return nil, err
 	}
 	var response struct {
 		Certificate model.EdgeTLSCertificate `json:"certificate"`
@@ -81,7 +72,7 @@ func (s *Service) fetchCellTLSCertificate(ctx context.Context, hostname string) 
 		return nil, err
 	}
 	cert := response.Certificate
-	if cert.Hostname != hostname || cert.AppID != ref.AppID || cert.TenantID != ref.TenantID || cert.CertificatePEM == "" || cert.PrivateKeyPEM == "" {
+	if cert.Hostname != hostname || cert.AppID != owner.AppID || cert.TenantID != owner.TenantID || cert.CertificatePEM == "" || cert.PrivateKeyPEM == "" {
 		return nil, errors.New("cell certificate response belongs to a different owner or is incomplete")
 	}
 	if err := client.CheckServingAssignment(ctx, id, ta); err != nil {

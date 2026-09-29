@@ -54,12 +54,12 @@ func (s *Server) handleGetPlatformConsumerTLSCertificate(w http.ResponseWriter, 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"certificate": certificate})
 }
 
-func (s *Server) servingTLSCertificateOwner(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID, host string) (consumerArtifactLookup, platformconfig.TLSIntent, error) {
+func (s *Server) servingTLSCertificateOwner(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID, host string) (consumerArtifactLookup, routeartifact.CertificateOwner, error) {
 	fail := errors.New("certificate is not owned by current serving cell assignment")
 	read := newConsumerArtifactReader(s.store.GetPlatformArtifact)
 	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, read)
 	if err != nil {
-		return consumerArtifactLookup{}, platformconfig.TLSIntent{}, fail
+		return consumerArtifactLookup{}, routeartifact.CertificateOwner{}, fail
 	}
 	for _, item := range resolved {
 		if item.Artifact.ID != artifactID || item.Artifact.ArtifactKind != model.PlatformArtifactKindCaddyRouteConfig || item.Assignment.ExpectedConsumerSetID != setID || item.Release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
@@ -67,58 +67,25 @@ func (s *Server) servingTLSCertificateOwner(claims platformcontrol.PlatformCompo
 		}
 		projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(claims.AuthorityID, claims.ScopeKey, read)
 		if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseID != item.Release.ID || projection.TrafficRelease.FencingToken != item.Release.FencingToken || projection.TrafficRelease.ReleaseSetID != item.Assignment.ReleaseSetID {
-			return consumerArtifactLookup{}, platformconfig.TLSIntent{}, fail
+			return consumerArtifactLookup{}, routeartifact.CertificateOwner{}, fail
 		}
 		bundle, err := routeartifact.MaterializeSnapshotForGroup(projection, claims.AuthorityID)
 		if err != nil {
-			return consumerArtifactLookup{}, platformconfig.TLSIntent{}, fail
+			return consumerArtifactLookup{}, routeartifact.CertificateOwner{}, fail
 		}
 		ref, err := certificateReferenceForRoutes(item.Artifact, bundle, host)
 		return item, ref, err
 	}
-	return consumerArtifactLookup{}, platformconfig.TLSIntent{}, fail
+	return consumerArtifactLookup{}, routeartifact.CertificateOwner{}, fail
 }
 
-func certificateReferenceForRoutes(artifact model.PlatformArtifact, bundle model.EdgeRouteBundle, host string) (platformconfig.TLSIntent, error) {
-	fail := errors.New("custom-domain certificate ownership does not match local signed routes")
+func certificateReferenceForRoutes(artifact model.PlatformArtifact, bundle model.EdgeRouteBundle, host string) (routeartifact.CertificateOwner, error) {
 	var payload struct {
 		Certificates []platformconfig.TLSIntent `json:"certificates"`
 	}
 	raw, err := json.Marshal(artifact.Content)
 	if err != nil || json.Unmarshal(raw, &payload) != nil {
-		return platformconfig.TLSIntent{}, fail
+		return routeartifact.CertificateOwner{}, errors.New("signed certificate references invalid")
 	}
-	var ref platformconfig.TLSIntent
-	refs := 0
-	for _, candidate := range payload.Certificates {
-		if candidate.Hostname == host {
-			ref, refs = candidate, refs+1
-		}
-	}
-	if refs != 1 || ref.Policy != model.EdgeRouteTLSPolicyCustomDomain || ref.AppID == "" || ref.TenantID == "" {
-		return ref, fail
-	}
-	routes, domains := 0, 0
-	for _, route := range bundle.Routes {
-		if route.Hostname != host || route.TLSPolicy != ref.Policy {
-			continue
-		}
-		if route.AppID != ref.AppID || route.TenantID != ref.TenantID || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
-			return ref, fail
-		}
-		routes++
-	}
-	for _, domain := range bundle.TLSAllowlist {
-		if domain.Hostname != host {
-			continue
-		}
-		if domain.Status != model.AppDomainStatusVerified || domain.AppID != ref.AppID || domain.TenantID != ref.TenantID {
-			return ref, fail
-		}
-		domains++
-	}
-	if routes == 0 || domains != 1 {
-		return ref, fail
-	}
-	return ref, nil
+	return routeartifact.CustomDomainCertificateOwner(payload.Certificates, bundle, host)
 }

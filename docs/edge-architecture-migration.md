@@ -739,6 +739,11 @@ validator and private-file installer. Missing scoped credentials cannot fall
 back to a legacy Edge token. Certificate distribution writes no readiness,
 domain status, serving authorization or artifact LKG; live Caddy proofs remain
 required. The existing legacy certificate path retains its prior behavior.
+Shared SNI hostnames may use a platform TLS reference while also carrying an
+application custom-domain path. Certificate ownership in that case comes from
+the signed local custom-domain routes and their unique verified allowlist entry;
+the platform path cannot supply or replace the tenant/app owner. API and Worker
+use the same ownership check, including rejection of mixed custom-domain owners.
 
 A staged shadow observation can have a newer artifact sequence than the actual
 selected serving publication. Transitioning its runtime cursor into the exact

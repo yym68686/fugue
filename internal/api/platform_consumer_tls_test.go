@@ -20,6 +20,10 @@ func TestCellCertificateReferenceAllowsSharedHostnamePlatformPaths(t *testing.T)
 	if _, err := certificateReferenceForRoutes(artifact, bundle, host); err != nil {
 		t.Fatal("unrelated platform path invalidated the signed custom-domain owner", err)
 	}
+	artifact.Content["certificates"] = []any{map[string]any{"hostname": host, "policy": "platform"}}
+	if _, err := certificateReferenceForRoutes(artifact, bundle, host); err != nil {
+		t.Fatal("shared hostname reference lost the signed custom-domain owner", err)
+	}
 	bundle.Routes[1].TenantID = "foreign"
 	if _, err := certificateReferenceForRoutes(artifact, bundle, host); err == nil {
 		t.Fatal("foreign custom-domain route owner accepted")
