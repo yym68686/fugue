@@ -676,3 +676,21 @@ the producer uses that record independently of the bootstrap file, so missing or
 expired bootstrap configuration cannot invalidate positive serving recovery.
 The optional projection alone grants nothing; enrollment and private probes
 remain separate configuration steps.
+
+The independent `cell_inventory_enrollment` CI lane selects one explicit
+`deploy/environments/production/cell-inventory` declaration. It binds the
+already-deployed private Worker UID, source, image, cell, node, state PVC and
+validated route-only ReleaseSet. The lane admits only an empty gray lane or the
+same declared gray parent, prepares both required consumer sets, and creates an
+immutable fifteen-minute permission. Retries reuse its original deadline.
+No full publication, artifact LKG attestation or public transport is changed.
+
+Initialization requires repeated actual Worker observations and authenticated
+route/TLS convergence for that exact Pod and gray publication. A bounded Job
+using the observed Worker image mounts only its isolated activation directory
+and executes the existing create-only activation CAS with the real bundle
+generation. The Worker retains its read-only activation mount. Three subsequent
+observations require fresh inventory after initialization. Missing proofs,
+replaced executors, expired permission, existing foreign activation or serving
+transport stop this initial lane; an expired permission is never renewed by a
+retry. Later full/LKG promotion and public handoff remain separate operations.

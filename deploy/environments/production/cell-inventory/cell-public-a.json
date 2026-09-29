@@ -1,0 +1,32 @@
+{
+  "schema": "fugue.cell-inventory-enrollment/v1",
+  "generation": 1,
+  "origin": "https://api.fugue.pro",
+  "authority_cell_id": "cell-public-a",
+  "namespace": "fugue-system",
+  "release_set": {
+    "id": "artifact_1790692533_be3dc8e9cbda",
+    "digest": "sha256:ac8aae58ae3130ac954a02cda1b2d06694d5c3da2702d9e08a5f23a1c5d69070"
+  },
+  "cohort": "complete",
+  "bootstrap_config_map": "fugue-cell-public-a-bootstrap",
+  "worker": {
+    "deployment": "fugue-edge-worker-public-a-candidate",
+    "deployment_uid": "dde73c84-c436-4e23-920a-064e257db522",
+    "pod": "fugue-edge-worker-public-a-candidate-5bc5f45b68-mkznp",
+    "instance_uid": "56806c95-6b55-4983-bc27-ec3c05bbe6d6",
+    "node": "vps-84c8f0a9",
+    "slot": "a",
+    "container": "edge",
+    "service_account": "fugue-edge-worker-public-a-candidate",
+    "source_sha": "ec63d277025bb0ce1cc6caf4dc4a486c94a0f6a6",
+    "image_digest": "sha256:3cd643a44de15d2eaf755c3acf7f799f711d18b8a29f22523a5b19e627b9a97b",
+    "pvc": "fugue-edge-worker-public-a-candidate-state",
+    "activation_path": "/var/lib/fugue-edge-front/activation.json"
+  },
+  "observation": {
+    "samples": 3,
+    "interval_seconds": 15,
+    "timeout_seconds": 600
+  }
+}

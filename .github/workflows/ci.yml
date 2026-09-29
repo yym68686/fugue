@@ -335,6 +335,57 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  cell_inventory_enrollment:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-cell-inventory, cancel-in-progress: false}
+    timeout-minutes: 20
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one explicit initial inventory declaration
+        id: inventory
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-inventory)
+          if (( ${#declarations[@]} > 1 )); then
+            echo 'one initial cell inventory declaration per configuration atom is required' >&2
+            exit 1
+          fi
+          if (( ${#declarations[@]} == 1 )); then
+            config="${declarations[0]}"
+            [[ "$config" =~ ^deploy/environments/production/cell-inventory/cell-[a-z0-9-]+\.json$ ]]
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/bootstrap_cell_inventory.py scripts/test_bootstrap_cell_inventory.py scripts/bootstrap_cell_producer.py scripts/reconcile_front_probe_transport.py scripts/observe_front_candidate.py scripts/publish_agent_edge_shadow.py; then
+              python3 -m unittest scripts.test_bootstrap_cell_inventory
+              python3 -m scripts.bootstrap_cell_inventory --validate-only "$config"
+              echo "config=$config" >> "$GITHUB_OUTPUT"
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Enroll bounded inventory and verify real private serving
+        if: steps.inventory.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          python3 -m scripts.bootstrap_cell_inventory "${{ steps.inventory.outputs.config }}" --evidence "$RUNNER_TEMP/cell-inventory-enrollment.json"
+      - name: Retain initial cell evidence
+        if: always() && steps.inventory.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-cell-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cell-inventory-enrollment.json
+          if-no-files-found: error
+          retention-days: 30
+
   agent_edge_trust:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
