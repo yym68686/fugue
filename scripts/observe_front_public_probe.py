@@ -20,16 +20,8 @@ def observe(config, profiles, samples=5, interval=15):
             profile = profiles[listener["name"]]
             proofs = []
             for route in profile["probes"]:
-                current = front.proof(listener["address"], route["host"], route["path"])
-                candidate = front.proof(listener["address"], route["host"], route["path"], listener["port"])
-                if current != candidate or candidate["edge"] != profile["node"] or candidate["group"] != profile["group"]:
-                    differences = sorted(key for key in set(current) | set(candidate) if current.get(key) != candidate.get(key))
-                    summary = {"listener": listener["name"], "host": route["host"], "differences": differences,
-                               "public_edge": current.get("edge"), "probe_edge": candidate.get("edge"),
-                               "public_version": current.get("version"), "probe_version": candidate.get("version"),
-                               "public_release": current.get("traffic", {}).get("release_id"), "probe_release": candidate.get("traffic", {}).get("release_id")}
-                    raise ValueError("external candidate route differs from the current public authority: " + front.canonical(summary))
-                proofs.append({"host": route["host"], "path": route["path"], "proof_digest": transport.digest(candidate)})
+                observed = front.stable_proof_pair(listener["address"], listener["port"], route["host"], route["path"], profile["node"], profile["group"])
+                proofs.append({"host": route["host"], "path": route["path"], "proof_digest": transport.digest(observed["proof"]), "publication_retries": observed["publication_retries"]})
             observations.append({"at": front.now().isoformat(), "listener": listener["name"], "address": listener["address"], "port": listener["port"], "profile_digest": transport.digest(profile), "proofs": proofs})
         if index + 1 < samples:
             time.sleep(interval)
