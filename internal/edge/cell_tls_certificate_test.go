@@ -110,3 +110,39 @@ func TestCellCertificateUsesExactSignedServingAssignmentWithoutLegacyCredential(
 func rejectedBeforeCertificate(scenario string) bool {
 	return scenario == "shadow" || scenario == "foreign hostname" || scenario == "bad parent" || scenario == "bad TLS" || scenario == "different scope" || scenario == "missing credential"
 }
+
+func TestCellTLSWarmupDoesNotWriteLegacyDomainStatus(t *testing.T) {
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Error("unexpected Caddy operation", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+	writes := 0
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writes++
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer api.Close()
+	host := "application.example.test"
+	bundle := testBundle("cell-warmup")
+	bundle.EdgeGroupID = "cell-a"
+	route := bundle.Routes[0]
+	route.Hostname, route.RouteKind, route.TLSPolicy = host, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain
+	route.EdgeGroupID, route.RuntimeEdgeGroupID = "cell-a", "cell-a"
+	bundle.Routes = []model.EdgeRouteBinding{route}
+	bundle.TLSAllowlist = []model.EdgeTLSAllowlistEntry{{Hostname: host, AppID: route.AppID, TenantID: route.TenantID, Status: model.AppDomainStatusVerified, TLSStatus: model.AppDomainTLSStatusPending}}
+	s := NewService(config.EdgeConfig{APIURL: api.URL, EdgeGroupID: "cell-a", EdgeToken: "legacy-must-not-be-used", ListenAddr: "127.0.0.1:7832", CaddyEnabled: true, CaddyAdminURL: admin.URL, CaddyListenAddr: ":18443", CaddyTLSMode: caddyTLSModePublicOnDemand, CaddyProxyListenAddr: ":7833", CaddyDataDir: t.TempDir()}, log.New(io.Discard, "", 0))
+	warmups := 0
+	s.caddyWarmup = func(context.Context, string, string) error { warmups++; return nil }
+	if _, ok := s.customDomainTLSReportHosts(bundle)[host]; !ok {
+		t.Fatal("fixture does not exercise the former legacy reporting branch")
+	}
+	if err := s.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatal(err)
+	}
+	if writes != 0 || warmups != 1 {
+		t.Fatal("cell warmup wrote legacy domain state or skipped TLS probing", writes, warmups)
+	}
+}

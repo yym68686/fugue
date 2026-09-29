@@ -669,6 +669,12 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 		warmup = warmupCaddyTLSWithProxyProtocol
 	}
 	reportHosts := s.customDomainTLSReportHosts(bundle)
+	if s.cellCertificateIdentityConfigured() {
+		// A cell reports runtime readiness through its authenticated artifact
+		// assignments. Warmup cannot write legacy business-domain state or
+		// export certificate material using a global Edge credential.
+		reportHosts = nil
+	}
 	started := time.Now()
 	var firstErr error
 	for _, host := range hosts {

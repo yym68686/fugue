@@ -744,6 +744,9 @@ application custom-domain path. Certificate ownership in that case comes from
 the signed local custom-domain routes and their unique verified allowlist entry;
 the platform path cannot supply or replace the tenant/app owner. API and Worker
 use the same ownership check, including rejection of mixed custom-domain owners.
+Cell TLS warmup performs its real local handshake but never calls the legacy
+domain-status writer or exports private material through a global Edge token.
+The existing assignment-bound serving observer owns Cell route/TLS facts.
 
 A staged shadow observation can have a newer artifact sequence than the actual
 selected serving publication. Transitioning its runtime cursor into the exact
