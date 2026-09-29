@@ -284,6 +284,57 @@ jobs:
           python3 scripts/reconcile_cell_trust.py "${{ steps.trust.outputs.config }}"
           python3 scripts/reconcile_cell_trust.py "${{ steps.trust.outputs.config }}" --check
 
+  cell_producer_shadow:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-cell-producer-shadow, cancel-in-progress: false}
+    timeout-minutes: 20
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one explicit cell producer declaration
+        id: producer
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/cell-producers)
+          if (( ${#declarations[@]} > 1 )); then
+            echo 'one cell producer declaration per configuration atom is required' >&2
+            exit 1
+          fi
+          if (( ${#declarations[@]} == 1 )); then
+            config="${declarations[0]}"
+            [[ "$config" =~ ^deploy/environments/production/cell-producers/cell-[a-z0-9-]+\.json$ ]]
+            git fetch origin main
+            if git diff --quiet HEAD origin/main -- "$config" scripts/bootstrap_cell_producer.py scripts/test_bootstrap_cell_producer.py; then
+              python3 -m unittest scripts.test_bootstrap_cell_producer
+              python3 -m scripts.bootstrap_cell_producer --validate-only "$config"
+              echo "config=$config" >> "$GITHUB_OUTPUT"
+              echo 'selected=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Publish exact cell inputs and shadow policy
+        if: steps.producer.outputs.selected == 'true'
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+        run: |
+          python3 -m scripts.bootstrap_cell_producer "${{ steps.producer.outputs.config }}" --evidence "$RUNNER_TEMP/cell-producer-shadow.json"
+      - name: Retain cell shadow evidence
+        if: steps.producer.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-cell-producer-shadow-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cell-producer-shadow.json
+          if-no-files-found: error
+          retention-days: 30
+
   agent_edge_trust:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
