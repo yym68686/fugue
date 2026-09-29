@@ -43,6 +43,18 @@ func TestNeutralControlCandidateHasIndependentStateAndNoCoreIssuer(t *testing.T)
 				continue
 			}
 			checked++
+			observedService := false
+			for _, probe := range component.Health {
+				if probe.Type == "service-http" {
+					t.Fatal("isolated Control cannot rely on an unauthorized API-server proxy path")
+				}
+				if probe.Type == "service-http-via-workload" && probe.Name == component.Workload.Name && probe.Path == "/readyz" && probe.Expected == `"ready":true` && probe.SourceWorkload != "" && probe.SourceContainer != "" {
+					observedService = true
+				}
+			}
+			if !observedService {
+				t.Fatal("candidate lacks an explicitly allowed in-cluster Service observer")
+			}
 			group := meta["labels"].(map[string]any)["fugue.io/authority-cell-id"].(string)
 			if !strings.HasPrefix(group, "cell-") {
 				t.Fatal("neutral scope is absent")
