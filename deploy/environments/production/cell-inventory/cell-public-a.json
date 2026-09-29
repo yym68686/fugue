@@ -1,6 +1,6 @@
 {
   "schema": "fugue.cell-inventory-enrollment/v1",
-  "generation": 2,
+  "generation": 3,
   "origin": "https://api.fugue.pro",
   "authority_cell_id": "cell-public-a",
   "namespace": "fugue-system",
@@ -9,18 +9,18 @@
     "digest": "sha256:ac8aae58ae3130ac954a02cda1b2d06694d5c3da2702d9e08a5f23a1c5d69070"
   },
   "cohort": "complete",
-  "bootstrap_config_map": "fugue-cell-public-a-bootstrap",
+  "bootstrap_config_map": "fugue-cell-public-a-inventory-bootstrap",
   "worker": {
     "deployment": "fugue-edge-worker-public-a-candidate",
     "deployment_uid": "dde73c84-c436-4e23-920a-064e257db522",
-    "pod": "fugue-edge-worker-public-a-candidate-5bc5f45b68-mkznp",
-    "instance_uid": "56806c95-6b55-4983-bc27-ec3c05bbe6d6",
+    "pod": "fugue-edge-worker-public-a-candidate-d4cc4f594-vb9rv",
+    "instance_uid": "4957f12b-68d5-47f3-b0bf-3ce8f09e43bf",
     "node": "vps-84c8f0a9",
     "slot": "a",
     "container": "edge",
     "service_account": "fugue-edge-worker-public-a-candidate",
-    "source_sha": "ec63d277025bb0ce1cc6caf4dc4a486c94a0f6a6",
-    "image_digest": "sha256:3cd643a44de15d2eaf755c3acf7f799f711d18b8a29f22523a5b19e627b9a97b",
+    "source_sha": "bd0045871b83562301740417aba01a3df5d918f9",
+    "image_digest": "sha256:09af0873a7d1ca0bdd94761485a7d9d6fb40ebff729f9fb2dab31e30e487a1b6",
     "pvc": "fugue-edge-worker-public-a-candidate-state",
     "activation_path": "/var/lib/fugue-edge-front/activation.json"
   },
@@ -28,11 +28,5 @@
     "samples": 3,
     "interval_seconds": 15,
     "timeout_seconds": 600
-  },
-  "previous_permission": {
-    "uid": "4b383005-c505-4fb9-aec8-3a3411608768",
-    "declaration_digest": "sha256:b8705c257a43ec2cdfdf24dba5b6548209a7dc885b45017d0aa2bee4b5b0d225",
-    "authorization_digest": "sha256:d2a033ca783a0755ac0911d88e47ffe101d804c28f9b3be7445958fbf4691b69",
-    "generation": 1
   }
 }
