@@ -14,6 +14,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 
 
 def require(ok, message):
@@ -59,6 +60,10 @@ def fence(plan):
 def unit_text(root, binary, config, uid, memory, cpu):
     extra = " run" if binary == "caddy" else ""
     cap = "AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n" if binary == "caddy" else "CapabilityBoundingSet=\n"
+    if binary == "fugue-static-edge-manager":
+        # The root manager accesses Caddy-owned 0700 directories and 0600
+        # admin sockets. An empty bounding set removes root's DAC override.
+        cap = "AmbientCapabilities=CAP_DAC_OVERRIDE\nCapabilityBoundingSet=CAP_DAC_OVERRIDE\n"
     return ("[Unit]\nDescription=Independent static serving generation\nAfter=network-online.target\nWants=network-online.target\n\n"
             "[Service]\nType=simple\nUser=" + uid + "\nGroup=" + uid + "\n"
             "ExecStart=" + str(root / binary) + extra + " --config " + str(root / config) + "\n"
@@ -67,6 +72,36 @@ def unit_text(root, binary, config, uid, memory, cpu):
             "MemoryMax=" + memory + "\nCPUQuota=" + cpu + "\nTasksMax=256\nNice=5\n"
             "Environment=GOMAXPROCS=2\nEnvironment=HOME=" + str(root / "storage") + "\n"
             + cap + "\n[Install]\nWantedBy=multi-user.target\n").encode()
+
+
+def put_unit(path, raw, root, role):
+    if role == "manager" and path.exists() and path.read_bytes() != raw:
+        previous = raw.replace(b"AmbientCapabilities=CAP_DAC_OVERRIDE\nCapabilityBoundingSet=CAP_DAC_OVERRIDE\n", b"CapabilityBoundingSet=\n")
+        require(path.read_bytes() == previous, "unrecognized management unit differs")
+        require(command("systemctl", "show", path.name, "--property=ActiveState", "--value") in ["inactive", "failed"], "stop only the failed candidate manager before repairing its unit")
+        require(not (root / "run/manager.sock").exists(), "management socket exists; inspect before repair")
+        no_links(path)
+        pending = path.with_suffix(".service.repair")
+        put(pending, raw, 0, 0, 0o644)
+        os.replace(pending, path)
+    else:
+        put(path, raw, 0, 0, 0o644)
+
+
+def manager_ready(root, edge_id, unit):
+    request = {"schema": "fugue.static-edge.rpc/v1", "edge_id": edge_id, "request_id": "generation-readiness", "operation": "status"}
+    for _ in range(20):
+        result = subprocess.run([str(root / "fugue-static-edge-manager"), "ssh-rpc", "--socket", str(root / "run/manager.sock")], input=json.dumps(request).encode(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8)
+        try:
+            response = json.loads(result.stdout)
+            ready = result.returncode == 0 and response.get("ok") is True and response.get("edge_id") == edge_id
+        except (ValueError, TypeError):
+            ready = False
+        if ready:
+            require(command("systemctl", "show", unit, "--property=ActiveState", "--value") == "active", "candidate manager exited during readiness check")
+            return
+        time.sleep(0.25)
+    raise ValueError("candidate management RPC is not ready")
 
 
 def install(v):
@@ -143,13 +178,14 @@ def install(v):
     wrapper = '#!/bin/sh\nset -eu\n[ "$#" = 1 ] && [ "$1" = ssh-rpc ]\nexec ' + str(root / "fugue-static-edge-manager") + ' ssh-rpc --socket ' + str(root / "run/manager.sock") + '\n'
     put(root / "manager-rpc", wrapper.encode(), 0, 0, 0o700)
     command("runuser", "-u", "caddy", "--", str(root / "caddy"), "validate", "--config", str(root / "caddy.json"))
-    for unit, (_, binary, config, user, memory, cpu) in zip(unit_names, units):
-        put(pathlib.Path("/etc/systemd/system", unit), unit_text(root, binary, config, user, memory, cpu), 0, 0, 0o644)
+    for unit, (role, binary, config, user, memory, cpu) in zip(unit_names, units):
+        put_unit(pathlib.Path("/etc/systemd/system", unit), unit_text(root, binary, config, user, memory, cpu), root, role)
     command("systemctl", "daemon-reload")
     for unit in unit_names:
         # start is idempotent for an already running generation; never restart.
         command("systemctl", "enable", "--now", unit)
         require(command("systemctl", "show", unit, "--property=ActiveState", "--value") == "active", "new generation service is not active")
+    manager_ready(root, p["edge_id"], unit_names[-1])
     fence(p)
     return {"phase": "generation_started_old_retained", "id": p["id"], "source_commit": p["source_commit"], "input_sha256": fingerprint, "units": unit_names, "root": str(root), "dns_changed": False, "predecessors_retained": True, "health_verified": False}
 

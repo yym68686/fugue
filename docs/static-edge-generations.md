@@ -6,6 +6,15 @@ Adding `--execute` starts a **new** Linux/systemd generation beside predecessors
 It never stops/reloads another Caddy, mutates DNS, clears connections, or retires
 an old generation. A stage result alone is not a traffic-switch readiness proof.
 
+Staging verifies the new manager's RPC and identity after service startup. The
+root management service retains only `CAP_DAC_OVERRIDE`, needed to access the
+Caddy-owned private admin socket and certificate files. It does not receive
+network-administration or process-tracing capabilities. An inactive manager
+created with the older empty capability set can be repaired by re-running the
+same stage command: only the exact recognized unit is replaced. An active
+manager, existing management socket, or unrelated unit change fails closed;
+business processes and their units are never restarted by this repair.
+
 The plan schema is `fugue.static-edge.generation/v1`. Required fields are `id`
 (lowercase name, at most 32 characters), `edge_id`, `role` (`edge` or `origin`),
 `ssh_host`, `management_ip`, `management_listen`, `source_commit`,
